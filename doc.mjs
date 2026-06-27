@@ -1,16 +1,16 @@
 // doc.mjs — the Google Docs clone "ceiling": a collaborative document entity
-// expressed in the post-stress-test API. Demonstrates the Phase-1 surface:
-// the mutation pipeline (fields own persistence+sync+event emission), the
-// uniform principal model (user + link), grant compiled into queryScope,
-// the `map` valued-set plugin (collaborator roles), the `state` plugin
-// (lifecycle + declarative effects + scheduled auto-transition), the `link`
-// principal (share-by-link), per-field access via fluent `.can()`, declarative
+// expressed in the grilled API. Demonstrates: the mutation pipeline (fields own
+// persistence+sync+event emission), the uniform principal model (user + link),
+// grant compiled into queryScope, the `map` valued-set plugin (collaborator
+// roles), the `state` plugin (lifecycle + declarative effects + scheduled
+// auto-transition), the `link` principal (share-by-link), per-field access via
+// fluent `.can()` (strong-inheriting the row grant by default), declarative
 // `effects`, and batched mutation. Comment (see comment.mjs) is a child entity
 // whose grant INHERITS this entity's — the typed-FK-traversal compilation
 // (abstraction #5).
 import {
   entity, text, number, date, ref, map, presence, log, state, link,
-  grant, deny, hide, read, write, subscribe, admin, anyOf, admits, never, scope,
+  grant, deny, read, write, subscribe, admin, anyOf, never, scope,
   router, User, Inbox,
 } from 'express-plus';
 import { commentRoutes } from './comment.mjs';
@@ -27,12 +27,12 @@ export const Doc = entity('Doc', {
     body:       text.crdt(),                                       // CRDT; emits :changed + :delta
     wordCount:  number({ derived: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0 }),
 
-    owner: ref('User', { role: 'owner', readonly: true }),       // auto-derives checks.owner (admitting)
+    owner: ref('User', { role: 'owner', readonly: true }),       // auto-derives checks.owner
     // Valued set: membership keyed by User, each member carries a role.
     // Uniqueness-by-construction (a User can't appear twice as a key) — the
     // `map` plugin dissolves the separate-join-entity + compound-unique pattern.
     // `.can(...)` is fluent field access (Note 2): the field owns its own
-    // capability rule; no separate top-level `access:` block to drift from it.
+    // capability rule; a field with no `.can` strong-inherits the row grant.
     collaborators: map(ref('User'), {
       role: ['viewer', 'editor'],                                // per-member payload
       default: {},
@@ -50,9 +50,11 @@ export const Doc = entity('Doc', {
     presence: presence({ cursor: true, selection: true }),        // ephemeral, per-connection
 
     // Chat: owner or any collaborator inherits their row-tier capability; a
-    // link holder (admitted by visibility but not a collaborator) gets
+    // link holder (admitted by read scope but not a collaborator) gets
     // viewer-read of the log. `.can(fn, defaults)` receives the row grant as
-    // `defaults` — return it to inherit the row decision.
+    // `defaults` — return it to inherit the row decision. A field read-denial
+    // would return a typed `withheld` marker; here non-collaborators still get
+    // VIEWER read, so no field is withheld.
     chat: log({ sender: ref('User'), body: text() })              // append-only; emits :appended:<id>
       .can(async ({ is }, defaults) =>
         ((await is.collaborator()) || (await is.owner())) ? defaults : grant(...VIEWER)),
@@ -68,7 +70,10 @@ export const Doc = entity('Doc', {
         archived: ['draft'],
       },
       effects: {
-        'shared→archived': { set: { archivedAt: 'now' } },        // declarative field write
+        // Same { mutate, with } primitive as entity effects — target defaults to
+        // self here, so this is a self-write (the engine sees the row exists →
+        // set). Keyed by a typed transition handle, not a magic string.
+        [state.transition('shared', 'archived')]: { with: { archivedAt: now } },
       },
       auto: {
         // A doc idle in `shared` for 90 days auto-archives. Scheduled mutation
@@ -83,104 +88,103 @@ export const Doc = entity('Doc', {
     archivedAt: date({ optional: true }),
   },
 
-  // `checks` is the SINGLE SOURCE OF TRUTH for auth facts. A check wrapped in
-  // `admits(...)` is BOTH SQL-compilable AND row-existence-admitting: it feeds
-  // the compiled queryScope (visibility) AND is awaitable as `is.*` in
-  // grant.can (capability). One declaration, two evaluation modes — no DRY leak
-  // between a visibility predicate and a capability predicate.
+  // `checks` is the SINGLE SOURCE OF TRUTH for auth facts. A check is a plain
+  // function — just a fact about a row. It grants nothing until a grant CALLS
+  // it. Whether a check compiles to SQL is DERIVED from what it touches, but
+  // that is a compiler concern, not something the developer marks.
   //
-  // A plain (non-`admits`) check is runtime-only — awaitable via `is.*` but NOT
-  // compiled into the WHERE (it can't compile, e.g. a role-scalar lookup), so
-  // it must never admit a row on its own.
+  // The developer declares READ INTENT by calling checks inside `scope(...)`
+  // (below). A check used in `scope` that cannot compile to SQL is a load-time
+  // error — never a silent runtime scan. A check used only in `.can` may be
+  // non-compilable (runtime is fine there).
   checks: {
-    // `role: 'owner'` auto-derives checks.owner as an admitting check:
-    //   admits(({ Doc, principal }) => Doc.owner.is(principal.id))
+    // `role: 'owner'` auto-derives checks.owner as:
+    //   ({ Doc, principal }) => Doc.owner.is(principal.id)
     // Author it explicitly here only if you want to override the derived form.
-    owner:        admits(({ Doc, principal }) => Doc.owner.is(principal.id)),
-    collaborator: admits(({ Doc, principal }) => Doc.collaborators.has(principal.id)),
+    owner:        ({ Doc, principal }) => Doc.owner.is(principal.id),
+    collaborator: ({ Doc, principal }) => Doc.collaborators.has(principal.id),
     // A link principal is admitted only if its token matches a linkShare token.
-    // `never()` compiles to FALSE, so a non-link principal can never admit a row
-    // through this check. `.is(undefined)` compiles to FALSE (never SQL IS NULL),
-    // so an unminted/anonymous link can't match rows whose linkShare.token is
-    // null — fail-closed at the compiler, not hand-rolled in the predicate.
-    linkHolder:   admits(({ Doc, principal }) =>
+    // `never()` compiles to SQL FALSE, so a non-link principal can never admit
+    // a row through this check. `.is(undefined)` compiles to FALSE (never
+    // SQL IS NULL), so an unminted/anonymous link can't match rows whose
+    // linkShare.token is null — fail-closed at the compiler, not hand-rolled.
+    linkHolder:   ({ Doc, principal }) =>
                     principal.type === 'link'
                       ? Doc.linkShare.token.is(principal.attributes?.token)
-                      : never()),
+                      : never(),
     // Role lookups are runtime-only (a scalar on the collaborators payload,
-    // not a compilable field-handle predicate) — so they are plain checks,
-    // NOT `admits(...)`: they await via is.* but never admit a row.
+    // not a compilable field-handle predicate) — so they are NEVER called in
+    // `scope` (that would be a load-time error). They await via is.* inside
+    // `.can` only.
     editor: ({ entity, principal }) =>
       entity.collaborators.get(principal.id)?.role === 'editor',
     viewer: ({ entity, principal }) =>
       entity.collaborators.get(principal.id)?.role === 'viewer',
   },
 
-  // Grant is the single authority. Visibility and capability are not two
-  // sibling keys ("feels arbitrary"); visibility is a DERIVED CONSEQUENCE of
-  // the scope that grants a row-visible capability:
+  // Grant is the single authority. `scope(...)` DECLARES read intent by calling
+  // the read-admitting checks (owner, collaborator, linkHolder) — this is the
+  // ONLY grant compiled to SQL (a WHERE so the DB never returns forbidden rows,
+  // exact pagination, no post-filter, no second auth path). `.can(fn)` is every
+  // OTHER capability, decided per-row at runtime; it MAY call non-compilable
+  // checks (editor/viewer) freely.
   //
-  //   scope(predicate)  — SYNC, declarative, field-handle predicates the engine
-  //                        COMPILES into the findAll WHERE. Exact pagination,
-  //                        no post-filter, no second auth path. NOT thenable.
-  //     .can(fn)         — MAY be async (cross-entity role lookups); every
-  //                        is.* is awaited so the Phase-0 unawaited-call guard
-  //                        is satisfied. Post-filters rows scope already
-  //                        admitted. Returns deny() (403) — never hide() here.
+  // There is no `hide`/visibility axis. A denied read simply removes the row
+  // from the result set (prod logs the omission; dev raises "this exists, but
+  // you wouldn't know that in production"). See DECISIONLOG.md.
   //
-  // USER REACTION (preserved verbatim): "Having visibile be different to
-  // editable and other permissions feels arbitrary And I would like an
-  // explanation for it."
-  //
-  // Why this shape: a scope that grants no readable capability admits no row
-  // (closes the ghost-row hole where a row is visible but 403s on every
-  // field). The grammar extends to the 3rd axis — `.deliver(predicate)` —
-  // when live delivery lands, instead of accreting a third sibling key.
-  //
-  // `anyOf.admittingChecks()` = the UNION of all `admits(...)` checks above:
-  // visibility is derived from the same single source as capability, never
-  // re-authored. See IMPLEMENTATION-PLAN.md §grant-axes.
+  // Grant is EXACTLY two halves — no third method. Live delivery does NOT add a
+  // `.deliver()` here: delivery = re-authorization (this same scope+can engine
+  // re-run at emit, latched for scale) + subscriber interest (a narrowing filter
+  // supplied at subscribe time, data-not-code). See DECISIONLOG.md.
   grant: ({ principal }) => [
-    scope(anyOf.admittingChecks())
+    scope(({ is }) => anyOf(is.owner(), is.collaborator(), is.linkHolder()))
       .can(async ({ is, entity }) => {
         if (await is.owner())    return grant(...OWNER);
         if (await is.editor())   return grant(...EDITOR);
         if (await is.viewer())   return grant(...VIEWER);
         if (await is.linkHolder()) {
-          const tier = entity.linkShare.tier;                      // current single tier 'view'|'comment'|'edit'
+          const tier = entity.linkShare.tier;                      // 'view'|'comment'|'edit'
           return grant(...(tier === 'edit' ? EDITOR : tier === 'comment' ? [read, subscribe] : VIEWER));
         }
         return deny('no capability for this principal');
       }),
   ],
 
-  // NOTE 2 (USER REACTION, preserved verbatim): "I don't like having to
-  // re-declear each field here. I feel that this could make easy drift and is
-  // less buttery smooth."
-  //
-  // Resolution: the separate top-level `access:` block is DELETED. A field's
-  // capability rule lives ON the field as fluent `.can(fn)` (see collaborators,
-  // linkShare, chat, status above). A field with no `.can` INHERITS the row
-  // grant (zero ceremony for title/body/wordCount/createdAt/...).
+  // Field access (Note 2): the separate top-level `access:` block is DELETED.
+  // A field's capability rule lives ON the field as fluent `.can(fn)`. A field
+  // with no `.can` STRONG-INHERITS the row grant (readable exactly when the row
+  // is readable; edit floor = the row grant's write capabilities) — zero
+  // ceremony for title/body/wordCount/createdAt/...
   //
   // For a security-sensitive entity, an OPTIONAL directive inverts the field
-  // floor to fail-closed — OMITTED here because Doc is collaborative (most
-  // fields are as readable as the row). A sensitive entity writes:
+  // floor to fail-closed — OMITTED here because Doc is collaborative. A
+  // sensitive entity writes:
   //
   //   fieldAccess: { default: ownerOnly }   // ownerOnly = authz fn, not raw deny
   //
   // Then any new field with no `.can` is owner-gated until explicitly opened,
-  // rather than silently inheriting row-read.
+  // rather than strong-inheriting row-read. See DECISIONLOG.md.
 
   // Declarative reactions: mutations triggered by mutations, compiled by the
-  // engine — NOT afterSave callbacks. "When a collaborator is added, create an
-  // invite inbox row" is a declarative data template, paralleling state.effects'
-  // `{ set: {...} }` shape. `delta.member` / `entity.id` are path references the
-  // engine resolves — no callback, no escape hatch.
+  // engine — NOT afterSave callbacks. One primitive — { mutate: <target>, with:
+  // <data-template> }; the engine decides set vs create from whether the target
+  // row exists (here, a cross-entity create). Typed handles throughout — the
+  // trigger is a typed event handle, the target is the Inbox entity handle, and
+  // `delta.member` / `entity.id` are typed path refs (never magic strings).
+  //
+  // Bounded reentrancy + same transaction: this effect re-enters the one
+  // pipeline and folds into the originating collaborators.set batch (one
+  // transaction, one composed event). A structural cycle is a load-time error;
+  // a runtime depth cap is the fail-closed backstop. The effect runs as an
+  // EFFECT PRINCIPAL — capability bounded to the declared target + template,
+  // authorized against Inbox's OWN grant (Inbox stays sovereign; its deny rolls
+  // back the batch), data interpolated only from the trigger delta + origin row.
+  // See DECISIONLOG.md.
   effects: {
-    'collaborators:added': { create: { entity: 'Inbox', data: {
-      recipient: 'delta.member', doc: 'entity.id', kind: 'invite',
-    } } },
+    [collaborators.onAdded]: { mutate: Inbox, with: {
+      recipient: delta.member, doc: entity.id, kind: 'invite',
+    } },
   },
 
   routes: (r, Doc) => {
@@ -198,7 +202,7 @@ function feed(Doc) {
   return async (req, res) => {
     const me = req.principal.id;
     // Typed field-handle predicates — no magic strings. queryScope (compiled
-    // from grant's scope) already filtered to rows this principal can see, so
+    // from grant's scope) already filtered to rows this principal can read, so
     // the findAll is pre-authorized, not post-filtered.
     const [owned, shared] = await Promise.all([
       Doc.findAll(Doc.owner.is(me)).sort(Doc.updatedAt, 'desc').limit(10),

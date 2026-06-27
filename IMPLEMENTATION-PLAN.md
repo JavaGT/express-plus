@@ -50,7 +50,17 @@ phase.
 3. **Declarative reactions** = mutations triggered by mutations. `state.effects`
    and stored-derived are the SAME primitive — "when X mutates, mutate Y
    through the pipeline" — declared, not callback'd. The engine compiles
-   them; the app never mounts them.
+   them; the app never mounts them. One primitive `{ mutate: <target>, with:
+   <data-template> }` (target = self or a typed entity handle; the engine
+   decides set vs create from whether the target row exists). Typed handles
+   throughout (trigger, target, path-refs) — a prerequisite for static cycle
+   detection. Reentrancy is BOUNDED (structural cycle = load-time error; runtime
+   depth cap = fail-closed backstop). A cross-entity effect re-enters the one
+   pipeline in the SAME transaction + composed event as the origin (target
+   grant/validation failure rolls back the origin); it runs as a bounded
+   EFFECT PRINCIPAL authorized against the target's own grant. Composed event
+   is atomic for commit, per-fragment per-subscriber for delivery (re-auth-at-
+   emit, ADR #5). See DECISIONLOG.md.
 
 4. **Scheduled mutation** = a timer feeding the pipeline. `state.auto`
    (field-level, conditional) and entity `tick` (recurring) are the same
@@ -77,8 +87,12 @@ at entity-load time, not as a style preference.
   out-of-band diff.
 - **`queryScope` is DERIVED from `grant`, never separately declared.** A
   second declaration drifts from `grant` → leaks + broken pagination.
-- **`state.effects` are declarative mutations only.** No
-  `async () => sendEmail()`, no `afterSave`/`onCreate`.
+- **`effects` are declarative `{ mutate, with }` only.** No
+  `async () => sendEmail()`, no `afterSave`/`onCreate`. Cross-entity targets are
+  allowed — they re-enter the one pipeline as a bounded effect principal in the
+  same transaction, not an imperative callback. A structural effect cycle is a
+  load-time error; a runtime depth cap aborts the batch. (A cross-store effect
+  target is a load-time error — it cannot share one DB transaction.)
 - **`is.*` thenable + runtime unawaited-call guard.** Awaitable alone is
   insufficient: `is.author() || is.blogOwner()` on two pending promises returns
   the first truthy promise (both are truthy objects) → silently grants to
@@ -89,36 +103,42 @@ at entity-load time, not as a style preference.
 - **Split ephemeral-FIELD from ephemeral-ENTITY.** Ephemeral is a field
   persistence strategy (a persisted Match can host ephemeral fields — exactly
   what games need); TTL/ephemeral-entity is an entity-lifecycle concern.
-- **Delivery scope is a THIRD grant axis** (visibility / capability /
-  delivery), evaluated at emit, never outside the entity. If the app filters
-  post-delivery, the second live path ships permanently.
+- **Live delivery is NOT a grant axis.** Grant is exactly `scope(...).can(...)`
+  — two halves on a performance boundary, no third sibling method. Delivery is
+  (1) re-authorization via the *same* scope+can engine re-run at emit (hard gate,
+  latched for scale, no second auth path), then (2) subscriber **interest** as a
+  narrowing-only post-filter. Interest is data-not-code (a typed constraint over
+  plugin-published event coordinates, validated at subscribe time, indexable),
+  runs only after re-auth, and is structurally incapable of widening the
+  authorized set. If the app filters post-delivery with free-form code, the
+  second live path ships permanently.
 - **Grant inheritance is declared** (`inherit`/`via`) and compiled through
-  typed FKs; never hand-copied parent-visibility logic in child `checks`.
+   typed FKs; never hand-copied parent read-scope logic in child `checks`.
 - **Prefer keyed-field membership** (uniqueness-by-construction) over a join
   entity + compound constraint, when a collection is owned by one side.
 
 ---
 
-## The grant axes (Design B, refined)
+## The grant halves (Design B, refined)
 
-`grant` decides three distinct things. The plan originally named two; the
-pain-point re-test added the third.
+`grant` decides two distinct things, split on a *performance* boundary — not on
+a visibility axis. There is no third method.
 
-- **Visibility** (row-visible-at-all?) — must be **compilable** to an exact
-  `WHERE` so pagination is exact. Built from owner-FK equality (incl. typed-FK
-  traversal), `state`/`enum` equality, and membership in an on-entity `set`.
-  Non-compilable visibility → entity-load warning that exact pagination is
-  impossible.
-- **Capability** (read vs write vs subscribe vs admin?) — may be **async**,
-  may consult cross-entity checks (`is.projectManager()`). Post-filters the
-  rows visibility already admitted.
-- **Delivery** (which admitted subscriber receives which event?) — a
-  per-subscriber, per-event predicate evaluated at emit. Distinct from
-  visibility (a player may *eventually* see a far chunk if they walk there)
-  and capability (they have read). The subscriber supplies an interest
-  declaration; the field-type plugin declares which event coordinates the
-  predicate may filter on. Reserved in Phase 1's emit-stage contract;
-  implemented in Phase 2 *before* delta-broadcast.
+- **`scope(...)` — read admission** (may this principal *read* this row?) — the
+  ONLY grant compiled to SQL. Declares read *intent* by calling plain-function
+  checks; the compiler *derives* whether those checks are SQL-compilable.
+  Built from owner-FK equality (incl. typed-FK traversal), `state`/`enum`
+  equality, and membership in an on-entity `set`. Read intent is **declared,
+  never derived from compilability** ("can compile" must not auto-admit a read —
+  an `archived` fact compiles but must not be world-readable). A check used in
+  `scope` that cannot compile is a **load-time error**, never a warning, never a
+  silent JS fallback.
+- **`.can(...)` — every other capability** (write / admin / subscribe / …) —
+  may be **async**, may consult cross-entity checks (`is.projectManager()`).
+  Decided per-row at runtime; post-filters the rows `scope` already admitted. May
+  call non-compilable checks freely.
+
+Live delivery does **not** add a third method here. See DECISIONLOG.md.
 
 ---
 
@@ -137,14 +157,15 @@ plus parent-grant inheritance (Blog→Post→Comment).
    irreversible design]` The plugin declares persistence strategy
    (`persisted`|`ephemeral`), scope (`entity`|`connection`), authority
    (`user`|`server`), mutation operators + their diffs, optional `inverse`
-   (undo reservation), optional `validate(value, ctx)` hook, and an
-   emit-stage per-subscriber delivery-predicate hook (reserved).
+   (undo reservation), optional `validate(value, ctx)` hook, and a published
+   event-coordinate schema (so subscriber interest can be validated/indexed).
 2. **Principal model** `{ user|link|system }`. `[small]`
 3. **`queryScope` derivation from `grant` + typed-FK traversal compilation.**
    `[narrow compiler change, depends on 2]` Compiles owner-FK equality,
    `state`/`enum` equality, `set` membership, AND typed-FK traversal paths
    (P4: User↔Patron) AND grant inheritance (P5: Post→Comment) into an exact
-   WHERE. Non-compilable visibility → entity-load warning.
+   WHERE. A check used in `scope` that cannot compile is a **load-time
+   error**, not a warning.
 4. **`state` + `enum` + `boolean` + valued-set (`map`) built-in plugins.**
    `[medium]` `state` owns transitions + `effects` (declarative mutations) +
    `auto` (field-level scheduler for scheduled publish / overdue). The `map`
@@ -159,8 +180,8 @@ plus parent-grant inheritance (Blog→Post→Comment).
 ### Phase 2 — Realtime, space-invaders end-to-end (performance)
 Prove the abstractions are fast, not just right.
 
-7. **Delivery scoping** — per-subscriber emit predicate (P1). `[must precede
-   delta-broadcast]`
+7. **Live delivery** — re-authorization at emit (latched) + subscriber
+   interest as data-not-code narrowing. `[must precede delta-broadcast]`
 8. **Ephemeral persistence + scope/authority** in the contract (already
    reserved in step 1; now exercised).
 9. **Entity-level `tick`** — recurring, lifecycle-bound to `state`
@@ -200,16 +221,17 @@ The plan was re-tested against 7 selected pain points from the original
 implementer reports. Ranked by threat to the plan:
 
 1. **P1 — Spatial/delivery scoping (minecraft BLOCKER #2).** ADD — overturn
-   the deferral. Deferring forces a second live path *today*. Delivery is a
-   third grant axis; reserve the emit-predicate hook in Phase 1, implement
-   Phase 2 before delta-broadcast.
+   the deferral. Deferring forces a second live path *today*. Delivery is NOT
+   a third grant axis (grant stays `scope(...).can(...)`); reserve the
+   emit-stage re-auth + interest hooks in Phase 1, implement Phase 2 before
+   delta-broadcast.
 2. **P4 — User↔Patron identity binding (library CONCERNING).** MODIFY Phase 1
    — queryScope must compile typed-FK traversal paths, not just direct-column
    equality, or pagination silently breaks for indirect-ownership apps.
 3. **P5 — Parent-grant inheritance (blog SHOULD-FIX).** ADD Phase 1 —
    declarable `grant: inherit(Post)` compiled through the same FK-traversal
    machinery as P4. Needed by the blog spine. Reject hand-copied parent
-   visibility at entity-load.
+   read-scope at entity-load.
 4. **P3 — Valued sets + compound uniqueness (reddit BLOCKER #2).** ADD small —
    a `map` plugin (valued set, keyed-member uniqueness-by-construction)
    dissolves the separate-Vote-entity pattern. Standalone compound uniqueness
@@ -237,6 +259,6 @@ implementer reports. Ranked by threat to the plan:
   compound uniqueness, subscriber-notify-as-effect, AND parent-grant
   inheritance — the full Phase-1 surface at human speed.
 - **Phase 2 spine: space-invaders.** Performance. Exercises ephemeral
-  persistence, 30Hz tick, latched-auth, delta-broadcast, delivery scoping.
+   persistence, 30Hz tick, latched-auth, delta-broadcast, live delivery.
 
 Prove right before fast.

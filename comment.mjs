@@ -1,8 +1,8 @@
 // comment.mjs — a child entity of Doc. Demonstrates abstraction #5: the
 // authorization compiler follows the typed FK `doc: ref('Doc')` so a Comment's
 // grant INHERITS its parent Doc's grant. `inheritDoc` contributes BOTH the
-// parent's compiled scope (joined through `doc` into the child's WHERE) AND
-// the parent's `.can` — one contribution, both axes.
+// parent's compiled read scope (joined through `doc` into the child's WHERE)
+// AND the parent's `.can` — one contribution, both halves.
 //
 // A Comment author can edit or delete their own comment; everyone else admitted
 // by the inherited Doc-scope gets read/subscribe only. The Doc's link-tier
@@ -14,7 +14,7 @@ import {
 } from 'express-plus';
 
 // Declarative inherit directive: the compiler resolves it through `doc`,
-// pulling in the parent Doc's scope (compiled WHERE join) AND its `.can`.
+// pulling in the parent Doc's read scope (compiled WHERE join) AND its `.can`.
 const inheritDoc = inherit('Doc', { via: 'doc' });
 
 export const Comment = entity('Comment', {
@@ -25,8 +25,8 @@ export const Comment = entity('Comment', {
       // Fluent field access (Note 2): the author gets write on their own row;
       // everyone else admitted by the inherited Doc-scope gets read/subscribe
       // only — NOT the Doc editor-tier, so a Doc editor can't edit someone
-      // else's comment. Every is.* is awaited — the Phase-0 unawaited-call
-      // guard is satisfied.
+      // else's comment. Every is.* is awaited. Non-author read is granted (not
+      // withheld) so the body is visible to all Doc-readers.
       .can(async ({ is }) =>
         (await is.author()) ? grant(read, write, subscribe) : grant(read, subscribe)),
     resolved: boolean({ default: false })
@@ -36,13 +36,13 @@ export const Comment = entity('Comment', {
   },
 
   // Grant inheritance: Comment follows the parent Doc grant through the typed FK
-  // (joins Comment→Doc in the WHERE), inheriting row visibility + base
+  // (joins Comment→Doc in the WHERE), inheriting row read-scope + base
   // capability for fields without an explicit `.can` override.
   grant: inheritDoc,
 
-  // `author` is a runtime-only check (awaitable via is.*) — NOT `admits(...)`,
-  // since Comment's row visibility comes from the inherited Doc-scope, not from
-  // this check. A plain check can never admit a row on its own.
+  // `author` is a runtime-only check (awaitable via is.*) — NEVER called in
+  // `scope`, since Comment's row read-scope comes from the inherited Doc-scope,
+  // not from this check. A plain check used only in `.can` may be non-compilable.
   checks: {
     author: ({ entity, principal }) => entity.author === principal.id,
   },
