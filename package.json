@@ -1,0 +1,12 @@
+{
+  "name": "express-plus-gdocs",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node app.mjs"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "express-plus": "^1.0.0"
+  }
+}

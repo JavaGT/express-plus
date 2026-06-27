@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>My Documents</title>
+    <style>
+      body { font: 14px/1.5 system-ui, sans-serif; max-width: 720px; margin: 2rem auto; }
+      h1 { font-size: 1.4rem; }
+      ul#files { list-style: none; padding: 0; }
+      .file { display: flex; justify-content: space-between; padding: .5rem 0; border-bottom: 1px solid #eee; }
+      .file.shared a::before { content: "🔗 "; }
+      .file.owned a::before { content: "📄 "; }
+      .meta { color: #888; font-size: .85rem; }
+    </style>
+  </head>
+  <body>
+    <h1>My Documents</h1>
+    <ul id="files"></ul>
+    <script type="module" src="/files.mjs"></script>
+  </body>
+</html>
