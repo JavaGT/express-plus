@@ -1,26 +1,26 @@
-// app.mjs — thin global wiring. One module + one .mount() per domain.
+// app.mjs — thin global wiring.
 //
 // Sensible defaults (security, body, sessions, req.user hydration, rate limit,
-// cors, logs, views, static, error handling, graceful shutdown) are baked into
-// express-plus — nothing to apply, nothing to hand-mount. mount() infers the
-// prefix from the module name (Doc → /docs); pass a second arg to override.
-// mount() is chainable; .listen() boots.
+// cors, logs, views, static, error handling, graceful shutdown, AND the WS
+// /events subscription stream) are baked into express-plus — nothing to apply,
+// nothing to hand-mount.
 //
-// Routes live INSIDE the domains. The ONLY thing app-level here is the truly
-// cross-cutting landing route `/`, which spans no single resource.
+// Mounting is Express-style: you declare the endpoint path. Persisted product
+// domains are entities (`app.mount('/docs', DocEntity)`); cross-cutting auth
+// is plain routers (`app.use('/sessions', ...)`). The live /events WS endpoint
+// is framework-baked and not declared here.
 import expressPlus from 'express-plus';
 import { config } from './config.mjs';
-import DocDomain from './domains/doc/index.mjs';
-import SessionDomain from './domains/session/index.mjs';
+import DocEntity from './domains/doc/index.mjs';
+import { sessionRoutes, userRoutes } from './domains/session/routes.mjs';
 import { userList } from './domains/session/handlers.mjs';
 
 const app = expressPlus();
 
-// Cross-cutting landing page — belongs to no single domain.
-app.get('/', userList);
+app.get('/', userList);                         // cross-cutting landing page
+app.use('/sessions', sessionRoutes());           // auth boundary (login opts out, rest authed)
+app.use('/users', userRoutes());                  // user views (authed)
+app.mount('/docs', DocEntity);                    // Doc entity: CRUD + /feed + /home + /:docId/shares + live fields
 
-app
-  .mount(SessionDomain)            // /sessions, /users — routes-only, require: null
-  .mount(DocDomain)               // /docs CRUD + /feed + /home + /:docId/shares + rooms + hooks
-  .listen(config.port, () =>
-    console.log(`gdocs-clone on http://localhost:${config.port} [${config.env}]`));
+app.listen(config.port, () =>
+  console.log(`gdocs-clone on http://localhost:${config.port} [${config.env}]`));
