@@ -4,7 +4,13 @@
 // Express-style routers mounted at the app level (not an `entity`). The route
 // gate (requireAuth) is default-on for every route; `open` opts the login route
 // out — the one legitimate unauthenticated endpoint (it mints the session).
-// `User` and `Session` are framework-provided entities (auth default-on).
+// `User` and `Session` are framework-provided entities (auth default-on); their
+// fields use typed handles — no magic strings in lookups or creates.
+//
+// Password handling: the framework User entity stores `password: hash()` (a
+// hashed field type), so login calls `user.verifyPassword(plain)` — never a
+// raw `===` comparison. Timestamps (`createdAt`) are framework-defaulted
+// (`date({ default })`), so `Session.create` omits them.
 import { router, open, User, Session } from 'express-plus';
 import { userList, userPage } from './handlers.mjs';
 
@@ -15,13 +21,13 @@ export function sessionRoutes() {
   // fail-closed auth default — this is the auth-minting endpoint.
   s.post('/', open, async (req, res, next) => {
     const { username, password } = req.body;
-    let user = await User.findOne({ username });
+    let user = await User.findOne(User.username.is(username));
     if (!user) {
-      user = await User.create({ username, password });
-    } else if (user.password !== password) {
+      user = await User.create({ [User.username]: username, [User.password]: password });
+    } else if (!await user.verifyPassword(password)) {
       return next({ status: 401, message: 'bad credentials' });
     }
-    const session = await Session.create({ userId: user.id, createdAt: Date.now() });
+    const session = await Session.create({ [Session.user]: user.id });  // FK typed handle; createdAt auto-set
     res.status(201).json({ token: session.token, user: { id: user.id, username: user.username } });
   });
 

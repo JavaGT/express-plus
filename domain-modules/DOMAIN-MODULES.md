@@ -1,94 +1,155 @@
-# Domain Modules — final entry-point design
+# Domain Modules — reactive-entity design
 
-The judge's verdict: **modified winner = Response A's single-`module()` spine**,
-adopting C's omit-gets-defaults semantics where they pay for themselves,
-**rejecting** B's separate `entity()` function and B's array route DSL, and
-**rejecting** C's public Tier 0 and C's auto-classified flat config.
+The reactive-entity paradigm: **one constructor (`entity()`)** whose typed
+**fields** own persistence, sync, and event emission. Authorization lives with
+the data. Grown additively from a 3-line floor to the full bounded context. No
+second API. No `rooms` block, no `on(app)` block — everything live is a field,
+and events are derived from field mutations.
 
-One constructor (`module()`), grown additively from a 3-line floor to the full
-bounded context. No second API. No invariant broken; one (invariant 3) is
-*skirted and contained* via `owner()`, documented below.
+This supersedes the earlier `module()` design (renamed: `module`→`entity`,
+`schema`→`fields`, `predicates`→`checks`, `base`→`defaults`,
+`crdt.text()`→`text.crdt()`). The single-constructor principle is preserved;
+`entity()` is the same object growing, floor to ceiling.
 
 ---
 
 ## Final API surface
 
-### `module(name, config)`
-Returns a `DomainModule`. Every key below `schema` is **optional**; omitting it
+### `entity(name, config)`
+Returns an entity class. Every key below `fields` is **optional**; omitting it
 selects a sensible default.
 
 ```
-module('Doc', {
-  schema:     { <field>: <fieldConstructor>, ... },   // PURELY fields
-  predicates: { <name>: ({doc,user,lookup,load}) => ... },   // peer of schema
-  grant:      async ({ is }) => grant(...) | deny(...) | hide(),
-  routes:     (r) => { r.get(...); r.resource(); r.use(path, sub) },
-  rooms:      [ { path, require, load, presence, chat, events } ],
-  hooks:      { afterSave: (ctx, app) => ... },
-  on:         (app) => { app.on(...) },
-  require:    requireAuth (default) | null,           // module-level route gate
+entity('Doc', {
+  fields:  { <field>: <fieldConstructor>, ... },        // PURELY fields
+  checks:  { <name>: ({entity,user,lookup,load}) => ... },   // peer of fields
+  grant:   async ({ is }) => grant(read,...) | deny(reason) | hide(),
+  routes:  (r, Entity) => { r.resource(); r.get(path, handler); r.use(path, sub) },
 })
 ```
 
-- **`schema` stays an explicit wrapper.** No auto-classification of top-level
-  keys (rejected C). A field is a field only inside `schema`; reserved words
-  (`rooms`, `on`, `routes`...) can never collide with a field name.
-- **The auth triad are top-level peers.** `predicates`, `grant`, and per-field
+- **`fields` is the field listing.** Each field is a reactive primitive owning
+  its storage strategy, sync transport, and emitted events:
+  - `text` → LWW string, emits `:changed`
+  - `text.crdt()` → CRDT-merged string, emits `:changed` + `:delta` (type-first, mechanism-second)
+  - `number`, `date` → LWW, emit `:changed`
+  - `ref('User')` → typed FK, auto-populates/traverses, emits `:changed`
+  - `set(ref('User'))` → set-merge collection, emits `:added:<id>` / `:removed:<id>`
+  - `presence({...})` → ephemeral per-connection state, emits `:joined`/`:moved`/`:left`
+  - `log()` → append-only stream, emits `:appended:<id>`
+  - `hash()` → one-way hashed field (passwords), exposes `verifyPassword(plain)`
+- **The auth triad are top-level peers.** `checks`, `grant`, and per-field
   `access` (which stays ON the field) read as the three auth controls at a
-  glance; `schema` is a clean field listing.
+  glance; `fields` is a clean field listing.
 - **Per-field `access`** is always a function, authoritative for that field;
-  declaring access two ways errors at schema load (invariant 5, unchanged).
+  declaring access two ways (static + function) errors at entity load (invariant 5).
 
-### `owner()`  — field marker
-Sugar for `ref('User', { from: 'req.user.id', readonly: true })` that ALSO marks
-the ownership relation. When `predicates.owner` is **not** declared, it
-auto-generates one **per-module, from this module's own field**, and (when
-`grant` is also absent) selects the default grant `owner ⇒ all, else hide()`.
+### Capabilities — typed handles, not strings
+Capabilities (`read`, `write`, `subscribe`, `admin`) are typed handles exported
+from `express-plus`, passed to `grant(...)` as a set — **no string keys, no
+string matching** in authorization decisions:
 
-- **Explicit opt-in beats `ref('User',{from})` auto-detection** (rejected C):
-  a Doc may ref a User as `reviewer`/`lastEditor` without that User being the
-  *owner*. `owner()` says exactly "this is ownership"; no false positives.
-- **Fully overridable.** Write `predicates.owner` yourself (as the full Doc
-  does) and generation is suppressed.
+```
+import { grant, deny, hide, read, write, subscribe, admin } from 'express-plus';
 
-### `app.mount(Module)` / `app.mount(Module, '/prefix')` / `app.mount(Module, { at, with })`
-One argument flattens the baseline `app.mount(Domain, {routes:{...}})`. Infers
-the prefix from the module name (`Doc → /docs`). Chainable. Name kept as
-`mount` (rejected C's `app.module()`): minimal churn from baseline, and "mount"
-is the verb-of-art for attaching a routable thing at a prefix.
+grant: async ({ is }) => {
+  if (is.owner())              return grant(read, write, subscribe, admin);
+  if (await is.banned())       return deny('account suspended');   // 403
+  if (await is.collaborator()) return grant(read, write, subscribe);
+  return hide();                                                    // 404
+}
+```
 
-### `routes: (r) => { ... }`  — verbs-as-methods, INSIDE the domain
-`r` is the same `router()` used everywhere (invariant 6 native). Gains
-`r.resource()` (explicit auto-CRUD), `r.use(path, sub)` (sub-resources).
-**Rejected B's `{get:[[path,handler]]}` arrays** — that is the nested-object
-route DSL invariant 6 forbids; there was nothing to "cautiously preserve."
+- **`subscribe` is a peer of `read`, not folded into it.** `read` = one-shot
+  REST fetch; `subscribe` = sustained WS push. They usually travel together
+  but can legitimately differ (e.g. an anonymous public whiteboard grants
+  `read` for a cheap snapshot but denies `subscribe` to bound the WS DoS
+  surface). One auth engine, re-authorized per push — no second auth path.
+- **`deny(reason)` = 403** (you exist, but refused); **`hide()` = 404**
+  (existence not leaked). ALLOWLIST throughout.
+
+### `role: owner` — FK marker (replaces `owner()` sugar)
+`ref('User', { role: owner, readonly: true })` marks the ownership relation.
+`owner` is a typed handle, not a string. TWO things fall out of it
+automatically — ONE source of truth for "who is the owner":
+1. the zero-to-one default grant (owner ⇒ all, else `hide()`)
+2. an auto-derived `checks.owner` (and thus `doc.isOwner(user)`), so even the
+   floor — which declares no `checks` — gets the method for free.
+
+The owner default (`req.user.id`) is also framework-derived from `role: owner`;
+do not hand-write it. Fully overridable: declare `checks.owner` yourself and
+generation is suppressed.
+
+### `app.mount('/prefix', Entity)` — explicit path, chainable
+Express-style: you declare the endpoint path. Persisted product domains are
+entities; cross-cutting concerns (auth) are plain routers (`app.use('/sessions', ...)`).
+The live `/events` WS endpoint is framework-baked, not declared.
+
+### `routes: (r, Entity) => { ... }` — verbs-as-methods, INSIDE the entity
+`r` is the same `router()` used everywhere (invariant 6 native). The callback
+receives the entity class as its 2nd arg so handlers use typed field handles and
+class methods with **no magic strings and no circular imports**. `r.resource()`
+opts into auto-CRUD (routed THROUGH grant/access) AND auto-surfaces `log`/
+`presence` field reads as sub-resource GETs (`GET /:id/chat`, `GET /:id/presence`)
+so a client can bootstrap history/roster before subscribing to live deltas.
+
+**Param-binding rule:** the framework auto-binds `:<entity>Id` (e.g. `:docId`)
+by loading the row through the route gate onto `req.<entity>` (`req.doc`). The
+param name is derived from the entity, so sub-routers inherit it without
+`mergeParams`.
 
 ### Omit-gets-defaults (transport)
-- `routes` omitted → auto-CRUD at `/<prefix>` and `/<prefix>/:id`, routed
-  **through** the schema's grant/access/predicates (safe by construction).
-  `routes` declared → auto-CRUD suppressed; opt back in with `r.resource()`.
-- `rooms` omitted → one default collaborative room at `/<prefix>/:id`
-  (`requireAuth`, `load:<Module>`, presence + chat). `rooms` declared → yours.
-- `hooks`/`on` omitted → no overhead.
+- `routes` omitted → auto-CRUD + live-field reads at `/<prefix>` and `/<prefix>/:id`,
+  routed **through** grant/access/checks (safe by construction). `routes` declared
+  → auto-CRUD suppressed; opt back in with `r.resource()`.
+- `grant` omitted → the zero-to-one default (owner ⇒ all, else hide) applies when
+  a `role: owner` FK exists.
+- No `rooms`/`on`/`hooks` blocks — presence/chat are fields; events derive from
+  field mutations.
 
-### `require` — the fail-closed gate
-Module-level `require` defaults to `requireAuth` (fail-closed). A single route
-opts out with the `public` middleware; a whole module opts out with
-`require: null` (used only by the auth-minting Session domain).
+### `open` — opt out of the fail-closed gate (per route)
+The route gate (`requireAuth`) is default-on for every route. A single route
+opts out with the `open` middleware — the one legitimate unauthenticated
+endpoint (it mints the session). Auth is cross-cutting, not a persisted entity,
+so the Session domain is plain routers, not an `entity`.
 
 ---
 
 ## The semantic fork, decided: THE FLOOR IS ALWAYS AUTHED
 
-**Rejected C's public Tier 0.** "Omit owner ⇒ fully public, no auth" puts a
-read/write-by-anyone app on the most-copied beginner path with zero auth code
-and no mental model that auth was a question — a footgun in the exact spot
-beginners cargo-cult. Invariant 8 already fixes the zero-to-one default at
-"owner=all, else hide" (i.e. authed).
+The floor includes `owner: ref('User', { role: owner, readonly: true })` — one
+field — and is authed by construction. The route gate (requireAuth) is default-on
+too, so the smoothest path is the safe path. Two independent default-on layers:
+**route gate** (`requireAuth`) and **row grant** (`grant` from the owner FK).
 
-Consequence: the floor includes `owner: owner()` — one token — and is authed by
-construction. Two independent default-on layers: **route gate** (`require`) and
-**row grant** (`grant` from `owner()`).
+---
+
+## Live events — derived from field mutations
+
+No `on(app)` block, no hand-written `app.emit(...)`. Mutating a field emits:
+
+```
+Doc:<id>:<fieldPath>:<verb>[:<elId>]
+  set         → :added:<id> / :removed:<id>
+  text.crdt   → :changed + :delta
+  text/number/date/ref → :changed
+  presence    → :joined / :moved / :left
+  log         → :appended:<id>
+```
+
+The baked-in WS `/events` stream re-authorizes every push through
+`grant`/`access`/`checks` (no second auth path). `subscribe` is the capability
+checked for sustained push.
+
+### Invite-notification lifecycle (the two halves differ — deliberately)
+- **`:added`** — the recipient subscribes to a **user-scoped pattern** across all
+  Docs ("`shares:added` where target === me"), backed by the reverse membership
+  index over the live stream. At delivery time the invitee IS now a collaborator
+  (the granting mutation is its own auth), so re-auth passes.
+- **`:removed`** — at delivery time the invitee has JUST been removed, so
+  re-auth would block the push. Rather than add a second auth path to force it
+  through, removal notifications are **deferred to the email-style inbox** and
+  discovered by fetch. One auth engine, no bypass.
 
 ---
 
@@ -97,24 +158,13 @@ construction. Two independent default-on layers: **route gate** (`require`) and
 | # | Invariant | Status |
 |---|-----------|--------|
 | 1 | Authz always functions | ✅ unchanged |
-| 2 | grant/deny/hide constructors | ✅ unchanged |
-| 3 | Per-schema predicates; no universalizing | ⚠️ **skirted, contained** — see below |
+| 2 | grant/deny/hide constructors | ✅ all three demonstrated (deny = banned → 403) |
+| 3 | Per-entity checks; no universalizing | ✅ `checks.owner` auto-derived per-entity from that entity's own owner FK |
 | 4 | request-scoped lookup / is.* memoization | ✅ unchanged |
 | 5 | per-field access function, authoritative, dup errors | ✅ unchanged |
-| 6 | verbs-as-methods routing | ✅ native (`routes:(r)=>...`); rejected B's arrays |
-| 7 | sensible defaults, no applyDefaults | ✅ strengthened (omit-gets-defaults) |
+| 6 | verbs-as-methods routing | ✅ native (`routes:(r,Entity)=>...`) |
+| 7 | sensible defaults baked in | ✅ strengthened (omit-gets-defaults, `getOrFail`, `touch:true`) |
 | 8 | zero-to-one default owner=all else hide | ✅ honored by authed floor |
-
-### Invariant 3, addressed
-`owner()` auto-generation does **not** universalize. It generates `is.owner`
-**per-module, from that module's own field**; Doc's generated `is.owner` and
-Project's are different functions over different fields. There is no shared
-global `owner` predicate. It is fully overridable (declare `predicates.owner`).
-This satisfies both the letter (no cross-kind universalization) and the spirit
-(per-schema, per-field) of invariant 3. Documented caveat, per Response A:
-**"override `predicates.owner` if your ownership relation isn't
-`field === req.user.id`."** This is the single point of derivation-over-literal
-authoring, and it is contained and opt-out.
 
 ---
 
@@ -122,46 +172,37 @@ authoring, and it is contained and opt-out.
 
 | Tier | Lines | What you add | File |
 |------|-------|--------------|------|
-| 0 floor | ~5 | `{ body: crdt.text(), owner: owner() }` → collaborative body, owner-only auth, auto-CRUD, default room w/ presence+chat | `hello.mjs` |
-| 1 | +N | more fields + a custom predicate (default grant still governs) | — |
-| 2 | +N | override default with your own `grant` | — |
-| 3 | +N | per-field `access` + more predicates | — |
-| 4 | +N | custom `routes:(r)=>{ r.resource(); r.get('/feed',feed); r.use('/:docId/shares',shareRoutes) }` + `hooks` | — |
-| 5 ceiling | full | multi-room + cross-domain `on(app)` | `domains/doc/index.mjs` |
+| 0 floor | ~5 | `{ body: text.crdt(), owner: ref('User',{role:owner}) }` → collaborative body, owner-only auth, auto-CRUD, live CRDT stream | `hello.mjs` |
+| 1 | +N | more fields + a custom check (default grant still governs) | — |
+| 2 | +N | override default with your own `grant` (typed capability handles) | — |
+| 3 | +N | per-field `access` + more checks | — |
+| 4 | +N | custom `routes:(r,Doc)=>{ r.resource(); r.get('/feed',feed(Doc)); r.use('/:docId/shares',shareRoutes(Doc)) }` | — |
+| 5 ceiling | full | `presence`/`chat` fields + `deny` path + cross-entity `projectManager` check | `domains/doc/index.mjs` |
 
-Entry stays `app.mount(Module)` one-arg at every tier.
+Entry stays `app.mount('/notes', Note)` at every tier.
 
 ---
 
 ## Routes-home rule
 
-- A route lives in the domain that **owns the resource it reads/mutates**.
-- Sub-resources (`/docs/:docId/shares`) live in the owning domain via `r.use()`.
-- A domain may be **schema-only, routes-only, or both**. The Session/Account
-  domain (`domains/session/`) is **routes-only, schema-less, `require: null`** —
-  it mints auth, so it cannot require auth.
+- A route lives in the entity that **owns the resource it reads/mutates**.
+- Sub-resources (`/docs/:docId/shares`) live in the owning entity via `r.use()`.
+- An entity may be **fields-only, routes-only, or both**. Auth is cross-cutting,
+  not a persisted entity, so the Session domain is plain routers with `open` on
+  the login route.
 - Truly cross-cutting routes that span no single resource (the `/` landing) live
   at **app level** in `app.mjs`.
-- Growth is pure JS-module-resolution: a single `domains/doc.mjs` splits to
+- Growth is pure JS-module-resolution: `domains/doc.mjs` splits to
   `domains/doc/{index.mjs, routes/handlers.mjs, routes/shares.mjs}`; the
   framework treats both identically.
 
 ---
 
-## Why B's `entity()` was rejected (subtract before add)
-A second entry function forks the type system ("same type as `module()`" — so
-why two?), forks the docs, and creates a migration cliff ("when you outgrow
-entity, drop to module"). A and C both prove the floor is reachable on the
-*single* constructor via omit-gets-defaults. The smooth path and the powerful
-path must be the **same object growing**, not two APIs with a seam between them.
-
----
-
 ## Deliverable files
 - `hello.mjs` — the 5-line floor.
-- `app.mjs` — thin entry: `/` + `.mount(Session).mount(Doc).listen()`.
-- `domains/doc/index.mjs` — full power-user Doc (auth bodies byte-for-byte from baseline).
-- `domains/doc/routes/handlers.mjs` — `/feed`, `/home`, updatedAt bump.
-- `domains/doc/routes/shares.mjs` — `/:docId/shares` sub-resource.
-- `domains/session/index.mjs` — routes-only domain, `require: null`.
-- `domains/session/handlers.mjs` — `userList`, `userPage`.
+- `app.mjs` — thin entry: `/` + `.use('/sessions',...)` + `.mount('/docs', DocEntity)`.listen().
+- `domains/doc/index.mjs` — full power-user Doc (ceiling).
+- `domains/doc/routes/handlers.mjs` — `/feed`, `/home` (typed-handle queries).
+- `domains/doc/routes/shares.mjs` — `/:docId/shares` sub-resource (auto-emitting set field).
+- `domains/session/routes.mjs` — auth boundary (plain routers, `open` login).
+- `domains/session/handlers.mjs` — `userList`, `userPage` (entity API, `getOrFail`).

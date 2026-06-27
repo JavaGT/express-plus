@@ -2,7 +2,7 @@
 //
 // Entity-oriented API, not app.db handles. `User` is the framework-provided
 // entity (auth is default-on, so a User entity exists). Typed field handles for
-// the select projection — no magic strings.
+// the select projection — no magic strings. `getOrFail` is the baked-in 404.
 import { User } from 'express-plus';
 
 export async function userList(req, res) {
@@ -10,8 +10,7 @@ export async function userList(req, res) {
   res.json({ users });
 }
 
-export async function userPage(req, res, next) {
-  const user = await User.get(req.params.id);
-  if (!user) return next({ status: 404, message: 'no such user' });
+export async function userPage(req, res) {
+  const user = await User.getOrFail(req.params.id);  // throws 404 if absent
   res.json({ id: user.id, username: user.username });
 }
