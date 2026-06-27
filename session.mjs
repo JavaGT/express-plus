@@ -29,8 +29,8 @@ export function sessionRoutes() {
 
   // link-share redemption: exchange a Doc share token for a `link` principal.
   // `open` — no user session. This is the MINTING path the uniform-principal
-  // story needs: a `link` principal is admitted by Doc.grant.visible (token
-  // match) and tiered by Doc.grant.can (linkShare.access). Without this route,
+  // story needs: a `link` principal is evaluated by Doc.grant.can for both
+  // row visibility and capability tiering (linkShare.tiers). Without this route,
   // the `link` principal is consumed in grant but never created.
   s.post('/link', open, async (req, res, next) => {
     const { token } = req.body;
@@ -39,7 +39,7 @@ export function sessionRoutes() {
     // Mint a link-scoped session; on subsequent requests the framework hydrates
     // req.principal = { type: 'link', attributes: { token } } from it.
     const session = await Session.create({ kind: 'link', token });
-    res.status(200).json({ token: session.token, access: doc.linkShare.access });
+    res.status(200).json({ token: session.token, tier: doc.linkShare.tier });
   });
 
   // logout: inherits requireAuth. Session.delete runs through the pipeline; a
@@ -54,11 +54,11 @@ export function sessionRoutes() {
 
 export function userRoutes() {
   const u = router();
-  u.get('/',     async (req, res) => {
+  u.get('/', async (req, res) => {
     const users = await User.findAll().select(User.id, User.username);   // typed-handle projection
     res.json({ users });
   });
-  u.get('/:id',  async (req, res) => {
+  u.get('/:id', async (req, res) => {
     const user = await User.getOrFail(req.params.id);                    // baked-in 404
     res.json({ id: user.id, username: user.username });
   });
