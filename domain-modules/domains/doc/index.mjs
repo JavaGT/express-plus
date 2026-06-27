@@ -33,7 +33,8 @@ export default entity('Doc', {
     title:     text({ max: 200, default: 'Untitled' }),
     // derived fields recompute from their source fields on mutation. Guard the
     // empty-string case: ''.split(' ') would yield [''] (length 1).
-    wordCount: number({ derived: (e) => e.body ? e.body.trim().split(/\s+/).filter(Boolean).length : 0, readonly: true }), 
+    wordCount: number({ derived: (e) => e.body ? e.body.trim().split(/\s+/).filter(Boolean).length : 0, readonly: true }),
+    // All derived values should probably be read only.
     body:      text.crdt({
       // Per-field access — always a function, authoritative for THIS field.
       // `defaults` is the capability set the entity-level `grant` already decided
@@ -104,7 +105,7 @@ export default entity('Doc', {
   //
   // deny(reason) = 403 (you exist, but refused); hide() = 404 (existence not
   // leaked). ALLOWLIST throughout.
-  grant: async ({ is }) => {
+  grant: async ({ is }) => { If this is called access on the perproperty Scale, Should it be called access here too?  
     if (is.owner())                  return grant(read, write, subscribe, admin);
     if (await is.banned())           return deny('account suspended');
     if (await is.projectManager())   return grant(read, write, subscribe, admin);
@@ -131,3 +132,5 @@ export default entity('Doc', {
     r.use('/:docId/shares', shareRoutes(Doc));  // sub-resource, owner-gated
   },
 });
+
+Add comments. Allow us to make comments on documents. In order to see a comment, I must have permission to access the document. Comments can be threaded, so in order to see a threaded comment I have to be able to see its parent comments and if that parent comment is attached to a document, I have to be able to see that document. 
