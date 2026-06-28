@@ -16,7 +16,9 @@ import { randomBytes } from 'node:crypto';
 import { assertGuarded } from './guard/static.mjs';
 import { compileReadScope, compileInheritScope, lowerToSql, fieldHandle } from './scope-sql.mjs';
 import { getActiveDb } from './db.mjs';
-import { serializeField, validateMutation, verifyHash } from './field-strategy.mjs';
+import {
+  serializeField, validateMutation, verifyHash, flattenStruct, structCellColumn,
+} from './field-strategy.mjs';
 
 // mintToken — a cryptographically random opaque session token. Handed to a
 // create policy so a framework entity that mints session-like rows (Session)
@@ -60,6 +62,29 @@ export function entity(name, declaration = {}) {
         `error (ADR #7): there is no default grant. Declare one explicitly, ` +
         `e.g. grant: () => [scope(...).can(...)].`,
     );
+  }
+
+  // A structured field generates `<field>__<cell>` columns; a declared field or
+  // sub-cell name containing the `__` separator could collide with a generated
+  // column, so it is a load-time error (fail closed — the generated namespace
+  // and the declared namespace must never alias).
+  for (const [fieldName, descriptor] of Object.entries(fields)) {
+    if (fieldName.includes('__')) {
+      throw new Error(
+        `entity('${name}') field '${fieldName}' contains the reserved '__' separator, ` +
+          `which is used to generate structured-field columns. Rename the field.`,
+      );
+    }
+    if (descriptor.kind === 'struct') {
+      for (const cellName of Object.keys(descriptor.cells)) {
+        if (cellName.includes('__')) {
+          throw new Error(
+            `entity('${name}') field '${fieldName}' has a sub-cell '${cellName}' containing ` +
+              `the reserved '__' separator. Rename the sub-cell.`,
+          );
+        }
+      }
+    }
   }
 
   // Derived role checks first, then developer-declared checks override them
@@ -131,12 +156,30 @@ export function entity(name, declaration = {}) {
   const hashFields = Object.entries(fields)
     .filter(([, descriptor]) => descriptor.kind === 'hash')
     .map(([fieldName]) => fieldName);
+  // struct fields store one flat `<field>__<cell>` column per sub-cell; on read
+  // they reconstruct a namespace object (row.linkShare = { token, tier }) and the
+  // raw generated columns are removed, so a handler sees the declared shape, not
+  // the storage shape (doc.mjs reads entity.linkShare.tier).
+  const structFields = Object.entries(fields).filter(([, d]) => d.kind === 'struct');
   const hydrate = (row) => {
     if (!row) return row;
     for (const fieldName of hashFields) {
       const stored = row[fieldName];
       if (stored === null || stored === undefined) continue;
       row[fieldName] = { verify: (plaintext) => verifyHash(plaintext, stored) };
+    }
+    for (const [fieldName, descriptor] of structFields) {
+      const namespace = {};
+      let any = false;
+      for (const cellName of Object.keys(descriptor.cells)) {
+        const column = structCellColumn(fieldName, cellName);
+        if (column in row) {
+          namespace[cellName] = row[column];
+          delete row[column];
+          if (row[column] !== null) any = true;
+        }
+      }
+      row[fieldName] = any || Object.keys(namespace).length > 0 ? namespace : null;
     }
     return row;
   };
@@ -193,7 +236,14 @@ export function entity(name, declaration = {}) {
   const insert = (cells) => {
     const stored = {};
     for (const [key, value] of Object.entries(cells)) {
-      stored[key] = serializeField(fields[key], value);
+      const descriptor = fields[key];
+      // a structured field expands into its per-cell flat columns; every other
+      // field is one serialized cell named by the field key.
+      if (descriptor && descriptor.kind === 'struct') {
+        Object.assign(stored, flattenStruct(key, descriptor, value));
+        continue;
+      }
+      stored[key] = serializeField(descriptor, value);
     }
     const cols = Object.keys(stored);
     const info = getActiveDb()

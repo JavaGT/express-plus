@@ -152,7 +152,57 @@ const STRATEGIES = Object.freeze({
     apply: phase2Merge('ordered'),
     diff: phase2Merge('ordered'),
   }),
+
+  // `struct` — a namespace of named value sub-cells (the `link` field is the
+  // first instance). The struct does not store a value of its own; it stores
+  // ONE flat cell per declared sub-cell, each serialized by that sub-cell's own
+  // value strategy. apply/diff over the whole struct are Phase 2 (a structured
+  // diff is per-sub-cell, not whole-value) and fail closed until then; the
+  // Phase 1 write path flattens a struct payload into its per-cell columns via
+  // flattenStruct (below), so serialize/apply/diff of the WHOLE struct are not
+  // on the Phase 1 path.
+  struct: Object.freeze({
+    validate(value, descriptor) {
+      if (value === null || value === undefined) return true;
+      if (typeof value !== 'object') return 'expected a structured value';
+      // every supplied sub-key must be a declared, stored sub-cell (fail closed)
+      for (const key of Object.keys(value)) {
+        if (!Object.prototype.hasOwnProperty.call(descriptor.cells, key)) {
+          return `'${key}' is not a stored sub-cell of this structured field`;
+        }
+        const structural = STRATEGIES[descriptor.cells[key].kind].validate(value[key], descriptor.cells[key]);
+        if (structural !== true) return `${key}: ${structural}`;
+      }
+      return true;
+    },
+    apply: phase2Merge('struct'),
+    diff: phase2Merge('struct'),
+  }),
 });
+
+// The generated column name for a structured field's sub-cell. Derived from the
+// declared shape (no magic strings): `<field>__<cell>`. The double underscore is
+// a visibly-generated separator; a load-time guard (entity compiler) forbids a
+// declared field/cell name containing it, so the generated name never collides
+// with a hand-declared field. This ONE function is the sole authority on the
+// name — the scope handle, the write path, and hydration all derive through it.
+export function structCellColumn(fieldName, cellName) {
+  return `${fieldName}__${cellName}`;
+}
+
+// Flatten a struct payload value into its per-cell stored columns. Used by the
+// write path so a single declared struct field becomes several flat columns.
+// Only declared sub-cells are emitted (validateMutation already rejected any
+// undeclared sub-key); each cell is serialized by its own value strategy.
+export function flattenStruct(fieldName, descriptor, value) {
+  const cells = {};
+  if (value === null || value === undefined) return cells;
+  for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells)) {
+    if (!Object.prototype.hasOwnProperty.call(value, cellName)) continue;
+    cells[structCellColumn(fieldName, cellName)] = serializeField(cellDescriptor, value[cellName]);
+  }
+  return cells;
+}
 
 // Resolve a field's strategy by its kind. An unknown kind fails closed — there is
 // no silent default strategy (the kind names the contract; an unknown kind is a

@@ -13,7 +13,7 @@
 // grant inheritance (Join). The `is`/`fields` builders are constructed per
 // entity-load from the frozen field descriptors; there is no per-request cost.
 
-import { serializeField } from './field-strategy.mjs';
+import { serializeField, structCellColumn } from './field-strategy.mjs';
 
 // The logical name of the param a role check (`is.<role>()`) emits — the one
 // placeholder the query layer rebinds per request to the concrete principal id.
@@ -112,6 +112,26 @@ export function fieldHandle(name, descriptor) {
     };
     return { fieldName: name, is: () => fail(), in: () => fail(), isNull: () => fail() };
   }
+  // A structured field (the `link` kind) is a NAMESPACE of named value sub-cells.
+  // The struct itself is not comparable (you compare a sub-cell, not the whole
+  // struct) — its own .is/.in/.isNull throw, like any non-value field. Each
+  // declared sub-cell resolves to an ORDINARY value handle bound to its own
+  // generated column (`<field>__<cell>`): the SAME `.is()` a flat field uses, so
+  // linkShare.token.is(x) lowers to `t0.linkShare__token = :p` through the
+  // existing value path (concentrate, not a second comparison path).
+  if (descriptor.kind === 'struct') {
+    const fail = () => {
+      throw new NonCompilableError(
+        `field '${String(name)}' is a structured (${descriptor.type}) field and cannot be ` +
+          `compared as a whole — compare one of its sub-cells (e.g. ${String(name)}.token)`,
+      );
+    };
+    const handle = { fieldName: name, is: fail, in: fail, isNull: fail };
+    for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells)) {
+      handle[cellName] = fieldHandle(structCellColumn(name, cellName), cellDescriptor);
+    }
+    return handle;
+  }
   if (descriptor.kind !== 'value') {
     const fail = () => {
       throw new NonCompilableError(
@@ -148,7 +168,10 @@ function makeFieldsProxy(fields, where) {
       if (descriptor === undefined) {
         throw new NonCompilableError(`no field '${String(name)}' on this entity`, { where });
       }
-      if (descriptor.kind !== 'value') {
+      // struct delegates to fieldHandle (the namespace handle: sub-cells are
+      // value handles, the struct's own .is throws). Other non-value kinds keep
+      // the scope-context `where` on their non-compilable error.
+      if (descriptor.kind !== 'value' && descriptor.kind !== 'struct') {
         const fail = () => {
           throw new NonCompilableError(
             `field '${String(name)}' is a ${descriptor.kind} field and cannot be compared in scope`,
