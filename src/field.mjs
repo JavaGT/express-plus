@@ -158,6 +158,52 @@ export function presence(cells = {}) {
   });
 }
 
+// `state({ values, transitions, effects, auto })` — a finite-state-machine
+// field (its own KIND `state`). The field's value is one of a CLOSED `values`
+// domain, and the only legal moves are those named in the `transitions` graph
+// (fail closed: a move not in the graph is rejected — the value is not a
+// free-form column the app may set to anything). doc.mjs: a Doc `status` moving
+// draft → shared → archived, with an effect on shared→archived and an `auto`
+// rule archiving a shared doc after 90 days.
+//
+//   - values      — the closed value domain (frozen; never a free column)
+//   - transitions — the legal-move graph { from: [to, …] } (frozen)
+//   - effects      — keyed by a `state.transition(from, to)` handle → an
+//                    in-transaction effect ({ with } / { mutate, with })
+//   - auto         — a time-driven auto-transition ({ when, after, to }), sugar
+//                    over the schedule time-source (ADR #19), deferred behavior
+//
+// `state.transition(from, to)` is a STATIC method returning a typed, stable,
+// stringifiable transition handle used as a COMPUTED OBJECT KEY in `effects`.
+// It is NOT a magic string (AGENTS: authorization/identifiers are never magic
+// strings): two calls for the same pair stringify to the SAME key, so the effect
+// map is keyed by a derived identifier, not a hand-authored string literal.
+//
+// Import-surface scope: this constructor delivers the descriptor the entity
+// compiler accepts. The transition enforcement (reject illegal moves), the
+// effect wiring, and the `auto` scheduler are the state kind's deferred behavior.
+export function state({ values, transitions, effects, auto } = {}) {
+  return makeDescriptor({
+    kind: 'state',
+    type: 'state',
+    values: Object.freeze([...(values ?? [])]),
+    transitions: Object.freeze({ ...(transitions ?? {}) }),
+    effects: Object.freeze({ ...(effects ?? {}) }),
+    auto,
+  });
+}
+// A typed transition handle. It stringifies to a stable identifier encoding the
+// from→to pair, so the same pair always yields the same computed-object key in
+// an `effects` map — a derived identifier, never a magic string literal.
+state.transition = (from, to) =>
+  Object.freeze({
+    from,
+    to,
+    toString() {
+      return `transition:${from}->${to}`;
+    },
+  });
+
 export function link({ tiers, tier, token } = {}) {
   return makeDescriptor({
     kind: 'struct',
