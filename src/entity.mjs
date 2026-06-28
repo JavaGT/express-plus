@@ -12,10 +12,18 @@
 //    predicate is NOT guarded: it compiles to SQL and never runs as JS, so its
 //    `is.*` calls are correctly un-awaited (SPEC §6.1).
 
+import { randomBytes } from 'node:crypto';
 import { assertGuarded } from './guard/static.mjs';
 import { compileReadScope, compileInheritScope, lowerToSql, fieldHandle } from './scope-sql.mjs';
 import { getActiveDb } from './db.mjs';
 import { serializeField, validateMutation, verifyHash } from './field-strategy.mjs';
+
+// mintToken — a cryptographically random opaque session token. Handed to a
+// create policy so a framework entity that mints session-like rows (Session)
+// generates an unguessable token without reaching for node:crypto itself.
+function mintToken() {
+  return randomBytes(24).toString('hex');
+}
 
 // Derive a role check from a ref field carrying `role`. The check is a plain
 // per-row fact comparing the principal's id against the FK column value — the
@@ -43,7 +51,7 @@ function resolveGrantClauses(grant) {
 }
 
 export function entity(name, declaration = {}) {
-  const { fields = {}, grant, checks: declaredChecks = {}, routes } = declaration;
+  const { fields = {}, grant, checks: declaredChecks = {}, routes, create: createPolicy } = declaration;
 
   // Fail closed: an entity with no grant cannot be mounted (ADR #7).
   if (grant === undefined || grant === null) {
@@ -175,21 +183,42 @@ export function entity(name, declaration = {}) {
     return hydrate(row);
   };
 
-  record.create = (payload) => {
-    validateMutation(record, payload);
-    const cells = {};
-    for (const [key, value] of Object.entries(payload)) {
-      cells[key] = serializeField(fields[key], value);
+  // insert(cells) — the trusted low-level write core: serialize each declared
+  // field's value to its stored cell, INSERT, and return the hydrated new row.
+  // It does NOT run validateMutation — its caller has already decided the cells
+  // are legitimate (the generic create validates an untrusted payload first; a
+  // create POLICY mints server-side cells it owns). This is the ONE place the
+  // INSERT/return-row mechanics live; both write paths compose it (singular
+  // system, deletion test: the policy override adds intent, not a second insert).
+  const insert = (cells) => {
+    const stored = {};
+    for (const [key, value] of Object.entries(cells)) {
+      stored[key] = serializeField(fields[key], value);
     }
-    const cols = Object.keys(cells);
+    const cols = Object.keys(stored);
     const info = getActiveDb()
       .prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`)
-      .run(cells);
+      .run(stored);
     return hydrate(
       getActiveDb()
         .prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`)
         .get({ id: info.lastInsertRowid }),
     );
+  };
+
+  // create(payload). By default it validates an untrusted payload (fail closed:
+  // undeclared keys, readonly fields, and required-clears are rejected) and
+  // inserts. A framework entity may DECLARE a `create` policy that absorbs a
+  // bespoke minting intent (Session mints token/principalType/principalId from a
+  // closed set of session intents) — declaration absorbs the imperative wiring.
+  // The policy receives the call payload and a trusted toolkit { insert, mintToken }
+  // so it composes the same insert core rather than opening a second write path.
+  record.create = (payload) => {
+    if (typeof createPolicy === 'function') {
+      return createPolicy(payload, { insert, mintToken });
+    }
+    validateMutation(record, payload);
+    return insert(payload);
   };
 
   record.delete = (id) => {
