@@ -42,6 +42,15 @@ export function date(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'date', ...options });
 }
 
+// `hash()` — a one-way salted password digest. Its own KIND (not `value`): a
+// plaintext password is digested on write and is NEVER queryable, so the scope
+// compiler refuses to compare it (a hash handle's .is throws — fail closed). A
+// hydrated row exposes `row.<field>.verify(plaintext)`; the stored cell is the
+// salted digest, never the plaintext.
+export function hash(options = {}) {
+  return makeDescriptor({ kind: 'hash', type: 'hash', ...options });
+}
+
 // `ref(Target)` — a typed foreign key. `target` is explicit (no opaque sugar).
 // `role` lets the entity compiler derive `is.<role>()` from the FK (the only
 // thing the FK derives — no zero-to-one default grant, ADR #7).

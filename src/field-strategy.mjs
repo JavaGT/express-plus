@@ -14,6 +14,8 @@
 // Phase 2 delta broadcast — registered here as a named whole whose apply/diff
 // fail CLOSED with a loud Phase-2 throw, never a silent mis-merge.
 
+import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+
 // A typed failure for the validate stage. Stage 1 throws this and NOTHING
 // downstream runs (no apply, no persist, no emit) — a bad payload never proceeds
 // (SPEC §7 stage 1, fail closed). The message names the field path + reason.
@@ -93,6 +95,33 @@ const STRATEGIES = Object.freeze({
     },
   }),
 
+  // `hash` — a one-way salted password digest. A plaintext string in, a salted
+  // scrypt digest (`salt:digest`, hex) stored. apply replaces (whole-value); diff
+  // compares the STORED cells, so re-storing the same plaintext (a fresh salt)
+  // reads as a change — passwords are write-only, never diffed for equality of
+  // plaintext. verify is exposed on the hydrated row, not here.
+  hash: Object.freeze({
+    validate(value) {
+      if (!isTextValue(value)) return 'expected a password string';
+      return true;
+    },
+    apply(_previous, next) {
+      return next;
+    },
+    diff(previous, next) {
+      if (Object.is(previous, next)) return null;
+      return { set: next };
+    },
+    // serialize digests the plaintext: random 16-byte salt + scrypt(64) →
+    // `saltHex:digestHex`. null/undefined pass through (a null cell is null).
+    serialize(value) {
+      if (value === null || value === undefined) return value;
+      const salt = randomBytes(16);
+      const digest = scryptSync(value, salt, 64);
+      return `${salt.toString('hex')}:${digest.toString('hex')}`;
+    },
+  }),
+
   // `crdt` — a custom merge with per-element deltas. Validates structurally in
   // Phase 1 (note.mjs body is a string); its merge is Phase 2.
   crdt: Object.freeze({
@@ -150,6 +179,22 @@ export function serializeField(descriptor, value) {
   const strategy = resolveStrategy(descriptor.kind);
   if (typeof strategy.serialize !== 'function') return value;
   return strategy.serialize(value, descriptor);
+}
+
+// verifyHash(candidate, stored) — the one-way check behind a hydrated hash
+// field's `.verify(plaintext)`. Recomputes scrypt over the candidate with the
+// stored salt and compares in constant time. Fail closed: a missing/malformed
+// stored cell, or a non-string candidate, is `false` (never a thrown 500 on the
+// login path, never a permissive default).
+export function verifyHash(candidate, stored) {
+  if (typeof candidate !== 'string' || typeof stored !== 'string') return false;
+  const sep = stored.indexOf(':');
+  if (sep <= 0) return false;
+  const salt = Buffer.from(stored.slice(0, sep), 'hex');
+  const expected = Buffer.from(stored.slice(sep + 1), 'hex');
+  if (salt.length === 0 || expected.length === 0) return false;
+  const actual = scryptSync(candidate, salt, expected.length);
+  return timingSafeEqual(actual, expected);
 }
 
 // Pipeline stage 1 — validate. Runs each payload key against the field-option

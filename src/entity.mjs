@@ -15,7 +15,7 @@
 import { assertGuarded } from './guard/static.mjs';
 import { compileReadScope, compileInheritScope, lowerToSql, fieldHandle } from './scope-sql.mjs';
 import { getActiveDb } from './db.mjs';
-import { serializeField, validateMutation } from './field-strategy.mjs';
+import { serializeField, validateMutation, verifyHash } from './field-strategy.mjs';
 
 // Derive a role check from a ref field carrying `role`. The check is a plain
 // per-row fact comparing the principal's id against the FK column value — the
@@ -116,6 +116,23 @@ export function entity(name, declaration = {}) {
     scopeAst,
   };
 
+  // hash-kind fields hydrate from their stored `salt:digest` cell into a
+  // `{ verify(plaintext) }` handle so a handler writes `user.password.verify(pw)`
+  // (session.mjs). The plaintext digest never leaves the field — a hash cell is
+  // not a comparable value, it is a one-way check. A null cell stays null.
+  const hashFields = Object.entries(fields)
+    .filter(([, descriptor]) => descriptor.kind === 'hash')
+    .map(([fieldName]) => fieldName);
+  const hydrate = (row) => {
+    if (!row) return row;
+    for (const fieldName of hashFields) {
+      const stored = row[fieldName];
+      if (stored === null || stored === undefined) continue;
+      row[fieldName] = { verify: (plaintext) => verifyHash(plaintext, stored) };
+    }
+    return row;
+  };
+
   // The runtime query API — the server's own trusted data-access primitive. A
   // hand-written handler (the imperative-router surface) reads and writes the
   // entity directly: User.findOne(User.username.is(name)), User.create(...),
@@ -131,17 +148,17 @@ export function entity(name, declaration = {}) {
     const row = getActiveDb()
       .prepare(`SELECT * FROM ${name} AS t0 WHERE ${sql} LIMIT 1`)
       .get(params);
-    return row ?? null;
+    return row ? hydrate(row) : null;
   };
 
   // findAll() returns the rows as an array that also carries a .select(...) so
   // both `findAll()` (all columns) and `findAll().select(a, b)` (projection) read
   // naturally off one call. select lowers its handles to a column list.
   record.findAll = () => {
-    const rows = getActiveDb().prepare(`SELECT * FROM ${name} AS t0`).all();
+    const rows = getActiveDb().prepare(`SELECT * FROM ${name} AS t0`).all().map(hydrate);
     rows.select = (...handles) => {
       const cols = handles.map((h) => h.fieldName);
-      return getActiveDb().prepare(`SELECT ${cols.join(', ')} FROM ${name} AS t0`).all();
+      return getActiveDb().prepare(`SELECT ${cols.join(', ')} FROM ${name} AS t0`).all().map(hydrate);
     };
     return rows;
   };
@@ -155,7 +172,7 @@ export function entity(name, declaration = {}) {
       err.status = 404;
       throw err;
     }
-    return row;
+    return hydrate(row);
   };
 
   record.create = (payload) => {
@@ -168,9 +185,11 @@ export function entity(name, declaration = {}) {
     const info = getActiveDb()
       .prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`)
       .run(cells);
-    return getActiveDb()
-      .prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`)
-      .get({ id: info.lastInsertRowid });
+    return hydrate(
+      getActiveDb()
+        .prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`)
+        .get({ id: info.lastInsertRowid }),
+    );
   };
 
   record.delete = (id) => {
