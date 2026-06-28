@@ -14,6 +14,11 @@ function capability(name) {
 export const read = capability('read');
 export const write = capability('write');
 export const subscribe = capability('subscribe');
+// `admin` — the management capability (rename, reshare, delete, change owner).
+// A distinct token, not a derived super-set of the others: an OWNER grant lists
+// it explicitly (`grant(read, write, subscribe, admin)`), so a capability check
+// stays an identity match, never an implied hierarchy.
+export const admin = capability('admin');
 
 // A grant decision: the set of capabilities conferred. `grant()` with no
 // capabilities is a deliberate empty grant (distinct from `deny`, which carries
