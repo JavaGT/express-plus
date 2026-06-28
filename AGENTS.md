@@ -32,8 +32,33 @@ naming, architecture, authorization, data, and live behavior.
 - **Subtract before you add.** Before adding a concept, ask what existing concept
   it makes unnecessary. The smallest change that removes ceremony is the target,
   not the floor.
+- **The deletion test gates every abstraction.** Delete a candidate abstraction
+  and watch the code. If one concept *absorbs* another and the net line count
+  drops, it **concentrates** — keep it. If the same code merely *moves into a
+  config object* behind a new name, same net count, it **relocates** — reject it.
+  A generator's pure half (a derivable schema, a uniform reducer) may concentrate;
+  its varying half (a per-entity authorize/handler body) stays hand-written, never
+  encoded into a config DSL.
+- **Build for the known use cases proactively, but no further.** The foundation
+  is built for the `projects/*` stress-test apps up front, not landed
+  incrementally as each app stubs its toe. The bar is "a real app in the set needs
+  this shape," never "build every conceivable knob" — proactive is not exhaustive.
 - **Fail closed.** When a default carries a security opinion, the default is the
   restrictive one: auth-on, private-by-default. Allowlists, not denylists.
+- **One reconciliation path.** A client event becomes state in exactly one place
+  (`ingest`), for the client's own echoed events and for foreign live events
+  alike. There is no second "apply" path. Optimistic apply is a *visible
+  placeholder*; `ingest` is what resolves it. A dual reconciliation path is the
+  source of "the two clients disagree" bugs — structurally forbidden.
+- **Persistence is opt-in by engaged seam, not a class field.** An action's class
+  (durable, ephemeral, volatile) is *emergent* from which seams it engages, never
+  a label it carries. Engage the persistence seam and it is durable; don't and it
+  is ephemeral. Reaching a capability means engaging its slot, not setting a flag
+  the framework reinterprets.
+- **Pipeline variants are named wholes, not orthogonal flags.** Where the dispatch
+  pipeline varies (durable vs live), a spec selects a *named, pre-validated
+  variant*, never toggles individual stages with independent booleans. Orthogonal
+  flags form an incoherent lattice that can half-apply; a named variant cannot.
 
 ## Authorization
 
@@ -61,6 +86,11 @@ naming, architecture, authorization, data, and live behavior.
   and event emission. Events are derived from field mutations, not hand-emitted.
 - **Uniform transport.** Pick one live transport (WebSockets here) and use it
   consistently; don't mix transports per feature.
+- **Out-of-band effects are projections over the committed log**, not a new effect
+  primitive. An in-transaction effect (`{ mutate, with }`) must be atomic with its
+  origin; a webhook, email, or external call must *not* (it leaves the process and
+  cannot join the DB transaction), so it runs as a post-commit projection consumer
+  — independently durable, retried on its own, never rolling back the origin.
 
 ## Defaults
 

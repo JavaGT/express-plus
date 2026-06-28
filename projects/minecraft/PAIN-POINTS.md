@@ -1,555 +1,727 @@
-# Pain Points — express-plus API vs. Minecraft Voxel Clone
+# Pain Points — express-plus grilled API vs. Minecraft Voxel Clone
 
-Every gap found while implementing a Minecraft-style multiplayer voxel world
-using the express-plus reactive-entity framework. Each entry cites the specific
-API construct that failed, explains why it failed, and proposes what the ideal
-API would provide.
+Stress-testing the grilled API (DECISIONLOG.md ADRs #1–#7) by attempting to
+implement a Minecraft multiplayer clone using the exemplar style of doc.mjs / comment.mjs.
 
-**Ranking scale:**
-- **BLOCKER** — cannot build the feature without a workaround that defeats the framework
-- **SHOULD-FIX** — can build but requires a second pathway, a leak, or repetitive boilerplate
-- **NIT** — minor ergonomic gap, the built-in types could express it with friction
+## Persona
 
----
-
-## BLOCKER 1: No custom field type extension point
-
-**API construct:** The field-type catalog is hardcoded — `text`, `text.crdt`,
-`number`, `ref`, `set`, `presence`, `log`, `date`, `hash`. There is NO
-`registerFieldType` export, no plugin registry, and no way to add a first-class
-field type that integrates with the framework's persistence, sync, and
-authorization layers.
-
-**Why it fails for Minecraft:**
-- A `chunk` field (RLE-compressed 16³ voxel data with delta sync) cannot be built.
-- A `vector3` field (batched x/y/z with one event per mutation) cannot be built.
-- An `inventory` field (keyed item-type → count map with stack limits) cannot be built.
-- The only workaround is to abuse `text` with hand-rolled serialization
-  (e.g., JSON-encode a 4096-byte array inside a text field → ~12KB of base64 in
-  a field designed for strings, emitting `:changed` with the full blob every time
-  one block changes). This is both semantically wrong and a performance disaster.
-
-**What the ideal API would provide:**
-```js
-import { registerFieldType, fieldTypeContract } from 'express-plus';
-
-const chunkFieldDef = {
-  events: { set: ':changed:block' },
-  init({ default }) { ... },
-  serialize(value) { ... },     // → persistence
-  deserialize(serialized) { ... },
-  diff(oldValue, newValue) { ... },  // → delta sync
-  merge(base, remote) { ... },       // → conflict resolution
-  methods: { getBlock, setBlock, fillRegion },
-};
-registerFieldType('chunk', chunkFieldDef);
-
-// Then use it as a first-class field:
-entity('World', { fields: { chunks: chunk({ compression: 'rle' }) } });
-```
-
-The framework validates the field-type contract at registration time, integrates
-the new type with the baked-in WS event stream (calls `diff` for delta payloads),
-persistence layer (calls `serialize`/`deserialize`), and authorization engine
-(field-level `access` works unchanged). The field's `methods` are surfaced on the
-loaded entity instance as typed handles: `world.chunks.getBlock(cx, cy, cz, x, y, z)`.
-
-**Current workaround:** Use `text` fields with manual JSON/binary serialization.
-Every block mutation re-serializes the full chunk and emits the full chunk blob
-over the WS stream. No delta sync, no structured query, no type safety.
+The Voxel Worldbuilder — cares about custom data types, spatial fanout, and whether the
+plugin/interest/tick contracts are real or just sketched. Skeptical that a doc-centric
+framework can express a voxel world without escape hatches.
 
 ---
 
-## BLOCKER 2: No spatial event scope — all events broadcast to all subscribers
+## Attempted entity shape
 
-**API construct:** The baked-in WS `/events` stream broadcasts every field
-mutation event (`:changed`, `:delta`, `:added`, `:removed`) to EVERY subscriber
-that passed `grant(... subscribe)`. Re-authorization happens per push but
-re-authorization only checks "can this user subscribe to this entity?" — not
-"is this user near the chunk this event affects?"
+The idealized code below references field types (`chunk`, `vector3`) and exports (`tick`,
+`subscribe`, `withheld`) that the grilled design sketches but does not concretize.
+Referencing not-yet-existing handles IS the point — this section names what a complete
+API would export.
 
-**Why it fails for Minecraft:**
-- A world has thousands of chunks. When a player places a block in chunk (10, 0,
-  -5), the delta event should only reach players whose loaded-chunk radius
-  includes those coordinates — typically 2–8 nearby players.
-- With the current model, every player on the world receives every chunk delta.
-  A 100-player server with even modest block-editing activity would saturate
-  every client's network pipe with irrelevant events.
-- The framework has NO spatial query concept, NO per-subscriber event filter,
-  and NO way to express "subscribe to events matching a predicate" in `grant`.
-- `grant` returns a capability set (`read`, `write`, `subscribe`), not a
-  filter function. `subscribe` is a boolean — you either get all entity events
-  or none.
-
-**What the ideal API would provide:**
 ```js
-// Option A: Per-subscriber event filter in grant
-grant: async ({ is, event }) => {
-  if (event.field === 'chunks' && !isNearChunk(event.coords, is.cameraPosition())) {
-    return grant(read);  // read allowed, but suppress this event's push
-  }
-  return grant(read, subscribe);
-}
+// minecraft-entities.mjs — World + Player entities expressed in the grilled API.
+// Imports that DON'T EXIST are marked [GHOST]; these are the handles the stress test
+// expects the field-type plugin contract (Phase 1 step 1), tick (Phase 2 step 9),
+// subscriber interest (ADR #5 / Phase 2 step 7), and built-in plugins to provide.
+import {
+  // Core
+  entity,               // entity declaration
+  grant, deny,          // auth primitives
+  read, write, subscribe, admin,  // capability handles
+  scope, anyOf, never,  // grant grammar
+  router,               // route mini-app
 
-// Option B: Subscription with a predicate
-app.entity.subscriptions.add(userId, Entity, {
-  filter: (event) => distance(event.position, player.position) < renderDistance,
+  // Built-in field types (Phase 1 + 2)
+  text, number, date, ref, boolean,  // scalars
+  map,                  // valued keyed set (collapses join entity)
+  blob,                 // Phase 2 step 12: binary blob
+
+  // [GHOST] field type plugin handles — the plugin contract (Phase 1 step 1)
+  // MUST produce these as first-class imports:
+  chunk,                // voxel grid: publish coords, delta diff, internal keyed store
+  vector3,              // batched x/y/z with one event per mutation, server-authoritative
+
+  // [GHOST] tick mechanism — Phase 2 step 9: entity-level recurring mutation
+  tick,
+
+  // [GHOST] subscriber interest — ADR #5: client declares interest at subscribe time
+  subscribe,
+
+  // Children
+  inherit,              // grant inheritance through typed FK
+  User, Inbox,          // built-in entities
+} from 'express-plus';
+
+// ─── Capabilities ───
+const PLAYER = [read, write, subscribe];
+const OWNER  = [read, write, subscribe, admin];
+
+// ─── World entity ──────────────────────────────────────────────────────
+
+export const World = entity('World', {
+  fields: {
+    name:       text({ validate: (v) => v.length <= 100 || 'name too long' }),
+    seed:       number({ default: () => Math.floor(Math.random() * 2**32) }),
+    gameMode:   text({ options: ['survival', 'creative', 'adventure', 'spectator'] }),
+    difficulty: text({ options: ['peaceful', 'easy', 'normal', 'hard'] }),
+
+    owner: ref('User', { role: 'owner', readonly: true }),
+    // Valued keyed set: membership keyed by User; uniqueness-by-construction.
+    // Collapses the separate PlayerMembership entity pattern.
+    players: map(ref('User'), {
+      role: ['player', 'operator'],
+      default: {},
+    }).can(async ({ is }) =>
+      (await is.owner()) ? grant(...OWNER) : deny('only the owner may manage players')),
+
+    // [GHOST] chunk() — custom field type via the plugin contract (Phase 1 step 1).
+    // The plugin publishes a coordinate schema { cx, cy, cz } so subscriber interest
+    // can express viewport-range constraints at subscribe time (ADR #5). Internally
+    // this field type manages a SPARSE KEY-VALUE STORE (chunk key → voxel data),
+    // NOT thousands of entity rows. The plugin contract's scope enum (`entity` |
+    // `connection`) doesn't fit: this is `entity`-scoped persistence but with
+    // thousands of independently-addressable sub-records — neither a single blob nor
+    // a connection-transient value. See BLOCKER #3.
+    chunks: chunk({
+      compression: 'rle',
+      dimensions:  { x: 16, y: 16, z: 16 },
+      // Published coordinate schema — subscriber interest validates + indexes on these.
+      coordinates: { cx: 'number', cy: 'number', cz: 'number' },
+    }).can(async ({ is }) =>
+      // Field access always runtime .can (ADR #3). Player can read/write chunks.
+      // Non-player link holders or viewers are denied — chunk read/write is
+      // world-interactive, not read-only view.
+      (await is.player())
+        ? grant(read, write, subscribe)
+        : deny('only world players may interact with chunks')),
+
+    createdAt: date({ default: () => new Date() }),
+  },
+
+  checks: {
+    owner:  ({ World, principal }) => World.owner.is(principal.id),
+    player: ({ World, principal }) => World.players.has(principal.id),
+  },
+
+  // Grant: exactly scope().can() — two halves, no third method (ADR #5).
+  // scope declares READ intent; .can decides write/subscribe at runtime.
+  grant: ({ principal }) => [
+    scope(({ is }) => anyOf(is.owner(), is.player()))
+      .can(async ({ is }) => {
+        if (await is.owner())  return grant(...OWNER);
+        if (await is.player()) return grant(...PLAYER);
+        return deny('no capability for this principal');
+      }),
+  ],
+
+  // ── [GHOST] tick — Phase 2 step 9 ──
+  // THIS IS A GAP: Phase 2 step 9 says tick is "lifecycle-bound to state transitions."
+  // A Minecraft world has no `state` field — it's always running. Binding tick to
+  // a state transition doesn't fit a continuous game loop. The plan's wording
+  // conflates `state.auto` (field-level, conditional, Phase 1 step 4) with entity-level
+  // recurring tick (a continuous timer) — these are different things. See BLOCKER #4.
+  tick: {
+    rate: 20, // Hz — fixed timestep with drift compensation
+    handler: async (world) => {
+      // Authoritative server mutations run through the pipeline as system principal.
+      // Physics, mob AI, crop growth — self-driven mutations, not REST-driven.
+      // world.players.toArray() yields each player; their position fields mutate
+      // through the pipeline → emit events → subscriber interest filters by viewport.
+    },
+  },
+
+  effects: {
+    [players.onAdded]: { mutate: Inbox, with: {
+      recipient: delta.member, world: entity.id, kind: 'world_join',
+    } },
+  },
+
+  routes: (r, World) => {
+    r.resource();
+    r.get('/home', home);
+  },
 });
 
-// Option C: Named spatial scopes on the chunk field itself
-chunks: chunk({
-  subscribe: ({ playerPosition, chunkCoords, renderDistance }) =>
-    manhattanDistance(playerPosition, chunkCoords) <= renderDistance * 16,
-})
-```
+// ─── Player entity ─────────────────────────────────────────────────────
 
-**Current workaround:** Implement a spatial routing layer OUTSIDE the framework
-that receives all events from the WS stream, filters them client-side, and
-discards irrelevant ones. This defeats the framework's "one auth engine, no
-second path" principle — the spatial filter is a second auth-like layer that
-lives outside grant/checks/access. It also doesn't save bandwidth — irrelevant
-events still traverse the server → client pipe.
+const inheritWorld = inherit('World', { via: 'world' });
 
----
+export const Player = entity('Player', {
+  fields: {
+    world: ref('World', { required: true }),         // typed FK; grant inherits through this
+    user:  ref('User', { role: 'author', readonly: true }),
 
-## BLOCKER 3: No chunk streaming / partial-load protocol
+    displayName: text({ validate: (v) => v.length <= 16 || 'name too long' }),
 
-**API construct:** The framework's data-access model is: REST to load the full
-entity (or auto-CRUD list), then WS for live deltas. `r.resource()` auto-generates
-GET /:id for the full row, GET / to list rows, and GET /:id/chat + GET /:id/presence
-for live-field history.
+    // [GHOST] vector3() — Phase 2 step 12: blob doesn't cut it, we need a typed
+    // 3D vector with batched x/y/z mutation emitting ONE event, server-authoritative
+    // validation (anti-cheat speed clamping), and an event-coordinate schema for
+    // subscriber interest (other players need to know where this player is).
+    //
+    // COMPOUND GAP: position is both PERSISTED (save on disconnect) and HIGH-FREQUENCY
+    // (20 updates/sec during play). The grilled API has no "ephemeral during play,
+    // commit-to-persisted on a trigger" persistence mode — Phase 3 step 16 defers this.
+    // Without it, either every tick writes to the DB (20 writes/sec/player = disaster)
+    // or position is fully ephemeral (lost on disconnect — wrong). See SHOULD-FIX #2.
+    position: vector3({
+      default: { x: 0, y: 64, z: 0 },
+      // Anti-cheat: server validates every position update through the pipeline
+      authority: 'server',                     // Phase 2 step 8: field authority
+      validate: (newPos, { self }) => {
+        const speed = distance(newPos, self.position) / dt;
+        return speed <= 1.5 || 'moving too fast';
+      },
+    }),
 
-**Why it fails for Minecraft:**
-- When a player joins, they need to load ALL chunks within their render distance
-  (render-distance 8 = (2×8+1)³ = 4,913 chunks × 4KB = ~20MB of voxel data).
-  Loading the full World entity via REST doesn't work — the world IS its chunks,
-  and you can't send 20MB over a REST call.
-- After joining, the player MOVES continuously. As they move, new chunks enter
-  render distance and must be loaded; old chunks leave render distance and must
-  be unloaded. This is SPATIALLY SCROLLING data access — fundamentally different
-  from the document model where you load the entity once and stream deltas
-  thereafter.
-- The framework has no concept of:
-  - A spatial query ("give me all chunks in radius R around (x,y,z)")
-  - A batch-load endpoint ("send me these 50 chunk IDs at once")
-  - A push-based chunk stream ("keep sending me chunk deltas for chunks in my
-    loaded radius, and notify me when a new chunk enters/exits my radius")
-  - A chunk-unload protocol ("I've left chunk (cx,cy,cz); stop sending its deltas")
+    // Ditto vector3; same authority + validate pattern.
+    velocity: vector3({ default: { x: 0, y: 0, z: 0 } }),
+    look:     vector3({ default: { x: 0, y: 0, z: 0 } }),  // yaw, pitch, roll
 
-**What the ideal API would provide:**
-```js
-// A spatial sub-resource that auto-generates chunk load/unload endpoints
-routes: (r, World) => {
-  r.resource();
-  // Framework-owned: the chunk field's spatial API is surfaced automatically
-  // GET /worlds/:id/chunks?cx=0..15&cy=0..0&cz=-7..7&at=x,y,z&radius=8
-  //   → returns compressed chunk data for all chunks in the spatial range
-  // WS protocol: client sends `subscribe:chunks` with position + radius;
-  //   server computes which chunks are in range, sends initial batch, then
-  //   streams deltas for those chunks. On player move, server recomputes
-  //   the chunk set and sends load/unload directives.
+    health: number({ default: 20, validate: (v) => (v >= 0 && v <= 20) || 'out of range' }),
+    food:   number({ default: 20, validate: (v) => (v >= 0 && v <= 20) || 'out of range' }),
+
+    // [GHOST] inventory field — keyed item-type → count map with stack limits.
+    // Phase 2 step 12: array plugin covers ordered lists but not keyed-value maps
+    // with per-key validation (stack limit depends on item type). A `map` field type
+    // with typed values (not just refs) is needed. The existing `map` stores ref
+    // memberships with a payload — it's a valued SET, not a keyed-value store.
+    // See BLOCKER #5.
+    inventory: map(text, number, { maxEntries: 36 })  // [GHOST — map over values, not refs]
+      .can(async ({ is }) => (
+        (await is.self()) ? grant(read, write, subscribe) : grant(read, subscribe))),
+
+    createdAt: date({ default: () => new Date() }),
+    lastSeen:  date({ touch: true }),
+  },
+
+  checks: {
+    self: ({ Player, principal }) => Player.user.is(principal.id),
+  },
+
+  // Inherit World grant through typed FK — Comment inherits Doc (doc.mjs), same
+  // machinery. Only world members (scope admits them) can read this player row.
+  // .can refines: a player gets write on their own row; others get read/subscribe only.
+  grant: ({ principal }) => [
+    scope(inheritWorld)
+      .can(async ({ is }) => {
+        if (await is.self()) return grant(...OWNER);
+        if (await is.playerOnWorld()) return grant(read, subscribe);
+        return deny('not a world member');
+      }),
+  ],
+
+  routes: (r) => {
+    r.resource();
+  },
+});
+
+// ─── Routes ───
+
+function home(req, res) {
+  res.render('worlds.html');
 }
-```
 
-**Current workaround:** Build a custom chunk-streaming WebSocket protocol on a
-separate socket (a second transport, violating "uniform transport"), with
-hand-rolled spatial queries against the data store. This is an entirely separate
-system living outside the entity — the entity's field declarations don't drive
-any of it.
+// [GHOST] subscribe() — ADR #5 says interest is "supplied at subscribe time" as
+// a typed constraint expression. But there is NO visible subscribe() export or
+// method in the grilled API. The doc.mjs exemplar has no subscribe path. Client
+// code that wants to express spatial interest has no API surface to call.
+// See BLOCKER #2.
+```
 
 ---
 
-## BLOCKER 4: No server tick / game-loop concept
+## Pain points
 
-**API construct:** The paradigm is "fields are reactive primitives; events derive
-from field mutations; mutations originate from user actions (REST calls)." There
-is no `loop`, `tick`, `interval`, or `schedule` hook on entities. There is no
-framework-managed timer with drift compensation or lifecycle management.
+### BLOCKER #1 — The subscribe() + interest API surface doesn't exist
 
-**Why it fails for Minecraft:**
-- Physics (gravity, fluid flow, entity collision) runs on a fixed timestep.
-- Mob AI, crop growth, hunger decay, and day/night cycle are timer-driven.
-- All of these are SELF-DRIVEN mutations — the system mutates its own fields on
-  a timer, not in response to a REST call.
-- The game loop must be framework-owned (not `setInterval` at module scope)
-  because:
-  - It needs to stop when the world is deleted (lifecycle).
-  - It needs drift compensation (fixed timestep, variable frame rate).
-  - It needs to pause when the server is under load (backpressure).
-  - Multiple worlds each need their own loop at their own tick rate.
+**What the grilled API says:** ADR #5 — delivery = re-auth-at-emit (latched) +
+subscriber interest ("a narrowing filter supplied at subscribe time, data-not-code,
+a typed constraint expression over plugin-published coordinates, validated at
+subscribe time, indexable").
 
-**What the ideal API would provide:**
+**What's missing:** There is **no visible subscribe API**. The entity declaration
+defines `checks`, `grant`, `effects`, `routes` — but nothing that a CLIENT calls
+to express interest. The doc.mjs exemplar never shows a subscribe call. The
+IMPLEMENTATION-PLAN Phase 2 step 7 says "live delivery" must precede delta-broadcast
+but doesn't define the client-facing subscribe contract.
+
+**Failing code — the API gap:**
 ```js
-entity('World', {
-  fields: { ... },
+// The client needs to say: "I want World events, but ONLY chunk deltas for chunks
+// within my viewport."
+//
+// What does this call look like? None of these exist:
 
-  // A framework-managed game loop. Runs at the declared interval. Framework
-  // handles start/stop on entity mount/unmount, drift compensation, and
-  // graceful shutdown.
-  tick: {
-    rate: 20,  // Hz (50ms interval)
-    handler: async (world) => {
-      // Physics, AI, decay — mutation emits events normally
-      for (const player of await world.players.toArray()) {
-        player.position = applyPhysics(player.position, player.velocity);
-      }
+// Option candidate A — entity-level subscribe with interest:
+await World.subscribe(worldId, {
+  interest: {
+    // ONLY the chunks field, NOT all fields (name changes, difficulty changes
+    // don't need spatial filtering — but do I want them?)
+    chunks: {
+      cx: { gte: 0, lte: 15 },
+      cz: { gte: -7, lte: 7 },
+    },
+  },
+  onEvent: (event) => { /* … */ },
+});
+
+// Option candidate B — connection-level subscribe:
+ws.send(JSON.stringify({
+  type: 'subscribe',
+  entity: 'World',
+  id: worldId,
+  interest: { /* as above */ },
+}));
+
+// Both are hand-waved. No export exists. No method signature is defined.
+// The exemplar (doc.mjs) routes to REST endpoints but never shows a subscribe path.
+// The FEATURES.md §5 mentions `app.room()` for realtime but room-level events
+// (broadcast all, no interest filter) are not the same as entity-level subscribe
+// with per-field spatial interest.
+```
+
+**Gap summary:** The grilled design correctly separates re-authorization (latched
+scope+can) from narrowing interest, but the **client-facing subscribe API surface**
+that carries the interest expression is undesigned. Without it, spatial event
+scoping is a declaration that no client can invoke.
+
+**Which ADR this tests:** ADR #5 (live delivery = re-auth + interest). The
+re-auth half is well-designed; the interest half has a data grammar but no
+invocation surface.
+
+---
+
+### BLOCKER #2 — Interest at field-level: can I scope interest to specific fields?
+
+**What the grilled API says:** ADR #5 — subscriber interest is "a narrowing filter"
+running after re-authorization, structurally incapable of widening, data-not-code.
+
+**What's missing:** Is interest per-entity or per-field? A World has fields `name`
+(always relevant), `difficulty` (always relevant), and `chunks` (spatially scoped).
+A player in a viewport wants ALL world-metadata events but ONLY chunks in their
+viewport. If interest is entity-level, EVERY event (including `name:changed`) must
+pass through the spatial filter — which doesn't make sense (a `name` field has no
+coordinates). If interest is per-field, the grammar must declare WHICH fields
+have interest and WHICH fields are unfiltered pass-through.
+
+**Failing code — the ambiguous boundary:**
+```js
+// If interest is entity-level, a `name:changed` event has no `chunk` coordinates
+// — does it pass through? Get rejected? The interest grammar would need a
+// "don't filter non-spatial fields" escape hatch, which the design doesn't specify.
+
+// If interest is per-field (my preferred interpretation):
+interest: {
+  chunks: { cx: { gte: 0, lte: 15 }, cz: { gte: -7, lte: 7 } },
+  // fields NOT listed = unfiltered pass-through for name, difficulty, etc.
+}
+
+// But: how does the chunk field PUBLISH `cx`, `cy`, `cz` as interest-able
+// coordinates? The field declaration says:
+//
+//   chunks: chunk({ coordinates: { cx: number, cy: number, cz: number } })
+//
+// This declares the schema, but: does the interest validator at subscribe time
+// REJECT an interest expression referencing `cy` if the chunk plugin doesn't
+// publish that coordinate? ADR #5 says "subscribe-time error on any unpublished
+// coordinate" — yes. Good. BUT where is the field → coordinate binding?
+//
+// The subscribe expression says `chunks: { cx: ..., cz: ... }` — how does the
+// framework know `chunks` is the field and `cx`/`cz` are the chunk plugin's
+// coordinate keys? The field name (`chunks`) and coordinate keys (`cx`) need
+// to be validated against the entity's field declarations at subscribe time.
+//
+// This validation requires the interest parser to traverse the entity's field
+// declarations, check that `chunks` is a custom field with a published coordinate
+// schema, and check that `cx`/`cz` are in that schema. The grilled design says
+// this happens but doesn't show the grammar or the validation contract.
+```
+
+**Which ADR this tests:** ADR #5 — interest is "data, not code" with "coordinates
+validated at subscribe time." The validation contract is underspecified.
+
+---
+
+### BLOCKER #3 — Chunk as field type vs. internal keyed store: the sub-record gap
+
+**What the grilled API says:** Phase 1 step 1 — the field-type plugin contract
+declares persistence strategy (`persisted`|`ephemeral`), scope (`entity`|`connection`),
+authority (`user`|`server`), mutation operators + diffs, optional `inverse`, optional
+`validate`, and a published event-coordinate schema.
+
+**What's missing:** A chunk field is NOT a single scalar value. It is a SPARSE
+INTERNAL KEYED STORE: key = `{cx, cy, cz}`, value = 4096-byte compressed voxel
+data. The field as a whole has ~4,913 sub-records per world (at render distance 8).
+The plugin contract's `scope` enum (entity | connection) and the persistence
+strategy (persisted | ephemeral) describe the FIELD'S storage, not the SUB-RECORDS'
+storage. Can a custom field type define its own internal indexing strategy?
+
+**Failing code — the gap between field-type and collection:**
+```js
+// The chunk field holds a keyed internal store. The field plugin must:
+// 1. Serialize/diff/delta-sync INDIVIDUAL sub-records, not the whole field.
+// 2. Index sub-records by key for O(1) lookup + O(log n) range scan.
+// 3. Publish a coordinate schema so subscriber interest can do range scans.
+//
+// The plugin contract as described (Phase 1 step 1) is designed for single-value
+// fields — a field serializes to ONE column, diffs between old/new value, emits
+// ONE event. A chunk field's internal store serializes to ONE column (the sparse
+// map), but its diffs are PER-KEY ("block at (10,4,-5) changed from stone to dirt")
+// and its events are PER-KEY.
+//
+// Is this the SAME "plugin contract" as a `vector3` field, or does a keyed store
+// field need a different contract? The plan doesn't distinguish single-value
+// fields from internally-keyed collection fields.
+
+// What the plugin contract needs to express (doesn't):
+const chunkPlugin = {
+  scope: 'entity',        // persisted, survives connection restart
+  persistence: 'persisted',
+  authority: 'user',      // players can place blocks
+
+  // [GAP] Internal store — the plugin manages MANY sub-records, not one value.
+  // The framework needs to know the sub-record key schema (for interest indexing)
+  // and the diff contract (per-key, not whole-field).
+  subKey: { cx: 'number', cy: 'number', cz: 'number' },   // [GHOST]
+  subValue: { type: 'binary', maxSize: 65536 },            // [GHOST]
+
+  // [GAP] Per-key operators — mutate one chunk at a time, not the whole field.
+  operators: {
+    setBlock: { authority: 'user', args: { cx, cy, cz, x, y, z, block } },
+    fillRegion: { authority: 'user', args: { … } },
+  },
+
+  // [GAP] Per-key diff — one block changed, not the whole chunk map.
+  diffKey(oldSubRecord, newSubRecord) { /* … */ },
+
+  // Serialize the WHOLE keyed store → persistence.
+  serialize(store) { /* → compressed blob of all sub-records */ },
+  deserialize(serialized) { /* → sparse keyed store */ },
+};
+```
+
+**Which part of the plan this tests:** Phase 1 step 1 — the field-type plugin
+contract. The contract is sketched for single-value fields but doesn't distinguish
+between a scalar field and an internally-keyed collection field. A chunk field
+needs the latter; forcing it into the former is the pre-grill `text` abuse
+reborn at the plugin level.
+
+---
+
+### SHOULD-FIX #1 — Interest expression language: what operators exist?
+
+**What the grilled API says:** ADR #5 — interest is "a typed constraint expression,
+data-not-code, indexable."
+
+**What's missing:** The OPERATOR grammar. Is it range-only (`gte`/`lte`)?
+Can it express disjunction ("chunk (0,0,-5) OR chunk (0,0,-6)")? Is it
+AND-only ("cx IN 0..15 AND cz IN -7..7")? The indexability constraint
+implies range-comparable operators, but which ones?
+
+```js
+// These all produce indexable range scans. Are they all supported?
+interest: {
+  chunks: {
+    cx: { gte: 0, lte: 15 },         // range
+    cz: { in: [-7, -6, -5] },        // discrete set
+    // cy: { eq: 0 },                 // exact match (redundant: range [0,0])
+  },
+}
+
+// What about multi-key intersection? "Chunks where cx=0 AND cz=-5 OR cx=1 AND cz=-5"
+// — this is not a single range per dimension; it's a Cartesian subset. The grammar
+// must decide: AND-only per dimension (no OR across dimensions) or full expression?
+// AND-only is indexable (composite index on (cx, cz)); OR introduces union queries.
+```
+
+**Which ADR this tests:** ADR #5 — "indexable" constrains the operator set, but
+the set is unspecified.
+
+---
+
+### SHOULD-FIX #2 — Per-subscriber backpressure on the block-delta firehose
+
+**What the grilled API says:** ADR #5 — re-auth at emit, latched for scale.
+Subscription delivery is indexed range scans against dirty chunks.
+
+**What's missing:** 100 players × 20Hz position updates × per-player events
+= a firehose. The grilled design addresses SCALE of re-auth (latched = cache check,
+not full re-eval) but says NOTHING about per-subscriber backpressure. A slow
+client on a mobile connection receives the same event stream as a fast client —
+no adaptive rate limiting, no per-subscriber queue depth, no priority class. The
+plan defers "RPC/intent vs mutation" (P2) but doesn't touch event priority or
+backpressure at all.
+
+```js
+// The framework needs per-subscriber queue management — NOT in the entity
+// declaration, but in the WS delivery engine. The grilled design is silent.
+
+// What a per-subscriber backpressure config might look like (doesn't exist):
+subscribe({
+  entity: World,
+  id: worldId,
+  interest: { … },
+  // [GHOST] per-subscriber delivery config:
+  backpressure: {
+    maxQueueDepth: 200,           // drop oldest events when queue fills
+    throttle: { maxPerSecond: 60 }, // drop above 60 events/sec
+    priority: {
+      'chunks:changed:block': 'high',   // block edits are critical
+      'position:changed': 'low',        // position is loss-tolerant
     },
   },
 });
 ```
 
-**Current workaround:** `setInterval` at app scope in `app.mjs`, manually loading
-the world entity by ID. No lifecycle integration: if the world is deleted, the
-interval keeps running. No drift compensation. No pause/resume. This is a full
-framework leak — the entity doesn't own its own behavior.
+**Which ADR/design feature this tests:** ADR #5 — live delivery with latched
+auth addresses the AUTH scale problem but not the NETWORK scale problem.
 
 ---
 
-## BLOCKER 5: No binary/structured field types
+### SHOULD-FIX #3 — Tick lifecycle binding: state-bound vs. continuous
 
-**API construct:** The field catalog has `text` (LWW string), `text.crdt`
-(CRDT-merged string), `number` (LWW), and `date` (LWW). No `binary`, `blob`,
-`json`, `struct`, or `buffer` field type.
+**What the grilled design says:** Phase 2 step 9 — entity-level `tick` is
+"lifecycle-bound to `state` transitions." Phase 1 step 4 — `state.auto` is
+field-level conditional scheduled mutation ("when `shared` for 90 days, 
+auto-archive").
 
-**Why it fails for Minecraft:**
-- Chunk voxel data is 4,096 bytes of dense binary data. Storing it in a `text`
-  field requires base64 encoding → 5,461 bytes, plus the overhead of treating
-  it as a string. `text` emits `:changed` on mutation and has no delta concept —
-  every block edit sends the full chunk.
-- Game rules (difficulty, gameMode, pvp, spawnMonsters, etc.) are a nested
-  object. Without a `json` or `struct` field type, each rule must be a separate
-  scalar field (exploding the field count) or encoded as JSON in a `text` field
-  (losing per-rule type safety and per-rule access control).
-- Player inventory is a keyed map ({ itemTypeId → count }). No `map` or `dict`
-  field type exists.
+**What's missing:** These are two different mechanisms:
+- `state.auto` = conditional one-shot timer (doc idle for 90d → archive)
+- entity `tick` = continuous recurring timer at fixed Hz (game loop always runs)
 
-**What the ideal API would provide:**
+Phase 2 step 9 says tick is "lifecycle-bound to `state` transitions" — this
+doesn't fit a Minecraft world. A world has no lifecycle state; it's running from
+creation to deletion. Binding tick to a `state` field forces adding a synthetic
+`state` field that never transitions, just to host the tick lifecycle. That's
+a framework leak.
+
 ```js
-fields: {
-  chunks:    binary({ maxSize: 65536 }),        // raw binary with delta diff
-  gameRules: json({                             // validated structured object
-    schema: { difficulty: 'string', gameMode: 'string', pvp: 'boolean' }
-  }),
-  inventory: map(text, number, { maxEntries: 100 }),  // key→value map
-}
+// The plan conflates these two shapes. They need to be DISTINCT:
+
+// Shape A: state.auto (Phase 1 step 4) — conditional one-shot.
+state({
+  auto: { when: 'shared', after: '90d', to: 'archived' }
+})
+
+// Shape B: entity.tick (Phase 2 step 9) — CONTINUOUS recurring.
+// Must NOT require a state field to host it. The tick lifecycle is:
+//   start → running → stop
+// Not:
+//   state=active → tick → state=paused → no tick
+//
+// If the framework REQUIRES a state field for tick lifecycle, it forces every
+// real-time entity to model its uptime as a state machine, which is wrong.
+tick: {
+  rate: 20,
+  // Lifecycle: starts when entity is first persisted, stops on entity delete.
+  // NOT bound to a state value.
+  handler: async (world) => { /* … */ },
+},
 ```
 
+**Which design features this tests:** Phase 2 step 9 vs. Phase 1 step 4 — the
+tick design conflates one-shot scheduled mutation with continuous recurring
+mutation. A game loop is the latter.
+
 ---
 
-## BLOCKER 6: Entity-explosion for dense sub-document data
+### SHOULD-FIX #4 — Partial-load protocol for spatially-scrolled data
 
-**API construct:** `entity()` is the ONLY way to model persisted data. Every
-entity gets auto-CRUD routes (or `r.resource()` opts in), a route gate
-(`requireAuth` on every route), and a grant evaluation on every access. There
-is no lighter-weight "value object" or "embedded document" construct.
+**What the grilled API says:** `r.resource()` auto-generates CRUD. `findAll`
+with field-handle predicates is indexed.
 
-**Why it fails for Minecraft:**
-- A World has thousands of chunks. If each chunk is a standalone `entity('Chunk',
-  { fields: { cx, cy, cz, voxels } })`, you get:
-  - 4,913 entities per world (at render distance 8) × grant evals per route.
-  - 4,913 REST endpoints (GET /chunks/:id for each chunk — never used).
-  - 4,913 route-gate evaluations on every chunk-level operation.
-  - N+1 queries for every "load all chunks for a world" operation.
-- The framework PUSHES you toward entity-per-row because `set` only stores refs
-  to OTHER entities, and there's no collection field that stores values inline.
-- A custom `chunk` field that manages a sparse key-value store internally is a
-  workaround — but it hides the collection structure from the framework, so the
-  framework can't auto-generate queries, indexes, or access controls on
-  individual chunks.
+**What's missing:** A Minecraft join is not "load the World entity." It's
+"load chunks progressively as the player moves." This is a PARTIAL-LOAD
+PROTOCOL: the client says "I now need chunks in region R" and receives initial
+data + starts receiving deltas for those chunks via the interest-filtered
+subscribe. When the player moves to region R', the client (or server) detects
+which chunks ENTERED and which LEFT the viewport, loads new chunks, and unloads
+old ones. The plan mentions spatial event SCOPING (Phase 2 step 7) but NOT
+spatial initial LOADING.
 
-**What the ideal API would provide:**
 ```js
-// A `collection` field that stores sub-documents WITHOUT making them full entities
-fields: {
-  chunks: collection({
-    key: ['cx', 'cy', 'cz'],          // compound key
-    value: chunk({ compression: 'rle' }),
-    access: ({ chunkCoords, playerPosition }) =>
-      isWithinRadius(chunkCoords, playerPosition),
-  }),
-}
+// What a partial-load endpoint might look like (doesn't exist):
+// GET /worlds/:id/chunks?cx=0..15&cy=0..0&cz=-7..7
+// → returns chunk data for chunks in the spatial range
+//
+// This requires the chunk field type to expose a range-query operator.
+// The framework would need to know:
+//   1. The chunk field's KEY schema ({ cx, cy, cz })
+//   2. How to BUILD an indexed range query over the internal store
+//   3. How to SERIALIZE results for transport
+//
+// None of this is in the plugin contract sketch.
+
+// The plugin contract would need a range-query method:
+const chunkPlugin = {
+  // … existing contract …
+
+  // [GHOST] Range query over the internal keyed store:
+  query: {
+    byKeyRange: (store, { cx, cy, cz }) => {
+      // Return sub-records matching the range. Framework calls this when
+      // a client requests chunk data for a spatial region.
+    },
+  },
+};
 ```
 
----
-
-## SHOULD-FIX 7: `presence` is the wrong field type for game position
-
-**API construct:** `presence({ cursor: true, selection: true })` is designed for
-collaborative document cursors: ephemeral (lives in the WS layer, not persisted),
-connection-scoped (dies on disconnect), and low-frequency (a few updates per
-second per user).
-
-**Why it fails for Minecraft:**
-- Player position MUST be persisted — if a player disconnects and reconnects,
-  they should resume at the same coordinates. `presence` data evaporates on
-  disconnect.
-- Player position MUST be server-validated (anti-cheat). `presence` has no
-  validation hook — it's designed as a "the client tells the server where its
-  cursor is" field, not a "the server validates and broadcasts" field.
-- Player position updates at 20Hz. `presence` emits per-user per-change events —
-  fine for 5 collaborators on a doc, catastrophic for 100 players on a world.
-- `presence` tracks connection identity (one entry per WS connection), not game
-  identity (one entry per Player entity). A Player entity with multiple
-  connections would have multiple presence entries.
-
-**The fix:** Add a `vector3` field type (or at minimum, clarify that `presence`
-is for document-collaboration ephemeral state and is NOT a general-purpose
-position field). Game position should be a persisted, validated, batched-mutation
-field type.
+**Which part of the plan this tests:** The plan defers "spatial queries" to
+"Deferred / plugin territory" — but spatial partial-load is NOT a query engine
+feature; it's a DATA-ACCESS protocol that the field-type plugin must expose.
+If it's deferred, every Minecraft client must hand-build a separate chunk-loading
+endpoint outside the entity declaration.
 
 ---
 
-## SHOULD-FIX 8: No batched / atomic multi-field mutation
+### SHOULD-FIX #5 — Inventory / keyed-value map over non-ref values
 
-**API construct:** Each field mutation is an independent operation. REST
-`PUT /players/:id` updates one field at a time (or a single body object, but
-the framework's field model handles them sequentially). There is no `patch`
-or multi-field mutation endpoint.
+**What the grilled API says:** Phase 1 step 4 — `map(ref('User'), value)` is a
+valued keyed set (uniqueness-by-construction). Phase 2 step 12 — `array` plugin.
 
-**Why it fails for Minecraft:**
-- On player spawn/respawn, you need to set position, velocity, look, health,
-  food, and dimension atomically. Doing 6 sequential writes means a game tick
-  could process intermediate state (e.g., position updated but health still at
-  the old value).
-- The intermediate states emit events. Between setting position and setting
-  health, other players see the player at the new position but with the old
-  health — a visible inconsistency.
-- Each individual write goes through the full auth pipeline (grant → field
-  access → serialize → event emit). 6 writes = 6 full pipeline traversals.
+**What's missing:** A `map` over VALUE types (not entity refs). A player's
+inventory is `{ itemType → count }` where `itemType` is a string ("dirt",
+"stone_pickaxe") and `count` is a number. This is NOT a set of refs to entity
+rows — the items aren't entities. The existing `map` stores ref memberships;
+there's no `map(primitiveType, valueType)` variant.
 
-**What the ideal API would provide:**
 ```js
-// A batch mutation that emits ONE composed event
-await player.batch({
-  position: { x: 0, y: 64, z: 0 },
-  velocity: { x: 0, y: 0, z: 0 },
-  look: { x: 0, y: 0, z: 0 },
-  health: 20,
-  food: 20,
-}).commit(); // → emits one Player:<id>:respawned event with all fields
+// The existing map(ref('User'), { role: ... }) stores refs to entity rows.
+// A Minecraft inventory needs a map over string keys with number values.
+// The framework has no first-class type for this.
+
+// What the API should provide (doesn't):
+inventory: map(text, number, {           // [GHOST] map over value types
+  maxEntries: 36,
+  validate: (count, { key }) => {
+    const maxStack = ITEM_STACK_SIZES[key] ?? 64;
+    return count <= maxStack || `stack overflow for ${key}`;
+  },
+}),
+
+// Workaround: abuse blob with JSON serialization (the pre-grill text-abuse reborn):
+inventory: blob({                             // Phase 2 step 12: blob exists
+  validate: (v) => typeof v === 'object',
+}),
+// → loses per-item-type validation, per-slot access control, typed diff.
 ```
 
+**Which design feature this tests:** Phase 1 step 4 `map` + Phase 2 step 12
+`array`/`blob` — the gap between "valued keyed set of refs" and "keyed-value
+map over primitives."
+
 ---
 
-## SHOULD-FIX 9: No field-level `validate` hook
+### Sharp edge #1 — Position: persisted vs ephemeral duality
 
-**API construct:** Fields own storage and sync but NOT validation. The `access`
-function controls who can read/write but not whether the VALUE is valid. Route
-handlers must validate manually: "is this position within the world bounds?",
-"is this block type valid?", "is the player within reach distance?"
+A player's position is both persisted (save on disconnect) and high-frequency
+(20 updates/sec during play). The grilled API has:
+- `persisted` fields → every mutation writes to DB (20 writes/sec/player = disaster)
+- `ephemeral` fields → data lost on disconnect (wrong — player should resume where
+  they were)
 
-**Why it fails for Minecraft:**
-- Anti-cheat position validation (speed clamping, no-clip detection, world
-  bounds) must be copied into EVERY route that mutates a player's position.
-  Miss one route, and you have a cheat vector.
-- Block placement validation (is the item in the player's inventory? is the
-  target block within the player's reach distance?) must be hand-written in the
-  block-edit route handler. The field doesn't own its own validity rules.
-- This violates "declaration absorbs imperative wiring" — the field's shape
-  should encode what constitutes a valid value, and the framework should enforce
-  it on every mutation path.
+The "ephemeral-with-commit-semantics" pattern (Phase 3 step 16) would solve this —
+an `ephemeral` field with a declarative commit-reaction that persists on
+disconnect / periodic save. But it's deferred to Phase 3, which means during
+Phase 2 (the realtime phase with Minecraft as spine) this pattern doesn't exist.
+A Minecraft implementation in Phase 2 would either hammer the DB or lose player
+positions.
 
-**What the ideal API would provide:**
+---
+
+### Sharp edge #2 — Field authority: server-authoritative validation
+
+`vector3` with `authority: 'server'` means the SERVER validates every position
+update (anti-cheat speed clamping, no-clip detection). The Phase 1 step 1 plugin
+contract reserves `authority` (`user`|`server`) but the validate hook's contract
+is underspecified: does `authority: 'server'` mean client-submitted values pass
+through `validate()` with rejection on failure? Or does the server compute the
+value and the client's submission is ignored?
+
 ```js
+// The intent: client submits position, server clamps to max speed.
+// The validate hook rejects invalid values — but in a game, rejection means
+// the client desyncs from server state. The server should AUTHORITATIVELY
+// compute the new position, not just reject bad input.
+
+// The plugin contract needs a distinction:
+//   authority: 'user'   → validate + accept/reject
+//   authority: 'server' → compute (the server owns the value; client input is advisory)
+//
+// A `compute` hook vs a `validate` hook — the grilled design has only `validate`.
 position: vector3({
-  default: { x: 0, y: 64, z: 0 },
-  validate: (newPos, { player, world }) => {
-    const speed = distance(newPos, player.position) / dt;
-    return speed <= 1.5 && world.isWithinBounds(newPos);
+  authority: 'server',
+  // [GHOST] compute hook — server computes the real position:
+  compute: (clientInput, { self, world }) => {
+    return clampSpeed(clientInput, self.position, MAX_SPEED);
   },
-}),
-```
-
-The framework calls `validate` before persisting, on EVERY mutation path
-(REST, WS, batch, game tick). One place to define the rule; enforced everywhere.
-
----
-
-## SHOULD-FIX 10: No event priority, rate limiting, or backpressure
-
-**API construct:** The WS `/events` stream sends every field mutation event to
-every subscriber that passed `grant(... subscribe)`. No priority queue, no
-rate limiting per subscriber, no backpressure (slow clients don't signal
-congestion).
-
-**Why it fails for Minecraft:**
-- 100 players × 20 position updates/sec = 2,000 events/sec just for position.
-  Add chunk deltas, inventory changes, chat messages — the stream is flooded.
-- A player on a slow connection (mobile, high latency) receives the same firehose
-  as a player on a fast connection. No adaptive rate limiting.
-- Critical events (block placed that affects a player's immediate surroundings)
-  and non-critical events (a player moved 0.001 blocks) share the same queue.
-- The framework assumes low-frequency events (a few per second per document)
-  because it was designed for collaborative editing, not real-time games.
-
-**What the ideal API would provide:**
-```js
-// Per-field event priority
-position: vector3({
-  eventPriority: 'low',      // position updates are frequent, loss-tolerant
-  rateLimit: { perSecond: 5, strategy: 'throttle' },
-}),
-chunks: chunk({
-  eventPriority: 'high',     // block edits are critical, must-deliver
+  validate: (newPos) => world.isWithinBounds(newPos) || 'out of bounds',
 }),
 ```
 
 ---
 
-## SHOULD-FIX 11: No entity lifecycle hooks
+## Prior findings re-checked
 
-**API construct:** Entities are defined via `entity(name, config)` with keys
-`fields`, `checks`, `grant`, `routes`. There is no `onCreate`, `onDelete`,
-`onMount`, or `onUnmount` hook.
+Each prior finding from the pre-grill PAIN-POINTS.md, re-evaluated against the
+grilled ADRs (#1–#7) and the IMPLEMENTATION-PLAN.
 
-**Why it fails for Minecraft:**
-- A World entity should start a game loop on creation and stop it on deletion.
-  Without lifecycle hooks, the loop must be managed externally (in `app.mjs`),
-  breaking encapsulation.
-- A Player entity should allocate/initialize inventory slots on creation.
-  Without `onCreate`, initialization logic must live in route handlers
-  (repeated everywhere a Player can be created).
-- A World entity should generate initial spawn chunks on creation
-  (procedural terrain generation). Without `onCreate`, this must be a
-  separate non-declarative step after `World.create()`.
+| # | Prior finding | Status | Why |
+|---|--------------|--------|-----|
+| 1 | No custom field type extension | **RESOLVED** | Phase 1 step 1: field-type plugin contract. Custom field types are first-class. |
+| 2 | No spatial event scope | **PARTIALLY-RESOLVED** | ADR #5 + Phase 2 step 7: subscriber interest is data-not-code narrowing. RESOLVED for the concept, but the interest expression grammar, subscribe API surface, and field-level-vs-entity-level interest scoping are undesigned gaps (see BLOCKER #1, #2, SHOULD-FIX #1). |
+| 3 | No chunk streaming / partial load | **STILL-OPEN** | Spatial event SCOPING (Phase 2 step 7) covers deltas but not initial LOAD. The plan defers spatial queries to "Deferred / plugin territory" and has no partial-load protocol. See SHOULD-FIX #4. |
+| 4 | No server tick / game loop | **PARTIALLY-RESOLVED** | Phase 2 step 9: entity-level `tick`. RESOLVED for the concept, but the lifecycle binding ("state transitions") conflates one-shot auto with continuous recurring tick. See SHOULD-FIX #3. |
+| 5 | No binary/structured field types | **RESOLVED** | Phase 2 step 12: `blob` + `array` built-in plugins. Plus custom field types (Phase 1 step 1) cover any remaining binary type. |
+| 6 | Entity explosion for dense data | **PARTIALLY-RESOLVED** | Custom field types can manage internal keyed stores, avoiding 4,913 entity rows. RESOLVED at the concept level, but the plugin contract doesn't distinguish single-value from internally-keyed-collection fields. See BLOCKER #3. |
+| 7 | `presence` wrong for game position | **STILL-OPEN** | No `vector3` in the plan. The `authority` field (user/server) is reserved but the compute-vs-validate distinction is missing. The persisted-vs-ephemeral duality for position isn't solved until Phase 3 step 16. See Sharp edge #1, #2. |
+| 8 | No batched multi-field mutation | **RESOLVED** | Phase 2 step 12: batched mutation + `batch()` in load-bearing guards. One composed event. |
+| 9 | No field-level `validate` hook | **RESOLVED** | Phase 1 step 5: validate as a pipeline stage. Phase 1 step 1 plugin contract includes `validate(value, ctx)`. |
+| 10 | No event priority / backpressure | **STILL-OPEN** | Nothing in the grilled design or implementation plan addresses per-subscriber backpressure, adaptive rate limiting, or event priority classes. See SHOULD-FIX #2. |
+| 11 | No entity lifecycle hooks | **PARTIALLY-RESOLVED** | Effects + tick provide some lifecycle behavior declaratively. But explicit `onCreate`/`onDelete` hooks (for procedural terrain generation, cleanup) are not in the plan. Effects run on field mutations, not entity instantiation/deletion. See Sharp edge #3. |
+| 12 | No boolean field type | **RESOLVED** | Phase 1 step 4: `boolean` built-in plugin. |
+| 13 | `set` stores refs, not values | **RESOLVED** | Phase 2 step 12: `array` plugin. Custom field types cover any remaining value collections. |
+| 14 | No structured sub-object field type | **PARTIALLY-RESOLVED** | Phase 2 step 12: `blob` handles nested data. But per-subfield access control, validated schemas, and structured diffs (not whole-blob diffs) are not designed. |
+| 15 | No `setOnce` field modifier | **RESOLVED** | Phase 3 step 17: ergonomic modifiers list includes `setOnce`. |
 
-**What the ideal API would provide:**
-```js
-entity('World', {
-  fields: { ... },
+### Additional gap surfaced by the grilled API
 
-  onCreate: async (world) => {
-    await world.chunks.generateSpawn();    // procedural terrain
-    startGameLoop(world);                  // start ticking
-  },
-
-  onDelete: async (world) => {
-    stopGameLoop(world.id);               // cleanup
-  },
-});
-```
-
----
-
-## SHOULD-FIX 12: No boolean field type
-
-**API construct:** Field types are `text`, `number`, `ref`, `set`, `presence`,
-`log`, `date`, `hash`. No `bool` or `boolean` type.
-
-**Why it matters for Minecraft:** PvP on/off, spawn monsters on/off, allow flight
-on/off, do daylight cycle on/off — all are booleans forced into `number({ default:
-1 })` or `text({ default: 'true' })`. Losing type semantics: a `number` field
-reads as "how many PvP?" when it means "is PvP enabled?"
-
-**The fix:** Add `bool()` to the built-in catalog.
+| # | New finding | Status | Why |
+|---|-----------|--------|-----|
+| 16 | Subscribe() API surface | **BLOCKER** | ADR #5 defines interest but no client-facing subscribe call. See BLOCKER #1. |
+| 17 | Interest field-level scoping | **BLOCKER** | Can interest scope to specific fields? See BLOCKER #2. |
+| 18 | Plugin contract: single-value vs keyed-store | **BLOCKER** | Chunk needs an internally-keyed collection field type. See BLOCKER #3. |
+| 19 | Interest operator grammar | **SHOULD-FIX** | What operators exist? Range-only? See SHOULD-FIX #1. |
+| 20 | Tick: continuous vs state-bound | **SHOULD-FIX** | Tick lifecycle conflated with state.auto. See SHOULD-FIX #3. |
+| 21 | Partial-load protocol | **SHOULD-FIX** | Spatial initial load is undesigned. See SHOULD-FIX #4. |
+| 22 | Map over non-ref value types | **SHOULD-FIX** | No keyed-value map over primitives. See SHOULD-FIX #5. |
+| 23 | compute vs validate for server-authoritative fields | **Sharp edge** | `authority: 'server'` needs a compute hook, not just validate. See Sharp edge #2. |
+| 24 | Entity onCreate/onDelete lifecycle | **Sharp edge** | Effects don't cover entity instantiation/deletion. Procedural terrain generation, cleanup, game loop start/stop need lifecycle hooks. |
 
 ---
 
-## SHOULD-FIX 13: `set` stores refs, not values — no collection-of-values field
+## Summary
 
-**API construct:** `set(ref('User'))` stores refs to OTHER entities. No field
-type stores inline values in a collection (like a `Set` of strings, numbers, or
-nested objects).
+The grilled design is a **substantial improvement** over the pre-grill API:
+- The field-type plugin contract (Phase 1 step 1) directly resolves 3 prior blockers.
+- Subscriber interest as data-not-code (ADR #5) resolves spatial event scoping at the
+  concept level.
+- Entity-level tick (Phase 2 step 9) resolves the game-loop problem at the concept level.
+- Batched mutation, boolean/blob/array types, and validate-as-pipeline-stage resolve
+  5 more prior pain points.
 
-**Why it matters for Minecraft:** A player's hotbar is an ordered list of item
-references, not a set of refs to standalone Item entities. Making every item a
-full entity with CRUD routes for a hotbar slot is absurd. The workaround is a
-`text` field with comma-separated IDs — fragile, not type-safe, no framework
-integration.
+**The remaining gaps cluster around three incompletely-designed surfaces:**
 
-**What the ideal API would provide:**
-```js
-// An ordered list of values
-hotbar: list(text, { maxLength: 9, default: [] }),
+1. **The subscribe API + interest grammar** — the grilled design correctly separates
+   re-auth from narrowing interest, but the client-facing invocation surface, the
+   interest operator grammar (range? set? AND-only?), and field-level-vs-entity-level
+   interest scoping are all underspecified. This is the largest gap.
 
-// A set of values (not refs)
-allowedBlocks: set(text, { allowed: ['stone','dirt','grass'] }),
-```
+2. **The field-type plugin contract for internally-keyed stores** — the contract is
+   sketched for single-value fields; a chunk field manages thousands of sub-records
+   with per-key diffs and per-key indexing. Without this distinction, chunk data is
+   forced into whole-field-serialization (the pre-grill `text` abuse at the plugin level).
 
----
-
-## NIT 14: No structured sub-object field type
-
-**API construct:** All fields are flat scalars (text, number, date), single
-refs, or sets of refs. No nested-object or structured field type.
-
-**Why it matters for Minecraft:** Game rules (difficulty + gameMode + pvp +
-spawnMonsters + doDaylightCycle + ...) are a conceptually single object that
-must be split across 6+ scalar fields. This:
-- Clutters the field listing with what is conceptually one unit.
-- Makes "reset all game rules to defaults" require 6+ field writes.
-- Loses the ability to validate the object as a whole (e.g., "spectator game
-  mode requires pvp off").
-- Loses per-field access granularity on the sub-fields (you can't grant read on
-  difficulty but hide pvp).
-
-**The fix:** Add a `json()` or `struct()` field type with optional validation
-schema.
-
----
-
-## NIT 15: No `read-only-except-on-create` field modifier
-
-**API construct:** `readonly: true` makes a field immutable after creation.
-`readonly: false` makes it always mutable. There's no "set once at creation, then
-readonly" modifier.
-
-**Why it matters for Minecraft:** A World's seed must be set at creation and
-never changed — but `readonly: true` prevents setting it during `World.create()`
-(the auto-CRUD POST endpoint). You need the `default` option to auto-generate
-it, but what if the player wants to CHOOSE their seed? Then the field must be
-mutable, and you must validate in the route that it's not being changed after
-creation.
-
-**The fix:**
-```js
-seed: number({ setOnce: true }),  // writable on create, readonly thereafter
-```
-
----
-
-## Summary table
-
-| # | Pain Point | Rank | API construct | Can work around? |
-|---|-----------|------|---------------|-----------------|
-| 1 | No custom field type extension | BLOCKER | `entity()` fields catalog | Only by abusing `text` |
-| 2 | No spatial event scope | BLOCKER | `/events` WS broadcast | Client-side filter (wasteful) |
-| 3 | No chunk streaming / partial load | BLOCKER | `r.resource()` auto-CRUD | Build second WS protocol |
-| 4 | No server tick / game loop | BLOCKER | Field-mutation-only model | `setInterval` leak |
-| 5 | No binary/structured field types | BLOCKER | `text`, `number` only | base64 in text field |
-| 6 | Entity explosion for dense data | BLOCKER | `entity()` + `set(ref)` only | Custom sparse field workaround |
-| 7 | `presence` wrong for game position | SHOULD-FIX | `presence` field type | Use custom `vector3` (needs #1) |
-| 8 | No batched multi-field mutation | SHOULD-FIX | Individual field writes | Sequential writes (racy) |
-| 9 | No field-level `validate` hook | SHOULD-FIX | Route handler validation | Copy-paste validation per route |
-| 10 | No event priority/rate-limiting | SHOULD-FIX | WS stream firehose | Client-side throttling |
-| 11 | No entity lifecycle hooks | SHOULD-FIX | `entity()` config keys | App-level manual management |
-| 12 | No boolean field type | SHOULD-FIX | No `bool` in catalog | `number({ default: 1 })` |
-| 13 | `set` stores refs, not values | SHOULD-FIX | `set(ref('User'))` | `text` with comma-sep IDs |
-| 14 | No structured sub-object type | NIT | Flat scalars only | Split into N scalar fields |
-| 15 | No `setOnce` field modifier | NIT | `readonly: true` on creation | Manual route validation |
-
----
-
-## Design reflection
-
-The express-plus API was designed for **collaborative documents** — the
-"Google Docs" use case shaped every abstraction:
-
-- **Field types** target text documents (text, text.crdt for collab editing) and
-  document metadata (number, date, ref). Binary, spatial, and structured data
-  are absent because they never arise in docs.
-- **Event fan-out** assumes "all collaborators see all changes" — true for a
-  shared document, false for a spatially scoped game world.
-- **Data access** assumes "load the entity once, then stream deltas" — true for
-  a fixed-size document, false for a scrollable world where data is constantly
-  loaded and unloaded.
-- **Mutation source** assumes user-driven REST calls — true for typing and
-  sharing, false for a server game loop that self-mutates at 20Hz.
-
-A Minecraft clone doesn't just need "more field types" — it challenges the
-framework's **data-access model** (spatial vs. one-shot load), **event model**
-(broadcast vs. scoped), and **mutation model** (user-driven vs. timer-driven).
-
-The framework's design is tight for its domain but **not pluggable** for domains
-outside it — and the #1 gap (no custom field type extension point) makes it
-impossible to bridge.
+3. **Per-subscriber backpressure + tick lifecycle clarity** — the grilled design
+   addresses AUTH scale (latched) but not NETWORK scale (backpressure). The entity
+   tick design conflates one-shot `state.auto` with continuous recurring tick.

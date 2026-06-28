@@ -134,9 +134,13 @@ Motivating cases the model must express:
   method: it is re-authorization (the same `scope`+`.can` engine re-run at emit,
   latched for scale) + subscriber interest (a narrowing filter supplied at
   subscribe time, data-not-code, indexable). See DECISIONLOG.md.
-- **Out-of-band side effects** (webhooks, emails, external HTTP) — NOT yet
-  designed. The grilled `effects` cover in-transaction DB mutations only; a side
-  effect that leaves the process is an open question.
+- **Out-of-band side effects** (webhooks, emails, external HTTP) — **projections
+  over the committed event log**, not a new effect primitive. The grilled
+  `effects` cover in-transaction DB mutations only (atomic with the origin); a
+  side effect that leaves the process cannot join the DB transaction, so it runs
+  as a post-commit projection consumer — independently durable, retried on its
+  own, never rolling back the origin. Validated against the scope workbench; see
+  `SCOPE-FINDINGS.md` and DECISIONLOG.md.
 
 Live-update loop: POST add collaborator → declarative effect
 `{ mutate: Inbox, with: { recipient, doc, kind: 'invite' } }` → one composed

@@ -1,246 +1,277 @@
-// projects/space-invaders/PAIN-POINTS.md
-//
-// Stress-test results: building an authoritative-server multiplayer arcade
-// game (Space Invaders) on the express-plus reactive-entity paradigm.
-//
-// Each pain point is ranked: BLOCKER (cannot ship), SHOULD-FIX (major
-// ergonomic/performance issue), NIT (minor naming or API surface gap).
+## Persona — The Arcade Game Loop Engineer
 
+Care about the tick/scheduler construct, ephemeral entities, and whether the
+live layer can sustain game-scale frequency without a firehose swamping every
+subscriber. Skeptical of any framework that assumes mutations originate only
+from user REST calls.
 
-## PAIN POINT 1: No scheduler/tick construct for authoritative server loops
+## Attempted entity shape
 
-**Rank: BLOCKER**
+The full aspirational implementation is at `projects/space-invaders/match.mjs`.
+Summary shape:
 
-**API construct that failed:** The entity constructor has `fields`, `checks`,
-`grant`, `routes` — but no `tick`, `loop`, `scheduler`, or `interval` block.
-The framework's reactivity model is "events derive from field mutations," but a
-game loop mutates state on a **timer** (every 33 ms at 30 Hz), not in response
-to any field mutation.
+- `entity('Match', { fields: { phase: state(...), score: number, players: map(ref('User'), {x, lives, score}), invaders: text (aspirational: grid), projectiles: text (aspirational: list) }, checks: { player }, grant: [(scope()...].can(...)], tick: { rate: 30, when: 'playing' } (aspirational), ttl: '5m' (aspirational) })`
+- Phase transitions: `lobby → playing → gameover` (terminal).
+- Grant: `scope(is.player())` — but can't express spectator read (no `everyone`/
+  `authenticated` compiled constant). `.can` tiers player vs spectator.
+- Tick: aspirational 30 Hz loop bound to `when: 'playing'`, system principal,
+  through the mutation pipeline with delta broadcast.
+- Fields: `grid` (2D boolean, delta-diff, ephemeral), `list` (ordered, delta-
+  diff), `players` map with server-authoritative sub-fields.
 
-**What we had to do:** Reach outside the framework with `setInterval` (a second
-pathway, violating "prefer a singular system" — AGENTS.md line 26). The game
-loop in `app.mjs` is a global `setInterval` that manages its own lifecycle
-(start on match start, stop on game over, cleanup on entity destroy). The
-framework provides no lifecycle hooks for entity state transitions (e.g., "when
-Match.phase changes to 'playing'"), so we also had to add a **polling interval**
-to detect phase changes (another `setInterval` in `app.mjs`).
+## Pain points
 
-**Aspirational fix:** An entity should be able to declare a `tick` block:
+### BLOCKER #1: `tick` construct — planned but zero API surface
+
+Tests: IMPLEMENTATION-PLAN Phase 2 item 9 (entity-level tick); singular-system
+principle (AGENTS.md).
+
+Failing code:
+
 ```js
-entity('Match', {
-  fields: { ... },
-  tick: {
-    rate: 30,  // Hz — framework owns the setInterval lifecycle
-    handler(match, dt) {
-      // Authoritative tick: move invaders, advance projectiles,
-      // check collisions. Framework diffs changed fields and
-      // broadcasts deltas — no manual serialization, no DB writes.
-      if (match.invaders.allDead()) match.phase = 'gameover';
-    },
-  },
-});
-```
-The framework starts the loop on a configurable trigger (e.g., phase
-transition to `playing`), stops it on `gameover`, and cleans up on entity
-destroy. No `setInterval`, no polling, no second pathway.
+// What the game needs: an authoritative loop at 30 Hz.
+// The plan says tick exists. The doc.mjs exemplar shows state.auto (a
+// one-shot field-level timer), not a recurring entity-level loop.
+//
+// Without tick, the game loop is a raw setInterval in app.mjs — a second
+// pathway outside the pipeline:
+const matches = new Map();
+const TICK_RATE = 1000 / 30;
+let handle = null;
 
-
-## PAIN POINT 2: No field type for shared ephemeral server-authoritative state
-
-**Rank: BLOCKER**
-
-**API construct that failed:** Every field type available to the `fields` block
-is either **persisted** (`text`, `number`, `date`, `set`, `ref`, `log`) or
-**per-connection ephemeral** (`presence`). There is no field type for:
-  - SHARED (all connections see the same value)
-  - EPHEMERAL (evaporates when the match/entity is destroyed — no DB persistence)
-  - SERVER-AUTHORITATIVE (clients can read but never write)
-  - TICK-MUTATED (updated by the server tick, not by any client action)
-
-The invader grid is the canonical example: a 2D boolean array (11×5 or wider)
-that every player's client must render identically, that the server mutates
-every tick, and that should never touch the database.
-
-**What we had to do:** We serialized the invader grid, projectile array, and
-ship positions as a JSON string into the `invaders: text` field of the Match
-entity every tick. This has two catastrophic consequences:
-  1. **30 DB writes/second per active match.** A text field is LWW-persisted;
-     every `match.invaders = jsonString` triggers a database write. For a
-     lobby with 10 active matches, that's 300 writes/second — to store data
-     that should be ephemeral.
-  2. **The entire grid is serialized and broadcast every frame.** There's no
-     delta compression — the framework sees "text field changed" and pushes
-     the full new value to all subscribers. A diffing broadcast (only send
-     the cells that changed) requires framework support.
-
-**What we also couldn't do:** Player ship positions are genuinely per-player —
-they belong in `presence`. But `presence` is designed for cursor/selection in
-collaborative document editing, not for game input. `presence` has no built-in
-server validation (it's client-dictated) and emits `:joined/:moved/:left`
-events — no mechanism for the server to clamp positions, enforce velocity caps,
-or reject spoofed coordinates. Ship positions ended up in the in-memory game
-loop, outside the entity system entirely.
-
-**Aspirational fix:** New field types for shared ephemeral game state:
-```js
-fields: {
-  invaders:    grid({ cols: 11, rows: 5 }),   // 2D boolean grid, delta-broadcast
-  projectiles: list({ max: 50 }),              // array of {x, y, dy, owner}
-  ships:       perPlayer({ x: number, lives: number }, {
-    serverAuthoritative: true,  // server clamps/rejects client values
-  }),
+// Imperative wiring restating what the entity declaration should own.
+// The framework should own tick lifecycle: start on phase→playing, stop
+// on gameover, destroy on entity-end, attribute to system principal.
+function startTickLoop() {
+  handle = setInterval(() => {
+    for (const [id, match] of matches) {
+      if (match.phase !== 'playing') continue;  // polling lifecycle
+      tick(match, TICK_RATE / 1000);
+    }
+  }, TICK_RATE);
 }
 ```
-These fields are **in-memory only** — no DB persistence. On tick, the framework
-diffs each field and broadcasts only the delta to subscribers. On entity
-destroy, the memory is freed.
 
-
-## PAIN POINT 3: Per-push re-authorization at high frequency (30 Hz × N players)
-
-**Rank: SHOULD-FIX**
-
-**API construct that failed:** The baked-in WS `/events` stream re-authorizes
-every push through `grant`/`access`/`checks` — "no second auth path"
-(DOMAIN-MODULES.md line 142). For a document-collaboration app, this is correct:
-shares change, collaborators are added/removed, and re-auth on each push catches
-permission revocations within one push-cycle.
-
-For an in-flight arcade match, the auth answer **does not change** between
-ticks. Once a player joins a match (authorized at join), they remain in the
-player roster (the `inMatch` check in `grant`). Re-checking `entity.players.has(user.id)`
-120 times per second (30 Hz × 4 players) is overhead with no security benefit.
-
-**The per-push pattern also blocks delta-compression optimizations.** If the
-framework must call `grant` per subscriber per push, it evaluates authorization
-for every connected user before it can even decide what to push. A match with
-4 players and 100 lobby spectators would call `grant` 3,000 times/second
-(30 Hz × 100 subscribers) — most of whom get `hide()` because they're not in
-the match. The framework ideally filters subscribers BEFORE evaluating per-push
-re-auth.
-
-**Aspirational fix:** Authorization-latch-on-subscribe. When a client subscribes
-to a match's fields, the framework evaluates `grant` ONCE and latches the
-capability set for the lifetime of that subscription (or until a
-subscription-invalidating event occurs, like a share revocation or player
-roster change). For fields that don't change auth mid-flight (the invader grid),
-this eliminates 99% of re-auth calls. A field could opt in:
-```js
-invaders: grid({ cols: 11, rows: 5, authLatch: true })
-```
-The framework would still re-auth on player join/leave (roster change) but skip
-per-tick re-auth during gameplay.
-
-
-## PAIN POINT 4: No ephemeral entity lifecycle
-
-**Rank: SHOULD-FIX**
-
-**API construct that failed:** All entities in express-plus are persisted by
-default. The Match entity has a `createdAt` date field and the framework stores
-every row in the database. But a Match is **ephemeral** — it exists for the
-duration of a game (typically 3–5 minutes) and should evaporate afterward.
-
-**What we had to do:** Nothing explicit — the Match rows linger in the database
-indefinitely as stale rows. The game loop reads/writes them every tick (see
-Pain Point 2), and when the match ends, the `score` and `phase` fields are
-preserved in the DB row, but the invader grid and projectile data are ephemeral
-(serialized in the text field, now stale). To clean up, the app would need a
-periodic sweep job (yet another `setInterval` — third pathway).
-
-**Aspirational fix:** An entity-level `ttl` (time-to-live) or `ephemeral` flag:
+Aspirational shape:
 ```js
 entity('Match', {
-  ttl: '5m',  // auto-delete row 5 minutes after creation
-  fields: { ... },
-});
-```
-Or a stronger `ephemeral: true` that keeps the entity entirely in-memory
-(no DB row, no persistence) — suitable for game sessions, temporary rooms,
-and other short-lived shared state.
-
-
-## PAIN POINT 5: No RPC/action pattern alongside field mutations
-
-**Rank: NIT**
-
-**API construct that failed:** The framework's only mutation path is field
-assignment (`match.invaders = ...`, `match.players.add(id)`). But arcade games
-need **actions** — "fire bullet," "move left," "start match." These are not
-field mutations: they're server-validated intents that the authoritative tick
-processes and whose side effects (a projectile appearing, a ship moving) are
-**derived state**, not client-written field values.
-
-**What we had to do:** We added POST routes (`/:matchId/fire`, `/:matchId/move`)
-that accept the intent, validate it, and queue it into the in-memory game loop's
-`pendingInput` array. The tick then processes the input and updates the game
-state. This works but feels like a parallel mutation mechanism — the framework
-knows about field mutations (and derives events from them), but action intents
-are opaque JSON payloads with no type safety, no validation, and no event
-derivation.
-
-**Aspirational fix:** An `actions` block on the entity that declares typed,
-server-validated player actions:
-```js
-entity('Match', {
-  actions: {
-    move: { direction: number(-1, 0, 1) },  // typed, validated
-    fire:  { shipX: number(0, GAME_WIDTH) },
-  },
   tick: {
-    rate: 30,
-    handler(match, dt, queuedActions) {
-      // queuedActions = [{ player, action: 'move', payload: { direction: -1 } }, ...]
-      // Already validated by the framework.
+    rate: 30,                               // Hz — framework owns setInterval
+    when: 'playing',                         // lifecycle-bound to phase
+    handler(match, dt, queuedActions) {       // through the pipeline
+      match.invaders = stepInvaders(match.invaders, dt);
+      match.projectiles = stepProjectiles(match.projectiles, dt);
+      if (allDead(match.invaders)) match.phase = 'gameover';
     },
   },
 });
 ```
-Actions are queued per-tick (one action per player per tick), validated against
-the declared types, and passed to the tick handler alongside the match state.
-The framework derives `Match:<id>:action:fire` events for spectators if desired.
 
+The gap: `state.auto` is a one-shot timer (`when: 'shared', after: '90d', to:
+'archived'`). A recurring game loop is a different construct with different
+semantics: repeating, delta-time-aware, input-queue-integrated, stop-on-
+transition. The plan acknowledges tick exists. The exemplar doesn't show it.
 
-## PAIN POINT 6: No built-in delta broadcast for high-frequency fields
+### BLOCKER #2: No `grid` field type for shared ephemeral authoritative state
 
-**Rank: SHOULD-FIX**
+Tests: IMPLEMENTATION-PLAN Phase 2 items 8 (ephemeral persistence), 11
+(per-field-type delta broadcast). Field-as-reactive-primitive principle.
 
-**API construct that failed:** When a text field changes, the framework emits
-`Doc:<id>:<fieldPath>:changed` with the full new value. For a CRDT text field,
-it also emits `:delta` with the operational transform. But for a serialized
-game grid in a `text` field, there's no delta — the full grid (JSON string)
-is pushed to every subscriber every frame.
+Failing code:
 
-At 30 Hz with a 4-player match and a 55-cell invader grid, the full grid JSON
-(≈500 bytes) is pushed 120 times/second. With delta compression, only the
-≈2–5 cells that changed per tick (≈20 bytes) would be pushed — a 25× bandwidth
-reduction.
+```js
+// The invader grid is a 11×5 boolean grid. The field-type catalog has:
+// text, number, date, ref, map, presence, log, state, boolean — no grid.
+//
+// Workaround: serialize to text. Catastrophic:
+// 1. 30 DB writes/second per active match (text is LWW-persisted).
+// 2. Full grid value broadcast to every subscriber every frame.
+// 3. No delta diff — the framework sees "text field changed" and emits
+//    the full 500-byte JSON, not the 2–5 cells that actually changed.
 
-**Aspirational fix:** All field types should support delta compression. The
-framework owns the diff algorithm per field type:
-  - `text.crdt()` → operational transform deltas (already exists)
-  - `grid()` → cell-level diffs (new field type)
-  - `list()` → add/remove/move operations (new field type)
-  - `number` → only emit when value changes (skip duplicate writes)
-The tick handler mutates fields in-memory; the framework diffs and broadcasts
-only what changed.
+fields: {
+  // THIS IS WHAT WE WRITE — but it's wrong:
+  invaders: text({ default: '[]' }),   // JSON grid — persisted, full broadcast
+}
 
+// THIS IS WHAT WE NEED — but it doesn't exist:
+// invaders: grid({ cols: 11, rows: 5 }),   // 2D boolean, delta-diff, ephemeral
+```
+
+Aspirational shape:
+```js
+fields: {
+  invaders: grid({ cols: 11, rows: 5, ephemeral: true }),
+  projectiles: list({ max: 50, item: { x: number, y: number, dy: -1|1, owner: ref('User') }, ephemeral: true }),
+}
+```
+
+The plan acknowledges ephemeral as a field persistence strategy ("a persisted
+Match can host ephemeral fields — exactly what games need"). But no exemplar
+shows an `ephemeral: true` field option, a `grid` plugin, or a `list` plugin.
+The field-type catalog in doc.mjs and comment.mjs is entirely persisted.
+
+### BLOCKER #3: No spectator read — `scope` can't express "any authenticated user"
+
+Tests: ADR #1 (no hide axis, read governs existence), ADR #3 (scope compiles to
+SQL), ADR #7 (no default grant). `publicRead` flag in plan Phase 1 item 6.
+
+Failing code:
+
+```js
+// A match has players (who read+write) and spectators (who only read).
+// In the grilled grammar, scope declares read intent via called checks
+// that MUST compile to SQL. To admit spectators, we'd need:
+grant: ({ principal }) => [
+  scope(({ is }) => anyOf(
+    is.player(),                                    // compiles: Match.players HAS user.id
+    // is.everyone() ???                             // no such check
+    // is.authenticated() ???                         // no such check
+  )).can(/* ... */),
+],
+```
+
+The plan mentions `publicRead` as a ~10-line entity flag. But the API surface
+for it is not shown. Without `publicRead`, the only way to admit spectators is
+to add a non-compilable check (`authenticated: () => true`) — which in scope
+is a LOAD-TIME ERROR. Spectators are structurally locked out.
+
+Alternatively, make every user a player on join, but then the ship grid gets
+cluttered, the tick processes ghost players, and the `.can` function can't
+cleanly split "player-who-can-fire" from "spectator-who-reads-only."
+
+### SHOULD-FIX #1: Entity TTL — Phase 3, no API surface
+
+Tests: IMPLEMENTATION-PLAN Phase 3 item 16 (entity TTL). Domain expectation
+that match rows don't linger after the game ends.
+
+Aspirational shape:
+```js
+entity('Match', {
+  ttl: '5m',        // auto-delete row 5 min after creation
+  // OR for purely in-memory matches:
+  persist: false,    // no DB row at all
+  fields: { /* ... */ },
+});
+```
+
+The plan splits ephemeral-field from ephemeral-entity, but shows neither in an
+exemplar. A match that writes 30×/sec to the DB only to be deleted 5 min later
+is wasteful. If the entity is fully ephemeral (no DB row), the match state lives
+in memory and the tick runs against in-memory fields — zero DB load.
+
+### SHOULD-FIX #2: Subscriber interest — designed, not exemplified
+
+Tests: ADR #5 (live delivery is NOT a third grant method; subscriber interest
+is data-not-code, narrowing-only, indexable).
+
+Failing code:
+
+```js
+// At 30 Hz × 100 lobby spectators, every tick mutation (invaders grid,
+// projectiles, players map) is broadcast to all 100 subscribers. Most
+// spectators don't need the full 500-byte invaders grid — they just
+// want to know the phase and score.
+//
+// The grilled design says interest is a narrowing filter at subscribe
+// time, data-not-code. But the subscribe-time syntax is not shown:
+//
+// match.subscribe({
+//   interest: {
+//     fields: ['phase', 'score', 'players.size'],  // spectator view
+//     // fields: ['invaders', 'projectiles']        // player view
+//   }
+// })
+//
+// Without interest, the framework has no mechanism to limit what it
+// emits per subscriber. The broadcast is all-or-nothing.
+```
+
+The design says interest is "a typed constraint expression over a coordinate
+schema the field-type plugin publishes (typed handles), validated at subscribe
+time." This is a strong design — but there is no exemplar showing what a
+subscribe-time call with interest looks like, how a field type publishes event
+coordinates, or how the framework indexes dirty chunks against interest.
+
+### Sharp edge #1: Conditional effects — no `if` guard on triggers
+
+Tests: ADR #8 (declarative effects: bounded, in-transaction, effect-principal).
+
+```js
+// Auto-start: when a player joins, if the roster is full, transition to
+// 'playing'. But effects fire on EVERY trigger:
+effects: {
+  [players.onAdded]: { mutate: self, with: { phase: 'playing' } },
+  // ^ fires on EVERY player join — even when roster has 1 player.
+  //   There's no `if` condition: "only when players.size >= maxPlayers".
+  //   The `with` template only interpolates trigger-delta fields (delta.member,
+  //   entity.id). No conditional guard, no computed boolean expression.
+}
+```
+
+The tick is the natural home for this logic (check roster size each frame, set
+phase when full). But without tick in the API surface, conditional effects are
+the only declarative path — and they can't do it.
+
+### Sharp edge #2: `authority: 'server'` operators not exemplified
+
+Tests: P2 adjudication (intents as mutations with server-authored `apply`). The
+plan says intents are mutations with `authority: 'server'` operators. No exemplar
+shows this.
+
+```js
+// A player sends "move left" → this should queue into the tick's pending
+// input. The plan says: intents are mutations with a server-authored `apply`
+// that may reject. But the API for declaring an `authority: 'server'` field
+// or operator is not shown. doc.mjs field types are all client-authoritative
+// (user writes title, user adds collaborators).
+//
+// The `presence` field is server-readonly from the client perspective, but
+// it's designed for passive state (cursor position), not game input (fire bullet).
+//
+// Aspirational shape for a ship-position field on the players map:
+players: map(ref('User'), {
+  x: number({ authority: 'server' }),   // only the tick may write x
+  lives: number({ authority: 'server' }),
+  score: number({ authority: 'server' }),
+})
+```
+
+## Prior findings re-checked
+
+Each prior finding from the pre-grill report, re-assessed against the grilled
+design (ADRs + IMPLEMENTATION-PLAN + doc.mjs/comment.mjs exemplars).
+
+| # | Prior finding | Prior rank | New verdict | Reason |
+|---|--------------|-----------|-------------|--------|
+| 1 | No tick/scheduler construct | BLOCKER | **NEW-ANGLE** | The plan adds tick in Phase 2 (item 9). The concept exists. But the API surface — `tick: { rate, when, handler }` — is not shown in any exemplar. `state.auto` (one-shot) exists; recurring tick does not. This flips from "framework doesn't know about game loops" to "framework knows about game loops but hasn't designed the API form yet." |
+| 2 | No shared-ephemeral field type | BLOCKER | **STILL-OPEN** | The plan splits ephemeral-FIELD from ephemeral-ENTITY (Phase 2 item 8) — a sharper concept. But no exemplar shows an `ephemeral: true` field option, a `grid` plugin, or a `list` plugin. The field-type catalog in doc.mjs/comment.mjs is entirely persisted. |
+| 3 | Per-push re-auth at 30 Hz | SHOULD-FIX | **RESOLVED** | ADR #5 explicitly designs latched re-auth: "the grant decision is cached at subscribe time and invalidated by roster/share/role/ownership changes, so the 30Hz path does a cheap cache check." The design directly addresses the high-frequency re-auth overhead. No API surface yet, but the architecture covers it. |
+| 4 | No ephemeral entity lifecycle | SHOULD-FIX | **STILL-OPEN** | Entity TTL is in Phase 3 (item 16). The concept is acknowledged but zero API surface. Match rows at 30 writes/sec → DB → delete 5 min later is wasteful even with TTL; the truly ephemeral entity (no DB row) is a stronger need not yet addressed. |
+| 5 | No RPC/action pattern | NIT | **NEW-ANGLE** | The plan reframes intents as mutations with server-authored `apply` (`authority: 'server'` operators). This is a clean model: one pipeline, attributed to principal, server validates. But the API surface for declaring server-authoritative fields/operators is not shown in any exemplar. |
+| 6 | No delta broadcast for game fields | SHOULD-FIX | **RESOLVED** | The mutation pipeline design (Phase 1 item 1) includes `diff` as a pipeline stage per field type. ADR #5 and the pipeline contract bake in per-field-type delta broadcast. The concept is structural; the remaining gap is which specific field types (grid, list) ship with delta definitions. |
 
 ## Summary
 
-| # | Pain Point | Rank | Workaround |
-|---|-----------|------|------------|
-| 1 | No tick/scheduler construct | BLOCKER | `setInterval` in app.mjs + polling for lifecycle |
-| 2 | No shared-ephemeral field type | BLOCKER | Serialize grid to `text` field → 30 DB writes/sec |
-| 3 | Per-push re-auth at 30 Hz | SHOULD-FIX | Accept the overhead (no workaround) |
-| 4 | No ephemeral entity lifecycle | SHOULD-FIX | Stale Match rows linger in DB |
-| 5 | No RPC/action pattern | NIT | POST routes with opaque JSON payloads |
-| 6 | No delta broadcast for game fields | SHOULD-FIX | Full grid serialized every frame |
+| # | Pain point | Rank | Tests |
+|---|-----------|------|-------|
+| 1 | `tick` — planned but zero API surface | BLOCKER | Phase 2 item 9; singular-system principle |
+| 2 | No `grid` field type | BLOCKER | Phase 2 items 8+11; field-as-reactive-primitive |
+| 3 | No spectator read in `scope` grammar | BLOCKER | ADR #1+#3+#7; `publicRead` flag |
+| 4 | Entity TTL — no API surface | SHOULD-FIX | Phase 3 item 16 |
+| 5 | Subscriber interest — not exemplified | SHOULD-FIX | ADR #5 |
+| 6 | Conditional effects — no `if` guard | Sharp edge | ADR #8 |
+| 7 | `authority:'server'` — not exemplified | Sharp edge | P2 adjudication |
 
-**Design verdict:** The reactive-entity paradigm is a strong fit for
-collaborative document editing (the Doc use case). It is a structural mismatch
-for authoritative-server real-time games, where the central abstraction is a
-timer-driven simulation loop, not reactive field mutations. The two most
-severe gaps (#1 and #2) require framework-level additions (a `tick` block and
-shared-ephemeral field types) before an arcade game could ship without reaching
-outside the framework for every core mechanic.
+**Design verdict:** The grill dramatically improved the live-delivery story
+(latched re-auth solves the high-frequency overhead; subscriber interest provides
+a principled narrowing path; the mutation pipeline unifies all mutation sources).
+But the framework still assumes mutations originate from a user REST call or
+a one-shot `state.auto` timer. The game loop — a recurring authoritative tick
+that is the *primary* mutation source for an entity — has no API form. Without
+tick, the game collapses to `setInterval` outside the framework (second pathway,
+violating the singular-system principle). The `grid`/`list` field types and
+`ephemeral` persistence strategy are acknowledged in the plan but not shown.
+The `spectator` authorization gap (no `everyone`/`authenticated` compiled
+constant in `scope`) is a new BLOCKER in the grilled design that the pre-grill
+report didn't catch because the old model had a separate `hide()` axis.

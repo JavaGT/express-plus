@@ -1,337 +1,320 @@
-# Pain Points: collaborative photo editor on express-plus
+# Pain Points: Collaborative Photo Editor on express-plus (post-grill)
 
-A design stress-test of the `entity()` reactive-entity API for a domain that is
-NOT a text-document app. The framework's field-type vocabulary was designed for
-Google Docs (collaborative text editing) and generalizes well to CRUD apps with
-user/role/permission modeling — but it breaks down when the core data is a
-raster pixel buffer, not a string.
-
-Each pain point cites the **specific API construct tried** and explains **what
-failed** and **what a fix would look like**.
+> **Stress-test of the grilled API** (7 ADRs, DECISIONLOG.md).  
+> **Persona:** "The Pixel Pusher" — cares about CRDTs beyond text, binary
+> storage, ordered collections, and whether declarative effects can drive a
+> render pipeline.
+>
+> **Exemplar code:** `photo-editor.mjs` in this directory.
 
 ---
 
-## 1. No blob / bytes / binary field type
+## Attempted entity shape
 
-**Severity: BLOCKER**
-
-**Construct tried:** `text({ max: 50_000_000 })` for `Layer.imageData`
-
-**What failed:**
-
-The only field types available are `text`, `text.crdt`, `number`, `date`, `ref`,
-`set(ref)`, `presence`, `log`, and `hash`. None stores raw binary. A photo
-editor's core data is pixel buffers — a 4096×4096 RGBA canvas is ~64 MB
-uncompressed. Forcing this into `text` as base64 means:
-
-- **33% storage overhead** on every read/write (base64 inflates binary by ~33%).
-- **No streaming.** A `text` field is loaded in full for every mutation; you
-  cannot read/write a chunk (e.g., a single tile of a large canvas).
-- **No content-type metadata.** Is the base64 blob PNG, JPEG, or raw RGBA? The
-  field doesn't know — the app carries that as a separate `format: text()`
-  field, which can drift.
-- **Arbitrary max ceiling.** `max: 50_000_000` (chars) ≈ 37 MB decoded binary —
-  less than a single 4K RGBA layer. The field doesn't understand that it holds
-  pixels; it's a string with a length cap.
-- **No deduplication or hash-based storage.** Two layers with the same base image
-  are stored twice. A `bytes` field could content-address the blob.
-
-**What a fix would look like:**
+The photo editor declares two entities attempting to use ONLY the grilled API
+surface:
 
 ```js
-// A `bytes` field that owns chunked storage, streaming reads/writes,
-// content-type tagging, and optional hash-based dedup.
-imageData: bytes({ maxSize: 256 * 1024 * 1024, contentType: 'image/*' })
-```
+// Canvas — top-level collaborative photo editing document
+// RasterLayer — standalone entity, grant inherited from Canvas via inherit()
 
-The field would expose `.stream()`, `.write(stream)`, `.range(offset, length)`,
-and `.contentType`. Mutations emit `:changed` (LWW) — the same event contract as
-`text`, so the live-sync plumbing is reused.
+Canvas = entity('Canvas', {
+  fields: {
+    title, width, height,
+    owner: ref('User', { role: 'owner' }),
+    collaborators: map(ref('User'), { role: ['viewer','editor'] }),
+    linkShare: link({ tiers: ['view','edit'] }),
+    // GAP: layers would be array(ref('RasterLayer')) — doesn't exist
+    presence, createdAt, updatedAt,
+  },
+  checks: { owner, collaborator, editor, viewer, linkHolder },
+  grant: scope(anyOf(is.owner(), is.collaborator(), is.linkHolder()))
+           .can(async ({ is, entity }) => { /* tier → capabilities */ }),
+  routes: (r) => { r.resource(); r.get('/:id/export.png', /* manual */); },
+});
 
----
-
-## 2. No raster / region-based CRDT merge field
-
-**Severity: BLOCKER**
-
-**Construct tried:** `strokes: log()` as a workaround
-
-**What failed:**
-
-The only merge primitive in the field vocabulary is `text.crdt()` —
-character-level string merging (Yjs/Automerge-style). There is no
-`raster.crdt()` or `region.crdt()` for merging pixel-buffer edits. A photo
-editor is NOT a text document: the core conflict is two users painting
-overlapping regions concurrently.
-
-Our workaround — an append-only `log()` of brush strokes replayed client-side —
-has fundamental problems:
-
-- **Replay cost.** Every new client joining a session with 10,000 strokes must
-  download and replay all 10,000 strokes locally. This is O(stroke count) per
-  join; a proper CRDT delta would be O(region changed) ≈ constant for small
-  brush edits.
-- **No server-side merge.** The server is a dumb append sink. It cannot composite
-  strokes into a canonical raster state; it cannot serve a pre-rendered
-  thumbnail without replaying the entire log server-side.
-- **No conflict resolution strategy.** Two users painting the same pixel — does
-  the last stroke win (LWW per-pixel)? Does opacity blend? The `log()` replay is
-  order-dependent and opaque to the framework: the framework doesn't know it's
-  pixels, so it can't offer a merge strategy.
-- **No snapshot/compaction.** The stroke log grows unbounded. A real raster CRDT
-  would periodically compact (flatten strokes into a base image + reset the
-  operation log) — the framework has no compaction hook.
-
-**What a fix would look like:**
-
-```js
-// A raster field with per-pixel or per-region CRDT merge. The merge function
-// is a framework extension point — the app provides a compositing strategy.
-raster: raster.crdt({
-  width: e => e.width,
-  height: e => e.height,
-  format: 'rgba8',
-  // mergeStrategy resolves concurrent edits to the same pixel/region.
-  // 'lww' = last-write-wins per-pixel (simplest).
-  // 'blend' = Porter-Duff compositing.
-  // Custom: (base, ops[]) => resolved.
-  mergeStrategy: 'blend',
-})
-```
-
-Or, more minimally, a `region.crdt()` that operates on rectangular pixel regions
-with LWW merge, emitting deltas the client applies to a local texture — no full
-replay, no dumb server.
-
----
-
-## 3. No ordered collection / array field type
-
-**Severity: SHOULD-FIX**
-
-**Construct tried:** `layers: set(ref('Layer'))` + per-Layer `order: number()`
-
-**What failed:**
-
-The only collection field is `set(ref(T))` — an UNORDERED set of FK references.
-Layers in a photo editor are inherently ordered (z-order: background on bottom,
-foreground on top). We fake ordering with a per-Layer `order` number field, but:
-
-- **Reorder is two LWW writes.** Moving layer at index 3 to index 1 requires
-  updating the moved layer's `order` AND the displaced layer's `order`. Two
-  separate entity-field mutations with no transactional boundary — if one write
-  succeeds and the other fails (network, validation), the ordering is corrupted.
-- **Concurrent reorders diverge.** Two users reordering different layers
-  simultaneously produce `order` values that may duplicate or collide. `number`
-  is LWW per-field — the last writer to each layer's `order` wins, but the
-  *set* of order values is not merged as a whole.
-- **Fragile client-side sort.** Every consumer must remember to sort by `order`
-  before rendering. The framework's FK auto-population (`layers.toArray()`)
-  returns results in insertion order or undefined order — it doesn't know about
-  the sort field.
-
-```js
-// Current — fragile, two mutations, LWW per field:
-await movedLayer.update({ order: 1 });
-await displacedLayer.update({ order: 3 });
-```
-
-**What a fix would look like:**
-
-```js
-// An `array(ref(T))` field with insert-at-index semantics and a list-CRDT
-// merge (RGA / LSEQ). Reorder is a single field mutation.
-layers: array(ref('Layer'))
-
-// Reorder: move layer to index 1. Framework figures out the CRDT op, emits
-// a delta to all clients, one mutation, one event.
-await canvas.layers.move(layerId, 1);
-```
-
-The array field would be backed by a fractional-indexing or RGA CRDT, so
-concurrent reorders merge deterministically. The same construct would also fix
-ordered todo lists, slide decks, and any domain where item order matters.
-
----
-
-## 4. No undo/redo primitive
-
-**Severity: SHOULD-FIX**
-
-**Construct tried:** None — no API to try. `log()` is append-only.
-
-**What failed:**
-
-The framework has no undo/redo concept. `text.crdt()` internally tracks
-operations for merge, but there is no exposed `.undo()` or `.redo()` method on
-any field type. `log()` is explicitly append-only (like a chat): you can only
-append, never pop or revert.
-
-A photo editor MUST have undo/redo — it's the most-used keyboard shortcut after
-brush. The workaround is to build an undo stack outside the framework:
-
-- Snapshot the entire `imageData` before a stroke batch (expensive for large
-  canvases).
-- Maintain a separate `undoStack: log()` of inverse operations, replayed in
-  reverse — but `log()` doesn't support popping or marking a checkpoint.
-
-**What a fix would look like:**
-
-```js
-// A `history` wrapper or field option that tracks mutations and exposes undo.
-imageData: text({ history: { depth: 50 } })
-// → entity.imageData.undo(), entity.imageData.redo()
-
-// Or, for log-based undo (stroke-by-stroke):
-strokes: log({ undoable: true, groupBy: 'batchId' })
-// → entity.strokes.undoLastBatch() removes the last batch of strokes
-//   and emits a `:reverted:<batchId>` event so clients drop the strokes.
-```
-
-This is not a new field type — it's a capability that several existing field
-types (`text`, `number`, `set`, `log`) should carry.
-
----
-
-## 5. No boolean field type
-
-**Severity: NIT**
-
-**Construct tried:** `visible: number({ default: 1 })`
-
-**What failed:**
-
-There is no `boolean` field type. Toggles (layer visibility, "is flattened",
-"show grid") are encoded as `number` with 0/1. This is semantically wrong
-(`number` means quantity; `boolean` means truth) and forces every consumer to
-remember the encoding convention: `if (layer.visible)` works by accident
-(0 is falsy, 1 is truthy), but `layer.visible === true` does not.
-
-The framework already has typed field constructors — adding `boolean()` is a
-small, obvious gap-fill.
-
-**What a fix would look like:**
-
-```js
-visible: boolean({ default: true })
-// Emits :changed (same event contract as number/text).
-// Validated to true/false at the field boundary.
+RasterLayer = entity('RasterLayer', {
+  fields: {
+    canvas: ref('Canvas'),
+    // BLOCKER: raster.crdt() doesn't exist → forced into text() as base64
+    imageData: text({ max: 50000000 }),
+    // WORKING: visibility gating via field .can() + withheld marker
+    visible: boolean({ default: true })
+      .can(async ({ is, entity }, defaults) => {
+        if (await is.editor()) return defaults;
+        if (entity.visible) return defaults;
+        return grant(subscribe);           // deny read → withheld
+      }),
+    // GAP: ordering via number() — fragile, non-atomic reorder
+    order: number({ default: 0 }),
+    opacity, blendMode, createdAt,
+  },
+  grant: inherit('Canvas', { via: 'canvas' }),  // RESOLVED: prior gap #7
+  checks: { editor, owner },
+});
 ```
 
 ---
 
-## 6. No render / computed-binary pipeline
+## Pain points
 
-**Severity: SHOULD-FIX**
+### BLOCKER #1 — No raster CRDT field type; no custom CRDT plugin contract
 
-**Construct tried:** Manual route `GET /:canvasId/export.png`
-
-**What failed:**
-
-The framework has `derived` fields (pure-pull computed values from other fields)
-but only for scalar types. There is no `derived` that produces binary (a PNG
-buffer), no render pipeline, and no caching/invalidation for expensive
-computations.
-
-Exporting a canvas to PNG is the photo editor's equivalent of "print" — it's a
-core operation, not a niche route. The current approach:
-
-1. Write a manual route handler.
-2. Load all layers via FK traversal (potentially dozens of queries).
-3. Composite server-side with an external library (sharp/canvas).
-4. No caching — every request recomputes the full composite.
-5. No invalidation — the route doesn't know when a layer changed, so it can't
-   cache the result.
-
-**What a fix would look like:**
-
+**Failing code:**
 ```js
-// A `render` field that is a function (entity) => Buffer, with framework-owned
-// caching and dependency-tracking invalidation.
+imageData: text({ max: 50000000 })
+// IDEALIZED:
+// imageData: raster.crdt({ mergeStrategy: 'blend' })
+```
+
+**What fails:** The only merge primitive is `text.crdt()` — character-level
+string merging (Yjs/Automerge-style). A photo editor's core conflict is two
+users painting overlapping regions concurrently. Forcing pixels into `text`
+as base64:
+- 33% storage overhead (base64 inflation)
+- No streaming — entire field loads for every mutation
+- No content-type metadata
+- No per-region merge — two users painting different regions still produce an
+  LWW conflict on the entire base64 string
+- No compaction — the full pixel buffer is rewritten every mutation
+
+**Which ADR/design feature this tests:** ADRs #1–2 (no hide axis, scope + can
+= exactly two grant halves). The grilled design's auth model is correct for
+raster data (read a pixel region? edit it? same two questions). What fails is
+the FIELD-TYPE CATALOG: `text.crdt()` is the ONLY merge-aware field, and the
+plugin contract for adding new CRDT types is undefined.
+
+The implementation plan Phase 1 item 1 promises a "Field-type plugin contract
++ mutation pipeline" but doesn't define its shape. Without it, `raster.crdt()`
+can't be designed — not even idealized — because we don't know what
+`validate → access → apply → diff → persist|ephemeral → emit` expects from a
+plugin, nor how merge strategies are declared.
+
+**What's needed:** A defined field-type plugin contract so `raster.crdt()`
+(and `polyline.crdt()`, `grid.crdt()`, etc.) can be implemented as plugins
+rather than ad-hoc additions to a closed catalog.
+
+---
+
+### BLOCKER #2 — No blob/bytes binary field type
+
+**Failing code:**
+```js
+imageData: text({ max: 50000000 })
+// IDEALIZED:
+// imageData: blob({ maxSize: 256 * 1024 * 1024, contentType: 'image/*' })
+```
+
+**What fails:** A 4096×4096 RGBA canvas is ~64 MB uncompressed. The only
+field that can store large data is `text`, which:
+- Inflates binary by ~33% (base64 encoding)
+- Has no streaming — can't read/write a chunk (single tile of a large canvas)
+- Has no content-type metadata — is this PNG, JPEG, or raw RGBA?
+- Has no deduplication or hash-based storage
+- Has an arbitrary `max` ceiling in characters, not bytes
+
+**Which ADR/design feature this tests:** The implementation plan Phase 2 item
+12 lists `blob` as a planned built-in plugin. The grilled exemplars don't
+include it. For the photo editor, `blob` is as fundamental as `text` is for
+a document editor — the core data is binary pixels, not strings.
+
+**What's needed:** A `blob(maxSize, { contentType, dedup })` field that owns
+chunked storage, streaming reads/writes, content-type tagging, and optional
+hash-based dedup. Mutations emit `:changed` (LWW) — same event contract as
+`text`, reusing the live-sync plumbing.
+
+---
+
+### SHOULD-FIX #1 — No ordered array collection (layers need z-order)
+
+**Failing code:**
+```js
+// On RasterLayer: fragile ordering via number()
+order: number({ default: 0 })
+
+// On Canvas: NO collection field declared — layers are standalone entities
+// related by FK, sorted client-side by `order`.
+
+// IDEALIZED on Canvas:
+// layers: array(ref('RasterLayer'))
+// → canvas.layers.move(layerId, 3)  // ONE mutation, ONE event
+```
+
+**What fails:** Layers are inherently ordered (z-order: background on bottom,
+foreground on top). The grilled API's `map` (valued set) is UNORDERED and
+keyed by a ref type — it can't express positional order. The workaround:
+1. Layers are standalone `RasterLayer` entities with a `canvas` FK + `order`
+   number
+2. Reordering layer at index 3 to index 1 requires TWO LWW writes (moved
+   layer's `order` + displaced layer's `order`)
+3. If one write succeeds and the other fails → corrupted ordering
+4. Concurrent reorders produce duplicate/colliding `order` values
+5. Every consumer must sort by `order` before rendering — fragile convention
+
+**Which ADR/design feature this tests:** Phase 2 item 12 lists `array` as a
+planned built-in. The `map` plugin (Phase 1 item 4) solves valued sets
+(keyed-member uniqueness) but NOT ordered collections. An `array(ref(T))`
+field with list-CRDT merge (RGA/LSEQ) would own insert-at, move-to,
+remove-at, emitting positional deltas — one mutation, one event, no drift.
+
+**What's needed:** `array(ref(T))` with list-CRDT merge, insert-at-index
+semantics, delete-and-close-gap, and move-to-index as a single atomic
+mutation. Same field-owns-events contract as every other field type.
+
+---
+
+### SHOULD-FIX #2 — Effects can't drive a render pipeline (two walls)
+
+**Failing code:**
+```js
+// IDEALIZED effect — DOES NOT COMPILE against the grilled API:
+effects: {
+  [RasterLayer.events.anyMutate]: {
+    mutate: self,
+    with: { export: compositeToPng(entity) },   // ← WALL A
+  },
+},
+
+// IDEALIZED render field:
 export: render({
   format: 'image/png',
-  compute: async (canvas) => {
+  compute: async (canvas) => {                   // ← WALL B
     const layers = await canvas.layers.toArray();
     return compositeToPng(layers, canvas.width, canvas.height);
   },
-})
-// → GET /canvases/:id/export returns the PNG.
-// → Cached. Auto-invalidated when any layer's relevant fields mutate.
-// → Surfaced by r.resource() like any other field.
+}),
 ```
 
-The `render` field tracks which entity fields its `compute` function reads
-(Canvas.width, Canvas.height, Layer.imageData, Layer.strokes, etc.) and
-invalidates the cache when any of them change. This is the declarative version
-of the manual route — the framework owns the cache, the invalidation, and the
-content-type header.
+**Wall A — `with` templates can't run computations.** The `{ mutate, with }`
+primitive interpolates only `delta.member`, `entity.id`, and trigger-delta
+fields. A render pipeline IS a computation: compositing N layers with opacity
++ blend modes + masks into a single PNG buffer. There is no way to express
+"run function X, store the result in field Y" in the `with` template.
+
+**Wall B — Effects are bounded in-transaction DB mutations only.** FEATURES.md
+§7: "Out-of-band side effects (webhooks, emails, external HTTP) — NOT yet
+designed." Rendering calls sharp/canvas/image libraries — these are
+out-of-band computations, not DB mutations. Even if `blob` existed (BLOCKER
+#2), an effect can't invoke an external render library.
+
+**Which ADR/design feature this tests:** ADR #6 (declarative effects). The
+grilled `effects` are correctly bounded (in-transaction, effect-principal,
+no SYSTEM god, structural cycle = load-time error). But they cover ONLY
+the "mutation triggers another mutation" case — not the "mutation triggers
+a computation whose RESULT is stored" case. The photo editor's render
+pipeline needs the latter: layer changes → composite → store PNG.
+
+Without this, the ENTIRE render pipeline is hand-rolled in route handlers:
+no caching, no dependency-tracking invalidation, no declarative trigger, no
+integration with the mutation pipeline.
+
+**What's needed:** One of:
+- A `render({ format, compute })` field type that owns dep-tracking
+  invalidation, caching, and content-type (the declarative approach —
+  framework owns the pipeline)
+- `effects` extended with a `compute` variant that runs a declared function,
+  stores the result in a field, and invalidates on dependency changes
+- Out-of-band effect hooks (deferred per FEATURES.md §7)
 
 ---
 
-## 7. No cross-entity grant delegation
+### Sharp edge #1 — Field `.can()` reading its own value (chicken-and-egg)
 
-**Severity: NIT**
-
-**Construct tried:** Manual re-check in Layer's `grant`
-
-**What failed:**
-
-Layer authorization is "same as parent Canvas." The natural expression would be
-to delegate: `return parent.grantCapabilities`. But there is no API for one
-entity's `grant` to call another entity's `grant` and receive back a set of
-capabilities. We re-check manually:
-
+**Code that works but tests a subtle contract:**
 ```js
-grant: async ({ load, entity, user }) => {
-  const canvas = await load(entity.canvas);
-  const isOwner = canvas.owner === user.id;
-  const isCollab = canvas.shares.has(user.id);
-  if (isOwner || isCollab) return grant(read, write, subscribe);
-  return hide();
+visible: boolean({ default: true })
+  .can(async ({ is, entity }, defaults) => {
+    if (entity.visible) return defaults;   // ← reading this field's OWN value
+    return grant(subscribe);
+  }),
+```
+
+**What's subtle:** To decide whether `visible` should be withheld, `.can()`
+reads `entity.visible` — the field's own current value. This works because
+ADR #3 says field access is always runtime and the row is already
+materialized when `.can` runs. But it means the framework MUST load the
+entire row (including fields with `.can` overrides) before evaluating any
+`.can`, not lazily. This is a correct consequence of the grilled design, not
+a bug — but it's a sharp edge worth documenting: a lazy-load implementation
+would deadlock on any field whose `.can` reads itself.
+
+---
+
+### Sharp edge #2 — No typed compound event trigger for effects
+
+**Code that can't be expressed:**
+```js
+// IDEALIZED: trigger when ANY of these fields change on ANY RasterLayer
+// that belongs to this Canvas:
+effects: {
+  [RasterLayer.events.anyMutate]: { ... },
 }
 ```
 
-This duplicates the Canvas entity's `grant` logic. If Canvas's grant changes
-(adding a "viewer" role, say), Layer's grant must be updated independently —
-they can drift.
+**What fails:** Even if `blob` + render computation existed, effects are
+triggered by a single typed event handle (e.g., `collaborators.onAdded`).
+There is no compound trigger like "any field on any child RasterLayer
+changes." The canvas render should recompute when imageData, visibility,
+opacity, blendMode, or order changes — on ANY of its layers. That is N
+separate triggers = N separate effect declarations. This is expressible
+(declare one effect per trigger) but noisy, and the framework must
+deduplicate when multiple fields change in one batch.
 
-**What a fix would look like:**
+---
 
+### Sharp edge #3 — No batch mutation API for multi-entity reorder
+
+**Failing code:**
 ```js
-// Delegate to the parent entity's grant, receiving back a capability set.
-grant: async ({ load, entity }) => {
-  const canvas = await load(entity.canvas);
-  return canvas.authz.as(canvas); // returns grant(read,write,subscribe) or hide()
-}
+// Reorder: two separate LWW writes, no atomic boundary
+await movedLayer.update({ order: 1 });
+await displacedLayer.update({ order: 3 });
+// If the second fails after the first succeeds → ordering corrupted
+
+// IDEALIZED (with array field):
+// await canvas.layers.move(layerId, 3);   // ONE mutation
 ```
 
-Or, a field-level annotation that auto-delegates:
+**What fails:** The workaround for ordered collections (per-Layer `order`
+number) requires multi-entity mutation for any reorder. There is no
+`.batch()` API in the grilled surface to make multiple entity writes atomic.
+The implementation plan mentions `batch()` as "the pipeline run in a
+transaction emitting one composed event" but doesn't exemplify the API.
+This sharp edge is a consequence of SHOULD-FIX #1 (no `array` field).
 
-```js
-canvas: ref('Canvas', { grant: delegate })
-// → Layer's grant is auto-derived from Canvas's grant.
-//   `delegate` is a typed handle, like `owner` for `role: owner`.
-```
+---
+
+## Prior findings re-checked
+
+| # | Prior finding (pre-grill) | Status | Why |
+|---|--------------------------|--------|-----|
+| 1 | No blob/bytes field | **STILL-OPEN** | Planned in Phase 2 item 12; not in grilled API surface. BLOCKER #2 above. |
+| 2 | No raster CRDT merge | **STILL-OPEN** | No design; blocked on undefined custom CRDT plugin contract. BLOCKER #1 above. |
+| 3 | No ordered collection | **STILL-OPEN (NEW-ANGLE)** | Planned in Phase 2 item 12; `map` (valued set) is unordered. The grilled API adds `map` but NOT `array`. SHOULD-FIX #1 above. |
+| 4 | No undo/redo primitive | **STILL-OPEN** | Deferred per IMPL PLAN P6. The grilled design reserves the `inverse` slot in the operator contract but doesn't expose it. Not raised as a new pain point here — the same gap, unchanged. |
+| 5 | No boolean field type | **RESOLVED** | `boolean` is imported and used in `comment.mjs` (`resolved: boolean({ default: false })`). Grill added it. ✔ |
+| 6 | No render pipeline | **STILL-OPEN (NEW-ANGLE)** | The grilled API adds `effects` (declarative mutations) but they can't drive a render pipeline — see SHOULD-FIX #2 above. The pre-grill report asked for a `render` field; the grilled answer is `effects`, which solves a DIFFERENT problem (declarative side-effects on mutation) but not THIS one (computation → cached binary output). |
+| 7 | No cross-entity grant delegation | **RESOLVED** | `inherit('Canvas', { via: 'canvas' })` compiles BOTH parent read-scope (SQL JOIN through FK) AND parent `.can`. The grilled `comment.mjs` exemplar demonstrates this. ✔ |
 
 ---
 
 ## Summary ranking
 
-| # | Pain point | Severity | Fix complexity |
-|---|-----------|----------|---------------|
-| 1 | No blob/bytes field | **BLOCKER** | New field type: `bytes()` |
-| 2 | No raster CRDT merge | **BLOCKER** | New field type: `raster.crdt()` or `region.crdt()` — high design cost |
-| 3 | No ordered collection | SHOULD-FIX | New field type: `array(ref())` with list-CRDT merge |
-| 4 | No undo/redo primitive | SHOULD-FIX | Add `{ history: depth }` option to existing field types |
-| 5 | No render pipeline | SHOULD-FIX | New field type: `render()` with dep-tracked caching |
-| 6 | No boolean type | NIT | New field constructor: `boolean()` |
-| 7 | No cross-entity grant delegation | NIT | Add `grant: delegate` to `ref()` options |
+| # | Pain point | Severity | Tests |
+|---|-----------|----------|-------|
+| 1 | No raster CRDT + no custom CRDT plugin contract | **BLOCKER** | Field-type catalog, plugin extension point |
+| 2 | No blob/bytes binary field | **BLOCKER** | Phase 2 item 12 (planned, not surfaced) |
+| 3 | No ordered array collection (z-order) | SHOULD-FIX | `map` solves valued sets but not ordered lists |
+| 4 | Effects can't drive a render pipeline | SHOULD-FIX | ADR #6 (effects are DB-only, `with` can't compute) |
+| 5 | Field `.can()` reading its own value | Sharp edge | ADR #3 (row materialized before field eval) |
+| 6 | No compound event trigger for effects | Sharp edge | ADR #6 (single typed handle per effect) |
+| 7 | No batch mutation API | Sharp edge | Consequence of no `array` field |
 
-**Verdict:** The `entity()` reactive paradigm — typed fields owning persistence,
-sync, and events — is sound and expressive. Auth, presence, chat, shares, and
-CRUD routing all map cleanly to a photo editor. But the field-type vocabulary is
-**text-document-shaped**: it has strings, CRDT strings, numbers, dates, FK
-refs, and sets. It lacks the three primitives a non-text collaborative domain
-needs: binary storage, a merge strategy for the domain's native conflict unit
-(pixels, not characters), and ordered collections. Without these, the photo
-editor is a leaky workaround, not a supported application.
+**Verdict:** The grilled design's authorization model (`scope` + `.can`,
+`inherit`, `withheld`, field `.can()` visibility gating) maps cleanly to a
+photo editor. The `effects` primitive is the RIGHT direction (declarative,
+not `afterSave`) but doesn't reach far enough. The real gaps are in the
+FIELD-TYPE CATALOG: the grilled API is still text-document-shaped — it has
+`text.crdt()` but no `raster.crdt()`, `text` but no `blob`, `map` but no
+`array`, `derived` but no `render`. The plugin contract that would let
+applications add these types is promised but undefined.
