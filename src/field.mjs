@@ -83,6 +83,36 @@ export function ref(target, options = {}) {
 // explicit so the write path serializes only `cells` and the handle exposes a
 // value sub-handle only for `cells` — `tiers` is not a queryable handle because
 // it is not row data.
+// `map(of, { role, default })` — an internally-keyed owned collection (the
+// `store` KIND), each member keyed by id and carrying a value of the declared
+// per-member descriptor `of` (doc.mjs: `map(ref('User'), { role:['viewer',
+// 'editor'], default:{} })` — a set of collaborators, each a User FK carrying a
+// role). It is the framework's owned-collection field: membership lives ON the
+// owning entity (AGENTS: an owned relation is a field, not a standalone table),
+// not a join table.
+//
+//   - of    — the per-member value descriptor (a ref, a text, …)
+//   - role  — the role names a member may hold (feeds the role-derived checks
+//             is.viewer()/is.editor() when the grant is compiled; declared CONFIG,
+//             never a per-row column)
+//   - default — the empty-collection default
+//
+// Import-surface scope: this constructor delivers the descriptor the entity
+// compiler accepts. The membership mutation (`.set`), the `onAdded` event handle,
+// and the role-derived checks are the `store` kind's Phase-2 merge/event behavior
+// (the strategy's apply/diff already fail closed with a loud Phase-2 throw).
+export function map(of, { role, default: fallback } = {}) {
+  return makeDescriptor({
+    kind: 'store',
+    type: 'map',
+    of,
+    // role names are declared config (the membership's role domain), never a
+    // per-row column — frozen so a later layer cannot mutate the declared set.
+    roles: Object.freeze([...(role ?? [])]),
+    default: fallback,
+  });
+}
+
 export function link({ tiers, tier, token } = {}) {
   return makeDescriptor({
     kind: 'struct',
