@@ -135,6 +135,29 @@ export function log(entry = {}) {
   });
 }
 
+// `presence({ cursor, selection })` — the framework's first NON-PERSISTING
+// field: per-connection live state (cursors, selections, typing indicators).
+// It is its own KIND (`presence`), a namespace of named live sub-cells. Its
+// ephemerality is EMERGENT, not a flag (SPEC §7.2): it engages no persistence
+// seam — there is no `presence` strategy entry, so it never serializes, and a
+// presence handle is not whole-value comparable in scope (the fieldHandle
+// non-value gate throws — fail closed). There is no `persisted: false` label;
+// the absence of the seam IS the ephemerality.
+//
+//   - cells — the declared live sub-cells (cursor, selection, …); the shape is
+//             config, frozen so a later layer cannot mutate the declared set.
+//
+// Import-surface scope: this constructor delivers the descriptor the entity
+// compiler accepts. The per-connection broadcast and volatile coalescing are
+// the presence kind's deferred live behavior.
+export function presence(cells = {}) {
+  return makeDescriptor({
+    kind: 'presence',
+    type: 'presence',
+    cells: Object.freeze({ ...cells }),
+  });
+}
+
 export function link({ tiers, tier, token } = {}) {
   return makeDescriptor({
     kind: 'struct',
