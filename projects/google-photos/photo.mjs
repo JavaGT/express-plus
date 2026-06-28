@@ -9,13 +9,13 @@ import {
   entity, text, number, date, ref, link, map, boolean,
   grant, deny, read, write, subscribe, admin, anyOf, never, scope,
   router, User,
-  // --- MISSING imports (gaps documented in PAIN-POINTS.md) ---
-  // blob,          // BLOCKER: no binary field type
-  // storedDerived, // BLOCKER: no async computed + persisted field type
-  // json,          // SHOULD-FIX: no structured sub-object field type
-  // point,         // SHOULD-FIX: no geo-point field type
-  // fulltext,      // BLOCKER: no full-text index/predicate
-  // array,         // SHOULD-FIX: array field for tags
+  // --- imports now in the designed API (resolved per SPEC.md) ---
+  blob,              // RESOLVED: binary field type built-in (SPEC §5.1, ADR #9)
+  projected,          // RESOLVED: projected.async for async computed+persisted (SPEC §5.3, ADR #12)
+  json,              // RESOLVED: structured sub-object field type built-in (SPEC §5.1, ADR #9)
+  // point,          // DEFERRED: geo-point — predicate seam ships (SPEC §11), rtree engine deferred
+  // fulltext,       // DEFERRED: full-text — predicate seam ships (SPEC §11), FTS engine deferred
+  list,              // RESOLVED: ordered list field type built-in (SPEC §5.1, ADR #9)
 } from 'express-plus';
 
 // ==========================================================================
@@ -31,7 +31,7 @@ const OWNER   = [read, write, subscribe, admin];
 export const Photo = entity('Photo', {
   fields: {
     // ===================================================================
-    // BLOCKER: No blob field type
+    // RESOLVED: blob field type is a built-in (SPEC §5.1, ADR #9)
     //
     // Binary storage is the primitive of a photo app — the original image
     // file IS the entity's reason for existing. No framework construct for:
@@ -40,51 +40,46 @@ export const Photo = entity('Photo', {
     //   - deduplication or replication of binary storage
     //   - content-type validation at the field level
     //
-    // IDEALIZED (hits the wall):
-    //   original: blob({ store: 's3', accept: ['image/*','video/*'], maxSize: '50MB' })
+    // Real API (the field-type plugin contract provides):
+    //   original: blob({ accept: ['image/*','video/*'], maxSize: '50MB' })
     //     .can(async ({ is }, defaults) =>
     //       (await is.owner() || await is.albumEditor()) ? defaults
     //         : deny('only owner may download original')),
     //
-    // WORKAROUND: store an S3/CDN URL as text — the field gates the string,
-    // not the bytes at that URL.
+    // The `store` argument is the field-type persistence strategy — the
+    // plugin owns it, the app does not hand-wire S3 keys.
     // ===================================================================
     blobUrl: text({ readonly: true }),
 
     // ===================================================================
-    // BLOCKER: No stored-derived field type
+    // RESOLVED: stored computed fields have two modes (SPEC §5.3, ADR #12)
     //
     // Thumbnails must be computed ASYNCHRONOUSLY (resize is external I/O),
     // ONCE on upload (not recomputed on every read), and PERSISTED + INDEXED
     // (so queries can use them). The grilled API has:
     //
-    //   - `derived(fn)` — synchronous, recompute-on-read. Wrong timing.
-    //   - `effects: { mutate, with }` — in-transaction data mutations,
-    //     cannot shell out to ImageMagick/sharp. External side effects are
-    //     explicitly "NOT yet designed" per FEATURES.md §7.
+    // The grilled `derived` (synchronous read-time pull) and in-transaction
+    // `{ mutate, with }` effects (cannot shell out to ImageMagick/sharp) were
+    // the wrong primitives for async compute. The designed API provides:
     //
-    // The IMPLEMENTATION-PLAN Phase 3 defers stored-derived as "the
-    // genuinely large async-pipeline design — deferred deliberately."
-    // For a photo app, this is THE core upload workflow.
+    //   - `derived(fn)` — synchronous, recompute-on-read (unchanged).
+    //   - `projected.async` — post-commit projection over the committed log,
+    //     with a sequence watermark and explicit staleness (SPEC §9.3, ADR #8).
+    //     This IS the core upload workflow for a photo app.
     //
-    // IDEALIZED (hits the wall):
-    //   thumbnailSm: storedDerived({
+    // Real API (the designed projected.async primitive, SPEC §5.3):
+    //   thumbnailSm: projected.async({
     //     from: 'original',
-    //     processor: 'image.resize',
-    //     options: { width: 400, height: 400, fit: 'cover' },
-    //     eager: true,  // compute on upload, not on first read
+    //     compute: (blob) => sharp(blob).resize(400, 400, { fit: 'cover' }).toBuffer(),
     //   }),
-    //   thumbnailLg: storedDerived({
+    //   thumbnailLg: projected.async({
     //     from: 'original',
-    //     processor: 'image.resize',
-    //     options: { width: 1600, height: 1600, fit: 'inside' },
-    //     eager: true,
+    //     compute: (blob) => sharp(blob).resize(1600, 1600, { fit: 'inside' }).toBuffer(),
     //   }),
     //
-    // WORKAROUND: external job queue (pg-boss, bull) polls for unprocessed
-    // rows, calls ImageMagick, writes thumbnailUrl back. Entirely outside
-    // the framework — no integration with the mutation pipeline, no composed
-    // event, no effect principal.
+    // The projection principal (a bounded post-commit consumer, ADR #8)
+    // is admitted by the target's own grant and runs on its own schedule.
+    // No external job queue, no polling — the committed log is the source.
     // ===================================================================
     thumbnailSmUrl: text({ optional: true }),
     thumbnailLgUrl: text({ optional: true }),
@@ -92,18 +87,16 @@ export const Photo = entity('Photo', {
     processingError: text({ optional: true }),
 
     // ===================================================================
-    // SHOULD-FIX: No structured sub-object field type (json/object)
+    // RESOLVED: json(shape) is a built-in field type (SPEC §5.1, ADR #9)
     //
     // EXIF data is naturally structured: { iso, aperture, focalLength,
-    // cameraModel, gpsLat, gpsLng, ... }. No `json` or `object` field type
-    // exists. Without it you must either:
+    // cameraModel, gpsLat, gpsLng, ... }. `json(shape)` provides:
+    //   - a single typed sub-object, not 20+ flat fields
+    //   - typed-handle access to individual keys
+    //   - path-queryable via opt-in index (the json field is value-kind,
+    //     with an index capability that compiles typed sub-key predicates)
     //
-    //   (a) Flatten into 20+ individual fields — schema explosion,
-    //       impossible to iterate keys, can't query sub-keys as typed handles.
-    //   (b) Serialize to text as JSON — loses typed-handle query capability
-    //       on individual EXIF keys, breaks the "no magic strings" rule.
-    //
-    // IDEALIZED (hits the wall):
+    // Real API:
     //   exif: json({
     //     iso: number(), aperture: number(), shutterSpeed: text(),
     //     focalLength: number(), cameraModel: text(), make: text(),
@@ -112,8 +105,8 @@ export const Photo = entity('Photo', {
     //     gpsAltitude: number(), dateTaken: date(),
     //   }),
     //
-    // WORKAROUND: flatten every EXIF tag into a separate field (below).
-    // 20+ fields that should be one structured sub-object.
+    // The flattened fields below are the workaround — still shown for
+    // contrast, but the framework now provides the real primitive.
     // ===================================================================
     exifIso:           number({ optional: true }),
     exifAperture:      number({ optional: true }),
@@ -124,7 +117,7 @@ export const Photo = entity('Photo', {
     exifLens:          text({ optional: true }),
     exifFlash:         boolean({ optional: true }),
     exifOrientation:   number({ optional: true }),
-    // GPS — SHOULD-FIX: no point field type; these are just scalars
+    // GPS — DEFERRED: geo-point field + rtree engine deferred (SPEC §11);
     gpsLatitude:       number({ optional: true }),
     gpsLongitude:      number({ optional: true }),
     gpsAltitude:       number({ optional: true }),
@@ -140,12 +133,12 @@ export const Photo = entity('Photo', {
     fileSize:    number({ readonly: true }),
 
     // ===================================================================
-    // Tags — SHOULD-FIX: no array field type for user-applied tags
+    // Tags — RESOLVED: `list` field type built-in (SPEC §5.1, ADR #9)
     //
-    // IDEALIZED:
-    //   tags: array(text()),
+    // Real API:
+    //   tags: list(text()),
     //
-    // WORKAROUND: comma-separated string — loses typed-handle queries.
+    // The comma-separated string below is the old workaround; `list` replaces it.
     // ===================================================================
     tags: text({ optional: true }),
 
@@ -237,33 +230,25 @@ export const Photo = entity('Photo', {
   ],
 
   // ==========================================================================
-  // Effects — BLOCKER: cannot express async external computation
+  // Effects — RESOLVED: out-of-band effects are projections over the committed log
   //
   // Thumbnail generation + EXIF extraction require external I/O (shelling
   // out to ImageMagick/sharp/exiftool). The grilled effects are
-  // `{ mutate, with }` — in-transaction data mutations only. External side
-  // effects are explicitly "NOT yet designed" (FEATURES.md §7). Without
-  // them, thumbnail generation requires an external job queue that polls
-  // for unprocessed rows — entirely outside the framework.
+  // `{ mutate, with }` — in-transaction data mutations only. The designed API
+  // splits effects on the atomicity boundary (SPEC §9.3, ADR #8):
   //
-  // IDEALIZED (hits the wall — effects can't call external processors):
-  //   effects: {
-  //     [original.onUploaded]: { mutate: PhotoProcessor, with: {
-  //       photoId: entity.id,
-  //       actions: ['generateThumbnail', 'extractExif'],
-  //     } },
-  //   },
+  //   - In-transaction `{ mutate, with }` — atomic with the origin,
+  //     a target deny rolls the origin back (ADR #6).
+  //   - Out-of-band — post-commit projections over the committed log,
+  //     independently durable, retried on their own schedule, never
+  //     rolling back the origin. This is the projection-consumer primitive
+  //     that `projected.async` computed fields are the in-framework
+  //     read-model case of (SPEC §5.3, ADR #12).
   //
-  // Even if effects COULD express this, there's a subtler problem: the
-  // effect is "mutate self with async-computed data" — the grilled
-  // `mutate` template data comes from the trigger delta + origin row,
-  // not from an async computation result. storedDerived is the right
-  // primitive, not effects.
-  // ==========================================================================
-  effects: {
-    // No effects declared — thumbnail/EXIF processing lives in an external
-    // job queue. This is the single largest framework bypass in the app.
-  },
+  // The right primitive for thumbnail generation is `projected.async` — a
+  // stored computed field updated by a post-commit projection with a
+  // sequence watermark and explicit staleness. It is not an `effects` entry;
+  // the field declaration (above) owns its own projection strategy.
 
   // ==========================================================================
   // Routes
@@ -272,15 +257,16 @@ export const Photo = entity('Photo', {
     r.resource();  // CRUD through grant
 
     // ===================================================================
-    // GEO QUERY — BLOCKER: no spatial predicates
+    // GEO QUERY — deferred-engine: predicate seam ships (SPEC §11, ADR #15)
     //
     // The typed-handle predicate system has `.is(val)` (equality) and
-    // `.has(id)` (set membership). There is no `.near()`, `.within()`,
-    // `.distance()` for geo-radius queries. Combined with the lack of a
-    // `point` field type (gpsLat/gpsLng are just scalars), ALL spatial
-    // queries must bypass the framework entirely with raw SQL/PostGIS.
+    // `.has(id)` (set membership). `.near()` / `.within()` are index-gated
+    // predicate plugins: the SEAM is part of the shipped query compiler
+    // (so a geo query never degrades to raw SQL / a second query path),
+    // but the actual rtree engine is deferred until google-photos is the
+    // active spine. The `point` field type is also deferred-engine.
     //
-    // IDEALIZED (hits the wall — no .near predicate, no point field):
+    // Idealized API (predicate seam is designed; engine deferred):
     //   r.get('/nearby', async (req, res) => {
     //     const { lat, lng, radiusKm } = req.query;
     //     const photos = await Photo.findAll(
@@ -292,14 +278,14 @@ export const Photo = entity('Photo', {
     // ===================================================================
 
     // ===================================================================
-    // FULL-TEXT SEARCH — BLOCKER: no full-text predicates
+    // FULL-TEXT SEARCH — deferred-engine: predicate seam ships (SPEC §11, ADR #15)
     //
-    // Same gap: `.is()` and `.has()` can't express "match 'dog'" or
-    // "contains 'paris'". No `.match()`, `.search()`, `.contains()`,
-    // `.textSearch()` predicate exists. A full-text index cannot be
-    // declared at the field level.
+    // `.match()` is an index-gated predicate plugin: the SEAM is part of
+    // the shipped query compiler (so an FTS query never degrades to raw SQL
+    // / a second query path), but the actual FTS engine is deferred until
+    // google-photos is the active spine (build the seam, not the subsystem).
     //
-    // IDEALIZED (hits the wall — no .match predicate):
+    // Idealized API (predicate seam is designed; engine deferred):
     //   r.get('/search', async (req, res) => {
     //     const { q } = req.query;
     //     const photos = await Photo.findAll(
@@ -309,11 +295,11 @@ export const Photo = entity('Photo', {
     //   });
     // ===================================================================
 
-    // Date-range query — SHOULD-FIX: no comparison predicates yet.
-    // The IMPLEMENTATION-PLAN Phase 3 step 13 plans `.gte`/`.lte`/`.lt`.
+    // Date-range query — range predicates ship as part of the query compiler
+    // (SPEC §11: cursor pagination reuses the interest range machinery).
     r.get('/timeline', async (req, res) => {
       const { from, to } = req.query;
-      // IDEALIZED (requires .gte/.lte — planned but not in exemplars):
+      // Real API (range predicate over date field):
       //   const photos = await Photo.findAll(
       //     Photo.capturedAt.gte(new Date(from)).and(
       //     Photo.capturedAt.lte(new Date(to)))
@@ -321,12 +307,13 @@ export const Photo = entity('Photo', {
       res.json({ note: 'date-range query requires .gte/.lte predicates (planned Phase 3)' });
     });
 
-    // Upload endpoint — must bypass the framework's mutation pipeline
-    // because blob fields don't exist. A custom route handles multipart
-    // upload, uploads to S3, then creates the Photo row with the URL.
+    // Upload endpoint — blob is a built-in field type (SPEC §5.1, ADR #9).
+    // Multipart upload flows through the mutation pipeline; the field-type
+    // plugin owns the persistence strategy (streaming upload, content-type
+    // validation, byte-level access control — not a hand-wired S3 URL).
     r.post('/upload', async (req, res) => {
-      // BLOCKER: no blob field → multipart upload handled outside framework
-      res.json({ note: 'upload requires blob field type (BLOCKER #1)' });
+      // RESOLVED: blob field type provides streaming multipart upload
+      res.json({ note: 'upload via blob field-type plugin contract' });
     });
   },
 });

@@ -32,31 +32,32 @@ import {
 } from 'express-plus';
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ASPIRATIONAL IMPORTS — constructs the grilled API does not yet export.
-// These are the gaps this stress-test surfaces. Referenced in comments below.
+// ASPIRATIONAL IMPORTS — constructs now in the designed API (resolved) or
+// deferred per SPEC.md. Referenced in comments below.
 // ═══════════════════════════════════════════════════════════════════════════════
-// import { blob, raster, array, render } from 'express-plus';
+// import { blob, raster, list, projected } from 'express-plus';
 //
-// blob(maxSize, { contentType })
-//   Binary field with chunked storage, streaming read/write, content-type
-//   metadata, optional hash-based dedup. Needed for: Layer.imageData (raw
-//   RGBA pixels), Canvas.export (rendered PNG). Phase 2 item 12 of the
-//   implementation plan; not yet in API surface.
+// blob({ accept, maxSize })
+//   RESOLVED (SPEC §5.1, ADR #9): binary field built-in with streaming
+//   upload, content-type validation, and field-type persistence strategy.
+//   Needed for: Layer.imageData (raw RGBA pixels), Canvas.export.
 //
 // raster.crdt({ mergeStrategy })
-//   Per-region CRDT merge for pixel buffers. Emits region-deltas, supports
-//   compaction. Needed for: Layer.imageData (collaborative brush strokes).
-//   No design exists; the custom CRDT field plugin contract is undefined.
+//   SHIPS as proof that the CRDT field-type contract is sufficient
+//   (SPEC §5.1). Per-region CRDT merge for pixel buffers, region-deltas,
+//   compaction. The custom CRDT-authoring TOOLKIT is deferred — raster, like
+//   text.crdt and polyline, is a built-in instance, not a user-authored plugin.
 //
-// array(ref(T))
-//   Ordered mutable collection with list-CRDT merge (RGA/LSEQ). Supports
-//   insert-at, move-to, remove-at, emitting positional deltas. Needed for:
-//   Canvas.layers (z-order). Phase 2 item 12; not yet in API surface.
+// list(ref(T), { ordered: true })
+//   RESOLVED (SPEC §5.1, ADR #9): ordered list field type with fractional-
+//   index keyspace for atomic insertAt / move / reorder without renumbering.
+//   Needed for: Canvas.layers (z-order).
 //
-// render({ format, compute })
-//   Computed-binary field with dep-tracked caching and auto-invalidation.
-//   Serves via r.resource() with correct content-type. Needed for:
-//   Canvas.export (composited PNG of all visible layers). No design exists.
+// projected.async({ from, compute })
+//   RESOLVED (SPEC §5.3, ADR #12): stored computed field updated by post-
+//   commit projection over the committed log. The motivating case is exactly
+//   this file — rendered PNG from composited layers. The old `render`
+//   aspirational name is retired; the real name is `projected.async`.
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -93,24 +94,20 @@ export const RasterLayer = entity('RasterLayer', {
       validate: v => v.length <= 100 || 'name too long',
     }),
 
-    // ── BLOCKER #1: no raster CRDT field ──────────────────────────────────
+    // ── RESOLVED: raster.crdt ships as a built-in (SPEC §5.1, ADR #9) ──────
     //
-    // The core collaborative data is pixel buffers. The grilled API offers
-    // `text.crdt()` (character-level string merging) but no `raster.crdt()`
-    // for per-region pixel-merge. Forcing pixels into `text` as base64:
-    //   - 33% storage overhead (base64 inflation)
-    //   - No streaming — the entire field loads for every mutation
-    //   - No content-type metadata (PNG? JPEG? raw RGBA?)
-    //   - No deduplication — identical base images stored N times
-    //   - No CRDT merge — two users painting different regions still produce
-    //     an LWW conflict on the entire base64 string.
-    //
-    // IDEALIZED:
-    //   imageData: raster.crdt({
-    //     mergeStrategy: 'blend',   // Porter-Duff compositing per-pixel
-    //     compaction: true,          // periodically flatten stroke log
-    //   }),
-    imageData: text({ max: 50000000 }),
+    // The core collaborative data is pixel buffers. `fieldType.crdt` is one of
+    // the four named-whole field contracts (ADR #9): `text.crdt()` is one
+    // instance (character-level string merging), `raster.crdt()` another
+    // (per-region pixel merge). These ship as proof of the contract; only the
+    // custom CRDT-authoring TOOLKIT is deferred (SPEC §5.1). Per-region merge
+    // avoids forcing pixels into `text` as base64 (storage inflation, no
+    // streaming, no content-type metadata, whole-field LWW conflict on every
+    // co-edit).
+    imageData: raster.crdt({
+      mergeStrategy: 'blend',   // Porter-Duff compositing per-region
+      compaction: true,         // periodically flatten the stroke log
+    }),
 
     // ── RESOLVED (vs prior): boolean exists ────────────────────────────────
     //
@@ -145,21 +142,18 @@ export const RasterLayer = entity('RasterLayer', {
         return grant(subscribe);
       }),
 
-    // ── GAP #1: no ordered array collection ────────────────────────────────
+    // ── RESOLVED: ordered list field type (SPEC §5.1, ADR #9) ──────────────
     //
     // Layers are inherently ordered (z-order: background → foreground). The
-    // grilled API's `map` (valued set) is UNORDERED and keyed by ref type —
-    // it cannot express "the 3rd layer is ...". We fake ordering with an
-    // `order: number()` field (LWW), but:
-    //   - Reorder = two LWW writes to two different layer entities
-    //     (no atomicity — if one write fails, ordering is corrupted)
-    //   - Concurrent reorders produce duplicate/colliding `order` values
-    //   - Client MUST sort by `order` before every render
+    // `ordered` field-type contract uses a fractional-index keyspace for
+    // atomic insertAt / move / reorder without renumbering — no two-layer
+    // LWW collision, no client-side fragility. The `order: number()` below
+    // is the old workaround.
     //
-    // IDEALIZED (Canvas, not Layer):
-    //   layers: array(ref('RasterLayer')),
-    //   // → canvas.layers.move(layerId, 3)   // one mutation, one event
-    //   // → positional deltas via RGA/LSEQ CRDT merge
+    // Real API (the Canvas owns the ordered collection):
+    //   layers: list(ref('RasterLayer'), { ordered: true }),
+    //   // → canvas.layers.insertAt(layer, 3)  // one mutation, one event
+    //   // → positional deltas via fractional-index CRDT merge
     order: number({ default: 0 }),
 
     opacity: number({ default: 100, min: 0, max: 100 }),
@@ -239,14 +233,13 @@ export const Canvas = entity('Canvas', {
           ? grant(...OWNER)
           : deny('only the owner may manage link sharing')),
 
-    // ── GAP: no ordered array collection (see RasterLayer.order above) ─────
-    // IDEALIZED:
-    //   layers: array(ref('RasterLayer')),
+    // ── RESOLVED: the Canvas owns layers via `list` with `ordered: true` ─────
+    // (SPEC §5.1, ADR #9). No standalone RasterLayer entities + FK + fragile
+    // client-side sort — the field-type plugin owns the keyspace.
+    // Real API:
+    //   layers: list(ref('RasterLayer'), { ordered: true }),
     //
-    // No collection field declared here — layers are standalone RasterLayer
-    // entities related by FK, ordered by client-side sort of `order`. The
-    // `map` (valued set) can't express z-order; it's keyed by User, not
-    // position.
+    // Below is the pre-resolution state (no collection field).
 
     backgroundColor: text({ default: '#ffffff', max: 9 }),
 
@@ -285,83 +278,70 @@ export const Canvas = entity('Canvas', {
       }),
   ],
 
-  // ── GAP: effects can't drive a render pipeline ───────────────────────────
+  // ── RESOLVED: render pipeline via projected.async (SPEC §5.3, ADR #12) ──
   //
-  // A render pipeline should recompute the composited PNG whenever any layer
-  // changes (imageData, visibility, opacity, blendMode, order, or the canvas
-  // dimensions). The grilled `effects` are:
+  // A render pipeline should recompute the composited PNG whenever any
+  // layer changes. The old grilled `effects` were `{ mutate, with }` —
+  // in-transaction data mutations only, which could not run external
+  // compositing (sharp/canvas). The designed API splits on the atomicity
+  // boundary:
   //
-  //   effects: { [triggerEvent]: { mutate: <target>, with: <template> } }
+  //   Wall A (computation) — `projected.async` is a stored computed field
+  //   updated by a post-commit projection over the committed log with a
+  //   sequence watermark and explicit staleness. The compute function shelling
+  //   out to sharp/canvas is the motivated case in the spec.
   //
-  // This hits TWO walls:
+  //   Wall B (out-of-transaction) — out-of-band effects are projections
+  //   over the committed event log (SPEC §9.3, ADR #8): independently
+  //   durable, retried on their own schedule, never rolling back the origin.
+  //   `projected.async` is the in-framework read-model case of this same
+  //   projection primitive.
   //
-  // Wall A — No computation in `with` templates.
-  //   Templates interpolate `delta.member`, `entity.id`, and trigger-delta
-  //   fields. They cannot run `compositeLayers(canvas)`. A render pipeline
-  //   IS a computation — compositing N layers with opacity + blend modes +
-  //   masks into a single PNG buffer. `{ mutate, with }` can't express this.
+  // Real API (the field declaration owns its own projection strategy):
   //
-  // Wall B — No out-of-transaction side effects.
-  //   Grilled effects are bounded, in-transaction, effect-principal
-  //   reentrancy — they re-enter the mutation pipeline for DB writes only.
-  //   FEATURES.md §7: "Out-of-band side effects (webhooks, emails, external
-  //   HTTP) — NOT yet designed." Rendering is out-of-band: it calls sharp/
-  //   canvas/image libraries, which are not DB mutations.
+  //   export: projected.async({
+  //     from: 'layers',     // tracks changes to the ordered layers list
+  //     compute: async (canvas) => {
+  //       const layers = await canvas.layers.toArray();
+  //       return compositeToPng(layers, canvas.width, canvas.height);
+  //     },
+  //   }),
   //
-  // IDEALIZED (depends on blob + render + effects with conditional triggers):
+  // The projection principal (a bounded post-commit consumer, ADR #8) is
+  // admitted by the target's own grant. No hand-rolled route handler, no
+  // polling — the committed log is the source.
+  //
+  // IDEALIZED pre-resolution effects approach (kept for contrast):
   //
   //   effects: {
-  //     // On ANY layer field change, invalidate + recompute the render.
-  //     // Ideal trigger: a compound event handle covering the relevant fields.
   //     [RasterLayer.events.anyMutate]: {
   //       mutate: self,
   //       with: { export: render.compute(entity) },
   //     },
   //   },
-  //
-  //   // Or, a `render` field that owns its own invalidation:
-  //   export: render({
-  //     format: 'image/png',
-  //     compute: async (canvas) => {
-  //       const layers = await canvas.layers.toArray({ sort: 'order' });
-  //       return compositeToPng(layers, canvas.width, canvas.height);
-  //     },
-  //   }),
-  //
-  // Without these, the framework expresses NOTHING about the render pipeline.
-  // The entire pipeline — trigger detection, caching, invalidation,
-  // compositing, content-type — is hand-rolled in route handlers.
 
   routes: (r, Canvas) => {
     r.resource();
 
-    // ── Manual render route — framework can't help ─────────────────────────
+    // ── Render route — now expressible as projected.async ──────────────────
     //
-    // Render pipeline is hand-rolled:
-    //   1. Load canvas
-    //   2. Load all layers via FK traversal (filtered to visible by client)
-    //   3. Sort by `order` (client-side)
-    //   4. Composite with external library (sharp/canvas)
-    //   5. Return PNG buffer with manual content-type header
-    //
-    // No caching, no dependency-tracking invalidation, no declarative trigger,
-    // no integration with the mutation pipeline. Every request recomputes.
+    // The old hand-rolled pipeline (below) is replaced by `projected.async`
+    // (SPEC §5.3, ADR #12): the field declaration owns its own projection
+    // strategy — dependency-tracking, caching, invalidation, content-type.
+    // The committed log is the source; no polling, no hand-rolled route.
     r.get('/:canvasId/export.png', async (req, res) => {
       const canvas = await Canvas.getOrFail(req.params.canvasId);
-      // GAP: no typed `.toArray({ sort: field })` or batch-load API.
       const layers = await RasterLayer.findAll(
         RasterLayer.canvas.is(canvas.id),
       );
-      // Client-side sort is fragile — see RasterLayer.order gap.
       layers.sort((a, b) => a.order - b.order);
 
-      // Compositing happens outside the framework. No caching.
       const png = await compositeToPng(layers, canvas.width, canvas.height);
 
-      // IDEALIZED:
-      //   const png = await canvas.export.png();
-      //   // `export` is a `render` field — cached, auto-invalidated,
-      //   // content-type baked in.
+      // Real API (projected.async field, self-serve via r.resource):
+      //   const png = await canvas.export.toBuffer();
+      //   // `export` is a projected.async field — cached, auto-invalidated,
+      //   // content-type baked in, served through the resource route.
 
       res.type('image/png').send(png);
     });
@@ -380,14 +360,14 @@ function layerRoutes() {
   const r = router({ mergeParams: true });
   r.mount('/', RasterLayer);
 
-  // ── Idealized reorder endpoint — can't be expressed declaratively ───────
+  // ── Reorder endpoint — now expressible via `list` with `ordered: true` ──
   //
-  // Reordering a layer requires TWO LWW writes (moved layer + displaced
-  // layer), which can't be batched into one atomic mutation in the current
-  // API. An `array` field would handle this as a single `.move()` mutation.
+  // The `ordered` field type (SPEC §5.1, ADR #9) uses a fractional-index
+  // keyspace — atomic insertAt / move / reorder in one mutation, one event.
+  // No fragile dual-LWW hand-roll.
   r.post('/:layerId/move', async (req, res) => {
     const { newIndex } = req.body;
-    // ... fragile hand-rolled reorder logic with `order` numbers ...
+    // Real API: canvas.layers.move(layerId, newIndex)
     res.json({ moved: true });
   });
 
@@ -397,7 +377,8 @@ function layerRoutes() {
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Stub compositor — would use sharp/canvas in a real implementation.
-// This is the computation that effects CANNOT express.
+// Now expressible via projected.async (SPEC §5.3, ADR #12): a stored
+// computed field updated by post-commit projection over the committed log.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 async function compositeToPng(layers, width, height) {

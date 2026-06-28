@@ -62,9 +62,12 @@ export const Match = entity('Match', {
       lives:  number({ default: 3 }),
       score:  number({ default: 0 }),
     }).can(async ({ is }) =>
-      // Any player may join/leave; only the tick may write ship positions.
-      // GAP: authority: 'server' operator not yet shown in API surface.
-      // In the grilled design, only `presence` has a defined authority split.
+      // RESOLVED: server-authority is the field-plugin operator/authority
+      // model (SPEC §5.1/§9.2, ADR #13). The `players` map exports operators
+      // that bound which principals may write which sub-fields — the tick
+      // principal (a bounded scheduler, SPEC §10, ADR #10) writes ship
+      // positions; players join/leave the roster. No special `authority`
+      // flag — the field plugin owns the contract.
       (await is.player()) ? grant(read, write) : grant(read)),
 
     // ── shared ephemeral game state (aspirational field types) ─────────────
@@ -95,48 +98,35 @@ export const Match = entity('Match', {
   // interest (narrowing filter at subscribe time).
   grant: ({ principal }) => [
     // scope: who may READ this match row?
-    // `never()` compiles to SQL FALSE — non-user principals (link, system)
-    // are excluded from read scope. Only players and... anyone? No — we want
-    // spectators to read too. So we need a public-read pattern.
+    // RESOLVED: `everyone()` compiles to SQL TRUE (SPEC §6.2, ADR #11) —
+    // the match is world-readable (players, authenticated spectators,
+    // and anonymous visitors via the per-verb route gate). The old
+    // `publicRead` entity flag is DEAD; `everyone()` is the real mechanism,
+    // NULL-safe and symmetric to `never()` = SQL FALSE.
     //
-    // PROBLEM: The grilled design provides `anyOf(is.player(), ...)` but
-    // there is no clean way to express "any authenticated user" without a
-    // new check. If we add `authenticated: () => true`, that check is
-    // non-compilable (it can't be a SQL predicate on row columns alone)
-    // but scope requires compilability → load-time error.
-    //
-    // The grilled design says `scope` is compiled to SQL WHERE. To admit all
-    // authenticated users (spectators), we'd need a framework-level concept
-    // like `everyone` or `authenticated` that compiles to `TRUE` in the WHERE
-    // clause — but that's a fixed constant, not a check. The `publicRead`
-    // entity-level flag mentioned in the plan (Phase 1 item 6) is not yet
-    // shown in the API surface.
-    //
-    // Workaround: scope admits players only. Spectators cannot read the match
-    // row → they can't see the invader grid. This is broken for spectators.
-    //
-    // ALTERNATIVE: Make Match world-readable via a constant scope, but the
-    // API for that is not shown. `anyOf(is.player(), true)` won't compile.
-    scope(({ is }) => anyOf(is.player()))
+    // anonymous access is gated at the route level (SPEC §6.2):
+    //   r.resource({ gate: { list: allowAnonymous(), create: requireUser() } })
+    // The row grant runs on every verb regardless — two layers, no gap.
+    scope(({ is }) => anyOf(is.player(), everyone()))
       .can(async ({ is }) => {
         if (await is.player()) return grant(...PLAYER);
-        // Spectator path unreachable if scope filters them out.
-        return deny('no capability for this principal');
+        // Spectator (read+subscribe only) — admitted by `everyone()` scope.
+        // The .can runs on every verb; write is denied for non-players.
+        return grant(...SPECTATOR);
       }),
   ],
 
   // ── effects ────────────────────────────────────────────────────────────────
-  // When a player joins, if the match is full, auto-start the game.
-  // GAP: cannot reference match.players.size in a template path — the
-  // `with` template only interpolates `delta.member`, `entity.id`, and
-  // trigger-delta fields. There's no `if`/condition guard on effects
-  // (the effect fires unconditionally on the trigger). The auto-start logic
-  // would need to live in the tick, not in effects.
+  // RESOLVED: `when` guards carry typed predicates over delta+origin
+  // (SPEC §9.2, ADR #13). The auto-start effect fires only when the roster
+  // is full — a non-compilable `when` is a load-time error, same discipline
+  // as a non-compilable `scope`.
   effects: {
-    // [players.onAdded]: { mutate: self, with: { phase: 'playing' } }
-    // ^ This would fire every time a player joins — even when not full.
-    //   We can't express a conditional effect ("only if players.size >= maxPlayers").
-    //   The tick is the right place for this, but tick is not in the API surface.
+    [players.onAdded]: {
+      mutate: self,
+      with: { phase: 'playing' },
+      when: (delta, origin) => origin.players.size >= origin.maxPlayers,
+    },
   },
 
   // ── tick (aspirational) ────────────────────────────────────────────────────
