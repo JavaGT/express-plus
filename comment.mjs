@@ -12,10 +12,11 @@ import {
   entity, text, date, ref, boolean, grant, read, write, subscribe,
   inherit, router,
 } from 'express-plus';
+import { Doc } from './doc.mjs';
 
 // Declarative inherit directive: the compiler resolves it through `doc`,
 // pulling in the parent Doc's read scope (compiled WHERE join) AND its `.can`.
-const inheritDoc = inherit('Doc', { via: 'doc' });
+const inheritDoc = inherit(Doc, { via: 'doc' });
 
 export const Comment = entity('Comment', {
   fields: {

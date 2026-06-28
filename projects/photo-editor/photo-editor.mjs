@@ -70,137 +70,6 @@ const OWNER   = [read, write, subscribe, admin];
 
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// RasterLayer — a single raster layer in a canvas.
-//
-// Designed as a STANDALONE entity (not a field-owned collection on Canvas)
-// because the grilled API's `map` is unordered. In the idealized API,
-// Canvas would have `layers: array(ref('RasterLayer'))` with list-CRDT merge.
-// Here, ordering is simulated via `RasterLayer.order: number()` (fragile).
-//
-// Grant is inherited from Canvas via `inherit('Canvas', { via: 'canvas' })` —
-// this RESOLVES prior pain point #7 ("no cross-entity grant delegation").
-// The grilled `inherit` compiles BOTH the parent's read-scope (SQL WHERE join
-// through the `canvas` FK) AND the parent's `.can`.
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const inheritCanvas = inherit('Canvas', { via: 'canvas' });
-
-export const RasterLayer = entity('RasterLayer', {
-  fields: {
-    canvas: ref('Canvas', { required: true }),
-
-    name: text({
-      default: 'New Layer',
-      validate: v => v.length <= 100 || 'name too long',
-    }),
-
-    // ── RESOLVED: raster.crdt ships as a built-in (SPEC §5.1, ADR #9) ──────
-    //
-    // The core collaborative data is pixel buffers. `fieldType.crdt` is one of
-    // the four named-whole field contracts (ADR #9): `text.crdt()` is one
-    // instance (character-level string merging), `raster.crdt()` another
-    // (per-region pixel merge). These ship as proof of the contract; only the
-    // custom CRDT-authoring TOOLKIT is deferred (SPEC §5.1). Per-region merge
-    // avoids forcing pixels into `text` as base64 (storage inflation, no
-    // streaming, no content-type metadata, whole-field LWW conflict on every
-    // co-edit).
-    imageData: raster.crdt({
-      mergeStrategy: 'blend',   // Porter-Duff compositing per-region
-      compaction: true,         // periodically flatten the stroke log
-    }),
-
-    // ── RESOLVED (vs prior): boolean exists ────────────────────────────────
-    //
-    // Prior report said "no boolean field type" — the grilled API added it.
-    // comment.mjs uses `boolean({ default: false })`. ✔
-    visible: boolean({ default: true })
-
-      // ── FIELD-LEVEL ACCESS: visibility gating via .can() ──────────────────
-      //
-      // The grilled API's field `.can(fn, defaults)` is the correct home for
-      // per-layer visibility rules. Viewers should not read invisible layers
-      // → field read-denial → `withheld` marker. Editors (who control
-      // visibility) see all layers regardless.
-      //
-      // CHICKEN-AND-EGG NOTE: `.can` needs `entity.visible` (the field's own
-      // current value) to decide whether to grant read. This works because the
-      // row is materialized before `.can` runs (field access is always runtime
-      // per ADR #3): the framework loads the full row from DB, then runs `.can`
-      // per field, then returns only authorized fields. entity.visible IS
-      // available during `.can` evaluation. This is a sharp edge, but a
-      // correct one — it flows from the grilled design, not a gap.
-      .can(async ({ is, entity }, defaults) => {
-        // Editors always see all layers (they control visibility)
-        if (await is.editor()) return defaults;
-        // Owner always sees all layers
-        if (await is.owner()) return defaults;
-        // Viewers + link-holders: inherit row grant normally if visible
-        if (entity.visible) return defaults;
-        // Invisible layer for a non-editor viewer:
-        // deny read → framework produces `withheld` marker
-        // keep subscribe so client is notified when visibility changes
-        return grant(subscribe);
-      }),
-
-    // ── RESOLVED: ordered list field type (SPEC §5.1, ADR #9) ──────────────
-    //
-    // Layers are inherently ordered (z-order: background → foreground). The
-    // `ordered` field-type contract uses a fractional-index keyspace for
-    // atomic insertAt / move / reorder without renumbering — no two-layer
-    // LWW collision, no client-side fragility. The `order: number()` below
-    // is the old workaround.
-    //
-    // Real API (the Canvas owns the ordered collection):
-    //   layers: list(ref('RasterLayer'), { ordered: true }),
-    //   // → canvas.layers.insertAt(layer, 3)  // one mutation, one event
-    //   // → positional deltas via fractional-index CRDT merge
-    order: number({ default: 0 }),
-
-    opacity: number({ default: 100, min: 0, max: 100 }),
-
-    blendMode: text({
-      default: 'normal',
-      validate: v =>
-        ['normal','multiply','screen','overlay','darken','lighten',
-         'color-dodge','color-burn','hard-light','soft-light','difference',
-         'exclusion','hue','saturation','color','luminosity'].includes(v)
-          || 'invalid blend mode',
-    }),
-
-    createdAt: date({ default: () => new Date() }),
-  },
-
-  // ── RESOLVED (vs prior): grant inheritance ────────────────────────────────
-  //
-  // `inherit('Canvas', { via: 'canvas' })` compiles BOTH parent read-scope
-  // (SQL JOIN through `canvas` FK → rows are readable exactly when Canvas is
-  // readable) AND parent `.can` (write/admin capability). This is exactly
-  // what "same as parent Canvas" authorization needs. ✔
-  grant: inheritCanvas,
-
-  checks: {
-    // Check for field `.can()` visibility gating — runtime only (non-compilable
-    // because it traverses the `canvas` FK to read Canvas.collaborators). Used
-    // ONLY in field `.can()`, never in `scope` (scope comes from inheritCanvas,
-    // which compiles the Canvas-side scope).
-    editor: async ({ entity, principal }) => {
-      const canvas = await entity.canvas;
-      return canvas.collaborators.get(principal.id)?.role === 'editor';
-    },
-    // Owner check (the Canvas owner). Also runtime-only — same reason.
-    owner: async ({ entity, principal }) => {
-      const canvas = await entity.canvas;
-      return canvas.owner === principal.id;
-    },
-  },
-
-  routes: (r) => {
-    r.resource();
-  },
-});
-
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // Canvas — the top-level collaborative photo editing document.
 //
 // This models a Figma-for-photos canvas: width × height, ordered layers,
@@ -350,6 +219,138 @@ export const Canvas = entity('Canvas', {
     r.use('/:canvasId/layers', layerRoutes());
   },
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RasterLayer — a single raster layer in a canvas.
+//
+// Designed as a STANDALONE entity (not a field-owned collection on Canvas)
+// because the grilled API's `map` is unordered. In the idealized API,
+// Canvas would have `layers: array(ref('RasterLayer'))` with list-CRDT merge.
+// Here, ordering is simulated via `RasterLayer.order: number()` (fragile).
+//
+// Grant is inherited from Canvas via `inherit('Canvas', { via: 'canvas' })` —
+// this RESOLVES prior pain point #7 ("no cross-entity grant delegation").
+// The grilled `inherit` compiles BOTH the parent's read-scope (SQL WHERE join
+// through the `canvas` FK) AND the parent's `.can`.
+// ═══════════════════════════════════════════════════════════════════════════════
+
+const inheritCanvas = inherit(Canvas, { via: 'canvas' });
+
+export const RasterLayer = entity('RasterLayer', {
+  fields: {
+    canvas: ref('Canvas', { required: true }),
+
+    name: text({
+      default: 'New Layer',
+      validate: v => v.length <= 100 || 'name too long',
+    }),
+
+    // ── RESOLVED: raster.crdt ships as a built-in (SPEC §5.1, ADR #9) ──────
+    //
+    // The core collaborative data is pixel buffers. `fieldType.crdt` is one of
+    // the four named-whole field contracts (ADR #9): `text.crdt()` is one
+    // instance (character-level string merging), `raster.crdt()` another
+    // (per-region pixel merge). These ship as proof of the contract; only the
+    // custom CRDT-authoring TOOLKIT is deferred (SPEC §5.1). Per-region merge
+    // avoids forcing pixels into `text` as base64 (storage inflation, no
+    // streaming, no content-type metadata, whole-field LWW conflict on every
+    // co-edit).
+    imageData: raster.crdt({
+      mergeStrategy: 'blend',   // Porter-Duff compositing per-region
+      compaction: true,         // periodically flatten the stroke log
+    }),
+
+    // ── RESOLVED (vs prior): boolean exists ────────────────────────────────
+    //
+    // Prior report said "no boolean field type" — the grilled API added it.
+    // comment.mjs uses `boolean({ default: false })`. ✔
+    visible: boolean({ default: true })
+
+      // ── FIELD-LEVEL ACCESS: visibility gating via .can() ──────────────────
+      //
+      // The grilled API's field `.can(fn, defaults)` is the correct home for
+      // per-layer visibility rules. Viewers should not read invisible layers
+      // → field read-denial → `withheld` marker. Editors (who control
+      // visibility) see all layers regardless.
+      //
+      // CHICKEN-AND-EGG NOTE: `.can` needs `entity.visible` (the field's own
+      // current value) to decide whether to grant read. This works because the
+      // row is materialized before `.can` runs (field access is always runtime
+      // per ADR #3): the framework loads the full row from DB, then runs `.can`
+      // per field, then returns only authorized fields. entity.visible IS
+      // available during `.can` evaluation. This is a sharp edge, but a
+      // correct one — it flows from the grilled design, not a gap.
+      .can(async ({ is, entity }, defaults) => {
+        // Editors always see all layers (they control visibility)
+        if (await is.editor()) return defaults;
+        // Owner always sees all layers
+        if (await is.owner()) return defaults;
+        // Viewers + link-holders: inherit row grant normally if visible
+        if (entity.visible) return defaults;
+        // Invisible layer for a non-editor viewer:
+        // deny read → framework produces `withheld` marker
+        // keep subscribe so client is notified when visibility changes
+        return grant(subscribe);
+      }),
+
+    // ── RESOLVED: ordered list field type (SPEC §5.1, ADR #9) ──────────────
+    //
+    // Layers are inherently ordered (z-order: background → foreground). The
+    // `ordered` field-type contract uses a fractional-index keyspace for
+    // atomic insertAt / move / reorder without renumbering — no two-layer
+    // LWW collision, no client-side fragility. The `order: number()` below
+    // is the old workaround.
+    //
+    // Real API (the Canvas owns the ordered collection):
+    //   layers: list(ref('RasterLayer'), { ordered: true }),
+    //   // → canvas.layers.insertAt(layer, 3)  // one mutation, one event
+    //   // → positional deltas via fractional-index CRDT merge
+    order: number({ default: 0 }),
+
+    opacity: number({ default: 100, min: 0, max: 100 }),
+
+    blendMode: text({
+      default: 'normal',
+      validate: v =>
+        ['normal','multiply','screen','overlay','darken','lighten',
+         'color-dodge','color-burn','hard-light','soft-light','difference',
+         'exclusion','hue','saturation','color','luminosity'].includes(v)
+          || 'invalid blend mode',
+    }),
+
+    createdAt: date({ default: () => new Date() }),
+  },
+
+  // ── RESOLVED (vs prior): grant inheritance ────────────────────────────────
+  //
+  // `inherit('Canvas', { via: 'canvas' })` compiles BOTH parent read-scope
+  // (SQL JOIN through `canvas` FK → rows are readable exactly when Canvas is
+  // readable) AND parent `.can` (write/admin capability). This is exactly
+  // what "same as parent Canvas" authorization needs. ✔
+  grant: inheritCanvas,
+
+  checks: {
+    // Check for field `.can()` visibility gating — runtime only (non-compilable
+    // because it traverses the `canvas` FK to read Canvas.collaborators). Used
+    // ONLY in field `.can()`, never in `scope` (scope comes from inheritCanvas,
+    // which compiles the Canvas-side scope).
+    editor: async ({ entity, principal }) => {
+      const canvas = await entity.canvas;
+      return canvas.collaborators.get(principal.id)?.role === 'editor';
+    },
+    // Owner check (the Canvas owner). Also runtime-only — same reason.
+    owner: async ({ entity, principal }) => {
+      const canvas = await entity.canvas;
+      return canvas.owner === principal.id;
+    },
+  },
+
+  routes: (r) => {
+    r.resource();
+  },
+});
+
+
 
 
 // ═══════════════════════════════════════════════════════════════════════════════

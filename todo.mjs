@@ -101,7 +101,7 @@ export const TodoList = entity('TodoList', {
 // FK `list` — one declaration contributes BOTH the compiled read-scope (joined
 // through `list` into this entity's WHERE) AND the parent's `.can`. No parent
 // auth logic is hand-copied into the child.
-const inheritList = inherit('TodoList', { via: 'list' });
+const inheritList = inherit(TodoList, { via: 'list' });
 
 export const SharedTodo = entity('Todo', {
   fields: {
