@@ -389,3 +389,14 @@ read (compilability ≠ read intent — ADR #2 leak guard).
   and event emission. Events are *derived from field mutations*, not hand-emitted.
 - **uniform transport** — one live transport (WebSockets). No per-feature
   transport mixing.
+- **transport is decided; the pipeline is transport-agnostic.** The
+  dispatch/sync/replay machinery above (action, event, sequence cursor, snapshot,
+  ingest, projection) is mined from scope, which shipped on **SSE + POST**. None
+  of it is SSE-specific: the sequence cursor, gap-resync, and snapshot-before-
+  stream rules are properties of the *log*, not the wire. express-plus chooses
+  **WebSockets** as that wire because the stress-test set needs symmetric,
+  low-latency push (space-invaders 30Hz tick, drawing-canvas in-progress strokes,
+  presence/CRDT) that SSE's half-duplex one-way shape serves awkwardly — this is
+  the one place express-plus deliberately diverges from scope's SSE+POST, and the
+  divergence is justified by an app in the set, not a speculative knob. The cursor
+  and replay vocabulary therefore reads identically over either wire.

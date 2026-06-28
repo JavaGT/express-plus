@@ -1,10 +1,22 @@
 # Domain Modules — reactive-entity design
 
+> **SUPERSEDED IN PART (authorization model).** This is the original
+> reactive-entity paradigm doc, written BEFORE the authorization grill. Its
+> *structural* content — single `entity()` constructor, fields-own-everything,
+> routes-home rule, progression ladder, no second API — is still current. Its
+> *authorization* content is NOT: the grill removed `hide()` (DECISIONLOG ADR #1
+> — no visibility axis; a denied read removes the row), removed the zero-to-one
+> default grant (ADR #7/#9 — an entity with no `grant` is a load-time error), and
+> replaced the per-field `access` block with field `.can()`. The check param is
+> `principal`, not `user`. For the authoritative current model read
+> **CONTEXT.md** and **FEATURES.md §6**; this file is kept for the paradigm
+> history. Inline notes below flag the stale spots.
+
 The reactive-entity paradigm: **one constructor (`entity()`)** whose typed
 **fields** own persistence, sync, and event emission. Authorization lives with
-the data. Grown additively from a 3-line floor to the full bounded context. No
-second API. No `rooms` block, no `on(app)` block — everything live is a field,
-and events are derived from field mutations.
+the data. Grown additively from a minimal floor (declare entity + declare grant)
+to the full bounded context. No second API. No `rooms` block, no `on(app)` block
+— everything live is a field, and events are derived from field mutations.
 
 This supersedes the earlier `module()` design (renamed: `module`→`entity`,
 `schema`→`fields`, `predicates`→`checks`, `base`→`defaults`,
@@ -22,10 +34,13 @@ selects a sensible default.
 ```
 entity('Doc', {
   fields:  { <field>: <fieldConstructor>, ... },        // PURELY fields
-  checks:  { <name>: ({entity,user,lookup,load}) => ... },   // peer of fields
-  grant:   async ({ is }) => grant(read,...) | deny(reason) | hide(),
+  checks:  { <name>: ({entity,principal,lookup,load}) => ... },   // peer of fields
+  grant:   () => [ scope(({is}) => ...).can(async ({is}) => grant(read,...) | deny(reason)) ],
   routes:  (r, Entity) => { r.resource(); r.get(path, handler); r.use(path, sub) },
 })
+// NOTE (current model): `grant` is `scope(...).can(...)` — read admission
+// compiled to SQL, plus every-other-capability per row. There is no `hide()`.
+// The check param is `principal` (was `user`). See CONTEXT.md.
 ```
 
 - **`fields` is the field listing.** Each field is a reactive primitive owning
@@ -38,11 +53,12 @@ entity('Doc', {
   - `presence({...})` → ephemeral per-connection state, emits `:joined`/`:moved`/`:left`
   - `log()` → append-only stream, emits `:appended:<id>`
   - `hash()` → one-way hashed field (passwords), exposes `verifyPassword(plain)`
-- **The auth triad are top-level peers.** `checks`, `grant`, and per-field
-  `access` (which stays ON the field) read as the three auth controls at a
-  glance; `fields` is a clean field listing.
-- **Per-field `access`** is always a function, authoritative for that field;
-  declaring access two ways (static + function) errors at entity load (invariant 5).
+- **The auth controls.** `checks` (named facts) and `grant` (`scope().can()`)
+  are top-level peers; per-field authorization lives ON the field as fluent
+  `.can(fn)` (current model — there is no separate top-level `access` block). A
+  field with no `.can` strong-inherits the row grant.
+- **Field `.can(fn)`** is always a function, authoritative for that field; a
+  field read-denial returns a typed `withheld` marker, not a `hide()`.
 
 ### Capabilities — typed handles, not strings
 Capabilities (`read`, `write`, `subscribe`, `admin`) are typed handles exported
@@ -50,33 +66,46 @@ from `express-plus`, passed to `grant(...)` as a set — **no string keys, no
 string matching** in authorization decisions:
 
 ```
-import { grant, deny, hide, read, write, subscribe, admin } from 'express-plus';
+import { grant, deny, read, write, subscribe, admin, scope } from 'express-plus';
 
-grant: async ({ is }) => {
-  if (is.owner())              return grant(read, write, subscribe, admin);
-  if (await is.banned())       return deny('account suspended');   // 403
-  if (await is.collaborator()) return grant(read, write, subscribe);
-  return hide();                                                    // 404
-}
+grant: () => [
+  scope(({ is }) => anyOf(is.owner(), is.collaborator()))   // read admission → SQL WHERE
+    .can(async ({ is }) => {
+      if (await is.owner())        return grant(read, write, subscribe, admin);
+      if (await is.banned())       return deny('account suspended');
+      if (await is.collaborator()) return grant(read, write, subscribe);
+      return deny('no capability for this principal');
+    }),
+]
 ```
+
+A principal not admitted by `scope` never appears in the result set at all (no
+`hide()`/404 — the row is simply absent, logged in prod, raised in dev). `deny`
+inside `.can` refuses a capability on a row the principal CAN read.
 
 - **`subscribe` is a peer of `read`, not folded into it.** `read` = one-shot
   REST fetch; `subscribe` = sustained WS push. They usually travel together
   but can legitimately differ (e.g. an anonymous public whiteboard grants
   `read` for a cheap snapshot but denies `subscribe` to bound the WS DoS
   surface). One auth engine, re-authorized per push — no second auth path.
-- **`deny(reason)` = 403** (you exist, but refused); **`hide()` = 404**
-  (existence not leaked). ALLOWLIST throughout.
+- **`deny(reason)`** refuses a capability on a readable row. There is no
+  `hide()`: a row the principal can't read is removed by `scope` from the result
+  set, never surfaced as a 404. ALLOWLIST throughout.
 
 ### `role: owner` — FK marker (replaces `owner()` sugar)
 `ref('User', { role: owner, readonly: true })` marks the ownership relation.
-`owner` is a typed handle, not a string. TWO things fall out of it
-automatically — ONE source of truth for "who is the owner":
-1. the zero-to-one default grant (owner ⇒ all, else `hide()`)
-2. an auto-derived `checks.owner` (and thus `doc.isOwner(user)`), so even the
-   floor — which declares no `checks` — gets the method for free.
+`owner` is a typed handle, not a string. ONE thing falls out of it
+automatically — ONE source of truth for "who is the owner": an auto-derived
+`checks.owner` (and thus `is.owner()`), so even the floor — which declares no
+`checks` — gets the fact for free.
 
-The owner default (`req.user.id`) is also framework-derived from `role: owner`;
+> STALE (corrected): earlier this section also claimed a *zero-to-one default
+> grant* (owner ⇒ all, else `hide()`). That default no longer exists — an entity
+> with no `grant` is a load-time error (ADR #9), and there is no `hide()` (ADR
+> #1). The owner FK derives the *check*, not a grant; the floor declares its
+> grant explicitly (see note.mjs).
+
+The owner FK auto-populates from the request principal (`principal.id`);
 do not hand-write it. Fully overridable: declare `checks.owner` yourself and
 generation is suppressed.
 
@@ -102,8 +131,9 @@ param name is derived from the entity, so sub-routers inherit it without
 - `routes` omitted → auto-CRUD + live-field reads at `/<prefix>` and `/<prefix>/:id`,
   routed **through** grant/access/checks (safe by construction). `routes` declared
   → auto-CRUD suppressed; opt back in with `r.resource()`.
-- `grant` omitted → the zero-to-one default (owner ⇒ all, else hide) applies when
-  a `role: owner` FK exists.
+- `grant` is **required** — omitting it is a load-time error (ADR #9). There is
+  no default-grant fallback; the `role: owner` FK derives `checks.owner`, not a
+  grant. (Stale: this line previously described a zero-to-one default.)
 - No `rooms`/`on`/`hooks` blocks — presence/chat are fields; events derive from
   field mutations.
 
@@ -158,13 +188,13 @@ checked for sustained push.
 | # | Invariant | Status |
 |---|-----------|--------|
 | 1 | Authz always functions | ✅ unchanged |
-| 2 | grant/deny/hide constructors | ✅ all three demonstrated (deny = banned → 403) |
+| 2 | grant via `scope().can()`; `deny` refuses a capability | ✅ current model (no `hide()` constructor — ADR #1) |
 | 3 | Per-entity checks; no universalizing | ✅ `checks.owner` auto-derived per-entity from that entity's own owner FK |
 | 4 | request-scoped lookup / is.* memoization | ✅ unchanged |
-| 5 | per-field access function, authoritative, dup errors | ✅ unchanged |
+| 5 | per-field `.can()` function, authoritative, dup errors | ✅ field `.can`, not a top-level `access` block |
 | 6 | verbs-as-methods routing | ✅ native (`routes:(r,Entity)=>...`) |
 | 7 | sensible defaults baked in | ✅ strengthened (omit-gets-defaults, `getOrFail`, `touch:true`) |
-| 8 | zero-to-one default owner=all else hide | ✅ honored by authed floor |
+| 8 | grant is required; no default-grant fallback | ✅ entity with no `grant` = load-time error (ADR #9); the old "zero-to-one default owner=all else hide" is removed |
 
 ---
 
@@ -172,10 +202,10 @@ checked for sustained push.
 
 | Tier | Lines | What you add | File |
 |------|-------|--------------|------|
-| 0 floor | ~5 | `{ body: text.crdt(), owner: ref('User',{role:owner}) }` → collaborative body, owner-only auth, auto-CRUD, live CRDT stream | `hello.mjs` |
-| 1 | +N | more fields + a custom check (default grant still governs) | — |
-| 2 | +N | override default with your own `grant` (typed capability handles) | — |
-| 3 | +N | per-field `access` + more checks | — |
+| 0 floor | declare entity + grant | `{ body: text.crdt(), owner: ref('User',{role:owner}) }` + an explicit owner `grant` → collaborative body, owner-only auth, auto-CRUD, live CRDT stream | `note.mjs` |
+| 1 | +N | more fields + a custom check (grant refined) | — |
+| 2 | +N | richer `grant` `scope().can()` (typed capability handles) | — |
+| 3 | +N | per-field `.can()` + more checks | — |
 | 4 | +N | custom `routes:(r,Doc)=>{ r.resource(); r.get('/feed',feed(Doc)); r.use('/:docId/shares',shareRoutes(Doc)) }` | — |
 | 5 ceiling | full | `presence`/`chat` fields + `deny` path + cross-entity `projectManager` check | `domains/doc/index.mjs` |
 

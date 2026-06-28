@@ -68,10 +68,14 @@ The relaxation has a bar, and we keep the bar: **"a real app in the set needs
 this shape" — not "build every conceivable knob."** The `projects/*` stress-test
 apps (blog-platform, reddit, library, space-invaders, minecraft, drawing-canvas,
 photo-editor, google-photos, todo) are the consumer set. A feature earns its
-place by being needed by one of them. A feature that no app needs (scope's
-example: a WebSocket transport when SSE+POST covers every app) is the
-speculative knob the brief still forbids — proactive is not the same as
-exhaustive.
+place by being needed by one of them. A feature that no app needs (e.g.
+geo/spatial predicates or full-text search as built-ins, when no stress-test app
+in the set requires them yet) is the speculative knob the brief still forbids —
+proactive is not the same as exhaustive. (Transport is the inverse case:
+express-plus DOES pick WebSockets over scope's SSE+POST, because apps in the set —
+space-invaders, drawing-canvas — need symmetric low-latency push. A divergence an
+app needs is proactive; a knob no app needs is speculative. See CONTEXT.md
+"Live / sync".)
 
 ### 1.3 No second path — the structural anti-foot-gun
 
