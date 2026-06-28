@@ -113,6 +113,28 @@ export function map(of, { role, default: fallback } = {}) {
   });
 }
 
+// `log(entry)` — an append-only, internally-keyed owned collection of STRUCTURED
+// entries (the `store` KIND, `type: 'log'`). Each entry has named sub-fields
+// declared by the `entry` shape (doc.mjs: `log({ sender: ref('User'), body:
+// text() })` — a chat log whose entries each carry a User-FK sender and text
+// body). Like `map`, membership lives ON the owning entity (AGENTS: an owned
+// relation is a field, not a join table), not a separate entries table.
+//
+//   - entry — the per-entry sub-field descriptor map (each a value/ref/text
+//             descriptor); declared shape, frozen so a later layer cannot mutate it.
+//
+// Import-surface scope: this constructor delivers the descriptor the entity
+// compiler accepts. The append mutation, the `:appended:<id>` event handle, and
+// any per-entry query are the `store` kind's Phase-2 merge/event behavior (the
+// strategy's apply/diff already fail closed with a loud Phase-2 throw).
+export function log(entry = {}) {
+  return makeDescriptor({
+    kind: 'store',
+    type: 'log',
+    entry: Object.freeze({ ...entry }),
+  });
+}
+
 export function link({ tiers, tier, token } = {}) {
   return makeDescriptor({
     kind: 'struct',
