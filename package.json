@@ -1,12 +1,13 @@
 {
-  "name": "express-plus-gdocs",
-  "version": "1.0.0",
+  "name": "express-plus",
+  "version": "0.0.0",
+  "description": "Express, but for collaborative, persisted, realtime data.",
   "type": "module",
-  "scripts": {
-    "start": "node app.mjs"
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs"
   },
-  "dependencies": {
-    "express": "^5.1.0",
-    "express-plus": "^1.0.0"
+  "scripts": {
+    "test": "node --test"
   }
 }

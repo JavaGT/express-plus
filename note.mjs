@@ -5,7 +5,7 @@
 // auto-derives `checks.owner` from it (so `is.owner()` exists) — one source of
 // truth for "who owns this row". That is the ONLY thing the FK derives: there
 // is no zero-to-one default grant. An entity with no `grant` is a LOAD-TIME
-// ERROR (DECISIONLOG ADR #9), so the floor below declares one explicitly. There
+// ERROR (DECISIONLOG ADR #7), so the floor below declares one explicitly. There
 // is no `hide()` / visibility axis either (ADR #1): a denied read simply removes
 // the row from the result set.
 //

@@ -1,0 +1,383 @@
+// The HTTP transport — Phase 2, slice 1 (SPEC §3, §4).
+//
+// Phase 1 resolved a declared app into an inspectable routing table (a list of
+// { method, path, verb, entity, gate }). This module turns that table into a
+// running node:http server. It is a DISTINCT seam from the resolution layer
+// (app.mjs): the table is built at mount time and is the single source of routes;
+// this module only serves it. There is no second routing path.
+//
+// The request flow, fail-closed at each step:
+//   1. derive the principal (default: anonymous, until session hydration lands)
+//   2. match { method, url } to a route in the table — no match → 404
+//   3. run the route's gate(principal) — the first default-on auth layer — and
+//      deny with 401 when it returns false
+//   4. dispatch the admitted request (slice 1: a stub echoing the matched verb;
+//      DB-backed CRUD is the next slice)
+//
+// The row grant (the SQL scope + .can) still runs downstream in dispatch on every
+// admitted verb — this layer decides route admission, never row visibility. No
+// second auth path.
+
+import { createServer as createHttpServer } from 'node:http';
+
+import { anonymous } from './principal.mjs';
+import { bindReadScope } from './scope-sql.mjs';
+import { validateMutation, ValidationError, serializeField } from './field-strategy.mjs';
+import { mayVerb } from './row-grant.mjs';
+import { config } from './config.mjs';
+import { applySecurityHeaders, renderError } from './middleware.mjs';
+
+// Match a concrete request path against a route's path template. Phase-1 routes
+// carry literal segments and `:param` segments (e.g. `/notes/:id`). Returns the
+// bound params on a match, or null on no match. A segment count mismatch is a
+// non-match (a longer or shorter path is a different route).
+function matchPath(template, actual) {
+  const t = template.split('/').filter(Boolean);
+  const a = actual.split('/').filter(Boolean);
+  if (t.length !== a.length) return null;
+  const params = {};
+  for (let i = 0; i < t.length; i += 1) {
+    if (t[i].startsWith(':')) {
+      params[t[i].slice(1)] = decodeURIComponent(a[i]);
+    } else if (t[i] !== a[i]) {
+      return null;
+    }
+  }
+  return params;
+}
+
+// Find the route whose method AND path template match the request. Path is
+// matched first so a known path with the wrong method can be told apart (405)
+// from an unknown path (404).
+function matchRoute(routes, method, pathname) {
+  let pathMatched = false;
+  for (const route of routes) {
+    const params = matchPath(route.path, pathname);
+    if (params === null) continue;
+    pathMatched = true;
+    if (route.method === method) return { route, params };
+  }
+  return { route: null, params: null, pathMatched };
+}
+
+// Send a JSON response with a status code. One place owns the response shape so
+// every exit (404, 401, 200) is consistent.
+function sendJson(res, status, body) {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(payload),
+  });
+  res.end(payload);
+}
+
+// Read and JSON-parse a request body (create/update payloads). Caps the body to
+// guard against an unbounded upload (a baked-in default; the formal middleware
+// stack in the next slice generalizes this). An empty body parses to {}.
+const BODY_LIMIT = 1_000_000; // ~1mb, SPEC §3 body-parse cap.
+
+function readJsonBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let aborted = false;
+    req.on('data', (chunk) => {
+      if (aborted) return;
+      size += chunk.length;
+      if (size > BODY_LIMIT) {
+        // Stop consuming and reject so the handler can write a 413. Do NOT
+        // destroy the socket — an abrupt close would race the response and the
+        // client would see a dropped connection instead of the 413. Pausing and
+        // resuming (drain-to-end) lets the response flush cleanly.
+        aborted = true;
+        req.pause();
+        reject(new BodyError('request body exceeds the 1mb limit', 413));
+        req.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8').trim();
+      if (raw === '') return resolve({});
+      try {
+        resolve(JSON.parse(raw));
+      } catch {
+        reject(new BodyError('request body is not valid JSON', 400));
+      }
+    });
+    req.on('error', reject);
+  });
+}
+
+// A request body the framework refuses to parse — distinct from a
+// ValidationError (a well-formed payload that fails a field rule). It carries the
+// HTTP status the refusal maps to: an oversized body is 413 Payload Too Large, a
+// malformed body is 400 Bad Request.
+class BodyError extends Error {
+  constructor(message, status) {
+    super(message);
+    this.status = status;
+  }
+}
+
+// The owner field a row carries server-side: a readonly `ref` with a `role`. Its
+// value is assigned from the principal's id on create (the client may not set it
+// — validateMutation already rejects a readonly key in the payload). SPEC §158's
+// `from:'req.user.id'` is the explicit form; a readonly role-ref is the default.
+function ownerFieldOf(entity) {
+  for (const [name, descriptor] of Object.entries(entity.fields)) {
+    if (descriptor.type === 'ref' && descriptor.role && descriptor.readonly) {
+      return name;
+    }
+  }
+  return null;
+}
+
+// Serialize a payload's declared fields to their stored representation (booleans
+// to 1/0, Dates to epoch — node:sqlite refuses JS booleans). Only declared
+// fields are serialized; validateMutation already rejected undeclared keys.
+function serializeRow(entity, payload) {
+  const row = {};
+  for (const [key, value] of Object.entries(payload)) {
+    row[key] = serializeField(entity.fields[key], value);
+  }
+  return row;
+}
+
+// DB-backed dispatch for one admitted verb. The route gate already admitted the
+// request; here the SECOND default-on auth layer runs: the row grant's SQL scope
+// (which rows are visible) and its .can capability (what may be done). Both must
+// pass. A missing db is fail-closed (500): an entity CRUD route cannot serve
+// without persistence.
+async function dispatch(req, res, route, principal, db, params, body) {
+  if (!db) {
+    sendJson(res, 500, { error: 'no database configured for entity dispatch' });
+    return;
+  }
+  const { entity, verb } = route;
+  const table = entity.name;
+  const bound = bindReadScope(entity.readScope, principal);
+  const where = bound ? bound.sql : '1=1';
+  const scopeParams = bound ? bound.params : {};
+
+  if (verb === 'list') {
+    const rows = db.prepare(`SELECT * FROM ${table} AS t0 WHERE ${where}`).all(scopeParams);
+    sendJson(res, 200, rows);
+    return;
+  }
+
+  if (verb === 'read') {
+    const row = db
+      .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
+      .get({ ...scopeParams, id: params.id });
+    // not visible under scope OR absent → 404 (do not distinguish, fail closed).
+    if (!row) return void sendJson(res, 404, { error: 'not found' });
+    if (!(await mayVerb(entity, 'read', row, principal))) {
+      return void sendJson(res, 403, { error: 'forbidden' });
+    }
+    sendJson(res, 200, row);
+    return;
+  }
+
+  if (verb === 'create') {
+    let payload;
+    try {
+      payload = validateMutation(entity, body);
+    } catch (err) {
+      if (err instanceof ValidationError) return void sendJson(res, 400, { error: err.message });
+      throw err;
+    }
+    const ownerField = ownerFieldOf(entity);
+    const row = serializeRow(entity, payload);
+    if (ownerField) row[ownerField] = principal.id;
+    const cols = Object.keys(row);
+    const placeholders = cols.map((c) => `:${c}`).join(', ');
+    const info = db
+      .prepare(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`)
+      .run(row);
+    const created = db
+      .prepare(`SELECT * FROM ${table} WHERE id = ?`)
+      .get(info.lastInsertRowid);
+    sendJson(res, 201, created);
+    return;
+  }
+
+  if (verb === 'update') {
+    const row = db
+      .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
+      .get({ ...scopeParams, id: params.id });
+    if (!row) return void sendJson(res, 404, { error: 'not found' });
+    if (!(await mayVerb(entity, 'update', row, principal))) {
+      return void sendJson(res, 403, { error: 'forbidden' });
+    }
+    let payload;
+    try {
+      payload = validateMutation(entity, body);
+    } catch (err) {
+      if (err instanceof ValidationError) return void sendJson(res, 400, { error: err.message });
+      throw err;
+    }
+    const updates = serializeRow(entity, payload);
+    const cols = Object.keys(updates);
+    if (cols.length > 0) {
+      const setClause = cols.map((c) => `${c} = :${c}`).join(', ');
+      db.prepare(`UPDATE ${table} SET ${setClause} WHERE id = :id`).run({ ...updates, id: params.id });
+    }
+    const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
+    sendJson(res, 200, updated);
+    return;
+  }
+
+  if (verb === 'remove') {
+    const row = db
+      .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
+      .get({ ...scopeParams, id: params.id });
+    if (!row) return void sendJson(res, 404, { error: 'not found' });
+    if (!(await mayVerb(entity, 'remove', row, principal))) {
+      return void sendJson(res, 403, { error: 'forbidden' });
+    }
+    db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(params.id);
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  // an unknown verb is fail-closed (the routing table only mints the five).
+  sendJson(res, 500, { error: `unknown verb '${verb}'` });
+}
+
+// Build the node:http request handler that serves a routing table. `principalOf`
+// derives the request's principal; it defaults to a function returning anonymous
+// so an unconfigured server is fail-closed (the default-on route gate denies
+// every anonymous request). A later slice replaces principalOf with session
+// hydration — it is the SAME admission path, not a second one. `db` is the
+// app-level node:sqlite handle the dispatcher runs against.
+export function makeRequestHandler(routes, { principalOf = () => anonymous, db, env = config.env } = {}) {
+  return async function handle(req, res) {
+    // Security headers are a baked-in default on EVERY response, set before any
+    // exit path writes its head (SPEC §3). They are retained through writeHead.
+    applySecurityHeaders(res);
+    try {
+      const url = new URL(req.url, 'http://localhost');
+      const { route, params, pathMatched } = matchRoute(routes, req.method, url.pathname);
+
+      // no path match → 404; path matched but method did not → 405.
+      if (!route) {
+        if (pathMatched) {
+          sendJson(res, 405, { error: 'method not allowed' });
+        } else {
+          sendJson(res, 404, { error: 'not found' });
+        }
+        return;
+      }
+
+      // the first default-on auth layer: the route gate decides admission.
+      const principal = principalOf(req);
+      if (!route.gate(principal)) {
+        sendJson(res, 401, { error: 'unauthorized' });
+        return;
+      }
+
+      // read a JSON body for the mutating verbs; other verbs ignore it.
+      let body = {};
+      if (route.verb === 'create' || route.verb === 'update') {
+        try {
+          body = await readJsonBody(req);
+        } catch (err) {
+          // a refused body carries its own status (413 oversized, 400 malformed).
+          if (err instanceof BodyError) return void sendJson(res, err.status, { error: err.message });
+          throw err;
+        }
+      }
+
+      // admitted. The second default-on auth layer (the row grant) runs inside
+      // dispatch against the app-level db.
+      await dispatch(req, res, route, principal, db, params, body);
+    } catch (err) {
+      // the single error renderer (SPEC §3): an unexpected exception becomes an
+      // opaque prod-safe 500 (or a dev 500 with a stack). `env` is server-owned,
+      // never client-controlled.
+      renderError(res, err, { env });
+    }
+  };
+}
+
+// Open a real node:http server for a resolved app and start listening. The
+// server is stored on `app.httpServer` and the app is returned (chainable). The
+// app's db handle is passed to the dispatcher (read here, owned by the app). The
+// routing table was built at mount time; this only serves it.
+//
+// The second argument is overloaded the Express way: a FUNCTION is a listening
+// callback (`app.listen(port, () => ...)`, the exemplar shape); an OBJECT is
+// server-owned listen options (`principalOf`, `env`). Both are server-owned —
+// neither is client-controlled.
+//
+// Graceful shutdown (SPEC §3) is framework-owned: SIGTERM/SIGINT close the live
+// server, and an unhandledRejection/uncaughtException is trapped. The app mounts
+// none of this — `app.shutdown()` is the close the traps call (and tests use).
+export function listen(app, port, optionsOrCallback = {}) {
+  const isCallback = typeof optionsOrCallback === 'function';
+  const options = isCallback ? {} : optionsOrCallback;
+  const onListening = isCallback ? optionsOrCallback : options.onListening;
+
+  const httpServer = createHttpServer(
+    makeRequestHandler(app.routes, { ...options, db: app.db }),
+  );
+  if (typeof onListening === 'function') httpServer.once('listening', onListening);
+  httpServer.listen(port);
+  app.httpServer = httpServer;
+
+  installGracefulShutdown(app);
+  return app;
+}
+
+// The set of live apps to close on a shutdown signal, and whether the
+// process-level traps are installed. These traps belong to the PROCESS, not an
+// app — installing them per app would accumulate listeners (a leak, and a
+// MaxListeners warning). They are installed ONCE; the signal handler closes
+// every registered app.
+const liveApps = new Set();
+let processTrapsInstalled = false;
+
+function installProcessTraps() {
+  if (processTrapsInstalled) return;
+  processTrapsInstalled = true;
+
+  const onSignal = () => {
+    Promise.all([...liveApps].map((a) => a.shutdown())).then(() => process.exit(0));
+  };
+  process.once('SIGTERM', onSignal);
+  process.once('SIGINT', onSignal);
+  process.on('unhandledRejection', (reason) => {
+    // surface, do not crash silently; fail closed by logging to stderr.
+    process.stderr.write(`unhandledRejection: ${reason}\n`);
+  });
+  process.on('uncaughtException', (err) => {
+    process.stderr.write(`uncaughtException: ${err?.stack ?? err}\n`);
+  });
+}
+
+// The graceful-shutdown seam. `app.shutdown()` closes the live server (resolving
+// once it has stopped accepting connections) and unregisters the app. SIGTERM/
+// SIGINT close every registered app; an unhandledRejection/uncaughtException is
+// trapped so a stray rejection cannot crash the process silently. The framework
+// owns these — an app that mounted its own would be a leak.
+function installGracefulShutdown(app) {
+  if (!app.shutdown) {
+    app.shutdown = () =>
+      new Promise((resolve) => {
+        if (app.httpServer && app.httpServer.listening) {
+          app.httpServer.close(() => {
+            liveApps.delete(app);
+            resolve();
+          });
+        } else {
+          liveApps.delete(app);
+          resolve();
+        }
+      });
+  }
+  liveApps.add(app);
+  installProcessTraps();
+}
