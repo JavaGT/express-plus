@@ -42,6 +42,14 @@ export function date(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'date', ...options });
 }
 
+// `number()` — a value-kind scalar (integer or float), stored as-is (SQLite
+// binds JS numbers directly). `derived` (a recompute-from-row function, e.g.
+// wordCount from body) rides the descriptor; its write-path materialization is
+// owned by the write/materialization seam, not this declaration.
+export function number(options = {}) {
+  return makeDescriptor({ kind: 'value', type: 'number', ...options });
+}
+
 // `hash()` — a one-way salted password digest. Its own KIND (not `value`): a
 // plaintext password is digested on write and is NEVER queryable, so the scope
 // compiler refuses to compare it (a hash handle's .is throws — fail closed). A
