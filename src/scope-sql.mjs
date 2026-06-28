@@ -98,8 +98,49 @@ function makeIsProxy(roleFields, where) {
   });
 }
 
+// A typed handle for one field, exposing the compilable value ops. This is the
+// ONE handle definition: the scope compiler reaches it through makeFieldsProxy
+// (where the field name comes from a `fields.<name>` access), and the runtime
+// query API attaches it directly on the compiled entity (Entity.<name>) so a
+// hand-written handler can write `User.username.is(name)`. The handle also
+// carries its own `fieldName`, so it doubles as a `.select(...)` projection
+// handle. Ops on a non-compilable field kind (crdt/ordered/store) throw.
+export function fieldHandle(name, descriptor) {
+  if (descriptor === undefined) {
+    const fail = (where) => {
+      throw new NonCompilableError(`no field '${String(name)}' on this entity`, { where });
+    };
+    return { fieldName: name, is: () => fail(), in: () => fail(), isNull: () => fail() };
+  }
+  if (descriptor.kind !== 'value') {
+    const fail = () => {
+      throw new NonCompilableError(
+        `field '${String(name)}' is a ${descriptor.kind} field and cannot be compared in scope`,
+      );
+    };
+    return { fieldName: name, is: fail, in: fail, isNull: fail };
+  }
+  return {
+    fieldName: name,
+    // .is(undefined) is the deliberate FALSE value (never IS NULL); .is(v) mints
+    // a literal-valued equality. The literal is baked in its SERIALIZED
+    // (stored-cell) form via the field's strategy — a boolean becomes 1/0, a
+    // Date epoch millis — so the param is bindable by node:sqlite, which refuses
+    // a JS boolean. One serialize, used here and by the write path.
+    is: (value) =>
+      value === undefined
+        ? FALSE
+        : makeNode({ node: 'eq', field: name, value: serializeField(descriptor, value) }),
+    in: (values) =>
+      makeNode({ node: 'in', field: name, values: [...values].map((v) => serializeField(descriptor, v)) }),
+    isNull: () => makeNode({ node: 'isNull', field: name }),
+  };
+}
+
 // `fields.<name>` is a handle exposing the compilable value ops. Ops on a
-// non-compilable field kind (crdt/ordered/store) are load-time errors.
+// non-compilable field kind (crdt/ordered/store) are load-time errors. The
+// proxy delegates to fieldHandle so there is one handle definition; it adds
+// the scope-context `where` to the undeclared/non-value error messages.
 function makeFieldsProxy(fields, where) {
   return new Proxy({}, {
     get(_t, name) {
@@ -116,20 +157,7 @@ function makeFieldsProxy(fields, where) {
         };
         return { is: fail, in: fail, isNull: fail };
       }
-      return {
-        // .is(undefined) is the deliberate FALSE value (never IS NULL); .is(v)
-        // mints a literal-valued equality. The literal is baked in its SERIALIZED
-        // (stored-cell) form via the field's strategy — a boolean becomes 1/0, a
-        // Date epoch millis — so the param is bindable by node:sqlite, which
-        // refuses a JS boolean. One serialize, used here and by the write path.
-        is: (value) =>
-          value === undefined
-            ? FALSE
-            : makeNode({ node: 'eq', field: name, value: serializeField(descriptor, value) }),
-        in: (values) =>
-          makeNode({ node: 'in', field: name, values: [...values].map((v) => serializeField(descriptor, v)) }),
-        isNull: () => makeNode({ node: 'isNull', field: name }),
-      };
+      return fieldHandle(name, descriptor);
     },
   });
 }

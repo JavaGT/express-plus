@@ -20,6 +20,7 @@
 
 import { resolveRouteGate, requireUser, isGate } from './route-gate.mjs';
 import { listen as serveListen } from './serve.mjs';
+import { setActiveDb } from './db.mjs';
 
 // The HTTP methods an imperative router verb maps to. `r.get/post/patch/delete`
 // build a hand-written route (a handler chain) rather than entity CRUD.
@@ -210,6 +211,10 @@ export default function expressPlus({ db } = {}) {
   // dispatch seam, not this field). An app with no db simply cannot serve
   // DB-backed entity CRUD — fail closed at dispatch.
   app.db = db;
+  // Bind the ambient active database so an entity's query API (declared
+  // independently of any app) reaches this same handle with no db argument.
+  // One shared db — the singular-system rule — not a second persistence path.
+  if (db) setActiveDb(db);
   app.port = undefined;
   app.httpServer = undefined;
   app.listen = (port, optionsOrCallback) => {

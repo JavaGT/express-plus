@@ -13,7 +13,9 @@
 //    `is.*` calls are correctly un-awaited (SPEC §6.1).
 
 import { assertGuarded } from './guard/static.mjs';
-import { compileReadScope, compileInheritScope } from './scope-sql.mjs';
+import { compileReadScope, compileInheritScope, lowerToSql, fieldHandle } from './scope-sql.mjs';
+import { getActiveDb } from './db.mjs';
+import { serializeField, validateMutation } from './field-strategy.mjs';
 
 // Derive a role check from a ref field carrying `role`. The check is a plain
 // per-row fact comparing the principal's id against the FK column value — the
@@ -104,7 +106,7 @@ export function entity(name, declaration = {}) {
   // rendering of the AST; the AST is the durable artifact.
   const scopeAst = readScope ? readScope.ast : undefined;
 
-  return Object.freeze({
+  const record = {
     name,
     fields: Object.freeze({ ...fields }),
     grant,
@@ -112,5 +114,92 @@ export function entity(name, declaration = {}) {
     routes,
     readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
     scopeAst,
+  };
+
+  // The runtime query API — the server's own trusted data-access primitive. A
+  // hand-written handler (the imperative-router surface) reads and writes the
+  // entity directly: User.findOne(User.username.is(name)), User.create(...),
+  // User.findAll().select(...), User.getOrFail(id), User.delete(id). These run
+  // UNSCOPED/PRIVILEGED: they do NOT thread a principal's read-scope, because a
+  // login lookup is inherently pre-principal and an admitted handler is trusted
+  // server code (like Express + an ORM), not a request path — so this is not a
+  // second auth path (DECISIONLOG #41). The db handle is ambient (getActiveDb),
+  // bound once by expressPlus({ db }); the same app.db handle, one shared db.
+  //
+  record.findOne = (predicate) => {
+    const { sql, params } = lowerToSql(predicate);
+    const row = getActiveDb()
+      .prepare(`SELECT * FROM ${name} AS t0 WHERE ${sql} LIMIT 1`)
+      .get(params);
+    return row ?? null;
+  };
+
+  // findAll() returns the rows as an array that also carries a .select(...) so
+  // both `findAll()` (all columns) and `findAll().select(a, b)` (projection) read
+  // naturally off one call. select lowers its handles to a column list.
+  record.findAll = () => {
+    const rows = getActiveDb().prepare(`SELECT * FROM ${name} AS t0`).all();
+    rows.select = (...handles) => {
+      const cols = handles.map((h) => h.fieldName);
+      return getActiveDb().prepare(`SELECT ${cols.join(', ')} FROM ${name} AS t0`).all();
+    };
+    return rows;
+  };
+
+  // getOrFail throws a 404-status error so renderError renders it through the
+  // deliberate-client-error path (a numeric status), not as an opaque 500.
+  record.getOrFail = (id) => {
+    const row = getActiveDb().prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`).get({ id });
+    if (!row) {
+      const err = new Error(`${name} ${id} not found`);
+      err.status = 404;
+      throw err;
+    }
+    return row;
+  };
+
+  record.create = (payload) => {
+    validateMutation(record, payload);
+    const cells = {};
+    for (const [key, value] of Object.entries(payload)) {
+      cells[key] = serializeField(fields[key], value);
+    }
+    const cols = Object.keys(cells);
+    const info = getActiveDb()
+      .prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`)
+      .run(cells);
+    return getActiveDb()
+      .prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`)
+      .get({ id: info.lastInsertRowid });
+  };
+
+  record.delete = (id) => {
+    getActiveDb().prepare(`DELETE FROM ${name} WHERE id = :id`).run({ id });
+  };
+
+  const frozen = Object.freeze(record);
+
+  // A declared field becomes a typed handle reached as `Entity.<field>`, so a
+  // handler writes a predicate as `User.username.is(value)` and a projection as
+  // `.select(User.id, User.username)`. The handle is minted on access through a
+  // Proxy rather than attached as an own property, so the entity's reserved
+  // metadata (name, fields, grant, checks, routes, readScope, scopeAst) and the
+  // query methods — all own properties — keep their meaning unshadowed: a field
+  // literally named `name` does not corrupt `entity.name`. The OPEN field
+  // namespace and the FIXED reserved set never collide because reserved keys are
+  // own properties (the Proxy passes them through) and only a NON-own string key
+  // resolves to a field handle. `id` is the synthetic primary-key handle
+  // (projection-only). An unknown key returns undefined (a non-field access).
+  return new Proxy(frozen, {
+    get(target, key, receiver) {
+      if (key in target || typeof key !== 'string') {
+        return Reflect.get(target, key, receiver);
+      }
+      if (key === 'id') return { fieldName: 'id' };
+      if (Object.prototype.hasOwnProperty.call(fields, key)) {
+        return fieldHandle(key, fields[key]);
+      }
+      return undefined;
+    },
   });
 }
