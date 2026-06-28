@@ -12,7 +12,7 @@ export { scope } from './scope.mjs';
 export { entity } from './entity.mjs';
 export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope } from './scope-sql.mjs';
 export { principal, anonymous, UnknownPrincipalTypeError } from './principal.mjs';
-export { requireUser, allowAnonymous, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
+export { requireUser, allowAnonymous, open, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient } from './pipeline.mjs';
 export { config } from './config.mjs';
 export { parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE } from './session.mjs';

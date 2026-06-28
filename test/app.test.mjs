@@ -35,6 +35,7 @@ import expressPlus, {
   scope,
   allowAnonymous,
   requireUser,
+  open,
 } from '../src/index.mjs';
 import { principal, anonymous } from '../src/principal.mjs';
 
@@ -174,4 +175,114 @@ test('router records mergeParams so a child can read a parent path param', () =>
   assert.equal(r.mergeParams, true);
   const plain = router();
   assert.equal(plain.mergeParams, false);
+});
+
+// --- Slice A: imperative router verbs build a SECOND route kind ---------------
+//
+// `r.get/post/patch/delete(path, ...handlers)` builds an imperative route: a
+// shared spine { method, path, gate } plus a discriminated tail { handlers }
+// (vs the entity tail { entity, verb }). The discriminant is structural — a
+// route with `handlers` is imperative, a route with `entity`/`verb` is an entity
+// CRUD route. Leading BRANDED gates peel off the front into `gate`; the rest is
+// the handler chain (optional middleware then exactly one final handler). A route
+// with no leading gate defaults to requireUser() (fail closed).
+
+test('router exposes the four imperative verb methods', () => {
+  const r = router();
+  for (const verb of ['get', 'post', 'patch', 'delete']) {
+    assert.equal(typeof r[verb], 'function', `r.${verb} is a function`);
+  }
+});
+
+test('r.get(path, handler) builds an imperative route with method, path, handlers and a default gate', () => {
+  const handler = (req, res) => res.json({ ok: true });
+  const r = router();
+  assert.equal(r.get('/ping', handler), r, 'verb method is chainable');
+  assert.equal(r.routes.length, 1);
+  const [route] = r.routes;
+  assert.equal(route.method, 'GET');
+  assert.equal(route.path, '/ping');
+  // imperative tail: a handler chain, NOT an entity/verb tail
+  assert.deepEqual(route.handlers, [handler]);
+  assert.equal(route.entity, undefined);
+  assert.equal(route.verb, undefined);
+  // no leading gate => default-on (requireUser): anonymous denied, user admitted
+  assert.equal(route.gate(anonymous), false);
+  assert.equal(route.gate(user), true);
+});
+
+test('a leading `open` gate peels off into route.gate, leaving only the handler chain', () => {
+  const handler = (req, res) => res.json({});
+  const r = router();
+  r.post('/login', open(), handler);
+  const [route] = r.routes;
+  assert.equal(route.gate(anonymous), true, 'open admits anonymous');
+  assert.deepEqual(route.handlers, [handler], 'gate is peeled, not left in the chain');
+});
+
+test('leading middleware before the final handler stays in the chain; only branded gates peel', () => {
+  const mw = (req, res, next) => next();
+  const handler = (req, res) => res.json({});
+  const r = router();
+  r.post('/x', open(), mw, handler);
+  const [route] = r.routes;
+  // open peels (branded); the plain middleware does NOT peel and stays in order
+  assert.deepEqual(route.handlers, [mw, handler]);
+  assert.equal(route.gate(anonymous), true);
+});
+
+test('an imperative route with no handlers is rejected (a route must do something)', () => {
+  const r = router();
+  assert.throws(() => r.get('/nothing'), /handler/i);
+  assert.throws(() => r.get('/nothing', open()), /handler/i);
+});
+
+test('the four verbs map to their HTTP methods', () => {
+  const h = (req, res) => res.json({});
+  const r = router();
+  r.get('/a', h);
+  r.post('/b', h);
+  r.patch('/c', h);
+  r.delete('/d', h);
+  const byPath = Object.fromEntries(r.routes.map((rt) => [rt.path, rt.method]));
+  assert.deepEqual(byPath, { '/a': 'GET', '/b': 'POST', '/c': 'PATCH', '/d': 'DELETE' });
+});
+
+// --- Slice A: app.use(path, router) mounts an imperative router ----------------
+//
+// `use` is a second NAME for the same mount operation as `mount`; the repo-root
+// exemplars deliberately read `app.use('/sessions', router)` for routers and
+// `app.mount('/docs', Doc)` for entities. Both call one resolver. Re-basing must
+// carry the imperative `handlers` tail through unchanged.
+
+test('app.use is an alias for mount; both re-base a mounted router under the path', () => {
+  const app = expressPlus();
+  assert.equal(typeof app.use, 'function');
+  const r = router();
+  const handler = (req, res) => res.json({});
+  r.post('/', open(), handler);
+  app.use('/sessions', r);
+  assert.equal(app.routes.length, 1);
+  const [route] = app.routes;
+  assert.equal(route.method, 'POST');
+  assert.equal(route.path, '/sessions');
+  // the imperative tail survives re-basing intact
+  assert.deepEqual(route.handlers, [handler]);
+  assert.equal(route.gate(anonymous), true);
+});
+
+test('app.use re-bases a multi-route imperative router and preserves each tail', () => {
+  const app = expressPlus();
+  const h = (req, res) => res.json({});
+  const r = router();
+  r.get('/', h);
+  r.get('/:id', h);
+  app.use('/users', r);
+  const paths = app.routes.map((rt) => rt.path).sort();
+  assert.deepEqual(paths, ['/users', '/users/:id']);
+  for (const route of app.routes) {
+    assert.deepEqual(route.handlers, [h]);
+    // default gate carried through re-basing
+    assert.equal(route.gate(anonymous), false);
+  }
 });

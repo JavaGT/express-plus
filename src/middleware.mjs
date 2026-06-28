@@ -26,19 +26,32 @@ export function applySecurityHeaders(res) {
 }
 
 // The single error renderer — the SPEC §3 "4-argument JSON error handler". It is
-// the ONE place an unexpected exception becomes a client response, so dev/prod
-// behavior is decided in one spot. In development it includes the stack to aid
-// debugging; in production it is opaque (no stack, no internal message) so an
-// internal failure never leaks implementation detail. `env` is server-owned
-// (a listen option, defaulting to config.env) — never client-controlled.
+// the ONE place an error becomes a client response, so the dev/prod and
+// deliberate/unexpected decisions are all made in one spot.
+//
+// Two shapes reach here, distinguished by a NUMERIC `status`:
+//   * a DELIBERATE client error — `next({ status, message })` from a handler, a
+//     thrown error carrying a numeric `status` — is the handler SAYING WHAT TO
+//     SEND. Its status and message are client-visible by intent (e.g. 401 "bad
+//     credentials"), in every environment.
+//   * an UNEXPECTED exception — a thrown Error with no numeric `status` — is a
+//     failure the handler did not anticipate. It is opaque in production (no
+//     stack, no internal message, so an internal failure never leaks
+//     implementation detail) and a 500-with-stack in development.
+//
+// `env` is server-owned (a listen option, defaulting to config.env) — never
+// client-controlled.
 export function renderError(res, err, { env = config.env } = {}) {
-  const body =
-    env === 'production'
+  const deliberate = typeof err?.status === 'number';
+  const status = deliberate ? err.status : 500;
+  const body = deliberate
+    ? { error: String(err.message ?? '') }
+    : env === 'production'
       ? { error: 'internal error' }
       : { error: 'internal error', message: String(err?.message ?? err), stack: err?.stack };
   const payload = JSON.stringify(body);
   if (!res.headersSent) {
-    res.writeHead(500, {
+    res.writeHead(status, {
       'content-type': 'application/json; charset=utf-8',
       'content-length': Buffer.byteLength(payload),
     });

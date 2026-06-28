@@ -18,18 +18,51 @@
 // name these; an unknown verb is a load-time typo guard (fail closed).
 export const ROUTE_VERBS = Object.freeze(['list', 'read', 'create', 'update', 'remove']);
 
+// Every gate carries a non-enumerable BRAND so the imperative-router varargs peel
+// (`r.post(path, open, handler)`) can tell a gate from a middleware/handler
+// deterministically — by the brand, never by argument position or arity (which
+// would be a magic convention, and a handler that happens to take one argument
+// would be mistaken for a gate). A gate stays a callable `(principal) => boolean`;
+// the brand is invisible to callers. This mirrors the pipeline action/event brand.
+const GATE_BRAND = Symbol('express-plus.gate');
+
+// brand(fn) — stamp an authorization function as a gate. Internal; the public
+// surface is the named gate factories below plus isGate() for the peeler.
+function brand(gate) {
+  Object.defineProperty(gate, GATE_BRAND, { value: true, enumerable: false });
+  return gate;
+}
+
+// isGate(value) — the brand check the varargs peeler uses. Only a branded gate
+// returns true; a plain handler, an arbitrary function, or a non-function never
+// peels as a gate (fail closed — an unbranded leading function is a handler).
+export function isGate(value) {
+  return typeof value === 'function' && value[GATE_BRAND] === true;
+}
+
 // requireUser() — admit any authenticated (non-anonymous) principal; reject
 // anonymous. This is the default-on route gate: the smoothest path is authed.
 export function requireUser() {
-  return (principal) => principal.type !== 'anonymous';
+  return brand((principal) => principal.type !== 'anonymous');
 }
 
 // allowAnonymous() — admit everyone, including the first-class `anonymous`
 // principal. The public-read path (a published blog post, the reddit front page)
 // that replaces the dead `publicRead` flag. The row grant still decides which
-// rows an anonymous principal may actually see.
+// rows an anonymous principal may actually see. This is the entity-facing name
+// used in a `{ verb: gate }` declaration.
 export function allowAnonymous() {
-  return () => true;
+  return brand(() => true);
+}
+
+// open() — the imperative-router-facing admit-anonymous gate. Behaviorally
+// identical to allowAnonymous() (admit everyone), but it is the name a hand-
+// written route reads naturally: `r.post('/', open, handler)`. Distinct name for
+// the distinct surface (imperative route vs entity verb-map); same admit-all
+// authorization function underneath. An imperative route with no leading gate
+// defaults to requireUser() (fail closed); `open` is the explicit opt-out.
+export function open() {
+  return brand(() => true);
 }
 
 // Normalize a declared `{ verb: gateFn }` map into a full per-verb gate, filling

@@ -248,6 +248,86 @@ async function dispatch(req, res, route, principal, db, params, body) {
   sendJson(res, 500, { error: `unknown verb '${verb}'` });
 }
 
+// The imperative terminal: run a hand-written handler chain over an Express-like
+// (req, res, next). This is the OTHER arm of the single dispatch fork — it never
+// touches the db or the row grant (an imperative route has no entity), so the
+// route gate is its only framework-applied auth, and the principal it sees was
+// already admitted by that gate (no second auth path).
+//
+// The chain is `[...optional middleware, finalHandler]`. Each handler is awaited
+// with (req, res, next). Calling next() with no argument advances to the next
+// handler; calling next(err) — including the deliberate next({ status, message })
+// shape — defers to the single error renderer and stops the chain. A handler that
+// writes the response (res.json / res.sendStatus / res.send) and does not call
+// next() ends the chain by completing the request.
+async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, query }, { env }) {
+  // an Express-like request facade over the node request. The raw node request
+  // remains reachable for handlers that need headers; the framework surfaces the
+  // already-parsed body, the matched path params, the parsed query, and the
+  // already-admitted principal.
+  const req = {
+    body,
+    params,
+    query: Object.fromEntries(query),
+    principal,
+    raw: nodeReq,
+    headers: nodeReq.headers,
+    method: nodeReq.method,
+    url: nodeReq.url,
+  };
+
+  // an Express-like response facade over the node response. `status(n)` records a
+  // pending code and chains; `json`/`send` flush with it (defaulting to 200);
+  // `sendStatus(n)` ends with no body.
+  let pendingStatus = 200;
+  const res = {
+    status(code) {
+      pendingStatus = code;
+      return res;
+    },
+    json(value) {
+      sendJson(nodeRes, pendingStatus, value);
+      return res;
+    },
+    send(value) {
+      const payload = typeof value === 'string' ? value : String(value);
+      if (!nodeRes.headersSent) {
+        nodeRes.writeHead(pendingStatus, {
+          'content-type': 'text/plain; charset=utf-8',
+          'content-length': Buffer.byteLength(payload),
+        });
+      }
+      nodeRes.end(payload);
+      return res;
+    },
+    sendStatus(code) {
+      nodeRes.writeHead(code);
+      nodeRes.end();
+      return res;
+    },
+    raw: nodeRes,
+  };
+
+  // walk the chain. `next` is single-shot per step: it either advances (no arg)
+  // or renders an error and halts. A thrown error inside a handler propagates to
+  // makeRequestHandler's catch, which runs the same renderer.
+  for (const handler of handlers) {
+    let advance = false;
+    let errored = false;
+    const next = (err) => {
+      if (err) {
+        errored = true;
+        renderError(nodeRes, err, { env });
+      } else {
+        advance = true;
+      }
+    };
+    await handler(req, res, next);
+    if (errored) return;
+    if (!advance) return; // the handler completed the response (no next() call)
+  }
+}
+
 // Build the node:http request handler that serves a routing table. `principalOf`
 // derives the request's principal; it defaults to a function returning anonymous
 // so an unconfigured server is fail-closed (the default-on route gate denies
@@ -281,9 +361,11 @@ export function makeRequestHandler(routes, { principalOf = () => anonymous, db, 
         return;
       }
 
-      // read a JSON body for the mutating verbs; other verbs ignore it.
+      // read a JSON body for the mutating entity verbs and for every imperative
+      // route (a hand-written handler expects req.body populated Express-style);
+      // read-only entity verbs ignore it.
       let body = {};
-      if (route.verb === 'create' || route.verb === 'update') {
+      if (route.handlers || route.verb === 'create' || route.verb === 'update') {
         try {
           body = await readJsonBody(req);
         } catch (err) {
@@ -293,9 +375,16 @@ export function makeRequestHandler(routes, { principalOf = () => anonymous, db, 
         }
       }
 
-      // admitted. The second default-on auth layer (the row grant) runs inside
-      // dispatch against the app-level db.
-      await dispatch(req, res, route, principal, db, params, body);
+      // admitted. One spine, one legitimate fork at the tail: a route carrying a
+      // handler chain runs the chain; an entity route runs DB-backed CRUD (where
+      // the second default-on auth layer, the row grant, applies). This is NOT a
+      // second auth path — the chain inherits the already-admitted principal and
+      // never re-gates.
+      if (route.handlers) {
+        await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams }, { env });
+      } else {
+        await dispatch(req, res, route, principal, db, params, body);
+      }
     } catch (err) {
       // the single error renderer (SPEC §3): an unexpected exception becomes an
       // opaque prod-safe 500 (or a dev 500 with a stack). `env` is server-owned,

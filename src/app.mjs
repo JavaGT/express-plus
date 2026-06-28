@@ -18,8 +18,17 @@
 // real transport is needed. The architecturally interesting part — does the table
 // resolve with the gates correctly wired — is fully proven here without a socket.
 
-import { resolveRouteGate } from './route-gate.mjs';
+import { resolveRouteGate, requireUser, isGate } from './route-gate.mjs';
 import { listen as serveListen } from './serve.mjs';
+
+// The HTTP methods an imperative router verb maps to. `r.get/post/patch/delete`
+// build a hand-written route (a handler chain) rather than entity CRUD.
+const IMPERATIVE_VERBS = Object.freeze({
+  get: 'GET',
+  post: 'POST',
+  patch: 'PATCH',
+  delete: 'DELETE',
+});
 
 // The five CRUD verbs a resource exposes, each mapped to its Express-style HTTP
 // method and path suffix (relative to the resource's base path). `:id` is the
@@ -75,6 +84,51 @@ function buildResourceRoutes(entity, base) {
   return collected;
 }
 
+// Build one imperative route record from a verb method call `r.get(path, ...rest)`.
+// `rest` is the varargs chain: zero or more LEADING branded gates, then optional
+// middleware, then exactly one final handler. Leading branded gates peel off the
+// front into a single `gate` (the LAST leading gate wins if several are stacked —
+// but normally exactly one). A plain (unbranded) function never peels — it is a
+// handler/middleware and stays in the chain. With no leading gate the route
+// defaults to requireUser() (fail closed: an undeclared-gate route admits no
+// anonymous principal). The remaining chain must contain at least one handler.
+//
+// The record shares the route spine { method, path, gate } with entity CRUD
+// routes but carries an imperative tail { handlers } instead of { entity, verb };
+// the dispatcher discriminates structurally on the presence of `handlers`.
+function buildImperativeRoute(method, path, rest) {
+  let i = 0;
+  let gate = requireUser();
+  let gateDeclared = false;
+  while (i < rest.length && isGate(rest[i])) {
+    gate = rest[i];
+    gateDeclared = true;
+    i += 1;
+  }
+
+  const handlers = rest.slice(i);
+  if (handlers.length === 0) {
+    const detail = gateDeclared
+      ? 'a gate alone is not a route'
+      : 'a route must declare at least one handler';
+    throw new Error(
+      `imperative route ${method} ${path} has no handler — ${detail}. ` +
+        `Pass (path, ...gates, handler).`,
+    );
+  }
+  // A handler must be a function; a stray non-function in the chain is a typo.
+  for (const handler of handlers) {
+    if (typeof handler !== 'function') {
+      throw new Error(
+        `imperative route ${method} ${path} has a non-function handler. ` +
+          `The chain is (...middleware, handler), each a function.`,
+      );
+    }
+  }
+
+  return Object.freeze({ method, path, gate, handlers: Object.freeze(handlers) });
+}
+
 // Re-base an already-resolved route under a parent mount path (used when a router
 // mini-app is mounted into a parent app). The route's path was resolved relative
 // to the router's own base; mounting re-roots it under `parentBase`.
@@ -99,7 +153,8 @@ function makeMountable({ mergeParams = false } = {}) {
     routes,
     mount(path, target) {
       if (target && Array.isArray(target.routes) && typeof target.mount === 'function') {
-        // target is a router mini-app: re-base its already-resolved routes.
+        // target is a router mini-app: re-base its already-resolved routes. The
+        // tail (entity/verb OR handlers) is carried through unchanged by rebase.
         for (const route of target.routes) {
           routes.push(rebaseRoute(route, path));
         }
@@ -112,6 +167,22 @@ function makeMountable({ mergeParams = false } = {}) {
       return surface;
     },
   };
+
+  // `use` is a second NAME for `mount` — the readability convention the repo-root
+  // exemplars adopt (`app.use('/sessions', router)` for routers,
+  // `app.mount('/docs', Doc)` for entities). Both names call the one resolver;
+  // there is a single mount operation, two words for it.
+  surface.use = surface.mount;
+
+  // Imperative verb methods: `r.get/post/patch/delete(path, ...gates, handler)`.
+  // Each builds an imperative route record and pushes it into the SAME table the
+  // entity CRUD routes live in — one routing table, discriminated by tail shape.
+  for (const [verb, method] of Object.entries(IMPERATIVE_VERBS)) {
+    surface[verb] = (path, ...rest) => {
+      routes.push(buildImperativeRoute(method, path, rest));
+      return surface;
+    };
+  }
 
   return surface;
 }
