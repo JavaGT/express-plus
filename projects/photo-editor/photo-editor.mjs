@@ -131,7 +131,7 @@ export const Canvas = entity('Canvas', {
                        : never(),
   },
 
-  grant: ({ principal }) => [
+  grant: () => [
     scope(({ is }) => anyOf(is.owner(), is.collaborator(), is.linkHolder()))
       .can(async ({ is, entity }) => {
         if (await is.owner())    return grant(...OWNER);

@@ -214,7 +214,7 @@ export const Photo = entity('Photo', {
   // scope = who can READ (compiled to SQL WHERE)
   // .can  = every other capability (runtime, per-row)
   // ==========================================================================
-  grant: ({ principal }) => [
+  grant: () => [
     scope(({ is }) => anyOf(is.owner(), is.albumMember(), is.linkHolder()))
       .can(async ({ is, entity }) => {
         if (await is.owner())         return grant(...OWNER);

@@ -146,7 +146,7 @@ export const Doc = entity('Doc', {
   // `.deliver()` here: delivery = re-authorization (this same scope+can engine
   // re-run at emit, latched for scale) + subscriber interest (a narrowing filter
   // supplied at subscribe time, data-not-code). See DECISIONLOG.md.
-  grant: ({ principal }) => [
+  grant: () => [
     scope(({ is }) => anyOf(is.owner(), is.collaborator(), is.linkHolder()))
       .can(async ({ is, entity }) => {
         if (await is.owner())    return grant(...OWNER);

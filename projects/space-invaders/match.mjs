@@ -96,7 +96,7 @@ export const Match = entity('Match', {
   // ── grant — scope (SQL-compilable read admission) + can (runtime write) ───
   // No third method. Live delivery = re-auth-at-emit (latched) + subscriber
   // interest (narrowing filter at subscribe time).
-  grant: ({ principal }) => [
+  grant: () => [
     // scope: who may READ this match row?
     // RESOLVED: `everyone()` compiles to SQL TRUE (SPEC §6.2, ADR #11) —
     // the match is world-readable (players, authenticated spectators,

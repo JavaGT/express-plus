@@ -104,7 +104,7 @@ export const Album = entity('Album', {
                    Album.collaborators.get(principal.id)?.role === 'coOwner',
   },
 
-  grant: ({ principal }) => [
+  grant: () => [
     scope(({ is }) => anyOf(is.owner(), is.collaborator(), is.linkHolder()))
       .can(async ({ is, entity }) => {
         if (await is.owner())       return grant(...OWNER);
