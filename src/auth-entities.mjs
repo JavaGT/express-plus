@@ -19,10 +19,10 @@
 // them only through the UNSCOPED, trusted query API, never a request path.
 
 import { entity } from './entity.mjs';
-import { text, hash } from './field.mjs';
+import { text, hash, ref } from './field.mjs';
 import { scope } from './scope.mjs';
 import { never } from './scope-sql.mjs';
-import { grant, deny } from './grant.mjs';
+import { grant, deny, read, subscribe } from './grant.mjs';
 
 // A framework auth entity is never request-readable: its rows are reached only
 // by trusted server code (login lookup, principal hydration), never dispatched
@@ -78,4 +78,32 @@ export const Session = entity('Session', {
   },
   grant: () => [notRequestReadable('Session')],
   create: mintSession,
+});
+
+// Inbox — the framework's per-user notification store. An app projects rows into
+// it via a declared effect (doc.mjs: when a collaborator is added to a Doc, a row
+// is created with { recipient: delta.member, doc: entity.id, kind: 'invite' }),
+// and a user reads their OWN inbox. Like User/Session it is the framework's
+// concern (every collaborative app needs the same per-user notification shape),
+// imported FROM express-plus, never app-declared.
+//
+//   - recipient — a User ref carrying the `recipient` role, so the entity
+//                 compiler derives is.recipient() and the grant's scope compiles
+//                 to `t0.recipient = :principalId`: a user reads ONLY their own
+//                 inbox rows (recipient-scoped, fail-closed default-on).
+//   - doc       — the Doc the notification is about (a typed FK).
+//   - kind      — the notification kind ('invite', ...): a plain text facet.
+//
+// The grant's SCOPE filters rows to the recipient (compiled to SQL, never run as
+// JS, so its is.recipient() is correctly un-awaited); the .can body then confers
+// read + subscribe on those already-recipient-scoped rows (a one-shot REST fetch
+// and a sustained WS push of new notifications). It needs no is.* call — the row
+// is already the principal's own — so it is trivially guard-clean.
+export const Inbox = entity('Inbox', {
+  fields: {
+    recipient: ref('User', { role: 'recipient' }),
+    doc: ref('Doc'),
+    kind: text(),
+  },
+  grant: () => [scope(({ is }) => is.recipient()).can(() => grant(read, subscribe))],
 });

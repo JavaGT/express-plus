@@ -10,7 +10,7 @@ export { resolveStrategy, validateMutation, ValidationError } from './field-stra
 export { read, write, subscribe, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
 export { entity } from './entity.mjs';
-export { User, Session } from './auth-entities.mjs';
+export { User, Session, Inbox } from './auth-entities.mjs';
 export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope } from './scope-sql.mjs';
 export { principal, anonymous, UnknownPrincipalTypeError } from './principal.mjs';
 export { requireUser, allowAnonymous, open, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
