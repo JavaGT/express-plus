@@ -1,0 +1,70 @@
+// session.mjs — session/auth wiring (SPEC §3, §572, §660).
+//
+// The principal a request carries is built SERVER-SIDE from its session. The
+// client sends only an opaque session token in a cookie; the identity (type, id)
+// is looked up in the Session table and constructed by the framework. The client
+// cannot supply its own identity — a forged or unknown token is `anonymous`, and
+// the default-on route gate then denies it (fail closed).
+//
+// This is the source of the `principalOf(req)` function the HTTP transport calls
+// per request — the SAME admission path as the bare `() => anonymous` default it
+// replaces, never a second auth path. When an app is constructed with a db
+// (`expressPlus({ db })`), session hydration becomes the default principal source.
+
+import { principal, anonymous } from './principal.mjs';
+
+// The session cookie name. The cookie value is an opaque token; it never carries
+// identity, only a key into the Session table.
+export const SESSION_COOKIE = 'sid';
+
+// Parse a raw `Cookie` request header (`name=value; name2=value2`) into a
+// name→value map. Values are url-decoded. A missing/empty header is an empty map.
+// Zero-dependency: node:http exposes the raw header string, nothing parses it.
+export function parseCookies(header) {
+  const cookies = {};
+  if (!header) return cookies;
+  for (const pair of header.split(';')) {
+    const eq = pair.indexOf('=');
+    if (eq === -1) continue;
+    const name = pair.slice(0, eq).trim();
+    if (!name) continue;
+    const value = pair.slice(eq + 1).trim();
+    cookies[name] = decodeURIComponent(value);
+  }
+  return cookies;
+}
+
+// Build the `Set-Cookie` header value for a session token. Fail-closed defaults:
+// HttpOnly (never readable by client JS), SameSite=Lax (CSRF-resistant), Secure
+// (TLS-only), Path=/. `secure` may be dropped for a non-TLS context (local dev /
+// tests over plain http); HttpOnly and SameSite are never dropped.
+export function sessionCookie(token, { secure = true } = {}) {
+  const attributes = [`${SESSION_COOKIE}=${token}`, 'HttpOnly', 'SameSite=Lax', 'Path=/'];
+  if (secure) attributes.push('Secure');
+  return attributes.join('; ');
+}
+
+// Build the `principalOf(req)` function for a given db. It reads the session
+// cookie, looks the token up in the Session table, and constructs the principal
+// SERVER-SIDE from the stored identity. Any failure — no cookie, no token, no
+// matching row, or a malformed stored type — yields `anonymous` (fail closed).
+export function sessionPrincipalOf(db) {
+  return (req) => {
+    const token = parseCookies(req.headers?.cookie)[SESSION_COOKIE];
+    if (!token) return anonymous;
+    try {
+      // The lookup is prepared per request rather than at construction so a
+      // broken db fails CLOSED (anonymous) on each request instead of throwing at
+      // listen time. The identity comes entirely from the server-side Session
+      // row; the client supplied only the token. principal() re-validates the
+      // closed type union, so a corrupt stored type is anonymous too.
+      const row = db
+        .prepare('SELECT principalType AS type, principalId AS id FROM Session WHERE token = ?')
+        .get(token);
+      if (!row) return anonymous;
+      return principal({ type: row.type, id: row.id });
+    } catch {
+      return anonymous;
+    }
+  };
+}

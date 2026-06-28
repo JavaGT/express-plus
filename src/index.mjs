@@ -15,4 +15,5 @@ export { principal, anonymous, UnknownPrincipalTypeError } from './principal.mjs
 export { requireUser, allowAnonymous, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient } from './pipeline.mjs';
 export { config } from './config.mjs';
+export { parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE } from './session.mjs';
 export { default, router } from './app.mjs';

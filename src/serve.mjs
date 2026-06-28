@@ -26,6 +26,7 @@ import { validateMutation, ValidationError, serializeField } from './field-strat
 import { mayVerb } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError } from './middleware.mjs';
+import { sessionPrincipalOf } from './session.mjs';
 
 // Match a concrete request path against a route's path template. Phase-1 routes
 // carry literal segments and `:param` segments (e.g. `/notes/:id`). Returns the
@@ -250,9 +251,10 @@ async function dispatch(req, res, route, principal, db, params, body) {
 // Build the node:http request handler that serves a routing table. `principalOf`
 // derives the request's principal; it defaults to a function returning anonymous
 // so an unconfigured server is fail-closed (the default-on route gate denies
-// every anonymous request). A later slice replaces principalOf with session
-// hydration — it is the SAME admission path, not a second one. `db` is the
-// app-level node:sqlite handle the dispatcher runs against.
+// every anonymous request). When an app has a db, `listen` supplies session
+// hydration as the principal source (sessionPrincipalOf) — the SAME admission
+// path, not a second one. `db` is the app-level node:sqlite handle the
+// dispatcher runs against.
 export function makeRequestHandler(routes, { principalOf = () => anonymous, db, env = config.env } = {}) {
   return async function handle(req, res) {
     // Security headers are a baked-in default on EVERY response, set before any
@@ -321,8 +323,16 @@ export function listen(app, port, optionsOrCallback = {}) {
   const options = isCallback ? {} : optionsOrCallback;
   const onListening = isCallback ? optionsOrCallback : options.onListening;
 
+  // The default principal source is session hydration when the app has a db: the
+  // principal is built server-side from the request's session cookie (SPEC §572).
+  // An explicit `principalOf` option overrides (tests inject a fixed principal).
+  // With no db there is nothing to look a session up in, so the source stays the
+  // fail-closed `() => anonymous` default in makeRequestHandler.
+  const principalOf =
+    options.principalOf ?? (app.db ? sessionPrincipalOf(app.db) : undefined);
+
   const httpServer = createHttpServer(
-    makeRequestHandler(app.routes, { ...options, db: app.db }),
+    makeRequestHandler(app.routes, { ...options, principalOf, db: app.db }),
   );
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
   httpServer.listen(port);
