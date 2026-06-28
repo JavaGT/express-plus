@@ -15,6 +15,15 @@ import {
 } from 'express-plus';
 import { commentRoutes } from './comment.mjs';
 
+// Ambient handles (NOT imported — injected, and still typed, never strings):
+// inside an effect/check/.can body the engine binds `entity` (the origin row),
+// `delta` (the triggering mutation's payload, e.g. `delta.member`), and `now`
+// (the commit instant). Computed effect keys are typed MEMBERS of a field/plugin
+// handle — `collaborators.onAdded` is the `map` field's event handle, and
+// `state.transition('shared','archived')` mints a typed transition handle from
+// the imported `state` plugin. None of these is a magic string; their provenance
+// is the evaluation scope and the plugin, not the import list.
+
 // Capability handles are typed, imported — never strings. `subscribe` is a
 // peer of `read` (sustained WS push vs one-shot REST fetch).
 const VIEWER  = [read, subscribe];

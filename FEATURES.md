@@ -34,19 +34,34 @@ tree DSL, no array-of-handler combos.
 ## 4. `app.doc(name, schema)` — document type declaration
 
 Declares a document type; the framework auto-generates REST CRUD + version
-history + a CRDT realtime room from it. Field types carry semantics:
+history + a CRDT realtime room from it. Field types are an **open registry of
+named-whole plugin contracts** (ADR #9) — `text.crdt()` is one *instance* of the
+registry, not a privileged built-in. Four kinds, distinguished by genuinely
+distinct diff+index+inverse machinery:
 
-- `expressPlus.text({ max, default, readonly, required })` — last-write-wins string.
-- `expressPlus.crdt.text()` — collaborative CRDT text (per-char merge like
-  Yjs / Automerge); framework owns merge math, op transport, presence, replay.
-- `expressPlus.number(...)` — numeric.
-- `expressPlus.ref('User', { from, readonly, required })` — typed reference;
-  `from: 'req.user.id'` auto-populates on create from request context (cannot
-  be spoofed), paired with `readonly` to prevent reassignment.
-- `expressPlus.date({ default, readonly })`.
+- **`fieldType.value`** — single stored value (`text`, `number`, `date`,
+  `blob`/`bytes`, `json(shape)` with typed path queries). Whole-value diff.
+- **`fieldType.store`** — an internally-keyed owned collection with per-key
+  diff + index + range-query (a minecraft chunk). What `map` could not be
+  (map is keyed-UNORDERED).
+- **`fieldType.crdt`** — custom-merge field with per-element granular deltas
+  (`text.crdt()`, `polyline`, `raster`). Merge-ordered.
+- **`fieldType.ordered`** — a fractional-index keyspace for atomic
+  `insertAt`/`move`/`reorder` without renumbering (`list`).
 
-- `derived: (doc) => ...` — pure-pull computed field (e.g. wordCount from body);
+Built-ins ship: `text`, `number`, `boolean`, `date`, `state`, `enum`, `ref`,
+`map`, `set`, `log`, `blob`, `json`, `list`. **Coordinates are constructed FROM
+declared indexes** (an unbacked coordinate is unrepresentable, not detected —
+fail-closed, no hand-SQL trapdoor). Field types carry:
+
+- `from: 'req.user.id'` on a `ref` auto-populates on create from request context
+  (cannot be spoofed), paired with `readonly` to prevent reassignment.
+- `derived: (row) => ...` — pure-pull computed field (e.g. wordCount from body);
   recompute timed by the framework around CRDT merges. No imperative onChange.
+- `projected: projected.inline({...})` (in-transaction, transactionally
+  consistent — a `hotRank`) or `projected.async({...})` (post-commit projection
+  — thumbnails, search-index embeddings; explicitly stale, never rolls back the
+  origin). See ADR #12.
 - field `.can(fn)` — fluent per-field capability rule, ON the field (see §6). A
   field with no `.can` strong-inherits the row grant; the separate top-level
   `access:` block is gone (it drifted from the field it described).
@@ -105,6 +120,30 @@ exists, but you wouldn't know that in production"). See DECISIONLOG.md.
   distinct from a non-compilable check (a load-time error): `never()` is intent
   the developer expressed; a non-compilable check is an accident the compiler
   refuses to silently degrade.
+- **`anonymous` principal** — a first-class principal for UNAUTHENTICATED
+  public-read (reddit front page, blog published posts): `{type:'anonymous',
+  id:null}`, capability-bounded, admitted only by checks that don't reference
+  identity (`published`). Never a `publicRead` flag.
+- **`everyone()`** — a compiled SQL `TRUE` constant (NULL-safe, symmetric to
+  `never()`=FALSE), a value the developer wrote — never the NULL-unsafe
+  `entity.id.is(entity.id)` tautology, never a derived admission.
+- **per-verb route gate** — `r.resource({ gate: { list: allowAnonymous(),
+  create: requireUser() } })` relaxes ONLY the route gate (session→principal)
+  for named verbs; the row grant runs on every verb regardless. Two default-on
+  layers intact, fail-closed default-empty, no second auth path.
+- **sub-account** — a domain identity (library Patron, blog Reader, game Player)
+  is an entity owned by `User` via a typed FK, NOT a new principal type. The
+  principal-type union stays closed (`user | link | system | anonymous`); a
+  Patron is a User wearing a domain hat. Every domain identity HAS an account
+  (no account-less "email user"; passwordless email-link login is fine). A
+  `User` may own MULTIPLE sub-accounts (RuneScape: one sign-in → many character-
+  accounts, each with own team permissions); the principal resolves to the
+  active sub-account. The framework hydrates the binding — must be easy for the
+  developer.
+- **`entryCan(entry, principal)`** — per-ENTRY access on a collection field,
+  finer than field-level `.can` (a patron sees their OWN hold entry while others
+  are withheld). `derived(row, principal)` is rejected — it confuses data
+  derivation with authz/view shaping.
 
 Motivating cases the model must express:
 - Payer funds a doc's storage but, by corporate privacy policy, may not view
@@ -129,11 +168,33 @@ Motivating cases the model must express:
   aborts the whole batch on overflow. Typed handles throughout (target, trigger,
   template path-refs) — the prerequisite for static cycle detection. Replaces
   `afterSave`/`onCreate`: no imperative uncompiled callbacks. See DECISIONLOG.md.
+- **Field-plugin operators in `with`** — `inc`/`dec`/`append`/`push`/`insertAt`/
+  `move` are operators the FIELD-TYPE plugin owns, named in the effect's `with`
+  (no new effect grammar). `when` guards (typed predicate over delta+origin;
+  non-compilable = load-time error). Explicit target-side admission via
+  `effectSource(handle)`, **verified at load time** (a missing admit is a
+  load-time error, not a runtime rollback). Owned-collection fan-out
+  (`mutate: many(Target, { over: Origin.collection })`) and typed compound
+  triggers `effect.anyOf(...)` are build-now; arbitrary-query fan-out and
+  `recomputeFrom(query)` are deferred (ADR #13).
+- **Time-driven sources** — `schedule.at(dateField)` / `schedule.after(anchor,
+  delay)` for one-shot deadlines (library overdue, blog scheduled-publish); `tick.
+  hz(n)` / `tick.every(...)` for recurring loops (the 20–30Hz game loop). Both
+  feed the one pipeline as a bounded scheduler/tick principal admitted by the
+  target grant; `state.auto` and entity-TTL are sugar over them (ADR #10).
 - **`app.emitTo(userId, event, data)`** — broadcast to a user's subscribed rooms
   without touching the raw socket layer. Live delivery is NOT a third grant
   method: it is re-authorization (the same `scope`+`.can` engine re-run at emit,
   latched for scale) + subscriber interest (a narrowing filter supplied at
   subscribe time, data-not-code, indexable). See DECISIONLOG.md.
+- **`subscribe(Entity, id, { fields, pace })`** — the client export. Interest is
+  field-keyed (a field not listed is pass-through); grammar is AND across
+  dimensions, per-dimension one `range` OR one finite `.in([...])` (indexed IN —
+  not the forbidden cross-dimension OR) OR `.is(v)`; subscribe-time validation.
+  Backpressure is two-layer: the field plugin publishes a lawful coalescer +
+  named pace-profiles; the subscriber selects `pace.coalesce({window,by})` or a
+  profile within plugin bounds. Scalar fields default included; high-volume
+  collection fields opt-in (ADR #15).
 - **Out-of-band side effects** (webhooks, emails, external HTTP) — **projections
   over the committed event log**, not a new effect primitive. The grilled
   `effects` cover in-transaction DB mutations only (atomic with the origin); a
@@ -176,3 +237,22 @@ awaiting the same rewrite.
 `hooks.afterSave`, rooms, share hooks). It predates the grill and has not yet
 been rewritten against the model above; treat it as the legacy baseline the
 grill was run against, not the target shape.
+
+## 10. Query predicates
+
+Query predicates share the compiler with `scope`-predicates but never auto-admit
+a read (compilability ≠ read intent — ADR #2 leak guard).
+
+- **`findTree`** — typed-FK-aware tree traversal over a self-referential `ref`,
+  compiled to a recursive CTE (with row `scope` in the WHERE). Deletes the
+  fetch-all-then-build-tree-in-JS pattern (reddit comments, todo subtasks).
+- **`.isNull()`** — a query predicate (read half) compiling to SQL `IS NULL`,
+  DISTINCT from `.is(undefined)` (a scope predicate, authz half, = FALSE).
+- **`unique([f1,f2]).where(...)`** — compound-uniqueness constraint for the
+  genuine compound-with-partial-predicate case a keyed field cannot dissolve.
+- **`.near()` / `.match()`** — geo / full-text predicates, index-gated predicate
+  plugins. The seam ships now so a query for them never degrades to raw SQL (no
+  second query path); the actual rtree/FTS engines defer until google-photos is
+  the active spine (build the seam, not the subsystem).
+- **cursor pagination** — `range` over a compound key; `projected.inline` sort
+  keys are cursor-paginable because they are materialized + indexed.

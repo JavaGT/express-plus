@@ -1,9 +1,10 @@
 # express-plus — Implementation Plan
 
-The roadmap for closing the stress-test gaps surfaced by 8 implementer
-reports (`projects/*/PAIN-POINTS.md`) and adjudicated by a council review
-(DS Pro / DS Flash / GLM-5.2, judged by Opus 4.8, then re-tested against the
-original pain points). This is the authoritative, dependency-ordered plan.
+The roadmap for closing the stress-test gaps surfaced by the 9-domain v2
+implementer reports (`projects/*/PAIN-POINTS.md`; see
+`projects/STRESS-TEST-FINDINGS.md`) and adjudicated by a two-model judge
+council (Opus + GPT-5.5, ~80% structural convergence; see DECISIONLOG.md
+ADRs #9–#16). This is the authoritative, dependency-ordered plan.
 
 All code in this repo is **idealized design exemplar** — files import from
 `express-plus`, a package that does not exist as runnable code. The plan
@@ -43,9 +44,12 @@ phase.
    live path.
 
 2. **The uniform principal**, feeding `grant` / `queryScope` / latched-auth.
-   One principal shape `{ id, type: 'user'|'link'|'system', attributes }`.
-   Collapses `findAll` grant, non-user principals (link-share), and
-   latched subscribe-time auth into one design.
+   One principal shape `{ id, type: 'user'|'link'|'system'|'anonymous',
+   attributes }`. The union is **closed** — domain identities (Patron, Reader,
+   Player) are sub-account entities owned by `User` via a typed FK, not new
+   principal types. A `User` may own multiple sub-accounts. Collapses
+   `findAll` grant, non-user principals (link-share), anonymous public-read,
+   and latched subscribe-time auth into one design.
 
 3. **Declarative reactions** = mutations triggered by mutations. `state.effects`
    and stored-derived are the SAME primitive — "when X mutates, mutate Y
@@ -62,10 +66,16 @@ phase.
    is atomic for commit, per-fragment per-subscriber for delivery (re-auth-at-
    emit, ADR #5). See DECISIONLOG.md.
 
-4. **Scheduled mutation** = a timer feeding the pipeline. `state.auto`
-   (field-level, conditional) and entity `tick` (recurring) are the same
-   mechanism at two granularities. Both attribute mutations to a system
-   principal through the pipeline.
+4. **Scheduled mutation** = a timer feeding the pipeline. Two public nouns —
+   `schedule.at(dateField)` / `schedule.after(anchor, delay)` for one-shot
+   deadlines (library overdue, blog scheduled-publish) and `tick.hz(n)` /
+   `tick.every(...)` for recurring loops (the 20–30Hz game loop) — because a
+   deadline and a recurring loop are different things. `state.auto` and entity
+   TTL are sugar over them. Both attribute mutations to a bounded scheduler/tick
+   principal (not the ambient SYSTEM god) through the pipeline, admitted by the
+   target's own grant via `effectSource(handle)`. The `while` discovery
+   predicate MUST be indexed (non-compilable = load-time error); empty `while`
+   is forbidden for row-set ticks.
 
 5. **Typed-FK traversal in the authorization compiler.** The queryScope/grant
    compiler follows typed foreign-key *paths*, not just direct-column
@@ -90,9 +100,14 @@ at entity-load time, not as a style preference.
 - **`effects` are declarative `{ mutate, with }` only.** No
   `async () => sendEmail()`, no `afterSave`/`onCreate`. Cross-entity targets are
   allowed — they re-enter the one pipeline as a bounded effect principal in the
-  same transaction, not an imperative callback. A structural effect cycle is a
-  load-time error; a runtime depth cap aborts the batch. (A cross-store effect
-  target is a load-time error — it cannot share one DB transaction.)
+  same transaction, not an imperative callback. `with` carries field-plugin
+  operators (`inc`/`append`/`insertAt`/`move` — no new effect grammar); `when`
+  guards are typed predicates (non-compilable = load-time error). Every declared
+  cross-entity effect must have a matching `effectSource(handle)` admitting check
+  on its target, verified at load time (missing admit = load-time error, not
+  runtime rollback). A structural effect cycle is a load-time error; a runtime
+  depth cap aborts the batch. (A cross-store effect target is a load-time error
+  — it cannot share one DB transaction.)
 - **`is.*` thenable + runtime unawaited-call guard.** Awaitable alone is
   insufficient: `is.author() || is.blogOwner()` on two pending promises returns
   the first truthy promise (both are truthy objects) → silently grants to
@@ -150,7 +165,7 @@ Live delivery does **not** add a third method here. See DECISIONLOG.md.
 ### Phase 1 — Spine, blog end-to-end (~4–6 wk; correctness, low frequency)
 Prove right before fast. Blog exercises the correctness surface across all
 six original items: state machine, scheduled publish, `findAll` leak,
-async-`is.*`, `publicRead`, compound uniqueness, subscriber-notify-as-effect,
+async-`is.*`, anonymous public-read, compound uniqueness, subscriber-notify-as-effect,
 plus parent-grant inheritance (Blog→Post→Comment).
 
 1. **Field-type plugin contract + mutation pipeline.** `[LARGE — the
@@ -172,45 +187,73 @@ plus parent-grant inheritance (Blog→Post→Comment).
    plugin dissolves the separate-Vote-entity pattern (keyed-member
    uniqueness-by-construction).
 5. **`validate` as a pipeline stage.** `[free — falls out of the contract]`
-6. **`publicRead`** entity flag `[~10 lines]`; **`unique`** single-field
-   constraint `[~1 wk]`; **`.and`/`.not`/`.is`/`.in`** predicate operators
-   `[~1 wk, declared per plugin]`; **`grant: inherit(Parent)`** / `owner:
-   via(Parent.owner)` compiled through typed FKs.
+6. **`anonymous` principal + `everyone()` + per-verb route gate**
+   (`r.resource({ gate: { list: allowAnonymous(), create: requireUser() } })`)
+   `[~10 lines]`; **`unique`** single-field constraint `[~1 wk]`;
+   **`.and`/`.not`/`.is`/`.in`/`.isNull`** predicate operators
+   `[~1 wk, declared per plugin]`; **`grant: inherit(Parent)`** /
+   `owner: via(Parent.owner)` compiled through typed FKs. (`publicRead` entity
+   flag is dead — replaced by `anonymous` + `everyone()` + per-verb gate.)
 
 ### Phase 2 — Realtime, space-invaders end-to-end (performance)
 Prove the abstractions are fast, not just right.
 
-7. **Live delivery** — re-authorization at emit (latched) + subscriber
-   interest as data-not-code narrowing. `[must precede delta-broadcast]`
+7. **Live delivery** — `subscribe(Entity, id, { fields, pace })` + field-keyed
+   interest (AND across dimensions; per-dim `range`/`.in`/`.is`; no cross-dim OR)
+   + two-layer pace (plugin publishes lawful coalescer; subscriber selects within
+   bounds) + re-authorization at emit (latched). `[must precede delta-broadcast]`
 8. **Ephemeral persistence + scope/authority** in the contract (already
    reserved in step 1; now exercised).
-9. **Entity-level `tick`** — recurring, lifecycle-bound to `state`
-   transitions, through the pipeline, system principal.
+9. **`tick.hz` / `tick.every`** — recurring loops, through the pipeline, as a
+   bounded scheduler/tick principal admitted by the target grant. NOT
+   lifecycle-bound to `state` transitions (the always-on entity foot-gun); gated
+   by an indexed `while` predicate instead. `schedule.at`/`schedule.after`
+   one-shot deadlines also land here (library overdue, blog scheduled-publish).
 10. **Latched subscribe-time auth** — cached `grant`, invalidated by
     subscription-invalidating events (roster change, share revocation).
 11. **Per-field-type delta broadcast** — diff-driven, not full-value.
-12. **`blob` + `array` built-in plugins; batched mutation** (pipeline
-    transaction, single composed event).
+12. **`blob` + `list` (ordered) + `json` built-in plugins; batched mutation**
+    (pipeline transaction, single composed event). `list` uses a fractional-
+    index keyspace for atomic `insertAt`/`move`/`reorder` (deletes the
+    map-as-ordered-array fake 5 apps hand-roll).
 
 ### Phase 3 — Round-out
 13. **`.gte`/`.lte`/`.lt`/range + cursor pagination** (needs exact queryScope
     from step 3; rank index + cursor token — narrow but non-trivial).
-14. **Stored-derived** = `state.effects` primitive (source-triggered recompute,
-    persisted + indexed). `[the genuinely large async-pipeline design —
-    deferred deliberately]`
-15. **Tree traversal** — a single `loadTree()` helper on self-referential
-    `ref`s. NOT a query-language extension.
+14. **Stored computed fields** — TWO named modes (ADR #12):
+    `projected.inline` (in-transaction, transactionally consistent — `hotRank`,
+    covered by ADR #6) and `projected.async` (post-commit projection —
+    thumbnails, search-index embeddings for scope; explicitly stale, never
+    rolls back the origin, written through a bounded projection principal
+    admitted by the target grant). `derived` stays pure read-time pull.
+15. **Tree traversal** — `findTree()` on self-referential `ref`s, compiled to a
+    recursive CTE (FK-aware, row `scope` in the WHERE). NOT a query-language
+    extension.
 16. **Compound uniqueness** (for cases that genuinely can't be a keyed field);
+    **`.isNull()`** query predicate (distinct from `.is(undefined)`=FALSE);
     **`ephemeral({...})` with commit-semantics** (accumulate-then-promote via
     a declarative commit-reaction — dissolves the active-construction case,
-    e.g. drawing-canvas in-progress stroke); **entity TTL**.
-17. **Ergonomic modifiers**: `setOnce`, `role: author` auto-populate.
+    e.g. drawing-canvas in-progress stroke); **entity TTL** (sugar over
+    `schedule.at`).
+17. **Ergonomic modifiers**: `setOnce`, `role: author` auto-populate
+    (generalized `from: principal.user` beyond `role:'owner'`),
+    `entryCan(entry, principal)` on collection fields, `ownerOnly({caps})`
+    shorthand, `inherit(...).through(...)` multi-hop chains.
 
 ### Deferred / plugin territory
-- Full-text search; geo / spatial predicates.
-- Spatial event scoping (game-specific; needs a framework-level go/no-go
+- **Geo / full-text search engines** — the predicate-plugin SEAM ships now
+  (`.near()`/`.match()` index-gated, never raw SQL); the rtree/FTS engines
+  defer until google-photos is the active spine (build the seam, not the
+  subsystem).
+- **Arbitrary-query fan-out + `recomputeFrom(query)` in effects** — beyond
+  ADR #6's "data interpolated only from trigger delta + origin row" bound
+  (cardinality becomes a runtime query result = unbounded-fixpoint door);
+  deferred until an app proves it needs it AND a safety case extends the ADR.
+- **Custom CRDT-authoring toolkit** — ship `text.crdt`/`polyline`/`raster` as
+  proof; do not build a CRDT-authoring DSL (proactive ≠ exhaustive).
+- **Spatial event scoping** (game-specific; needs a framework-level go/no-go
   before design begins).
-- Batch-load endpoints (dissolve into the plugin registry — a custom field
+- **Batch-load endpoints** (dissolve into the plugin registry — a custom field
   type owns its loading protocol).
 
 ---
@@ -255,10 +298,10 @@ implementer reports. Ranked by threat to the plan:
 ## Spine-app selection
 
 - **Phase 1 spine: blog-platform.** Correctness, low frequency. Exercises the
-  state machine, scheduled publish, `findAll` leak, async-`is.*`, `publicRead`,
-  compound uniqueness, subscriber-notify-as-effect, AND parent-grant
+  state machine, scheduled publish, `findAll` leak, async-`is.*`, anonymous
+  public-read, compound uniqueness, subscriber-notify-as-effect, AND parent-grant
   inheritance — the full Phase-1 surface at human speed.
 - **Phase 2 spine: space-invaders.** Performance. Exercises ephemeral
-   persistence, 30Hz tick, latched-auth, delta-broadcast, live delivery.
+   persistence, 30Hz `tick.hz`, latched-auth, delta-broadcast, live delivery.
 
 Prove right before fast.

@@ -37,7 +37,9 @@ export const Match = entity('Match', {
         gameover: [],                      // terminal — no transitions out
       },
       effects: {
-        // When the game ends by tick detection, record the timestamp.
+        // When the game ends by tick detection, record the timestamp. No
+        // `mutate` target → the engine writes self (the row exists → set), the
+        // same { with }-only self-write shape doc.mjs uses for archivedAt.
         [state.transition('playing', 'gameover')]: { with: { endedAt: now } },
       },
       // NOTE: no `auto` here — the authoritative tick (not a one-shot timer)
