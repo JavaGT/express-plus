@@ -7,14 +7,18 @@
 //    grant; the smoothest path is still an explicit one.
 //  - A `ref` field with `role: 'x'` auto-derives a check `is.x()` — the ONE
 //    thing the FK derives (SPEC §6.2): the single source of truth for "who is
-//    the x of this row". A developer-declared check of the same name wins.
+//    the x of this row". A developer-declared check of the same name is a
+//    LOAD-TIME ERROR: a ref-role check cannot be redeclared (DECISIONLOG #54;
+//    the one registry derives both the SQL filter face and the runtime boolean
+//    face from the one field — a second hand-written body is the split-brain
+//    the unified registry exists to forbid).
 //  - Every `.can` body is statically guarded (assertGuarded, ADR #16). A `scope`
 //    predicate is NOT guarded: it compiles to SQL and never runs as JS, so its
 //    `is.*` calls are correctly un-awaited (SPEC §6.1).
 
 import { randomBytes } from 'node:crypto';
 import { assertGuarded } from './guard/static.mjs';
-import { compileReadScope, compileInheritScope, lowerToSql, fieldHandle } from './scope-sql.mjs';
+import { compileReadScope, compileInheritScope, lowerToSql, fieldHandle, membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
 import { getActiveDb } from './db.mjs';
 import { buildCheckRegistry } from './registry.mjs';
 import {
@@ -163,6 +167,40 @@ export function entity(name, declaration = {}) {
   // raw generated columns are removed, so a handler sees the declared shape, not
   // the storage shape (doc.mjs reads entity.linkShare.tier).
   const structFields = Object.entries(fields).filter(([, d]) => d.kind === 'struct');
+  // map fields (store/map) hydrate from a side-table into a write handle that
+  // exposes add/remove/has. The main-table has no column for them — they live
+  // entirely in the membership side-table named <Entity>_<field>.
+  const mapFields = Object.entries(fields).filter(([, d]) => d.kind === 'store' && d.type === 'map');
+
+  // makeMapHandle(entityName, fieldName, ownerId) — returns a write handle
+  // for a map field, using the ambient db for all queries.
+  const makeMapHandle = (entityName, fieldName, ownerId) => {
+    const table = membershipTable(entityName, fieldName);
+    const ownerCol = membershipOwnerCol(entityName);
+
+    return {
+      add: (memberId, role) => {
+        const db = getActiveDb();
+        db
+          .prepare(`INSERT INTO ${table} (${ownerCol}, ${MEMBER_COLUMN}, role) VALUES (:owner, :member, :role)`)
+          .run({ owner: ownerId, member: memberId, role: role ?? null });
+      },
+      remove: (memberId) => {
+        const db = getActiveDb();
+        db
+          .prepare(`DELETE FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
+          .run({ owner: ownerId, member: memberId });
+      },
+      has: (memberId) => {
+        const db = getActiveDb();
+        const row = db
+          .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
+          .get({ owner: ownerId, member: memberId });
+        return row !== undefined;
+      },
+    };
+  };
+
   const hydrate = (row) => {
     if (!row) return row;
     for (const fieldName of hashFields) {
@@ -182,6 +220,9 @@ export function entity(name, declaration = {}) {
         }
       }
       row[fieldName] = any || Object.keys(namespace).length > 0 ? namespace : null;
+    }
+    for (const [fieldName] of mapFields) {
+      row[fieldName] = makeMapHandle(name, fieldName, row.id);
     }
     return row;
   };
@@ -239,6 +280,11 @@ export function entity(name, declaration = {}) {
     const stored = {};
     for (const [key, value] of Object.entries(cells)) {
       const descriptor = fields[key];
+      // a map field has no main-table column — it lives in a side-table.
+      // skip it on insert; the row handle's .add() writes there directly.
+      if (descriptor && descriptor.kind === 'store' && descriptor.type === 'map') {
+        continue;
+      }
       // a structured field expands into its per-cell flat columns; every other
       // field is one serialized cell named by the field key.
       if (descriptor && descriptor.kind === 'struct') {
