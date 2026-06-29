@@ -44,7 +44,7 @@ function resolveGrantClauses(grant) {
 }
 
 export function entity(name, declaration = {}) {
-  const { fields = {}, grant, checks: declaredChecks = {}, routes, create: createPolicy } = declaration;
+  const { fields = {}, grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null } = declaration;
 
   // Fail closed: an entity with no grant cannot be mounted (ADR #7).
   if (grant === undefined || grant === null) {
@@ -153,6 +153,7 @@ export function entity(name, declaration = {}) {
     routes,
     readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
     scopeAst,
+    effects,
   };
 
   // hash-kind fields hydrate from their stored `salt:digest` cell into a

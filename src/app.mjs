@@ -26,6 +26,7 @@
 import { resolveRouteGate, requireUser, isGate } from './route-gate.mjs';
 import { listen as serveListen } from './serve.mjs';
 import { setActiveDb } from './db.mjs';
+import { executeDDL } from './ddl.mjs';
 
 // The HTTP methods an imperative router verb maps to. `r.get/post/patch/delete`
 // build a hand-written route (a handler chain) rather than entity CRUD.
@@ -276,6 +277,27 @@ export default function expressPlus({ db } = {}) {
   if (db) setActiveDb(db);
   app.port = undefined;
   app.httpServer = undefined;
+
+  // Auto-create tables for mounted entities. Must be called AFTER all mounts
+  // and AFTER resolveRoutes (so declarations are resolved). Reads the entity
+  // list from the resolved declarations and generates+executes CREATE TABLE for
+  // each. A db handle must be set on the app.
+  app.ddl = async () => {
+    if (!app.db) throw new Error('cannot generate DDL — no db configured on the app');
+    await app.resolveRoutes();
+    const seen = new Set();
+    for (const decl of app.declarations) {
+      if (decl.kind === 'mount') {
+        const entity = decl.target;
+        if (entity && typeof entity.name === 'string' && !seen.has(entity.name)) {
+          seen.add(entity.name);
+          executeDDL(entity, app.db);
+        }
+      }
+    }
+    return app;
+  };
+
   app.listen = (port, optionsOrCallback) => {
     app.port = port;
     return serveListen(app, port, optionsOrCallback);
