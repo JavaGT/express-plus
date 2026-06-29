@@ -335,12 +335,19 @@ async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, q
 // hydration as the principal source (sessionPrincipalOf) — the SAME admission
 // path, not a second one. `db` is the app-level node:sqlite handle the
 // dispatcher runs against.
-export function makeRequestHandler(routes, { principalOf = () => anonymous, db, env = config.env } = {}) {
+export function makeRequestHandler(source, { principalOf = () => anonymous, db, env = config.env } = {}) {
+  // `source` is either a plain resolved routing table (an array) or an app whose
+  // table resolves asynchronously (two-phase boot). When it is an app, every
+  // request first awaits `app.ready` so the socket may accept connections before
+  // resolution completes without ever dispatching against a partial table.
+  const isApp = source && typeof source.resolveRoutes === 'function';
   return async function handle(req, res) {
     // Security headers are a baked-in default on EVERY response, set before any
     // exit path writes its head (SPEC §3). They are retained through writeHead.
     applySecurityHeaders(res);
     try {
+      if (isApp) await source.ready;
+      const routes = isApp ? source.routes : source;
       const url = new URL(req.url, 'http://localhost');
       const { route, params, pathMatched } = matchRoute(routes, req.method, url.pathname);
 
@@ -420,14 +427,37 @@ export function listen(app, port, optionsOrCallback = {}) {
   const principalOf =
     options.principalOf ?? (app.db ? sessionPrincipalOf(app.db) : undefined);
 
-  const httpServer = createHttpServer(
-    makeRequestHandler(app.routes, { ...options, principalOf, db: app.db }),
+  // Two-phase boot. The routing table resolves asynchronously (an entity's
+  // `routes` thunk may be async — e.g. a parent lazily dynamic-imports a child at
+  // wiring time), but the SOCKET opens synchronously so `app.httpServer` is
+  // available the instant `listen` returns (the chainable, fluent contract). The
+  // handler bridges the two: every request first awaits `app.ready`, so no
+  // request is ever served against a partial table even though the socket is
+  // already accepting connections. A resolution failure rejects `app.ready`; the
+  // handler surfaces it as a 500 and the request is never dispatched — fail closed.
+  const resolved = makeRequestHandler(
+    // Read the table through a thunk: it is empty until resolution completes, and
+    // the handler below gates every request on `app.ready` before reading it.
+    app,
+    { ...options, principalOf, db: app.db },
   );
+
+  const httpServer = createHttpServer(resolved);
+  app.httpServer = httpServer;
+  installGracefulShutdown(app);
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
   httpServer.listen(port);
-  app.httpServer = httpServer;
 
-  installGracefulShutdown(app);
+  // Resolution runs in the background; `app.ready` completes once the table is
+  // built AND the socket is listening, so a caller may await it before closing.
+  app.ready = (async () => {
+    await app.resolveRoutes();
+    if (!httpServer.listening) {
+      await new Promise((resolve) => httpServer.once('listening', resolve));
+    }
+    return app;
+  })();
+
   return app;
 }
 

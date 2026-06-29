@@ -41,12 +41,10 @@ export const Comment = entity('Comment', {
   // capability for fields without an explicit `.can` override.
   grant: inheritDoc,
 
-  // `author` is a runtime-only check (awaitable via is.*) — NEVER called in
-  // `scope`, since Comment's row read-scope comes from the inherited Doc-scope,
-  // not from this check. A plain check used only in `.can` may be non-compilable.
-  checks: {
-    author: ({ entity, principal }) => entity.author === principal.id,
-  },
+  // `author` is auto-derived from `author: ref('User', { role: 'author' })` —
+  // the field is the single source of truth, so checks.author is NOT redeclared
+  // here (redeclaring a ref-role-derived check name is a load-time error;
+  // DECISIONLOG #54). It is awaitable via is.author() inside `.can`.
 
   routes: (r) => {
     r.resource();                                    // CRUD; :docId on the parent path auto-loads req.doc

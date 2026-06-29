@@ -1,22 +1,27 @@
-// The app resolution layer — Todo C (SPEC §3, §4, §6.2; ADR #20).
+// The app assembly layer — Todo C (SPEC §3, §4, §6.2; ADR #20).
 //
-// `expressPlus()` is the default export: a chainable app. `app.mount(path, Entity)`
-// resolves a declared entity into routes by invoking its `routes:(r)=>...` thunk
-// with a route builder `r`. The builder's `r.resource({gate})` declares the five
-// CRUD verbs and runs the per-verb gate map through resolveRouteGate (Todo B), so
-// every mounted route carries its resolved `(principal)=>boolean` gate. The result
-// is an INSPECTABLE routing table: a list of { method, path, verb, entity, gate }.
+// `expressPlus()` is the default export: a chainable app. Assembly is TWO-PHASE.
+// `app.mount(path, Entity)` RECORDS an ordered mount declaration and returns the
+// app synchronously, so the fluent `app.mount(...).mount(...).listen()` chain is
+// preserved. The concrete routing table is RESOLVED later by `resolveRoutes()`:
+// it invokes each entity's `routes:(r, Entity)=>...` thunk with a route builder
+// `r`, whose `r.resource({gate})` declares the five CRUD verbs and runs the
+// per-verb gate map through resolveRouteGate (Todo B). Resolution is ASYNC — an
+// entity's `routes` thunk may be `async` and dynamic-import a child module at
+// wiring time (the parent/child lazy mount that breaks an import cycle without a
+// second route-building path). The result is an INSPECTABLE routing table: a list
+// of { method, path, verb, entity, gate } (CRUD) and { method, path, gate,
+// handlers } (imperative) entries.
 //
 // This is the WIRING that connects a declared entity to its mounted routes with the
 // two default-on auth layers intact — the route gate here, the row grant (the SQL
 // scope + .can) still running on every verb downstream. There is no second auth
 // path: this layer decides route admission, never row visibility.
 //
-// Scope (DECISIONLOG): the RESOLUTION layer only. `.listen(port)` records the port
-// and returns the app (chainable) so the exemplar call shape works; the live HTTP
-// socket + req/res dispatch + the baked-in middleware stack land in Phase 2 when a
-// real transport is needed. The architecturally interesting part — does the table
-// resolve with the gates correctly wired — is fully proven here without a socket.
+// `.listen(port)` finalizes (resolveRoutes) and then opens the real node:http
+// socket; it returns the app synchronously (chainable) and exposes the boot as
+// `app.ready`. The server never serves a partial table — resolution completes
+// before the request handler is created.
 
 import { resolveRouteGate, requireUser, isGate } from './route-gate.mjs';
 import { listen as serveListen } from './serve.mjs';
@@ -48,41 +53,6 @@ const RESOURCE_VERBS = Object.freeze([
 function joinPath(base, suffix) {
   const joined = `${base}${suffix}`;
   return joined.replace(/\/{2,}/g, '/').replace(/(.)\/$/, '$1');
-}
-
-// The route builder `r` handed to an entity's `routes:(r)=>...` thunk. It collects
-// resource declarations; each `r.resource({gate})` expands to the five CRUD verbs
-// with the per-verb gate resolved (unlisted verbs default to requireUser()). An
-// entity that omits `routes` is auto-CRUD'd via a default `r.resource()`.
-function buildResourceRoutes(entity, base) {
-  const collected = [];
-
-  const r = {
-    resource(options = {}) {
-      const resolvedGate = resolveRouteGate(options.gate ?? {});
-      for (const { verb, method, suffix } of RESOURCE_VERBS) {
-        collected.push(
-          Object.freeze({
-            method,
-            path: joinPath(base, suffix),
-            verb,
-            entity,
-            gate: resolvedGate[verb],
-          }),
-        );
-      }
-      return r;
-    },
-  };
-
-  if (typeof entity.routes === 'function') {
-    entity.routes(r);
-  } else {
-    // No `routes` declared → the framework auto-CRUDs through the grant.
-    r.resource();
-  }
-
-  return collected;
 }
 
 // Build one imperative route record from a verb method call `r.get(path, ...rest)`.
@@ -140,52 +110,141 @@ function rebaseRoute(route, parentBase) {
   });
 }
 
-// A mountable surface — the shared core of both the top-level app and a router
-// mini-app. `mount(path, target)` accepts either a compiled entity (resolve its
-// resource routes under `path`) or another router (re-base its routes under
-// `path`). The accumulated `routes` table is inspectable. `mergeParams` is carried
-// so a child router mounted under a parametric parent path (`/:docId/notes`) can
-// read the parent's path param.
-function makeMountable({ mergeParams = false } = {}) {
+// A mountable surface — the shared core of the top-level app, a router mini-app,
+// and the `r` handed to an entity's `routes:(r, Entity)=>...` thunk. Two-phase
+// assembly: every `mount`/`use`/verb call RECORDS an ordered declaration; the
+// concrete `routes` table is RESOLVED later by `resolveRoutes()`. Recording is
+// synchronous (so the fluent `app.mount(...).mount(...).listen()` chain is
+// preserved), but resolution may be async — an entity's `routes` thunk can be
+// `async` and dynamic-import a child module at wiring time (the parent/child
+// lazy-mount that breaks an import cycle). `mergeParams` is carried so a child
+// router mounted under a parametric parent path (`/:docId/notes`) can read the
+// parent's path param. `resource` is present only on the per-entity builder
+// (bound to its entity + base); a bare router/app has no resource of its own.
+function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) {
+  const declarations = [];
   const routes = [];
+  let resolution = null; // the in-flight/resolved finalization promise (idempotent)
+
+  function recordMount(path, target) {
+    if (resolution) {
+      throw new Error('cannot mount after routes are resolved — assemble the app before listen()');
+    }
+    declarations.push({ kind: 'mount', path, target });
+    return surface;
+  }
 
   const surface = {
     mergeParams,
     routes,
-    mount(path, target) {
-      if (target && Array.isArray(target.routes) && typeof target.mount === 'function') {
-        // target is a router mini-app: re-base its already-resolved routes. The
-        // tail (entity/verb OR handlers) is carried through unchanged by rebase.
-        for (const route of target.routes) {
-          routes.push(rebaseRoute(route, path));
-        }
-      } else {
-        // target is a compiled entity: resolve its resource routes under `path`.
-        for (const route of buildResourceRoutes(target, path)) {
-          routes.push(route);
-        }
-      }
-      return surface;
-    },
+    declarations,
+    mount: recordMount,
   };
 
   // `use` is a second NAME for `mount` — the readability convention the repo-root
   // exemplars adopt (`app.use('/sessions', router)` for routers,
-  // `app.mount('/docs', Doc)` for entities). Both names call the one resolver;
-  // there is a single mount operation, two words for it.
+  // `app.mount('/docs', Doc)` for entities). Both names record the one declaration
+  // kind; there is a single mount operation, two words for it.
   surface.use = surface.mount;
 
-  // Imperative verb methods: `r.get/post/patch/delete(path, ...gates, handler)`.
-  // Each builds an imperative route record and pushes it into the SAME table the
-  // entity CRUD routes live in — one routing table, discriminated by tail shape.
-  for (const [verb, method] of Object.entries(IMPERATIVE_VERBS)) {
-    surface[verb] = (path, ...rest) => {
-      routes.push(buildImperativeRoute(method, path, rest));
+  // The per-entity builder also exposes `r.resource({gate})`: expand the five CRUD
+  // verbs for THIS entity at THIS base, resolved through the per-verb gate map.
+  if (entity) {
+    surface.resource = (options = {}) => {
+      if (resolution) {
+        throw new Error('cannot declare routes after resolution');
+      }
+      declarations.push({ kind: 'resource', options });
       return surface;
     };
   }
 
+  // Imperative verb methods: `r.get/post/patch/delete(path, ...gates, handler)`.
+  // Each records an imperative declaration; at resolution it becomes a route in
+  // the SAME table the entity CRUD routes live in — one routing table,
+  // discriminated by tail shape.
+  for (const [verb, method] of Object.entries(IMPERATIVE_VERBS)) {
+    surface[verb] = (path, ...rest) => {
+      if (resolution) {
+        throw new Error('cannot declare routes after resolution');
+      }
+      // buildImperativeRoute validates synchronously (a route with no handler is
+      // a declaration error and must throw at authoring time, not at resolution).
+      declarations.push({ kind: 'imperative', route: buildImperativeRoute(method, path, rest) });
+      return surface;
+    };
+  }
+
+  // Drain the ordered declarations into `routes`. Idempotent: the first call
+  // performs (and caches) resolution; later calls return the same promise. An
+  // entity's `routes` thunk may be async, so resolution is async throughout —
+  // the synchronous recording above is what keeps the public chain sync.
+  surface.resolveRoutes = () => {
+    if (resolution) return resolution;
+    resolution = (async () => {
+      for (const decl of declarations) {
+        if (decl.kind === 'imperative') {
+          routes.push(rebaseRoute(decl.route, base));
+        } else if (decl.kind === 'resource') {
+          for (const route of resolveResource(entity, joinPath(base, ''), decl.options)) {
+            routes.push(route);
+          }
+        } else if (decl.kind === 'mount') {
+          for (const route of await resolveMount(decl.path, decl.target)) {
+            routes.push(rebaseRoute(route, base));
+          }
+        }
+      }
+      return routes;
+    })();
+    return resolution;
+  };
+
   return surface;
+}
+
+// Resolve one `mount(path, target)` declaration into a flat list of route records
+// based under `path`. A router/entity-builder target (anything with its own
+// declarations + resolveRoutes) is finalized recursively and its routes re-based;
+// a compiled entity target is wired through a fresh per-entity builder so its
+// `routes:(r, Entity)=>...` thunk runs (awaited — it may be async).
+async function resolveMount(path, target) {
+  if (target && typeof target.resolveRoutes === 'function' && Array.isArray(target.declarations)) {
+    await target.resolveRoutes();
+    return target.routes.map((route) => rebaseRoute(route, path));
+  }
+  return buildEntityRoutes(target, path);
+}
+
+// Expand the five CRUD verbs for `entity` at `base`, resolving the per-verb gate
+// map (unlisted verbs default to requireUser() via resolveRouteGate).
+function resolveResource(entity, base, options = {}) {
+  const resolvedGate = resolveRouteGate(options.gate ?? {});
+  return RESOURCE_VERBS.map(({ verb, method, suffix }) =>
+    Object.freeze({
+      method,
+      path: joinPath(base, suffix),
+      verb,
+      entity,
+      gate: resolvedGate[verb],
+    }),
+  );
+}
+
+// Wire one compiled entity at `base` into its route records. The entity's
+// `routes:(r, Entity)=>...` thunk receives a per-entity builder (a mountable
+// surface that also carries `.resource()` bound to this entity+base). The thunk
+// may be async (it can dynamic-import a child module at wiring time); we await it.
+// An entity that omits `routes` is auto-CRUD'd via a default `r.resource()`.
+async function buildEntityRoutes(entity, base) {
+  const r = makeMountable({ entity, base });
+  if (typeof entity.routes === 'function') {
+    await entity.routes(r, entity);
+  } else {
+    r.resource();
+  }
+  await r.resolveRoutes();
+  return r.routes;
 }
 
 // router(opts) — a mini-app mounted bare into a parent app with

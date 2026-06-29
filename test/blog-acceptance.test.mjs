@@ -210,7 +210,7 @@ test('Comment readability is inherited from its parent Post through the FK', () 
 
 // --- ACCEPTANCE 5: the app resolves the spine into a routing table ---
 
-test('mounting the spine resolves a routing table with the two default-on auth layers intact', () => {
+test('mounting the spine resolves a routing table with the two default-on auth layers intact', async () => {
   const Blog = makeBlog();
   const Post = makePost();
   const Comment = makeComment(Post);
@@ -224,6 +224,8 @@ test('mounting the spine resolves a routing table with the two default-on auth l
     .mount('/posts', Post)
     .mount('/posts/:postId/comments', comments)
     .listen(0);
+
+  await app.resolveRoutes();
 
   assert.equal(app.port, 0, 'listen records the port');
   assert.ok(app.httpServer, 'listen opened a real http server');

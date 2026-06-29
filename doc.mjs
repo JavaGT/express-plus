@@ -13,7 +13,11 @@ import {
   grant, deny, read, write, subscribe, admin, anyOf, never, scope,
   router, User, Inbox, now,
 } from 'express-plus';
-import { commentRoutes } from './comment.mjs';
+// comment.mjs is imported LAZILY inside the routes thunk (below), not here:
+// comment.mjs reads `Doc` at module-eval (`inherit(Doc, ...)`), so an eager
+// top-level import here would form a cycle and hit `Doc` in its temporal dead
+// zone. The routes thunk runs at wiring time (after Doc is fully defined), so a
+// dynamic `import()` there is safe. See DECISIONLOG.
 
 // Handles — typed, frozen, never magic strings. `now` is the imported deferred
 // commit-instant token. Effect `with` functions receive `{ delta, entity }` as
@@ -105,10 +109,10 @@ export const Doc = entity('Doc', {
   // error — never a silent runtime scan. A check used only in `.can` may be
   // non-compilable (runtime is fine there).
   checks: {
-    // `role: 'owner'` auto-derives checks.owner as:
-    //   ({ Doc, principal }) => Doc.owner.is(principal.id)
-    // Author it explicitly here only if you want to override the derived form.
-    owner:        ({ Doc, principal }) => Doc.owner.is(principal.id),
+    // `role: 'owner'` on the field auto-derives checks.owner — the field is the
+    // single source of truth, so it is NOT (and cannot be) redeclared here
+    // (redeclaring a ref-role-derived check name is a load-time error;
+    // DECISIONLOG #54). Only checks the framework does not derive live here.
     collaborator: ({ Doc, principal }) => Doc.collaborators.has(principal.id),
     // A link principal is admitted only if its token matches a linkShare token.
     // `never()` compiles to SQL FALSE, so a non-link principal can never admit
@@ -195,11 +199,12 @@ export const Doc = entity('Doc', {
     },
   },
 
-  routes: (r, Doc) => {
+  routes: async (r, Doc) => {
     r.resource();                                                 // CRUD through grant
     r.get('/feed', feed(Doc));                                   // JSON bootstrap for the client
     r.get('/home', home);                                        // HTML file-list page
     r.use('/:docId/shares', shareRoutes(Doc));                   // sub-resource; :docId auto-loads req.doc
+    const { commentRoutes } = await import('./comment.mjs');     // lazy: breaks the doc<->comment cycle
     r.use('/:docId/comments', commentRoutes());                  // child entity; grant inherits via typed FK
   },
 });
