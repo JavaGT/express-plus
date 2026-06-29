@@ -113,4 +113,8 @@ function shareRoutes() {
   return r;
 }
 
-expressPlus().mount('/docs', Doc).listen(3000);
+// Only auto-start when run directly (not imported by test suites).
+import { fileURLToPath } from 'node:url';
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  expressPlus().mount('/docs', Doc).listen(3000);
+}

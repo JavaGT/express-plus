@@ -54,8 +54,10 @@ const STRATEGIES = Object.freeze({
     validate(value, descriptor) {
       switch (descriptor.type) {
         case 'text':
+          if (!isTextValue(value)) return 'expected a text value';
+          return true;
         case 'ref':
-          if (!isTextValue(value)) return `expected a ${descriptor.type} value`;
+          if (typeof value !== 'string' && typeof value !== 'number') return 'expected a ref value';
           return true;
         case 'boolean':
           if (typeof value !== 'boolean') return 'expected a boolean';
@@ -89,6 +91,8 @@ const STRATEGIES = Object.freeze({
           return value ? 1 : 0;
         case 'date':
           return value instanceof Date ? value.getTime() : value;
+        case 'ref':
+          return String(value);
         default:
           return value;
       }

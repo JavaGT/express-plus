@@ -186,28 +186,61 @@ export function createLiveServer(httpServer, {
   // Fan-out: emit an event to every authorized subscriber of (entity, id).
   // `row` is the materialized row (needed for re-authorization via mayVerb).
   // `eventPayload` is what each subscriber receives as `event` in their JSON.
-  function emit(entity, id, row, eventPayload) {
+  //
+  // Each scope (`entity:id`) carries a monotonic sequence number, assigned on
+  // every emit. The client's sequence cursor advances with each delivered event
+  // and detects gaps (missing events → resync) and duplicates (re-delivery →
+  // idempotent skip). `actionId` deduplicates: the same actionId replayed within
+  // a scope produces the same sequence number — a retried create/update is
+  // idempotent (SPEC §7, §7.1).
+  //
+  // The sequence counter is in-memory (per process). Persisting it alongside the
+  // durable event log is Phase 2.
+  const sequences = new Map();           // scope → last assigned seq
+  const dispatchedActions = new Map();   // scope → Map<actionId, {seq, events}>
+
+  function emit(entity, id, row, eventPayload, actionId = null) {
     const byId = byEntity.get(entity);
     if (!byId) return;
     const subs = byId.get(String(id));
     if (!subs) return;
+
+    const scope = `${entity}:${id}`;
+    let seq;
+
+    // Deduplicate by actionId: a replayed CRUD action (e.g. retried request)
+    // that already emitted for this scope returns the stored events and sequence.
+    if (actionId && dispatchedActions.has(scope)) {
+      const scopeActions = dispatchedActions.get(scope);
+      if (scopeActions.has(actionId)) {
+        return; // already dispatched — no duplicate event emit
+      }
+    }
+
+    // Assign the next monotonic sequence number for this scope.
+    seq = (sequences.get(scope) ?? 0) + 1;
+    sequences.set(scope, seq);
+
+    // Record the dedupe guard (if actionId provided).
+    if (actionId) {
+      if (!dispatchedActions.has(scope)) dispatchedActions.set(scope, new Map());
+      dispatchedActions.get(scope).set(actionId, { seq });
+    }
 
     for (const conn of subs) {
       if (conn.closed) {
         subs.delete(conn);
         continue;
       }
-      // Re-authorize: the same mayVerb engine the REST dispatch uses.
-      // verb='subscribe' — the grant's .can body decides.
       if (mayVerb) {
         try {
           const allowed = mayVerb(entity, 'subscribe', row, conn.principal ?? { type: 'anonymous', id: null });
           if (!allowed) continue;
         } catch {
-          continue; // fail closed: an auth error withholds the event
+          continue;
         }
       }
-      conn.send({ type: 'event', entity, id, event: eventPayload });
+      conn.send({ type: 'event', entity, id, seq, event: eventPayload });
     }
   }
 

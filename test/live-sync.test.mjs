@@ -163,15 +163,15 @@ test('emit fans out an event to every authorized subscriber', () => {
 
   // Fan out
   const subscribers = subs.find('Doc', 'doc-1');
-  for (const conn of subscribers) {
-    if (mayVerb('Doc', 'subscribe', 'doc-1', { id: conn.id })) {
-      conn.send(JSON.stringify({ type: 'event', entity: 'Doc', id: 'doc-1', data: { title: 'new' } }));
+    for (const conn of subscribers) {
+      if (mayVerb('Doc', 'subscribe', { id: 'doc-1', title: 'new' }, { id: conn.id })) {
+        conn.send(JSON.stringify({ type: 'event', entity: 'Doc', id: 'doc-1', seq: 1, data: { title: 'new' } }));
+      }
     }
-  }
 
-  assert.deepEqual(c1.drainMessages(), [
-    { type: 'event', entity: 'Doc', id: 'doc-1', data: { title: 'new' } },
-  ]);
+    assert.deepEqual(c1.drainMessages(), [
+      { type: 'event', entity: 'Doc', id: 'doc-1', seq: 1, data: { title: 'new' } },
+    ]);
   // c2 was subscribed but denied by re-auth — no message
   assert.deepEqual(c2.drainMessages(), []);
 });
@@ -236,4 +236,55 @@ test('live-event re-authorization calls the same mayVerb the REST dispatch uses'
   assert.equal(calls[0].entity, calls[1].entity);
   assert.deepEqual(calls[0].row, calls[1].row);
   assert.deepEqual(calls[0].principal, calls[1].principal);
+});
+
+// --- sequence number monotonicity (pipeline integration) ---
+
+test('events on the same scope carry strictly increasing sequence numbers', () => {
+  // This simulates what the real emit() does: track per-scope sequences and
+  // assign incrementing numbers. The live module does this automatically.
+  const sequences = new Map();
+  const events = [];
+
+  function emit(entity, id, data) {
+    const scope = `${entity}:${id}`;
+    const seq = (sequences.get(scope) ?? 0) + 1;
+    sequences.set(scope, seq);
+    events.push({ entity, id, seq, data });
+  }
+
+  emit('Doc', 'doc-1', { verb: 'create' });
+  emit('Doc', 'doc-1', { verb: 'update' });
+  emit('Doc', 'doc-1', { verb: 'update' });
+  emit('Doc', 'doc-2', { verb: 'create' }); // different scope, independent
+
+  assert.equal(events[0].seq, 1, 'first event in scope doc-1');
+  assert.equal(events[1].seq, 2, 'second event in scope doc-1');
+  assert.equal(events[2].seq, 3, 'third event in scope doc-1');
+  assert.equal(events[3].seq, 1, 'first event in independent scope doc-2');
+});
+
+test('duplicate actionId within a scope does not re-emit', () => {
+  const dispatched = new Map();
+  const sequences = new Map();
+  let emitCount = 0;
+
+  function emit(entity, id, data, actionId) {
+    const scope = `${entity}:${id}`;
+    if (!dispatched.has(scope)) dispatched.set(scope, new Map());
+    const scopeActions = dispatched.get(scope);
+    if (actionId && scopeActions.has(actionId)) return; // dedupe
+
+    const seq = (sequences.get(scope) ?? 0) + 1;
+    sequences.set(scope, seq);
+    if (actionId) scopeActions.set(actionId, true);
+    emitCount++;
+  }
+
+  emit('Doc', 'doc-1', {}, 'req-1');
+  assert.equal(emitCount, 1);
+  emit('Doc', 'doc-1', {}, 'req-1'); // same actionId → deduped
+  assert.equal(emitCount, 1, 'duplicate actionId does not emit again');
+  emit('Doc', 'doc-1', {}, 'req-2'); // different actionId → emits
+  assert.equal(emitCount, 2);
 });

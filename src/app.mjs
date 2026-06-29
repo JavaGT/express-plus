@@ -278,6 +278,11 @@ export default function expressPlus({ db } = {}) {
   app.port = undefined;
   app.httpServer = undefined;
 
+  // Static accessor for the router constructor, so exemplars may write
+  // `expressPlus.router({ mergeParams: true })` alongside the named import.
+  // One constructor, two access paths — singular system.
+  expressPlus.router = router;
+
   // Auto-create tables for mounted entities. Must be called AFTER all mounts
   // and AFTER resolveRoutes (so declarations are resolved). Reads the entity
   // list from the resolved declarations and generates+executes CREATE TABLE for

@@ -19,6 +19,7 @@
 // second auth path.
 
 import { createServer as createHttpServer } from 'node:http';
+import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
 import { anonymous } from './principal.mjs';
@@ -172,6 +173,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     return;
   }
   const live = app?.live;
+  const actionId = randomUUID();
   const { entity, verb } = route;
   const table = entity.name;
   const bound = bindReadScope(entity.readScope, principal);
@@ -217,7 +219,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
       .prepare(`SELECT * FROM ${table} WHERE id = ?`)
       .get(info.lastInsertRowid);
     sendJson(res, 201, created);
-    if (live) live.emit(entity.name, created.id, created, { verb: 'create', row: created });
+    if (live) live.emit(entity.name, created.id, created, { verb: 'create', row: created }, actionId);
     return;
   }
 
@@ -244,7 +246,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     }
     const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
     sendJson(res, 200, updated);
-    if (live) live.emit(entity.name, updated.id, updated, { verb: 'update', row: updated });
+    if (live) live.emit(entity.name, updated.id, updated, { verb: 'update', row: updated }, actionId);
     return;
   }
 
@@ -259,7 +261,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(params.id);
     res.writeHead(204);
     res.end();
-    if (live) live.emit(entity.name, String(params.id), row, { verb: 'remove', id: params.id });
+    if (live) live.emit(entity.name, String(params.id), row, { verb: 'remove', id: params.id }, actionId);
     return;
   }
 

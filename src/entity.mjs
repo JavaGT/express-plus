@@ -199,6 +199,12 @@ export function entity(name, declaration = {}) {
           .get({ owner: ownerId, member: memberId });
         return row !== undefined;
       },
+      get: (memberId) => {
+        const db = getActiveDb();
+        return db
+          .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
+          .get({ owner: ownerId, member: memberId }) ?? undefined;
+      },
     };
   };
 

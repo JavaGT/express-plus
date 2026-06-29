@@ -17,13 +17,13 @@ import expressPlus, { entity, text, ref, grant, deny, read, write, subscribe, sc
 
 export const Note = entity('Note', {
   fields: { body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }) },
-  // The smallest honest grant: the owner reads/writes/subscribes their own row,
-  // nobody else admitted. `scope` is the only half compiled to SQL (read
-  // admission); `.can` decides every other capability per row.
   grant: () => [
     scope(({ is }) => is.owner())
       .can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe) : deny('not the owner')),
   ],
 });
 
-expressPlus().mount('/notes', Note).listen(3000);
+import { fileURLToPath } from 'node:url';
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  expressPlus().mount('/notes', Note).listen(3000);
+}
