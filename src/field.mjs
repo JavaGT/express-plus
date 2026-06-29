@@ -99,11 +99,12 @@ export function ref(target, options = {}) {
 //
 // Import-surface scope: this constructor delivers the descriptor the entity
 // compiler accepts. On a loaded row the field hydrates into a write handle
-// exposing `.add(memberId, role)`/`.remove(memberId)`/`.has(memberId)` against
-// the `<Entity>_<field>` side-table (entity.mjs makeMapHandle). The `onAdded`
-// event handle (present so effect keys can reference it) and the role-derived
-// checks (is.viewer()/is.editor(), runtime-only) remain the `store` kind's
-// deferred behavior — the handles exist at import, their firing is deferred.
+// exposing `.set(memberId, { role })`/`.remove(memberId)`/`.has(memberId)`/
+// `.toArray()` against the `<Entity>_<field>` side-table (entity.mjs
+// makeMapHandle). The `onAdded` event handle (present so effect keys can
+// reference it) and the role-derived checks (is.viewer()/is.editor(),
+// runtime-only) remain the `store` kind's deferred behavior — the handles
+// exist at import, their firing is deferred.
 export function map(of, { role, default: fallback } = {}) {
   return makeDescriptor({
     kind: 'store',

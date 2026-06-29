@@ -19,7 +19,7 @@
 import { randomBytes } from 'node:crypto';
 import { assertGuarded } from './guard/static.mjs';
 import { compileReadScope, compileInheritScope, lowerToSql, fieldHandle, membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
-import { getActiveDb } from './db.mjs';
+import { getActiveDb, getActiveEntity, setActiveEntity } from './db.mjs';
 import { buildCheckRegistry } from './registry.mjs';
 import {
   serializeField, validateMutation, verifyHash, flattenStruct, structCellColumn,
@@ -191,38 +191,89 @@ export function entity(name, declaration = {}) {
   };
 
   // makeMapHandle(entityName, fieldName, ownerId) — returns a write handle
-  // for a map field, using the ambient db for all queries.
+  // for a map field, using the ambient db for all queries. The canonical
+  // mutation is `.set(memberId, { role })` (upsert — idempotent re-share just
+  // updates the role); `.remove`, `.has`, `.get` complete the handle. `.toArray()`
+  // populates each member through its declared `of: ref(Target)` so a share list
+  // returns hydrated member rows (a hash password stays a {verify} handle, not a
+  // raw digest) as `[member, role]` pairs.
   const makeMapHandle = (entityName, fieldName, ownerId) => {
     const table = membershipTable(entityName, fieldName);
     const ownerCol = membershipOwnerCol(entityName);
+    // The side-table's owner/member columns are TEXT (ddl.mjs mapTableDDL),
+    // and an owner id is a numeric SQLite PK. A ref field stores String(value)
+    // for the same reason; the map handle does the same so a row reloaded by id
+    // matches its membership (a numeric 10 stored as text '10', not '10.0',
+    // and the upsert existence probe finds the prior row).
+    const oid = String(ownerId);
+    const ofDescriptor = fields[fieldName].of;
+    const targetName = ofDescriptor && ofDescriptor.kind === 'value' && ofDescriptor.type === 'ref'
+      ? ofDescriptor.target
+      : null;
+    // The side-table has a `role` column only when roles are declared on the
+    // map (ddl.mjs mapTableDDL). Branch the mutation SQL on that so a role-less
+    // map stores just (owner, member) and a role update never references a
+    // column that does not exist.
+    const hasRole = Array.isArray(fields[fieldName].roles) && fields[fieldName].roles.length > 0;
+
+    const probe = (memberId) =>
+      getActiveDb()
+        .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
+        .get({ owner: oid, member: String(memberId) });
 
     return {
-      add: (memberId, role) => {
+      // `.set` is an UPSERT — idempotent re-share updates the role rather than
+      // duplicating the member. It checks existence first (the same probe the
+      // effect-firing decision needs) so it does not depend on a UNIQUE
+      // constraint being present on the side-table.
+      set: (memberId, { role } = {}) => {
+        const mid = String(memberId);
         const db = getActiveDb();
-        db
-          .prepare(`INSERT INTO ${table} (${ownerCol}, ${MEMBER_COLUMN}, role) VALUES (:owner, :member, :role)`)
-          .run({ owner: ownerId, member: memberId, role: role ?? null });
-        if (effects) fireMapEffects('added', { member: memberId, role, entity: { id: ownerId } }, fields[fieldName]);
+        const existed = probe(memberId);
+        if (existed) {
+          if (hasRole) {
+            db
+              .prepare(`UPDATE ${table} SET role = :role WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
+              .run({ owner: oid, member: mid, role: role ?? null });
+          }
+        } else {
+          const cols = [ownerCol, MEMBER_COLUMN];
+          const vals = [':owner', ':member'];
+          const params = { owner: oid, member: mid };
+          if (hasRole) { cols.push('role'); vals.push(':role'); params.role = role ?? null; }
+          db
+            .prepare(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${vals.join(', ')})`)
+            .run(params);
+        }
+        // fire 'added' only for a NEW member — a role update is not a fresh invite.
+        if (!existed && effects) {
+          fireMapEffects('added', { member: mid, role, entity: { id: ownerId } }, fields[fieldName]);
+        }
       },
       remove: (memberId) => {
+        const mid = String(memberId);
         const db = getActiveDb();
         db
           .prepare(`DELETE FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
-          .run({ owner: ownerId, member: memberId });
-        if (effects) fireMapEffects('removed', { member: memberId, entity: { id: ownerId } }, fields[fieldName]);
+          .run({ owner: oid, member: mid });
+        if (effects) fireMapEffects('removed', { member: mid, entity: { id: ownerId } }, fields[fieldName]);
       },
-      has: (memberId) => {
-        const db = getActiveDb();
-        const row = db
-          .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
-          .get({ owner: ownerId, member: memberId });
-        return row !== undefined;
-      },
+      has: (memberId) => probe(memberId) !== undefined,
       get: (memberId) => {
-        const db = getActiveDb();
-        return db
+        const mid = String(memberId);
+        return getActiveDb()
           .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
-          .get({ owner: ownerId, member: memberId }) ?? undefined;
+          .get({ owner: oid, member: mid }) ?? undefined;
+      },
+      toArray: () => {
+        const db = getActiveDb();
+        const selectCols = hasRole ? `${MEMBER_COLUMN} AS member_id, role` : `${MEMBER_COLUMN} AS member_id`;
+        const rows = db
+          .prepare(`SELECT ${selectCols} FROM ${table} WHERE ${ownerCol} = :owner`)
+          .all({ owner: oid });
+        const target = targetName ? getActiveEntity(targetName) : null;
+        if (!target) return rows.map((r) => [null, hasRole ? r.role : null]);
+        return rows.map((r) => [target.findById(r.member_id), hasRole ? r.role : null]);
       },
     };
   };
@@ -293,15 +344,22 @@ export function entity(name, declaration = {}) {
   };
 
   // getOrFail throws a 404-status error so renderError renders it through the
-  // deliberate-client-error path (a numeric status), not as an opaque 500.
-  record.getOrFail = (id) => {
+  // deliberate-client-error path (a numeric status), not as an opaque 500. It
+  // composes findById — the non-throwing hydrated-by-id lookup — so there is one
+  // lookup mechanic, two call shapes (null on miss vs. a 404 throw).
+  record.findById = (id) => {
     const row = getActiveDb().prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`).get({ id });
+    return row ? hydrate(row) : null;
+  };
+
+  record.getOrFail = (id) => {
+    const row = record.findById(id);
     if (!row) {
       const err = new Error(`${name} ${id} not found`);
       err.status = 404;
       throw err;
     }
-    return hydrate(row);
+    return row;
   };
 
   // insert(cells) — the trusted low-level write core: serialize each declared
@@ -315,8 +373,8 @@ export function entity(name, declaration = {}) {
     const stored = {};
     for (const [key, value] of Object.entries(cells)) {
       const descriptor = fields[key];
-      // a map field has no main-table column — it lives in a side-table.
-      // skip it on insert; the row handle's .add() writes there directly.
+        // a map field has no main-table column — it lives in a side-table.
+        // skip it on insert; the row handle's .set() writes there directly.
       if (descriptor && descriptor.kind === 'store' && descriptor.type === 'map') {
         continue;
       }
@@ -360,18 +418,20 @@ export function entity(name, declaration = {}) {
 
   const frozen = Object.freeze(record);
 
-  // A declared field becomes a typed handle reached as `Entity.<field>`, so a
-  // handler writes a predicate as `User.username.is(value)` and a projection as
-  // `.select(User.id, User.username)`. The handle is minted on access through a
-  // Proxy rather than attached as an own property, so the entity's reserved
-  // metadata (name, fields, grant, checks, routes, readScope, scopeAst) and the
-  // query methods — all own properties — keep their meaning unshadowed: a field
-  // literally named `name` does not corrupt `entity.name`. The OPEN field
-  // namespace and the FIXED reserved set never collide because reserved keys are
-  // own properties (the Proxy passes them through) and only a NON-own string key
-  // resolves to a field handle. `id` is the synthetic primary-key handle
-  // (projection-only). An unknown key returns undefined (a non-field access).
-  return new Proxy(frozen, {
+  // A declared field becomes a typed handle reached as `Entity.<field>`. The
+  // handle is minted on access through a Proxy rather than attached as an own
+  // property, so the entity's reserved metadata (name, fields, grant, checks,
+  // routes, readScope, scopeAst) and the query methods — all own properties —
+  // keep their meaning unshadowed: a field literally named `name` does not
+  // corrupt `entity.name`. Reserved keys are own properties (the Proxy passes
+  // them through); only a NON-own string key resolves to a field handle. `id`
+  // is the synthetic primary-key handle (projection-only); an unknown key
+  // returns undefined.
+  //
+  // A new entity also registers itself by name so a `map(ref('User'))` field
+  // can resolve 'User' to this record and hydrate members on read. The ambient
+  // registry mirrors the ambient db — one name → one module-cached entity.
+  const proxy = new Proxy(frozen, {
     get(target, key, receiver) {
       if (key in target || typeof key !== 'string') {
         return Reflect.get(target, key, receiver);
@@ -383,4 +443,6 @@ export function entity(name, declaration = {}) {
       return undefined;
     },
   });
+  setActiveEntity(name, proxy);
+  return proxy;
 }

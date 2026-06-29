@@ -24,3 +24,21 @@ export function getActiveDb() {
   }
   return activeDb;
 }
+
+// The ambient entity registry — the same ambient pattern as the db. A `map`
+// field's `of: ref('User')` names its member entity by STRING; to populate
+// members on read (toArray) the handle must resolve that name to the compiled
+// entity record (so it can hydrate the member row — keeping a hash password,
+// for instance, from leaking as a raw digest). An entity is declared
+// independently of any app, so it cannot be passed in; it registers ITSELF by
+// name at construction. One name → one entity (module-cached), the singular
+// source for FK population.
+const activeEntities = new Map();
+
+export function setActiveEntity(name, entityRecord) {
+  activeEntities.set(name, entityRecord);
+}
+
+export function getActiveEntity(name) {
+  return activeEntities.get(name);
+}

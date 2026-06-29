@@ -61,24 +61,24 @@ test('loaded row map field add and has', () => {
   const list = TodoList.getOrFail(created.id);
 
   assert.ok(list.collaborators, 'map field should exist on hydrated row');
-  assert.equal(typeof list.collaborators.add, 'function', 'add should be a function');
+  assert.equal(typeof list.collaborators.set, 'function', 'set should be a function');
   assert.equal(typeof list.collaborators.remove, 'function', 'remove should be a function');
   assert.equal(typeof list.collaborators.has, 'function', 'has should be a function');
 
-  // add with role
-  list.collaborators.add('u2', 'editor');
+  // set with role
+  list.collaborators.set('u2', { role: 'editor' });
   assert.equal(list.collaborators.has('u2'), true, 'u2 should be a member');
   assert.equal(list.collaborators.has('u3'), false, 'u3 should not be a member');
 });
 
-// ---- Test 2: add without role, remove, has false after remove -------------
+// ---- Test 2: set without role, remove, has false after remove -------------
 
-test('add without role stores null; remove then has returns false', () => {
+test('set without role stores null; remove then has returns false', () => {
   const created = TodoList.create({ title: 'Chores', owner: 'u1' });
   const list = TodoList.getOrFail(created.id);
 
-  // add with no role
-  list.collaborators.add('u4');
+  // set with no role
+  list.collaborators.set('u4');
   assert.equal(list.collaborators.has('u4'), true);
 
   // remove
@@ -91,7 +91,7 @@ test('add without role stores null; remove then has returns false', () => {
 test('side-table row written correctly', () => {
   const created = TodoList.create({ title: 'Side table check', owner: 'u1' });
   const list = TodoList.getOrFail(created.id);
-  list.collaborators.add('u5', 'viewer');
+  list.collaborators.set('u5', { role: 'viewer' });
 
   const row = db.prepare(
     `SELECT * FROM TodoList_collaborators WHERE TodoList_id = :id AND member_id = :member`,

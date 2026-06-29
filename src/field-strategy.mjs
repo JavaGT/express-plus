@@ -298,12 +298,12 @@ export function validateMutation(entityRecord, payload) {
 
     // map fields cannot be written via create/update payload — they are
     // membership collections that must be mutated through the row handle
-    // (list.<field>.add(...)/.remove(...)). Accepting a map payload would
+    // (row.<field>.set(...)/.remove(...)). Accepting a map payload would
     // try to store an object literal as a main-table cell (fail closed).
     if (descriptor.kind === 'store' && descriptor.type === 'map') {
       throw new ValidationError(
         `${name}.${key} is a map field and cannot be set via payload. ` +
-          `Mutate it through the row handle: row.${key}.add(memberId, role).`,
+          `Mutate it through the row handle: row.${key}.set(memberId, { role }).`,
       );
     }
 

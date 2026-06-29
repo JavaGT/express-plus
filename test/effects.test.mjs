@@ -37,9 +37,9 @@ test('map add fires effects, creating target entity rows', () => {
   db.prepare('INSERT INTO Doc (id, title, owner) VALUES (?, ?, ?)').run(1, 'Test', 'u1');
 
   const row = Doc.getOrFail(1);
-  assert.equal(typeof row.collaborators.add, 'function');
+  assert.equal(typeof row.collaborators.set, 'function');
 
-  row.collaborators.add('u2', 'viewer');
+  row.collaborators.set('u2', { role: 'viewer' });
 
   const inboxes = db.prepare('SELECT * FROM Inbox').all();
   assert.equal(inboxes.length, 1, 'effect should create one Inbox row');

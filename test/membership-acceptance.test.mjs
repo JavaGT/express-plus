@@ -121,7 +121,7 @@ test('a collaborator (membership row) is admitted by BOTH layers', async () => {
   const row = seedOwnedRow(db, TodoList, { title: 'shared', owner: 'owner-1' });
   // Add a collaborator THROUGH the row write handle (E2-E), not raw SQL — this
   // also proves the write path and the read/scope paths share one table shape.
-  row.collaborators.add('member-1', 'editor');
+  row.collaborators.set('member-1', { role: 'editor' });
 
   const member = principal({ type: 'user', id: 'member-1' });
 
@@ -151,7 +151,7 @@ test('removing a collaborator revokes BOTH layers (scope + .can)', async () => {
   const TodoList = buildTodoListEntity();
 
   const row = seedOwnedRow(db, TodoList, { title: 'shared', owner: 'owner-1' });
-  row.collaborators.add('member-1', 'viewer');
+  row.collaborators.set('member-1', { role: 'viewer' });
 
   const member = principal({ type: 'user', id: 'member-1' });
   // Admitted while a member.
