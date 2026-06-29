@@ -8,20 +8,21 @@ roadmap). It is paired with two documents that keep their own job:
 - **`AGENTS.md`** — the binding design values (naming, architecture,
   authorization, data, live/sync, defaults). The SPEC obeys those values; it does
   not restate them. Read AGENTS.md first.
-- **`DECISIONLOG.md`** — the append-only ledger of the 15 architectural decisions
-  (ADRs #1–#15) that produced this design. The SPEC cites ADRs by number; the
-  ledger holds the full reasoning and the alternatives rejected.
+- **`DECISIONLOG.md`** — the append-only ledger of the architectural decisions
+  (ADRs) and implementation decisions that produced this design. The SPEC cites
+  entries by number; the ledger holds the full reasoning and the alternatives
+  rejected.
 
 Findings that motivated the design live in **`SCOPE-FINDINGS.md`** (what the
 shipped `scope` workbench proves is buildable) and
 **`projects/STRESS-TEST-FINDINGS.md`** (the 9-app synthesis, with per-app
 evidence under `projects/<name>/PAIN-POINTS.md`).
 
-> **Status: design exercise.** All `.mjs` files in this repo are idealized
-> exemplars. They import a package (`express-plus`) that does not exist yet;
-> there is no build and no test suite. Verification is read-back against this
-> spec and the ADRs. The exemplars show the DX ceiling the framework must reach,
-> not running code.
+> **Status: implemented.** The framework is built — zero-dependency (Node 26:
+> `node:http`/`crypto`/`sqlite`/`fs`), suite green under `node --test`. The
+> binding exemplars (`doc.mjs`, `gdoc.mjs`, `note.mjs`, `comment.mjs`,
+> `todo.mjs`, `session.mjs`) are running code. Machinery not yet shipped — the
+> durable event-log kernel and live sync — is written in the future tense below.
 
 ---
 
@@ -581,9 +582,8 @@ its own identity.
 ## 13. Build order (roadmap)
 
 The full dependency-ordered roadmap, the per-pain-point adjudication, and the
-"prove right before fast" spine selection were in the former
-`IMPLEMENTATION-PLAN.md` and are summarized here. Phase work is ordered so each
-phase has a working spine app.
+"prove right before fast" spine selection live in §13 here. Phase work is
+ordered so each phase has a working spine app.
 
 **Five unifying abstractions** (each concentrates several pain points):
 

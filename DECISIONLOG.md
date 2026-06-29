@@ -1,11 +1,11 @@
 # Decision Log
 
-The append-only ledger of architectural decisions (ADRs #1–#15, one per
-`Decision:` line below). The design these decisions produced is specified in
-**[SPEC.md](SPEC.md)**; the values they obey are in **[AGENTS.md](AGENTS.md)**.
-References to "FEATURES §N" in the reasoning below are historical (FEATURES.md is
-retired into SPEC.md) and are kept verbatim as the record of what each decision
-overturned.
+The append-only ledger of architectural decisions (ADRs) and implementation
+decisions, one per `Decision:` line below (numbered by entry). The design these
+decisions produced is specified in **[SPEC.md](SPEC.md)**; the values they obey
+are in **[AGENTS.md](AGENTS.md)**. References to "FEATURES §N" in the reasoning
+below are historical (FEATURES.md is retired into SPEC.md) and are kept verbatim
+as the record of what each decision overturned.
 
 Decision: Kill the separate visibility/hide axis; row existence is governed by `read`, while other capabilities (write/admin/subscribe) remain runtime grants. Reason: "invisible" was a third outcome that had to be derived and reconciled against grant/deny, and "visible be different to editable feels arbitrary" — the second axis shouldn't exist. A denied read removes the row from the result set; absent-vs-forbidden is recovered by a prod server-side log + a dev-mode "this exists, but you wouldn't know that in production" error.
 Decision: Drop the `admits(...)` check wrapper; `scope(...)` declares read intent by calling plain-function checks. Reason: `admits` was a magic marker serving the compiler, not developer intent, and hand-applying what the framework can derive is a leak. Crucially, "can compile to SQL" must not auto-admit a read (an `archived` fact compiles but must not be world-readable) — read intent is declared, never derived from compilability. A check used in `scope` that cannot compile to SQL is a load-time error — never a silent JS fallback, never a warning.
