@@ -11,24 +11,26 @@
 import {
   entity, text, number, date, ref, map, presence, log, state, link,
   grant, deny, read, write, subscribe, admin, anyOf, never, scope,
-  router, User, Inbox,
+  router, User, Inbox, now,
 } from 'express-plus';
 import { commentRoutes } from './comment.mjs';
 
-// Ambient handles (NOT imported — injected, and still typed, never strings):
-// inside an effect/check/.can body the engine binds `entity` (the origin row),
-// `delta` (the triggering mutation's payload, e.g. `delta.member`), and `now`
-// (the commit instant). Computed effect keys are typed MEMBERS of a field/plugin
-// handle — `collaborators.onAdded` is the `map` field's event handle, and
-// `state.transition('shared','archived')` mints a typed transition handle from
-// the imported `state` plugin. None of these is a magic string; their provenance
-// is the evaluation scope and the plugin, not the import list.
+// Handles — typed, frozen, never magic strings. `now` is the imported deferred
+// commit-instant token. Effect `with` functions receive `{ delta, entity }` as
+// parameters (per-mutation runtime values). `collaborators.onAdded` is the map
+// field's typed event handle (usable as a computed effect key).
 
 // Capability handles are typed, imported — never strings. `subscribe` is a
 // peer of `read` (sustained WS push vs one-shot REST fetch).
 const VIEWER  = [read, subscribe];
 const EDITOR  = [read, write, subscribe];
 const OWNER   = [read, write, subscribe, admin];
+
+const collaborators = map(ref('User'), {
+  role: ['viewer', 'editor'],
+  default: {},
+}).can(async ({ is }) =>
+  (await is.owner()) ? grant(...OWNER) : deny('only the owner may manage collaborators'));
 
 export const Doc = entity('Doc', {
   fields: {
@@ -42,11 +44,7 @@ export const Doc = entity('Doc', {
     // `map` plugin dissolves the separate-join-entity + compound-unique pattern.
     // `.can(...)` is fluent field access (Note 2): the field owns its own
     // capability rule; a field with no `.can` strong-inherits the row grant.
-    collaborators: map(ref('User'), {
-      role: ['viewer', 'editor'],                                // per-member payload
-      default: {},
-    }).can(async ({ is }) =>
-      (await is.owner()) ? grant(...OWNER) : deny('only the owner may manage collaborators')),
+    collaborators,
 
     // Share-by-link: a non-user principal. The `link` field mints a token,
     // declares the allowed tiers, and carries the CURRENT tier granted by this
@@ -191,9 +189,10 @@ export const Doc = entity('Doc', {
   // back the batch), data interpolated only from the trigger delta + origin row.
   // See DECISIONLOG.md.
   effects: {
-    [collaborators.onAdded]: { mutate: Inbox, with: {
-      recipient: delta.member, doc: entity.id, kind: 'invite',
-    } },
+    [collaborators.onAdded]: {
+      mutate: Inbox,
+      with: ({ delta, entity }) => ({ recipient: delta.member, doc: entity.id, kind: 'invite' }),
+    },
   },
 
   routes: (r, Doc) => {

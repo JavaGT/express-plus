@@ -98,9 +98,10 @@ export function ref(target, options = {}) {
 //   - default — the empty-collection default
 //
 // Import-surface scope: this constructor delivers the descriptor the entity
-// compiler accepts. The membership mutation (`.set`), the `onAdded` event handle,
-// and the role-derived checks are the `store` kind's Phase-2 merge/event behavior
-// (the strategy's apply/diff already fail closed with a loud Phase-2 throw).
+// compiler accepts. The membership mutation (`.set`), the `onAdded` event handle
+// (present so effect keys can reference it), and the role-derived checks are the
+// `store` kind's deferred behavior — the handle exists at import, its firing is
+// deferred (the strategy's apply/diff already fail closed with a loud Phase-2 throw).
 export function map(of, { role, default: fallback } = {}) {
   return makeDescriptor({
     kind: 'store',
@@ -110,6 +111,7 @@ export function map(of, { role, default: fallback } = {}) {
     // per-row column — frozen so a later layer cannot mutate the declared set.
     roles: Object.freeze([...(role ?? [])]),
     default: fallback,
+    onAdded: Object.freeze({ event: 'added', toString() { return 'map:onAdded'; } }),
   });
 }
 

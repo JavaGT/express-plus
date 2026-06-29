@@ -47,6 +47,23 @@ test('a map field compiles into an entity at import (does not throw at load)', (
   });
 });
 
+test('map exposes a frozen onAdded event handle with stable toString', () => {
+  const d = map(ref('User'), { role: ['viewer'], default: {} });
+  assert.ok(Object.isFrozen(d.onAdded), 'onAdded should be frozen');
+  assert.equal(String(d.onAdded), 'map:onAdded');
+});
+
+test('({ [d.onAdded]: 1 }) key is the stable string', () => {
+  const d = map(ref('User'), { role: ['viewer'], default: {} });
+  assert.equal(({ [d.onAdded]: 1 })['map:onAdded'], 1);
+});
+
+test('map(...).can(fn) preserves onAdded', () => {
+  const d = map(ref('User'), { role: ['viewer'] }).can(() => {});
+  assert.ok(Object.isFrozen(d.onAdded), 'onAdded should survive .can');
+  assert.equal(String(d.onAdded), 'map:onAdded');
+});
+
 test('a map field is not whole-value comparable in scope (fail closed)', () => {
   const Doc = entity('Doc', {
     fields: { collaborators: map(ref('User'), { role: ['viewer'] }) },
