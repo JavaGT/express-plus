@@ -18,6 +18,7 @@ export { requireUser, allowAnonymous, open, isGate, resolveRouteGate, routeGateF
 export { action, event, createServer, createClient } from './pipeline.mjs';
 export { createLiveServer } from './live.mjs';
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
+export { resolveTemplate, matchExtension, isSafePath } from './views.mjs';
 export { config } from './config.mjs';
 export { parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE } from './session.mjs';
 export { default, router } from './app.mjs';

@@ -19,6 +19,7 @@
 // second auth path.
 
 import { createServer as createHttpServer } from 'node:http';
+import { resolve } from 'node:path';
 
 import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
@@ -28,6 +29,9 @@ import { config } from './config.mjs';
 import { applySecurityHeaders, renderError } from './middleware.mjs';
 import { sessionPrincipalOf } from './session.mjs';
 import { createLiveServer } from './live.mjs';
+import { resolveTemplate } from './views.mjs';
+import { readFileSync, existsSync } from 'node:fs';
+import { isSafePath, matchExtension } from './views.mjs';
 
 // Match a concrete request path against a route's path template. Phase-1 routes
 // carry literal segments and `:param` segments (e.g. `/notes/:id`). Returns the
@@ -310,6 +314,23 @@ async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, q
       nodeRes.end();
       return res;
     },
+    render(name, data = {}) {
+      try {
+        const html = resolveTemplate(config.viewsDir ?? resolve(process.cwd(), 'views'), name, data);
+        if (!nodeRes.headersSent) {
+          nodeRes.writeHead(pendingStatus, {
+            'content-type': 'text/html; charset=utf-8',
+            'content-length': Buffer.byteLength(html),
+          });
+        }
+        nodeRes.end(html);
+      } catch (err) {
+        // Template read failure (e.g. file not found) → 500 or 404.
+        const status = err.code === 'ENOENT' ? 404 : 500;
+        renderError(nodeRes, { status, message: err.code === 'ENOENT' ? `template not found: ${name}` : err.message }, { env });
+      }
+      return res;
+    },
     raw: nodeRes,
   };
 
@@ -353,7 +374,40 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
     try {
       if (isApp) await source.ready;
       const routes = isApp ? source.routes : source;
+
+      // Static file serving — intercepts before route matching. The app declares
+      // `app.static('/public', dir)`; every GET request under the prefix is served
+      // from the filesystem with a content-type derived from the file extension.
+      // Missing files → 404; path-traversal attempts → 404 (fail closed).
       const url = new URL(req.url, 'http://localhost');
+      if (isApp && source._static && req.method === 'GET') {
+        const { prefix, dir } = source._static;
+        if (url.pathname.startsWith(prefix)) {
+          const filePath = url.pathname.slice(prefix.length) || '/index.html';
+          if (!isSafePath(dir, filePath)) {
+            sendJson(res, 404, { error: 'not found' });
+            return;
+          }
+          const fullPath = resolve(dir, filePath);
+          if (!existsSync(fullPath)) {
+            sendJson(res, 404, { error: 'not found' });
+            return;
+          }
+          try {
+            const content = readFileSync(fullPath);
+            const mime = matchExtension(filePath);
+            res.writeHead(200, {
+              'content-type': mime,
+              'content-length': Buffer.byteLength(content),
+            });
+            res.end(content);
+          } catch {
+            sendJson(res, 500, { error: 'internal error' });
+          }
+          return;
+        }
+      }
+
       const { route, params, pathMatched } = matchRoute(routes, req.method, url.pathname);
 
       // no path match → 404; path matched but method did not → 405.

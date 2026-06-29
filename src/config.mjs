@@ -17,4 +17,5 @@ function readPort(raw) {
 export const config = Object.freeze({
   port: readPort(process.env.PORT),
   env: process.env.NODE_ENV ?? 'development',
+  viewsDir: process.env.VIEWS_DIR ?? null, // null → framework default (cwd/views)
 });

@@ -280,5 +280,13 @@ export default function expressPlus({ db } = {}) {
     app.port = port;
     return serveListen(app, port, optionsOrCallback);
   };
+  // Static file serving. `prefix` is the URL prefix (e.g. '/static');
+  // `dir` is the filesystem directory. The handler checks the URL prefix and
+  // serves matching files; it runs in the HTTP dispatch path BEFORE route
+  // matching, so it intercepts any request under the prefix.
+  app.static = (prefix, dir) => {
+    app._static = { prefix: prefix.replace(/\/$/, ''), dir };
+    return app;
+  };
   return app;
 }
