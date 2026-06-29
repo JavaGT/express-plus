@@ -32,6 +32,50 @@ function mintToken() {
   return randomBytes(24).toString('hex');
 }
 
+// makeQueryBuilder({ name, predicate, hydrate }) — the awaitable, chainable
+// query behind `findAll(predicate)`. It composes WHERE (the lowered predicate)
+// + ORDER BY + LIMIT + column projection and executes ONE SELECT on await (a
+// thenable, so `Promise.all([builder.sort().limit()])` and `await builder` both
+// run it). `sort` takes a field handle (its declared fieldName — a safe column
+// name, never client input) and a direction; `limit` is bound as a param. The
+// builder mutates as it chains and is single-use (await consumes it).
+function makeQueryBuilder({ name, predicate, hydrate }) {
+  const where = lowerToSql(predicate);
+  const state = { orderBy: null, limit: null, selectCols: null };
+  const builder = {
+    sort(field, dir = 'asc') {
+      const direction = String(dir).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
+      state.orderBy = `${field.fieldName} ${direction}`;
+      return builder;
+    },
+    limit(n) {
+      state.limit = Number(n);
+      return builder;
+    },
+    select(...handles) {
+      state.selectCols = handles.map((h) => h.fieldName);
+      return builder;
+    },
+    then(resolve, reject) {
+      try {
+        const cols = state.selectCols ? state.selectCols.join(', ') : '*';
+        let sql = `SELECT ${cols} FROM ${name} AS t0 WHERE ${where.sql}`;
+        const params = { ...where.params };
+        if (state.orderBy) sql += ` ORDER BY ${state.orderBy}`;
+        if (state.limit !== null) {
+          sql += ` LIMIT :limit`;
+          params.limit = state.limit;
+        }
+        const rows = getActiveDb().prepare(sql).all(params).map(hydrate);
+        resolve(rows);
+      } catch (err) {
+        reject(err);
+      }
+    },
+  };
+  return builder;
+}
+
 // Normalize the grant declaration into an array of clauses. A grant is either a
 // thunk returning an array of `scope().can()` clauses (note.mjs) or — Phase 1
 // reserved — an `inherit(Parent, { via })` directive (comment.mjs). The thunk
@@ -331,16 +375,28 @@ export function entity(name, declaration = {}) {
     return row ? hydrate(row) : null;
   };
 
-  // findAll() returns the rows as an array that also carries a .select(...) so
-  // both `findAll()` (all columns) and `findAll().select(a, b)` (projection) read
-  // naturally off one call. select lowers its handles to a column list.
-  record.findAll = () => {
-    const rows = getActiveDb().prepare(`SELECT * FROM ${name} AS t0`).all().map(hydrate);
-    rows.select = (...handles) => {
-      const cols = handles.map((h) => h.fieldName);
-      return getActiveDb().prepare(`SELECT ${cols.join(', ')} FROM ${name} AS t0`).all().map(hydrate);
-    };
-    return rows;
+  // findAll() has two call shapes:
+  //   findAll()              — every row, synchronously, as a plain array that
+  //                            also carries a .select(...) projection (the
+  //                            pre-authorized bulk read).
+  //   findAll(predicate)     — a chainable, awaitable QUERY BUILDER composing
+  //                            WHERE (the lowered predicate) + .sort(field, dir)
+  //                            + .limit(n) + .select(...). It executes on await
+  //                            (or Promise.all), so the exemplar composes
+  //                            `Doc.findAll(Doc.owner.is(me)).sort(...).limit(10)`
+  //                            inside a Promise.all and reads the rows out.
+  // The predicate form is a THENABLE, not a plain array: it carries the query
+  // state until something awaits it, then runs one composed SELECT.
+  record.findAll = (predicate) => {
+    if (predicate === undefined) {
+      const rows = getActiveDb().prepare(`SELECT * FROM ${name} AS t0`).all().map(hydrate);
+      rows.select = (...handles) => {
+        const cols = handles.map((h) => h.fieldName);
+        return getActiveDb().prepare(`SELECT ${cols.join(', ')} FROM ${name} AS t0`).all().map(hydrate);
+      };
+      return rows;
+    }
+    return makeQueryBuilder({ name, predicate, hydrate });
   };
 
   // getOrFail throws a 404-status error so renderError renders it through the
