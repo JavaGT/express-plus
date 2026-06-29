@@ -114,6 +114,7 @@ export function map(of, { role, default: fallback } = {}) {
     roles: Object.freeze([...(role ?? [])]),
     default: fallback,
     onAdded: Object.freeze({ event: 'added', toString() { return 'map:onAdded'; } }),
+    onRemoved: Object.freeze({ event: 'removed', toString() { return 'map:onRemoved'; } }),
   });
 }
 

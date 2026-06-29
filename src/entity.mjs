@@ -173,6 +173,23 @@ export function entity(name, declaration = {}) {
   // entirely in the membership side-table named <Entity>_<field>.
   const mapFields = Object.entries(fields).filter(([, d]) => d.kind === 'store' && d.type === 'map');
 
+  // Fire effects for a map field mutation. `eventName` is 'added' or 'removed'.
+  // The declared effects map is keyed by frozen event handles (like
+  // collaborators.onAdded) whose toString() produces a stable key. We match by
+  // comparing the descriptor's own handle against each effect key.
+  const fireMapEffects = (eventName, delta, mapDescriptor) => {
+    if (!effects || !mapDescriptor) return;
+    const eventHandle = eventName === 'added' ? mapDescriptor.onAdded : mapDescriptor.onRemoved;
+    if (!eventHandle) return;
+    const effect = effects[eventHandle];
+    if (effect && typeof effect.mutate?.create === 'function') {
+      const payload = typeof effect.with === 'function'
+        ? effect.with({ delta, entity: delta.entity })
+        : {};
+      try { effect.mutate.create(payload); } catch { /* fail-not-open: a broken effect doesn't roll back */ }
+    }
+  };
+
   // makeMapHandle(entityName, fieldName, ownerId) — returns a write handle
   // for a map field, using the ambient db for all queries.
   const makeMapHandle = (entityName, fieldName, ownerId) => {
@@ -185,12 +202,14 @@ export function entity(name, declaration = {}) {
         db
           .prepare(`INSERT INTO ${table} (${ownerCol}, ${MEMBER_COLUMN}, role) VALUES (:owner, :member, :role)`)
           .run({ owner: ownerId, member: memberId, role: role ?? null });
+        if (effects) fireMapEffects('added', { member: memberId, role, entity: { id: ownerId } }, fields[fieldName]);
       },
       remove: (memberId) => {
         const db = getActiveDb();
         db
           .prepare(`DELETE FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
           .run({ owner: ownerId, member: memberId });
+        if (effects) fireMapEffects('removed', { member: memberId, entity: { id: ownerId } }, fields[fieldName]);
       },
       has: (memberId) => {
         const db = getActiveDb();
