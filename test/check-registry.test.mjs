@@ -240,3 +240,34 @@ test('unknown check name in scope throws at entity load', () => {
     },
   );
 });
+
+// ---- Test 7: declared check returning a non-AST value in scope → load error ----
+// A declared check body that returns a raw value (a runtime-shaped boolean)
+// instead of composing framework field handles into an AST node cannot lower to
+// SQL. Using it in a scope predicate must fail at load — fail closed, never
+// silently dropped from the SQL filter (which would widen row visibility).
+
+test('declared check that returns a non-AST value in scope throws at entity load', () => {
+  assert.throws(
+    () => {
+      entity('Leaky', {
+        fields: {
+          body: text(),
+          owner: ref('User', { role: 'owner' }),
+        },
+        // A runtime-shaped body: returns a raw boolean, not an AST node.
+        checks: {
+          secret: ({ principal: p }) => p.id === 'admin',
+        },
+        grant: () => [
+          scope(({ is }) => is.secret()).can(() => grant(read)),
+        ],
+      });
+    },
+    (err) => {
+      assert.ok(err instanceof NonCompilableError);
+      assert.match(err.message, /non-AST|returned a non-AST value/i);
+      return true;
+    },
+  );
+});
