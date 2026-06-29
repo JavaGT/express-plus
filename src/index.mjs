@@ -16,6 +16,8 @@ export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope } fr
 export { principal, anonymous, UnknownPrincipalTypeError } from './principal.mjs';
 export { requireUser, allowAnonymous, open, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient } from './pipeline.mjs';
+export { createLiveServer } from './live.mjs';
+export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
 export { config } from './config.mjs';
 export { parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE } from './session.mjs';
 export { default, router } from './app.mjs';

@@ -27,6 +27,7 @@ import { mayVerb } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError } from './middleware.mjs';
 import { sessionPrincipalOf } from './session.mjs';
+import { createLiveServer } from './live.mjs';
 
 // Match a concrete request path against a route's path template. Phase-1 routes
 // carry literal segments and `:param` segments (e.g. `/notes/:id`). Returns the
@@ -151,11 +152,12 @@ function serializeRow(entity, payload) {
 // (which rows are visible) and its .can capability (what may be done). Both must
 // pass. A missing db is fail-closed (500): an entity CRUD route cannot serve
 // without persistence.
-async function dispatch(req, res, route, principal, db, params, body) {
+async function dispatch(req, res, route, principal, db, params, body, app = null) {
   if (!db) {
     sendJson(res, 500, { error: 'no database configured for entity dispatch' });
     return;
   }
+  const live = app?.live;
   const { entity, verb } = route;
   const table = entity.name;
   const bound = bindReadScope(entity.readScope, principal);
@@ -201,6 +203,7 @@ async function dispatch(req, res, route, principal, db, params, body) {
       .prepare(`SELECT * FROM ${table} WHERE id = ?`)
       .get(info.lastInsertRowid);
     sendJson(res, 201, created);
+    if (live) live.emit(entity.name, created.id, created, { verb: 'create', row: created });
     return;
   }
 
@@ -227,6 +230,7 @@ async function dispatch(req, res, route, principal, db, params, body) {
     }
     const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
     sendJson(res, 200, updated);
+    if (live) live.emit(entity.name, updated.id, updated, { verb: 'update', row: updated });
     return;
   }
 
@@ -241,6 +245,7 @@ async function dispatch(req, res, route, principal, db, params, body) {
     db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(params.id);
     res.writeHead(204);
     res.end();
+    if (live) live.emit(entity.name, String(params.id), row, { verb: 'remove', id: params.id });
     return;
   }
 
@@ -390,7 +395,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       if (route.handlers) {
         await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams }, { env });
       } else {
-        await dispatch(req, res, route, principal, db, params, body);
+        await dispatch(req, res, route, principal, db, params, body, isApp ? source : null);
       }
     } catch (err) {
       // the single error renderer (SPEC §3): an unexpected exception becomes an
@@ -447,6 +452,16 @@ export function listen(app, port, optionsOrCallback = {}) {
   installGracefulShutdown(app);
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
   httpServer.listen(port);
+
+  // The live WebSocket server for /events subscriptions. It fans out entity-row
+  // change events to authorized subscribers using the SAME mayVerb the REST
+  // dispatch uses (verb='subscribe') — no second auth path. Created after the
+  // HTTP server so the upgrade handler binds to a real socket; stored on the app
+  // so dispatch can reach it at request time.
+  app.live = createLiveServer(httpServer, {
+    path: '/events',
+    mayVerb: (entity, verb, row, principal) => mayVerb(entity, verb, row, principal),
+  });
 
   // Resolution runs in the background; `app.ready` completes once the table is
   // built AND the socket is listening, so a caller may await it before closing.
