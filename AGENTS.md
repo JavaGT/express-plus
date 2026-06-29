@@ -25,6 +25,18 @@ naming, architecture, authorization, data, and live behavior.
   same goal drift apart, conflict in unexpected ways, and confuse. If a second
   path seems needed, fold it into the first or remove the first — don't run two
   in parallel.
+- **A new general mechanism retires the special-case it generalizes, in the same
+  change.** When you introduce a more-general mechanism (a registry, a uniform
+  evaluator, a single pipeline) that *subsumes* an existing hand-rolled path, you
+  migrate the old case onto the new mechanism NOW — you do not leave the old path
+  running beside the new one "because it works." A working second path is still a
+  second path: its agreement with the new path today is unverified luck, not
+  safety, and it is the exact seam where the two drift tomorrow. This OUTRANKS
+  "subtract before you add" and "build no further" when they are read as "don't
+  touch working code" — minimal-diff is about not adding *unneeded* concepts, never
+  an excuse to keep a redundant pathway alive. The larger, riskier migration that
+  ends with one mechanism beats the smaller change that ends with two. (Pay the
+  cost behind a green test suite: migrate, then prove the suite still passes.)
 - **Declaration absorbs imperative wiring.** Behavior should flow from declared
   shape, not hand-written glue. If you're writing wiring (`on`, `emit`, mount
   config) that restates what the declaration already implies, the declaration
@@ -68,7 +80,12 @@ naming, architecture, authorization, data, and live behavior.
   condition that denies it.
 - **No second auth path.** Every transport (REST, live stream, subscriptions) runs
   through the same authorization engine. Live events are re-authorized before
-  delivery, not bypassed.
+  delivery, not bypassed. This applies *within* the engine too: a capability
+  (`owner`, `collaborator`) resolves through ONE check registry evaluated in both
+  modes — compiled to SQL for the row-scope filter and run as a boolean at request
+  time — never a role-map for one mode plus a separate derived function for the
+  other. When a check gains a second mode, route the existing checks through the
+  same registry rather than letting the old per-mode handling persist.
 
 ## Data & queries
 
