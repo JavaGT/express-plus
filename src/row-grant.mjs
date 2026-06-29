@@ -92,3 +92,40 @@ export async function mayVerb(entityRecord, verb, row, principal) {
   if (!decision.granted) return false;
   return decision.capabilities.includes(required);
 }
+
+// Field-level capability authority (SPEC §6, AGENTS Authorization § "one auth
+// engine"). A field with `.can(fn)` owns its capability rule — `access({ is },
+// defaults)` → grant(...)/deny(...). A field WITHOUT `.can` strong-inherits the
+// row grant: the field-readable/writable check falls through to the ROW grant's
+// read/write capability (no second auth path — the SAME `makeIs` + rowCapabilities
+// runs for both, and the field `.can` body receives the same `is` proxy and the
+// row-grant decision as its `defaults`).
+//
+// Principal-present = request path = enforced. Principal-absent (null) = trusted
+// query API = bypassed, mirroring `mayVerb` which also runs only in dispatch
+// (DECISIONLOG #41). A null principal means "not a request path — skip field
+// authz"; the caller is trusted server code (or the trusted query API).
+export async function fieldCapabilities(entityRecord, fieldName, row, principal) {
+  const is = makeIs(entityRecord, row, principal);
+  const defaults = await rowCapabilities(entityRecord, row, principal);
+  const access = entityRecord.fields?.[fieldName]?.access;
+  if (!access) return defaults;                       // strong-inherit row grant
+  let decision;
+  await resolveDecision(
+    async () => { decision = await access({ is }, defaults); return decision.granted; },
+    [],
+    { where: `the field .can body on entity('${entityRecord.name}').${fieldName}` },
+  );
+  return decision && decision.granted
+    ? { granted: true, capabilities: decision.capabilities ?? [] }
+    : { granted: false, capabilities: [] };
+}
+
+// True iff the principal holds `capability` (read|write) on this field of this
+// row. Runs the field's `.can` pipeline (or the strong-inherited row grant when
+// the field has no `.can`).
+export async function mayFieldOp(entityRecord, fieldName, capability, row, principal) {
+  const decision = await fieldCapabilities(entityRecord, fieldName, row, principal);
+  if (!decision.granted) return false;
+  return decision.capabilities.includes(capability);
+}

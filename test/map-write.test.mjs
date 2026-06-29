@@ -55,7 +55,7 @@ const TodoList = entity('TodoList', {
 
 // ---- Test 1: write API (add / has) on a loaded row -----------------------
 
-test('loaded row map field add and has', () => {
+test('loaded row map field add and has', async () => {
   const created = TodoList.create({ title: 'Buy groceries', owner: 'u1' });
   // Reload through getOrFail so we get a hydrated row.
   const list = TodoList.getOrFail(created.id);
@@ -66,32 +66,32 @@ test('loaded row map field add and has', () => {
   assert.equal(typeof list.collaborators.has, 'function', 'has should be a function');
 
   // set with role
-  list.collaborators.set('u2', { role: 'editor' });
+  await list.collaborators.set('u2', { role: 'editor' });
   assert.equal(list.collaborators.has('u2'), true, 'u2 should be a member');
   assert.equal(list.collaborators.has('u3'), false, 'u3 should not be a member');
 });
 
 // ---- Test 2: set without role, remove, has false after remove -------------
 
-test('set without role stores null; remove then has returns false', () => {
+test('set without role stores null; remove then has returns false', async () => {
   const created = TodoList.create({ title: 'Chores', owner: 'u1' });
   const list = TodoList.getOrFail(created.id);
 
   // set with no role
-  list.collaborators.set('u4');
+  await list.collaborators.set('u4');
   assert.equal(list.collaborators.has('u4'), true);
 
   // remove
-  list.collaborators.remove('u4');
+  await list.collaborators.remove('u4');
   assert.equal(list.collaborators.has('u4'), false);
 });
 
 // ---- Test 3: the side-table actually got the row --------------------------
 
-test('side-table row written correctly', () => {
+test('side-table row written correctly', async () => {
   const created = TodoList.create({ title: 'Side table check', owner: 'u1' });
   const list = TodoList.getOrFail(created.id);
-  list.collaborators.set('u5', { role: 'viewer' });
+  await list.collaborators.set('u5', { role: 'viewer' });
 
   const row = db.prepare(
     `SELECT * FROM TodoList_collaborators WHERE TodoList_id = :id AND member_id = :member`,

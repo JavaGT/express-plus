@@ -325,7 +325,7 @@ async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, q
   // otherwise). This is not a second auth path: the row grant still applies to
   // the entity's own CRUD verbs; auto-load is a read for the handler's benefit.
   if (autoLoad) {
-    const row = autoLoad.entity.findById(params[autoLoad.param]);
+    const row = autoLoad.entity.findById(params[autoLoad.param], principal);
     if (!row) {
       renderError(nodeRes, { status: 404, message: `${autoLoad.entity.name} ${params[autoLoad.param]} not found` }, { env });
       return;

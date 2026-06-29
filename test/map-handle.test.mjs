@@ -43,27 +43,27 @@ function setup() {
   return db;
 }
 
-test('.set adds a new member and fires nothing extra on a repeat (upsert)', () => {
+test('.set adds a new member and fires nothing extra on a repeat (upsert)', async () => {
   const db = setup();
   const doc = Doc.getOrFail(10);
 
-  doc.collaborators.set('2', { role: 'viewer' });
+  await doc.collaborators.set('2', { role: 'viewer' });
   assert.equal(doc.collaborators.has('2'), true);
   assert.equal(doc.collaborators.get('2').role, 'viewer');
 
   // Repeat share updates the role — no duplicate row.
-  doc.collaborators.set('2', { role: 'editor' });
+  await doc.collaborators.set('2', { role: 'editor' });
   const members = db.prepare('SELECT member_id FROM Doc_collaborators WHERE Doc_id = 10').all();
   assert.equal(members.length, 1, 'no duplicate member row');
   assert.equal(doc.collaborators.get('2').role, 'editor');
 });
 
-test('.toArray() populates members as hydrated [member, role] pairs', () => {
+test('.toArray() populates members as hydrated [member, role] pairs', async () => {
   setup();
   const doc = Doc.getOrFail(10);
-  doc.collaborators.set('2', { role: 'viewer' });
+  await doc.collaborators.set('2', { role: 'viewer' });
 
-  const rows = doc.collaborators.toArray();
+  const rows = await doc.collaborators.toArray();
   assert.equal(rows.length, 1);
   const [member, role] = rows[0];
   assert.equal(role, 'viewer');
@@ -75,7 +75,7 @@ test('.toArray() populates members as hydrated [member, role] pairs', () => {
   assert.equal(member.password.digest, undefined, 'no raw digest on the handle');
 });
 
-test('.toArray() with no registered target returns [null, role] pairs (graceful degrade)', () => {
+test('.toArray() with no registered target returns [null, role] pairs (graceful degrade)', async () => {
   // A map whose of-target is an entity that was never registered (e.g. a ref to
   // a name with no compiled entity). toArray degrades rather than throwing.
   const Phantom = entity('Phantom', {
@@ -87,7 +87,7 @@ test('.toArray() with no registered target returns [null, role] pairs (graceful 
   for (const sql of generateDDL(Phantom)) db.exec(sql);
   db.prepare("INSERT INTO Phantom (id, tag) VALUES (1, 'p')").run();
   const row = Phantom.getOrFail(1);
-  row.members.set('m1');
-  const rows = row.members.toArray();
+  await row.members.set('m1');
+  const rows = await row.members.toArray();
   assert.deepEqual(rows, [[null, null]]);
 });

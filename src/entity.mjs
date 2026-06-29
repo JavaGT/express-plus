@@ -21,6 +21,8 @@ import { assertGuarded } from './guard/static.mjs';
 import { compileReadScope, compileInheritScope, lowerToSql, fieldHandle, membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
 import { getActiveDb, getActiveEntity, setActiveEntity } from './db.mjs';
 import { buildCheckRegistry } from './registry.mjs';
+import { mayFieldOp } from './row-grant.mjs';
+import { read, write } from './grant.mjs';
 import {
   serializeField, validateMutation, verifyHash, flattenStruct, structCellColumn,
 } from './field-strategy.mjs';
@@ -234,14 +236,22 @@ export function entity(name, declaration = {}) {
     }
   };
 
-  // makeMapHandle(entityName, fieldName, ownerId) — returns a write handle
+  // makeMapHandle(entityName, fieldName, row, principal) — returns a write handle
   // for a map field, using the ambient db for all queries. The canonical
   // mutation is `.set(memberId, { role })` (upsert — idempotent re-share just
   // updates the role); `.remove`, `.has`, `.get` complete the handle. `.toArray()`
   // populates each member through its declared `of: ref(Target)` so a share list
   // returns hydrated member rows (a hash password stays a {verify} handle, not a
   // raw digest) as `[member, role]` pairs.
-  const makeMapHandle = (entityName, fieldName, ownerId) => {
+  //
+  // When `principal` is present (the request path), `set`/`remove`/`toArray`
+  // enforce the field's `.can()` authorization BEFORE the mechanics. When
+  // `principal` is null (the trusted query API), field authz is bypassed —
+  // mirroring `mayVerb`, which also runs only in dispatch (DECISIONLOG #41).
+  // No second auth path: the field `.can` body receives the SAME `makeIs` check
+  // registry as the row grant; `has`/`get` are read primitives used inside check
+  // evaluation and stay synchronous + unguarded.
+  const makeMapHandle = (entityName, fieldName, row, principal) => {
     const table = membershipTable(entityName, fieldName);
     const ownerCol = membershipOwnerCol(entityName);
     // The side-table's owner/member columns are TEXT (ddl.mjs mapTableDDL),
@@ -249,7 +259,7 @@ export function entity(name, declaration = {}) {
     // for the same reason; the map handle does the same so a row reloaded by id
     // matches its membership (a numeric 10 stored as text '10', not '10.0',
     // and the upsert existence probe finds the prior row).
-    const oid = String(ownerId);
+    const oid = String(row.id);
     const ofDescriptor = fields[fieldName].of;
     const targetName = ofDescriptor && ofDescriptor.kind === 'value' && ofDescriptor.type === 'ref'
       ? ofDescriptor.target
@@ -270,7 +280,10 @@ export function entity(name, declaration = {}) {
       // duplicating the member. It checks existence first (the same probe the
       // effect-firing decision needs) so it does not depend on a UNIQUE
       // constraint being present on the side-table.
-      set: (memberId, { role } = {}) => {
+      set: async (memberId, { role } = {}) => {
+        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
         const mid = String(memberId);
         const db = getActiveDb();
         const existed = probe(memberId);
@@ -291,16 +304,19 @@ export function entity(name, declaration = {}) {
         }
         // fire 'added' only for a NEW member — a role update is not a fresh invite.
         if (!existed && effects) {
-          fireMapEffects('added', { member: mid, role, entity: { id: ownerId } }, fields[fieldName]);
+          fireMapEffects('added', { member: mid, role, entity: { id: row.id } }, fields[fieldName]);
         }
       },
-      remove: (memberId) => {
+      remove: async (memberId) => {
+        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
         const mid = String(memberId);
         const db = getActiveDb();
         db
           .prepare(`DELETE FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
           .run({ owner: oid, member: mid });
-        if (effects) fireMapEffects('removed', { member: mid, entity: { id: ownerId } }, fields[fieldName]);
+        if (effects) fireMapEffects('removed', { member: mid, entity: { id: row.id } }, fields[fieldName]);
       },
       has: (memberId) => probe(memberId) !== undefined,
       get: (memberId) => {
@@ -309,7 +325,10 @@ export function entity(name, declaration = {}) {
           .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
           .get({ owner: oid, member: mid }) ?? undefined;
       },
-      toArray: () => {
+      toArray: async () => {
+        if (principal && !(await mayFieldOp(record, fieldName, read, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
         const db = getActiveDb();
         const selectCols = hasRole ? `${MEMBER_COLUMN} AS member_id, role` : `${MEMBER_COLUMN} AS member_id`;
         const rows = db
@@ -322,7 +341,7 @@ export function entity(name, declaration = {}) {
     };
   };
 
-  const hydrate = (row) => {
+  const hydrate = (row, principal = null) => {
     if (!row) return row;
     for (const fieldName of hashFields) {
       const stored = row[fieldName];
@@ -343,7 +362,7 @@ export function entity(name, declaration = {}) {
       row[fieldName] = any || Object.keys(namespace).length > 0 ? namespace : null;
     }
     for (const [fieldName] of mapFields) {
-      row[fieldName] = makeMapHandle(name, fieldName, row.id);
+      row[fieldName] = makeMapHandle(name, fieldName, row, principal);
     }
     // Derived fields compute on read from the hydrated row. The `derived` function
     // receives the row (with all stored columns + hydrated handles) and returns the
@@ -403,9 +422,9 @@ export function entity(name, declaration = {}) {
   // deliberate-client-error path (a numeric status), not as an opaque 500. It
   // composes findById — the non-throwing hydrated-by-id lookup — so there is one
   // lookup mechanic, two call shapes (null on miss vs. a 404 throw).
-  record.findById = (id) => {
+  record.findById = (id, principal = null) => {
     const row = getActiveDb().prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`).get({ id });
-    return row ? hydrate(row) : null;
+    return row ? hydrate(row, principal) : null;
   };
 
   record.getOrFail = (id) => {

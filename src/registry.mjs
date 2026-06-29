@@ -84,17 +84,23 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
       const runtimeSelf = {};
       if (entityName) {
         for (const [fName, desc] of Object.entries(fields)) {
-          // For map fields, expose `.has(memberId)` that queries the membership table.
+          // For map fields, expose `.has(memberId)` and `.get(memberId)` that
+          // query the membership table. `.get` returns the raw side-table row
+          // (or undefined) so checks can inspect a member's role.
           if (desc?.kind === 'store' && desc.type === 'map') {
             const table = membershipTable(entityName, fName);
             const ownerCol = membershipOwnerCol(entityName);
+            const db = getActiveDb();
             runtimeSelf[fName] = {
               has: (memberId) => {
-                const db = getActiveDb();
-                const stmt = db.prepare(
+                return db.prepare(
                   `SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
-                );
-                return stmt.get({ owner: row.id, member: memberId }) !== undefined;
+                ).get({ owner: row.id, member: memberId }) !== undefined;
+              },
+              get: (memberId) => {
+                return db.prepare(
+                  `SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
+                ).get({ owner: row.id, member: memberId }) ?? undefined;
               },
             };
           }

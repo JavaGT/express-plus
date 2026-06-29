@@ -122,15 +122,20 @@ export const Doc = entity('Doc', {
     linkHolder:   ({ Doc, principal }) =>
                     principal.type === 'link'
                       ? Doc.linkShare.token.is(principal.attributes?.token)
-                      : never(),
+                      // At harvest time principal.id is a Symbol (PRINCIPAL_ID_TOKEN);
+                      // at runtime it is a string. `never()` returns the SQL FALSE AST
+                      // node needed for scope compilation; at runtime we need boolean
+                      // false so the grant .can body does not enter the linkHolder arm
+                      // for non-link principals.
+                      : (typeof principal.id !== 'string' ? never() : false),
     // Role lookups are runtime-only (a scalar on the collaborators payload,
     // not a compilable field-handle predicate) — so they are NEVER called in
     // `scope` (that would be a load-time error). They await via is.* inside
     // `.can` only.
-    editor: ({ entity, principal }) =>
-      entity.collaborators.get(principal.id)?.role === 'editor',
-    viewer: ({ entity, principal }) =>
-      entity.collaborators.get(principal.id)?.role === 'viewer',
+    editor: ({ Doc, principal }) =>
+      Doc.collaborators.get(principal.id)?.role === 'editor',
+    viewer: ({ Doc, principal }) =>
+      Doc.collaborators.get(principal.id)?.role === 'viewer',
   },
 
   // Grant is the single authority. `scope(...)` DECLARES read intent by calling
