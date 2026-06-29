@@ -128,6 +128,8 @@ export function entity(name, declaration = {}) {
       readScope = compileReadScope(scoped[0].predicate, {
         fields,
         where: `scope on entity('${name}')`,
+        entityName: name,
+        declaredChecks,
       });
     }
   } else if (clauses && clauses.inherit) {
@@ -295,7 +297,7 @@ export function entity(name, declaration = {}) {
       }
       if (key === 'id') return { fieldName: 'id' };
       if (Object.prototype.hasOwnProperty.call(fields, key)) {
-        return fieldHandle(key, fields[key]);
+        return fieldHandle(key, fields[key], name);
       }
       return undefined;
     },
