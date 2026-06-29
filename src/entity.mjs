@@ -231,6 +231,15 @@ export function entity(name, declaration = {}) {
     for (const [fieldName] of mapFields) {
       row[fieldName] = makeMapHandle(name, fieldName, row.id);
     }
+    // Derived fields compute on read from the hydrated row. The `derived` function
+    // receives the row (with all stored columns + hydrated handles) and returns the
+    // computed value. If the function throws, the field stays absent from the row
+    // (fail-not-open: a broken derivation doesn't block the read).
+    for (const [fieldName, descriptor] of Object.entries(fields)) {
+      if (descriptor.derived && typeof descriptor.derived === 'function') {
+        try { row[fieldName] = descriptor.derived(row); } catch { /* skip */ }
+      }
+    }
     return row;
   };
 

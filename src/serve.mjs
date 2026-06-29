@@ -148,6 +148,8 @@ function serializeRow(entity, payload) {
   const row = {};
   const { fields } = entity;
   for (const [key, descriptor] of Object.entries(fields)) {
+    // Derived fields have no stored column — they are computed on read.
+    if (descriptor.derived) continue;
     // map / store / presence / state fields are NOT stored in the main table.
     if (descriptor.kind === 'store' || descriptor.kind === 'presence' || descriptor.kind === 'state') continue;
     if (Object.hasOwn(payload, key)) {
@@ -239,6 +241,12 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
       throw err;
     }
     const updates = serializeRow(entity, payload);
+    // Touch fields auto-bump on every mutation: the client never sets them,
+    // and the framework writes the current instant server-side. The value is
+    // serialized through the field's descriptor (Date → epoch millis).
+    for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
+      if (descriptor.touch) updates[fieldName] = serializeField(descriptor, new Date());
+    }
     const cols = Object.keys(updates);
     if (cols.length > 0) {
       const setClause = cols.map((c) => `${c} = :${c}`).join(', ');

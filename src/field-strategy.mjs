@@ -280,12 +280,19 @@ export function validateMutation(entityRecord, payload) {
       );
     }
 
+    // Derived fields are computed on read — a client may not set them.
+    if (descriptor.derived) {
+      throw new ValidationError(
+        `${name}.${key} is a derived field and may not be set by the client.`,
+      );
+    }
+
     // readonly: the field's mere presence in an untrusted payload is rejected —
     // the client cannot set it; the framework assigns it server-side.
-    if (descriptor.readonly === true) {
+    if (descriptor.readonly === true || descriptor.touch === true) {
       throw new ValidationError(
-        `${name}.${key} is readonly: a client may not set or change it. It is ` +
-          `assigned server-side (e.g. from the authenticated principal).`,
+        `${name}.${key} is ${descriptor.touch ? 'a touch field' : 'readonly'}: a client may not set or ` +
+          `change it. It is assigned server-side${descriptor.touch ? ' on every mutation' : ''}.`,
       );
     }
 

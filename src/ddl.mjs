@@ -42,6 +42,8 @@ function mainTableDDL(entity) {
   if (!fields) return cols;
 
   for (const [name, descriptor] of Object.entries(fields)) {
+    // Derived fields have no stored column (computed on read).
+    if (descriptor.derived) continue;
     // Fields that are stored in the main table (value, crdt, hash, struct)
     if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash') {
       cols.push(`${name} ${sqlType(descriptor)}`);
