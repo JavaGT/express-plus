@@ -289,7 +289,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
 // shape — defers to the single error renderer and stops the chain. A handler that
 // writes the response (res.json / res.sendStatus / res.send) and does not call
 // next() ends the chain by completing the request.
-async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, query }, { env }) {
+async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, query, autoLoad }, { env }) {
   // an Express-like request facade over the node request. The raw node request
   // remains reachable for handlers that need headers; the framework surfaces the
   // already-parsed body, the matched path params, the parsed query, and the
@@ -304,6 +304,21 @@ async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, q
     method: nodeReq.method,
     url: nodeReq.url,
   };
+
+  // Entity auto-load: a route under an entity's `:<entity>Id` subtree loads the
+  // parent row and attaches it as req.<entity> (doc.mjs: req.doc). A missing row
+  // is a 404 — the parent resource the handler operates on does not exist, so the
+  // request cannot be admitted (a null req.doc would null-deref to an opaque 500
+  // otherwise). This is not a second auth path: the row grant still applies to
+  // the entity's own CRUD verbs; auto-load is a read for the handler's benefit.
+  if (autoLoad) {
+    const row = autoLoad.entity.findById(params[autoLoad.param]);
+    if (!row) {
+      renderError(nodeRes, { status: 404, message: `${autoLoad.entity.name} ${params[autoLoad.param]} not found` }, { env });
+      return;
+    }
+    req[autoLoad.key] = row;
+  }
 
   // an Express-like response facade over the node response. `status(n)` records a
   // pending code and chains; `json`/`send` flush with it (defaulting to 200);
@@ -467,7 +482,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // second auth path — the chain inherits the already-admitted principal and
       // never re-gates.
       if (route.handlers) {
-        await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams }, { env });
+        await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad }, { env });
       } else {
         await dispatch(req, res, route, principal, db, params, body, isApp ? source : null);
       }

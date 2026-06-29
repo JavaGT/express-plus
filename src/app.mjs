@@ -127,11 +127,26 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
   const routes = [];
   let resolution = null; // the in-flight/resolved finalization promise (idempotent)
 
+  // When an ENTITY-bound builder mounts a child under a `:<entityName>Id` path
+  // segment (doc.mjs: `r.use('/:docId/shares', ...)` on Doc's builder), the
+  // framework auto-loads that entity row by the path param and attaches it to
+  // `req.<entityName>` for every descendant route — so a share handler reads
+  // `req.doc` with no hand-written load boilerplate. The convention is scoped to
+  // an entity's own route subtree (a generic router mounting `:userId` does NOT
+  // auto-load), and the param name carries the link (no magic string — the
+  // entity name is the link, named in the path).
+  function makeAutoLoad(path) {
+    if (!entity || typeof entity.name !== 'string') return null;
+    const key = entity.name.toLowerCase();
+    const param = `${key}Id`;
+    return path.includes(`:${param}`) ? { param, entity, key } : null;
+  }
+
   function recordMount(path, target) {
     if (resolution) {
       throw new Error('cannot mount after routes are resolved — assemble the app before listen()');
     }
-    declarations.push({ kind: 'mount', path, target });
+    declarations.push({ kind: 'mount', path, target, autoLoad: makeAutoLoad(path) });
     return surface;
   }
 
@@ -192,7 +207,11 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
           }
         } else if (decl.kind === 'mount') {
           for (const route of await resolveMount(decl.path, decl.target)) {
-            routes.push(rebaseRoute(route, base));
+            const rebased = rebaseRoute(route, base);
+            // Stamp the entity auto-load onto every descendant route so a
+            // handler under `/:docId/shares` finds req.doc regardless of how
+            // deeply the child router nests.
+            routes.push(decl.autoLoad ? Object.freeze({ ...rebased, autoLoad: decl.autoLoad }) : rebased);
           }
         }
       }
