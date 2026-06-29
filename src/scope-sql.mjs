@@ -29,8 +29,8 @@ export const membershipOwnerCol = (entityName) => `${entityName}_id`;
 
 // A branded token the harvester injects as `principal.id` so a map `.has()` can
 // tell "this is the requesting principal → emit a rebindable principalId param"
-// from a literal value. Not exported; only the harvester mints this.
-const PRINCIPAL_ID_TOKEN = Symbol('principalId');
+// from a literal value. Exported so the registry can reference it.
+export const PRINCIPAL_ID_TOKEN = Symbol('principalId');
 
 // A typed load-time failure, sibling to UnawaitedCheckError. Raised when a scope
 // predicate cannot be lowered to SQL.
@@ -50,12 +50,12 @@ export class NonCompilableError extends Error {
 const TRUE = Object.freeze({ node: 'true' });
 const FALSE = Object.freeze({ node: 'false' });
 
-function isNode(x) {
+export function isNode(x) {
   return x !== null && typeof x === 'object' && typeof x.node === 'string';
 }
 
 // Attach the fluent combinators (.and/.not) to every node so `a.and(b)` works.
-function makeNode(props) {
+export function makeNode(props) {
   const node = { ...props };
   node.and = (other) => makeNode({ node: 'and', operands: [Object.freeze(node), other] });
   node.not = () => makeNode({ node: 'not', operand: Object.freeze(node) });
@@ -93,47 +93,31 @@ export const anyOf = (...nodes) =>
   makeNode({ node: 'and', operands: nodes.map((n) => makeNode({ node: 'not', operand: n })) }).not();
 
 // ---- the per-entity predicate builders --------------------------------------
-// `is.<role>()` emits an Eq against the FK column backing that role, comparing
-// to the logical principalId param. An undeclared role is non-compilable.
-// When `declaredChecks` is provided, a role NOT in roleFieldMap is looked up in
-// the declared checks: if it IS a declared check, invoking it returns its
-// harvested AST node (the declared check is called with a self handle keyed by
-// the entity name and a `principal: { id: principalToken }` context, and its
-// return value becomes the scope predicate node).
-function makeIsProxy(roleFields, where, { declaredChecks, entityName, fields } = {}) {
+// `is.<name>()` resolves through the REGISTRY — the same registry that produces
+// the runtime (per-row) faces for row-grant.mjs. This is the ONE check registry
+// evaluated in both modes (compile and runtime), not two independent paths.
+//
+// A name with a `harvest` face → invoke it (returns an AST node).
+// A name in the registry WITHOUT a harvest face → runtime-only, throw.
+// A name NOT in the registry at all → throw.
+function makeIsProxy(registry, where) {
   return new Proxy({}, {
-    get(_t, role) {
-      const fieldName = roleFields[role];
-      if (fieldName !== undefined) {
-        return () => makeNode({ node: 'eq', field: fieldName, param: PRINCIPAL_ID_PARAM });
-      }
-      // Not a role field — try the declared checks. A declared check receives the
-      // entity-name-keyed self handle and a principal context, invoked ONCE to
-      // harvest an AST node (never run per row).
-      if (declaredChecks && typeof declaredChecks[role] === 'function') {
-        const selfHandle = {};
-        if (fields && entityName) {
-          for (const [fName, desc] of Object.entries(fields)) {
-            selfHandle[fName] = fieldHandle(fName, desc, entityName);
-          }
+    get(_t, name) {
+      const entry = registry[name];
+      if (entry) {
+        if (entry.harvest) {
+          return () => entry.harvest();
         }
-        const entityContext = entityName ? { [entityName]: selfHandle } : {};
         return () => {
-          const result = declaredChecks[role]({
-            ...entityContext,
-            principal: { id: PRINCIPAL_ID_TOKEN },
-          });
-          if (!isNode(result)) {
-            throw new NonCompilableError(
-              `declared check '${String(role)}' returned a non-AST value`,
-              { where },
-            );
-          }
-          return result;
+          throw new NonCompilableError(
+            `check '${String(name)}' is runtime-only and cannot be used in scope ` +
+              `(it inspects a per-row payload the SQL filter never sees)`,
+            { where },
+          );
         };
       }
       return () => {
-        throw new NonCompilableError(`no role '${String(role)}' on this entity`, { where });
+        throw new NonCompilableError(`no check '${String(name)}' on this entity`, { where });
       };
     },
   });
@@ -203,11 +187,23 @@ export function fieldHandle(name, descriptor, entityName) {
               `to construct the membership table — use the entity-name handle, not 'fields'.`,
           );
         }
+        // If the value is the principal-id TOKEN (branded), emit a rebindable
+        // principalId param so bindReadScope fills it per request. A literal
+        // member id is baked into the node directly — it is NOT the requesting
+        // principal, so it must not be rebound.
+        if (value === PRINCIPAL_ID_TOKEN) {
+          return makeNode({
+            node: 'existsMembership',
+            table: tableName,
+            ownerCol,
+            param: PRINCIPAL_ID_PARAM,
+          });
+        }
         return makeNode({
           node: 'existsMembership',
           table: tableName,
           ownerCol,
-          param: PRINCIPAL_ID_PARAM,
+          value,
         });
       },
     };
@@ -266,22 +262,13 @@ function makeFieldsProxy(fields, where) {
   });
 }
 
-// Build the role→fieldName map from ref fields carrying a role.
-function roleFieldMap(fields) {
-  const map = {};
-  for (const [fieldName, descriptor] of Object.entries(fields)) {
-    if (descriptor.type === 'ref' && descriptor.role) map[descriptor.role] = fieldName;
-  }
-  return map;
-}
-
 // Harvest the AST by invoking the predicate once with the builders. Any throw is
 // re-wrapped as NonCompilableError; a non-AST return is a NonCompilableError.
-// declaredChecks and entityName thread through to makeIsProxy so declared checks
-// (e.g. is.collaborator()) can resolve through the check registry and build self
-// handles that know the owning entity name for membership table naming.
-export function harvest(predicate, { fields, where, declaredChecks, entityName }) {
-  const is = makeIsProxy(roleFieldMap(fields), where, { declaredChecks, entityName, fields });
+// The `registry` is the unified check registry (built by buildCheckRegistry) — it
+// provides both harvest AND run faces, and the scope compiler consults its harvest
+// faces exclusively.
+export function harvest(predicate, { fields, where, registry }) {
+  const is = makeIsProxy(registry, where);
   const fieldsProxy = makeFieldsProxy(fields, where);
   let ast;
   try {
@@ -351,13 +338,21 @@ export function lowerToSql(ast, ctx = {}) {
         const joinOn = `${parentAlias}.id = ${col(node.via)}`;
         return `EXISTS (SELECT 1 FROM ${node.parentName} AS ${parentAlias} WHERE ${joinOn} AND (${inner}))`;
       }
-      // A map-membership membership check: the row is admitted iff the side-table
+      // A map-membership check: the row is admitted iff the side-table
       // has a row whose owner FK points at THIS entity row AND whose member column
-      // equals the requesting principal's id (the rebindable principalId param).
+      // matches. When the node carries a `param` field, it uses the rebindable
+      // principalId param; when it carries a `value` field, the literal is baked
+      // in (not the requesting principal, so it must not be rebound per request).
       case 'existsMembership': {
         const mAlias = `j${state.n += 1}`;
-        const key = freshParam(PRINCIPAL_ID_PARAM);
-        params[key] = null;
+        if ('param' in node) {
+          const key = freshParam(node.param);
+          params[key] = null;
+          return `EXISTS (SELECT 1 FROM ${node.table} AS ${mAlias} WHERE ${mAlias}.${node.ownerCol} = ${alias}.id AND ${mAlias}.${MEMBER_COLUMN} = :${key})`;
+        }
+        // Literal value branch: bake the literal member id directly.
+        const key = freshParam(MEMBER_COLUMN);
+        params[key] = node.value;
         return `EXISTS (SELECT 1 FROM ${node.table} AS ${mAlias} WHERE ${mAlias}.${node.ownerCol} = ${alias}.id AND ${mAlias}.${MEMBER_COLUMN} = :${key})`;
       }
       default:
@@ -380,8 +375,8 @@ function lower2(ast, ctx) {
 // returning the harvested AST so a child entity can re-lower it under a join
 // alias (the inherit path). The AST is the durable artifact; the SQL is one
 // rendering of it.
-export function compileReadScope(predicate, { fields, where, declaredChecks, entityName }) {
-  const ast = harvest(predicate, { fields, where, declaredChecks, entityName });
+export function compileReadScope(predicate, { fields, where, registry }) {
+  const ast = harvest(predicate, { fields, where, registry });
   return { ...lowerToSql(ast, { where }), ast };
 }
 

@@ -24,8 +24,14 @@ import { read, write } from './grant.mjs';
 // a thrown error (fail closed) rather than a silent false.
 function makeIs(entityRecord, row, principal) {
   const is = {};
-  for (const [role, factFn] of Object.entries(entityRecord.checks)) {
-    is[role] = check(() => factFn({ entity: row, principal }), { name: role });
+  // Read from the unified registry's RUN faces — a check with no run face
+  // simply isn't present at runtime (calling it → undefined → would throw;
+  // fail-closed). The canonical home is `registry`; `checks` is a backward-
+  // compat bridge exposed on the entity record.
+  for (const [role, entry] of Object.entries(entityRecord.registry)) {
+    if (entry.run) {
+      is[role] = check(() => entry.run({ entity: row, principal }), { name: role });
+    }
   }
   return is;
 }

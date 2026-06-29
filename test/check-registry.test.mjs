@@ -1,0 +1,242 @@
+// E2-B + E2-C: the unified check registry — one source of truth for BOTH the
+// compile (scope→SQL) and runtime (per-row) faces of every named check.
+//
+// The registry is built by `buildCheckRegistry({ fields, declaredChecks, entityName })`.
+// Each entry has up to two faces: `harvest` (→ AST node, for scope compilation)
+// and `run` (→ boolean, for per-row evaluation). Three sources populate it:
+// ref-role fields (both faces), declared checks (both faces), and map-role
+// names (runtime-only). Checks that cannot compile (e.g., `is.editor()` in a
+// scope predicate) are a load-time error — fail closed, no silent fallback.
+//
+// Pair every dual-mode check with SQL-shape AND runtime-boolean tests that
+// must agree. This file tests the registry directly (unit) and via entity()
+// (integration for load-time guards).
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+
+// We import these from the production modules. buildCheckRegistry will be
+// created in the next step — for now the import fails (RED).
+import { buildCheckRegistry } from '../src/registry.mjs';
+import { setActiveDb } from '../src/db.mjs';
+import {
+  entity,
+  ref,
+  text,
+  map,
+  scope,
+  grant,
+  read,
+  anyOf,
+  NonCompilableError,
+} from '../src/index.mjs';
+import { principal, anonymous } from '../src/principal.mjs';
+
+const norm = (sql) => sql.replace(/\s+/g, ' ').trim();
+
+// ---- Test 1: owner harvest (compile face) ----
+// The registry must produce the SAME SQL as today's roleFieldMap for a ref-role
+// field — the owner check lowers to `owner = :p<n>_principalId`.
+
+test('owner check harvests to a typed-FK equality AST (same SQL as before)', () => {
+  const TodoList = entity('TodoList', {
+    fields: {
+      title: text(),
+      owner: ref('User', { role: 'owner' }),
+    },
+    grant: () => [
+      scope(({ is }) => is.owner()).can(() => grant(read)),
+    ],
+  });
+
+  const s = norm(TodoList.readScope.sql);
+  assert.match(s, /owner = :p\d+_principalId/);
+});
+
+// ---- Test 2: owner run (runtime face) ----
+// The registry's ref-role source builds BOTH faces from the ONE field declaration.
+
+test('owner check run face tests principal identity against the FK column', () => {
+  const reg = buildCheckRegistry({
+    fields: {
+      owner: ref('User', { role: 'owner' }),
+    },
+    declaredChecks: {},
+    entityName: 'Test',
+  });
+
+  // The owner entry must have BOTH faces.
+  assert.equal(typeof reg.owner.harvest, 'function');
+  assert.equal(typeof reg.owner.run, 'function');
+
+  // Own row: principal id matches the FK value → true.
+  assert.equal(reg.owner.run({ entity: { owner: 'u1' }, principal: { id: 'u1' } }), true);
+
+  // Different principal → false.
+  assert.equal(reg.owner.run({ entity: { owner: 'u1' }, principal: { id: 'u2' } }), false);
+
+  // Null FK → false (fail closed — a null owner matches no one).
+  assert.equal(reg.owner.run({ entity: { owner: null }, principal: { id: 'u1' } }), false);
+});
+
+// ---- Test 3: collaborator run (declared check with membership) ----
+// A declared check `collaborator: ({E,principal}) => E.collaborators.has(principal.id)`
+// builds BOTH faces: harvest compiles to an EXISTS, run queries the DB.
+
+test('declared check with membership runs against the real DB', () => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+
+  // Create the membership side-table that the runtime face will query.
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS TestEntity_collaborators (
+      TestEntity_id TEXT,
+      member_id TEXT,
+      role TEXT
+    )
+  `);
+  // Insert a test row: principal 'u1' is a member of entity 'L1' (role doesn't
+  // matter for the base check — the check just tests membership existence).
+  db.exec(`
+    INSERT INTO TestEntity_collaborators (TestEntity_id, member_id, role)
+    VALUES ('L1', 'u1', 'viewer')
+  `);
+
+  const reg = buildCheckRegistry({
+    fields: {
+      owner: ref('User', { role: 'owner' }),
+      // map field: generates membership table TestEntity_collaborators
+      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+    },
+    declaredChecks: {
+      collaborator: ({ TestEntity, principal }) =>
+        TestEntity.collaborators.has(principal.id),
+    },
+    entityName: 'TestEntity',
+  });
+
+  // Both faces must exist.
+  assert.equal(typeof reg.collaborator.harvest, 'function');
+  assert.equal(typeof reg.collaborator.run, 'function');
+
+  // Principal 'u1' IS a member → true.
+  assert.equal(
+    reg.collaborator.run({ entity: { id: 'L1' }, principal: { id: 'u1' } }),
+    true,
+  );
+
+  // Principal 'u2' is NOT a member → false.
+  assert.equal(
+    reg.collaborator.run({ entity: { id: 'L1' }, principal: { id: 'u2' } }),
+    false,
+  );
+
+  // Wrong entity (different row id) → false.
+  assert.equal(
+    reg.collaborator.run({ entity: { id: 'L2' }, principal: { id: 'u1' } }),
+    false,
+  );
+});
+
+// ---- Test 4: editor/viewer run (map-role, runtime-only) ----
+// Map-role names (from `map(of, { role: [...] })`) get a run face ONLY — no
+// harvest face (they inspect a per-row payload the SQL filter never sees).
+
+test('map-role names have a run face only; harvest is undefined', () => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS Doc_collaborators (
+      Doc_id TEXT,
+      member_id TEXT,
+      role TEXT
+    )
+  `);
+  // Insert a member with role='editor' (NOT 'viewer').
+  db.exec(`
+    INSERT INTO Doc_collaborators (Doc_id, member_id, role)
+    VALUES ('D1', 'u1', 'editor')
+  `);
+
+  const reg = buildCheckRegistry({
+    fields: {
+      owner: ref('User', { role: 'owner' }),
+      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+    },
+    declaredChecks: {},
+    entityName: 'Doc',
+  });
+
+  // editor entry: has run face, NO harvest face.
+  assert.equal(typeof reg.editor.run, 'function');
+  assert.equal(reg.editor.harvest, undefined);
+
+  // viewer entry: has run face, NO harvest face.
+  assert.equal(typeof reg.viewer.run, 'function');
+  assert.equal(reg.viewer.harvest, undefined);
+
+  // The principal 'u1' IS an editor → editor.run → true.
+  assert.equal(
+    reg.editor.run({ entity: { id: 'D1' }, principal: { id: 'u1' } }),
+    true,
+  );
+
+  // The principal 'u1' is NOT a viewer → viewer.run → false.
+  assert.equal(
+    reg.viewer.run({ entity: { id: 'D1' }, principal: { id: 'u1' } }),
+    false,
+  );
+});
+
+// ---- Test 5: runtime-only check used in scope → load error ----
+// A check with no harvest face (editor from map roles) used in a scope
+// predicate must throw at load time with a clear message.
+
+test('runtime-only check in scope throws at entity load', () => {
+  assert.throws(
+    () => {
+      entity('Doc', {
+        fields: {
+          owner: ref('User', { role: 'owner' }),
+          members: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+        },
+        grant: () => [
+          // is.editor() has NO harvest face — it's a runtime-only check.
+          scope(({ is }) => is.editor()).can(() => grant(read)),
+        ],
+      });
+    },
+    (err) => {
+      assert.ok(err instanceof NonCompilableError);
+      assert.match(err.message, /runtime-only|cannot be used in scope|cannot compile/i);
+      return true;
+    },
+  );
+});
+
+// ---- Test 6: unknown check name in scope → load error ----
+// A check name not in any source (ref-role, declared, map-role) must throw
+// at load time.
+
+test('unknown check name in scope throws at entity load', () => {
+  assert.throws(
+    () => {
+      entity('Bad', {
+        fields: {
+          body: text(),
+          owner: ref('User', { role: 'owner' }),
+        },
+        grant: () => [
+          scope(({ is }) => is.nope()).can(() => grant(read)),
+        ],
+      });
+    },
+    (err) => {
+      assert.ok(err instanceof NonCompilableError);
+      assert.match(err.message, /no check 'nope'|no check.*nope/i);
+      return true;
+    },
+  );
+});

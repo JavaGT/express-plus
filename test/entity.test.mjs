@@ -64,20 +64,49 @@ test('the derived role check tests principal identity against the ref column', (
   assert.equal(Note.checks.owner({ entity: row, principal: { id: 'user-2' } }), false);
 });
 
-test('a developer-declared check coexists with derived role checks', () => {
+test('redeclaring a ref-role-derived check name in checks is a load-time error (one source of truth, fail-closed)', () => {
+  // A ref field carrying `role: 'author'` IS the single source of truth for
+  // is.author(): the framework derives BOTH the SQL filter face (FK equality)
+  // and the runtime boolean face from the one field, so they cannot disagree.
+  // A `checks` entry that redeclares that name would fuse two independent
+  // definitions into one check — the split-brain (SQL says one thing, runtime
+  // another) the unified registry exists to abolish. Redeclaration is rejected
+  // at load; a developer who wants different behavior uses a different name.
+  assert.throws(
+    () => entity('Comment', {
+      fields: { body: text(), author: ref('User', { role: 'author' }) },
+      grant: () => [
+        scope(({ is }) => is.author()).can(
+          async ({ is }) => (await is.author()) ? grant(read, write, subscribe) : deny('not the author'),
+        ),
+      ],
+      checks: { author: ({ entity: row, principal }) => row.author === principal.id },
+    }),
+    /author.*cannot be redeclared|already derived/i,
+    'a checks entry colliding with a ref-role name must throw at load time',
+  );
+});
+
+test('a ref-role check resolves through ONE registry in both modes (scope SQL + runtime boolean)', () => {
+  // With ONLY the ref-role declaration (no redeclaration), is.author() is
+  // usable in BOTH faces, derived from the single field:
+  //  - scope(is.author()) compiles to a SQL row-filter (the entity loads, which
+  //    requires the harvest face to lower successfully);
+  //  - the runtime face is a boolean identity check against the ref column.
   const Comment = entity('Comment', {
     fields: { body: text(), author: ref('User', { role: 'author' }) },
-    // the grant's scope must reference a role this entity declares (author),
-    // since scope lowers to SQL at load — an undeclared role is a load error.
     grant: () => [
       scope(({ is }) => is.author()).can(
         async ({ is }) => (await is.author()) ? grant(read, write, subscribe) : deny('not the author'),
       ),
     ],
-    checks: { author: ({ entity: row, principal }) => row.author === principal.id },
   });
-  // an explicit check wins over the derived one when both name 'author'
-  assert.equal(typeof Comment.checks.author, 'function');
+  // harvest face: the scope compiled to SQL referencing the author column.
+  assert.match(Comment.readScope.sql, /author/);
+  // run face: identity of principal against the author column.
+  const row = { author: 'user-1' };
+  assert.equal(Comment.checks.author({ entity: row, principal: { id: 'user-1' } }), true);
+  assert.equal(Comment.checks.author({ entity: row, principal: { id: 'user-2' } }), false);
 });
 
 test('a grant with two scope clauses is a load-time error (one read-scope per grant, fail-closed)', () => {

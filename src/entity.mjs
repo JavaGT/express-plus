@@ -16,6 +16,7 @@ import { randomBytes } from 'node:crypto';
 import { assertGuarded } from './guard/static.mjs';
 import { compileReadScope, compileInheritScope, lowerToSql, fieldHandle } from './scope-sql.mjs';
 import { getActiveDb } from './db.mjs';
+import { buildCheckRegistry } from './registry.mjs';
 import {
   serializeField, validateMutation, verifyHash, flattenStruct, structCellColumn,
 } from './field-strategy.mjs';
@@ -25,20 +26,6 @@ import {
 // generates an unguessable token without reaching for node:crypto itself.
 function mintToken() {
   return randomBytes(24).toString('hex');
-}
-
-// Derive a role check from a ref field carrying `role`. The check is a plain
-// per-row fact comparing the principal's id against the FK column value — the
-// same shape a developer would hand-write, but derived from the one declaration.
-function deriveRoleChecks(fields) {
-  const derived = {};
-  for (const [fieldName, descriptor] of Object.entries(fields)) {
-    if (descriptor.type === 'ref' && descriptor.role) {
-      derived[descriptor.role] = ({ entity: row, principal }) =>
-        row[fieldName] === principal.id;
-    }
-  }
-  return derived;
 }
 
 // Normalize the grant declaration into an array of clauses. A grant is either a
@@ -87,9 +74,11 @@ export function entity(name, declaration = {}) {
     }
   }
 
-  // Derived role checks first, then developer-declared checks override them
-  // (an explicit check of the same name is the single source of truth).
-  const checks = Object.freeze({ ...deriveRoleChecks(fields), ...declaredChecks });
+  // Build the unified check registry — the ONE source of truth for every named
+  // check, consulted by BOTH the scope→SQL compiler (harvest face) and the
+  // per-row runtime evaluator (run face). Derived role checks (ref-role),
+  // declared checks, and map-role names all land here; no second path.
+  const registry = buildCheckRegistry({ fields, declaredChecks, entityName: name });
 
   // Statically guard every runtime `.can` body (not scope predicates — those
   // compile to SQL and never run as JS). At the same time, lower the entity's
@@ -128,8 +117,7 @@ export function entity(name, declaration = {}) {
       readScope = compileReadScope(scoped[0].predicate, {
         fields,
         where: `scope on entity('${name}')`,
-        entityName: name,
-        declaredChecks,
+        registry,
       });
     }
   } else if (clauses && clauses.inherit) {
@@ -145,7 +133,19 @@ export function entity(name, declaration = {}) {
     name,
     fields: Object.freeze({ ...fields }),
     grant,
-    checks,
+    registry,
+    // Keep a `checks` object for tests that read entity.checks.<name>(...).
+    // Each key is the RUN face — the canonical home is `registry`, but existing
+    // tests expect `checks` to expose callable functions. Built eagerly so it
+    // is a plain object (not a Proxy over a frozen target, which would throw
+    // when a get trap returns a different value from a non-writable property).
+    get checks() {
+      const checksObj = {};
+      for (const [name, entry] of Object.entries(registry)) {
+        if (entry.run) checksObj[name] = entry.run;
+      }
+      return Object.freeze(checksObj);
+    },
     routes,
     readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
     scopeAst,
