@@ -145,8 +145,18 @@ function ownerFieldOf(entity) {
 // fields are serialized; validateMutation already rejected undeclared keys.
 function serializeRow(entity, payload) {
   const row = {};
-  for (const [key, value] of Object.entries(payload)) {
-    row[key] = serializeField(entity.fields[key], value);
+  const { fields } = entity;
+  for (const [key, descriptor] of Object.entries(fields)) {
+    // map / store / presence / state fields are NOT stored in the main table.
+    if (descriptor.kind === 'store' || descriptor.kind === 'presence' || descriptor.kind === 'state') continue;
+    if (Object.hasOwn(payload, key)) {
+      row[key] = serializeField(descriptor, payload[key]);
+    } else if (Object.hasOwn(descriptor, 'default')) {
+      const def = typeof descriptor.default === 'function' ? descriptor.default() : descriptor.default;
+      row[key] = serializeField(descriptor, def);
+    }
+    // No default and not in payload → omit (SQLite stores NULL, which is correct
+    // for truly optional fields with no declared default).
   }
   return row;
 }
