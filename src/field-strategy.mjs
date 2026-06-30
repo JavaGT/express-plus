@@ -339,11 +339,17 @@ export function flattenStruct(fieldName, descriptor, value) {
 // no silent default strategy (the kind names the contract; an unknown kind is a
 // declaration error).
 export function resolveStrategy(kind) {
+  if (kind === 'ephemeral') {
+    throw new Error(
+      `ephemeral fields do not persist — no persistence strategy ` +
+        `(they engage the pace seam, not the persist seam)`,
+    );
+  }
   const strategy = STRATEGIES[kind];
   if (!strategy) {
     throw new Error(
       `unknown field kind '${kind}'. The field kinds are: ` +
-        `value, crdt, hash, store, ordered, struct, state, ephemeral.`,
+        `value, crdt, hash, store, ordered, struct, state.`,
     );
   }
   return strategy;
