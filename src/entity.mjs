@@ -28,6 +28,7 @@ import {
 } from './field-strategy.mjs';
 import { action, event } from './pipeline.mjs';
 import { generateDDL } from './ddl.mjs';
+import { validateEffectDeclaration } from './effect-compiler.mjs';
 
 // mintToken — a cryptographically random opaque session token. Handed to a
 // create policy so a framework entity that mints session-like rows (Session)
@@ -92,7 +93,7 @@ function resolveGrantClauses(grant) {
 }
 
 export function entity(name, declaration = {}) {
-  const { fields = {}, grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null } = declaration;
+  const { fields = {}, grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null, admitsEffects = null } = declaration;
 
   // Fail closed: an entity with no grant cannot be mounted (ADR #7).
   if (grant === undefined || grant === null) {
@@ -181,6 +182,17 @@ export function entity(name, declaration = {}) {
   // rendering of the AST; the AST is the durable artifact.
   const scopeAst = readScope ? readScope.ast : undefined;
 
+  // Validate declared effects at load time (but not cycle detection — that runs
+  // globally after all entities are defined). Each effect must have valid
+  // { mutate, with, when? } shape. A non-compilable 'when' predicate is a load-
+  // time error (ADR #22).
+  const validatedEffects = effects ? Object.freeze({ ...effects }) : null;
+  if (validatedEffects) {
+    for (const [triggerHandle, effect] of Object.entries(validatedEffects)) {
+      validateEffectDeclaration(effect, { triggerHandle, sourceEntityName: name });
+    }
+  }
+
   const record = {
     name,
     fields: Object.freeze({ ...fields }),
@@ -201,7 +213,8 @@ export function entity(name, declaration = {}) {
     routes,
     readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
     scopeAst,
-    effects,
+    effects: validatedEffects,
+    admitsEffects,
   };
 
   // hash-kind fields hydrate from their stored `salt:digest` cell into a

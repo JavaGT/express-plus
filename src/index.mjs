@@ -24,3 +24,4 @@ export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL } fr
 export { config } from './config.mjs';
 export { parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE } from './session.mjs';
 export { default, router } from './app.mjs';
+export { inc, dec, validateEffectDeclaration, createEffectContext, checkEffectDepth, executeEffectsForEvent, buildEffectsRegistry, verifyAdmissionHandshake, detectCrossEntityCycles, compileEntityEffects } from './effect-compiler.mjs';

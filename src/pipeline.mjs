@@ -10,6 +10,18 @@
 // state and it has nothing to fold without one — there is no second apply path
 // (AGENTS.md, one reconciliation path).
 
+// Lazy import of effect compiler (avoids circular dependency at module load time).
+// Use createRequire for dynamic import in ES module context.
+import { createRequire } from 'node:module';
+const _require = createRequire(import.meta.url);
+let _effectModule = null;
+function _getEffectModule() {
+  if (!_effectModule) {
+    _effectModule = _require('./effect-compiler.mjs');
+  }
+  return _effectModule;
+}
+
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
 export function action(type) {
@@ -30,7 +42,119 @@ export function event(type, reduce) {
   return Object.freeze({ brand: 'event', type, reduce });
 }
 
-// createServer({ handlers, authorize, db }) — the server-side mutation handler
+// ---- Shared in-txn event application core ----
+//
+// This is the core that BOTH the outer dispatch and the effect runtime use.
+// It appends events to _Log (with per-scope seq), runs projection consumers,
+// blob adopter (if any), and post-handler authorize — all inside the caller's
+// open transaction. Effects JOIN the outer txn; they do NOT re-BEGIN.
+//
+// This is the "singular system" implementation (AGENTS.md): one event-application
+// path, called by both the outer dispatch and in-txn effects (ADR #6, #22).
+
+const VERB_FROM_EVENT = Object.freeze({ created: 'create', updated: 'update', removed: 'remove' });
+
+// applyEventsToTxn(db, events, { now, actionId, nextSeq, projectionConsumers, blobAdopter, postHandlerAuthorize, principal, effectsExecutor, depth, maxEffectDepth })
+// Appends events to _Log, runs projections, blob adopt, and post-handler authorize.
+// Executes effects (if provided) and applies their target events recursively.
+// All inside the caller's open transaction — does NOT begin/commit.
+// Returns the finalized events array.
+async function applyEventsToTxn(db, events, {
+  now,
+  actionId,
+  nextSeq,
+  projectionConsumers = [],
+  blobAdopter,
+  postHandlerAuthorize,
+  principal,
+  effectsExecutor,
+  depth = 0,
+  maxEffectDepth = 8,
+} = {}) {
+  const finalizedEvents = [];
+
+  // Append events to _Log with per-scope sequence numbers
+  for (const e of events) {
+    const scope = e.scope;
+    const seq = nextSeq(scope);
+    db.prepare(
+      'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
+    ).run(scope, seq, e.type, JSON.stringify(e.data ?? {}), actionId, now);
+    finalizedEvents.push(Object.freeze({ ...e, seq, actionId, committedAt: now }));
+  }
+
+  // Projection consumers — materialize entity rows from events
+  for (const consumer of projectionConsumers) {
+    for (const ev of finalizedEvents) {
+      if (consumer.eventTypes.includes(ev.type)) {
+        consumer.apply(ev, db);
+      }
+    }
+  }
+
+  // Blob adopt (in-txn) — atomic with log append + projection writes
+  if (blobAdopter) {
+    const blobIds = new Set();
+    for (const ev of finalizedEvents) {
+      for (const id of blobAdopter.resolve(ev)) blobIds.add(id);
+    }
+    if (blobIds.size > 0) {
+      blobAdopter.adopt(db, [...blobIds]);
+    }
+  }
+
+  // In-txn post-handler row-grant hook — authorizes against the principal
+  // (for effects, this is the effect principal)
+  if (postHandlerAuthorize) {
+    for (const ev of finalizedEvents) {
+      const dotIdx = ev.type.indexOf('.');
+      if (dotIdx > 0) {
+        const entityName = ev.type.slice(0, dotIdx);
+        const suffix = ev.type.slice(dotIdx + 1);
+        const verb = VERB_FROM_EVENT[suffix];
+        if (!verb) continue;
+        const granted = await postHandlerAuthorize({
+          entityName,
+          verb,
+          principal,
+          eventType: ev.type,
+          event: ev,
+        });
+        if (!granted) {
+          throw Object.assign(new Error('forbidden'), { status: 403 });
+        }
+      }
+    }
+  }
+
+  // Execute effects (in-txn reentrancy) — ADR #6, #22
+  // Effects fire on committed events and apply their target events through
+  // the SAME in-txn path (recursive, with depth tracking).
+  if (effectsExecutor && depth < maxEffectDepth) {
+    for (const ev of finalizedEvents) {
+      const effectEvents = effectsExecutor(ev, { now, actionId, depth: depth + 1, maxEffectDepth });
+      if (effectEvents && effectEvents.length > 0) {
+        // Recursively apply effect events through the same path
+        await applyEventsToTxn(db, effectEvents, {
+          now,
+          actionId,
+          nextSeq,
+          projectionConsumers,
+          blobAdopter,
+          postHandlerAuthorize,
+          principal, // Will be effect principal for target authorization
+          effectsExecutor,
+          depth: depth + 1,
+          maxEffectDepth,
+        });
+      }
+    }
+  }
+
+  return finalizedEvents;
+}
+
+// createServer({ handlers, authorize, db, effects }) — the server-side mutation handler
 // (SPEC §7). It runs one pipeline for every action: authorize (outside the
 // transaction, Fork C — authorize BEFORE dedupe) → dedupe by action id → run the
 // handler → assign each emitted event a per-scope monotonic sequence number →
@@ -42,9 +166,10 @@ export function event(type, reduce) {
 // (backwards-compatible, for clients that don't need durability). Both paths share
 // the same shape — the persistence seam changes WHERE state lands, never HOW.
 //
-// When `db` is engaged, `dispatch` is ASYNC (authorize may be async; the handler
-// runs inside a serialized write transaction). When `db` is absent, `dispatch`
-// stays synchronous for backwards compatibility.
+// Effects (optional): pass `effects: registry` where registry is built via
+// buildEffectsRegistry(entities). Effects fire in-txn on committed CRUD events,
+// re-entering through the SAME applyEventsToTxn path (ADR #6, #22). A target grant
+// DENY rolls back the origin (in-txn atomic). Depth cap prevents runaway chains.
 //
 // `authorize` is REQUIRED and fails closed: there is no default. A default
 // `() => true` would admit every action (fail OPEN), the opposite of the route
@@ -52,7 +177,7 @@ export function event(type, reduce) {
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
 // gate + grant engine compose — it is not a second, looser auth path.
-export function createServer({ handlers = {}, authorize, db, projections: projectionConsumers = [], postHandlerAuthorize, blobAdopter, postCommitConsumers: postCommitConsumers = [] } = {}) {
+export function createServer({ handlers = {}, authorize, db, projections: projectionConsumers = [], postHandlerAuthorize, blobAdopter, postCommitConsumers: postCommitConsumers = [], effects = null } = {}) {
   if (typeof authorize !== 'function') {
     throw new Error(
       `createServer requires an authorize function. There is no default — a ` +
@@ -61,6 +186,15 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
         `authorize: ({ type, payload, principal }) => boolean.`,
     );
   }
+
+  // Build effects executor if effects registry is provided — fires effects in-txn
+  // on committed CRUD events, re-entering through applyEventsToTxn.
+  const effectsExecutor = effects
+    ? (event, { now, actionId, depth, maxDepth }) => {
+        const { executeEffectsForEvent } = _getEffectModule();
+        return executeEffectsForEvent(event, effects, { now, actionId, depth, maxDepth });
+      }
+    : null;
 
   // ---- ephemeral path (no db) — synchronous, in-memory ----
   if (!db) {
@@ -156,77 +290,24 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
     // The handler may be sync or async.
     const emitted = await handler({ payload, principal });
 
-    // Assign per-scope seq and append to the Log inside a write transaction.
+    // Apply events inside a write transaction using the shared core.
     // node:sqlite's DatabaseSync is single-writer; BEGIN/COMMIT serialize writes.
     const now = new Date().toISOString();
-    const events = [];
+    const actionIdForLog = actionId || `dispatch-${Date.now()}`;
+    let events;
 
     db.exec('BEGIN IMMEDIATE');
     try {
-      for (const e of emitted) {
-        const scope = e.scope;
-        const seq = nextSeq(scope);
-        db.prepare(
-          'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
-        ).run(scope, seq, e.type, JSON.stringify(e.data ?? {}), actionId, now);
-        events.push(Object.freeze({ ...e, seq, actionId, committedAt: now }));
-      }
-      // Projection consumers run inside the txn — entity rows are derived from
-      // committed events (Fork A: entity-as-projection). A projection failure
-      // rolls back the whole dispatch txn (atomic: log event + projected row).
-      for (const consumer of projectionConsumers) {
-        for (const ev of events) {
-          if (consumer.eventTypes.includes(ev.type)) {
-            consumer.apply(ev, db);
-          }
-        }
-      }
-      // Blob adopt (in-txn) — atomic with the log append + projection writes
-      // (spec #2). A denial below rolls back, leaving the blob 'pending' for the
-      // reaper; only a committed dispatch adopts. The kernel never owns blob
-      // field knowledge — `blobAdopter.resolve` (wired by the app from entity
-      // metadata) returns the blob ids an event references. The post-commit
-      // file rename (finalize) runs as a registered post-commit consumer below,
-      // not an inline kernel call.
-      if (blobAdopter) {
-        const blobIds = new Set();
-        for (const ev of events) {
-          for (const id of blobAdopter.resolve(ev)) blobIds.add(id);
-        }
-        if (blobIds.size > 0) {
-          blobAdopter.adopt(db, [...blobIds]);
-        }
-      }
-      // In-txn post-handler row-grant hook (spec #5). Runs after projections
-      // have written the materialized row. The entity name is parsed from the
-      // event type (e.g. 'Note.created' → entity 'Note', verb 'update' from
-      // 'Note.updated'). If postHandlerAuthorize returns false, the txn rolls
-      // back and the dispatch returns denied.
-      if (postHandlerAuthorize) {
-        // Event-type suffix → row-grant verb. An explicit closed map, NOT
-        // `.replace('d','')` (which removed the FIRST 'd' and turned 'updated'
-        // into 'upated' — silently denying every update once the hook is wired).
-        const VERB_FROM_EVENT = { created: 'create', updated: 'update', removed: 'remove' };
-        for (const ev of events) {
-          const dotIdx = ev.type.indexOf('.');
-          if (dotIdx > 0) {
-            const entityName = ev.type.slice(0, dotIdx);
-            const suffix = ev.type.slice(dotIdx + 1);
-            const verb = VERB_FROM_EVENT[suffix];
-            if (!verb) continue;            // unknown event shape → can't authorize → skip
-            const granted = await postHandlerAuthorize({
-              entityName,
-              verb,
-              principal,
-              eventType: ev.type,
-              event: ev,
-            });
-            if (!granted) {
-              throw Object.assign(new Error('forbidden'), { status: 403 });
-            }
-          }
-        }
-      }
+      events = await applyEventsToTxn(db, emitted, {
+        now,
+        actionId: actionIdForLog,
+        nextSeq,
+        projectionConsumers,
+        blobAdopter,
+        postHandlerAuthorize,
+        principal,
+        effectsExecutor,
+      });
       db.exec('COMMIT');
       // Post-commit fan-out (eng-review §D3). Consumers run AFTER commit — an
       // out-of-band effect (live WS fan-out, blob file finalize, job enqueue,
@@ -239,7 +320,7 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
       // kernel calls.
       for (const consumer of postCommitConsumers) {
         try {
-          await consumer(events, { db, actionId });
+          await consumer(events, { db, actionId: actionIdForLog });
         } catch {
           // a post-commit fan-out failure never undoes the committed dispatch
         }
