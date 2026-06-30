@@ -102,3 +102,87 @@ export function discoverDueSchedules(db, entities, now) {
   }
   return results;
 }
+
+// The expected scheduler source for a declared schedule. DERIVED from declared
+// shape (entity name + verb + field name) — never an author magic string. A
+// reaper minting a scheduler principal MUST use this same derivation so the
+// principal binds to exactly ONE declared schedule (a Blog.update source cannot
+// admit a Doc.update dispatch). This is the binding that makes a system
+// principal's authority equal to the entity's DECLARED will (not a free grant).
+export function schedulerSource(entityName, verb, fieldName) {
+  return `${entityName}.${verb}.${fieldName}`;
+}
+
+// admitScheduledMutation — IN-TXN admission for a scheduler system principal
+// (Option A, DECISIONLOG #62). Called from the dispatch spine's in-txn hook
+// (postHandlerAuthorize) ONLY for principals of kind system with attributes.source.
+// The scheduler principal is NOT a user with a row grant: its authority is the
+// entity's declared schedule. This re-checks, against the CURRENT in-txn row:
+//   (1) the principal's source binds to a declared schedule on this entity/verb;
+//   (2) the row is STILL due (TOCTOU: it was due at discovery, may not be now);
+//   (3) the compiled `while` predicate STILL holds on the current row;
+//   (4) the dispatched payload matches the `with` payload recomputed from the
+//       CURRENT row — a scheduler principal may NEVER send an arbitrary payload
+//       (else "due" = "system write-anything").
+// Admits only when ALL hold; denies (returns false) on any mismatch — fail-closed.
+// This is a SIBLING to postHandlerAuthorize's create row-grant, NOT a widened
+// admitsEffects and NOT a second auth path (same dispatch spine, branch on kind).
+export function admitScheduledMutation({ entity, verb, rowId, payload, principal, db, now }) {
+  // Fail closed: only a bound scheduler system principal reaches this gate.
+  if (!principal || typeof principal !== 'object') return false;
+  if (principal.type !== 'system') return false;
+  const source = principal.attributes?.source;
+  if (typeof source !== 'string' || source === '') return false;
+
+  // The entity must declare a schedule for this verb.
+  const trigger = entity?.schedule?.[verb];
+  if (!trigger || !trigger.fieldName) return false;
+
+  // The principal's source must bind to THIS declared schedule (derived id).
+  if (source !== schedulerSource(entity.name, verb, trigger.fieldName)) return false;
+
+  // Re-read the CURRENT row (in-txn): it may have been deleted/mutated between
+  // discovery and this dispatch. A missing row → deny (TOCTOU-safe).
+  const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(rowId);
+  if (!row) return false;
+
+  // Re-check DUE against the current row value + the original delay semantics.
+  // Date/number fields store epoch-ms integers (field-strategy.mjs serialize).
+  const fieldVal = Number(row[trigger.fieldName]);
+  if (!Number.isFinite(fieldVal)) return false;
+  const dueAt = trigger.kind === 'schedule.after' ? fieldVal + (trigger.delay ?? 0) : fieldVal;
+  if (dueAt > now) return false; // no longer due at dispatch time
+
+  // Re-check the compiled `while` predicate against the current row, using the
+  // t0 alias discoverDueSchedules/compileReadScope established. No row = while
+  // no longer holds → deny (the declared will still governs).
+  if (trigger.whileSql) {
+    const params = { ...(trigger.whileParams ?? {}), __rowId: rowId };
+    const held = db.prepare(
+      `SELECT 1 FROM ${entity.name} AS t0 WHERE t0.id = :__rowId AND (${trigger.whileSql})`,
+    ).get(params);
+    if (!held) return false;
+  }
+
+  // Recompute the declared `with` payload from the CURRENT row, then COMPARE the
+  // dispatched payload against it. The scheduler may send ONLY this payload.
+  let declaredPayload;
+  if (typeof trigger.with === 'function') {
+    declaredPayload = trigger.with({ row });
+  } else if (trigger.with && typeof trigger.with === 'object') {
+    declaredPayload = { ...trigger.with };
+  } else {
+    declaredPayload = {};
+  }
+  // Deep structural equality (values, nested objects/arrays) — a mismatched
+  // payload (a field the schedule did not declare, or a stale recomputed value)
+  // is a deny. JSON.stringify round-trip is sufficient for the payload grammar
+  // (plain objects/values; functions are not valid payload members).
+  try {
+    if (JSON.stringify(payload) !== JSON.stringify(declaredPayload)) return false;
+  } catch {
+    return false; // unserializable payload → fail closed
+  }
+
+  return true; // due + while + bound source + exact payload → admitted
+}
