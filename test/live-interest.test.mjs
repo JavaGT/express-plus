@@ -320,9 +320,9 @@ test('B1: subscribe with array fields rejects "invalid fields interest"', async 
   }
 });
 
-// --- Invariant 6: pace not yet supported ---
+// --- Invariant 6: pace now accepted (B2) — valid pace subscribes, invalid rejects ---
 
-test('B1: subscribe with pace rejects "pace not yet supported"', async () => {
+test('B2: subscribe with a valid pace is accepted (pace retired the B1 rejection)', async () => {
   const { app } = bootCanvas();
   await app.ready;
   const port = app.httpServer.address().port;
@@ -332,12 +332,35 @@ test('B1: subscribe with pace rejects "pace not yet supported"', async () => {
     ws = await openRawWS(port, 'alice');
     ws.send(JSON.stringify({
       type: 'subscribe', entity: 'Canvas', id: 'c1',
+      fields: { activeStroke: true },
       pace: { profile: '15fps' },
     }));
     const msg = await ws.nextMessage();
     assert.ok(msg, 'server must respond');
-    assert.equal(msg.type, 'error');
-    assert.match(msg.message, /pace not yet supported/i);
+    assert.equal(msg.type, 'subscribed', 'a valid pace is accepted, not rejected');
+  } finally {
+    ws?.close();
+    app.live.close();
+    app.httpServer.close();
+  }
+});
+
+test('B2: subscribe with an INVALID pace is rejected (validatePaceSelection fail-closed)', async () => {
+  const { app } = bootCanvas();
+  await app.ready;
+  const port = app.httpServer.address().port;
+  let ws;
+
+  try {
+    ws = await openRawWS(port, 'alice');
+    ws.send(JSON.stringify({
+      type: 'subscribe', entity: 'Canvas', id: 'c1',
+      fields: { activeStroke: true },
+      pace: { profile: 'no-such-profile' },
+    }));
+    const msg = await ws.nextMessage();
+    assert.ok(msg, 'server must respond');
+    assert.equal(msg.type, 'error', 'an unknown profile is rejected at subscribe time');
   } finally {
     ws?.close();
     app.live.close();

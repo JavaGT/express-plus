@@ -32,6 +32,7 @@ import { FrameSender, FrameParser, upgradeWebSocket } from './websocket.mjs';
 import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
 import { hasOwnCanGrant } from './row-grant.mjs';
+import { PACE_STRATEGIES, validatePaceSelection } from './field-pace.mjs';
 
 // Bounds on subscriptions: a single connection can't register unbounded keys
 // (memory DoS), and a scope id can't be an unbounded string (-parse/storage
@@ -64,6 +65,51 @@ export function createLiveServer(httpServer, {
   // per-conn cap is O(1) to check.
   const connSubs = new Map();
   const connections = new Set();
+
+  // Coalescing buffers for paced subscribers: Map<bufferKey, {conn, scope, field, events:Array, timer:Timeout|null}>
+  // key = `${conn.id}|${scope}|${field}` — scope = `${entity}:${id}`, field = ephemeral field name.
+  // SEPARATE from SubSpec (DECISIONLOG #69 F2: folding a draining timer into the registry value
+  // re-creates a two-lifetime smell).
+  const paceBuffers = new Map();
+
+  // Flush one paced buffer: re-auth, coalesce, send ONE envelope, then clear.
+  // Called from setTimeout. Async with internal error handling (never rejects the
+  // timer callback's returned promise).
+  async function flushPacedBuffer(key) {
+    const entry = paceBuffers.get(key);
+    if (!entry) return;
+    const { conn, scope, field, events, entityRecord, authzRow } = entry;
+    // Clear FIRST — re-entrant safety.
+    if (entry.timer !== null) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    paceBuffers.delete(key);
+    if (events.length === 0) return;
+    if (conn.closed) return;
+
+    // Re-auth (fail-closed): a thrown check or !allowed → drop the buffer silently.
+    if (mayVerb) {
+      let allowed = true;
+      try {
+        allowed = await mayVerb(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous);
+      } catch {
+        allowed = false;
+      }
+      if (!allowed) return;
+    }
+
+    // Coalesce using the ephemeral kind's logic.
+    const kind = PACE_STRATEGIES.ephemeral;
+    const coalescer = entry.by ? kind.coalescers[entry.by] : null;
+    const coalesced = coalescer ? events.reduce(coalescer) : events[events.length - 1];
+    const span = kind.reduceSpan(events);
+    const [entityName, idStr] = scope.split(':');
+    conn.send({
+      type: 'event', entity: entityName, id: idStr,
+      seq: span.seq, seqSpan: span.seqSpan, event: coalesced,
+    });
+  }
 
   // The per-scope committed seq from the kernel's `_Cursor`. Reported on subscribe
   // so a client can detect the snapshot-vs-live race: if the server's currentSeq
@@ -235,10 +281,15 @@ export function createLiveServer(httpServer, {
         fields = msg.fields;
       }
 
-      // Reject pace — deferred to B2 (P6e-1b later slice).
+      // Validate optional pace/coalescing (P6e-1b B2).
+      let pace = null;
       if (msg.pace !== undefined && msg.pace !== null) {
-        this.error('pace not yet supported');
-        return;
+        try {
+          pace = validatePaceSelection('ephemeral', msg.pace);
+        } catch (err) {
+          this.error(err.message);
+          return;
+        }
       }
 
       const principal = this.#principal ?? anonymous;
@@ -265,7 +316,7 @@ export function createLiveServer(httpServer, {
         }
         if (!allowed) { this.error('forbidden'); return; }
       }
-      addSubscription(msg.entity, idStr, this, fields);
+      addSubscription(msg.entity, idStr, this, fields, pace);
       this.send({
         type: 'subscribed', entity: msg.entity, id: msg.id,
         currentSeq: currentSeq(key),
@@ -286,11 +337,11 @@ export function createLiveServer(httpServer, {
   }
 
   // Subscription helpers
-  function addSubscription(entity, id, conn, fields = null) {
+  function addSubscription(entity, id, conn, fields = null, pace = null) {
     if (!byEntity.has(entity)) byEntity.set(entity, new Map());
     const byId = byEntity.get(entity);
     if (!byId.has(id)) byId.set(id, new Map());
-    byId.get(id).set(conn, { fields, latch: true });
+    byId.get(id).set(conn, { fields, latch: true, pace });
     let mine = connSubs.get(conn);
     if (!mine) { mine = new Set(); connSubs.set(conn, mine); }
     mine.add(`${entity}:${id}`);
@@ -329,6 +380,13 @@ export function createLiveServer(httpServer, {
       if (byId.size === 0) byEntity.delete(entity);
     }
     connSubs.delete(conn);
+    // Purge all pacing buffers for this connection (conn.id is part of buffer key).
+    for (const [bufKey, entry] of paceBuffers) {
+      if (entry.conn === conn) {
+        if (entry.timer !== null) { clearTimeout(entry.timer); entry.timer = null; }
+        paceBuffers.delete(bufKey);
+      }
+    }
   }
 
   // Fan-out: forward a committed kernel event to every authorized subscriber of
@@ -404,7 +462,49 @@ export function createLiveServer(httpServer, {
         const interest = subSpec?.fields;
         if (!interest || interest[ephemeralField] !== true) continue;
       }
-      conn.send({ type: 'event', entity: name, id, seq: committedEvent.seq, event: committedEvent });
+
+      // Determine effective pace for this subscriber + field.
+      // Only ephemeral field events may be paced; pass-through/removed events
+      // and subscribers without pace always use window=0.
+      let pace = { window: 0, by: null };
+      if (ephemeralField !== null && subSpec?.pace !== null && subSpec?.pace !== undefined) {
+        pace = subSpec.pace;
+      }
+
+      // ONE paced emit path: window=0 = pass-through (flush-on-receive, inline);
+      // window>0 = enqueue + timer (coalesced on flush).
+      if (pace.window === 0) {
+        // Pass-through: send immediately with single-event seqSpan.
+        conn.send({
+          type: 'event', entity: name, id, seq: committedEvent.seq,
+          seqSpan: [committedEvent.seq, committedEvent.seq],
+          event: committedEvent,
+        });
+      } else {
+        // Paced: enqueue into per-(conn, scope, field) buffer.
+        const scope = `${name}:${String(id)}`;
+        const bufKey = `${conn.id}|${scope}|${ephemeralField}`;
+        let entry = paceBuffers.get(bufKey);
+        if (!entry) {
+          entry = {
+            conn,
+            scope,
+            field: ephemeralField,
+            events: [],
+            timer: null,
+            by: pace.by,
+            entityRecord,
+            authzRow,
+          };
+          paceBuffers.set(bufKey, entry);
+        }
+        entry.events.push(committedEvent);
+        // Refresh authzRow with latest re-read so flush-time re-auth is current.
+        entry.authzRow = authzRow;
+        if (entry.timer === null) {
+          entry.timer = setTimeout(() => flushPacedBuffer(bufKey), pace.window);
+        }
+      }
     }
   }
 
@@ -419,6 +519,11 @@ export function createLiveServer(httpServer, {
     }
     byEntity.clear();
     connections.clear();
+    // Purge any remaining pacing buffers + timers.
+    for (const [, entry] of paceBuffers) {
+      if (entry.timer !== null) { clearTimeout(entry.timer); entry.timer = null; }
+    }
+    paceBuffers.clear();
   }
 
   // Attach the upgrade handler.
