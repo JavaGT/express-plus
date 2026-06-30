@@ -186,11 +186,39 @@ export function entity(name, declaration = {}) {
   // globally after all entities are defined). Each effect must have valid
   // { mutate, with, when? } shape. A non-compilable 'when' predicate is a load-
   // time error (ADR #22).
-  const validatedEffects = effects ? Object.freeze({ ...effects }) : null;
+  // Bind store/map effect handles to entity+field-specific event types. An effect
+  // keyed by the GENERIC map handle (`collaborators.onAdded` → 'map:onAdded') is
+  // RE-KEYED to the specific event the `.set` handle EMITS (`Doc.collaborators.
+  // added`) — otherwise the general compiler (effect-compiler.mjs buildEffectsRegistry)
+  // keys the effect under 'map:onAdded' while the handle dispatches
+  // 'Doc.collaborators.added', so the effect would never fire (consult #19/#23,
+  // UNIT 2). CRUD string-key triggers ('Note.created') + already-specific string
+  // keys pass through unchanged. The field's own onAdded/onRemoved handle is dead
+  // below (fireMapEffects retired); only the re-keyed effects object carries the
+  // binding. Each effect still validates its declared { mutate, with, when? } shape
+  // at load time (cycle/admission detection runs globally after all entities).
+  let validatedEffects = effects ? { ...effects } : null;
   if (validatedEffects) {
+    for (const [fieldName, descriptor] of Object.entries(fields)) {
+      if (descriptor.kind === 'store' && descriptor.type === 'map') {
+        const addedKey = `${name}.${fieldName}.added`;
+        const removedKey = `${name}.${fieldName}.removed`;
+        const oldAdded = descriptor.onAdded ? String(descriptor.onAdded) : null;
+        const oldRemoved = descriptor.onRemoved ? String(descriptor.onRemoved) : null;
+        if (oldAdded && Object.prototype.hasOwnProperty.call(validatedEffects, oldAdded)) {
+          validatedEffects[addedKey] = validatedEffects[oldAdded];
+          delete validatedEffects[oldAdded];
+        }
+        if (oldRemoved && Object.prototype.hasOwnProperty.call(validatedEffects, oldRemoved)) {
+          validatedEffects[removedKey] = validatedEffects[oldRemoved];
+          delete validatedEffects[oldRemoved];
+        }
+      }
+    }
     for (const [triggerHandle, effect] of Object.entries(validatedEffects)) {
       validateEffectDeclaration(effect, { triggerHandle, sourceEntityName: name });
     }
+    validatedEffects = Object.freeze(validatedEffects);
   }
 
   const record = {
@@ -248,39 +276,30 @@ export function entity(name, declaration = {}) {
   // re-enter; without one it throws (fail closed, no silent direct-SQL fallback).
   const logFields = Object.entries(fields).filter(([, d]) => d.kind === 'store' && d.type === 'log');
 
-  // Fire effects for a map field mutation. `eventName` is 'added' or 'removed'.
-  // The declared effects map is keyed by frozen event handles (like
-  // collaborators.onAdded) whose toString() produces a stable key. We match by
-  // comparing the descriptor's own handle against each effect key.
-  const fireMapEffects = (eventName, delta, mapDescriptor) => {
-    if (!effects || !mapDescriptor) return;
-    const eventHandle = eventName === 'added' ? mapDescriptor.onAdded : mapDescriptor.onRemoved;
-    if (!eventHandle) return;
-    const effect = effects[eventHandle];
-    if (effect && typeof effect.mutate?.create === 'function') {
-      const payload = typeof effect.with === 'function'
-        ? effect.with({ delta, entity: delta.entity })
-        : {};
-      try { effect.mutate.create(payload); } catch { /* fail-not-open: a broken effect doesn't roll back */ }
-    }
-  };
-
-  // makeMapHandle(entityName, fieldName, row, principal) — returns a write handle
-  // for a map field, using the ambient db for all queries. The canonical
-  // mutation is `.set(memberId, { role })` (upsert — idempotent re-share just
-  // updates the role); `.remove`, `.has`, `.get` complete the handle. `.toArray()`
-  // populates each member through its declared `of: ref(Target)` so a share list
-  // returns hydrated member rows (a hash password stays a {verify} handle, not a
-  // raw digest) as `[member, role]` pairs.
+  // makeMapHandle(entityName, fieldName, row, principal, dispatch) — returns a
+  // write handle for a map field. The canonical mutation `.set(memberId,
+  // { role })` is a committed pipeline ACTION (consult #19, UNIT 2): it RE-ENTERS
+  // dispatch as `<Entity>.<field>.add` (a new member) or `.setRole` (a role
+  // change — DECISIONLOG #57: idempotent re-share is roleChanged, NOT a fresh
+  // add, so onAdded does not re-fire); `.remove` dispatches `.remove`. The
+  // projection applies the `:added`/`:roleChanged`/`:removed` event to the
+  // side-table — the handle does NOT write the side-table directly (no second
+  // reconciliation path). A repeat share with the SAME role is a no-op (no
+  // dispatch). READS (`has`/`get`/`toArray`) stay direct-SQL (the trusted query
+  // API; a read is not a mutation, DECISIONLOG #41); `.toArray()` populates each
+  // member through `of: ref(Target)` so a share list returns hydrated member
+  // rows (a hash password stays a {verify} handle, not a raw digest) as
+  // `[member, role]` pairs.
   //
-  // When `principal` is present (the request path), `set`/`remove`/`toArray`
-  // enforce the field's `.can()` authorization BEFORE the mechanics. When
-  // `principal` is null (the trusted query API), field authz is bypassed —
-  // mirroring `mayVerb`, which also runs only in dispatch (DECISIONLOG #41).
-  // No second auth path: the field `.can` body receives the SAME `makeIs` check
-  // registry as the row grant; `has`/`get` are read primitives used inside check
-  // evaluation and stay synchronous + unguarded.
-  const makeMapHandle = (entityName, fieldName, row, principal) => {
+  // The 5th `dispatch` arg is REQUIRED for mutations (a handle hydrated without
+  // one — the trusted query API — throws on `.set`/`.remove` rather than falling
+  // back to direct SQL, which would recreate a forbidden dual path). Field-level
+  // `.can()` authorization runs BEFORE the mechanics when `principal` is present
+  // (the request path); bypassed when null (trusted query API). No second auth
+  // path: the field `.can` body receives the SAME check registry as the row
+  // grant; `has`/`get` are read primitives used inside check evaluation and stay
+  // synchronous + unguarded.
+  const makeMapHandle = (entityName, fieldName, row, principal, dispatch) => {
     const table = membershipTable(entityName, fieldName);
     const ownerCol = membershipOwnerCol(entityName);
     // The side-table's owner/member columns are TEXT (ddl.mjs mapTableDDL),
@@ -304,48 +323,61 @@ export function entity(name, declaration = {}) {
         .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
         .get({ owner: oid, member: String(memberId) });
 
+    const probeRow = (memberId) =>
+      getActiveDb()
+        .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
+        .get({ owner: oid, member: String(memberId) });
+
+    const requireDispatch = () => {
+      if (!dispatch) {
+        throw new Error(
+          `cannot mutate ${entityName}.${fieldName} without a dispatch ref ` +
+            `(hydrate with dispatch inside a handler/route)`,
+        );
+      }
+    };
+
     return {
-      // `.set` is an UPSERT — idempotent re-share updates the role rather than
-      // duplicating the member. It checks existence first (the same probe the
-      // effect-firing decision needs) so it does not depend on a UNIQUE
-      // constraint being present on the side-table.
+      // `.set(memberId, { role })` — a committed pipeline ACTION. A NEW member
+      // dispatches `<Entity>.<field>.add` (emits `:added`, fires onAdded via the
+      // compiler); an EXISTING member with a DIFFERENT role dispatches `.setRole`
+      // (emits `:roleChanged`, does NOT re-fire onAdded — DECISIONLOG #57); the
+      // SAME role is a no-op (no dispatch). The side-table is written by the
+      // projection applying the emitted event, NOT by the handle.
       set: async (memberId, { role } = {}) => {
         if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
           throw { status: 403, message: 'forbidden' };
         }
         const mid = String(memberId);
-        const db = getActiveDb();
-        const existed = probe(memberId);
-        if (existed) {
-          if (hasRole) {
-            db
-              .prepare(`UPDATE ${table} SET role = :role WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
-              .run({ owner: oid, member: mid, role: role ?? null });
-          }
-        } else {
-          const cols = [ownerCol, MEMBER_COLUMN];
-          const vals = [':owner', ':member'];
-          const params = { owner: oid, member: mid };
-          if (hasRole) { cols.push('role'); vals.push(':role'); params.role = role ?? null; }
-          db
-            .prepare(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${vals.join(', ')})`)
-            .run(params);
-        }
-        // fire 'added' only for a NEW member — a role update is not a fresh invite.
-        if (!existed && effects) {
-          fireMapEffects('added', { member: mid, role, entity: { id: row.id } }, fields[fieldName]);
-        }
+        const existing = probeRow(memberId);
+        const actionType =
+          !existing ? `${entityName}.${fieldName}.add`
+          : hasRole && existing.role !== (role ?? null) ? `${entityName}.${fieldName}.setRole`
+          : null;
+        if (actionType === null) return; // same-role repeat share: no-op
+        requireDispatch();
+        const result = await dispatch({
+          actionId: randomUUID(),
+          type: actionType,
+          payload: { owner: oid, member: mid, role },
+          principal,
+        });
+        if (!result.granted) throw { status: 403, message: 'forbidden' };
       },
       remove: async (memberId) => {
         if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
           throw { status: 403, message: 'forbidden' };
         }
         const mid = String(memberId);
-        const db = getActiveDb();
-        db
-          .prepare(`DELETE FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
-          .run({ owner: oid, member: mid });
-        if (effects) fireMapEffects('removed', { member: mid, entity: { id: row.id } }, fields[fieldName]);
+        if (!probe(memberId)) return; // idempotent remove: nothing to dispatch
+        requireDispatch();
+        const result = await dispatch({
+          actionId: randomUUID(),
+          type: `${entityName}.${fieldName}.remove`,
+          payload: { owner: oid, member: mid },
+          principal,
+        });
+        if (!result.granted) throw { status: 403, message: 'forbidden' };
       },
       has: (memberId) => probe(memberId) !== undefined,
       get: (memberId) => {
@@ -542,7 +574,7 @@ export function entity(name, declaration = {}) {
       row[fieldName] = any || Object.keys(namespace).length > 0 ? namespace : null;
     }
     for (const [fieldName] of mapFields) {
-      row[fieldName] = makeMapHandle(name, fieldName, row, principal);
+      row[fieldName] = makeMapHandle(name, fieldName, row, principal, dispatch);
     }
     for (const [fieldName] of orderedFields) {
       row[fieldName] = makeOrderedListHandle(name, fieldName, row, principal);
@@ -700,9 +732,43 @@ export function entity(name, declaration = {}) {
       `${name}.removed`,
       // each log field's append event → side-table INSERT (consult #19)
       ...logFields.map(([fieldName]) => `${name}.${fieldName}.appended`),
+      // each map field's store events → side-table INSERT/UPDATE/DELETE (consult
+      // #19, UNIT 2: store mutations are committed pipeline actions; the handle
+      // dispatches, the projection applies — one reconciliation path).
+      ...mapFields.flatMap(([fieldName]) => [
+        `${name}.${fieldName}.added`,
+        `${name}.${fieldName}.roleChanged`,
+        `${name}.${fieldName}.removed`,
+      ]),
     ],
     apply: (event, db) => {
       const table = name;
+      // map store events: the owning entity's membership side-table is mutated
+      // by the projection applying the `:added`/`:roleChanged`/`:removed` event
+      // the `.set`/`.remove` handle dispatched.
+      for (const [mapField, descriptor] of mapFields) {
+        const sideTable = membershipTable(name, mapField);
+        const ownerCol = membershipOwnerCol(name);
+        const hasRole = Array.isArray(descriptor.roles) && descriptor.roles.length > 0;
+        if (event.type === `${name}.${mapField}.added`) {
+          const cols = [ownerCol, MEMBER_COLUMN];
+          const vals = [':owner', ':member'];
+          const params = { owner: String(event.data?.owner), member: String(event.data?.member) };
+          if (hasRole) { cols.push('role'); vals.push(':role'); params.role = event.data?.role ?? null; }
+          db.prepare(`INSERT INTO ${sideTable} (${cols.join(', ')}) VALUES (${vals.join(', ')})`).run(params);
+          return;
+        }
+        if (event.type === `${name}.${mapField}.roleChanged` && hasRole) {
+          db.prepare(`UPDATE ${sideTable} SET role = :role WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
+            .run({ owner: String(event.data?.owner), member: String(event.data?.member), role: event.data?.role ?? null });
+          return;
+        }
+        if (event.type === `${name}.${mapField}.removed`) {
+          db.prepare(`DELETE FROM ${sideTable} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
+            .run({ owner: String(event.data?.owner), member: String(event.data?.member) });
+          return;
+        }
+      }
       // log append: `<Entity>.<field>.appended` → INSERT a side-table row for
       // the minted entry id + the declared entry sub-fields (serialized). The
       // owner becomes the owning entity's FK (the row the log hangs off of).
@@ -803,6 +869,11 @@ export function entity(name, declaration = {}) {
     // of). Field-level `.can()` authz runs in the HANDLE (the convenient-API
     // path); a direct dispatch is trusted server code (parity with create).
     ...appendLogHandlers(name, fields, logFields),
+    // map mutations: `<Entity>.<field>.add`/`.setRole`/`.remove` → emit
+    // `:added`/`:roleChanged`/`:removed`. The handle's existence probe has
+    // already decided which action to dispatch (add vs roleChanged vs no-op),
+    // so the handler trusts that + emits (consult #19, UNIT 2).
+    ...mapMutateHandlers(name, fields, mapFields),
   });
 
   function ownerFieldOf(entity) {
@@ -840,6 +911,58 @@ export function entity(name, declaration = {}) {
           type: `${entityName}.${logField}.appended`,
           scope: `${entityName}:${owner}`,
           data: { owner, id, ...entry },
+        }];
+      };
+    }
+    return handlers;
+  }
+
+  // Map mutation handlers. A map `.set`/`.remove` is a committed pipeline action
+  // (consult #19, UNIT 2): the handle's existence probe decides add vs roleChanged
+  // vs no-op, then dispatches `${entityName}.${field}.add`/`.setRole`/`.remove`.
+  // The handler validates owner + member are present (fail closed) and emits
+  // `${entityName}.${field}.added`/`.roleChanged`/`.removed`; the projection
+  // applies the event to the side-table. Spread into crudHandlers so a dispatched
+  // map action lands in one handler map alongside create/update/remove/log-append.
+  function mapMutateHandlers(entityName, fields, mapFieldEntries) {
+    const handlers = {};
+    for (const [mapField, descriptor] of mapFieldEntries) {
+      const hasRole = Array.isArray(descriptor.roles) && descriptor.roles.length > 0;
+      const requireOwnerMember = (payload) => {
+        const { owner, member } = payload ?? {};
+        if (owner == null || member == null) {
+          throw Object.assign(
+            new Error(`${entityName}.${mapField} action requires owner + member`),
+            { status: 400 },
+          );
+        }
+        return { owner: String(owner), member: String(member) };
+      };
+      handlers[`${entityName}.${mapField}.add`] = ({ payload }) => {
+        const { owner, member } = requireOwnerMember(payload);
+        return [{
+          type: `${entityName}.${mapField}.added`,
+          scope: `${entityName}:${owner}`,
+          data: { owner, member, role: hasRole ? (payload.role ?? null) : undefined },
+        }];
+      };
+      handlers[`${entityName}.${mapField}.setRole`] = ({ payload }) => {
+        const { owner, member } = requireOwnerMember(payload);
+        if (!hasRole) {
+          throw Object.assign(new Error(`${entityName}.${mapField}.setRole on a role-less map`), { status: 400 });
+        }
+        return [{
+          type: `${entityName}.${mapField}.roleChanged`,
+          scope: `${entityName}:${owner}`,
+          data: { owner, member, role: payload.role ?? null },
+        }];
+      };
+      handlers[`${entityName}.${mapField}.remove`] = ({ payload }) => {
+        const { owner, member } = requireOwnerMember(payload);
+        return [{
+          type: `${entityName}.${mapField}.removed`,
+          scope: `${entityName}:${owner}`,
+          data: { owner, member },
         }];
       };
     }

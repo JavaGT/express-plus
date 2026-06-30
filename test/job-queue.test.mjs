@@ -171,3 +171,60 @@ test('jobs are claimed in enqueue order (oldest first, FIFO)', () => {
   assert.deepEqual([a.payload.n, b.payload.n, c.payload.n].map(String), ['1', '2', '3'], 'claimed oldest-first');
   db.close();
 });
+
+test('reaper does not revoke an actively-heartbeating worker (heartbeat bumps _Worker.lastHeartbeat)', () => {
+  // Regression: heartbeat() used to update only _Job (status/leaseUntil), never
+  // _Worker.lastHeartbeat — which the reaper uses to revoke workers. So an
+  // active worker was revoked heartbeatGraceMs after REGISTRATION regardless of
+  // heartbeats → bearer rejected → its in-flight job reassigned to another
+  // worker (duplicate execution).
+  let t = 10_000;
+  const now = () => t;
+  const { db, queue } = freshQueue({ leaseMs: 100_000, heartbeatGraceMs: 3000, now });
+  const { workerId, token } = queue.registerWorker(SECRET); // lastHeartbeat = 10000
+  queue.enqueue({ kind: 'k', payload: {} });
+  const job = queue.claim(workerId);
+  // Worker stays alive by heartbeating its job.
+  t = 17_000;
+  assert.equal(queue.heartbeat(job.id, workerId, { now }), true, 'heartbeat accepted');
+  // reg-time (10000) is 9000ms in the past (> grace); the heartbeat (17000) is
+  // only 2000ms ago (< grace 3000). An active worker must NOT be revoked at t=19000.
+  t = 19_000;
+  const { revoked } = queue.reap({ now });
+  assert.equal(revoked, 0, 'an actively-heartbeating worker must not be revoked');
+  assert.equal(queue.authenticate(`${workerId}.${token}`), workerId, 'bearer still valid after reap');
+  const row = db.prepare('SELECT lastHeartbeat FROM _Worker WHERE id=?').get(workerId);
+  assert.equal(row.lastHeartbeat, 17_000, 'heartbeat must bump the worker lastHeartbeat');
+  db.close();
+});
+
+test('result: a non-owner cannot ack an already-terminal job (owner-only idempotent no-op)', () => {
+  // Regression: the terminal short-circuit returned {accepted:true,noop:true}
+  // WITHOUT verifying the submitter owns the job — so a non-owner probing
+  // someone else's terminal job got an accepting ack (info-leak + wrong ack).
+  const { queue, db } = freshQueue();
+  const w1 = queue.registerWorker(SECRET);
+  const w2 = queue.registerWorker(SECRET);
+  queue.enqueue({ kind: 'k', payload: {} });
+  const job = queue.claim(w1.workerId);
+  // owner completes
+  assert.deepEqual(
+    queue.submitResult(job.id, w1.workerId, { status: 'completed', output: { ok: true } }),
+    { accepted: true, noop: false },
+  );
+  // owner retry → idempotent no-op ack (first terminal wins, output not overwritten)
+  assert.deepEqual(
+    queue.submitResult(job.id, w1.workerId, { status: 'completed', output: { evil: true } }),
+    { accepted: true, noop: true },
+    'owner retry is an idempotent no-op',
+  );
+  const row = db.prepare('SELECT payload FROM _Job WHERE id=?').get(job.id);
+  assert.equal(JSON.parse(row.payload).ok, true, 'terminal output NOT overwritten by owner retry');
+  // non-owner probing the terminal job → REJECTED, never a noop ack
+  assert.deepEqual(
+    queue.submitResult(job.id, w2.workerId, { status: 'failed', output: { x: 1 } }),
+    { accepted: false },
+    'non-owner must not get an accepting ack for someone else\'s terminal job',
+  );
+  db.close();
+});

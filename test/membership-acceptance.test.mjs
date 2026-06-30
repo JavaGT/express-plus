@@ -41,6 +41,8 @@ import {
   subscribe,
   deny,
   anyOf,
+  createServer,
+  executeFrameworkDDL,
 } from '../src/index.mjs';
 import { principal } from '../src/principal.mjs';
 
@@ -77,6 +79,25 @@ function seed() {
   return db;
 }
 
+async function seedWithServer() {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE TodoList (id TEXT PRIMARY KEY, title TEXT, owner TEXT)');
+  db.exec(
+    'CREATE TABLE TodoList_collaborators (TodoList_id TEXT, member_id TEXT, role TEXT)',
+  );
+  const TodoList = buildTodoListEntity();
+  const server = await createServer({
+    db,
+    handlers: TodoList.crudHandlers,
+    projections: [TodoList.projection],
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+  return { db, TodoList, server };
+}
+
 // Seed an owned row the trusted server-side way. `owner` is readonly, so a
 // client `create({ owner })` is (correctly) rejected — the HTTP create path
 // assigns owner server-side from the principal. A test is trusted server code,
@@ -89,6 +110,15 @@ function seedOwnedRow(db, TodoList, { title, owner }) {
     .prepare('INSERT INTO TodoList (id, title, owner) VALUES (:id, :title, :owner)')
     .run({ id, title, owner });
   return TodoList.getOrFail(id);
+}
+
+// Seed an owned row with dispatch-hydrated handle for mutation tests.
+function seedOwnedRowWithDispatch({ db, TodoList, server }, { title, owner }) {
+  const id = randomUUID();
+  db
+    .prepare('INSERT INTO TodoList (id, title, owner) VALUES (:id, :title, :owner)')
+    .run({ id, title, owner });
+  return TodoList.hydrate({ id }, null, server.dispatch);
 }
 
 // Helper: which rows does the SCOPE SQL admit for this principal?
@@ -116,14 +146,14 @@ test('owner is admitted by BOTH the scope filter and the runtime .can', async ()
   assert.equal(await mayVerb(TodoList, 'read', row, owner), true);
 });
 
-test('a collaborator (membership row) is admitted by BOTH layers', async () => {
-  const db = seed();
-  const TodoList = buildTodoListEntity();
+test('a collaborator (membership row) is admitted by BOTH layers', async (t) => {
+  const { db, TodoList, server } = await seedWithServer();
+  t.after(() => db.close());
 
-  const row = seedOwnedRow(db, TodoList, { title: 'shared', owner: 'owner-1' });
+  const row = seedOwnedRowWithDispatch({ db, TodoList, server }, { title: 'shared', owner: 'owner-1' });
   // Add a collaborator THROUGH the row write handle (E2-E), not raw SQL — this
   // also proves the write path and the read/scope paths share one table shape.
-  row.collaborators.set('member-1', { role: 'editor' });
+  await row.collaborators.set('member-1', { role: 'editor' });
 
   const member = principal({ type: 'user', id: 'member-1' });
 
@@ -148,12 +178,12 @@ test('a non-member is denied by BOTH layers (the two agree)', async () => {
   assert.equal(await mayVerb(TodoList, 'read', row, stranger), false);
 });
 
-test('removing a collaborator revokes BOTH layers (scope + .can)', async () => {
-  const db = seed();
-  const TodoList = buildTodoListEntity();
+test('removing a collaborator revokes BOTH layers (scope + .can)', async (t) => {
+  const { db, TodoList, server } = await seedWithServer();
+  t.after(() => db.close());
 
-  const row = seedOwnedRow(db, TodoList, { title: 'shared', owner: 'owner-1' });
-  row.collaborators.set('member-1', { role: 'viewer' });
+  const row = seedOwnedRowWithDispatch({ db, TodoList, server }, { title: 'shared', owner: 'owner-1' });
+  await row.collaborators.set('member-1', { role: 'viewer' });
 
   const member = principal({ type: 'user', id: 'member-1' });
   // Admitted while a member.
@@ -161,7 +191,7 @@ test('removing a collaborator revokes BOTH layers (scope + .can)', async () => {
   assert.equal(await mayVerb(TodoList, 'read', row, member), true);
 
   // Revoke membership through the same handle.
-  row.collaborators.remove('member-1');
+  await row.collaborators.remove('member-1');
 
   // Now denied by BOTH layers — they revoke together.
   assert.deepEqual(scopedRowIds(db, TodoList, member), []);

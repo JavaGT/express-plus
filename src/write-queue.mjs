@@ -62,9 +62,13 @@ export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.n
     const timeout = new Promise((_, reject) => {
       setTimeout(() => {
         if (!acquired) {
+          // Set cancelled and reject fast (client gets 503 immediately). Do NOT
+          // decrement `waiters` or releaseNext here — the lock-chain's
+          // `if (cancelled)` branch does both, exactly once, when the held lock
+          // releases. The waiters counter over-reports a dead waiter until then
+          // (fail-closed: maxDepth guard trips earlier under starvation, never
+          // later), avoiding the double-decrement drift that weakened it.
           cancelled = true;
-          waiters--;
-          releaseNext();
           const err = new Error('write queue: wait timeout');
           err.status = 503;
           reject(err);

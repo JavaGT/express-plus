@@ -1,7 +1,6 @@
 // E2-E: map field write API on a loaded row.
 // A map field (e.g. collaborators) exposes add/remove/has on the hydrated row
 // instance, writing to a side-table named <Entity>_<field>.
-// The framework does NOT generate DDL; the test harness creates tables manually.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,31 +15,12 @@ import {
   scope,
   grant,
   read,
+  createServer,
+  executeFrameworkDDL,
 } from '../src/index.mjs';
 import { ValidationError } from '../src/field-strategy.mjs';
 
 // ---- Setup ----------------------------------------------------------------
-
-const db = new DatabaseSync(':memory:');
-setActiveDb(db);
-
-// Main entity table.
-db.exec(`
-  CREATE TABLE IF NOT EXISTS TodoList (
-    id TEXT PRIMARY KEY,
-    title TEXT,
-    owner TEXT
-  )
-`);
-
-// Membership side-table for the map field.
-db.exec(`
-  CREATE TABLE IF NOT EXISTS TodoList_collaborators (
-    TodoList_id TEXT,
-    member_id TEXT,
-    role TEXT
-  )
-`);
 
 const TodoList = entity('TodoList', {
   fields: {
@@ -53,12 +33,43 @@ const TodoList = entity('TodoList', {
   ],
 });
 
+async function setup() {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  executeFrameworkDDL(db);
+  // Manual DDL: role column is nullable (matches old test, allows .set without role)
+  db.exec(`CREATE TABLE IF NOT EXISTS TodoList (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    owner TEXT
+  )`);
+  db.exec(`CREATE TABLE IF NOT EXISTS TodoList_collaborators (
+    TodoList_id TEXT,
+    member_id TEXT,
+    role TEXT
+  )`);
+  const server = await createServer({
+    db,
+    handlers: TodoList.crudHandlers,
+    projections: [TodoList.projection],
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+  return { db, server };
+}
+
+// hydrate threading the dispatch ref (3rd arg)
+function listWith(server, id) {
+  return TodoList.hydrate({ id }, null, server.dispatch);
+}
+
 // ---- Test 1: write API (add / has) on a loaded row -----------------------
 
-test('loaded row map field add and has', async () => {
+test('loaded row map field add and has', async (t) => {
+  const { db, server } = await setup();
+  t.after(() => db.close());
   const created = TodoList.create({ title: 'Buy groceries', owner: 'u1' });
-  // Reload through getOrFail so we get a hydrated row.
-  const list = TodoList.getOrFail(created.id);
+  const list = listWith(server, created.id);
 
   assert.ok(list.collaborators, 'map field should exist on hydrated row');
   assert.equal(typeof list.collaborators.set, 'function', 'set should be a function');
@@ -73,9 +84,11 @@ test('loaded row map field add and has', async () => {
 
 // ---- Test 2: set without role, remove, has false after remove -------------
 
-test('set without role stores null; remove then has returns false', async () => {
+test('set without role stores null; remove then has returns false', async (t) => {
+  const { db, server } = await setup();
+  t.after(() => db.close());
   const created = TodoList.create({ title: 'Chores', owner: 'u1' });
-  const list = TodoList.getOrFail(created.id);
+  const list = listWith(server, created.id);
 
   // set with no role
   await list.collaborators.set('u4');
@@ -88,9 +101,11 @@ test('set without role stores null; remove then has returns false', async () => 
 
 // ---- Test 3: the side-table actually got the row --------------------------
 
-test('side-table row written correctly', async () => {
+test('side-table row written correctly', async (t) => {
+  const { db, server } = await setup();
+  t.after(() => db.close());
   const created = TodoList.create({ title: 'Side table check', owner: 'u1' });
-  const list = TodoList.getOrFail(created.id);
+  const list = listWith(server, created.id);
   await list.collaborators.set('u5', { role: 'viewer' });
 
   const row = db.prepare(

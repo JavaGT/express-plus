@@ -132,6 +132,14 @@ export function createJobQueue({
          SET status = ?, leaseUntil = ?
        WHERE id = ? AND workerId = ? AND status IN (?, ?)`,
     ).run(STATES.RUNNING, t + leaseMs, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
+    if (res.changes > 0) {
+      // Keep the OWNING worker alive too: the reaper revokes workers by
+      // _Worker.lastHeartbeat, not by job lease. A heartbeat that extended
+      // only the job lease would let an active worker be revoked
+      // (heartbeatGraceMs after registration) → its bearer rejected → the
+      // in-flight job reassigned to another worker (duplicate execution).
+      db.prepare('UPDATE _Worker SET lastHeartbeat = ? WHERE id = ?').run(t, workerId);
+    }
     return res.changes > 0;
   }
 
@@ -143,10 +151,13 @@ export function createJobQueue({
     if (status !== STATES.COMPLETED && status !== STATES.FAILED) {
       throw new Error('submitResult: status must be completed or failed');
     }
-    const current = db.prepare('SELECT status, payload FROM _Job WHERE id = ?').get(jobId);
+    const current = db.prepare('SELECT status, payload, workerId FROM _Job WHERE id = ?').get(jobId);
     if (!current) return { accepted: false };
     if (TERMINAL.has(current.status)) {
-      return { accepted: true, noop: true };
+      // Idempotent retry: only the OWNING worker gets the no-op ack. A non-owner
+      // probing someone else's terminal job is rejected — no accepting ack and no
+      // confirmation that the job is terminal.
+      return current.workerId === workerId ? { accepted: true, noop: true } : { accepted: false };
     }
     const res = db.prepare(
       `UPDATE _Job SET status = ?, payload = ?

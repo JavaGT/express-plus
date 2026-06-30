@@ -1,10 +1,15 @@
 // Map handle: `.set` upsert + `.toArray()` FK population.
 //
-// `.set(memberId, { role })` is the canonical map mutation (the binding
-// exemplars doc.mjs/gdoc.mjs use it for share routes). It is an UPSERT: a
-// repeat share updates the role instead of duplicating the member, and fires
-// the 'added' effect only on a genuinely new member. `.toArray()` populates
-// each member through the declared `of: ref('User')` so the share list returns
+// `.set(memberId, { role })` is the canonical map mutation (the binding exemplars
+// doc.mjs/gdoc.mjs use it for share routes). It is a committed pipeline ACTION
+// (consult #19): `.set` RE-ENTERS dispatch as `<Entity>.<field>.add` (a new
+// member) or `.setRole` (a role change — DECISIONLOG #57: idempotent re-share is
+// roleChanged, NOT a fresh add so onAdded does not re-fire); `.remove` dispatches
+// `.remove`; the projection applies the `:added`/`:roleChanged`/`:removed` event
+// to the side-table. The handle needs a `dispatch` ref (threaded via hydrate); a
+// repeat share with the SAME role is a no-op (no dispatch). READS (has/get/
+// toArray) stay direct-SQL (trusted-query, DECISIONLOG #41). `.toArray()`
+// populates each member through `of: ref('User')` so the share list returns
 // hydrated member rows — a hash password stays a {verify} handle, not a raw
 // digest leaking into the response.
 
@@ -12,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { entity, text, ref, map, hash, grant, read, generateDDL } from '../src/index.mjs';
+import { entity, text, ref, map, hash, grant, read, generateDDL, createServer, executeFrameworkDDL } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 // A User with a hash password — the security reason toArray must hydrate.
@@ -30,9 +35,10 @@ const Doc = entity('Doc', {
   grant: () => grant(read),
 });
 
-function setup() {
+async function setup() {
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
+  executeFrameworkDDL(db);
   for (const sql of generateDDL(User)) db.exec(sql);
   for (const sql of generateDDL(Doc)) db.exec(sql);
   db.prepare("INSERT INTO User (id, username, password) VALUES ('1', 'alice', 'salt:digest')")
@@ -40,18 +46,31 @@ function setup() {
   db.prepare("INSERT INTO User (id, username, password) VALUES ('2', 'bob', 'salt:digest2')")
     .run();
   db.prepare("INSERT INTO Doc (id, title, owner) VALUES ('10', 'Hello', '1')").run();
-  return db;
+  const server = await createServer({
+    db,
+    handlers: Doc.crudHandlers,
+    projections: [Doc.projection],
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+  return { db, server };
 }
 
-test('.set adds a new member and fires nothing extra on a repeat (upsert)', async () => {
-  const db = setup();
-  const doc = Doc.getOrFail('10');
+// hydrate threading the dispatch ref (3rd arg); principal null = trusted query
+// API (mayFieldOp bypassed — mirrors the log-field handle test).
+function docWith(server, id) {
+  return Doc.hydrate({ id }, null, server.dispatch);
+}
+
+test('.set adds a new member; a role change updates the role (no duplicate row)', async () => {
+  const { db, server } = await setup();
+  const doc = docWith(server, '10');
 
   await doc.collaborators.set('2', { role: 'viewer' });
   assert.equal(doc.collaborators.has('2'), true);
   assert.equal(doc.collaborators.get('2').role, 'viewer');
 
-  // Repeat share updates the role — no duplicate row.
+  // Role change → roleChanged UPDATE (idempotent re-share), NOT a fresh add.
   await doc.collaborators.set('2', { role: 'editor' });
   const members = db.prepare('SELECT member_id FROM Doc_collaborators WHERE Doc_id = 10').all();
   assert.equal(members.length, 1, 'no duplicate member row');
@@ -59,8 +78,8 @@ test('.set adds a new member and fires nothing extra on a repeat (upsert)', asyn
 });
 
 test('.toArray() populates members as hydrated [member, role] pairs', async () => {
-  setup();
-  const doc = Doc.getOrFail('10');
+  const { server } = await setup();
+  const doc = docWith(server, '10');
   await doc.collaborators.set('2', { role: 'viewer' });
 
   const rows = await doc.collaborators.toArray();
@@ -84,9 +103,17 @@ test('.toArray() with no registered target returns [null, role] pairs (graceful 
   });
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
+  executeFrameworkDDL(db);
   for (const sql of generateDDL(Phantom)) db.exec(sql);
   db.prepare("INSERT INTO Phantom (id, tag) VALUES ('1', 'p')").run();
-  const row = Phantom.getOrFail('1');
+  const server = await createServer({
+    db,
+    handlers: Phantom.crudHandlers,
+    projections: [Phantom.projection],
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+  const row = Phantom.hydrate({ id: '1' }, null, server.dispatch);
   await row.members.set('m1');
   const rows = await row.members.toArray();
   assert.deepEqual(rows, [[null, null]]);

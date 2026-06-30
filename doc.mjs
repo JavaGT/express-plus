@@ -198,7 +198,10 @@ export const Doc = entity('Doc', {
   effects: {
     [collaborators.onAdded]: {
       mutate: Inbox,
-      with: ({ delta, entity }) => ({ recipient: delta.member, doc: entity.id, kind: 'invite' }),
+      // `with` runs over { delta, origin }: delta is the :added event data
+      // ({owner, member, role}); origin is the triggering row ({id: <owner>})
+      // — the canonical effect contract (consult #22, ADR #6).
+      with: ({ delta, origin }) => ({ recipient: delta.member, doc: origin.id, kind: 'invite' }),
     },
   },
 

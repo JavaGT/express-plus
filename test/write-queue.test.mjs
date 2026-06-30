@@ -277,19 +277,74 @@ test('custom now() is used for timeout measurement', async () => {
 test('sync fn works correctly', async () => {
   const q = createWriteQueue();
   const results = [];
-  
+
   const r1 = q.run(() => {
     results.push('sync1');
     return 10;
   });
-  
+
   const r2 = q.run(() => {
     results.push('sync2');
     return 20;
   });
-  
+
   assert.strictEqual(r1, 10);
   const r2Val = await r2;
   assert.strictEqual(r2Val, 20);
   assert.deepStrictEqual(results, ['sync1', 'sync2']);
+});
+
+test('timeouts do not drift depth negative (one decrement per waiter)', async () => {
+  // Regression: a timed-out waiter used to decrement `waiters` twice — once in
+  // the timeout callback and again in the lock-chain's `if (cancelled)` branch
+  // (which runs when the held lock releases). N timeouts → depth drifts to -N,
+  // so the bounded-depth → 503 guard (`waiters + 1 >= maxDepth`) weakens over
+  // time and never trips — a starvation DoS vector.
+  const maxWaitMs = 20;
+  const q = createWriteQueue({ maxWaitMs });
+  let resolveFn1;
+  const fn1Done = new Promise((r) => { resolveFn1 = r; });
+
+  const p1 = q.run(async () => { await fn1Done; return 'fn1'; });
+
+  // 4 waiters; each should time out while fn1 holds the lock.
+  const rejected = [];
+  for (let i = 0; i < 4; i++) {
+    rejected.push(
+      q.run(async () => `fn${i + 2}`).then(
+        () => { throw new Error(`waiter ${i} should have timed out`); },
+        (err) => { assert.strictEqual(err.status, 503); return true; },
+      ),
+    );
+  }
+  await Promise.all(rejected);
+
+  // Release fn1 so the lock chain drains the (already-cancelled) waiters — the
+  // branch where the second (buggy) decrement fired.
+  resolveFn1();
+  await p1;
+  await delay(5);
+
+  assert.strictEqual(q.depth, 0, `depth should settle to 0, got ${q.depth}`);
+  assert.ok(q.depth >= 0, `depth went negative (drift): ${q.depth}`);
+
+  // The guard must still trip after timeouts: a fresh set of waiters, all
+  // exceeding maxDepth, must reject with 503 (no under-counting).
+  const q2 = createWriteQueue({ maxWaitMs: 20, maxDepth: 3 });
+  let resolveHeld;
+  const held = new Promise((r) => { resolveHeld = r; });
+  q2.run(async () => { await held; return 'held'; });
+  let timedOut = 0;
+  const wave = [];
+  for (let i = 0; i < 6; i++) {
+    wave.push(
+      q2.run(async () => `w${i}`).then(
+        () => { throw new Error(`w${i} should 503`); },
+        (err) => { if (err.status === 503) timedOut++; return true; },
+      ),
+    );
+  }
+  await Promise.all(wave);
+  assert.ok(timedOut > 0, 'maxDepth guard should reject after timeout drift');
+  resolveHeld();
 });

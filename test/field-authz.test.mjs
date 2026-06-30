@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { executeDDL, User, Inbox } from '../src/index.mjs';
+import expressPlus, { executeDDL, User, Inbox, createServer, executeFrameworkDDL } from '../src/index.mjs';
 import { Doc } from '../doc.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -153,9 +153,10 @@ test('Owner can manage collaborators (regression guard)', async () => {
   }
 });
 
-test('Trusted query API (no principal) bypasses field authz (mechanics)', async () => {
+test('Trusted query API (no principal) bypasses field authz (mechanics)', async (t) => {
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
+  executeFrameworkDDL(db);
   executeDDL(User, db);
   executeDDL(Doc, db);
   executeDDL(Inbox, db);
@@ -166,7 +167,16 @@ test('Trusted query API (no principal) bypasses field authz (mechanics)', async 
   // principal→owner assignment; the query API is unscoped — DECISIONLOG #41).
   db.prepare("INSERT INTO Doc (id, title, owner) VALUES (1, 'Trusted Test', 1)").run();
 
-  const doc = Doc.findById('1');
+  const server = await createServer({
+    db,
+    handlers: Doc.crudHandlers,
+    projections: [Doc.projection],
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+  t.after(() => db.close());
+
+  const doc = Doc.hydrate({ id: '1' }, null, server.dispatch);
   assert.ok(doc, 'doc must exist');
 
   // set with no principal: field authz is bypassed (trusted query path).

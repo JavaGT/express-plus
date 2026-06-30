@@ -550,7 +550,18 @@ async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, q
       renderError(nodeRes, { status: auth.status, message: auth.status === 404 ? 'not found' : 'forbidden' }, { env });
       return;
     }
-    req[autoLoad.key] = autoLoad.entity.hydrate(auth.row, principal);
+    // Thread a dispatch ref so a store MUTATION off the hydrated row
+    // (`req.doc.collaborators.set(...)`) RE-ENTERS dispatch as a committed
+    // pipeline action (consult #19, UNIT 2) — the handle dispatches, the
+    // projection applies, one reconciliation path (no direct-SQL fallback). The
+    // ref is the writeQueue-wrapped kernel.dispatch (the same wrapping the CRUD
+    // sites use, so store mutations serialize through the single-writer mutex).
+    // Custom route handlers run OUTSIDE writeQueue, so re-entry acquires a free
+    // lock (no deadlock).
+    const dispatchRef = app?.kernel
+      ? (args) => app.writeQueue.run(() => app.kernel.dispatch(args))
+      : null;
+    req[autoLoad.key] = autoLoad.entity.hydrate(auth.row, principal, dispatchRef);
   }
 
   // an Express-like response facade over the node response. `status(n)` records a
