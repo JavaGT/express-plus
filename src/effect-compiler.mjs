@@ -19,6 +19,7 @@
 
 import { principal } from './principal.mjs';
 import { randomUUID } from 'node:crypto';
+import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
 
 // ---- Field-plugin operators for `with` templates (P6b Part 1) ----
 
@@ -41,6 +42,14 @@ export function dec(n) {
 
 export const self = Object.freeze({ kind: 'self' });
 
+// many — fan-out effect constructor (P6c-C step 2).
+// When an effect declares `mutate: many(Target, { over })`, the effect creates
+// one target row per member in the `over` collection (e.g. one Inbox per collaborator).
+// Each member gets a fresh UUID targetId (create-only, no upsert).
+export function many(target, { over }) {
+  return Object.freeze({ kind: 'many', target, overField: over });
+}
+
 // ---- Compile-time validation ----
 
 // Validate an effect declaration at load time.
@@ -54,13 +63,30 @@ export function validateEffectDeclaration(effect, { triggerHandle, sourceEntityN
     );
   }
 
-  // mutate: must be a typed entity handle (e.g. Inbox) OR the `self` sentinel
+  // mutate: must be a typed entity handle (e.g. Inbox) OR the `self` sentinel OR `many` fan-out
   const isSelf = effect.mutate && typeof effect.mutate === 'object' && effect.mutate.kind === 'self';
-  if (!effect.mutate || typeof effect.mutate !== 'object' || (!effect.mutate.name && !isSelf)) {
+  const isMany = effect.mutate && typeof effect.mutate === 'object' && effect.mutate.kind === 'many';
+  if (!effect.mutate || typeof effect.mutate !== 'object' || (!effect.mutate.name && !isSelf && !isMany)) {
     throw new Error(
       `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
-      `must have 'mutate' as a typed entity handle (e.g. mutate: Inbox) or the 'self' sentinel.`,
+      `must have 'mutate' as a typed entity handle (e.g. mutate: Inbox), the 'self' sentinel, or 'many' fan-out.`,
     );
+  }
+
+  // Validate `many` sentinel: requires target entity with .name and overField descriptor
+  if (isMany) {
+    if (!effect.mutate.target || !effect.mutate.target.name) {
+      throw new Error(
+        `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+        `uses 'many' but target entity is missing or has no .name.`,
+      );
+    }
+    if (!effect.mutate.overField || typeof effect.mutate.overField !== 'object') {
+      throw new Error(
+        `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+        `uses 'many' but 'over' field descriptor is missing or not an object.`,
+      );
+    }
   }
 
   // with: must be a function ({delta, origin}) => {...} OR an object with field operators
@@ -150,11 +176,16 @@ export function compileEntityEffects(entityRecord, allEntities) {
 
     if (validation.valid) {
       compiledEffects.set(triggerHandle, effect);
-      // Self-target has no .name — guard to avoid adding undefined (the sentinel
-      // sidesteps cycle detection by producing no edge; a real self-edge would
-      // trip detectCrossEntityCycles at recStack.has(neighbor))
-      if (validation.targetEntity?.name) {
-        effectGraphEntry.add(validation.targetEntity.name);
+
+      // Graph edge: self has no edge, many uses .target.name, plain uses .name
+      let edgeName;
+      if (validation.targetEntity?.kind === 'many') {
+        edgeName = validation.targetEntity.target?.name;
+      } else if (validation.targetEntity?.name) {
+        edgeName = validation.targetEntity.name;
+      }
+      if (edgeName) {
+        effectGraphEntry.add(edgeName);
       }
     }
   }
@@ -166,6 +197,30 @@ export function compileEntityEffects(entityRecord, allEntities) {
 }
 
 // ---- Runtime effect execution ----
+
+// Resolve the membership rows for a `many` fan-out effect.
+// Returns an array of {id, member} where `id` is a fresh UUID (create-only)
+// and `member` carries the member data {id, ...otherCells}.
+function resolveManyMembers(effect, { originId, sourceEntityName, db, overFieldName }) {
+  if (!overFieldName || !db) return [];
+
+  const table = membershipTable(sourceEntityName, overFieldName);
+  const ownerCol = membershipOwnerCol(sourceEntityName);
+
+  // Select all members for this origin entity
+  const rows = db.prepare(`SELECT ${MEMBER_COLUMN} AS member_id, * FROM ${table} WHERE ${ownerCol} = ?`).all(originId);
+
+  // Strip the internal membership columns (member_id, owner FK) from memberData
+  return rows.map((r) => {
+    const memberData = { id: r.member_id };
+    for (const [key, val] of Object.entries(r)) {
+      if (key !== MEMBER_COLUMN && key !== ownerCol) {
+        memberData[key] = val;
+      }
+    }
+    return { id: randomUUID(), member: memberData };
+  });
+}
 
 // Execute a single effect, creating target entity events.
 // Supports effects with mutate: TargetEntity/self and with: function/object.
@@ -179,21 +234,23 @@ export function compileEntityEffects(entityRecord, allEntities) {
 //
 // P6c-C: inc/dec operators perform read-modify-write using the in-txn db handle.
 // P6c-C: self target mutates the origin row (emits :updated) rather than creating fresh.
-function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName, db }) {
-  const isSelf = effect.mutate?.kind === 'self';
-  const targetEntity = effect.mutate;
+// P6c-C step 2: `many(Target, {over})` fan-out creates one target row per collection member.
+function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName, db, overFieldName }) {
+  const kind = effect.mutate?.kind; // 'self' | 'many' | undefined (plain create)
+
+  // Resolve the REAL target entity:
+  // - self: no real target (origin entity itself)
+  // - many: target is effect.mutate.target
+  // - plain: target is effect.mutate
+  const realTarget = kind === 'many' ? effect.mutate.target : (kind === 'self' ? null : effect.mutate);
 
   // Extract delta and origin from the trigger event
   const delta = triggerEvent.data || {};
   const originId = triggerEvent.scope.split(':')[1];
   const origin = { id: originId };
 
-  // Target resolution:
-  // - self: target is the origin entity/row (emits :updated, row exists)
-  // - plain mutate: fresh targetId (emits :created, row does not exist yet)
-  const targetName = isSelf ? sourceEntityName : targetEntity.name;
-  const targetId = isSelf ? originId : randomUUID();
-  const scope = `${targetName}:${targetId}`;
+  // Target name: self uses source entity, others use real target's name
+  const targetName = kind === 'self' ? sourceEntityName : realTarget.name;
 
   // The effect principal — a bounded system principal tagged with its source
   // entity. NOT the triggering user, NOT a SYSTEM god-principal (ADR #6).
@@ -202,11 +259,10 @@ function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName, 
     attributes: { effect: sourceEntityName },
   });
 
-  // Runtime admission handshake (gap #3). For self-targets, this is still
-  // evaluated at runtime by postHandlerAuthorize in applyEventsToTxn; there is
-  // no load-time graph edge for self (guarded in compileEntityEffects).
-  if (!isSelf && typeof targetEntity.admitsEffects === 'function') {
-    const admitted = targetEntity.admitsEffects({
+  // Runtime admission handshake (gap #3). For self-targets, skip; for others
+  // (many + plain create), check admission with realTarget.
+  if (kind !== 'self' && realTarget && typeof realTarget.admitsEffects === 'function') {
+    const admitted = realTarget.admitsEffects({
       effect: sourceEntityName,
       principal: effectPrincipal,
       delta,
@@ -220,45 +276,72 @@ function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName, 
     }
   }
 
-  // Resolve the `with` template
-  let payload;
-  if (typeof effect.with === 'function') {
-    payload = effect.with({ delta, origin });
-  } else if (typeof effect.with === 'object') {
-    // Operator-interpretation pass for inc/dec RMW (P6c-C)
-    const isOperatorMarker = (v) => v && typeof v === 'object' && (v.kind === 'inc' || v.kind === 'dec');
-    payload = {};
-    for (const [fieldName, value] of Object.entries(effect.with)) {
-      if (!isOperatorMarker(value)) {
-        payload[fieldName] = value;
-        continue;
-      }
-      // RMW: read current cell in-txn. For self, the origin row exists; for
-      // create, the freshly-minted targetId row does not exist yet → current
-      // defaults to 0 (SPEC §9.1: inc on create is degenerate literal, not an error).
-      const readRowId = isSelf ? originId : targetId;
-      const existing = readRowId && db
-        ? db.prepare(`SELECT ${fieldName} FROM ${targetName} WHERE id = ?`).get(readRowId)
-        : null;
-      const current = Number(existing?.[fieldName] ?? 0);
-      payload[fieldName] = value.kind === 'inc' ? current + value.value : current - value.value;
-    }
+  // Resolve target rows to a list:
+  // - self: [{id: originId, member: undefined}] (one row, origin exists)
+  // - plain create: [{id: randomUUID(), member: undefined}] (one row, does not exist yet)
+  // - many: N rows from membership table, each with fresh UUID
+  let targetRows;
+  if (kind === 'many') {
+    targetRows = resolveManyMembers(effect, { originId, sourceEntityName, db, overFieldName });
+  } else if (kind === 'self') {
+    targetRows = [{ id: originId, member: undefined }];
   } else {
-    payload = {};
+    targetRows = [{ id: randomUUID(), member: undefined }];
   }
 
-  // Emit the event:
-  // - self: type is `{targetName}.updated`, carries originId
-  // - plain create: type is `{targetName}.created`, carries fresh targetId
-  const eventType = isSelf ? `${targetName}.updated` : `${targetName}.created`;
-  return [{
-    type: eventType,
-    scope,
-    data: { id: targetId, ...payload },
-    _effectSource: sourceEntityName,
-    _effectPrincipal: effectPrincipal,
-    _parentActionId: actionId,
-  }];
+  // For each resolved target row, resolve `with` + existence probe + emit event
+  const events = [];
+  for (const row of targetRows) {
+    const { id: rowId, member } = row;
+
+    // Existence probe: does this row already exist?
+    // For self, origin exists; for plain create, fresh UUID doesn't exist;
+    // for many, each member gets a fresh UUID (create-only, no upsert).
+    const existing = db
+      ? db.prepare(`SELECT 1 AS hit FROM ${targetName} WHERE id = ?`).get(rowId)
+      : null;
+    const exists = !!existing?.hit;
+
+    // Resolve the `with` template
+    let payload;
+    if (typeof effect.with === 'function') {
+      // Function form: pass {delta, origin, member} (member is undefined for self/create)
+      payload = effect.with({ delta, origin, member });
+    } else if (typeof effect.with === 'object') {
+      // Operator-interpretation pass for inc/dec RMW
+      const isOperatorMarker = (v) => v && typeof v === 'object' && (v.kind === 'inc' || v.kind === 'dec');
+      payload = {};
+      for (const [fieldName, value] of Object.entries(effect.with)) {
+        if (!isOperatorMarker(value)) {
+          payload[fieldName] = value;
+          continue;
+        }
+        // RMW: read current cell in-txn for this specific row
+        const currentRowExisting = db
+          ? db.prepare(`SELECT ${fieldName} FROM ${targetName} WHERE id = ?`).get(rowId)
+          : null;
+        const current = Number(currentRowExisting?.[fieldName] ?? 0);
+        payload[fieldName] = value.kind === 'inc' ? current + value.value : current - value.value;
+      }
+    } else {
+      payload = {};
+    }
+
+    // Determine event type based on existence
+    const eventType = exists ? `${targetName}.updated` : `${targetName}.created`;
+    const scope = `${targetName}:${rowId}`;
+
+    events.push({
+      type: eventType,
+      scope,
+      data: { id: rowId, ...payload },
+      _effectSource: sourceEntityName,
+      _effectPrincipal: effectPrincipal,
+      _parentActionId: actionId,
+    });
+  }
+
+  return events;
 }
 
 // Execute effects for a committed event.
@@ -282,7 +365,7 @@ export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, 
 
   const allTargetEvents = [];
 
-  for (const { sourceEntity, effect } of eventEffects) {
+  for (const { sourceEntity, effect, overFieldName } of eventEffects) {
     // Check the `when` guard if present
     if (effect.when) {
       try {
@@ -305,6 +388,7 @@ export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, 
       actionId,
       sourceEntityName: sourceEntity,
       db,
+      overFieldName,
     });
     allTargetEvents.push(...targetEvents);
   }
@@ -342,7 +426,26 @@ export function buildEffectsRegistry(entities) {
       if (!registry.has(eventType)) {
         registry.set(eventType, []);
       }
-      registry.get(eventType).push({ sourceEntity: name, effect });
+      // For `many` effects, resolve the `over` field descriptor to a field NAME
+      // by identity-matching against the source entity's declared fields (no bare
+      // strings; derived from declared shape). This is the runtime registry path
+      // — compileEntityEffects is not invoked at boot, so resolution lives here.
+      const entry = { sourceEntity: name, effect };
+      if (effect.mutate?.kind === 'many') {
+        const overFieldName = entityRecord.fields
+          ? Object.keys(entityRecord.fields).find(
+              (k) => entityRecord.fields[k] === effect.mutate.overField,
+            )
+          : null;
+        if (!overFieldName) {
+          throw new Error(
+            `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${name}' ` +
+              `uses 'many' but 'over' does not resolve to a declared field on '${name}'.`,
+          );
+        }
+        entry.overFieldName = overFieldName;
+      }
+      registry.get(eventType).push(entry);
     }
   }
 
@@ -453,8 +556,14 @@ export function buildEffectsGraph(entities) {
     if (!effects) continue;
     const targets = new Set();
     for (const effect of Object.values(effects)) {
-      if (effect && effect.mutate && effect.mutate.name) {
-        targets.add(effect.mutate.name);
+      const tgt = effect && effect.mutate;
+      if (tgt) {
+        // self: skip (no edge), many: use .target.name, plain: use .name
+        if (tgt.name) {
+          targets.add(tgt.name);
+        } else if (tgt.kind === 'many' && tgt.target?.name) {
+          targets.add(tgt.target.name);
+        }
       }
     }
     if (targets.size > 0) graph.set(name, targets);

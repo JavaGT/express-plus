@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   entity, text, ref, map, number, grant, read, write, subscribe,
   generateDDL, generateFrameworkDDL, executeFrameworkDDL,
-  principal, inc, dec, self, action, event, createServer,
+  principal, inc, dec, self, many, action, event, createServer,
   createEffectContext, checkEffectDepth,
   buildEffectsRegistry, detectCrossEntityCycles,
 } from '../src/index.mjs';
@@ -522,4 +522,221 @@ test('db threaded through effects executor: RMW read uses in-txn db handle', asy
   const result = db.prepare('SELECT * FROM Counter').get();
   assert.ok(result, 'counter should exist');
   assert.equal(result.count, 150, 'db threading enables RMW: 50 (from create) + 100 → 150');
+});
+
+// ============================================================
+// P6c-C step 2: `many` fan-out effect tests
+// ============================================================
+
+test('many fan-out: creates N target rows (one per collection member at trigger time)', async () => {
+  const db = setupDb();
+
+  // Capture the field descriptor FIRST (before entity definition)
+  const collaboratorsField = map(ref('User', { role: 'collaborator', readonly: true }));
+
+  // Define Inbox FIRST (target entity) to avoid temporal dead zone
+  const Inbox = entity('Inbox', {
+    fields: {
+      recipient: ref('User', { readonly: true }),
+      post: ref('User', { readonly: true }),
+      kind: text(),
+    },
+    grant: () => grant(read, write, subscribe),
+  });
+  for (const sql of generateDDL(Inbox)) db.exec(sql);
+
+  // User has a map of members (collaborators)
+  // Effect on collaborators.onAdded: when a collaborator is added, fan-out to ALL current members
+  const User = entity('User', {
+    fields: {
+      name: text(),
+      collaborators: collaboratorsField,
+    },
+    grant: () => grant(read, write, subscribe),
+    admitsEffects: ({ effect, principal }) => true,
+    effects: {
+      [collaboratorsField.onAdded]: {
+        mutate: many(Inbox, { over: collaboratorsField }),
+        with: ({ origin, member }) => ({
+          recipient: member.id,
+          post: origin.id,
+          kind: 'notify',
+        }),
+      },
+    },
+  });
+  for (const sql of generateDDL(User)) db.exec(sql);
+
+  const registry = buildEffectsRegistry([User, Inbox]);
+  const server = createServer({
+    handlers: User.crudHandlers,
+    db,
+    projections: [User.projection, Inbox.projection],
+    effects: registry,
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+
+  // Create 2 collaborator users first
+  await server.dispatch({
+    actionId: 'create-c1',
+    type: 'User.create',
+    payload: { name: 'C1' },
+    principal: principal({ type: 'user', id: 'c1' }),
+  });
+  await server.dispatch({
+    actionId: 'create-c2',
+    type: 'User.create',
+    payload: { name: 'C2' },
+    principal: principal({ type: 'user', id: 'c2' }),
+  });
+  await server.dispatch({
+    actionId: 'create-c3',
+    type: 'User.create',
+    payload: { name: 'C3' },
+    principal: principal({ type: 'user', id: 'c3' }),
+  });
+
+  // Create the origin user (no collaborators yet)
+  await server.dispatch({
+    actionId: 'create-owner',
+    type: 'User.create',
+    payload: { name: 'Owner' },
+    principal: principal({ type: 'user', id: 'owner' }),
+  });
+
+  // Get a row handle and add 3rd collaborator
+  // At trigger time, collection has 3 members (c1, c2, c3 just added), so fan-out creates 3 Inboxes
+  const ownerRow = db.prepare('SELECT * FROM User WHERE name = ?').get('Owner');
+  const ownerHandle = User.hydrate(ownerRow, null, server.dispatch);
+
+  // Add 3rd collaborator - at this point collection has {c3} only (first add)
+  // Fan-out reads the collection and creates 1 Inbox (for c3)
+  await ownerHandle.collaborators.set('c3', { role: 'collaborator' });
+
+  // Add 2nd collaborator - collection now has {c3, c2}
+  // Fan-out reads the collection and creates 2 Inboxes (for c3 and c2)
+  await ownerHandle.collaborators.set('c2', { role: 'collaborator' });
+
+  // Total so far: 1 + 2 = 3 Inboxes
+
+  // Verify: 3 Inbox rows total (1 from first add, 2 from second add)
+  const inboxes = db.prepare('SELECT * FROM Inbox').all();
+  assert.equal(inboxes.length, 3, 'fan-out creates N Inboxes where N = collection size at trigger time');
+
+  // Verify recipients are among the collaborators
+  const recipientIds = inboxes.map((i) => i.recipient).sort();
+  assert.deepEqual(recipientIds, ['c2', 'c3', 'c3'], 'recipients should be from the collection (c3 added twice due to fan-out on each add)');
+
+  const postIds = inboxes.map((i) => i.post);
+  assert.ok(postIds.every((pid) => pid === ownerRow.id), 'all inboxes should reference the origin user');
+});
+
+test('many fan-out: create-only (no dedup, two origins each add member → separate fan-outs)', async () => {
+  const db = setupDb();
+
+  // Capture the field descriptor FIRST (before entity definition)
+  const collaboratorsField = map(ref('User', { role: 'collaborator', readonly: true }));
+
+  // Define Inbox FIRST (target entity) to avoid temporal dead zone
+  const Inbox = entity('Inbox', {
+    fields: {
+      recipient: ref('User', { readonly: true }),
+      post: ref('User', { readonly: true }),
+      kind: text(),
+    },
+    grant: () => grant(read, write, subscribe),
+  });
+  for (const sql of generateDDL(Inbox)) db.exec(sql);
+
+  // User has a map of members (collaborators)
+  const User = entity('User', {
+    fields: {
+      name: text(),
+      collaborators: collaboratorsField,
+    },
+    grant: () => grant(read, write, subscribe),
+    admitsEffects: ({ effect, principal }) => true,
+    effects: {
+      [collaboratorsField.onAdded]: {
+        mutate: many(Inbox, { over: collaboratorsField }),
+        with: ({ origin, member }) => ({
+          recipient: member.id,
+          post: origin.id,
+          kind: 'notify',
+        }),
+      },
+    },
+  });
+  for (const sql of generateDDL(User)) db.exec(sql);
+
+  const registry = buildEffectsRegistry([User, Inbox]);
+  const server = createServer({
+    handlers: User.crudHandlers,
+    db,
+    projections: [User.projection, Inbox.projection],
+    effects: registry,
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+
+  // Create collaborator
+  await server.dispatch({
+    actionId: 'create-c1',
+    type: 'User.create',
+    payload: { name: 'C1' },
+    principal: principal({ type: 'user', id: 'c1' }),
+  });
+
+  // Create two origin users
+  await server.dispatch({
+    actionId: 'create-owner1',
+    type: 'User.create',
+    payload: { name: 'Owner1' },
+    principal: principal({ type: 'user', id: 'owner1' }),
+  });
+  await server.dispatch({
+    actionId: 'create-owner2',
+    type: 'User.create',
+    payload: { name: 'Owner2' },
+    principal: principal({ type: 'user', id: 'owner2' }),
+  });
+
+  const owner1Row = db.prepare('SELECT * FROM User WHERE name = ?').get('Owner1');
+  const owner2Row = db.prepare('SELECT * FROM User WHERE name = ?').get('Owner2');
+  const owner1Handle = User.hydrate(owner1Row, null, server.dispatch);
+  const owner2Handle = User.hydrate(owner2Row, null, server.dispatch);
+
+  // Add c1 to owner1: collection has {c1} → fan-out creates 1 Inbox
+  await owner1Handle.collaborators.set('c1', { role: 'collaborator' });
+
+  // Add c1 to owner2: collection has {c1} → fan-out creates 1 Inbox (separate, no dedup with owner1's)
+  await owner2Handle.collaborators.set('c1', { role: 'collaborator' });
+
+  // Total: 2 Inboxes (one per origin, each targeting c1)
+  const inboxes = db.prepare('SELECT * FROM Inbox').all();
+  assert.equal(inboxes.length, 2, 'two origins each fan-out to same member → 2 separate Inboxes (no cross-origin dedup)');
+
+  // Both Inboxes should target c1 but with different posts (owner1 vs owner2)
+  const recipientIds = inboxes.map((i) => i.recipient);
+  assert.deepEqual(recipientIds.sort(), ['c1', 'c1'], 'both inboxes target c1');
+
+  const postIds = inboxes.map((i) => i.post).sort();
+  assert.deepEqual(postIds, [owner1Row.id, owner2Row.id].sort(), 'inboxes have different post origins');
+});
+
+test('many() operator creates correct sentinel object', () => {
+  const Target = entity('Target', {
+    fields: { name: text() },
+    grant: () => grant(read, write, subscribe),
+  });
+
+  const overField = map(ref('Other', { role: 'member' }));
+
+  const sentinel = many(Target, { over: overField });
+
+  assert.equal(sentinel.kind, 'many');
+  assert.equal(sentinel.target, Target);
+  assert.equal(sentinel.overField, overField);
+  assert.ok(Object.isFrozen(sentinel), 'sentinel should be frozen');
 });
