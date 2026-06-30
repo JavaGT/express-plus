@@ -5,7 +5,7 @@
 
 export { check, resolveDecision, UnawaitedCheckError } from './check.mjs';
 export { assertGuarded } from './guard/static.mjs';
-export { text, boolean, date, number, ref, hash, blob, link, map, log, presence, state } from './field.mjs';
+export { text, boolean, date, number, ref, hash, blob, link, map, list, log, presence, state } from './field.mjs';
 export { now } from './deferred.mjs';
 export { resolveStrategy, validateMutation, ValidationError } from './field-strategy.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';

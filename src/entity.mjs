@@ -233,6 +233,11 @@ export function entity(name, declaration = {}) {
   // exposes add/remove/has. The main-table has no column for them — they live
   // entirely in the membership side-table named <Entity>_<field>.
   const mapFields = Object.entries(fields).filter(([, d]) => d.kind === 'store' && d.type === 'map');
+  // ordered (list) fields hydrate from a fractional-index side-table into a write
+  // handle exposing .insertAt/.move/.reorder/.remove/.toArray. Like map, the main
+  // table has no column for them — they live entirely in the <Entity>_<field>
+  // side-table (ddl.mjs orderedTableDDL), ordered by a fractional REAL `key`.
+  const orderedFields = Object.entries(fields).filter(([, d]) => d.kind === 'ordered');
 
   // Fire effects for a map field mutation. `eventName` is 'added' or 'removed'.
   // The declared effects map is keyed by frozen event handles (like
@@ -356,6 +361,99 @@ export function entity(name, declaration = {}) {
     };
   };
 
+  // makeOrderedListHandle(entityName, fieldName, row, principal) — returns a
+  // write handle for an `ordered`/`list` field over a fractional-index
+  // side-table (owner, id, key, item). Order is derived by ORDER BY key, so a
+  // between-insert or a move re-keys ONLY the affected row — siblings keep their
+  // keys (no renumber, the hallmark of fractional indexing). `insertAt` mints a
+  // stable `id` (returned to the caller) + a fractional key between the
+  // neighbor keys; `move(id, i)` re-keys the one element; `reorder([ids])`
+  // re-keys the lot to an evenly-spaced sequence (sugar over move). The element
+  // value is stored as a JSON `item` cell (A2: scalar items; FK hydration of a
+  // ref `of` is a later refinement).
+  const makeOrderedListHandle = (entityName, fieldName, row, principal) => {
+    const table = membershipTable(entityName, fieldName);
+    const ownerCol = membershipOwnerCol(entityName);
+    const oid = String(row.id);
+
+    const rowsOrdered = () =>
+      getActiveDb()
+        .prepare(`SELECT id, key, item FROM ${table} WHERE ${ownerCol} = :owner ORDER BY key`)
+        .all({ owner: oid });
+
+    // Mint a fractional key between two neighbor keys (or before-first /
+    // after-last when a side is absent). Float keys are bounded-but-sufficient
+    // for A2 (production-grade string fractional indexing avoids float-precision
+    // limits after ~52 levels; the contract + no-renumber semantics are what ship).
+    const keyBetween = (low, high) => {
+      if (low == null && high == null) return 0;
+      if (low == null) return high - 1;
+      if (high == null) return low + 1;
+      return (low + high) / 2;
+    };
+
+    return {
+      insertAt: async (index, value) => {
+        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
+        const db = getActiveDb();
+        const rows = rowsOrdered();
+        const low = index > 0 ? rows[index - 1].key : null;
+        const high = index < rows.length ? rows[index].key : null;
+        const id = randomUUID();
+        db.prepare(`INSERT INTO ${table} (${ownerCol}, id, key, item) VALUES (:owner, :id, :key, :item)`)
+          .run({ owner: oid, id, key: keyBetween(low, high), item: JSON.stringify(value) });
+        return id;
+      },
+      move: async (id, index) => {
+        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
+        const db = getActiveDb();
+        const sid = String(id);
+        const others = rowsOrdered().filter((r) => r.id !== sid);
+        const low = index > 0 ? others[index - 1].key : null;
+        const high = index < others.length ? others[index].key : null;
+        db.prepare(`UPDATE ${table} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`)
+          .run({ owner: oid, id: sid, key: keyBetween(low, high) });
+      },
+      reorder: async (ids) => {
+        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
+        const db = getActiveDb();
+        const stmt = db.prepare(`UPDATE ${table} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`);
+        // evenly-spaced keys so ORDER BY key matches the requested id sequence
+        ids.forEach((id, i) => stmt.run({ owner: oid, id: String(id), key: i }));
+      },
+      remove: async (id) => {
+        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
+        const db = getActiveDb();
+        db.prepare(`DELETE FROM ${table} WHERE ${ownerCol} = :owner AND id = :id`)
+          .run({ owner: oid, id: String(id) });
+      },
+      has: (id) =>
+        getActiveDb()
+          .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND id = :id`)
+          .get({ owner: oid, id: String(id) }) !== undefined,
+      get: (id) => {
+        const r = getActiveDb()
+          .prepare(`SELECT item FROM ${table} WHERE ${ownerCol} = :owner AND id = :id`)
+          .get({ owner: oid, id: String(id) });
+        return r ? JSON.parse(r.item) : undefined;
+      },
+      toArray: async () => {
+        if (principal && !(await mayFieldOp(record, fieldName, read, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
+        return rowsOrdered().map((r) => JSON.parse(r.item));
+      },
+    };
+  };
+
   const hydrate = (row, principal = null) => {
     if (!row) return row;
     for (const fieldName of hashFields) {
@@ -378,6 +476,9 @@ export function entity(name, declaration = {}) {
     }
     for (const [fieldName] of mapFields) {
       row[fieldName] = makeMapHandle(name, fieldName, row, principal);
+    }
+    for (const [fieldName] of orderedFields) {
+      row[fieldName] = makeOrderedListHandle(name, fieldName, row, principal);
     }
     // Derived fields compute on read from the hydrated row. The `derived` function
     // receives the row (with all stored columns + hydrated handles) and returns the

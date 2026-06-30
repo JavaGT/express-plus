@@ -166,6 +166,32 @@ export function log(entry = {}) {
 // Import-surface scope: this constructor delivers the descriptor the entity
 // compiler accepts. The per-connection broadcast and volatile coalescing are
 // the presence kind's deferred live behavior.
+// `list(of)` — the `ordered` KIND's first instance: a fractional-index
+// keyspace. Each element has a STABLE `id` (identity, never re-keyed) and a
+// fractional `key` (the sort position, mutable). insertAt mints a key BETWEEN
+// the neighbor keys — siblings keep their keys (no renumber, the hallmark of
+// fractional indexing vs an array shift); move re-keys ONLY the moved element;
+// reorder re-keys the lot to a fresh evenly-spaced sequence (sugar over move).
+//
+//   - of — the per-element value descriptor (a text/ref/number …). Drives the
+//          item's storage/serialization shape; scalar items store as a single
+//          JSON cell on the side-table.
+//
+// Import-surface scope: this constructor delivers the descriptor the entity
+// compiler accepts + the side-table DDL (ddl.mjs orderedTableDDL). On a loaded
+// row the field hydrates into a write handle exposing `.insertAt(i, value)`/
+// `.move(id, i)`/`.reorder([id, …])`/`.remove(id)`/`.toArray()` against the
+// `<Entity>_<field>` side-table (entity.mjs makeOrderedListHandle). The
+// per-element diff reconciles to this stored model in P6e's delta broadcast.
+export function list(of, options = {}) {
+  return makeDescriptor({
+    kind: 'ordered',
+    type: 'list',
+    of,
+    ...options,
+  });
+}
+
 export function presence(cells = {}) {
   return makeDescriptor({
     kind: 'presence',
