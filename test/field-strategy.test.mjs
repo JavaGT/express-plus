@@ -46,13 +46,13 @@ test('value strategy diff is a whole-value set, null when unchanged', () => {
   assert.equal(diff('a', 'a'), null, 'an unchanged value produces no diff');
 });
 
-// --- crdt/store/ordered: known names, validate works, merge is Phase 2 ---
+// --- crdt/store/ordered: known names, validate works, merge is per-element ---
 
-test('crdt strategy validates structurally but its merge is a loud Phase-2 throw', () => {
+test('crdt strategy validates structurally and its merge is a per-element diff', () => {
   const crdt = resolveStrategy('crdt');
   assert.doesNotThrow(() => crdt.validate('hello', text.crdt()));
-  assert.throws(() => crdt.apply('a', 'b'), /crdt.*phase 2/i);
-  assert.throws(() => crdt.diff('a', 'b'), /crdt.*phase 2/i);
+  assert.equal(crdt.apply('a', 'b'), 'b');
+  assert.deepEqual(crdt.diff('hello', 'hello!'), { insert: { at: 5, text: '!' } });
 });
 
 // --- validate-as-pipeline-stage over an entity's declared fields ---

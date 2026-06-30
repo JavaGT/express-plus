@@ -8,11 +8,11 @@
 // the deletion test passing: the kind ABSORBS the strategy (no per-field config
 // object that merely relocates the machinery behind a name).
 //
-// Phase 1's blog spine exercises only `value` (whole-value diff: text/ref/
+// Phase 1's blog spine exercises `value` (whole-value diff: text/ref/
 // boolean/date) and the structural-validate half of `crdt` (note.mjs body). The
-// crdt/store/ordered MERGE machinery (per-element deltas, fractional index) is
-// Phase 2 delta broadcast — registered here as a named whole whose apply/diff
-// fail CLOSED with a loud Phase-2 throw, never a silent mis-merge.
+// crdt/store/ordered/struct MERGE machinery (per-element deltas, fractional
+// index, per-sub-cell diff) lands in Phase 2 — registered here as named wholes
+// whose diff produces element-level deltas (consult #18/#20).
 
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
@@ -26,23 +26,104 @@ export class ValidationError extends Error {
   }
 }
 
-// A Phase-2 merge seam that is engaged before its machinery ships fails closed,
-// loudly, naming the kind — never a silent wrong merge.
-function phase2Merge(kind) {
-  return () => {
-    throw new Error(
-      `the '${kind}' field kind's merge machinery is Phase 2 (per-element ` +
-        `deltas / fractional index). It validates structurally in Phase 1 but ` +
-        `cannot apply or diff until live delta broadcast lands (SPEC §7.2, §13).`,
-    );
-  };
-}
-
 // Structural validators per kind. These check the SHAPE the kind can store,
 // before any declared `validate` runs. A declared validate refines; the
 // structural check is the floor.
 function isTextValue(v) {
   return typeof v === 'string';
+}
+
+// crdt text diff — common-prefix + common-suffix detection yields the minimal
+// per-element delta. A pure insert → {insert:{at,text}}; a replace →
+// {delete:{at,length}, insert:{at,text}}. Never a whole-value `{ set }` (consult
+// #18: real per-element merge, not the deferred concurrent toolkit #33).
+function crdtTextDiff(previous, next) {
+  if (Object.is(previous, next)) return null;
+  const p = previous == null ? '' : String(previous);
+  const n = next == null ? '' : String(next);
+  const minLen = Math.min(p.length, n.length);
+  let pre = 0;
+  while (pre < minLen && p[pre] === n[pre]) pre++;
+  const maxSuf = minLen - pre;
+  let suf = 0;
+  while (suf < maxSuf && p[p.length - 1 - suf] === n[n.length - 1 - suf]) suf++;
+  const delStart = pre;
+  const delEnd = p.length - suf;
+  const insStart = pre;
+  const insEnd = n.length - suf;
+  const deleted = delEnd > delStart ? p.slice(delStart, delEnd) : null;
+  const inserted = insEnd > insStart ? n.slice(insStart, insEnd) : null;
+  if (!deleted && !inserted) return null;
+  const delta = {};
+  if (deleted) delta.delete = { at: delStart, length: delEnd - delStart };
+  if (inserted) delta.insert = { at: insStart, text: inserted };
+  return delta;
+}
+
+// store (map) membership diff over { member: role } materializations. A member
+// add → added; a member gone → removed; a same-member role change → changed
+// (NOT added — only a NEW member fires onAdded, DECISIONLOG #57).
+function storeMapDiff(previous, next) {
+  const prev = previous && typeof previous === 'object' ? previous : {};
+  const nxt = next && typeof next === 'object' ? next : {};
+  const added = [], removed = [], changed = [];
+  for (const [member, role] of Object.entries(nxt)) {
+    if (!(member in prev)) added.push({ member, role });
+    else if (!Object.is(prev[member], role)) changed.push({ member, role });
+  }
+  for (const member of Object.keys(prev)) {
+    if (!(member in nxt)) removed.push(member);
+  }
+  if (!added.length && !removed.length && !changed.length) return null;
+  return { added, removed, changed };
+}
+
+// ordered (list) diff over keyed-element lists { key, ...item }. The delta is
+// computed by KEY: a sibling keeps its key across an insert/move (no renumber).
+// Moves are reported only on a pure reorder (key set unchanged) — index shifts
+// caused by a structural add are NOT moves (consult #20: fractional-index).
+function orderedListDiff(previous, next) {
+  const prev = Array.isArray(previous) ? previous : [];
+  const nxt = Array.isArray(next) ? next : [];
+  const prevByKey = new Map(prev.map((e, i) => [e.key, i]));
+  const nextByKey = new Map(nxt.map((e, i) => [e.key, i]));
+  const added = [], removed = [], moved = [];
+  for (let i = 0; i < nxt.length; i++) {
+    const { key, ...item } = nxt[i];
+    if (!prevByKey.has(key)) added.push({ at: i, key, item });
+  }
+  for (const e of prev) {
+    if (!nextByKey.has(e.key)) removed.push({ key: e.key });
+  }
+  if (added.length === 0 && removed.length === 0) {
+    for (let i = 0; i < nxt.length; i++) {
+      const from = prevByKey.get(nxt[i].key);
+      if (from !== i) moved.push({ key: nxt[i].key, from, to: i });
+    }
+  }
+  if (!added.length && !removed.length && !moved.length) return null;
+  return { added, removed, moved };
+}
+
+// struct per-sub-cell diff. Only changed declared sub-cells appear in `cells`
+// as { set: value }; an unchanged sub-cell is absent. A cleared cell → { set: null }.
+function structDiff(previous, next, descriptor) {
+  const prev = previous && typeof previous === 'object' ? previous : {};
+  const nxt = next && typeof next === 'object' ? next : {};
+  const declared = descriptor?.cells ?? {};
+  const cells = {};
+  for (const name of Object.keys(nxt)) {
+    if (Object.prototype.hasOwnProperty.call(declared, name) && !Object.is(prev[name], nxt[name])) {
+      cells[name] = { set: nxt[name] };
+    }
+  }
+  for (const name of Object.keys(prev)) {
+    if (Object.prototype.hasOwnProperty.call(declared, name) && !(name in nxt) && prev[name] != null) {
+      cells[name] = { set: null };
+    }
+  }
+  if (Object.keys(cells).length === 0) return null;
+  return { cells };
 }
 
 // The four named-whole strategies. value is fully implemented (whole-value diff);
@@ -126,45 +207,65 @@ const STRATEGIES = Object.freeze({
     },
   }),
 
-  // `crdt` — a custom merge with per-element deltas. Validates structurally in
-  // Phase 1 (note.mjs body is a string); its merge is Phase 2.
+  // `crdt` — a custom merge with per-element deltas. Validates structurally
+  // (note.mjs body is a string); diff is a per-element text delta (insert /
+  // delete) computed from common prefix + suffix, NOT a whole-value `{ set }`.
+  // Single-writer dispatch stores `next` (apply = replace); the per-element DELTA
+  // is the broadcast artifact — the "merge machinery" consult #18 names. The
+  // concurrent-merge toolkit (reconciling concurrent edits) is deferred (#33).
   crdt: Object.freeze({
     validate(value) {
       if (!isTextValue(value)) return 'expected a crdt text value';
       return true;
     },
-    apply: phase2Merge('crdt'),
-    diff: phase2Merge('crdt'),
+    apply(_previous, next) {
+      return next;
+    },
+    diff(previous, next) {
+      return crdtTextDiff(previous, next);
+    },
   }),
 
-  // `store` — an internally-keyed owned collection. Phase 2.
+  // `store` — an internally-keyed owned collection (map). diff is a membership
+  // delta: {added, removed, changed}. A role change is `changed`, NOT `added` —
+  // only a NEW member fires onAdded (idempotent re-share, DECISIONLOG #57).
   store: Object.freeze({
     validate(value) {
       if (value === null || typeof value !== 'object') return 'expected a store value';
       return true;
     },
-    apply: phase2Merge('store'),
-    diff: phase2Merge('store'),
+    apply(_previous, next) {
+      return next;
+    },
+    diff(previous, next) {
+      return storeMapDiff(previous, next);
+    },
   }),
 
-  // `ordered` — a fractional-index keyspace. Phase 2.
+  // `ordered` — a fractional-index keyspace (list). diff is an element delta
+  // {added, removed, moved} computed by KEY: a sibling keeps its key across an
+  // insert/move (no renumber). Moves are reported only on a pure reorder (key set
+  // unchanged); an insert/move's index shifts of siblings are a CONSEQUENCE of
+  // the structural add, not reported as moves.
   ordered: Object.freeze({
     validate(value) {
       if (!Array.isArray(value)) return 'expected an ordered list';
       return true;
     },
-    apply: phase2Merge('ordered'),
-    diff: phase2Merge('ordered'),
+    apply(_previous, next) {
+      return next;
+    },
+    diff(previous, next) {
+      return orderedListDiff(previous, next);
+    },
   }),
 
   // `struct` — a namespace of named value sub-cells (the `link` field is the
   // first instance). The struct does not store a value of its own; it stores
-  // ONE flat cell per declared sub-cell, each serialized by that sub-cell's own
-  // value strategy. apply/diff over the whole struct are Phase 2 (a structured
-  // diff is per-sub-cell, not whole-value) and fail closed until then; the
-  // Phase 1 write path flattens a struct payload into its per-cell columns via
-  // flattenStruct (below), so serialize/apply/diff of the WHOLE struct are not
-  // on the Phase 1 path.
+  // ONE flat cell per declared sub-cell. diff is a PER-SUB-CELL delta — only
+  // changed sub-cells appear in `cells` (an unchanged sub-cell is absent). The
+  // Phase 1 write path flattens a struct payload into per-cell columns via
+  // flattenStruct; serialize/apply of the WHOLE struct replace it.
   struct: Object.freeze({
     validate(value, descriptor) {
       if (value === null || value === undefined) return true;
@@ -179,8 +280,12 @@ const STRATEGIES = Object.freeze({
       }
       return true;
     },
-    apply: phase2Merge('struct'),
-    diff: phase2Merge('struct'),
+    apply(_previous, next) {
+      return next;
+    },
+    diff(previous, next, descriptor) {
+      return structDiff(previous, next, descriptor);
+    },
   }),
 });
 
