@@ -29,7 +29,8 @@ import { mayVerb, hasOwnCanGrant } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
-import { admitScheduledMutation } from './schedule.mjs';
+import { admitScheduledMutation, tickSource, admitTickedMutation } from './schedule.mjs';
+import { startTickEngine } from './tick-engine.mjs';
 import { createLiveServer } from './live.mjs';
 import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer } from './pipeline.mjs';
@@ -1069,6 +1070,31 @@ function buildKernel(app) {
     effects: effectsRegistry.size > 0 ? effectsRegistry : null,
     authorize: () => true,
     preProjectionAuthorize: async ({ entityName, verb, principal, event, payload, db: hookDb, now }) => {
+      // Tick SOURCE — a dispatch under a tick system principal. The source is
+      // `${entityName}.${verb}` (exactly 2 dotted segments). Distinguish by
+      // comparing principal.attributes.source against the exact tickSource; if
+      // it matches, route to admitTickedMutation. If not, fall through to the
+      // scheduler branch below (which handles 3-segment sources like
+      // `${entityName}.${verb}.${fieldName}`). Non-system and
+      // unrecognized principals pass through unchanged.
+      const src = principal?.attributes?.source;
+      if (principal?.type === 'system' && src) {
+        // tickSource pattern: exactly 2 parts — source has no fieldName suffix.
+        const expected = tickSource(entityName, verb);
+        if (src === expected) {
+          const entity = app.entities?.get(entityName);
+          if (!entity) return false;
+          return admitTickedMutation({
+            entity,
+            verb,
+            rowId: event?.data?.id,
+            payload,
+            principal,
+            db: hookDb ?? app.db,
+            now: now ?? Date.now(),
+          });
+        }
+      }
       // SCHEDULER SYSTEM PRINCIPAL (Option A, DECISIONLOG #62) — a reaper-fired
       // dispatch under a scheduler principal is NOT a user with a row grant: its
       // authority is the entity's DECLARED schedule. This admission runs
@@ -1200,6 +1226,13 @@ export function listen(app, port, optionsOrCallback = {}) {
     if (typeof blobTimer.unref === 'function') blobTimer.unref();
     app.onShutdown('blob-reaper', () => { if (blobTimer) clearInterval(blobTimer); }, { timeoutMs: 1000 });
   }
+  // Start the tick engine if any entity declares a tick trigger. DEFERRED into
+  // `app.ready` below — `app.kernel` (and thus `dispatch`) is not built until
+  // `buildKernel(app)` runs; starting earlier would hand the engine an undefined
+  // dispatch handle. Scans entities for tick triggers (tick.hz / tick.every);
+  // only starts if at least one exists (avoids a no-op timer). ONE reconciliation
+  // path — the engine dispatches under a system principal through `kernel.dispatch`,
+  // admitted in-txn by `preProjectionAuthorize` → `admitTickedMutation`.
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
   httpServer.listen(port);
 
@@ -1221,6 +1254,15 @@ export function listen(app, port, optionsOrCallback = {}) {
   app.ready = (async () => {
     await app.resolveRoutes();
     app.kernel = buildKernel(app);
+    // Start the tick engine now that `app.kernel.dispatch` exists. Only starts
+    // if some entity declares a tick trigger (tick.hz / tick.every); otherwise
+    // startTickEngine returns a no-op and no timer is created.
+    const tickEngine = startTickEngine({
+      db: app.db,
+      entities: app.entities,
+      dispatch: app.kernel?.dispatch,
+    });
+    app.onShutdown('tick-engine', () => { tickEngine.stop(); }, { timeoutMs: 1000 });
     if (!httpServer.listening) {
       await new Promise((resolve) => httpServer.once('listening', resolve));
     }
