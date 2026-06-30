@@ -91,7 +91,7 @@ function logTableDDL(entity, name, descriptor) {
 function ephemeralTableDDL(entity, name) {
   const tableName = `${entity.name}_${name}`;
   const ownerCol = `${entity.name}_id`;
-  const cols = [`${ownerCol} TEXT NOT NULL`, 'client_id TEXT NOT NULL', `PRIMARY KEY (${ownerCol}, client_id)`];
+  const cols = [`${ownerCol} TEXT NOT NULL`, 'client_id TEXT NOT NULL', 'cells TEXT', `PRIMARY KEY (${ownerCol}, client_id)`];
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 

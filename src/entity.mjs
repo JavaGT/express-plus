@@ -412,6 +412,16 @@ export function entity(name, declaration = {}) {
   // table has no column for them — they live entirely in the <Entity>_<field>
   // side-table (ddl.mjs orderedTableDDL), ordered by a fractional REAL `key`.
   const orderedFields = Object.entries(fields).filter(([, d]) => d.kind === 'ordered');
+  // ephemeral (non-persisting) fields hydrate a per-connection write handle exposing
+  // .set(cells). Like map/ordered/log, the main table has no column for them — they
+  // live entirely in the <Entity>_<field> side-table keyed ({Entity}_id, client_id)
+  // (ddl.mjs ephemeralTableDDL). A .set is a committed pipeline ACTION (consult
+  // #19): it RE-ENTERS dispatch as `<Entity>.<field>.set` → handler emits
+  // `<Entity>.<field>.set` → the projection upserts the per-connection cells row.
+  // The handle needs a `dispatch` ref; without one it throws (fail closed). This is
+  // P6e-1a's raw verbatim pathway — P6e-1b's pace/coalescer retires it into the
+  // paced path (one mechanism, not a parallel permanent path).
+  const ephemeralFields = Object.entries(fields).filter(([, d]) => d.kind === 'ephemeral');
   // log (store/log) fields hydrate from an append-only side-table into a write
   // handle exposing .append(entry)/.entries(). Like map/ordered, the main table
   // has no column for them — they live entirely in the <Entity>_<field> side-table
@@ -725,6 +735,54 @@ export function entity(name, declaration = {}) {
     };
   };
 
+  // makeEphemeralHandle(entityName, fieldName, row, principal, dispatch) — a write
+  // handle for an `ephemeral` field. `.set(cells)` RE-ENTERS dispatch as
+  // `<Entity>.<field>.set` (own actionId, own txn) like the store handles — ephemeral
+  // mutations are committed pipeline actions, so the .set is atomic + replayable,
+  // not a direct unlogged side-table write (no second path). client_id resolves from
+  // the principal (dispatch is principal-keyed; the side-table keys per-connection).
+  // The handle needs a `dispatch` ref; without one it throws on mutation (fail
+  // closed, no silent direct-SQL fallback). P6e-1a delivers every .set verbatim
+  // through the post-commit fan-out — P6e-1b retires this raw path into the paced
+  // pipeline (the same change that introduces pace absorbs the special-case).
+  const makeEphemeralHandle = (entityName, fieldName, row, principal, dispatch) => {
+    const table = membershipTable(entityName, fieldName);
+    const ownerCol = membershipOwnerCol(entityName);
+    const oid = String(row.id);
+    const clientId = String(principal?.id ?? 'anonymous');
+
+    const requireDispatch = () => {
+      if (!dispatch) {
+        throw new Error(
+          `cannot mutate ${entityName}.${fieldName} without a dispatch ref ` +
+            `(hydrate with dispatch inside a handler/route)`,
+        );
+      }
+    };
+
+    return {
+      set: async (cells) => {
+        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
+        requireDispatch();
+        const result = await dispatch({
+          actionId: randomUUID(),
+          type: `${entityName}.${fieldName}.set`,
+          payload: { owner: oid, client: clientId, cells: cells ?? {} },
+          principal,
+        });
+        if (!result.granted) throw { status: 403, message: 'forbidden' };
+      },
+      get: () => {
+        const r = getActiveDb()
+          .prepare(`SELECT cells FROM ${table} WHERE ${ownerCol} = :owner AND client_id = :client`)
+          .get({ owner: oid, client: clientId });
+        return r ? JSON.parse(r.cells ?? '{}') : {};
+      },
+    };
+  };
+
   // hydrate(row, principal, dispatch) — assemble hash{verify}, struct namespaces,
   // store handles, and derived fields onto a raw row. `dispatch` is OPTIONAL: a
   // store MUTATION handle (log .append) needs it to re-enter dispatch; it's null
@@ -760,6 +818,9 @@ export function entity(name, declaration = {}) {
     }
     for (const [fieldName] of logFields) {
       row[fieldName] = makeLogHandle(name, fieldName, row, principal, dispatch);
+    }
+    for (const [fieldName] of ephemeralFields) {
+      row[fieldName] = makeEphemeralHandle(name, fieldName, row, principal, dispatch);
     }
     // Derived fields compute on read from the hydrated row. The `derived` function
     // receives the row (with all stored columns + hydrated handles) and returns the
@@ -926,6 +987,8 @@ export function entity(name, declaration = {}) {
         `${name}.${fieldName}.reordered`,
         `${name}.${fieldName}.removed`,
       ]),
+      // each ephemeral field's per-connection .set → side-table upsert (P6e-1a).
+      ...ephemeralFields.map(([fieldName]) => `${name}.${fieldName}.set`),
     ],
     apply: (event, db) => {
       const table = name;
@@ -981,6 +1044,22 @@ export function entity(name, declaration = {}) {
         if (event.type === `${name}.${ordField}.removed`) {
           db.prepare(`DELETE FROM ${sideTable} WHERE ${ownerCol} = :owner AND id = :id`)
             .run({ owner: String(event.data?.owner), id: event.data?.id });
+          return;
+        }
+      }
+      // ephemeral per-connection .set → upsert the latest cells snapshot for the
+      // writing client_id (P6e-1a: latest snapshot wins — P6e-1b's pace will retire
+      // the verbatim delivery into coalesced delivery, not change this projection).
+      for (const [ephField] of ephemeralFields) {
+        if (event.type === `${name}.${ephField}.set`) {
+          const sideTable = membershipTable(name, ephField);
+          const ownerCol = membershipOwnerCol(name);
+          db.prepare(`INSERT OR REPLACE INTO ${sideTable} (${ownerCol}, client_id, cells) VALUES (:owner, :client, :cells)`)
+            .run({
+              owner: String(event.data?.owner),
+              client: String(event.data?.client),
+              cells: JSON.stringify(event.data?.cells ?? {}),
+            });
           return;
         }
       }
@@ -1133,6 +1212,10 @@ export function entity(name, declaration = {}) {
     // fractional key(s) and dispatches the action; the handler validates payload
     // (fail closed) and emits (consult #19, UNIT 3).
     ...orderedMutateHandlers(name, fields, orderedFields),
+    // ephemeral mutations: `<Entity>.<field>.set` → emit `<Entity>.<field>.set`
+    // (per-connection cells snapshot). The handle has already resolved client_id
+    // + done the write-grant check; the handler trusts that + emits (P6e-1a).
+    ...ephemeralMutateHandlers(name, fields, ephemeralFields),
   });
 
   function ownerFieldOf(entity) {
@@ -1287,6 +1370,38 @@ export function entity(name, declaration = {}) {
           type: `${entityName}.${ordField}.removed`,
           scope: `${entityName}:${owner}`,
           data: { owner, id: String(payload.id) },
+        }];
+      };
+    }
+    return handlers;
+  }
+
+  // Ephemeral mutation handlers (P6e-1a). An ephemeral `.set(cells)` is a committed
+  // pipeline action: the handle resolved client_id (principal.id) + did the
+  // write-grant check, then dispatched `${entityName}.${field}.set`. The handler
+  // trusts that + emits `${entityName}.${field}.set` carrying owner + client +
+  // cells; the projection upserts the per-connection side-table row. One emission
+  // type (no per-op split — ephemeral is whole-cells-snapshot replace). Spread into
+  // crudHandlers so a dispatched ephemeral action lands in one handler map.
+  function ephemeralMutateHandlers(entityName, fields, ephemeralFieldEntries) {
+    const handlers = {};
+    for (const [ephField] of ephemeralFieldEntries) {
+      const requireOwnerClient = (payload) => {
+        const { owner, client } = payload ?? {};
+        if (owner == null || client == null) {
+          throw Object.assign(
+            new Error(`${entityName}.${ephField}.set requires an owner + client`),
+            { status: 400 },
+          );
+        }
+        return { owner: String(owner), client: String(client) };
+      };
+      handlers[`${entityName}.${ephField}.set`] = ({ payload }) => {
+        const { owner, client } = requireOwnerClient(payload);
+        return [{
+          type: `${entityName}.${ephField}.set`,
+          scope: `${entityName}:${owner}`,
+          data: { owner, client, cells: payload.cells ?? {} },
         }];
       };
     }
