@@ -32,6 +32,8 @@ import { sessionPrincipalOf } from './session.mjs';
 import { createLiveServer } from './live.mjs';
 import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer } from './pipeline.mjs';
+import { createWriteQueue } from './write-queue.mjs';
+import { createRateLimiter } from './rate-limit.mjs';
 import { resolveTemplate } from './views.mjs';
 import { readFileSync, existsSync } from 'node:fs';
 import { isSafePath, matchExtension } from './views.mjs';
@@ -225,8 +227,9 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
     let result;
     try {
-      result = await kernel.dispatch({ actionId, type: `${table}.create`, payload: body, principal });
+      result = await app.writeQueue.run(() => kernel.dispatch({ actionId, type: `${table}.create`, payload: body, principal }));
     } catch (err) {
+      if (err?.status === 503) return void sendJson(res, 503, { error: 'service busy' });
       if (err instanceof ValidationError) return void sendJson(res, 400, { error: err.message });
       throw err;
     }
@@ -251,13 +254,14 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     }
     let result;
     try {
-      result = await kernel.dispatch({
+      result = await app.writeQueue.run(() => kernel.dispatch({
         actionId,
         type: `${table}.update`,
         payload: { ...body, id: params.id },
         principal,
-      });
+      }));
     } catch (err) {
+      if (err?.status === 503) return void sendJson(res, 503, { error: 'service busy' });
       if (err instanceof ValidationError) return void sendJson(res, 400, { error: err.message });
       throw err;
     }
@@ -277,12 +281,18 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     if (!(await mayVerb(entity, 'remove', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
-    const result = await kernel.dispatch({
-      actionId,
-      type: `${table}.remove`,
-      payload: { id: params.id },
-      principal,
-    });
+    let result;
+    try {
+      result = await app.writeQueue.run(() => kernel.dispatch({
+        actionId,
+        type: `${table}.remove`,
+        payload: { id: params.id },
+        principal,
+      }));
+    } catch (err) {
+      if (err?.status === 503) return void sendJson(res, 503, { error: 'service busy' });
+      throw err;
+    }
     if (!result.granted) return void sendJson(res, 403, { error: 'forbidden' });
     res.writeHead(204);
     res.end();
@@ -537,6 +547,37 @@ async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, q
   }
 }
 
+// The standard stateless CSRF guard (eng-review §8 Tier-2 ops bundle, #13). A
+// state-MUTATING request (anything but a safe method) carrying a FOREIGN Origin
+// or Referer is rejected; the browser always sends a foreign Origin on a
+// cross-site POST (the real forgery vector). A mutation with NO Origin/Referer
+// is allowed — Node fetch and curl omit these by default, so a fail-closed
+// "missing → reject" would block every non-browser API client. Same-origin
+// (the header's host:port equals the request Host) passes. This is a COMPUTED
+// decision (AGENTS.md → Authorization: always functions), not a magic-word
+// check; it runs before the route gate so a forged mutation never reaches it.
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+
+function sameOriginAsHost(headerValue, host) {
+  if (!headerValue) return null; // absent — caller falls back / allows
+  try {
+    return new URL(headerValue).host === host;
+  } catch {
+    return false; // present but unparseable → treat as foreign (fail closed)
+  }
+}
+
+// Returns true when the mutation is allowed, false when it is foreign (→ 403).
+function csrfGuard(req) {
+  if (SAFE_METHODS.has(req.method)) return true;
+  const host = req.headers.host;
+  const origin = sameOriginAsHost(req.headers.origin, host);
+  if (origin !== null) return origin;         // Origin present → its verdict stands
+  const referer = sameOriginAsHost(req.headers.referer, host);
+  if (referer !== null) return referer;       // no Origin; Referer present → its verdict
+  return true;                                // neither present → non-browser client, allow
+}
+
 // Build the node:http request handler that serves a routing table. `principalOf`
 // derives the request's principal; it defaults to a function returning anonymous
 // so an unconfigured server is fail-closed (the default-on route gate denies
@@ -544,7 +585,7 @@ async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, q
 // hydration as the principal source (sessionPrincipalOf) — the SAME admission
 // path, not a second one. `db` is the app-level node:sqlite handle the
 // dispatcher runs against.
-export function makeRequestHandler(source, { principalOf = () => anonymous, db, env = config.env } = {}) {
+export function makeRequestHandler(source, { principalOf = () => anonymous, db, env = config.env, rateLimiter = null } = {}) {
   // `source` is either a plain resolved routing table (an array) or an app whose
   // table resolves asynchronously (two-phase boot). When it is an app, every
   // request first awaits `app.ready` so the socket may accept connections before
@@ -557,6 +598,29 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
     try {
       if (isApp) await source.ready;
       const routes = isApp ? source.routes : source;
+
+      // Rate-limit (opt-in via `listen(port, {rateLimit:{...}})`) runs first in
+      // the ops stack (eng-review line 213: rateLimit → csrfOrigin). A flood is
+      // rejected cheaply here — before CSRF, the route gate, or any write lock —
+      // so a denial-of-service attempt never reaches the kernel (the writeQueue
+      // is never held by a request that will be refused). Per-IP fixed window; a
+      // session limit, when configured, is additional (stricter wins).
+      if (rateLimiter) {
+        const r = rateLimiter.check({ ip: req.socket?.remoteAddress });
+        if (!r.allowed) {
+          res.setHeader('Retry-After', String(Math.ceil(r.retryAfterMs / 1000)));
+          sendJson(res, 429, { error: 'rate limit exceeded', retryAfterMs: r.retryAfterMs });
+          return;
+        }
+      }
+
+      // CSRF origin guard (eng-review #13) — a foreign-origin mutation is
+      // rejected before it reaches the route gate or any state change. Bare
+      // non-browser requests (no Origin/Referer — Node fetch, curl) pass.
+      if (isApp && !csrfGuard(req)) {
+        sendJson(res, 403, { error: 'forbidden' });
+        return;
+      }
 
       // Static file serving — intercepts before route matching. The app declares
       // `app.static('/public', dir)`; every GET request under the prefix is served
@@ -785,6 +849,14 @@ function buildKernel(app) {
     });
   }
 
+  // The single-writer mutex over node:sqlite (D9, eng-review spec #6). A durable
+  // dispatch holds BEGIN→…→COMMIT open across an async `postHandlerAuthorize`
+  // (the in-txn create row-grant), so two in-flight mutations on the one
+  // connection would race a second BEGIN → "cannot start a transaction within a
+  // transaction" → 500. The writeQueue serializes the whole dispatch txn; a
+  // bounded wait or depth rejects with 503 (fail closed, do not pile unbounded).
+  app.writeQueue = createWriteQueue();
+
   return createServer({
     handlers,
     projections,
@@ -848,7 +920,7 @@ export function listen(app, port, optionsOrCallback = {}) {
     // Read the table through a thunk: it is empty until resolution completes, and
     // the handler below gates every request on `app.ready` before reading it.
     app,
-    { ...options, principalOf, db: app.db },
+    { ...options, principalOf, db: app.db, rateLimiter: options.rateLimit ? createRateLimiter(options.rateLimit) : null },
   );
 
   const httpServer = createHttpServer(resolved);
