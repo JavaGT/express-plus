@@ -231,9 +231,9 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
   // Build effects executor if effects registry is provided — fires effects in-txn
   // on committed CRUD events, re-entering through applyEventsToTxn.
   const effectsExecutor = effects
-    ? (event, { now, actionId, depth, maxDepth, db }) => {
+    ? (event, { now, actionId, depth, maxEffectDepth, db }) => {
         const { executeEffectsForEvent } = _getEffectModule();
-        return executeEffectsForEvent(event, effects, { now, actionId, depth, maxDepth, db });
+        return executeEffectsForEvent(event, effects, { now, actionId, depth, maxDepth: maxEffectDepth, db });
       }
     : null;
 
