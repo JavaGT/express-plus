@@ -215,7 +215,13 @@ export function entity(name, declaration = {}) {
         }
       }
     }
+    // Validate string-keyed effects (existing path)
     for (const [triggerHandle, effect] of Object.entries(validatedEffects)) {
+      validateEffectDeclaration(effect, { triggerHandle, sourceEntityName: name });
+    }
+    // P6c-C step 3: validate symbol-keyed effects (anyOf) in a second pass
+    for (const triggerHandle of Object.getOwnPropertySymbols(validatedEffects)) {
+      const effect = validatedEffects[triggerHandle];
       validateEffectDeclaration(effect, { triggerHandle, sourceEntityName: name });
     }
     validatedEffects = Object.freeze(validatedEffects);

@@ -9,9 +9,9 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   entity, text, ref, map, number, grant, read, write, subscribe,
   generateDDL, generateFrameworkDDL, executeFrameworkDDL,
-  principal, inc, dec, self, many, action, event, createServer,
+  principal, inc, dec, self, many, effect, action, event, createServer,
   createEffectContext, checkEffectDepth,
-  buildEffectsRegistry, detectCrossEntityCycles,
+  buildEffectsRegistry, detectCrossEntityCycles, validateEffects,
 } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -739,4 +739,242 @@ test('many() operator creates correct sentinel object', () => {
   assert.equal(sentinel.target, Target);
   assert.equal(sentinel.overField, overField);
   assert.ok(Object.isFrozen(sentinel), 'sentinel should be frozen');
+});
+
+// ============================================================
+// P6c-C step 3: `effect.anyOf()` compound fan-IN trigger tests
+// ============================================================
+
+test('effect.anyOf() returns a symbol (sentinel shape)', () => {
+  const sym = effect.anyOf('A.created', 'B.updated');
+  assert.equal(typeof sym, 'symbol', 'anyOf should return a symbol');
+  assert.ok(sym.toString().includes('effect.anyOf'), 'symbol description should include effect.anyOf');
+});
+
+test('effect.anyOf() throws on zero triggers (fail-closed)', () => {
+  assert.throws(
+    () => effect.anyOf(),
+    /requires at least one trigger/,
+    'anyOf with zero triggers should throw',
+  );
+});
+
+test('Fan-IN: anyOf(Source.created, Source.updated) fires on EITHER event', async () => {
+  const db = setupDb();
+
+  const Target = entity('Target', {
+    fields: { count: number() },
+    grant: () => grant(read, write, subscribe),
+    admitsEffects: ({ effect, principal }) => true,
+  });
+  for (const sql of generateDDL(Target)) db.exec(sql);
+
+  const Source = entity('Source', {
+    fields: { name: text() },
+    grant: () => grant(read, write, subscribe),
+    effects: {
+      [effect.anyOf('Source.created', 'Source.updated')]: {
+        mutate: Target,
+        with: { count: inc(1) },
+      },
+    },
+  });
+  for (const sql of generateDDL(Source)) db.exec(sql);
+
+  const registry = buildEffectsRegistry([Source, Target]);
+  const server = createServer({
+    handlers: Source.crudHandlers,
+    db,
+    projections: [Source.projection, Target.projection],
+    effects: registry,
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+
+  // Create source - fires anyOf on .created
+  await server.dispatch({
+    actionId: 'create-src',
+    type: 'Source.create',
+    payload: { name: 'test' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  let targets = db.prepare('SELECT * FROM Target').all();
+  assert.equal(targets.length, 1, 'effect should fire on Source.created');
+
+  // Update source - fires anyOf on .updated
+  const srcRow = db.prepare('SELECT * FROM Source').get();
+  await server.dispatch({
+    actionId: 'update-src',
+    type: 'Source.update',
+    payload: { id: srcRow.id, name: 'updated' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  targets = db.prepare('SELECT * FROM Target').all();
+  assert.equal(targets.length, 2, 'effect should fire on Source.updated too (fan-IN fires on both)');
+});
+
+test('Admission coverage: anyOf effect targeting non-admitting entity throws at boot', () => {
+  const db = setupDb();
+
+  // Target without admitsEffects
+  const TargetNoAdmit = entity('TargetNoAdmit', {
+    fields: { name: text() },
+    grant: () => grant(read, write, subscribe),
+    // No admitsEffects
+  });
+  for (const sql of generateDDL(TargetNoAdmit)) db.exec(sql);
+
+  const Source = entity('Source', {
+    fields: { name: text() },
+    grant: () => grant(read, write, subscribe),
+    effects: {
+      [effect.anyOf('Source.created', 'Source.updated')]: {
+        mutate: TargetNoAdmit,
+        with: { name: 'test' },
+      },
+    },
+  });
+  for (const sql of generateDDL(Source)) db.exec(sql);
+
+  // validateEffects should throw because TargetNoAdmit has no admitsEffects
+  // This proves the :558 fix - without it, the symbol-keyed effect would be invisible
+  assert.throws(
+    () => validateEffects([Source, TargetNoAdmit]),
+    /admitsEffects/,
+    'validation should fail when target lacks admitsEffects (proves buildEffectsGraph sees symbol-keyed effects)',
+  );
+});
+
+test('Dedupe: anyOf(X.created, X.created) registers effect ONCE', async () => {
+  const db = setupDb();
+
+  const Target = entity('Target', {
+    fields: { count: number() },
+    grant: () => grant(read, write, subscribe),
+    admitsEffects: ({ effect, principal }) => true,
+  });
+  for (const sql of generateDDL(Target)) db.exec(sql);
+
+  // Use a variable handle twice to test dedupe
+  const Source = entity('Source', {
+    fields: { name: text() },
+    grant: () => grant(read, write, subscribe),
+    effects: {
+      [effect.anyOf('Source.created', 'Source.created')]: {
+        mutate: Target,
+        with: { count: inc(1) },
+      },
+    },
+  });
+  for (const sql of generateDDL(Source)) db.exec(sql);
+
+  const registry = buildEffectsRegistry([Source, Target]);
+
+  // Check that Source.created has exactly one effect entry (not two)
+  const createdEffects = registry.get('Source.created');
+  assert.ok(createdEffects, 'Source.created should have effects');
+  assert.equal(createdEffects.length, 1, 'dedupe should prevent duplicate registration');
+
+  // Fire the event and verify only one target row created
+  const server = createServer({
+    handlers: Source.crudHandlers,
+    db,
+    projections: [Source.projection, Target.projection],
+    effects: registry,
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+
+  await server.dispatch({
+    actionId: 'create-src',
+    type: 'Source.create',
+    payload: { name: 'test' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  const targets = db.prepare('SELECT * FROM Target').all();
+  assert.equal(targets.length, 1, 'effect should fire once, not twice');
+});
+
+test('Self-recursion depth cap: anyOf effect with self-mutate bounded by maxDepth', async () => {
+  const db = setupDb();
+
+  const Counter = entity('Counter', {
+    fields: { count: number(), phase: text() },
+    grant: () => grant(read, write, subscribe),
+    admitsEffects: ({ effect, principal }) => true,
+    effects: {
+      // anyOf triggers on Counter.updated - self-effect creates recursion
+      [effect.anyOf('Counter.updated')]: {
+        mutate: self,
+        with: { count: inc(1), phase: 'ticking' },
+      },
+    },
+  });
+  for (const sql of generateDDL(Counter)) db.exec(sql);
+
+  const registry = buildEffectsRegistry([Counter]);
+  const server = createServer({
+    handlers: Counter.crudHandlers,
+    db,
+    projections: [Counter.projection],
+    effects: registry,
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+
+  // Seed a row
+  await server.dispatch({
+    actionId: 'seed-rec',
+    type: 'Counter.create',
+    payload: { count: 0, phase: 'initial' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  const seeded = db.prepare('SELECT * FROM Counter').get();
+
+  // Trigger the recursion - should hit depth cap, not hang
+  let threw = false;
+  let errorMsg = '';
+  try {
+    await server.dispatch({
+      actionId: 'trigger-rec',
+      type: 'Counter.update',
+      payload: { id: seeded.id, count: 0, phase: 'start' },
+      principal: principal({ type: 'user', id: 'u1' }),
+    });
+  } catch (err) {
+    threw = true;
+    errorMsg = err.message;
+  }
+
+  assert.ok(threw, 'should throw depth-cap error, not hang');
+  assert.ok(/depth limit exceeded/i.test(errorMsg), `error should mention depth cap: ${errorMsg}`);
+});
+
+test('Map-handle rejection: anyOf with map:onAdded throws at registry-build', () => {
+  const collaboratorsField = map(ref('User', { role: 'collaborator', readonly: true }));
+
+  const BadEntity = entity('BadEntityAnyOf', {
+    fields: {
+      name: text(),
+      collaborators: collaboratorsField,
+    },
+    grant: () => grant(read, write, subscribe),
+    effects: {
+      [effect.anyOf(collaboratorsField.onAdded, 'BadEntityAnyOf.updated')]: {
+        mutate: entity('TargetAnyOf', { fields: { x: text() }, grant: () => grant(read, write, subscribe) }),
+        with: { x: 'y' },
+      },
+    },
+  });
+
+  // The error is thrown at registry-build time (resolveTriggerEventType), not entity() compile
+  assert.throws(
+    () => buildEffectsRegistry([BadEntity]),
+    /does not support map-collection triggers/,
+    'anyOf with map:onAdded should throw clear error at registry-build',
+  );
 });
