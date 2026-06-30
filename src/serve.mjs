@@ -29,6 +29,7 @@ import { mayVerb, hasOwnCanGrant } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
+import { admitScheduledMutation } from './schedule.mjs';
 import { createLiveServer } from './live.mjs';
 import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer } from './pipeline.mjs';
@@ -1067,7 +1068,31 @@ function buildKernel(app) {
     projections,
     effects: effectsRegistry.size > 0 ? effectsRegistry : null,
     authorize: () => true,
-    postHandlerAuthorize: async ({ entityName, verb, principal, event }) => {
+    preProjectionAuthorize: async ({ entityName, verb, principal, event, payload, db: hookDb, now }) => {
+      // SCHEDULER SYSTEM PRINCIPAL (Option A, DECISIONLOG #62) — a reaper-fired
+      // dispatch under a scheduler principal is NOT a user with a row grant: its
+      // authority is the entity's DECLARED schedule. This admission runs
+      // PRE-projection, IN-TXN, against the row as it stood when the schedule
+      // was discovered (the `while`/due/`with` re-checks must NOT see this
+      // dispatch's own projected mutation — they check the candidate is still
+      // due). admitScheduledMutation denies fail-closed on any mismatch
+      // (future-due, while-fails, wrong source, arbitrary payload). On denial it
+      // throws 403 with ZERO footprint: nothing appended to _Log, no projection.
+      if (principal?.type !== 'system' || !principal.attributes?.source) return true;
+      const entity = app.entities?.get(entityName);
+      if (!entity) return false;
+      const hookDbRef = hookDb ?? app.db;
+      return admitScheduledMutation({
+        entity,
+        verb,
+        rowId: event?.data?.id,
+        payload,
+        principal,
+        db: hookDbRef,
+        now: now ?? Date.now(),
+      });
+    },
+    postHandlerAuthorize: async ({ entityName, verb, principal, event, payload, db: hookDb, now }) => {
       // EFFECT-ORIGINATED events (carrying `_effectPrincipal`) are authorized by
       // the TARGET's `admitsEffects` admission gate — already evaluated in-txn by
       // the effect compiler (executeEffect) before the event was minted, and a

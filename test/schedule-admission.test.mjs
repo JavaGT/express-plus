@@ -202,3 +202,109 @@ test('admitScheduledMutation: schedule.after due = row.field + delay <= now', ()
   });
   assert.equal(granted2, false, 'after: field + delay > now → not due → deny');
 });
+
+// ============================================================
+// END-TO-END: the wired dispatch spine admits / denies a scheduler principal
+// (Option A — postHandlerAuthorize branches to admitScheduledMutation).
+// ============================================================
+import { createServer } from '../src/pipeline.mjs';
+import { principal as makePrincipal } from '../src/principal.mjs';
+
+function setupAppServer() {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
+  const publishedAt = date();
+  const status = { kind: 'value', type: 'text' };
+  const Blog = entity('BlogE2E', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    fields: { publishedAt, status },
+    schedule: {
+      update: schedule.at(publishedAt, {
+        while: ({ fields }) => fields.status.is('draft'),
+        with: { status: 'published' },
+      }),
+    },
+  });
+  for (const sql of generateDDL(Blog)) db.exec(sql);
+  db.exec('CREATE TABLE _Cursor (scope TEXT PRIMARY KEY, lastSeq INTEGER)');
+  // The real serve.mjs hook (mirrored here): scheduler branch → admitScheduledMutation.
+  // The real serve.mjs hook (mirrored here): scheduler admission runs in the
+  // PRE-projection phase so admitScheduledMutation re-checks due/while/with
+  // against the row as it stood at discovery — NOT after this dispatch's own
+  // projection has applied the payload. On denial it throws 403 with zero
+  // footprint (no _Log row, no projection write).
+  const server = createServer({
+    handlers: Blog.crudHandlers,
+    db,
+    projections: [Blog.projection],
+    authorize: () => true,
+    preProjectionAuthorize: async ({ entityName, verb, principal: p, event, payload, db: hookDb, now }) => {
+      if (p?.type !== 'system' || !p.attributes?.source) return true;
+      return admitScheduledMutation({
+        entity: Blog, verb, rowId: event?.data?.id,
+        payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
+      });
+    },
+  });
+  return { db, Blog, server };
+}
+
+test('e2e: a bound scheduler dispatch is ADMITTED through the wired dispatch hook', async () => {
+  const { db, Blog, server } = setupAppServer();
+  const now = Date.now();
+  db.prepare('INSERT INTO BlogE2E (id, publishedAt, status) VALUES (?, ?, ?)').run('b1', now - 1000, 'draft');
+
+  const res = await server.dispatch({
+    actionId: 'sched-1',
+    type: 'BlogE2E.update',
+    payload: { id: 'b1', status: 'published' },
+    principal: makePrincipal({ type: 'system', attributes: { source: 'BlogE2E.update.publishedAt' } }),
+  });
+  assert.equal(res.granted, true, 'scheduler principal dispatched the declared payload on a due+while-holding row');
+  assert.ok(res.events?.length >= 1, 'the update event was committed');
+  // The row was mutated by the projection:
+  const row = db.prepare('SELECT * FROM BlogE2E WHERE id = ?').get('b1');
+  assert.equal(row.status, 'published', 'projection applied the declared with payload (status: published)');
+});
+
+test('e2e: a scheduler principal sending an UNDECLARED payload is DENIED (write-anything hole)', async () => {
+  const { db, server } = setupAppServer();
+  const now = Date.now();
+  db.prepare('INSERT INTO BlogE2E (id, publishedAt, status) VALUES (?, ?, ?)').run('b2', now - 1000, 'draft');
+
+  const res = await server.dispatch({
+    actionId: 'sched-2',
+    type: 'BlogE2E.update',
+    payload: { id: 'b2', status: 'hijacked' }, // wrong value: schedule declared { status: 'published' }
+    principal: makePrincipal({ type: 'system', attributes: { source: 'BlogE2E.update.publishedAt' } }),
+  });
+  assert.equal(res.granted, false, 'undeclared payload → deny; the scheduler principal cannot write-anything');
+});
+
+test('e2e: a scheduler principal with the WRONG source is DENIED', async () => {
+  const { db, server } = setupAppServer();
+  const now = Date.now();
+  db.prepare('INSERT INTO BlogE2E (id, publishedAt, status) VALUES (?, ?, ?)').run('b3', now - 1000, 'draft');
+
+  const res = await server.dispatch({
+    actionId: 'sched-3',
+    type: 'BlogE2E.update',
+    payload: { id: 'b3', status: 'published' },
+    principal: makePrincipal({ type: 'system', attributes: { source: 'Other.update.publishedAt' } }),
+  });
+  assert.equal(res.granted, false, 'wrong source → deny; principal must bind to the declared schedule');
+});
+
+test('e2e: a scheduler dispatch on a NON-draft row (while-fails) is DENIED', async () => {
+  const { db, server } = setupAppServer();
+  const now = Date.now();
+  db.prepare('INSERT INTO BlogE2E (id, publishedAt, status) VALUES (?, ?, ?)').run('b4', now - 1000, 'archived');
+
+  const res = await server.dispatch({
+    actionId: 'sched-4',
+    type: 'BlogE2E.update',
+    payload: { id: 'b4', status: 'published' },
+    principal: makePrincipal({ type: 'system', attributes: { source: 'BlogE2E.update.publishedAt' } }),
+  });
+  assert.equal(res.granted, false, 'while no longer holds → deny (the declared will still governs)');
+});

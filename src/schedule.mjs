@@ -174,12 +174,18 @@ export function admitScheduledMutation({ entity, verb, rowId, payload, principal
   } else {
     declaredPayload = {};
   }
+  // The dispatched payload carries the structural `id` (the row's primary key)
+  // which the `update` handler REQUIRES to locate the row ('update requires an
+  // id'); the declared `with` never includes it. The rowId is the TARGET, not a
+  // field the schedule writes. Strip `id` from the dispatched payload before
+  // comparing, so the write-anything guard matches on the DECLARED FIELD SET.
+  const { id: _rowId, ...payloadFields } = payload ?? {};
   // Deep structural equality (values, nested objects/arrays) — a mismatched
   // payload (a field the schedule did not declare, or a stale recomputed value)
   // is a deny. JSON.stringify round-trip is sufficient for the payload grammar
   // (plain objects/values; functions are not valid payload members).
   try {
-    if (JSON.stringify(payload) !== JSON.stringify(declaredPayload)) return false;
+    if (JSON.stringify(payloadFields) !== JSON.stringify(declaredPayload)) return false;
   } catch {
     return false; // unserializable payload → fail closed
   }

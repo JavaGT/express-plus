@@ -95,13 +95,48 @@ async function applyEventsToTxn(db, events, {
   nextSeq,
   projectionConsumers = [],
   blobAdopter,
+  preProjectionAuthorize,
   postHandlerAuthorize,
   principal,
   effectsExecutor,
   depth = 0,
   maxEffectDepth = 8,
+  payload,
 } = {}) {
   const finalizedEvents = [];
+
+  // Pre-projection admission — runs IN-TXN against the PRE-mutation row, BEFORE
+  // the event is appended to _Log or projected. Denial leaves zero footprint
+  // (no _Log row, no projection write). This is the phase scheduler admission
+  // needs: its `while`/due/with re-checks are against the row as it stood when
+  // the schedule was discovered, NOT after THIS dispatch's own projection has
+  // applied the payload. The POST-projection create row-grant (below, in
+  // postHandlerAuthorize) has the OPPOSITE visibility need (authorize against
+  // the freshly-projected row) — so the two are distinct hook phases, not one.
+  if (preProjectionAuthorize) {
+    for (const e of events) {
+      const dotIdx = e.type.indexOf('.');
+      if (dotIdx > 0) {
+        const entityName = e.type.slice(0, dotIdx);
+        const suffix = e.type.slice(dotIdx + 1);
+        const verb = VERB_FROM_EVENT[suffix];
+        if (!verb) continue;
+        const granted = await preProjectionAuthorize({
+          entityName,
+          verb,
+          principal,
+          eventType: e.type,
+          event: e,
+          db,
+          now,
+          payload,
+        });
+        if (!granted) {
+          throw Object.assign(new Error('forbidden'), { status: 403 });
+        }
+      }
+    }
+  }
 
   // Append events to _Log with per-scope sequence numbers. NOW tokens in the
   // event data are resolved to the commit-time ISO here (ADR #24) — before
@@ -152,6 +187,9 @@ async function applyEventsToTxn(db, events, {
           principal,
           eventType: ev.type,
           event: ev,
+          db,
+          now,
+          payload,
         });
         if (!granted) {
           throw Object.assign(new Error('forbidden'), { status: 403 });
@@ -182,11 +220,12 @@ async function applyEventsToTxn(db, events, {
           nextSeq,
           projectionConsumers,
           blobAdopter,
+          preProjectionAuthorize,
           postHandlerAuthorize,
           principal: effectPrincipal,
           effectsExecutor,
           depth: depth + 1,
-          maxEffectDepth,
+          payload,
         });
       }
     }
@@ -218,7 +257,7 @@ async function applyEventsToTxn(db, events, {
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
 // gate + grant engine compose — it is not a second, looser auth path.
-export function createServer({ handlers = {}, authorize, db, projections: projectionConsumers = [], postHandlerAuthorize, blobAdopter, postCommitConsumers: postCommitConsumers = [], effects = null } = {}) {
+export function createServer({ handlers = {}, authorize, db, projections: projectionConsumers = [], preProjectionAuthorize, postHandlerAuthorize, blobAdopter, postCommitConsumers: postCommitConsumers = [], effects = null } = {}) {
   if (typeof authorize !== 'function') {
     throw new Error(
       `createServer requires an authorize function. There is no default — a ` +
@@ -345,9 +384,11 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
         nextSeq,
         projectionConsumers,
         blobAdopter,
+        preProjectionAuthorize,
         postHandlerAuthorize,
         principal,
         effectsExecutor,
+        payload,
       });
       db.exec('COMMIT');
       // Post-commit fan-out (eng-review §D3). Consumers run AFTER commit — an
