@@ -27,3 +27,4 @@ export { default, router } from './app.mjs';
 export { inc, dec, self, many, effect, validateEffectDeclaration, createEffectContext, checkEffectDepth, executeEffectsForEvent, buildEffectsRegistry, buildEffectsGraph, validateEffects, verifyAdmissionHandshake, detectCrossEntityCycles, compileEntityEffects } from './effect-compiler.mjs';
 export { schedule, tick, tickSource, discoverTickedRows, admitTickedMutation, discoverDueSchedules } from './schedule.mjs';
 export { startTickEngine } from './tick-engine.mjs';
+export { startReaper } from './reaper.mjs';

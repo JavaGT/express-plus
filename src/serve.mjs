@@ -31,6 +31,7 @@ import { applySecurityHeaders, renderError } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
 import { admitScheduledMutation, tickSource, admitTickedMutation } from './schedule.mjs';
 import { startTickEngine } from './tick-engine.mjs';
+import { startReaper } from './reaper.mjs';
 import { createLiveServer } from './live.mjs';
 import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer } from './pipeline.mjs';
@@ -1254,15 +1255,21 @@ export function listen(app, port, optionsOrCallback = {}) {
   app.ready = (async () => {
     await app.resolveRoutes();
     app.kernel = buildKernel(app);
+    const dispatchThroughWriteQueue = (args) => app.writeQueue.run(() => app.kernel.dispatch(args));
     // Start the tick engine now that `app.kernel.dispatch` exists. Only starts
     // if some entity declares a tick trigger (tick.hz / tick.every); otherwise
     // startTickEngine returns a no-op and no timer is created.
     const tickEngine = startTickEngine({
       db: app.db,
       entities: app.entities,
-      dispatch: app.kernel?.dispatch,
+      dispatch: dispatchThroughWriteQueue,
     });
     app.onShutdown('tick-engine', () => { tickEngine.stop(); }, { timeoutMs: 1000 });
+    // Start the schedule reaper now that app.kernel.dispatch exists. Mirrors
+    // the tick engine pattern; uses a fixed 1s poll interval. Only starts if
+    // some entity declares a schedule.at / schedule.after deadline trigger.
+    const reaper = startReaper({ db: app.db, entities: app.entities, dispatch: dispatchThroughWriteQueue });
+    app.onShutdown('reaper', () => { reaper.stop(); }, { timeoutMs: 1000 });
     if (!httpServer.listening) {
       await new Promise((resolve) => httpServer.once('listening', resolve));
     }

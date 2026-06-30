@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { entity, scope, everyone, grant, read, tick, date } from '../src/index.mjs';
+import expressPlus, { entity, scope, everyone, grant, read, tick, date } from '../src/index.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
@@ -264,6 +264,47 @@ test('e2e: tick dispatch updates row through projection', async (t) => {
   await poll(() => {
     const row = db.prepare('SELECT status FROM BlogTick WHERE id = ?').get('b1');
     assert.equal(row?.status, 'moving', 'projection applied the declared with payload');
+  }, { timeoutMs: 3000 });
+});
+
+test('listen tick dispatch waits behind the app write queue', async (t) => {
+  const statusDesc = { kind: 'value', type: 'text' };
+  const Blog = entity('BlogTickQueue', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    fields: { status: statusDesc },
+    schedule: {
+      update: tick.hz(20, {
+        while: ({ fields }) => fields.status.is('alive'),
+        with: { status: 'moving' },
+      }),
+    },
+  });
+  const db = seededDb();
+  for (const sql of generateDDL(Blog)) db.exec(sql);
+  db.prepare('INSERT INTO BlogTickQueue (id, status) VALUES (?, ?)').run('bq1', 'alive');
+
+  const app = expressPlus({ db }).mount('/ticks', Blog).listen(0, {
+    principalOf: () => makePrincipal({ type: 'user', id: 'u1' }),
+  });
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+  await app.ready;
+
+  let releaseHold;
+  const hold = app.writeQueue.run(() => new Promise((resolve) => { releaseHold = resolve; }));
+  await new Promise((resolve) => setTimeout(resolve, 150));
+
+  const heldRow = db.prepare('SELECT status FROM BlogTickQueue WHERE id = ?').get('bq1');
+  assert.equal(heldRow?.status, 'alive', 'timer dispatch must not bypass the held write queue');
+
+  releaseHold();
+  await hold;
+
+  await poll(() => {
+    const row = db.prepare('SELECT status FROM BlogTickQueue WHERE id = ?').get('bq1');
+    assert.equal(row?.status, 'moving', 'queued tick dispatch runs after the write queue releases');
   }, { timeoutMs: 3000 });
 });
 
