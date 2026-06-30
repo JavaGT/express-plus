@@ -227,16 +227,22 @@ export function entity(name, declaration = {}) {
     validatedEffects = Object.freeze(validatedEffects);
   }
 
-  // Validate schedule declarations at load time (P6d Spine A step 1 → step 2).
+  // Validate schedule declarations at load time (P6d Spine A step 1 → step 4a).
   // Each [verbName, trigger] must be a valid schedule.at() or schedule.after() call.
-  // Step 2 compiles the optional `while` predicate (scope predicate) and rejects `when`.
+  // Step 2 compiles the optional `while` predicate; step 4a adds CRUD verb restriction,
+  // field identity resolution, and `with` payload validation.
   let validatedSchedule = null;
   const scheduleKeys = Object.keys(schedule);
   if (scheduleKeys.length > 0) {
     validatedSchedule = {};
     for (const [verbName, trigger] of Object.entries(schedule)) {
+      // CRUD verb restriction (fail-closed): only create/update/remove are dispatchable
+      // (handlers[type] lookup at pipeline.mjs:325 throws for unknown types — no custom verbs).
       if (typeof verbName !== 'string' || verbName.length === 0) {
         throw new Error(`schedule: verb name must be a non-empty string, got ${verbName}`);
+      }
+      if (!['create', 'update', 'remove'].includes(verbName)) {
+        throw new Error(`schedule verb '${verbName}' must be one of create | update | remove (entity '${name}')`);
       }
       if (!trigger || typeof trigger !== 'object' || !(trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after')) {
         throw new Error(`schedule.${verbName}: expected schedule.at(...) or schedule.after(...), got ${JSON.stringify(trigger)}`);
@@ -244,12 +250,38 @@ export function entity(name, declaration = {}) {
       if (!trigger.field || typeof trigger.field !== 'object') {
         throw new Error(`schedule.${verbName}: field must be a field descriptor (no bare strings)`);
       }
+      // Identity-resolve the field descriptor to a field NAME (same pattern `many`'s `over` uses).
+      // The trigger.field is a descriptor object; match it against declared fields by object identity.
+      let fieldName = null;
+      for (const [fname, fdesc] of Object.entries(fields)) {
+        if (fdesc === trigger.field) {
+          fieldName = fname;
+          break;
+        }
+      }
+      if (!fieldName) {
+        throw new Error(`schedule '${verbName}': field descriptor is not a declared field on entity '${name}'`);
+      }
+      // Verify the resolved field's kind is comparable as a date/value (allows <= comparison).
+      // Date fields serialize to epoch-ms integers (field-strategy.mjs), enabling direct integer SQL comparison.
+      const fieldKind = fields[fieldName].kind;
+      const fieldType = fields[fieldName].type;
+      if (fieldKind !== 'value' || (fieldType !== 'date' && fieldType !== 'number')) {
+        throw new Error(`schedule '${verbName}': field '${fieldName}' must be a date or number field (kind 'value', comparable via <=)`);
+      }
       if (trigger.kind === 'schedule.after' && !Number.isFinite(trigger.delay)) {
         throw new Error(`schedule.${verbName}: delay must be a finite number (parseDelay should have validated)`);
       }
       // Reject 'when' lifecycle guard (Spine C8 state runtime, not yet implemented)
       if (trigger.when) {
         throw new Error(`schedule.${verbName}: 'when' lifecycle guard is not yet supported (ships with state runtime, Spine C8)`);
+      }
+      // Validate `with` payload option (fail-closed)
+      let withValue = trigger.with;
+      if (withValue !== undefined && withValue !== null) {
+        if (typeof withValue !== 'function' && (typeof withValue !== 'object' || Array.isArray(withValue))) {
+          throw new Error(`schedule '${verbName}': 'with' must be an object or a function ({row}) => obj`);
+        }
       }
       // Compile the optional 'while' predicate (strict fail-closed; NonCompilableError propagates)
       let whileSql, whileParams, whileAst;
@@ -266,10 +298,12 @@ export function entity(name, declaration = {}) {
       validatedSchedule[verbName] = Object.freeze({
         kind: trigger.kind,
         field: trigger.field,
+        fieldName,
         delay: trigger.delay,
         whileSql,
         whileParams,
         whileAst,
+        with: withValue,
       });
     }
     validatedSchedule = Object.freeze(validatedSchedule);

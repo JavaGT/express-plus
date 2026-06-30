@@ -64,15 +64,15 @@ test('entity with schedule slot: builds and record.schedule is frozen', () => {
     grant: scope(() => everyone()).can(() => grant(read)),
     fields: { publishedAt },
     schedule: {
-      publish: schedule.at(publishedAt),
+      update: schedule.at(publishedAt),
     },
   });
   assert.ok(Blog);
   assert.ok(Blog.schedule);
   assert.ok(Object.isFrozen(Blog.schedule));
-  assert.ok(Object.isFrozen(Blog.schedule.publish));
-  assert.equal(Blog.schedule.publish.kind, 'schedule.at');
-  assert.equal(Blog.schedule.publish.field, publishedAt);
+  assert.ok(Object.isFrozen(Blog.schedule.update));
+  assert.equal(Blog.schedule.update.kind, 'schedule.at');
+  assert.equal(Blog.schedule.update.field, publishedAt);
 });
 
 test('entity with schedule.after: builds correctly', () => {
@@ -81,13 +81,13 @@ test('entity with schedule.after: builds correctly', () => {
     grant: scope(() => everyone()).can(() => grant(read)),
     fields: { createdAt },
     schedule: {
-      remind: schedule.after(createdAt, '7d'),
+      update: schedule.after(createdAt, '7d'),
     },
   });
   assert.ok(Todo);
   assert.ok(Todo.schedule);
-  assert.equal(Todo.schedule.remind.kind, 'schedule.after');
-  assert.equal(Todo.schedule.remind.delay, 604_800_000);
+  assert.equal(Todo.schedule.update.kind, 'schedule.after');
+  assert.equal(Todo.schedule.update.delay, 604_800_000);
 });
 
 test('entity rejects malformed schedule: bogus kind', () => {
@@ -97,10 +97,10 @@ test('entity rejects malformed schedule: bogus kind', () => {
       grant: scope(() => everyone()).can(() => grant(read)),
       fields: { f },
       schedule: {
-        publish: { kind: 'bogus' },
+        update: { kind: 'bogus' },
       },
     }),
-    /schedule\.publish: expected schedule\.at\(\.\.\.\) or schedule\.after\(\.\.\.\)/,
+    /schedule\.update: expected schedule\.at\(\.\.\.\) or schedule\.after\(\.\.\.\)/,
   );
 });
 
@@ -141,11 +141,11 @@ test('schedule trigger field identity: same object identity rides through', () =
     grant: scope(() => everyone()).can(() => grant(read)),
     fields: { publishedAt },
     schedule: {
-      publish: schedule.at(publishedAt),
+      update: schedule.at(publishedAt),
     },
   });
   // Proves descriptors ride through untouched for later identity-matching
-  assert.strictEqual(Blog.schedule.publish.field, publishedAt);
+  assert.strictEqual(Blog.schedule.update.field, publishedAt);
 });
 
 test('schedule constructors accept any object as field (identity-matching happens later)', () => {
@@ -225,16 +225,16 @@ test('entity with schedule.at + while: compiles to whileSql, whileParams, whileA
     grant: scope(() => everyone()).can(() => grant(read)),
     fields: { status, publishedAt },
     schedule: {
-      publish: schedule.at(publishedAt, { while: ({ fields }) => fields.status.is('queued') }),
+      update: schedule.at(publishedAt, { while: ({ fields }) => fields.status.is('queued') }),
     },
   });
   assert.ok(Blog);
   assert.ok(Blog.schedule);
-  assert.ok(Blog.schedule.publish);
-  assert.ok(typeof Blog.schedule.publish.whileSql === 'string' && Blog.schedule.publish.whileSql.length > 0);
-  assert.ok(Blog.schedule.publish.whileSql.includes('status'));
-  assert.ok(Blog.schedule.publish.whileParams && typeof Blog.schedule.publish.whileParams === 'object' && Object.keys(Blog.schedule.publish.whileParams).length > 0);
-  assert.ok(Blog.schedule.publish.whileAst && typeof Blog.schedule.publish.whileAst === 'object');
+  assert.ok(Blog.schedule.update);
+  assert.ok(typeof Blog.schedule.update.whileSql === 'string' && Blog.schedule.update.whileSql.length > 0);
+  assert.ok(Blog.schedule.update.whileSql.includes('status'));
+  assert.ok(Blog.schedule.update.whileParams && typeof Blog.schedule.update.whileParams === 'object' && Object.keys(Blog.schedule.update.whileParams).length > 0);
+  assert.ok(Blog.schedule.update.whileAst && typeof Blog.schedule.update.whileAst === 'object');
 });
 
 test('entity with schedule.after + while: compiles to whileSql, whileParams, whileAst', () => {
@@ -244,16 +244,16 @@ test('entity with schedule.after + while: compiles to whileSql, whileParams, whi
     grant: scope(() => everyone()).can(() => grant(read)),
     fields: { status, createdAt },
     schedule: {
-      remind: schedule.after(createdAt, '1h', { while: ({ fields }) => fields.status.is('pending') }),
+      update: schedule.after(createdAt, '1h', { while: ({ fields }) => fields.status.is('pending') }),
     },
   });
   assert.ok(Todo);
   assert.ok(Todo.schedule);
-  assert.ok(Todo.schedule.remind);
-  assert.ok(typeof Todo.schedule.remind.whileSql === 'string' && Todo.schedule.remind.whileSql.length > 0);
-  assert.ok(Todo.schedule.remind.whileSql.includes('status'));
-  assert.ok(Todo.schedule.remind.whileParams && typeof Todo.schedule.remind.whileParams === 'object' && Object.keys(Todo.schedule.remind.whileParams).length > 0);
-  assert.ok(Todo.schedule.remind.whileAst && typeof Todo.schedule.remind.whileAst === 'object');
+  assert.ok(Todo.schedule.update);
+  assert.ok(typeof Todo.schedule.update.whileSql === 'string' && Todo.schedule.update.whileSql.length > 0);
+  assert.ok(Todo.schedule.update.whileSql.includes('status'));
+  assert.ok(Todo.schedule.update.whileParams && typeof Todo.schedule.update.whileParams === 'object' && Object.keys(Todo.schedule.update.whileParams).length > 0);
+  assert.ok(Todo.schedule.update.whileAst && typeof Todo.schedule.update.whileAst === 'object');
 });
 
 test('entity with no while on schedule trigger: whileSql is undefined', () => {
@@ -262,13 +262,13 @@ test('entity with no while on schedule trigger: whileSql is undefined', () => {
     grant: scope(() => everyone()).can(() => grant(read)),
     fields: { publishedAt },
     schedule: {
-      publish: schedule.at(publishedAt),
+      update: schedule.at(publishedAt),
     },
   });
   assert.ok(Blog);
-  assert.strictEqual(Blog.schedule.publish.whileSql, undefined);
-  assert.strictEqual(Blog.schedule.publish.whileParams, undefined);
-  assert.strictEqual(Blog.schedule.publish.whileAst, undefined);
+  assert.strictEqual(Blog.schedule.update.whileSql, undefined);
+  assert.strictEqual(Blog.schedule.update.whileParams, undefined);
+  assert.strictEqual(Blog.schedule.update.whileAst, undefined);
 });
 
 test('non-compilable while: load-time error (NonCompilableError propagates)', () => {
@@ -278,10 +278,10 @@ test('non-compilable while: load-time error (NonCompilableError propagates)', ()
       grant: scope(() => everyone()).can(() => grant(read)),
       fields: { publishedAt },
       schedule: {
-        publish: schedule.at(publishedAt, { while: ({ fields }) => fields.nonexistent.eq(1) }),
+        update: schedule.at(publishedAt, { while: ({ fields }) => fields.nonexistent.eq(1) }),
       },
     }),
-    /schedule\.publish while on entity/,
+    /schedule\.update while on entity/,
   );
 });
 
@@ -293,10 +293,10 @@ test("'when' rejection: trigger with when throws not-yet-supported error", () =>
       grant: scope(() => everyone()).can(() => grant(read)),
       fields: { publishedAt },
       schedule: {
-        publish: handBuiltTrigger,
+        update: handBuiltTrigger,
       },
     }),
-    /schedule\.publish: 'when' lifecycle guard is not yet supported/,
+    /schedule\.update: 'when' lifecycle guard is not yet supported/,
   );
 });
 
@@ -307,12 +307,12 @@ test('while referencing a value-kind comparable field compiles', () => {
     grant: scope(() => everyone()).can(() => grant(read)),
     fields: { status, publishedAt },
     schedule: {
-      publish: schedule.at(publishedAt, { while: ({ fields }) => fields.status.is('draft') }),
+      update: schedule.at(publishedAt, { while: ({ fields }) => fields.status.is('draft') }),
     },
   });
   assert.ok(Doc);
   assert.ok(Doc.schedule);
-  assert.ok(Doc.schedule.publish);
-  assert.ok(typeof Doc.schedule.publish.whileSql === 'string');
-  assert.ok(Doc.schedule.publish.whileParams);
+  assert.ok(Doc.schedule.update);
+  assert.ok(typeof Doc.schedule.update.whileSql === 'string');
+  assert.ok(Doc.schedule.update.whileParams);
 });
