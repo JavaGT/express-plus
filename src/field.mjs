@@ -195,12 +195,36 @@ export function list(of, options = {}) {
   });
 }
 
-export function presence(cells = {}) {
+// `ephemeral(cells)` — the general NON-PERSISTING field kind. Accepts an author-
+// declared cell shape (richer than boolean toggles — e.g. a drawing canvas can
+// hold a 60Hz in-progress stroke). It is its own KIND (`ephemeral`), a namespace
+// of named live sub-cells. Its ephemerality is EMERGENT: it engages no persistence
+// seam (no strategy entry, so it never serializes), per DECISIONLOG #51 — the
+// absent seam IS the ephemerality. A side-table MAY hold per-connection cells
+// (that is NOT the "persistence seam" — that's STRATEGIES/_Log); it's allowed.
+//
+//   - cells — the declared live sub-cells; the shape is config, frozen so a later
+//             layer cannot mutate the declared set.
+//
+// Import-surface scope: this constructor delivers the descriptor the entity
+// compiler accepts. The per-connection broadcast and volatile coalescing are
+// the ephemeral kind's deferred live behavior.
+export function ephemeral(cells = {}) {
   return makeDescriptor({
-    kind: 'presence',
-    type: 'presence',
+    kind: 'ephemeral',
+    type: 'ephemeral',
     cells: Object.freeze({ ...cells }),
   });
+}
+
+// `presence({ cursor, selection })` — RETIRED to a thin wrapper over `ephemeral`
+// (AGENTS: "a new general mechanism retires the special-case it generalizes, in
+// the same change"). There is ONE non-persisting kind — `ephemeral`; `presence`
+// is the convenience name for the canonical { cursor, selection } presence shape.
+// Do not re-introduce a separate `presence` kind: that would run a parallel path
+// beside `ephemeral`, the exact drift this retirement removed.
+export function presence(cells = {}) {
+  return ephemeral(cells);
 }
 
 // `state({ values, transitions, effects, auto })` — a finite-state-machine

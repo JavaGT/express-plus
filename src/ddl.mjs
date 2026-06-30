@@ -15,10 +15,9 @@
 //   id                                  → TEXT PRIMARY KEY (caller-owned UUID)
 //
 // Side-table naming (from scope-sql.mjs):
-//   map        → {Entity}_{field} ({Entity}_id, member_id [, role])
-//   log        → {Entity}_{field} ({Entity}_id, ...entry sub-fields)
-//   presence   → {Entity}_{field} ({Entity}_id, ...presence sub-fields)
-
+//   map          → {Entity}_{field} ({Entity}_id, member_id [, role])
+//   log          → {Entity}_{field} ({Entity}_id, ...entry sub-fields)
+//   ephemeral   → {Entity}_{field} ({Entity}_id, client_id)
 import { structCellColumn } from './field-strategy.mjs';
 
 // Map a field's kind+type to its SQLite column type.
@@ -53,7 +52,7 @@ function mainTableDDL(entity) {
         cols.push(`${structCellColumn(name, cellName)} TEXT`);
       }
     }
-    // map / log / presence / state / store → NOT stored in main table
+    // map / log / ephemeral / state / store → NOT stored in main table
   }
   return `CREATE TABLE IF NOT EXISTS ${entity.name} (\n  ${cols.join(',\n  ')}\n);`;
 }
@@ -87,8 +86,9 @@ function logTableDDL(entity, name, descriptor) {
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
-// Generate side-table DDL for presence fields (connected client tracking).
-function presenceTableDDL(entity, name) {
+// Generate side-table DDL for ephemeral fields (per-connection cell tracking).
+// `presence` is a retired wrapper over `ephemeral` (one non-persisting kind).
+function ephemeralTableDDL(entity, name) {
   const tableName = `${entity.name}_${name}`;
   const ownerCol = `${entity.name}_id`;
   const cols = [`${ownerCol} TEXT NOT NULL`, 'client_id TEXT NOT NULL', `PRIMARY KEY (${ownerCol}, client_id)`];
@@ -128,8 +128,8 @@ export function generateDDL(entity) {
       } else if (descriptor.type === 'log') {
         statements.push(logTableDDL(entity, name, descriptor));
       }
-    } else if (descriptor.kind === 'presence') {
-      statements.push(presenceTableDDL(entity, name));
+    } else if (descriptor.kind === 'ephemeral') {
+      statements.push(ephemeralTableDDL(entity, name));
     } else if (descriptor.kind === 'ordered') {
       statements.push(orderedTableDDL(entity, name));
     }
