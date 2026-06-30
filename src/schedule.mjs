@@ -1,6 +1,11 @@
 // P6d Spine A: time-driven sources (ADR #10). Import-surface only —
 // constructuring + entity-slot acceptance. Firing/dispatch/reaper wiring
 // lands in step 4; while/when discovery in step 2; tick in step 5.
+//
+// Tick triggers (tick.hz / tick.every) are row-set intervals: fire `update`
+// against EVERY row matching `while` per interval. An EMPTY `while` is
+// forbidden (the "run on ALL rows forever" foot-gun) — enforced at
+// entity-load-time in entity.mjs.
 
 const MS = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000 };
 
@@ -191,4 +196,132 @@ export function admitScheduledMutation({ entity, verb, rowId, payload, principal
   }
 
   return true; // due + while + bound source + exact payload → admitted
+}
+
+// tick — interval trigger constructors for row-set ticks.
+// A tick fires `update` against EVERY row matching `while` per interval.
+// No singleton/cron shape. An EMPTY `while` is FORBIDDEN at load-time.
+export const tick = Object.freeze({
+  hz(n, options = {}) {
+    if (typeof n !== 'number' || !Number.isFinite(n) || n <= 0) {
+      throw new Error('tick.hz: n must be a finite positive number');
+    }
+    const { while: whilePredicate, with: withPayload, when } = options;
+    if (whilePredicate !== undefined && typeof whilePredicate !== 'function') {
+      throw new Error('tick.hz: while must be a function');
+    }
+    const validatedWith = validateWith(withPayload, '.tick.hz');
+    return Object.freeze({ kind: 'tick.hz', hertz: n, when, while: whilePredicate ?? undefined, with: validatedWith });
+  },
+  every(duration, options = {}) {
+    const { while: whilePredicate, with: withPayload, when } = options;
+    if (whilePredicate !== undefined && typeof whilePredicate !== 'function') {
+      throw new Error('tick.every: while must be a function');
+    }
+    const validatedWith = validateWith(withPayload, '.tick.every');
+    return Object.freeze({ kind: 'tick.every', intervalMs: parseDelay(duration), when, while: whilePredicate ?? undefined, with: validatedWith });
+  },
+});
+
+// tickSource — derives the identity for a tick principal, mirroring the
+// schedulerSource pattern (entity + verb). No fieldName — a tick has no
+// field; derived id, never magic string.
+export function tickSource(entityName, verb) {
+  return `${entityName}.${verb}`;
+}
+
+// discoverTickedRows — PURE read-only discovery for tick triggers (parallel to
+// discoverDueSchedules). For each row-set tick (tick.hz / tick.every), finds
+// every row matching `while` and yields { entity, verb, rowId, payload }.
+// `now` is accepted for signature parity but unused — ticks have no due-time.
+export function discoverTickedRows(db, entities, now) {
+  const results = [];
+  for (const entity of entities) {
+    if (!entity || !entity.schedule) continue;
+    for (const [verb, trigger] of Object.entries(entity.schedule)) {
+      if (trigger.kind !== 'tick.hz' && trigger.kind !== 'tick.every') continue;
+
+      // Defensive: skip rows without a compiled while predicate (the empty-while
+      // guard at entity-load-time guarantees this, but guard here too).
+      if (!trigger.whileSql) continue;
+
+      // Build: SELECT id FROM <name> AS t0 WHERE <whileSql>
+      const sql = `SELECT id FROM ${entity.name} AS t0 WHERE ${trigger.whileSql}`;
+      const params = { ...(trigger.whileParams ?? {}) };
+      const rows = db.prepare(sql).all(params);
+
+      for (const row of rows) {
+        // Resolve payload from `with` (IDENTICAL to discoverDueSchedules)
+        let payload = {};
+        if (trigger.with !== undefined && trigger.with !== null) {
+          if (typeof trigger.with === 'function') {
+            // Re-fetch the full row for the function
+            const fullRow = db.prepare(`SELECT * FROM ${entity.name} WHERE id = :id`).get({ id: row.id });
+            payload = trigger.with({ row: fullRow });
+          } else {
+            // Object literal: shallow copy per row
+            payload = { ...trigger.with };
+          }
+        }
+        results.push({ entity: entity.name, verb, rowId: row.id, payload });
+      }
+    }
+  }
+  return results;
+}
+
+// admitTickedMutation — IN-TXN admission for a ticked system principal
+// (sibling to admitScheduledMutation). Called from the dispatch spine's in-txn
+// hook AFTER a tick trigger fired. It SKIPS the due-check (a tick is due-by-firing)
+// but KEEPS source-binding + while-recheck + payload-compare.
+// A ticked principal may NEVER send an arbitrary payload. Fail-closed on any mismatch.
+export function admitTickedMutation({ entity, verb, rowId, payload, principal, db, now }) {
+  // Fail closed: only a bound ticked system principal reaches this gate.
+  if (!principal || typeof principal !== 'object') return false;
+  if (principal.type !== 'system') return false;
+  const source = principal.attributes?.source;
+  if (typeof source !== 'string' || source === '') return false;
+
+  // The entity must declare a tick schedule for this verb.
+  const trigger = entity?.schedule?.[verb];
+  if (!trigger) return false;
+  if (trigger.kind !== 'tick.hz' && trigger.kind !== 'tick.every') return false;
+
+  // The principal's source must bind to THIS entity/verb (derived id, no fieldName).
+  if (source !== tickSource(entity.name, verb)) return false;
+
+  // Re-read the CURRENT row (in-txn): it may have been deleted/mutated between
+  // discovery and this dispatch. A missing row → deny (TOCTOU-safe).
+  const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(rowId);
+  if (!row || !row.id) return false;
+
+  // While recheck — ticks MUST have whileSql (enforced at entity-load-time).
+  // No row = while no longer holds → deny (the declared will still governs).
+  if (!trigger.whileSql) return false;
+  const whileParams = { ...(trigger.whileParams ?? {}), __rowId: rowId };
+  const held = db.prepare(
+    `SELECT 1 FROM ${entity.name} AS t0 WHERE t0.id = :__rowId AND (${trigger.whileSql})`,
+  ).get(whileParams);
+  if (!held) return false;
+
+  // Recompute the declared `with` payload from the CURRENT row, then COMPARE the
+  // dispatched payload against it. The ticked principal may send ONLY this payload.
+  let declaredPayload;
+  if (typeof trigger.with === 'function') {
+    declaredPayload = trigger.with({ row });
+  } else if (trigger.with && typeof trigger.with === 'object') {
+    declaredPayload = { ...trigger.with };
+  } else {
+    declaredPayload = {};
+  }
+  // Strip `id` from dispatched payload (the row's primary key) before comparing
+  // against the declared `with` — the ticked principal may never write-anything.
+  const { id: _id, ...payloadFields } = payload ?? {};
+  try {
+    if (JSON.stringify(payloadFields) !== JSON.stringify(declaredPayload)) return false;
+  } catch {
+    return false; // unserializable payload → fail closed
+  }
+
+  return true; // source-bound + while-holds + exact payload → admitted
 }

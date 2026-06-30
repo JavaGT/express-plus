@@ -228,9 +228,10 @@ export function entity(name, declaration = {}) {
   }
 
   // Validate schedule declarations at load time (P6d Spine A step 1 → step 4a).
-  // Each [verbName, trigger] must be a valid schedule.at() or schedule.after() call.
-  // Step 2 compiles the optional `while` predicate; step 4a adds CRUD verb restriction,
-  // field identity resolution, and `with` payload validation.
+  // Each [verbName, trigger] must be a valid schedule.at(), schedule.after(), tick.hz(),
+  // or tick.every() call. Step 2 compiles the optional `while` predicate.
+  // Deadline triggers (schedule.at/after): field identity resolution + while + with.
+  // Row-set ticks (tick.hz/tick.every): empty-while guard + hertz/intervalMs + while + with.
   let validatedSchedule = null;
   const scheduleKeys = Object.keys(schedule);
   if (scheduleKeys.length > 0) {
@@ -244,47 +245,88 @@ export function entity(name, declaration = {}) {
       if (!['create', 'update', 'remove'].includes(verbName)) {
         throw new Error(`schedule verb '${verbName}' must be one of create | update | remove (entity '${name}')`);
       }
-      if (!trigger || typeof trigger !== 'object' || !(trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after')) {
-        throw new Error(`schedule.${verbName}: expected schedule.at(...) or schedule.after(...), got ${JSON.stringify(trigger)}`);
+      // Accept deadline (schedule.at/after) and tick (tick.hz/tick.every) triggers.
+      const isDeadline = trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after';
+      const isTick = trigger.kind === 'tick.hz' || trigger.kind === 'tick.every';
+      if (!trigger || typeof trigger !== 'object' || !(isDeadline || isTick)) {
+        throw new Error(`schedule.${verbName}: expected schedule.at(...), schedule.after(...), tick.hz(...), or tick.every(...), got ${JSON.stringify(trigger)}`);
       }
-      if (!trigger.field || typeof trigger.field !== 'object') {
-        throw new Error(`schedule.${verbName}: field must be a field descriptor (no bare strings)`);
-      }
-      // Identity-resolve the field descriptor to a field NAME (same pattern `many`'s `over` uses).
-      // The trigger.field is a descriptor object; match it against declared fields by object identity.
+
+      let whileSql, whileParams, whileAst, withValue;
       let fieldName = null;
-      for (const [fname, fdesc] of Object.entries(fields)) {
-        if (fdesc === trigger.field) {
-          fieldName = fname;
-          break;
+
+      if (isDeadline) {
+        // ---- Deadline trigger path (schedule.at / schedule.after) ----
+        // Reject 'when' lifecycle guard FIRST (accepting it unenforced would be a
+        // silent no-op foot-gun; fail-closed forbids. Ships with state runtime).
+        if (trigger.when) {
+          throw new Error(`schedule.${verbName}: 'when' lifecycle guard is not yet supported (ships with state runtime)`);
+        }
+        if (!trigger.field || typeof trigger.field !== 'object') {
+          throw new Error(`schedule.${verbName}: field must be a field descriptor (no bare strings)`);
+        }
+        // Identity-resolve the field descriptor to a field NAME (same pattern `many`'s `over` uses).
+        fieldName = null;
+        for (const [fname, fdesc] of Object.entries(fields)) {
+          if (fdesc === trigger.field) {
+            fieldName = fname;
+            break;
+          }
+        }
+        if (!fieldName) {
+          throw new Error(`schedule '${verbName}': field descriptor is not a declared field on entity '${name}'`);
+        }
+        // Verify the resolved field's kind is comparable as a date/value.
+        const fieldKind = fields[fieldName].kind;
+        const fieldType = fields[fieldName].type;
+        if (fieldKind !== 'value' || (fieldType !== 'date' && fieldType !== 'number')) {
+          throw new Error(`schedule '${verbName}': field '${fieldName}' must be a date or number field (kind 'value', comparable via <=)`);
+        }
+        if (trigger.kind === 'schedule.after' && !Number.isFinite(trigger.delay)) {
+          throw new Error(`schedule.${verbName}: delay must be a finite number (parseDelay should have validated)`);
+        }
+        withValue = trigger.with;
+        if (withValue !== undefined && withValue !== null) {
+          if (typeof withValue !== 'function' && (typeof withValue !== 'object' || Array.isArray(withValue))) {
+            throw new Error(`schedule '${verbName}': 'with' must be an object or a function ({row}) => obj`);
+          }
+        }
+      } else {
+        // ---- Tick trigger path (tick.hz / tick.every) ----
+        // Reject 'when' lifecycle guard (fires before empty-while guard so the
+        // 'when' error is reported rather than swallowing it behind the while check).
+        if (trigger.when) {
+          throw new Error(`schedule.${verbName}: 'when' lifecycle guard is not yet supported (ships with state runtime)`);
+        }
+        // Empty-while FORBIDDEN: a row-set tick requires a 'while' predicate
+        // (an empty while would fire on every row forever — the foot-gun guard).
+        if (trigger.while === undefined) {
+          throw new Error(
+            `schedule.${verbName}: a row-set tick requires a 'while' predicate ` +
+              `(empty while would fire on every row forever)`,
+          );
+        }
+        // Validate hertz/intervalMs finite + positive (match schedule.after's delay-finite guard).
+        if (trigger.kind === 'tick.hz') {
+          if (!Number.isFinite(trigger.hertz) || trigger.hertz <= 0) {
+            throw new Error(`schedule.${verbName}: hertz must be a finite positive number (tick.hz should have validated)`);
+          }
+        } else {
+          if (!Number.isFinite(trigger.intervalMs) || trigger.intervalMs <= 0) {
+            throw new Error(`schedule.${verbName}: intervalMs must be a finite positive number (tick.every should have validated)`);
+          }
+        }
+        withValue = trigger.with;
+        if (withValue !== undefined && withValue !== null) {
+          if (typeof withValue !== 'function' && (typeof withValue !== 'object' || Array.isArray(withValue))) {
+            throw new Error(`schedule '${verbName}': 'with' must be an object or a function ({row}) => obj`);
+          }
         }
       }
-      if (!fieldName) {
-        throw new Error(`schedule '${verbName}': field descriptor is not a declared field on entity '${name}'`);
-      }
-      // Verify the resolved field's kind is comparable as a date/value (allows <= comparison).
-      // Date fields serialize to epoch-ms integers (field-strategy.mjs), enabling direct integer SQL comparison.
-      const fieldKind = fields[fieldName].kind;
-      const fieldType = fields[fieldName].type;
-      if (fieldKind !== 'value' || (fieldType !== 'date' && fieldType !== 'number')) {
-        throw new Error(`schedule '${verbName}': field '${fieldName}' must be a date or number field (kind 'value', comparable via <=)`);
-      }
-      if (trigger.kind === 'schedule.after' && !Number.isFinite(trigger.delay)) {
-        throw new Error(`schedule.${verbName}: delay must be a finite number (parseDelay should have validated)`);
-      }
-      // Reject 'when' lifecycle guard (Spine C8 state runtime, not yet implemented)
-      if (trigger.when) {
-        throw new Error(`schedule.${verbName}: 'when' lifecycle guard is not yet supported (ships with state runtime, Spine C8)`);
-      }
-      // Validate `with` payload option (fail-closed)
-      let withValue = trigger.with;
-      if (withValue !== undefined && withValue !== null) {
-        if (typeof withValue !== 'function' && (typeof withValue !== 'object' || Array.isArray(withValue))) {
-          throw new Error(`schedule '${verbName}': 'with' must be an object or a function ({row}) => obj`);
-        }
-      }
-      // Compile the optional 'while' predicate (strict fail-closed; NonCompilableError propagates)
-      let whileSql, whileParams, whileAst;
+
+      // Compile the 'while' predicate (strict fail-closed; NonCompilableError propagates).
+      // For ticks this is mandatory (checked above); for deadline triggers it's optional
+      // because the field value alone serves as the discovery condition.
       if (trigger.while !== undefined) {
         const compiled = compileReadScope(trigger.while, {
           fields,
@@ -295,16 +337,31 @@ export function entity(name, declaration = {}) {
         whileParams = compiled.params;
         whileAst = compiled.ast;
       }
-      validatedSchedule[verbName] = Object.freeze({
-        kind: trigger.kind,
-        field: trigger.field,
-        fieldName,
-        delay: trigger.delay,
-        whileSql,
-        whileParams,
-        whileAst,
-        with: withValue,
-      });
+
+      // Build the frozen per-verb trigger stored on validatedSchedule.
+      if (isDeadline) {
+        validatedSchedule[verbName] = Object.freeze({
+          kind: trigger.kind,
+          field: trigger.field,
+          fieldName,
+          delay: trigger.delay,
+          whileSql,
+          whileParams,
+          whileAst,
+          with: withValue,
+        });
+      } else {
+        // Ticks carry NO field/fieldName/delay — distinguish from deadline triggers.
+        validatedSchedule[verbName] = Object.freeze({
+          kind: trigger.kind,
+          hertz: trigger.hertz,
+          intervalMs: trigger.intervalMs,
+          whileSql,
+          whileParams,
+          whileAst,
+          with: withValue,
+        });
+      }
     }
     validatedSchedule = Object.freeze(validatedSchedule);
   }

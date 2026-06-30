@@ -100,7 +100,7 @@ test('entity rejects malformed schedule: bogus kind', () => {
         update: { kind: 'bogus' },
       },
     }),
-    /schedule\.update: expected schedule\.at\(\.\.\.\) or schedule\.after\(\.\.\.\)/,
+    /schedule\.update: expected schedule\.at\(\.\.\.\), schedule\.after\(\.\.\.\), tick\.hz\(\.\.\.\), or tick\.every\(\.\.\.\)/,
   );
 });
 
