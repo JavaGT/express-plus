@@ -28,7 +28,7 @@ import { ValidationError } from './field-strategy.mjs';
 import { mayVerb, hasOwnCanGrant } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError } from './middleware.mjs';
-import { sessionPrincipalOf } from './session.mjs';
+import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
 import { createLiveServer } from './live.mjs';
 import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer } from './pipeline.mjs';
@@ -749,9 +749,12 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // rejected cheaply here — before CSRF, the route gate, or any write lock —
       // so a denial-of-service attempt never reaches the kernel (the writeQueue
       // is never held by a request that will be refused). Per-IP fixed window; a
-      // session limit, when configured, is additional (stricter wins).
+      // session window, when configured, additionally caps a logged-in browser
+      // (stricter wins). The session key is the opaque `sid` cookie token — read
+      // cheaply with no DB lookup, before principal hydration; the IP gate is the
+      // non-spoofable base that holds when no cookie is present.
       if (rateLimiter) {
-        const r = rateLimiter.check({ ip: req.socket?.remoteAddress });
+        const r = rateLimiter.check({ ip: req.socket?.remoteAddress, sessionId: sessionTokenOf(req) });
         if (!r.allowed) {
           res.setHeader('Retry-After', String(Math.ceil(r.retryAfterMs / 1000)));
           sendJson(res, 429, { error: 'rate limit exceeded', retryAfterMs: r.retryAfterMs });

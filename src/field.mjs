@@ -6,11 +6,14 @@
 // FK, and derived-check role; the access engine reads its `.can` function (or,
 // when absent, strong-inherits the row grant per ADR #4).
 //
-// The four KINDS are named wholes, not a flag enum (ADR #9): `value` (single
-// stored value, whole-value diff), `store` (internally-keyed owned collection),
-// `crdt` (custom merge with per-element deltas), `ordered` (fractional-index
-// keyspace). Phase 1's blog spine uses `value` and `crdt`; `store`/`ordered`
-// ship as the registry grows.
+// The KINDS are named wholes, not a flag enum (ADR #9): `value` (single stored
+// value, whole-value diff — text/boolean/date/number/ref; `blob` is a value with
+// a marker), `crdt` (custom merge with per-element deltas), `hash` (one-way
+// salted digest, never queryable — its own kind so scope refuses to compare),
+// `store` (internally-keyed owned collection — map/log), `ordered` (fractional-
+// index keyspace — list), `presence` (live cells), `state` (transition-enforced
+// state machine), `struct` (nested structure). Each is deferred-incremental: the
+// descriptor ships at import; its persistence/merge/diff strategy fires later.
 
 // A field descriptor is frozen so no later layer can mutate a declared field.
 // `.can(fn)` returns a NEW frozen descriptor carrying the access function — it

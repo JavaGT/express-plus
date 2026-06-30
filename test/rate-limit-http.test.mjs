@@ -54,3 +54,43 @@ test('rate-limit (opt-in): the Nth+1 request in the window is 429 with Retry-Aft
   const body = await over.json();
   assert.equal(body.error, 'rate limit exceeded');
 });
+
+test('rate-limit: a configured per-session window is enforced against the session cookie', async (t) => {
+  // The session window must be keyed by the request's session cookie token, not
+  // ignored. With ip max high and session max low (2), a logged-in browser
+  // (sending `sid=<token>`) is capped by the session window while the IP budget
+  // is untouched; a different session token gets its own bucket. (eng-review:
+  // rateLimit runs first/cheaply — no DB lookup; the token is read from the
+  // cookie, the IP gate stays the non-spoofable base.)
+  const db = new DatabaseSync(':memory:');
+  const app = expressPlus({ db });
+  app.mount('/notes', ownedNote());
+  await app.ddl();
+  app.listen(0, {
+    principalOf: () => ({ id: 'u1' }),
+    rateLimit: {
+      ip: { windowMs: 60_000, max: 100 },
+      session: { windowMs: 60_000, max: 2 },
+    },
+  });
+  await app.ready;
+  const port = app.httpServer.address().port;
+  const base = `http://127.0.0.1:${port}`;
+  t.after(() => { app.httpServer.close(); db.close(); });
+
+  async function postCookie(sid) {
+    return fetch(`${base}/notes`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie: `sid=${sid}` },
+      body: JSON.stringify({ body: 'x' }),
+    });
+  }
+
+  // Same session token: first 2 allowed (session budget), 3rd denied by session.
+  assert.equal((await postCookie('tokA')).status, 201, 'session A #1 allowed');
+  assert.equal((await postCookie('tokA')).status, 201, 'session A #2 allowed');
+  assert.equal((await postCookie('tokA')).status, 429, 'session A #3 denied by session window');
+
+  // A different session token has its own bucket (not a global counter).
+  assert.equal((await postCookie('tokB')).status, 201, 'session B #1 allowed (independent bucket)');
+});

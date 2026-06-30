@@ -54,13 +54,24 @@ export function sessionCookie(token, { secure = true, env = config.env } = {}) {
   return attributes.join('; ');
 }
 
+// Read the opaque session token from the request's `sid` cookie, or undefined
+// when there is none. Pure (no DB): the rate-limit stack reads this to key a
+// per-session window cheaply and BEFORE principal hydration (eng-review: rate
+// limiting rejects a flood before any DB lookup or write lock). The token is the
+// stable per-session key — a single client cannot rotate another user's token,
+// and the IP gate (which runs first) is the non-spoofable base that holds when no
+// cookie is present. sessionPrincipalOf reuses this same read.
+export function sessionTokenOf(req) {
+  return parseCookies(req.headers?.cookie)[SESSION_COOKIE] || undefined;
+}
+
 // Build the `principalOf(req)` function for a given db. It reads the session
 // cookie, looks the token up in the Session table, and constructs the principal
 // SERVER-SIDE from the stored identity. Any failure — no cookie, no token, no
 // matching row, or a malformed stored type — yields `anonymous` (fail closed).
 export function sessionPrincipalOf(db) {
   return (req) => {
-    const token = parseCookies(req.headers?.cookie)[SESSION_COOKIE];
+    const token = sessionTokenOf(req);
     if (!token) return anonymous;
     try {
       // The lookup is prepared per request rather than at construction so a
