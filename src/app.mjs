@@ -29,6 +29,7 @@ import { setActiveDb } from './db.mjs';
 import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
+import { createJobQueue } from './job-queue.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 
@@ -285,7 +286,7 @@ export function router(options = {}) {
 // (chainable). The server is exposed on `app.httpServer`. `options.principalOf`
 // overrides the request→principal source (default: anonymous, fail-closed). Both
 // chain.
-export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migrations = [] } = {}) {
+export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts } = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
     const val = process.env[v];
@@ -315,6 +316,15 @@ export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migr
     const root = blobOpts?.root ?? path.join(process.cwd(), '.blobs');
     mkdirSync(root, { recursive: true });
     app.blobs = createBlobStore({ root, db });
+  }
+  // The job-queue substrate (spec #5) — a separate seam, opt-in. Built at
+  // construction when a db + `jobs` config are engaged (the shared secret is
+  // required: createJobQueue throws if absent — fail-closed at construction, like
+  // envGate). Reached by the framework-owned /workers + /jobs HTTP routes AND by
+  // post-commit consumers that call `app.jobs.enqueue(...)`. No `jobs` config →
+  // no queue, no routes, no reaper (zero blast radius).
+  if (db && jobOpts) {
+    app.jobs = createJobQueue({ db, ...jobOpts });
   }
   app.port = undefined;
   app.httpServer = undefined;

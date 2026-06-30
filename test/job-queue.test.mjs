@@ -1,0 +1,173 @@
+// Priority 5 — job-queue substrate (eng-review spec #5, Walk 2, test plan 716-724).
+// A job is a unit of work with its own lifecycle (queued/claimed/running/completed/
+// failed/reassigned), NOT a derived read model — so the queue is a SEPARATE seam
+// from the projection registry (deletion test: folding it in would only RELOCATE
+// the claim/lease/heartbeat/reaper concept). The two compose at the enqueue edge:
+// a post-commit consumer may call jobs.enqueue(); the queue's lifecycle is its own.
+//
+// Auth model (eng-review §5): worker registration uses a shared secret
+// (constant-time compared); job operations use a per-worker bearer token
+// (constant-time compared, revocable by the reaper). A bearer is per-worker,
+// NEVER the shared secret. Fail-closed on unknown/revoked.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { executeFrameworkDDL } from '../src/ddl.mjs';
+import { createJobQueue } from '../src/job-queue.mjs';
+
+const SECRET = 's3cret-shared-deployment-key';
+
+function freshQueue({ leaseMs = 1000, heartbeatGraceMs = 3000, now } = {}) {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const queue = createJobQueue({ db, sharedSecret: SECRET, leaseMs, heartbeatGraceMs, now });
+  return { db, queue };
+}
+
+test('register: correct secret issues a worker + bearer; wrong secret rejected (fail-closed)', () => {
+  const { db, queue } = freshQueue();
+  const bad = queue.registerWorker('wrong-secret');
+  assert.equal(bad, null, 'wrong secret → null, not a worker');
+  const w = queue.registerWorker(SECRET);
+  assert.ok(w && w.workerId, 'correct secret → workerId');
+  assert.ok(w.token, 'correct secret → bearer token');
+  // The shared secret is NEVER stored; only the token HASH is.
+  const row = db.prepare('SELECT * FROM _Worker WHERE id=?').get(w.workerId);
+  assert.ok(row.tokenHash && !row.tokenHash.includes(w.token), 'token stored hashed, not raw');
+  db.close();
+});
+
+test('authenticate: valid bearer → workerId; tampered/unknown/revoked → null', () => {
+  const { db, queue } = freshQueue();
+  const { workerId, token } = queue.registerWorker(SECRET);
+  assert.equal(queue.authenticate(`${workerId}.${token}`), workerId, 'valid bearer');
+  assert.equal(queue.authenticate(`${workerId}.tampered`), null, 'tampered token → null');
+  assert.equal(queue.authenticate('unknown.token'), null, 'unknown worker → null');
+  assert.equal(queue.authenticate('not-even-a-bearer'), null, 'malformed → null');
+  // Revocation: flip the row; the bearer is now rejected.
+  db.prepare('UPDATE _Worker SET revoked=1 WHERE id=?').run(workerId);
+  assert.equal(queue.authenticate(`${workerId}.${token}`), null, 'revoked bearer → null');
+  db.close();
+});
+
+test('claim race: two workers, exactly one gets the job (atomic UPDATE…WHERE status=queued)', () => {
+  const { db, queue } = freshQueue();
+  const w1 = queue.registerWorker(SECRET);
+  const w2 = queue.registerWorker(SECRET);
+  queue.enqueue({ kind: 'transcribe', payload: { url: 'a' } });
+  const a = queue.claim(w1.workerId);
+  const b = queue.claim(w2.workerId);
+  assert.ok(a, 'first claimant got the job');
+  assert.equal(b, null, 'second claimant got nothing');
+  assert.equal(a.workerId, w1.workerId, 'job owned by first claimant');
+  assert.equal(a.status, 'claimed', 'status flipped to claimed');
+  // claim with no queued jobs → null (no spurious claim).
+  assert.equal(queue.claim(w2.workerId), null, 'no queued work → null');
+  db.close();
+});
+
+test('heartbeat: extends lease + flips claimed→running; only for the owning worker', () => {
+  const { queue, db } = freshQueue({ leaseMs: 1000, now: () => 10_000 });
+  const w1 = queue.registerWorker(SECRET);
+  const w2 = queue.registerWorker(SECRET);
+  queue.enqueue({ kind: 'k', payload: {} });
+  const job = queue.claim(w1.workerId);
+  // first heartbeat: claimed → running, lease extends
+  const ok = queue.heartbeat(job.id, w1.workerId, { now: () => 11_000 });
+  assert.equal(ok, true, 'owner heartbeat accepted');
+  const running = db.prepare('SELECT status, leaseUntil FROM _Job WHERE id=?').get(job.id);
+  assert.equal(running.status, 'running', 'first heartbeat flipped to running');
+  assert.equal(running.leaseUntil, 11_000 + 1000, 'lease extended by leaseMs');
+  // non-owner heartbeat rejected
+  assert.equal(queue.heartbeat(job.id, w2.workerId), false, 'non-owner heartbeat rejected');
+  db.close();
+});
+
+test('reaper: re-queues a job whose lease expired (claimable again)', () => {
+  let t = 10_000;
+  const now = () => t;
+  const { db, queue } = freshQueue({ leaseMs: 1000, heartbeatGraceMs: 100_000, now });
+  const w1 = queue.registerWorker(SECRET);
+  const w2 = queue.registerWorker(SECRET);
+  queue.enqueue({ kind: 'k', payload: {} });     // enqueuedAt=10000
+  const job = queue.claim(w1.workerId);          // leaseUntil = 10000 + 1000 = 11000
+  t = 20_000;                                    // advance past the lease
+  const { reassigned } = queue.reap({ now });
+  assert.equal(reassigned, 1, 'one job reassigned');
+  const row = db.prepare('SELECT status, workerId FROM _Job WHERE id=?').get(job.id);
+  assert.equal(row.status, 'queued', 'expired job back to queued');
+  assert.equal(row.workerId, null, 'workerId cleared on reassign');
+  // a DIFFERENT worker can now claim it
+  const reclaimed = queue.claim(w2.workerId);
+  assert.equal(reclaimed.id, job.id, 'reassigned job claimable by another worker');
+  db.close();
+});
+
+test('reaper: revokes a worker whose heartbeat is stale (bearer rejected after)', () => {
+  let t = 10_000;
+  const now = () => t;
+  const { db, queue } = freshQueue({ heartbeatGraceMs: 3000, now });
+  const { workerId, token } = queue.registerWorker(SECRET); // lastHeartbeat=10000
+  t = 20_000;                                               // 7000 past grace (grace=3000)
+  const { revoked } = queue.reap({ now });
+  assert.equal(revoked, 1, 'one worker revoked');
+  const row = db.prepare('SELECT revoked FROM _Worker WHERE id=?').get(workerId);
+  assert.equal(row.revoked, 1, 'worker row flagged revoked');
+  assert.equal(queue.authenticate(`${workerId}.${token}`), null, 'stale worker bearer now rejected');
+  db.close();
+});
+
+test('result: idempotent by job id — a retried result for a completed job is a no-op (no double-apply)', () => {
+  const { db, queue } = freshQueue();
+  const w = queue.registerWorker(SECRET);
+  queue.enqueue({ kind: 'k', payload: {} });
+  const job = queue.claim(w.workerId);
+  const r1 = queue.submitResult(job.id, w.workerId, { status: 'completed', output: { url: 'thumb.png' } });
+  assert.deepEqual(r1, { accepted: true, noop: false }, 'first result accepted + applied');
+  // retry with DIFFERENT output — must NOT overwrite (idempotent: first terminal wins)
+  const r2 = queue.submitResult(job.id, w.workerId, { status: 'completed', output: { url: 'evil.png' } });
+  assert.deepEqual(r2, { accepted: true, noop: true }, 'retried result is a no-op ack');
+  const row = db.prepare('SELECT status, payload FROM _Job WHERE id=?').get(job.id);
+  assert.equal(row.status, 'completed', 'still completed');
+  assert.equal(JSON.parse(row.payload).url, 'thumb.png', 'output NOT overwritten by the retry');
+  db.close();
+});
+
+test('result: failed is terminal; non-owner result rejected', () => {
+  const { db, queue } = freshQueue();
+  const w1 = queue.registerWorker(SECRET);
+  const w2 = queue.registerWorker(SECRET);
+  queue.enqueue({ kind: 'k', payload: {} });
+  const job = queue.claim(w1.workerId);
+  assert.equal(queue.submitResult(job.id, w2.workerId, { status: 'completed', output: {} }).accepted, false, 'non-owner rejected');
+  const r = queue.submitResult(job.id, w1.workerId, { status: 'failed', output: { error: 'boom' } });
+  assert.deepEqual(r, { accepted: true, noop: false }, 'owner failed result accepted');
+  const row = db.prepare('SELECT status FROM _Job WHERE id=?').get(job.id);
+  assert.equal(row.status, 'failed', 'marked failed (terminal)');
+  db.close();
+});
+
+test('enqueue: mints an id when absent; preserves a caller-supplied id', () => {
+  const { db, queue } = freshQueue();
+  const a = queue.enqueue({ kind: 'k', payload: { n: 1 } });
+  assert.ok(a.id, 'mints an id');
+  assert.equal(a.status, 'queued', 'starts queued');
+  const b = queue.enqueue({ kind: 'k', payload: { n: 2 }, id: 'caller-fixed-id' });
+  assert.equal(b.id, 'caller-fixed-id', 'preserves caller id');
+  db.close();
+});
+
+test('jobs are claimed in enqueue order (oldest first, FIFO)', () => {
+  let t = 1000;
+  const { queue, db } = freshQueue({ now: () => (t += 1000) });
+  const w = queue.registerWorker(SECRET);
+  queue.enqueue({ kind: 'k', payload: { n: 1 } }); // enqueuedAt 2000
+  queue.enqueue({ kind: 'k', payload: { n: 2 } }); // enqueuedAt 3000
+  queue.enqueue({ kind: 'k', payload: { n: 3 } }); // enqueuedAt 4000
+  const a = queue.claim(w.workerId);
+  const b = queue.claim(w.workerId);
+  const c = queue.claim(w.workerId);
+  assert.deepEqual([a.payload.n, b.payload.n, c.payload.n].map(String), ['1', '2', '3'], 'claimed oldest-first');
+  db.close();
+});

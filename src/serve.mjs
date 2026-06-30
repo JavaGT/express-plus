@@ -435,6 +435,73 @@ async function handleBlobUploadRoute(app, req, res, principal) {
   return true;
 }
 
+// Framework-owned job-queue endpoints (spec #5, Walk 2). NOT mounted routes: the
+// worker / job API is a framework default, intercepted before route matching (like
+// /blobs, /health, /snapshot). Auth is its OWN path — a per-worker bearer token,
+// constant-time compared + revocable (cso: never the shared secret, which is used
+// only at /workers/register). These routes are anonymous w.r.t. the route gate — a
+// worker is not a logged-in principal; the bearer IS the credential. Workers are
+// non-browser clients (no Origin/Referer) so they pass the foreign-only CSRF guard.
+// Returns true when handled; false to fall through to matchRoute.
+async function handleJobRoute(app, req, res) {
+  const url = new URL(req.url, 'http://localhost');
+  if (req.method !== 'POST' || !app?.jobs) return false;
+  const jobs = app.jobs;
+
+  // Bearer extraction: `Authorization: Bearer <workerId>.<token>`.
+  const bearer = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim() || null;
+
+  if (url.pathname === '/workers/register') {
+    let body;
+    try { body = await readJsonBody(req); } catch (err) {
+      if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
+      throw err;
+    }
+    const w = jobs.registerWorker(body.secret);
+    if (!w) { sendJson(res, 401, { error: 'invalid shared secret' }); return true; }
+    sendJson(res, 200, w);
+    return true;
+  }
+
+  if (url.pathname === '/jobs/claim') {
+    const workerId = jobs.authenticate(bearer);
+    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
+    const job = jobs.claim(workerId);
+    if (!job) { res.writeHead(204); res.end(); return true; } // no queued work
+    sendJson(res, 200, job);
+    return true;
+  }
+
+  const hb = url.pathname.match(/^\/jobs\/([^/]+)\/heartbeat$/);
+  if (hb) {
+    const workerId = jobs.authenticate(bearer);
+    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
+    const ok = jobs.heartbeat(hb[1], workerId);
+    if (!ok) { sendJson(res, 403, { error: 'not the owning worker or job not running' }); return true; }
+    sendJson(res, 200, { ok: true });
+    return true;
+  }
+
+  const rs = url.pathname.match(/^\/jobs\/([^/]+)\/result$/);
+  if (rs) {
+    const workerId = jobs.authenticate(bearer);
+    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
+    let body;
+    try { body = await readJsonBody(req); } catch (err) {
+      if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
+      throw err;
+    }
+    let result;
+    try { result = jobs.submitResult(rs[1], workerId, body); }
+    catch (err) { sendJson(res, 400, { error: err.message }); return true; }
+    if (!result.accepted) { sendJson(res, 403, { error: 'not the owning worker or job not in progress' }); return true; }
+    sendJson(res, 200, result);
+    return true;
+  }
+
+  return false;
+}
+
 // The imperative terminal: run a hand-written handler chain over an Express-like
 // (req, res, next). This is the OTHER arm of the single dispatch fork — it never
 // touches the db or the row grant (an imperative route has no entity), so the
@@ -704,6 +771,13 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // the snapshot/resync endpoints and the /events WS transport.
       if (isApp && req.method === 'POST') {
         const handled = await handleBlobUploadRoute(source, req, res, principalOf(req));
+        if (handled) return;
+      }
+      // Framework-owned job-queue endpoints (spec #5): /workers/register,
+      // /jobs/claim, /jobs/:id/heartbeat, /jobs/:id/result. Bearer-auth'd (not
+      // route-gate auth) — intercepted before matchRoute, like /blobs.
+      if (isApp && req.method === 'POST' && source.jobs) {
+        const handled = await handleJobRoute(source, req, res);
         if (handled) return;
       }
       if (isApp && source._static && req.method === 'GET') {
@@ -991,6 +1065,15 @@ export function listen(app, port, optionsOrCallback = {}) {
   const httpServer = createHttpServer(resolved);
   app.httpServer = httpServer;
   installGracefulShutdown(app);
+  // The job-queue reaper runs as a framework-owned periodic sweep (spec #5):
+  // re-assigns lease-expired jobs + revokes stale-heartbeat workers. Started
+  // after installGracefulShutdown so its stop() can be registered with the
+  // onShutdown registry (the timer is cleared on graceful exit). Only when the
+  // app engaged the job-queue substrate.
+  if (app.jobs) {
+    app.jobs.startReaper();
+    app.onShutdown('job-queue-reaper', () => app.jobs.stop(), { timeoutMs: 1000 });
+  }
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
   httpServer.listen(port);
 

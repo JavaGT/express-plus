@@ -150,6 +150,29 @@ export function generateFrameworkDDL() {
   scope TEXT NOT NULL PRIMARY KEY,
   lastSeq INTEGER NOT NULL
 );`,
+    // Job-queue substrate (spec #5). A job is a unit of work with its own
+    // lifecycle (queued/claimed/running/completed/failed), NOT a derived read
+    // model — separate seam from the projection registry. Timestamps are ms-epoch
+    // INTEGERS so lease/grace comparisons are plain numeric (no ISO-string
+    // juggling). _Worker stores only the token HASH (never the raw bearer).
+    `CREATE TABLE IF NOT EXISTS _Job (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,
+  payload TEXT,
+  status TEXT NOT NULL DEFAULT 'queued',
+  enqueuedAt INTEGER NOT NULL,
+  workerId TEXT,
+  claimedAt INTEGER,
+  leaseUntil INTEGER
+);`,
+    'CREATE INDEX IF NOT EXISTS idx__job_claim ON _Job (status, enqueuedAt);',
+    `CREATE TABLE IF NOT EXISTS _Worker (
+  id TEXT PRIMARY KEY,
+  tokenHash TEXT NOT NULL,
+  lastHeartbeat INTEGER NOT NULL,
+  revoked INTEGER NOT NULL DEFAULT 0,
+  registeredAt INTEGER NOT NULL
+);`,
   ];
 }
 
