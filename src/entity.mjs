@@ -238,6 +238,15 @@ export function entity(name, declaration = {}) {
   // table has no column for them — they live entirely in the <Entity>_<field>
   // side-table (ddl.mjs orderedTableDDL), ordered by a fractional REAL `key`.
   const orderedFields = Object.entries(fields).filter(([, d]) => d.kind === 'ordered');
+  // log (store/log) fields hydrate from an append-only side-table into a write
+  // handle exposing .append(entry)/.entries(). Like map/ordered, the main table
+  // has no column for them — they live entirely in the <Entity>_<field> side-table
+  // (ddl.mjs logTableDDL), ordered by rowid (append order). A log append is a
+  // committed pipeline ACTION (consult #19): `.append()` re-enters dispatch as
+  // `<Entity>.<field>.append` (a fresh txn) → handler emits `:appended` → the
+  // projection writes the side-table. The handle needs a `dispatch` ref to
+  // re-enter; without one it throws (fail closed, no silent direct-SQL fallback).
+  const logFields = Object.entries(fields).filter(([, d]) => d.kind === 'store' && d.type === 'log');
 
   // Fire effects for a map field mutation. `eventName` is 'added' or 'removed'.
   // The declared effects map is keyed by frozen event handles (like
@@ -454,7 +463,65 @@ export function entity(name, declaration = {}) {
     };
   };
 
-  const hydrate = (row, principal = null) => {
+  // makeLogHandle(entityName, fieldName, row, principal, dispatch) — returns a
+  // write handle for a `store/log` field. An `.append(entry)` RE-ENTERS dispatch
+  // as `<Entity>.<field>.append` (own actionId, own txn) rather than writing the
+  // side-table directly — store mutations are committed pipeline actions (consult
+  // #19), so the append is atomic + replayable, not a second unlogged write path.
+  // `.entries()` is the owning-entity query (side-table rows for this owner, in
+  // append order). The 5th `dispatch` arg is REQUIRED for `.append` (a handle
+  // hydrated without one — the trusted query API — throws on mutation rather
+  // than falling back to direct SQL, which would recreate a forbidden dual path).
+  const makeLogHandle = (entityName, fieldName, row, principal, dispatch) => {
+    const table = membershipTable(entityName, fieldName);
+    const ownerCol = membershipOwnerCol(entityName);
+    const oid = String(row.id);
+    const entryDescriptor = fields[fieldName].entry ?? {};
+    return {
+      append: async (entry) => {
+        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
+        if (!dispatch) {
+          throw new Error(
+            `cannot append to ${entityName}.${fieldName} without a dispatch ref ` +
+              `(hydrate with dispatch inside a handler/route)`,
+          );
+        }
+        const result = await dispatch({
+          actionId: randomUUID(),
+          type: `${entityName}.${fieldName}.append`,
+          payload: { owner: oid, ...(entry ?? {}) },
+          principal,
+        });
+        if (!result.granted) throw { status: 403, message: 'forbidden' };
+        const appended = result.events?.find((e) => e.type === `${entityName}.${fieldName}.appended`);
+        return appended?.data?.id;
+      },
+      entries: async () => {
+        if (principal && !(await mayFieldOp(record, fieldName, read, row, principal))) {
+          throw { status: 403, message: 'forbidden' };
+        }
+        const rows = getActiveDb()
+          .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner ORDER BY rowid`)
+          .all({ owner: oid });
+        return rows.map((r) => {
+          const rest = { ...r };
+          delete rest[ownerCol];
+          return rest;
+        });
+      },
+    };
+  };
+
+  // hydrate(row, principal, dispatch) — assemble hash{verify}, struct namespaces,
+  // store handles, and derived fields onto a raw row. `dispatch` is OPTIONAL: a
+  // store MUTATION handle (log .append) needs it to re-enter dispatch; it's null
+  // for the trusted query API + reads (findOne/findAll/findById pass null; a
+  // request path that wants in-handler store mutations threads the kernel's
+  // dispatch fn — UNIT 2's concern for map/ordered). Default null = backward-
+  // compatible (store query handles + all reads work without it).
+  const hydrate = (row, principal = null, dispatch = null) => {
     if (!row) return row;
     for (const fieldName of hashFields) {
       const stored = row[fieldName];
@@ -479,6 +546,9 @@ export function entity(name, declaration = {}) {
     }
     for (const [fieldName] of orderedFields) {
       row[fieldName] = makeOrderedListHandle(name, fieldName, row, principal);
+    }
+    for (const [fieldName] of logFields) {
+      row[fieldName] = makeLogHandle(name, fieldName, row, principal, dispatch);
     }
     // Derived fields compute on read from the hydrated row. The `derived` function
     // receives the row (with all stored columns + hydrated handles) and returns the
@@ -549,7 +619,7 @@ export function entity(name, declaration = {}) {
   // the RAW row; the call site that needs a live `req.<entity>` hydrates here so
   // there is ONE admission path and hydration stays the entity's own concern
   // (not a second authz path). findById stays the unscoped trusted primitive.
-  record.hydrate = (row, principal = null) => hydrate(row, principal);
+  record.hydrate = (row, principal = null, dispatch = null) => hydrate(row, principal, dispatch);
 
   record.getOrFail = (id) => {
     const row = record.findById(id);
@@ -628,9 +698,35 @@ export function entity(name, declaration = {}) {
       `${name}.created`,
       `${name}.updated`,
       `${name}.removed`,
+      // each log field's append event → side-table INSERT (consult #19)
+      ...logFields.map(([fieldName]) => `${name}.${fieldName}.appended`),
     ],
     apply: (event, db) => {
       const table = name;
+      // log append: `<Entity>.<field>.appended` → INSERT a side-table row for
+      // the minted entry id + the declared entry sub-fields (serialized). The
+      // owner becomes the owning entity's FK (the row the log hangs off of).
+      for (const [logField] of logFields) {
+        if (event.type === `${name}.${logField}.appended`) {
+          const entryDescriptor = fields[logField].entry ?? {};
+          const sideTable = membershipTable(name, logField);
+          const ownerCol = membershipOwnerCol(name);
+          const cols = [ownerCol, 'id'];
+          const vals = [':owner', ':id'];
+          const params = { owner: event.data?.owner != null ? String(event.data.owner) : null, id: event.data?.id };
+          for (const [subField, descriptor] of Object.entries(entryDescriptor)) {
+            if (Object.prototype.hasOwnProperty.call(event.data ?? {}, subField)) {
+              cols.push(subField);
+              vals.push(`:${subField}`);
+              params[subField] = serializeField(descriptor, event.data[subField]);
+            }
+          }
+          db.prepare(
+            `INSERT INTO ${sideTable} (${cols.join(', ')}) VALUES (${vals.join(', ')})`,
+          ).run(params);
+          return;
+        }
+      }
       if (event.type === `${name}.created`) {
         const row = {};
         for (const [key, value] of Object.entries(event.data ?? {})) {
@@ -701,6 +797,12 @@ export function entity(name, declaration = {}) {
       if (!payload.id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
       return [{ type: record.verbs.removed.type, scope: `${name}:${payload.id}`, data: { id: payload.id } }];
     },
+    // log append: `<Entity>.<field>.append` → validate the entry shape (fail
+    // closed on an unknown sub-field), mint a stable entry id, emit `:appended`.
+    // The payload's `owner` is the owning entity id (the row the log hangs off
+    // of). Field-level `.can()` authz runs in the HANDLE (the convenient-API
+    // path); a direct dispatch is trusted server code (parity with create).
+    ...appendLogHandlers(name, fields, logFields),
   });
 
   function ownerFieldOf(entity) {
@@ -710,6 +812,38 @@ export function entity(name, declaration = {}) {
       }
     }
     return null;
+  }
+
+  // Append handlers for each log field. A log append is a committed pipeline
+  // action (consult #19): validate the entry shape (fail closed — an unknown
+  // sub-field is rejected), mint a stable entry id, emit `<Entity>.<field>.
+  // appended` carrying the owner + id + declared entry cells. Spread into
+  // crudHandlers so a dispatched `<Entity>.<field>.append` lands in one handler
+  // map alongside create/update/remove.
+  function appendLogHandlers(entityName, fields, logFieldEntries) {
+    const handlers = {};
+    for (const [logField] of logFieldEntries) {
+      const entryDescriptor = fields[logField].entry ?? {};
+      handlers[`${entityName}.${logField}.append`] = ({ payload }) => {
+        const { owner, ...entry } = payload ?? {};
+        if (owner == null) {
+          throw Object.assign(new Error(`${entityName}.${logField}.append requires an owner`), { status: 400 });
+        }
+        // fail closed: every supplied key must be a declared entry sub-field
+        for (const key of Object.keys(entry)) {
+          if (!Object.prototype.hasOwnProperty.call(entryDescriptor, key)) {
+            throw Object.assign(new Error(`unknown entry field: ${key}`), { status: 400 });
+          }
+        }
+        const id = randomUUID();
+        return [{
+          type: `${entityName}.${logField}.appended`,
+          scope: `${entityName}:${owner}`,
+          data: { owner, id, ...entry },
+        }];
+      };
+    }
+    return handlers;
   }
 
   const frozen = Object.freeze(record);

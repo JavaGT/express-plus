@@ -71,17 +71,19 @@ function mapTableDDL(entity, name, descriptor) {
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
-// Generate side-table DDL for log fields (entries with sub-fields).
+// Generate side-table DDL for log fields (append-only entries with sub-fields).
+// Each entry has a stable `id` (identity) + one stored cell per declared entry
+// sub-field. Like map/ordered, the main table has no column for a log — it lives
+// entirely in the <Entity>_<field> side-table, ordered by rowid (append order).
 function logTableDDL(entity, name, descriptor) {
   const tableName = `${entity.name}_${name}`;
   const ownerCol = `${entity.name}_id`;
-  const cols = [`${ownerCol} TEXT NOT NULL`];
-  if (Array.isArray(descriptor.fields)) {
-    for (const entryField of descriptor.fields) {
-      // log entry sub-fields — assume TEXT for simplicity
-      cols.push(`${entryField} TEXT`);
-    }
+  const entryCols = Object.keys(descriptor.entry ?? {});
+  const cols = [`${ownerCol} TEXT NOT NULL`, 'id TEXT NOT NULL'];
+  for (const subField of entryCols) {
+    cols.push(`${subField} TEXT`);
   }
+  cols.push(`PRIMARY KEY (${ownerCol}, id)`);
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
