@@ -585,16 +585,47 @@ function csrfGuard(req) {
 // hydration as the principal source (sessionPrincipalOf) — the SAME admission
 // path, not a second one. `db` is the app-level node:sqlite handle the
 // dispatcher runs against.
-export function makeRequestHandler(source, { principalOf = () => anonymous, db, env = config.env, rateLimiter = null } = {}) {
+export function makeRequestHandler(source, { principalOf = () => anonymous, db, env = config.env, rateLimiter = null, csp, hsts, cors, requestLog = false } = {}) {
   // `source` is either a plain resolved routing table (an array) or an app whose
   // table resolves asynchronously (two-phase boot). When it is an app, every
   // request first awaits `app.ready` so the socket may accept connections before
   // resolution completes without ever dispatching against a partial table.
   const isApp = source && typeof source.resolveRoutes === 'function';
+  // Request log (opt-in via `listen(port, {requestLog:true})`) — writes
+  // `METHOD path status durationMs` to stderr at response end. The requestCount
+  // counter feeding /health/stats runs on every app request regardless.
+  const shouldLogRequest = requestLog;
+  const requestCount = { count: 0 };
   return async function handle(req, res) {
+    const startTime = Date.now();
+    if (isApp) requestCount.count += 1;
+    if (shouldLogRequest) {
+      let statusCode = 200;
+      const origWriteHead = res.writeHead;
+      res.writeHead = function patchedWriteHead(code, ...args) {
+        statusCode = code;
+        return origWriteHead.apply(this, [code, ...args]);
+      };
+      res.on('finish', () => {
+        const path = new URL(req.url, 'http://localhost').pathname;
+        const durationMs = Date.now() - startTime;
+        process.stderr.write(`${req.method} ${path} ${statusCode} ${durationMs}ms\n`);
+      });
+    }
     // Security headers are a baked-in default on EVERY response, set before any
     // exit path writes its head (SPEC §3). They are retained through writeHead.
     applySecurityHeaders(res);
+    // CSP / HSTS / CORS policy headers (piece 4 — opt-in, default off)
+    if (csp) res.setHeader('content-security-policy', csp);
+    if (hsts) res.setHeader('strict-transport-security', 'max-age=31536000');
+    // CORS: check Origin and set headers if configured (allowlist over denylist)
+    const origin = req.headers.origin;
+    if (cors && cors.origins && Array.isArray(cors.origins) && origin) {
+      if (cors.origins.includes(origin)) {
+        res.setHeader('access-control-allow-origin', origin);
+        res.setHeader('vary', 'Origin');
+      }
+    }
     try {
       if (isApp) await source.ready;
       const routes = isApp ? source.routes : source;
@@ -622,11 +653,43 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
         return;
       }
 
+      const url = new URL(req.url, 'http://localhost');
+      // Framework-owned /health endpoint (piece 1) — PUBLIC, anonymous, no auth.
+      // Intercepts BEFORE matchRoute (like /snapshot, /blobs, /events).
+      if (isApp && req.method === 'GET') {
+        if (url.pathname === '/health') {
+          sendJson(res, 200, { status: 'ok', env });
+          return;
+        }
+        if (url.pathname === '/health/stats') {
+          sendJson(res, 200, {
+            status: 'ok',
+            env,
+            uptimeMs: Math.round(process.uptime() * 1000),
+            rssBytes: process.memoryUsage().rss,
+            requestCount: requestCount.count,
+          });
+          return;
+        }
+      }
+      // CORS preflight (piece 4 — opt-in): OPTIONS with allowed origin/method → 204
+      if (isApp && req.method === 'OPTIONS' && cors && cors.origins && Array.isArray(cors.origins)) {
+        const origin = req.headers.origin;
+        if (origin && cors.origins.includes(origin)) {
+          res.setHeader('access-control-allow-origin', origin);
+          res.setHeader('vary', 'Origin');
+          res.setHeader('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+          res.setHeader('access-control-allow-headers', 'content-type');
+          res.writeHead(204);
+          res.end();
+          return;
+        }
+      }
+
       // Static file serving — intercepts before route matching. The app declares
       // `app.static('/public', dir)`; every GET request under the prefix is served
       // from the filesystem with a content-type derived from the file extension.
       // Missing files → 404; path-traversal attempts → 404 (fail closed).
-      const url = new URL(req.url, 'http://localhost');
       // Framework-owned default endpoints — snapshot + resync (spec #1, D6/D7).
       // Like the /events WS transport, these are framework defaults (not mounted
       // routes): `/snapshot/:entity/:id` and `/events-since/:entity/:id` resolve
@@ -916,11 +979,13 @@ export function listen(app, port, optionsOrCallback = {}) {
   // request is ever served against a partial table even though the socket is
   // already accepting connections. A resolution failure rejects `app.ready`; the
   // handler surfaces it as a 500 and the request is never dispatched — fail closed.
+  // CSP / HSTS / CORS / requestLog are opt-in policy headers (piece 4, 5).
   const resolved = makeRequestHandler(
     // Read the table through a thunk: it is empty until resolution completes, and
     // the handler below gates every request on `app.ready` before reading it.
     app,
-    { ...options, principalOf, db: app.db, rateLimiter: options.rateLimit ? createRateLimiter(options.rateLimit) : null },
+    { ...options, principalOf, db: app.db, rateLimiter: options.rateLimit ? createRateLimiter(options.rateLimit) : null,
+      csp: options.csp, hsts: options.hsts, cors: options.cors, requestLog: options.requestLog },
   );
 
   const httpServer = createHttpServer(resolved);
@@ -987,19 +1052,54 @@ function installProcessTraps() {
 // SIGINT close every registered app; an unhandledRejection/uncaughtException is
 // trapped so a stray rejection cannot crash the process silently. The framework
 // owns these — an app that mounted its own would be a leak.
+// 
+// onShutdown registry (eng-review #16): apps register named hooks with deadlines.
+// Hooks run in registration order on shutdown; each bounded by its timeoutMs.
+// A hook exceeding its deadline is force-abandoned (resolve with timeout error, log,
+// continue to next).
 function installGracefulShutdown(app) {
+  if (!app._shutdownHooks) {
+    app._shutdownHooks = [];
+  }
+  if (!app.onShutdown) {
+    app.onShutdown = (name, fn, { timeoutMs = 5000 } = {}) => {
+      app._shutdownHooks.push({ name, fn, timeoutMs });
+    };
+  }
   if (!app.shutdown) {
     app.shutdown = () =>
       new Promise((resolve) => {
-        if (app.httpServer && app.httpServer.listening) {
-          app.httpServer.close(() => {
+        // Run registered hooks first, each bounded by its deadline
+        const runHooks = async () => {
+          for (const hook of app._shutdownHooks) {
+            const timer = new Promise((_, reject) => {
+              const t = setTimeout(() => {
+                clearTimeout(t);
+                reject(new Error(`onShutdown hook '${hook.name}' exceeded ${hook.timeoutMs}ms deadline`));
+              }, hook.timeoutMs);
+            });
+            try {
+              await Promise.race([hook.fn(), timer]);
+            } catch (err) {
+              process.stderr.write(`onShutdown hook '${hook.name}' failed: ${err.message}\n`);
+              // Continue to next hook (force-abandon on timeout)
+            }
+          }
+        };
+        // Close http server and live server, then resolve
+        const closeServer = () => new Promise((resolveClose) => {
+          if (app.httpServer && app.httpServer.listening) {
+            app.httpServer.close(() => {
+              liveApps.delete(app);
+              resolveClose();
+            });
+          } else {
             liveApps.delete(app);
-            resolve();
-          });
-        } else {
-          liveApps.delete(app);
-          resolve();
-        }
+            resolveClose();
+          }
+        });
+        // Run hooks then close
+        runHooks().then(closeServer).then(resolve);
       });
   }
   liveApps.add(app);

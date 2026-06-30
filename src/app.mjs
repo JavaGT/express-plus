@@ -284,7 +284,14 @@ export function router(options = {}) {
 // (chainable). The server is exposed on `app.httpServer`. `options.principalOf`
 // overrides the request→principal source (default: anonymous, fail-closed). Both
 // chain.
-export default function expressPlus({ db, blobs: blobOpts } = {}) {
+export default function expressPlus({ db, blobs: blobOpts, requireEnv = [] } = {}) {
+  // envGate (cso #15): fail-closed at app construction — required env vars must be set.
+  for (const v of requireEnv) {
+    const val = process.env[v];
+    if (!val) {
+      throw new Error(`missing required env: ${v}`);
+    }
+  }
   const app = makeMountable();
   // The DB handle is an app-level resource, supplied once at construction and
   // read by every transport (HTTP now, WS /events later) — not a per-transport

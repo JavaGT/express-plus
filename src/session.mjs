@@ -12,6 +12,7 @@
 // (`expressPlus({ db })`), session hydration becomes the default principal source.
 
 import { principal, anonymous } from './principal.mjs';
+import { config } from './config.mjs';
 
 // The session cookie name. The cookie value is an opaque token; it never carries
 // identity, only a key into the Session table.
@@ -20,6 +21,7 @@ export const SESSION_COOKIE = 'sid';
 // Parse a raw `Cookie` request header (`name=value; name2=value2`) into a
 // name→value map. Values are url-decoded. A missing/empty header is an empty map.
 // Zero-dependency: node:http exposes the raw header string, nothing parses it.
+// Malformed percent-escapes are skipped (fail closed) — never throw 500 (cso M1).
 export function parseCookies(header) {
   const cookies = {};
   if (!header) return cookies;
@@ -29,7 +31,11 @@ export function parseCookies(header) {
     const name = pair.slice(0, eq).trim();
     if (!name) continue;
     const value = pair.slice(eq + 1).trim();
-    cookies[name] = decodeURIComponent(value);
+    try {
+      cookies[name] = decodeURIComponent(value);
+    } catch {
+      // Malformed percent-encoding — skip this cookie (fail closed, anonymous)
+    }
   }
   return cookies;
 }
@@ -38,7 +44,11 @@ export function parseCookies(header) {
 // HttpOnly (never readable by client JS), SameSite=Lax (CSRF-resistant), Secure
 // (TLS-only), Path=/. `secure` may be dropped for a non-TLS context (local dev /
 // tests over plain http); HttpOnly and SameSite are never dropped.
-export function sessionCookie(token, { secure = true } = {}) {
+// cso M2: In production, secure:false is refused — tokens must be TLS-only.
+export function sessionCookie(token, { secure = true, env = config.env } = {}) {
+  if (env === 'production' && !secure) {
+    throw new Error('sessionCookie secure:false is not permitted in production');
+  }
   const attributes = [`${SESSION_COOKIE}=${token}`, 'HttpOnly', 'SameSite=Lax', 'Path=/'];
   if (secure) attributes.push('Secure');
   return attributes.join('; ');
