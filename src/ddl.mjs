@@ -31,7 +31,7 @@ function sqlType(descriptor) {
     }
   }
   if (kind === 'struct') return 'TEXT'; // each struct cell is a TEXT column
-  return 'TEXT'; // fallback (presence, state, etc. are not stored in the main table)
+  return 'TEXT'; // fallback (state, ephemeral, etc.)
 }
 
 // Generate the main table DDL for one entity.
@@ -44,7 +44,7 @@ function mainTableDDL(entity) {
     // Derived fields have no stored column (computed on read).
     if (descriptor.derived) continue;
     // Fields that are stored in the main table (value, crdt, hash, struct)
-    if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash') {
+    if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash' || descriptor.kind === 'state') {
       cols.push(`${name} ${sqlType(descriptor)}`);
     } else if (descriptor.kind === 'struct') {
       // struct fields (link) flatten to multiple columns
@@ -52,7 +52,7 @@ function mainTableDDL(entity) {
         cols.push(`${structCellColumn(name, cellName)} TEXT`);
       }
     }
-    // map / log / ephemeral / state / store → NOT stored in main table
+    // map / log / ephemeral / store → NOT stored in main table
   }
   return `CREATE TABLE IF NOT EXISTS ${entity.name} (\n  ${cols.join(',\n  ')}\n);`;
 }

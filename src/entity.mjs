@@ -24,7 +24,7 @@ import { buildCheckRegistry } from './registry.mjs';
 import { mayFieldOp } from './row-grant.mjs';
 import { read, write } from './grant.mjs';
 import {
-  serializeField, validateMutation, verifyHash, flattenStruct, structCellColumn,
+  serializeField, validateMutation, ValidationError, verifyHash, flattenStruct, structCellColumn,
 } from './field-strategy.mjs';
 import { action, event } from './pipeline.mjs';
 import { generateDDL } from './ddl.mjs';
@@ -1068,6 +1068,45 @@ export function entity(name, declaration = {}) {
       const { id, ...rest } = payload;
       if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
       validateMutation(record, rest);
+      // Transition guard: for every state field in the payload, pre-read the
+      // current row and verify the move is in the declared transition graph.
+      // Runs after structural validation so invalid targets report as domain
+      // errors before transition errors (clearer diagnostic order).
+      for (const [fieldName, descriptor] of Object.entries(fields)) {
+        if (descriptor.kind !== 'state') continue;
+        if (!(fieldName in rest)) continue;
+        let current;
+        try {
+          current = record.findById(id);
+        } catch (e) {
+          throw Object.assign(
+            new ValidationError(
+              `Illegal transition check requires a durable database ` +
+              `(in-memory kernel cannot verify state transitions for ${name}.${fieldName})`,
+            ),
+            { status: 400 },
+          );
+        }
+        if (!current || current[fieldName] == null) {
+          throw Object.assign(
+            new ValidationError(
+              `${name}.${fieldName}: illegal transition (no current state) -> ${rest[fieldName]}`,
+            ),
+            { status: 400 },
+          );
+        }
+        const currentValue = current[fieldName];
+        if (currentValue === rest[fieldName]) continue; // no-op, skip check
+        const legalTargets = descriptor.transitions[currentValue];
+        if (!legalTargets || !legalTargets.includes(rest[fieldName])) {
+          throw Object.assign(
+            new ValidationError(
+              `${name}.${fieldName}: illegal transition ${currentValue} -> ${rest[fieldName]}`,
+            ),
+            { status: 400 },
+          );
+        }
+      }
       const data = { ...rest, id };
       for (const [fieldName, descriptor] of Object.entries(fields)) {
         if (descriptor.touch) data[fieldName] = new Date();

@@ -287,6 +287,28 @@ const STRATEGIES = Object.freeze({
       return structDiff(previous, next, descriptor);
     },
   }),
+
+  // `state` — a finite-state-machine field: a closed domain of string values plus
+  // a declared legal-transition graph. validate checks membership in the declared
+  // values set. diff reports `{ from, to }` on change (never a whole-value set).
+  // apply replaces. No serialize needed (the value is already a domain string).
+  // The transition guard (reject illegal moves at update time) lives in the CRUD
+  // handler — this strategy validates shape only.
+  state: Object.freeze({
+    validate(value, descriptor) {
+      if (!descriptor.values.includes(value)) {
+        return `expected one of [${descriptor.values.join(', ')}]`;
+      }
+      return true;
+    },
+    apply(_previous, next) {
+      return next;
+    },
+    diff(previous, next) {
+      if (previous === next) return null;
+      return { from: previous, to: next };
+    },
+  }),
 });
 
 // The generated column name for a structured field's sub-cell. Derived from the
@@ -320,8 +342,8 @@ export function resolveStrategy(kind) {
   const strategy = STRATEGIES[kind];
   if (!strategy) {
     throw new Error(
-      `unknown field kind '${kind}'. The field kinds are the four named wholes ` +
-        `value/store/crdt/ordered (SPEC §5.1, ADR #9).`,
+      `unknown field kind '${kind}'. The field kinds are: ` +
+        `value, crdt, hash, store, ordered, struct, state, ephemeral.`,
     );
   }
   return strategy;

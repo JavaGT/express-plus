@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
+import { randomUUID } from 'node:crypto';
 import { entity, state, text, date, scope, everyone, grant, read } from '../src/index.mjs';
+import { setActiveDb } from '../src/db.mjs';
 
 // `state({ values, transitions, effects, auto })` — a finite-state-machine field.
 // It is its own KIND (`state`): a closed value domain plus a declared legal-
@@ -93,5 +96,260 @@ test('a state handle cannot be compared in scope (fail closed)', () => {
   assert.throws(
     () => Doc.status.is('draft'),
     /state field and cannot be compared/,
+  );
+});
+
+// ---- RUNTIME tests (Spine C8: strategy + DDL + transition guard) ----
+
+import { resolveStrategy, ValidationError } from '../src/field-strategy.mjs';
+import { generateDDL } from '../src/ddl.mjs';
+import { executeFrameworkDDL, createServer } from '../src/index.mjs';
+
+function setupDoc() {
+  const Doc = entity('DocState', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    fields: {
+      title: text(),
+      status: state({
+        values: ['draft', 'shared', 'archived'],
+        transitions: { draft: ['shared'], shared: ['archived', 'draft'] },
+      }),
+    },
+  });
+  return Doc;
+}
+
+test('resolveStrategy("state") resolves and validates correctly', () => {
+  const strategy = resolveStrategy('state');
+  assert.ok(strategy, 'resolveStrategy should return the state strategy');
+  assert.equal(typeof strategy.validate, 'function');
+  assert.equal(typeof strategy.apply, 'function');
+  assert.equal(typeof strategy.diff, 'function');
+
+  const descriptor = state({ values: ['draft', 'shared', 'archived'] });
+  assert.equal(strategy.validate('draft', descriptor), true);
+  assert.equal(strategy.validate('shared', descriptor), true);
+  assert.equal(strategy.validate('archived', descriptor), true);
+
+  const reason = strategy.validate('nonsense', descriptor);
+  assert.ok(typeof reason === 'string', 'invalid value returns a reason string');
+  assert.match(reason, /expected one of/);
+  assert.match(reason, /draft/);
+
+  const nullReason = strategy.validate(null, descriptor);
+  assert.ok(nullReason, 'null is rejected');
+});
+
+test('DDL includes a TEXT column for state fields', () => {
+  const Doc = setupDoc();
+  const sql = generateDDL(Doc);
+  assert.ok(Array.isArray(sql));
+  const mainDDL = sql[0];
+  assert.match(mainDDL, /status TEXT/, 'state field should produce a TEXT column');
+});
+
+test('create with valid state value persists the row', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  executeFrameworkDDL(db);
+  const Doc = setupDoc();
+  for (const s of generateDDL(Doc)) db.exec(s);
+
+  const server = createServer({
+    db,
+    handlers: Doc.crudHandlers,
+    projections: [Doc.projection],
+    authorize: () => true,
+  });
+  t.after(() => db.close());
+
+  const result = await server.dispatch({
+    actionId: 'c-valid-1',
+    type: 'DocState.create',
+    payload: { title: 'test doc', status: 'draft' },
+    principal: { id: 'u1' },
+  });
+  assert.equal(result.granted, true);
+  const row = Doc.findById(result.events[0].data.id);
+  assert.ok(row);
+  assert.equal(row.status, 'draft');
+});
+
+test('create with invalid state value throws ValidationError', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  executeFrameworkDDL(db);
+  const Doc = setupDoc();
+  for (const s of generateDDL(Doc)) db.exec(s);
+
+  const server = createServer({
+    db,
+    handlers: Doc.crudHandlers,
+    projections: [Doc.projection],
+    authorize: () => true,
+  });
+  t.after(() => db.close());
+
+  await assert.rejects(
+    () => server.dispatch({
+      actionId: 'c-invalid-1',
+      type: 'DocState.create',
+      payload: { title: 'test doc', status: 'nonsense' },
+      principal: { id: 'u1' },
+    }),
+    (err) => {
+      assert.ok(err instanceof ValidationError || err.status === 400);
+      return true;
+    },
+  );
+});
+
+test('update legal transition (draft -> shared) persists', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  executeFrameworkDDL(db);
+  const Doc = setupDoc();
+  for (const s of generateDDL(Doc)) db.exec(s);
+
+  const server = createServer({
+    db,
+    handlers: Doc.crudHandlers,
+    projections: [Doc.projection],
+    authorize: () => true,
+  });
+  t.after(() => db.close());
+
+  // Create with 'draft'
+  const createResult = await server.dispatch({
+    actionId: 'c-legal-1',
+    type: 'DocState.create',
+    payload: { title: 'legal doc', status: 'draft' },
+    principal: { id: 'u1' },
+  });
+  const docId = createResult.events[0].data.id;
+
+  // Update draft -> shared
+  const result = await server.dispatch({
+    actionId: 'u-legal-1',
+    type: 'DocState.update',
+    payload: { id: docId, status: 'shared' },
+    principal: { id: 'u1' },
+  });
+  assert.equal(result.granted, true);
+  const row = Doc.findById(docId);
+  assert.equal(row.status, 'shared');
+});
+
+test('update illegal transition (draft -> archived) throws 400 with zero footprint', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  executeFrameworkDDL(db);
+  const Doc = setupDoc();
+  for (const s of generateDDL(Doc)) db.exec(s);
+
+  const server = createServer({
+    db,
+    handlers: Doc.crudHandlers,
+    projections: [Doc.projection],
+    authorize: () => true,
+  });
+  t.after(() => db.close());
+
+  // Create with 'draft'
+  const createResult = await server.dispatch({
+    actionId: 'c-zero-1',
+    type: 'DocState.create',
+    payload: { title: 'zero-footprint doc', status: 'draft' },
+    principal: { id: 'u1' },
+  });
+  const docId = createResult.events[0].data.id;
+
+  // Record the log count before illegal update
+  const logBefore = db.prepare('SELECT COUNT(*) AS cnt FROM _Log').get();
+
+  // Attempt illegal transition: draft -> archived
+  await assert.rejects(
+    () => server.dispatch({
+      actionId: 'u-illegal-1',
+      type: 'DocState.update',
+      payload: { id: docId, status: 'archived' },
+      principal: { id: 'u1' },
+    }),
+    (err) => {
+      assert.ok(err.status === 400 || err.message.includes('illegal transition'));
+      return true;
+    },
+  );
+
+  // Zero footprint: no _Log rows added
+  const logAfter = db.prepare('SELECT COUNT(*) AS cnt FROM _Log').get();
+  assert.equal(logAfter.cnt, logBefore.cnt, 'illegal transition must not append _Log rows');
+
+  // Row unchanged
+  const row = Doc.findById(docId);
+  assert.equal(row.status, 'draft');
+});
+
+test('update state to current value is a no-op (skips transition check)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  executeFrameworkDDL(db);
+  const Doc = setupDoc();
+  for (const s of generateDDL(Doc)) db.exec(s);
+
+  const server = createServer({
+    db,
+    handlers: Doc.crudHandlers,
+    projections: [Doc.projection],
+    authorize: () => true,
+  });
+  t.after(() => db.close());
+
+  const createResult = await server.dispatch({
+    actionId: 'c-noop-1',
+    type: 'DocState.create',
+    payload: { title: 'noop doc', status: 'draft' },
+    principal: { id: 'u1' },
+  });
+  const docId = createResult.events[0].data.id;
+
+  // Update with same state
+  const result = await server.dispatch({
+    actionId: 'u-noop-1',
+    type: 'DocState.update',
+    payload: { id: docId, status: 'draft' },
+    principal: { id: 'u1' },
+  });
+  assert.equal(result.granted, true);
+  const row = Doc.findById(docId);
+  assert.equal(row.status, 'draft');
+});
+
+test('update nonexistent row with state change throws 400 (no current state)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  executeFrameworkDDL(db);
+  const Doc = setupDoc();
+  for (const s of generateDDL(Doc)) db.exec(s);
+
+  const server = createServer({
+    db,
+    handlers: Doc.crudHandlers,
+    projections: [Doc.projection],
+    authorize: () => true,
+  });
+  t.after(() => db.close());
+
+  await assert.rejects(
+    () => server.dispatch({
+      actionId: 'u-missing-1',
+      type: 'DocState.update',
+      payload: { id: 'nonexistent-id', status: 'shared' },
+      principal: { id: 'u1' },
+    }),
+    (err) => {
+      assert.ok(err.status === 400 || err.message.includes('no current state'));
+      return true;
+    },
   );
 });
