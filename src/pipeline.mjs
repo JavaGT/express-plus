@@ -134,6 +134,14 @@ async function applyEventsToTxn(db, events, {
     for (const ev of finalizedEvents) {
       const effectEvents = effectsExecutor(ev, { now, actionId, depth: depth + 1, maxEffectDepth });
       if (effectEvents && effectEvents.length > 0) {
+        // gap #2: effect target events run under their EFFECT PRINCIPAL
+        // (`principal({type:'system', attributes:{effect:<sourceEntity>}})`,
+        // carried on each target event as `_effectPrincipal`), NOT the outer
+        // request principal. So postHandlerAuthorize below evaluates the target
+        // row's grant against the effect principal — a target deny rolls back
+        // the origin (in-txn atomic, ADR #6). Fall back to the outer principal
+        // only if an effect event lacks the tag (defensive).
+        const effectPrincipal = effectEvents[0]?._effectPrincipal ?? principal;
         // Recursively apply effect events through the same path
         await applyEventsToTxn(db, effectEvents, {
           now,
@@ -142,7 +150,7 @@ async function applyEventsToTxn(db, events, {
           projectionConsumers,
           blobAdopter,
           postHandlerAuthorize,
-          principal, // Will be effect principal for target authorization
+          principal: effectPrincipal,
           effectsExecutor,
           depth: depth + 1,
           maxEffectDepth,

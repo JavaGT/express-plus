@@ -32,6 +32,14 @@ import { sessionPrincipalOf } from './session.mjs';
 import { createLiveServer } from './live.mjs';
 import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer } from './pipeline.mjs';
+import { buildEffectsRegistry, validateEffects } from './effect-compiler.mjs';
+import { User, Session, Inbox } from './auth-entities.mjs';
+
+// Framework auth entities are always-available effect targets (an app's effect
+// may target Inbox without mounting it — auth entities are never request-facing
+// routes). They must be present in the validation set so the admission handshake
+// can resolve them + their `admitsEffects`.
+const FRAMEWORK_ENTITIES = [User, Session, Inbox];
 import { createWriteQueue } from './write-queue.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
 import { resolveTemplate } from './views.mjs';
@@ -899,6 +907,24 @@ function buildKernel(app) {
   app.entities = entities;
   if (app.db && typeof app.db.exec === 'function') executeFrameworkDDL(app.db);
 
+  // Effects (gap #4 wiring): build the registry from every mounted entity and
+  // run the GLOBAL validation pass — detectCrossEntityCycles +
+  // verifyAdmissionHandshake — so effect safety is load-time-enforced at boot
+  // (fail-closed: a cycle or a missing admitsEffects rejects app.ready). No-op
+  // for an app with no effects (zero blast radius). The registry is passed to
+  // createServer so effects fire in-txn on committed CRUD events through the
+  // real app path, not only via the direct createServer test harness.
+  const effectsRegistry = buildEffectsRegistry([...entities.values()]);
+  if (effectsRegistry.size > 0) {
+    // Include framework auth entities so effects targeting them (e.g. Doc → Inbox)
+    // resolve in the admission handshake even though they aren't mounted routes.
+    const forValidation = [...entities.values()];
+    for (const fe of FRAMEWORK_ENTITIES) {
+      if (fe && !entities.has(fe.name)) forValidation.push(fe);
+    }
+    validateEffects(forValidation);
+  }
+
   // Auto-wire the blob adopter from declared blob fields (spec #2). Every entity
   // field marked `blob: true` holds a blob id; a dispatch committing an event
   // that carries one adopts that blob IN the dispatch transaction (a rolled-back
@@ -997,8 +1023,18 @@ function buildKernel(app) {
   return createServer({
     handlers,
     projections,
+    effects: effectsRegistry.size > 0 ? effectsRegistry : null,
     authorize: () => true,
     postHandlerAuthorize: async ({ entityName, verb, principal, event }) => {
+      // EFFECT-ORIGINATED events (carrying `_effectPrincipal`) are authorized by
+      // the TARGET's `admitsEffects` admission gate — already evaluated in-txn by
+      // the effect compiler (executeEffect) before the event was minted, and a
+      // deny there already rolled back the origin. The row-grant mayVerb below is
+      // the USER-mutation gate (route-admitted principal Against a row); re-running
+      // it for an effect principal would force every effect target to also admit
+      // system principals in its row grant — a redundant, verbose second gate. So
+      // effect events are admitted here (admitsEffects is THE effect gate, ADR #6).
+      if (event?._effectPrincipal) return true;
       // CREATE has no pre-existing row, so dispatch's pre-check (serve.mjs)
       // can't authorize it — this in-txn hook is the authoritative create
       // row-grant (spec #5). update/remove are pre-authorized in dispatch

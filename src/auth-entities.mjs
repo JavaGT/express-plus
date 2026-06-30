@@ -106,4 +106,10 @@ export const Inbox = entity('Inbox', {
     kind: text(),
   },
   grant: () => [scope(({ is }) => is.recipient()).can(() => grant(read, subscribe))],
+  // Inbox EXISTS to receive projected notifications from other entities' effects
+  // (e.g. Doc's collaboratorAdded → Inbox invite row). It admits effect
+  // principals — the effect is already bounded to its declared `with` template,
+  // and the recipient read-scope above still gates WHO may read a row. Admitting
+  // the effect principal here is the target's opt-in to the effect (ADR #6).
+  admitsEffects: () => true,
 });

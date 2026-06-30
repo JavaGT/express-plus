@@ -156,9 +156,15 @@ export function compileEntityEffects(entityRecord, allEntities) {
 // ---- Runtime effect execution ----
 
 // Execute a single effect, creating target entity events.
-// For Part 1: supports effects with mutate: TargetEntity and with: function/object.
-// Returns array of target events to apply through the in-txn path.
-function executeEffect(effect, { triggerEvent, now, actionId }) {
+// Supports effects with mutate: TargetEntity and with: function/object.
+// Returns array of target events to apply through the in-txn path. Each target
+// event carries its EFFECT PRINCIPAL (gap #2: effects run as
+// `principal({type:'system', attributes:{effect:<sourceEntityName>}})`, NOT the
+// triggering user) so the recursive applyEventsToTxn authorizes the target event
+// against the effect principal. The target's `admitsEffects` is the RUNTIME
+// admission gate (gap #3): a deny throws 403 → rolls back the origin (in-txn
+// atomic, ADR #6/#22).
+function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName }) {
   const targetEntity = effect.mutate;
   const targetName = targetEntity.name;
   const targetId = randomUUID();
@@ -167,6 +173,32 @@ function executeEffect(effect, { triggerEvent, now, actionId }) {
   // Extract delta and origin from the trigger event
   const delta = triggerEvent.data || {};
   const origin = { id: triggerEvent.scope.split(':')[1] };
+
+  // The effect principal — a bounded system principal tagged with its source
+  // entity. NOT the triggering user, NOT a SYSTEM god-principal (ADR #6).
+  const effectPrincipal = principal({
+    type: 'system',
+    attributes: { effect: sourceEntityName },
+  });
+
+  // Runtime admission handshake (gap #3). The target declares
+  // `admitsEffects: ({ effect, principal, delta, origin }) => boolean`. A deny
+  // throws 403 → the in-txn ROLLBACK undoes the ORIGIN (atomic). This is the
+  // runtime counterpart to the load-time verifyAdmissionHandshake.
+  if (typeof targetEntity.admitsEffects === 'function') {
+    const admitted = targetEntity.admitsEffects({
+      effect: sourceEntityName,
+      principal: effectPrincipal,
+      delta,
+      origin,
+    });
+    if (!admitted) {
+      throw Object.assign(
+        new Error(`effect admission denied: target '${targetName}' rejects effect principal from '${sourceEntityName}'`),
+        { status: 403 },
+      );
+    }
+  }
 
   // Resolve the `with` template
   let payload;
@@ -181,12 +213,14 @@ function executeEffect(effect, { triggerEvent, now, actionId }) {
     payload = {};
   }
 
-  // Create CRUD events for the target entity (Part 1: create only)
+  // Create CRUD events for the target entity (create only — inc/dec RMW +
+  // many() fan-out land with P6c, where ordered/log/list field strategies ship)
   return [{
     type: `${targetName}.created`,
     scope,
     data: { id: targetId, ...payload },
-    _effectSource: targetName, // Marker for effect-originated events
+    _effectSource: sourceEntityName, // the entity whose effect fired this event
+    _effectPrincipal: effectPrincipal, // gap #2: threaded into the in-txn recursion
     _parentActionId: actionId,
   }];
 }
@@ -225,11 +259,14 @@ export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, 
       }
     }
 
-    // Execute the effect and create target events
+    // Execute the effect and create target events. `sourceEntity` is the name of
+    // the entity whose effect is firing — it becomes the effect principal's
+    // `attributes.effect` tag (gap #2) and the source tag for admission (gap #3).
     const targetEvents = executeEffect(effect, {
       triggerEvent: event,
       now,
       actionId,
+      sourceEntityName: sourceEntity,
     });
     allTargetEvents.push(...targetEvents);
   }
@@ -362,6 +399,41 @@ export function verifyAdmissionHandshake(effectsGraph, allEntities) {
   if (errors.length > 0) {
     throw new Error(`Effect admission errors:\n${errors.join('\n')}`);
   }
+}
+
+// Build the cross-entity effects graph from a set of entities.
+// Returns Map<sourceEntityName, Set<targetEntityName>> — the input shape for
+// detectCrossEntityCycles + verifyAdmissionHandshake. A node with no effects (or
+// an entity whose effects all use `when` false) still appears as a source if it
+// declares effects, so its targets are admitted. Entities without effects are
+// absent (a no-op graph → validateEffects is a no-op for an app with no effects,
+// zero blast radius for the existing suite).
+export function buildEffectsGraph(entities) {
+  const graph = new Map();
+  for (const entityRecord of entities) {
+    const { name, effects } = entityRecord;
+    if (!effects) continue;
+    const targets = new Set();
+    for (const effect of Object.values(effects)) {
+      if (effect && effect.mutate && effect.mutate.name) {
+        targets.add(effect.mutate.name);
+      }
+    }
+    if (targets.size > 0) graph.set(name, targets);
+  }
+  return graph;
+}
+
+// Global validation pass (gap #4). Runs at app boot, AFTER every entity is known,
+// to make effect safety load-time-enforced rather than exported-but-uncalled.
+// Builds the effects graph, detects structural cycles (A→B→A), and verifies the
+// admission handshake (every target declares admitsEffects). A failure throws —
+// the app fails to boot, fail-closed (ADR #22). No-op when no effects declared.
+export function validateEffects(entities) {
+  const graph = buildEffectsGraph(entities);
+  if (graph.size === 0) return;
+  detectCrossEntityCycles(graph);
+  verifyAdmissionHandshake(graph, entities);
 }
 
 // ---- Helpers ----
