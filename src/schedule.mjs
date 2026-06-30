@@ -14,12 +14,25 @@ function parseDelay(delay) {
 }
 
 export const schedule = Object.freeze({
-  at(field) {
+  at(field, options = {}) {
     if (!field || typeof field !== 'object') throw new Error('schedule.at: field must be a field descriptor');
-    return Object.freeze({ kind: 'schedule.at', field });
+    const { while: whilePredicate } = options;
+    if (whilePredicate !== undefined && typeof whilePredicate !== 'function') {
+      throw new Error('schedule.at: while must be a function');
+    }
+    return Object.freeze({ kind: 'schedule.at', field, while: whilePredicate ?? undefined });
   },
-  after(field, delay) {
+  after(field, delay, options = {}) {
     if (!field || typeof field !== 'object') throw new Error('schedule.after: field must be a field descriptor');
-    return Object.freeze({ kind: 'schedule.after', field, delay: parseDelay(delay) });
+    const { while: whilePredicate } = options;
+    if (whilePredicate !== undefined && typeof whilePredicate !== 'function') {
+      throw new Error('schedule.after: while must be a function');
+    }
+    // Deferral note: Spine A step 5 (tick) implements the runtime-guard fallback
+    // for non-compilable while predicates (SPEC §10), the 'when' lifecycle guard
+    // (Spine C8 state runtime), and the "empty while forbidden for row-set ticks"
+    // guard. For schedule.at/after, strict compile of 'while' is fail-closed;
+    // absent 'while' is valid (the date field IS the discovery).
+    return Object.freeze({ kind: 'schedule.after', field, delay: parseDelay(delay), while: whilePredicate ?? undefined });
   },
 });

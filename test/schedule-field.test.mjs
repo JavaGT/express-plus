@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { entity, schedule, date, scope, everyone, grant, read } from '../src/index.mjs';
+import { entity, schedule, date, scope, everyone, grant, read, text } from '../src/index.mjs';
 
 // P6d Spine A step 1: time-driven sources (ADR #10). Import-surface only —
 // constructuring + entity-slot acceptance. Firing/dispatch/reaper wiring
@@ -187,4 +187,132 @@ test('schedule.after with non-finite number throws', () => {
     () => schedule.after(f, NaN),
     /schedule\.after: invalid delay/,
   );
+});
+
+// Step 2: while predicate support
+
+test('schedule.at(field, { while }) carries the while fn on the descriptor', () => {
+  const publishedAt = date();
+  const whilePredicate = ({ fields }) => fields.status.is('queued');
+  const trigger = schedule.at(publishedAt, { while: whilePredicate });
+  assert.equal(trigger.kind, 'schedule.at');
+  assert.strictEqual(trigger.field, publishedAt);
+  assert.strictEqual(trigger.while, whilePredicate);
+  assert.ok(Object.isFrozen(trigger));
+});
+
+test('schedule.at(field, { while: "notafn" }) throws at construction', () => {
+  const f = date();
+  assert.throws(
+    () => schedule.at(f, { while: 'notafn' }),
+    /schedule\.at: while must be a function/,
+  );
+});
+
+test('schedule.at(f) and schedule.after(f, 1000) without options still work (backward-compat)', () => {
+  const f1 = date();
+  const f2 = date();
+  const t1 = schedule.at(f1);
+  const t2 = schedule.after(f2, 1000);
+  assert.strictEqual(t1.while, undefined);
+  assert.strictEqual(t2.while, undefined);
+});
+
+test('entity with schedule.at + while: compiles to whileSql, whileParams, whileAst', () => {
+  const status = text();
+  const publishedAt = date();
+  const Blog = entity('BlogWhileAt', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    fields: { status, publishedAt },
+    schedule: {
+      publish: schedule.at(publishedAt, { while: ({ fields }) => fields.status.is('queued') }),
+    },
+  });
+  assert.ok(Blog);
+  assert.ok(Blog.schedule);
+  assert.ok(Blog.schedule.publish);
+  assert.ok(typeof Blog.schedule.publish.whileSql === 'string' && Blog.schedule.publish.whileSql.length > 0);
+  assert.ok(Blog.schedule.publish.whileSql.includes('status'));
+  assert.ok(Blog.schedule.publish.whileParams && typeof Blog.schedule.publish.whileParams === 'object' && Object.keys(Blog.schedule.publish.whileParams).length > 0);
+  assert.ok(Blog.schedule.publish.whileAst && typeof Blog.schedule.publish.whileAst === 'object');
+});
+
+test('entity with schedule.after + while: compiles to whileSql, whileParams, whileAst', () => {
+  const status = text();
+  const createdAt = date();
+  const Todo = entity('TodoWhileAfter', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    fields: { status, createdAt },
+    schedule: {
+      remind: schedule.after(createdAt, '1h', { while: ({ fields }) => fields.status.is('pending') }),
+    },
+  });
+  assert.ok(Todo);
+  assert.ok(Todo.schedule);
+  assert.ok(Todo.schedule.remind);
+  assert.ok(typeof Todo.schedule.remind.whileSql === 'string' && Todo.schedule.remind.whileSql.length > 0);
+  assert.ok(Todo.schedule.remind.whileSql.includes('status'));
+  assert.ok(Todo.schedule.remind.whileParams && typeof Todo.schedule.remind.whileParams === 'object' && Object.keys(Todo.schedule.remind.whileParams).length > 0);
+  assert.ok(Todo.schedule.remind.whileAst && typeof Todo.schedule.remind.whileAst === 'object');
+});
+
+test('entity with no while on schedule trigger: whileSql is undefined', () => {
+  const publishedAt = date();
+  const Blog = entity('BlogNoWhile', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    fields: { publishedAt },
+    schedule: {
+      publish: schedule.at(publishedAt),
+    },
+  });
+  assert.ok(Blog);
+  assert.strictEqual(Blog.schedule.publish.whileSql, undefined);
+  assert.strictEqual(Blog.schedule.publish.whileParams, undefined);
+  assert.strictEqual(Blog.schedule.publish.whileAst, undefined);
+});
+
+test('non-compilable while: load-time error (NonCompilableError propagates)', () => {
+  const publishedAt = date();
+  assert.throws(
+    () => entity('BadWhileEntity', {
+      grant: scope(() => everyone()).can(() => grant(read)),
+      fields: { publishedAt },
+      schedule: {
+        publish: schedule.at(publishedAt, { while: ({ fields }) => fields.nonexistent.eq(1) }),
+      },
+    }),
+    /schedule\.publish while on entity/,
+  );
+});
+
+test("'when' rejection: trigger with when throws not-yet-supported error", () => {
+  const publishedAt = date();
+  const handBuiltTrigger = { kind: 'schedule.at', field: publishedAt, when: 'playing' };
+  assert.throws(
+    () => entity('BadWhenEntity', {
+      grant: scope(() => everyone()).can(() => grant(read)),
+      fields: { publishedAt },
+      schedule: {
+        publish: handBuiltTrigger,
+      },
+    }),
+    /schedule\.publish: 'when' lifecycle guard is not yet supported/,
+  );
+});
+
+test('while referencing a value-kind comparable field compiles', () => {
+  const status = text();
+  const publishedAt = date();
+  const Doc = entity('DocWhileValue', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    fields: { status, publishedAt },
+    schedule: {
+      publish: schedule.at(publishedAt, { while: ({ fields }) => fields.status.is('draft') }),
+    },
+  });
+  assert.ok(Doc);
+  assert.ok(Doc.schedule);
+  assert.ok(Doc.schedule.publish);
+  assert.ok(typeof Doc.schedule.publish.whileSql === 'string');
+  assert.ok(Doc.schedule.publish.whileParams);
 });

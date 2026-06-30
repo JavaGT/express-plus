@@ -227,8 +227,9 @@ export function entity(name, declaration = {}) {
     validatedEffects = Object.freeze(validatedEffects);
   }
 
-  // Validate schedule declarations at load time (P6d Spine A step 1).
+  // Validate schedule declarations at load time (P6d Spine A step 1 → step 2).
   // Each [verbName, trigger] must be a valid schedule.at() or schedule.after() call.
+  // Step 2 compiles the optional `while` predicate (scope predicate) and rejects `when`.
   let validatedSchedule = null;
   const scheduleKeys = Object.keys(schedule);
   if (scheduleKeys.length > 0) {
@@ -246,7 +247,30 @@ export function entity(name, declaration = {}) {
       if (trigger.kind === 'schedule.after' && !Number.isFinite(trigger.delay)) {
         throw new Error(`schedule.${verbName}: delay must be a finite number (parseDelay should have validated)`);
       }
-      validatedSchedule[verbName] = trigger;
+      // Reject 'when' lifecycle guard (Spine C8 state runtime, not yet implemented)
+      if (trigger.when) {
+        throw new Error(`schedule.${verbName}: 'when' lifecycle guard is not yet supported (ships with state runtime, Spine C8)`);
+      }
+      // Compile the optional 'while' predicate (strict fail-closed; NonCompilableError propagates)
+      let whileSql, whileParams, whileAst;
+      if (trigger.while !== undefined) {
+        const compiled = compileReadScope(trigger.while, {
+          fields,
+          where: `schedule.${verbName} while on entity('${name}')`,
+          registry,
+        });
+        whileSql = compiled.sql;
+        whileParams = compiled.params;
+        whileAst = compiled.ast;
+      }
+      validatedSchedule[verbName] = Object.freeze({
+        kind: trigger.kind,
+        field: trigger.field,
+        delay: trigger.delay,
+        whileSql,
+        whileParams,
+        whileAst,
+      });
     }
     validatedSchedule = Object.freeze(validatedSchedule);
   }
