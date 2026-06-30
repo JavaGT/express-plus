@@ -93,7 +93,7 @@ function resolveGrantClauses(grant) {
 }
 
 export function entity(name, declaration = {}) {
-  const { fields = {}, grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null, admitsEffects = null } = declaration;
+  const { fields = {}, grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {} } = declaration;
 
   // Fail closed: an entity with no grant cannot be mounted (ADR #7).
   if (grant === undefined || grant === null) {
@@ -227,6 +227,30 @@ export function entity(name, declaration = {}) {
     validatedEffects = Object.freeze(validatedEffects);
   }
 
+  // Validate schedule declarations at load time (P6d Spine A step 1).
+  // Each [verbName, trigger] must be a valid schedule.at() or schedule.after() call.
+  let validatedSchedule = null;
+  const scheduleKeys = Object.keys(schedule);
+  if (scheduleKeys.length > 0) {
+    validatedSchedule = {};
+    for (const [verbName, trigger] of Object.entries(schedule)) {
+      if (typeof verbName !== 'string' || verbName.length === 0) {
+        throw new Error(`schedule: verb name must be a non-empty string, got ${verbName}`);
+      }
+      if (!trigger || typeof trigger !== 'object' || !(trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after')) {
+        throw new Error(`schedule.${verbName}: expected schedule.at(...) or schedule.after(...), got ${JSON.stringify(trigger)}`);
+      }
+      if (!trigger.field || typeof trigger.field !== 'object') {
+        throw new Error(`schedule.${verbName}: field must be a field descriptor (no bare strings)`);
+      }
+      if (trigger.kind === 'schedule.after' && !Number.isFinite(trigger.delay)) {
+        throw new Error(`schedule.${verbName}: delay must be a finite number (parseDelay should have validated)`);
+      }
+      validatedSchedule[verbName] = trigger;
+    }
+    validatedSchedule = Object.freeze(validatedSchedule);
+  }
+
   const record = {
     name,
     fields: Object.freeze({ ...fields }),
@@ -249,6 +273,7 @@ export function entity(name, declaration = {}) {
     scopeAst,
     effects: validatedEffects,
     admitsEffects,
+    schedule: validatedSchedule,
   };
 
   // hash-kind fields hydrate from their stored `salt:digest` cell into a
