@@ -54,7 +54,10 @@ export function createLiveServer(httpServer, {
   db = null,
   resolveEntity = null,
 } = {}) {
-  // Subscription registry: Map<entity, Map<id, Set<connection>>>
+  // Subscription registry: Map<entity, Map<id, Map<conn, SubSpec>>>
+  // SubSpec = { fields: object|null, latch: true }
+  //   fields — the validated interest object (or null = none declared)
+  //   latch  — cached subscribe-time mayVerb decision (emitted per-emit)
   const byEntity = new Map();
   // Per-connection subscription keys (`${entity}:${id}`) — mirrors byEntity so a
   // disconnect can purge in O(subs) without scanning every entity, and so the
@@ -198,6 +201,46 @@ export function createLiveServer(httpServer, {
       if (!resolveEntity || !mayVerb || !db) { this.error('forbidden'); return; }
       const entity = resolveEntity(msg.entity);
       if (!entity) { this.error('forbidden'); return; }
+
+      // Validate optional fields interest (P6e-1b).
+      let fields = null;
+      if (msg.fields !== undefined && msg.fields !== null) {
+        // Must be a plain object (not array, not string, not function).
+        if (typeof msg.fields !== 'object' || msg.fields === null || Array.isArray(msg.fields)) {
+          this.error('invalid fields interest');
+          return;
+        }
+        // Reject closures (data-not-code — SPEC §8).
+        if (typeof msg.fields === 'function') {
+          this.error('fields interest must be data, not a closure');
+          return;
+        }
+        for (const [key, value] of Object.entries(msg.fields)) {
+          if (typeof value === 'function') {
+            this.error('fields interest must be data, not a closure');
+            return;
+          }
+          // Each field-key must be a declared field on the entity.
+          if (!entity.fields || !(key in entity.fields)) {
+            this.error(`unknown field ${key} in interest`);
+            return;
+          }
+          // In B1 the value must be `true` (whole-field). Reject coordinate
+          // narrowing (range, in, is) — deferred to P6e-3.
+          if (value !== true) {
+            this.error('coordinate narrowing not yet supported');
+            return;
+          }
+        }
+        fields = msg.fields;
+      }
+
+      // Reject pace — deferred to B2 (P6e-1b later slice).
+      if (msg.pace !== undefined && msg.pace !== null) {
+        this.error('pace not yet supported');
+        return;
+      }
+
       const principal = this.#principal ?? anonymous;
       const bound = bindReadScope(entity.readScope, principal);
       const where = bound ? bound.sql : '1=1';
@@ -222,7 +265,7 @@ export function createLiveServer(httpServer, {
         }
         if (!allowed) { this.error('forbidden'); return; }
       }
-      addSubscription(msg.entity, idStr, this);
+      addSubscription(msg.entity, idStr, this, fields);
       this.send({
         type: 'subscribed', entity: msg.entity, id: msg.id,
         currentSeq: currentSeq(key),
@@ -243,11 +286,11 @@ export function createLiveServer(httpServer, {
   }
 
   // Subscription helpers
-  function addSubscription(entity, id, conn) {
+  function addSubscription(entity, id, conn, fields = null) {
     if (!byEntity.has(entity)) byEntity.set(entity, new Map());
     const byId = byEntity.get(entity);
-    if (!byId.has(id)) byId.set(id, new Set());
-    byId.get(id).add(conn);
+    if (!byId.has(id)) byId.set(id, new Map());
+    byId.get(id).set(conn, { fields, latch: true });
     let mine = connSubs.get(conn);
     if (!mine) { mine = new Set(); connSubs.set(conn, mine); }
     mine.add(`${entity}:${id}`);
@@ -320,7 +363,22 @@ export function createLiveServer(httpServer, {
       try { authzRow = entityRecord.findById(String(id), null) ?? row; } catch { authzRow = row; }
     }
 
-    for (const conn of subs) {
+    // Determine if this is an ephemeral field event that requires opt-in.
+    // An ephemeral event has type `<Entity>.<field>.set` where `<field>` is a
+    // declared ephemeral field. Split on `.`; 3 parts → Entity.field.set.
+    let ephemeralField = null;
+    if (!removed) {
+      const parts = committedEvent.type?.split('.');
+      if (parts?.length === 3 && parts[2] === 'set') {
+        const fieldName = parts[1];
+        const fd = entityRecord.fields?.[fieldName];
+        if (fd?.kind === 'ephemeral') {
+          ephemeralField = fieldName;
+        }
+      }
+    }
+
+    for (const [conn, subSpec] of subs) {
       if (conn.closed) {
         subs.delete(conn);
         continue;
@@ -337,6 +395,14 @@ export function createLiveServer(httpServer, {
           allowed = false;                   // a thrown check fails closed
         }
         if (!allowed) continue;
+      }
+      // Interest filter for ephemeral events: deliver ONLY if the subscriber's
+      // SubSpec.fields includes the ephemeral field. Pass-through events
+      // (created/updated/removed/collection) and removed events are delivered
+      // to ALL subscribers (unchanged from P6e-1a).
+      if (ephemeralField !== null) {
+        const interest = subSpec?.fields;
+        if (!interest || interest[ephemeralField] !== true) continue;
       }
       conn.send({ type: 'event', entity: name, id, seq: committedEvent.seq, event: committedEvent });
     }
