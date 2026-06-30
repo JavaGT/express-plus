@@ -37,6 +37,7 @@ import { fieldHandle } from './scope-sql.mjs';
 import {
   PRINCIPAL_ID_PARAM,
   PRINCIPAL_ID_TOKEN,
+  PRINCIPAL_ATTR_TOKEN,
   makeNode,
   isNode,
   NonCompilableError,
@@ -104,6 +105,21 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
               },
             };
           }
+          // For struct fields (the `link` kind), expose each sub-cell as a value
+          // handle with a runtime `.is(v)` — the run-time mirror of the harvest
+          // value `.is()`. A check like `Doc.linkShare.token.is(principal.attributes.token)`
+          // resolves here: the hydrated namespace (`row.linkShare = {token, tier}`)
+          // supplies the stored value; `.is(undefined)` is false (fail-closed for
+          // a non-link principal, mirroring the harvest FALSE + SQL NULL bind).
+          else if (desc?.kind === 'struct') {
+            const handle = {};
+            for (const [cellName] of Object.entries(desc.cells)) {
+              handle[cellName] = {
+                is: (v) => v == null ? false : row[fName]?.[cellName] === v,
+              };
+            }
+            runtimeSelf[fName] = handle;
+          }
           // For value/ref fields, expose the raw column value so a check can read
           // other columns if it needs to (the check destructures the entity).
           else {
@@ -128,7 +144,7 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
       const entityContext = entityName ? { [entityName]: compileSelfHandle } : {};
       const result = fn({
         ...entityContext,
-        principal: { id: PRINCIPAL_ID_TOKEN },
+        principal: { id: PRINCIPAL_ID_TOKEN, attributes: { token: PRINCIPAL_ATTR_TOKEN } },
       });
       if (!isNode(result)) {
         throw new NonCompilableError(

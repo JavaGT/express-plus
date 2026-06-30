@@ -16,7 +16,7 @@
 // the grant runs every verb.
 
 import { check, resolveDecision } from './check.mjs';
-import { read, write } from './grant.mjs';
+import { read, write, subscribe } from './grant.mjs';
 
 // Build the `is` proxy the .can body destructures: each entity check, bound to
 // this row + principal, wrapped as an awaitable check so `await is.owner()`
@@ -58,7 +58,7 @@ export async function rowCapabilities(entityRecord, row, principal) {
   let decision;
   await resolveDecision(
     async () => {
-      decision = await clause.can({ is });
+      decision = await clause.can({ is, entity: row });
       // hand the backstop a boolean so its thenable-escape check applies to the
       // body's control flow, not to the grant object it returns.
       return decision.granted;
@@ -72,15 +72,29 @@ export async function rowCapabilities(entityRecord, row, principal) {
 }
 
 // The capability each CRUD verb requires. Reads (list/read) need `read`;
-// mutations (create/update/remove) need `write`. This is the allowlist: a verb
-// names the capability that GRANTS it, never a condition that denies it.
+// mutations (create/update/remove) need `write`; live re-authorization needs
+// `subscribe`. This is the allowlist: a verb names the capability that GRANTS
+// it, never a condition that denies it. An unknown verb fails closed.
 const VERB_CAPABILITY = Object.freeze({
   list: read,
   read,
   create: write,
   update: write,
   remove: write,
+  subscribe,
 });
+
+// True iff the entity's grant carries its OWN `.can` body (a scope(...).can(fn)
+// clause). Inherit children (grant is an `inherit` directive) and scope-only
+// grants have NO own `.can` — their capability resolves elsewhere (the parent
+// seam for inherit children; the read-scope alone for scope-only). `mayVerb`
+// returns denied for such entities (no clause to run), so callers that gate on
+// mayVerb (the create in-txn hook, the list post-filter) must SKIP them rather
+// than deny — authorize what the row-grant engine can resolve at this layer.
+export function hasOwnCanGrant(entityRecord) {
+  const grant = typeof entityRecord.grant === 'function' ? entityRecord.grant() : null;
+  return Array.isArray(grant) && grant.some((c) => c && typeof c.can === 'function');
+}
 
 // True iff the principal holds the capability `verb` requires on this row. The
 // dispatcher calls this on every admitted verb (the row grant runs every verb,

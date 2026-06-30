@@ -15,11 +15,13 @@
 //     { type: 'event', entity, id, event }
 //     { type: 'error', message }
 //
-// When an entity row changes (CRUD create/update/delete), the mutation path calls
-// `live.emit(entity, id, eventPayload)`. The fan-out:
+// When an entity row changes (CRUD create/update/delete), the kernel's
+// post-commit fan-out loop calls `live.emit(entity, id, row, committedEvent)`
+// after commit. The fan-out:
 //   1. Finds every subscriber for (entity, id)
 //   2. Re-authorizes each via mayVerb(entity, 'subscribe', row, principal)
-//   3. Sends the event to every authorized subscriber
+//   3. Forwards the kernel's committed event (carrying its per-scope seq) to
+//      every authorized subscriber
 //
 // Access to the subscriber's principal is governed by the same auth engine —
 // the principal is set on the connection after the HTTP request-level auth
@@ -27,19 +29,49 @@
 // an app never mounts it.
 
 import { FrameSender, FrameParser, upgradeWebSocket } from './websocket.mjs';
+import { anonymous } from './principal.mjs';
+import { bindReadScope } from './scope-sql.mjs';
+import { hasOwnCanGrant } from './row-grant.mjs';
+
+// Bounds on subscriptions: a single connection can't register unbounded keys
+// (memory DoS), and a scope id can't be an unbounded string (-parse/storage
+// cost before any DB work). Failures here reject the ONE message, not the
+// connection — a misbehaving client stays connected (it may have other valid
+// subscriptions), but can't grow its footprint past the cap.
+const MAX_SUBS_PER_CONN = 256;
+const MAX_ID_LEN = 256;
 
 // Create a live server on the given HTTP server, upgrading connections on
 // `path` (default '/events'). `mayVerb` is the re-authorization engine —
 // the same function the REST dispatch uses: mayVerb(entity, verb, row, principal).
 // `principalOf` derives a WS connection's principal (default: anonymous).
+// `resolveEntity(name)` maps an entity NAME to its compiled record — needed so
+// subscribe-time can run bindReadScope + mayVerb (the same engine fan-out uses).
 export function createLiveServer(httpServer, {
   path = '/events',
   mayVerb = null,
   principalOf = () => ({ type: 'anonymous', id: null }),
+  db = null,
+  resolveEntity = null,
 } = {}) {
   // Subscription registry: Map<entity, Map<id, Set<connection>>>
   const byEntity = new Map();
+  // Per-connection subscription keys (`${entity}:${id}`) — mirrors byEntity so a
+  // disconnect can purge in O(subs) without scanning every entity, and so the
+  // per-conn cap is O(1) to check.
+  const connSubs = new Map();
   const connections = new Set();
+
+  // The per-scope committed seq from the kernel's `_Cursor`. Reported on subscribe
+  // so a client can detect the snapshot-vs-live race: if the server's currentSeq
+  // is ahead of the client's bootstrap cursor, the client resyncs the gap before
+  // going live (never misses an event committed between snapshot read and
+  // subscribe). The log is the single seq source — no second counter (D7).
+  const currentSeq = (scope) => {
+    if (!db) return 0;
+    const row = db.prepare('SELECT lastSeq FROM _Cursor WHERE scope = ?').get(scope);
+    return row ? row.lastSeq : 0;
+  };
 
   // A live connection wraps one upgraded WebSocket socket.
   class LiveConnection {
@@ -124,12 +156,11 @@ export function createLiveServer(httpServer, {
       if (!msg || typeof msg !== 'object') return;
       switch (msg.type) {
         case 'subscribe':
-          if (typeof msg.entity === 'string' && msg.id !== undefined) {
-            addSubscription(msg.entity, String(msg.id), this);
-            this.send({ type: 'subscribed', entity: msg.entity, id: msg.id });
-          } else {
-            this.error('subscribe requires entity (string) and id');
-          }
+          // Authorized by the SAME engine as fan-out (bindReadScope + mayVerb
+          // 'subscribe'), run BEFORE the subscription is stored or the cursor is
+          // revealed. #handleMessage is sync, so dispatch the async authorizer and
+          // treat any rejection as a denial (uniform — no existence leak).
+          this.#authorizeAndSubscribe(msg).catch(() => this.error('forbidden'));
           break;
         case 'unsubscribe':
           if (typeof msg.entity === 'string' && msg.id !== undefined) {
@@ -140,6 +171,62 @@ export function createLiveServer(httpServer, {
         default:
           this.error(`unknown message type: ${msg.type}`);
       }
+    }
+
+    // One admission decision for subscribe: load the row under the principal's
+    // read-scope, then run mayVerb('subscribe') on the HYDRATED row (a `.can`
+    // body may read a struct like entity.linkShare.tier, which a raw SELECT row
+    // lacks). Denials are uniform (`forbidden`) and NEVER return currentSeq — an
+    // unknown entity, an out-of-scope row, and a `.can`-denied principal all
+    // look identical to the client (no existence/activity oracle). Scope-only /
+    // bare grants (hasOwnCanGrant false) are admitted by scope alone — the same
+    // rule authorizeRead, the list filter, and the create hook apply, so one
+    // engine decides across every path.
+    async #authorizeAndSubscribe(msg) {
+      if (typeof msg.entity !== 'string' || msg.id === undefined) {
+        this.error('subscribe requires entity (string) and id');
+        return;
+      }
+      const idStr = String(msg.id);
+      if (idStr.length > MAX_ID_LEN) { this.error('subscribe id too long'); return; }
+      const key = `${msg.entity}:${idStr}`;
+      const mine = connSubs.get(this);
+      if (mine && mine.size >= MAX_SUBS_PER_CONN && !mine.has(key)) {
+        this.error('too many subscriptions');
+        return;
+      }
+      if (!resolveEntity || !mayVerb || !db) { this.error('forbidden'); return; }
+      const entity = resolveEntity(msg.entity);
+      if (!entity) { this.error('forbidden'); return; }
+      const principal = this.#principal ?? anonymous;
+      const bound = bindReadScope(entity.readScope, principal);
+      const where = bound ? bound.sql : '1=1';
+      const scopeParams = bound ? bound.params : {};
+      let row;
+      try {
+        row = db
+          .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
+          .get({ ...scopeParams, id: idStr });
+      } catch {
+        this.error('forbidden');
+        return;
+      }
+      if (!row) { this.error('forbidden'); return; }
+      if (hasOwnCanGrant(entity)) {
+        let allowed = true;
+        try {
+          const hydrated = entity.hydrate ? entity.hydrate(row, principal) : row;
+          allowed = await mayVerb(entity, 'subscribe', hydrated, principal);
+        } catch {
+          allowed = false;
+        }
+        if (!allowed) { this.error('forbidden'); return; }
+      }
+      addSubscription(msg.entity, idStr, this);
+      this.send({
+        type: 'subscribed', entity: msg.entity, id: msg.id,
+        currentSeq: currentSeq(key),
+      });
     }
 
     #close() {
@@ -161,70 +248,76 @@ export function createLiveServer(httpServer, {
     const byId = byEntity.get(entity);
     if (!byId.has(id)) byId.set(id, new Set());
     byId.get(id).add(conn);
+    let mine = connSubs.get(conn);
+    if (!mine) { mine = new Set(); connSubs.set(conn, mine); }
+    mine.add(`${entity}:${id}`);
   }
 
   function removeSubscription(entity, id, conn) {
     const byId = byEntity.get(entity);
-    if (!byId) return;
-    const subs = byId.get(id);
-    if (!subs) return;
-    subs.delete(conn);
-    if (subs.size === 0) byId.delete(id);
-    if (byId.size === 0) byEntity.delete(entity);
-  }
-
-  function removeAll(conn) {
-    for (const [entity, byId] of byEntity) {
-      for (const [id, subs] of byId) {
+    if (byId) {
+      const subs = byId.get(id);
+      if (subs) {
         subs.delete(conn);
         if (subs.size === 0) byId.delete(id);
+        if (byId.size === 0) byEntity.delete(entity);
       }
-      if (byId.size === 0) byEntity.delete(entity);
+    }
+    const mine = connSubs.get(conn);
+    if (mine) {
+      mine.delete(`${entity}:${id}`);
+      if (mine.size === 0) connSubs.delete(conn);
     }
   }
 
-  // Fan-out: emit an event to every authorized subscriber of (entity, id).
-  // `row` is the materialized row (needed for re-authorization via mayVerb).
-  // `eventPayload` is what each subscriber receives as `event` in their JSON.
-  //
-  // Each scope (`entity:id`) carries a monotonic sequence number, assigned on
-  // every emit. The client's sequence cursor advances with each delivered event
-  // and detects gaps (missing events → resync) and duplicates (re-delivery →
-  // idempotent skip). `actionId` deduplicates: the same actionId replayed within
-  // a scope produces the same sequence number — a retried create/update is
-  // idempotent (SPEC §7, §7.1).
-  //
-  // The sequence counter is in-memory (per process). Persisting it alongside the
-  // durable event log is Phase 2.
-  const sequences = new Map();           // scope → last assigned seq
-  const dispatchedActions = new Map();   // scope → Map<actionId, {seq, events}>
+  function removeAll(conn) {
+    const mine = connSubs.get(conn);
+    if (!mine) return;
+    for (const key of mine) {
+      const sep = key.indexOf(':');
+      const entity = key.slice(0, sep);
+      const id = key.slice(sep + 1);
+      const byId = byEntity.get(entity);
+      if (!byId) continue;
+      const subs = byId.get(id);
+      if (!subs) continue;
+      subs.delete(conn);
+      if (subs.size === 0) byId.delete(id);
+      if (byId.size === 0) byEntity.delete(entity);
+    }
+    connSubs.delete(conn);
+  }
 
-  function emit(entity, id, row, eventPayload, actionId = null) {
-    const byId = byEntity.get(entity);
+  // Fan-out: forward a committed kernel event to every authorized subscriber of
+  // (entity, id). `entity` is the compiled entity RECORD — mayVerb needs it to
+  // run the grant's `.can` body. For 'created'/'updated', the row is re-read +
+  // HYDRATED here (a raw SELECT row lacks the assembled struct namespace that
+  // `.can` bodies read, e.g. `entity.linkShare.tier`); hydration via findById
+  // also re-reads the post-commit materialized state. For 'removed', the row is
+  // gone (the consumer passes `undefined`) — re-authorization is SKIPPED and the
+  // remove event forwards to every current subscriber (it IS the revocation
+  // signal). `committedEvent` is the kernel's event — its `seq` is the per-scope
+  // monotonic seq from `_Cursor`, and `data` is the mutation payload. The client
+  // receives the SAME committed-event shape it would replay from the log on
+  // subscribe-since resync — one event shape, one seq source, one dedupe (the
+  // kernel's). live is a post-commit projection consumer, not a second path
+  // (SPEC §7, §7.1; eng-review §D2/D3 — subtract before add at the post-commit
+  // seam).
+  async function emit(entityRecord, id, row, committedEvent) {
+    const name = entityRecord?.name;
+    if (!name) return;                       // unknown entity → can't authorize → fail closed
+    const byId = byEntity.get(name);
     if (!byId) return;
     const subs = byId.get(String(id));
     if (!subs) return;
 
-    const scope = `${entity}:${id}`;
-    let seq;
-
-    // Deduplicate by actionId: a replayed CRUD action (e.g. retried request)
-    // that already emitted for this scope returns the stored events and sequence.
-    if (actionId && dispatchedActions.has(scope)) {
-      const scopeActions = dispatchedActions.get(scope);
-      if (scopeActions.has(actionId)) {
-        return; // already dispatched — no duplicate event emit
-      }
-    }
-
-    // Assign the next monotonic sequence number for this scope.
-    seq = (sequences.get(scope) ?? 0) + 1;
-    sequences.set(scope, seq);
-
-    // Record the dedupe guard (if actionId provided).
-    if (actionId) {
-      if (!dispatchedActions.has(scope)) dispatchedActions.set(scope, new Map());
-      dispatchedActions.get(scope).set(actionId, { seq });
+    const removed = row === undefined;       // removed → row gone post-commit
+    // Hydrate so .can bodies reading entity.<struct>.* resolve. Falls back to
+    // the raw row when hydration is unavailable (unchanged behavior for simple
+    // entities whose .can body reads only `is.*`).
+    let authzRow = row;
+    if (!removed && entityRecord.findById) {
+      try { authzRow = entityRecord.findById(String(id), null) ?? row; } catch { authzRow = row; }
     }
 
     for (const conn of subs) {
@@ -232,15 +325,20 @@ export function createLiveServer(httpServer, {
         subs.delete(conn);
         continue;
       }
-      if (mayVerb) {
+      if (mayVerb && !removed) {
+        // AWAIT — the bypass bug was calling mayVerb without await, so the
+        // returned Promise was always truthy and the `!allowed` guard never
+        // fired. The SAME mayVerb the REST dispatch uses (verb='subscribe') —
+        // no second auth path.
+        let allowed = true;
         try {
-          const allowed = mayVerb(entity, 'subscribe', row, conn.principal ?? { type: 'anonymous', id: null });
-          if (!allowed) continue;
+          allowed = await mayVerb(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous);
         } catch {
-          continue;
+          allowed = false;                   // a thrown check fails closed
         }
+        if (!allowed) continue;
       }
-      conn.send({ type: 'event', entity, id, seq, event: eventPayload });
+      conn.send({ type: 'event', entity: name, id, seq: committedEvent.seq, event: committedEvent });
     }
   }
 

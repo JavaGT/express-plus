@@ -5,7 +5,7 @@
 
 export { check, resolveDecision, UnawaitedCheckError } from './check.mjs';
 export { assertGuarded } from './guard/static.mjs';
-export { text, boolean, date, number, ref, hash, link, map, log, presence, state } from './field.mjs';
+export { text, boolean, date, number, ref, hash, blob, link, map, log, presence, state } from './field.mjs';
 export { now } from './deferred.mjs';
 export { resolveStrategy, validateMutation, ValidationError } from './field-strategy.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
@@ -19,7 +19,8 @@ export { action, event, createServer, createClient } from './pipeline.mjs';
 export { createLiveServer } from './live.mjs';
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
 export { resolveTemplate, matchExtension, isSafePath } from './views.mjs';
-export { generateDDL, executeDDL } from './ddl.mjs';
+export { mayVerb, mayFieldOp } from './row-grant.mjs';
+export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL } from './ddl.mjs';
 export { config } from './config.mjs';
 export { parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE } from './session.mjs';
 export { default, router } from './app.mjs';

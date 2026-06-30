@@ -84,7 +84,7 @@ function makeDoc() {
 function seedDb() {
   const db = new DatabaseSync(':memory:');
   db.exec(
-    'CREATE TABLE Doc (id INTEGER PRIMARY KEY, title TEXT, linkShare__token TEXT, linkShare__tier TEXT)',
+    'CREATE TABLE Doc (id TEXT PRIMARY KEY, title TEXT, linkShare__token TEXT, linkShare__tier TEXT)',
   );
   return db;
 }

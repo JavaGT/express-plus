@@ -51,7 +51,7 @@ function openRawWS(port) {
           return;
         }
         upgraded = true;
-        resolve({ sock, send, nextEvent, close });
+        resolve({ sock, send, nextEvent, nextMessage, close });
       }
       // Parse unmasked frames from the server (after upgrade).
       while (buf.length >= 2) {
@@ -102,6 +102,15 @@ function openRawWS(port) {
       return null;
     }
 
+    async function nextMessage(timeoutMs = 1000) {
+      const start = Date.now();
+      while (Date.now() - start <= timeoutMs) {
+        if (inbox.length > 0) return JSON.parse(inbox.shift());
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return null;
+    }
+
     function close() {
       try { sock.destroy(); } catch { /* ignore */ }
     }
@@ -110,12 +119,13 @@ function openRawWS(port) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-test('create emits WS event with seq:1', async () => {
+test('update emits a WS event with seq:1', async () => {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE IF NOT EXISTS User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)');
-  db.exec("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'hash')");
+  db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
+  db.exec("INSERT INTO User (id, username, password) VALUES ('1', 'alice', 'hash')");
   const Note = makeNote();
   for (const sql of generateDDL(Note)) db.exec(sql);
+  db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'hello', '1')").run();
 
   const app = expressPlus({ db }).mount('/notes', Note);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
@@ -124,32 +134,118 @@ test('create emits WS event with seq:1', async () => {
   const origin = `http://127.0.0.1:${port}`;
 
   const ws = await openRawWS(port);
-  ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: '1' }));
+  ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 
-  const r = await fetch(`${origin}/notes`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ body: 'hello' }),
+  const r = await fetch(`${origin}/notes/n1`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body: 'updated' }),
   });
-  assert.equal(r.status, 201);
+  assert.equal(r.status, 200);
 
   const ev = await ws.nextEvent();
   assert.ok(ev, 'event received');
   assert.equal(ev.type, 'event');
   assert.equal(ev.entity, 'Note');
   assert.equal(ev.seq, 1);
-  assert.equal(ev.event.verb, 'create');
+  assert.equal(ev.event.type, 'Note.updated');
 
   ws.close();
   app.httpServer.close();
 });
 
-test('update and delete emit sequential WS events (seq:2, seq:3)', async () => {
+// The live fan-out is a projection consumer of the committed log: the sequence
+// number on a live event is the KERNEL's per-scope seq (from _Cursor), not a
+// counter live mints itself. A mutation dispatched with no subscriber still
+// advances the kernel cursor; a later mutation (now with a subscriber) must
+// carry the kernel's next seq — not 1 as a freshly-seeded local counter would.
+test('live event carries the kernel committed seq, not a local counter', async () => {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE IF NOT EXISTS User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)');
-  db.exec("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'hash')");
+  db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
+  db.exec("INSERT INTO User (id, username, password) VALUES ('1', 'alice', 'hash')");
   const Note = makeNote();
   for (const sql of generateDDL(Note)) db.exec(sql);
+  db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'hello', '1')").run();
+
+  const app = expressPlus({ db }).mount('/notes', Note);
+  app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
+  await app.ready;
+  const { port } = app.httpServer.address();
+  const origin = `http://127.0.0.1:${port}`;
+
+  // First mutation: kernel commits Note.updated (seq:1) but NO subscriber is
+  // listening yet → no live delivery. The kernel cursor for Note:n1 is now 1.
+  const r1 = await fetch(`${origin}/notes/n1`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body: 'first' }),
+  });
+  assert.equal(r1.status, 200);
+
+  // Now subscribe, then mutate again. The kernel's next seq is 2.
+  const ws = await openRawWS(port);
+  ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+  await sleep(50);
+
+  const r2 = await fetch(`${origin}/notes/n1`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body: 'second' }),
+  });
+  assert.equal(r2.status, 200);
+
+  const ev = await ws.nextEvent();
+  assert.ok(ev, 'event received');
+  assert.equal(ev.type, 'event');
+  assert.equal(ev.entity, 'Note');
+  assert.equal(ev.seq, 2, 'kernel committed seq, not a local counter that would say 1');
+
+  ws.close();
+  app.httpServer.close();
+});
+
+// On subscribe the server reports the per-scope currentSeq from the kernel's
+// `_Cursor`. This closes the snapshot-vs-live race: a client that bootstrapped a
+// snapshot at seq N, then subscribes, compares currentSeq to N and resyncs the
+// gap if the server is ahead — never missing an event committed between the
+// snapshot read and the subscribe (eng-review Walk 3, D7).
+test('subscribe reports the kernel currentSeq for the scope', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
+  db.exec("INSERT INTO User (id, username, password) VALUES ('1', 'alice', 'hash')");
+  const Note = makeNote();
+  for (const sql of generateDDL(Note)) db.exec(sql);
+  db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'hello', '1')").run();
+
+  const app = expressPlus({ db }).mount('/notes', Note);
+  app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
+  await app.ready;
+  const { port } = app.httpServer.address();
+  const origin = `http://127.0.0.1:${port}`;
+
+  // A mutation advances the kernel cursor for Note:n1 to 1 — BEFORE the client
+  // subscribes (the race window: the event is already in the log).
+  await fetch(`${origin}/notes/n1`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body: 'updated' }),
+  });
+
+  const ws = await openRawWS(port);
+  ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+  const ack = await ws.nextMessage();
+  assert.ok(ack, 'subscribed ack received');
+  assert.equal(ack.type, 'subscribed');
+  assert.equal(ack.currentSeq, 1, 'the server reports the kernel cursor, not 0');
+
+  ws.close();
+  app.httpServer.close();
+});
+
+test('update and delete emit sequential WS events', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
+  db.exec("INSERT INTO User (id, username, password) VALUES ('1', 'alice', 'hash')");
+  const Note = makeNote();
+  for (const sql of generateDDL(Note)) db.exec(sql);
+  db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'first', '1')").run();
 
   const app = expressPlus({ db }).mount('/notes', Note);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
@@ -158,36 +254,26 @@ test('update and delete emit sequential WS events (seq:2, seq:3)', async () => {
   const origin = `http://127.0.0.1:${port}`;
 
   const ws = await openRawWS(port);
-  ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: '1' }));
+  ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 
-  // create (seq:1)
-  const r1 = await fetch(`${origin}/notes`, {
-    method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ body: 'first' }),
-  });
-  assert.equal(r1.status, 201);
-  const doc = await r1.json();
-
-  // update (seq:2)
-  const r2 = await fetch(`${origin}/notes/${doc.id}`, {
+  // update (seq:1)
+  const r2 = await fetch(`${origin}/notes/n1`, {
     method: 'PATCH', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ body: 'updated' }),
   });
   assert.equal(r2.status, 200);
 
-  // delete (seq:3)
-  const r3 = await fetch(`${origin}/notes/${doc.id}`, { method: 'DELETE' });
+  // delete (seq:2)
+  const r3 = await fetch(`${origin}/notes/n1`, { method: 'DELETE' });
   assert.equal(r3.status, 204);
 
   const ev1 = await ws.nextEvent();
   const ev2 = await ws.nextEvent();
-  const ev3 = await ws.nextEvent();
-  assert.ok(ev1 && ev2 && ev3, 'all three events received');
-  assert.deepEqual([ev1.seq, ev2.seq, ev3.seq], [1, 2, 3]);
-  assert.equal(ev1.event.verb, 'create');
-  assert.equal(ev2.event.verb, 'update');
-  assert.equal(ev3.event.verb, 'remove');
+  assert.ok(ev1 && ev2, 'both events received');
+  assert.deepEqual([ev1.seq, ev2.seq], [1, 2]);
+  assert.equal(ev1.event.type, 'Note.updated');
+  assert.equal(ev2.event.type, 'Note.removed');
 
   ws.close();
   app.httpServer.close();

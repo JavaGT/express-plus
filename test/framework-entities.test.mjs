@@ -30,9 +30,9 @@ import { sessionPrincipalOf, SESSION_COOKIE } from '../src/session.mjs';
 // sessionPrincipalOf queries.
 function seed() {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   db.exec(
-    'CREATE TABLE Session (id INTEGER PRIMARY KEY, token TEXT, principalType TEXT, principalId TEXT)',
+    'CREATE TABLE Session (id TEXT PRIMARY KEY, token TEXT, principalType TEXT, principalId TEXT)',
   );
   return db;
 }
@@ -136,6 +136,9 @@ test('a minted link session resolves to a link principal through sessionPrincipa
   const who = principalOf(req);
   assert.equal(who.type, 'link');
   assert.equal(who.id, 'share-xyz');
+  // A link principal must carry its token as attributes.token — the linkHolder
+  // check reads it to admit rows the token grants (#1 symbolic attribute bind).
+  assert.equal(who.attributes?.token, 'share-xyz');
 });
 
 test('Session.delete(id) removes the session row', () => {

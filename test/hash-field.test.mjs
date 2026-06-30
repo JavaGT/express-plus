@@ -29,7 +29,7 @@ function makeUser() {
 
 function seedDb() {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   return db;
 }
 

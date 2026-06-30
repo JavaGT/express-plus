@@ -49,11 +49,11 @@ test('doc.mjs share routes: list (empty), add, list (populated), remove', async 
     // Add bob as editor.
     const added = await fetch(`${origin}/docs/${doc.id}/shares`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ userId: 2, role: 'editor' }),
+      body: JSON.stringify({ userId: '2', role: 'editor' }),
     });
     assert.equal(added.status, 201);
     const addBody = await added.json();
-    assert.equal(addBody.sharedWith.id, 2);
+    assert.equal(addBody.sharedWith.id, '2');
     assert.equal(addBody.sharedWith.role, 'editor');
 
     // List shares — bob appears, populated+hydrated (username, not a raw hash).
@@ -61,7 +61,7 @@ test('doc.mjs share routes: list (empty), add, list (populated), remove', async 
     assert.equal(listed.status, 200);
     const shares = (await listed.json()).shares;
     assert.equal(shares.length, 1);
-    assert.equal(shares[0].id, 2);
+    assert.equal(shares[0].id, '2');
     assert.equal(shares[0].username, 'bob');
     assert.equal(shares[0].role, 'editor');
 
@@ -109,7 +109,7 @@ test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', asyn
     // bob shares bDoc with alice.
     const shared = await fetch(`${origin2}/docs/${bDoc.id}/shares`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ userId: 1, role: 'viewer' }),
+      body: JSON.stringify({ userId: '1', role: 'viewer' }),
     });
     assert.equal(shared.status, 201);
     app2.httpServer.close();

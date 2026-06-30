@@ -1,0 +1,295 @@
+// write-queue.test.mjs — tests for single-writer async mutex with bounded wait/depth
+
+import test from 'node:test';
+import assert from 'node:assert';
+import { createWriteQueue } from '../src/write-queue.mjs';
+
+const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test('createWriteQueue returns expected API', () => {
+  const q = createWriteQueue();
+  assert.strictEqual(typeof q.run, 'function');
+  assert.strictEqual(q.depth, 0);
+  assert.strictEqual(q.running, false);
+});
+
+test('serialized runs return their own value in order', async () => {
+  const q = createWriteQueue();
+  const results = [];
+  
+  const p1 = q.run(async () => {
+    await delay(10);
+    return 1;
+  });
+  const p2 = q.run(async () => {
+    await delay(10);
+    return 2;
+  });
+  
+  const [r1, r2] = await Promise.all([p1, p2]);
+  results.push(r1, r2);
+  
+  assert.deepStrictEqual(results, [1, 2]);
+});
+
+test('two dispatches do not interleave — serial execution', async () => {
+  const q = createWriteQueue();
+  const events = [];
+  
+  const p1 = q.run(async () => {
+    events.push('fn1-start');
+    await delay(20);
+    events.push('fn1-mid');
+    await delay(10);
+    events.push('fn1-end');
+    return 'fn1-done';
+  });
+  
+  const p2 = q.run(async () => {
+    events.push('fn2-start');
+    await delay(10);
+    events.push('fn2-mid');
+    await delay(10);
+    events.push('fn2-end');
+    return 'fn2-done';
+  });
+  
+  await Promise.all([p1, p2]);
+  
+  // fn2 must not start until fn1 completes
+  const fn1EndIdx = events.indexOf('fn1-end');
+  const fn2StartIdx = events.indexOf('fn2-start');
+  assert.ok(fn2StartIdx > fn1EndIdx, `fn2 started before fn1 ended: ${events.join('→')}`);
+});
+
+test('bounded wait → 503 when starved', async () => {
+  const maxWaitMs = 30;
+  let fn2Called = false;
+  let resolveFn1;
+  const fn1Promise = new Promise((r) => {
+    resolveFn1 = r;
+  });
+  
+  const q = createWriteQueue({ maxWaitMs, now: Date.now });
+  
+  // fn1 holds the lock indefinitely
+  const p1 = q.run(async () => {
+    await fn1Promise;
+    return 'fn1';
+  });
+  
+  // fn2 should timeout and reject with 503
+  const start = Date.now();
+  await assert.rejects(
+    async () => {
+      await q.run(async () => {
+        fn2Called = true;
+        return 'fn2';
+      });
+    },
+    (err) => {
+      assert.strictEqual(err.status, 503);
+      assert.ok(err.message.includes('wait') || err.message.includes('timeout'));
+      return true;
+    },
+  );
+  const elapsed = Date.now() - start;
+  
+  assert.ok(elapsed >= maxWaitMs - 5, `timeout fired too early: ${elapsed}ms`);
+  assert.ok(elapsed < maxWaitMs + 50, `timeout fired too late: ${elapsed}ms`);
+  assert.strictEqual(fn2Called, false, 'fn2 must not be called on timeout');
+  
+  // Release fn1 so the queue doesn't hang
+  resolveFn1();
+  await p1;
+});
+
+test('bounded depth → 503 when maxDepth reached', async () => {
+  const maxDepth = 2;
+  const q = createWriteQueue({ maxDepth });
+  
+  let fn1Resolve, fn2Resolve;
+  const fn1Done = new Promise((r) => {
+    fn1Resolve = r;
+  });
+  const fn2Done = new Promise((r) => {
+    fn2Resolve = r;
+  });
+  
+  // fn1 is running
+  q.run(async () => {
+    await fn1Done;
+    return 'fn1';
+  });
+  
+  // fn2 is waiting (depth = 1)
+  const p2 = q.run(async () => {
+    await fn2Done;
+    return 'fn2';
+  });
+  
+  // Wait for p2 to actually queue up
+  await delay(10);
+  
+  // fn3 should be rejected immediately (depth would be 2, which is >= maxDepth)
+  let fn3Called = false;
+  await assert.rejects(
+    async () => {
+      await q.run(async () => {
+        fn3Called = true;
+        return 'fn3';
+      });
+    },
+    (err) => {
+      assert.strictEqual(err.status, 503);
+      return true;
+    },
+  );
+  
+  assert.strictEqual(fn3Called, false, 'fn3 must not be called when depth exceeded');
+  
+  // Release fn1 and fn2
+  fn1Resolve();
+  await delay(10);
+  fn2Resolve();
+  await p2;
+});
+
+test('a fn that throws still releases the lock', async () => {
+  const q = createWriteQueue();
+  let fn2Called = false;
+  
+  await assert.rejects(
+    async () => {
+      await q.run(async () => {
+        throw new Error('intentional');
+      });
+    },
+    (err) => {
+      assert.strictEqual(err.message, 'intentional');
+      return true;
+    },
+  );
+  
+  // fn2 should still run after fn1 threw
+  const r2 = await q.run(async () => {
+    fn2Called = true;
+    return 'fn2';
+  });
+  
+  assert.strictEqual(fn2Called, true);
+  assert.strictEqual(r2, 'fn2');
+});
+
+test('depth and running reflect current state', async () => {
+  const q = createWriteQueue();
+  let resolveFn1;
+  const fn1Done = new Promise((r) => {
+    resolveFn1 = r;
+  });
+  
+  assert.strictEqual(q.depth, 0);
+  assert.strictEqual(q.running, false);
+  
+  // Start fn1
+  const p1 = q.run(async () => {
+    await fn1Done;
+    return 'fn1';
+  });
+  
+  // Give it a moment to start
+  await delay(10);
+  assert.strictEqual(q.running, true);
+  assert.strictEqual(q.depth, 0);
+  
+  // Queue fn2 and fn3 with delays so they stay running
+  let resolveFn2;
+  const fn2Done = new Promise(r => resolveFn2 = r);
+  const p2 = q.run(async () => {
+    await fn2Done;
+    return 'fn2';
+  });
+  await delay(10);
+  assert.strictEqual(q.depth, 1);
+  
+  const p3 = q.run(async () => 'fn3');
+  await delay(10);
+  assert.strictEqual(q.depth, 2);
+  
+  // Release fn1
+  resolveFn1();
+  await p1;
+  
+  // fn2 should be running now, fn3 waiting
+  await delay(10);
+  assert.strictEqual(q.running, true);
+  assert.strictEqual(q.depth, 1);
+  
+  resolveFn2();
+  await p2;
+  await p3;
+  
+  assert.strictEqual(q.running, false);
+  assert.strictEqual(q.depth, 0);
+});
+
+test('custom now() is used for timeout measurement', async () => {
+  let fakeNow = 0;
+  const now = () => fakeNow;
+  const maxWaitMs = 100;
+  const q = createWriteQueue({ maxWaitMs, now });
+  
+  let resolveFn1;
+  const fn1Done = new Promise((r) => {
+    resolveFn1 = r;
+  });
+  
+  // fn1 holds the lock
+  q.run(async () => {
+    await fn1Done;
+    return 'fn1';
+  });
+  
+  let fn2Called = false;
+  const p2 = q.run(async () => {
+    fn2Called = true;
+    return 'fn2';
+  });
+  
+  // Advance time past maxWaitMs
+  fakeNow = maxWaitMs + 10;
+  
+  // fn2 should now reject with 503
+  await assert.rejects(
+    async () => {
+      await p2;
+    },
+    (err) => {
+      assert.strictEqual(err.status, 503);
+      return true;
+    },
+  );
+  
+  assert.strictEqual(fn2Called, false);
+  resolveFn1();
+});
+
+test('sync fn works correctly', async () => {
+  const q = createWriteQueue();
+  const results = [];
+  
+  const r1 = q.run(() => {
+    results.push('sync1');
+    return 10;
+  });
+  
+  const r2 = q.run(() => {
+    results.push('sync2');
+    return 20;
+  });
+  
+  assert.strictEqual(r1, 10);
+  const r2Val = await r2;
+  assert.strictEqual(r2Val, 20);
+  assert.deepStrictEqual(results, ['sync1', 'sync2']);
+});

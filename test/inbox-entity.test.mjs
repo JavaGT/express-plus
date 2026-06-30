@@ -22,11 +22,11 @@ import { principal } from '../src/principal.mjs';
 function seedDb() {
   const db = new DatabaseSync(':memory:');
   db.exec(
-    'CREATE TABLE Inbox (id INTEGER PRIMARY KEY, recipient TEXT, doc TEXT, kind TEXT)',
+    'CREATE TABLE Inbox (id TEXT PRIMARY KEY, recipient TEXT, doc TEXT, kind TEXT)',
   );
-  db.prepare('INSERT INTO Inbox (recipient, doc, kind) VALUES (?, ?, ?)').run('alice', 'doc-1', 'invite');
-  db.prepare('INSERT INTO Inbox (recipient, doc, kind) VALUES (?, ?, ?)').run('alice', 'doc-2', 'invite');
-  db.prepare('INSERT INTO Inbox (recipient, doc, kind) VALUES (?, ?, ?)').run('bob', 'doc-3', 'invite');
+  db.prepare('INSERT INTO Inbox (id, recipient, doc, kind) VALUES (1, ?, ?, ?)').run('alice', 'doc-1', 'invite');
+  db.prepare('INSERT INTO Inbox (id, recipient, doc, kind) VALUES (2, ?, ?, ?)').run('alice', 'doc-2', 'invite');
+  db.prepare('INSERT INTO Inbox (id, recipient, doc, kind) VALUES (3, ?, ?, ?)').run('bob', 'doc-3', 'invite');
   return db;
 }
 

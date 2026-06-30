@@ -34,9 +34,9 @@ test('map add fires effects, creating target entity rows', () => {
   });
 
   for (const sql of generateDDL(Doc)) db.exec(sql);
-  db.prepare('INSERT INTO Doc (id, title, owner) VALUES (?, ?, ?)').run(1, 'Test', 'u1');
+  db.prepare('INSERT INTO Doc (id, title, owner) VALUES (?, ?, ?)').run('1', 'Test', 'u1');
 
-  const row = Doc.getOrFail(1);
+  const row = Doc.getOrFail('1');
   assert.equal(typeof row.collaborators.set, 'function');
 
   row.collaborators.set('u2', { role: 'viewer' });

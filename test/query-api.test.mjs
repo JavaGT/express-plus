@@ -28,9 +28,9 @@ function makeUser() {
 // A real on-disk-shaped in-memory DB seeded with a User table.
 function seedDb() {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)');
-  db.prepare('INSERT INTO User (username, password) VALUES (?, ?)').run('alice', 'pw-a');
-  db.prepare('INSERT INTO User (username, password) VALUES (?, ?)').run('bob', 'pw-b');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
+  db.prepare("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'pw-a')").run();
+  db.prepare("INSERT INTO User (id, username, password) VALUES (2, 'bob', 'pw-b')").run();
   return db;
 }
 
@@ -75,10 +75,10 @@ test('Entity.findAll().select(...handles) projects only the named columns', () =
 test('Entity.getOrFail(id) returns the row; a missing id throws a 404-status error', () => {
   const User = makeUser();
   expressPlus({ db: seedDb() });
-  const row = User.getOrFail(1);
+  const row = User.getOrFail('1');
   assert.equal(row.username, 'alice');
   assert.throws(
-    () => User.getOrFail(999),
+    () => User.getOrFail('999'),
     (err) => err.status === 404,
   );
 });

@@ -35,17 +35,17 @@ function setup() {
   setActiveDb(db);
   for (const sql of generateDDL(User)) db.exec(sql);
   for (const sql of generateDDL(Doc)) db.exec(sql);
-  db.prepare("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'salt:digest')")
+  db.prepare("INSERT INTO User (id, username, password) VALUES ('1', 'alice', 'salt:digest')")
     .run();
-  db.prepare("INSERT INTO User (id, username, password) VALUES (2, 'bob', 'salt:digest2')")
+  db.prepare("INSERT INTO User (id, username, password) VALUES ('2', 'bob', 'salt:digest2')")
     .run();
-  db.prepare("INSERT INTO Doc (id, title, owner) VALUES (10, 'Hello', 1)").run();
+  db.prepare("INSERT INTO Doc (id, title, owner) VALUES ('10', 'Hello', '1')").run();
   return db;
 }
 
 test('.set adds a new member and fires nothing extra on a repeat (upsert)', async () => {
   const db = setup();
-  const doc = Doc.getOrFail(10);
+  const doc = Doc.getOrFail('10');
 
   await doc.collaborators.set('2', { role: 'viewer' });
   assert.equal(doc.collaborators.has('2'), true);
@@ -60,14 +60,14 @@ test('.set adds a new member and fires nothing extra on a repeat (upsert)', asyn
 
 test('.toArray() populates members as hydrated [member, role] pairs', async () => {
   setup();
-  const doc = Doc.getOrFail(10);
+  const doc = Doc.getOrFail('10');
   await doc.collaborators.set('2', { role: 'viewer' });
 
   const rows = await doc.collaborators.toArray();
   assert.equal(rows.length, 1);
   const [member, role] = rows[0];
   assert.equal(role, 'viewer');
-  assert.equal(member.id, 2);
+  assert.equal(member.id, '2');
   assert.equal(member.username, 'bob');
   // The hash password hydrated to a {verify} handle — the raw digest does NOT
   // leak into the populated member row.
@@ -85,8 +85,8 @@ test('.toArray() with no registered target returns [null, role] pairs (graceful 
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
   for (const sql of generateDDL(Phantom)) db.exec(sql);
-  db.prepare("INSERT INTO Phantom (id, tag) VALUES (1, 'p')").run();
-  const row = Phantom.getOrFail(1);
+  db.prepare("INSERT INTO Phantom (id, tag) VALUES ('1', 'p')").run();
+  const row = Phantom.getOrFail('1');
   await row.members.set('m1');
   const rows = await row.members.toArray();
   assert.deepEqual(rows, [[null, null]]);

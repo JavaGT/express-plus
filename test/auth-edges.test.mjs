@@ -20,7 +20,7 @@ function makeNote() {
 
 function setup({ principal } = {}) {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE IF NOT EXISTS User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)');
+  db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   db.exec("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'hash')");
   const Note = makeNote();
   for (const sql of generateDDL(Note)) db.exec(sql);
@@ -50,7 +50,7 @@ test('anonymous is rejected by default-on route gate (401)', async () => {
 
 test('row grant denies a different user (403)', async () => {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE IF NOT EXISTS User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)');
+  db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   db.exec("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'hash')");
   db.exec("INSERT INTO User (id, username, password) VALUES (2, 'bob', 'hash')");
   const Note = makeNote();

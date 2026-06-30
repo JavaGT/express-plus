@@ -62,7 +62,13 @@ export function sessionPrincipalOf(db) {
         .prepare('SELECT principalType AS type, principalId AS id FROM Session WHERE token = ?')
         .get(token);
       if (!row) return anonymous;
-      return principal({ type: row.type, id: row.id });
+      // A link session's principalId IS the share token (auth-entities.mjs). The
+      // linkHolder check reads `principal.attributes.token`, so a link principal
+      // must carry it here — otherwise scope binds the token param to NULL and
+      // the link principal reads nothing (fail-closed by accident, not by the
+      // token match the session was minted to grant).
+      const attributes = row.type === 'link' ? { token: row.id } : {};
+      return principal({ type: row.type, id: row.id, attributes });
     } catch {
       return anonymous;
     }

@@ -27,7 +27,7 @@ setActiveDb(db);
 // Main entity table.
 db.exec(`
   CREATE TABLE IF NOT EXISTS TodoList (
-    id INTEGER PRIMARY KEY,
+    id TEXT PRIMARY KEY,
     title TEXT,
     owner TEXT
   )
@@ -36,7 +36,7 @@ db.exec(`
 // Membership side-table for the map field.
 db.exec(`
   CREATE TABLE IF NOT EXISTS TodoList_collaborators (
-    TodoList_id INTEGER,
+    TodoList_id TEXT,
     member_id TEXT,
     role TEXT
   )

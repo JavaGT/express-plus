@@ -16,7 +16,7 @@
 //    predicate is NOT guarded: it compiles to SQL and never runs as JS, so its
 //    `is.*` calls are correctly un-awaited (SPEC §6.1).
 
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { assertGuarded } from './guard/static.mjs';
 import { compileReadScope, compileInheritScope, lowerToSql, fieldHandle, membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
 import { getActiveDb, getActiveEntity, setActiveEntity } from './db.mjs';
@@ -26,6 +26,8 @@ import { read, write } from './grant.mjs';
 import {
   serializeField, validateMutation, verifyHash, flattenStruct, structCellColumn,
 } from './field-strategy.mjs';
+import { action, event } from './pipeline.mjs';
+import { generateDDL } from './ddl.mjs';
 
 // mintToken — a cryptographically random opaque session token. Handed to a
 // create policy so a framework entity that mints session-like rows (Session)
@@ -427,6 +429,14 @@ export function entity(name, declaration = {}) {
     return row ? hydrate(row, principal) : null;
   };
 
+  // Hydrate an already-fetched raw row (assembled struct namespaces, principal-
+  // aware map handles, derived fields). The server's authorized read-admission
+  // path (serve.mjs authorizeRead) does a scoped SELECT + mayVerb and hands back
+  // the RAW row; the call site that needs a live `req.<entity>` hydrates here so
+  // there is ONE admission path and hydration stays the entity's own concern
+  // (not a second authz path). findById stays the unscoped trusted primitive.
+  record.hydrate = (row, principal = null) => hydrate(row, principal);
+
   record.getOrFail = (id) => {
     const row = record.findById(id);
     if (!row) {
@@ -445,30 +455,29 @@ export function entity(name, declaration = {}) {
   // INSERT/return-row mechanics live; both write paths compose it (singular
   // system, deletion test: the policy override adds intent, not a second insert).
   const insert = (cells) => {
-    const stored = {};
+    const id = cells.id ?? randomUUID();
+    const stored = { id };
     for (const [key, value] of Object.entries(cells)) {
+      if (key === 'id') continue;
       const descriptor = fields[key];
-        // a map field has no main-table column — it lives in a side-table.
-        // skip it on insert; the row handle's .set() writes there directly.
       if (descriptor && descriptor.kind === 'store' && descriptor.type === 'map') {
         continue;
       }
-      // a structured field expands into its per-cell flat columns; every other
-      // field is one serialized cell named by the field key.
       if (descriptor && descriptor.kind === 'struct') {
         Object.assign(stored, flattenStruct(key, descriptor, value));
         continue;
       }
+      if (!descriptor) continue;
       stored[key] = serializeField(descriptor, value);
     }
     const cols = Object.keys(stored);
-    const info = getActiveDb()
+    getActiveDb()
       .prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`)
       .run(stored);
     return hydrate(
       getActiveDb()
         .prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`)
-        .get({ id: info.lastInsertRowid }),
+        .get({ id }),
     );
   };
 
@@ -490,6 +499,104 @@ export function entity(name, declaration = {}) {
   record.delete = (id) => {
     getActiveDb().prepare(`DELETE FROM ${name} WHERE id = :id`).run({ id });
   };
+
+  record.verbs = Object.freeze({
+    create: action(`${name}.create`),
+    created: event(`${name}.created`, (state, { data }) => ({ ...state, ...data })),
+    update: action(`${name}.update`),
+    updated: event(`${name}.updated`, (state, { data }) => ({ ...state, ...data })),
+    remove: action(`${name}.remove`),
+    removed: event(`${name}.removed`, (state) => ({ ...state, _removed: true })),
+  });
+
+  record.projection = Object.freeze({
+    eventTypes: [
+      `${name}.created`,
+      `${name}.updated`,
+      `${name}.removed`,
+    ],
+    apply: (event, db) => {
+      const table = name;
+      if (event.type === `${name}.created`) {
+        const row = {};
+        for (const [key, value] of Object.entries(event.data ?? {})) {
+          const descriptor = fields[key];
+          if (descriptor && descriptor.kind === 'store') continue;
+          if (descriptor && descriptor.kind === 'struct') {
+            Object.assign(row, flattenStruct(key, descriptor, value));
+            continue;
+          }
+          if (descriptor) {
+            row[key] = serializeField(descriptor, value);
+          } else {
+            row[key] = value;
+          }
+        }
+        const cols = Object.keys(row);
+        if (cols.length > 0) {
+          db.prepare(
+            `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`,
+          ).run(row);
+        }
+      } else if (event.type === `${name}.updated`) {
+        const { id, ...data } = event.data ?? {};
+        if (!id) return;
+        const updates = [];
+        const params = { id };
+        for (const [key, value] of Object.entries(data)) {
+          const descriptor = fields[key];
+          if (descriptor && descriptor.kind === 'store') continue;
+          if (descriptor && descriptor.kind === 'struct') continue;
+          const stored = descriptor ? serializeField(descriptor, value) : value;
+          updates.push(`${key} = :${key}`);
+          params[key] = stored;
+        }
+        if (updates.length > 0) {
+          db.prepare(`UPDATE ${table} SET ${updates.join(', ')} WHERE id = :id`).run(params);
+        }
+      } else if (event.type === `${name}.removed`) {
+        db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(event.data?.id);
+      }
+    },
+  });
+
+  record.insert = (cells) => insert(cells);
+
+  record.generateDDL = () => generateDDL(record);
+
+  const ownerField = ownerFieldOf(record);
+  record.crudHandlers = Object.freeze({
+    [`${name}.create`]: ({ payload, principal }) => {
+      validateMutation(record, payload);
+      const id = randomUUID();
+      const data = { ...payload, id };
+      if (ownerField) data[ownerField] = principal?.id;
+      return [{ type: record.verbs.created.type, scope: `${name}:${id}`, data }];
+    },
+    [`${name}.update`]: ({ payload, principal: _p }) => {
+      const { id, ...rest } = payload;
+      if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
+      validateMutation(record, rest);
+      const data = { ...rest, id };
+      for (const [fieldName, descriptor] of Object.entries(fields)) {
+        if (descriptor.touch) data[fieldName] = new Date();
+      }
+      return [{ type: record.verbs.updated.type, scope: `${name}:${id}`, data }];
+    },
+    [`${name}.remove`]: ({ payload, principal: _p }) => {
+      if (!payload.id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
+      return [{ type: record.verbs.removed.type, scope: `${name}:${payload.id}`, data: { id: payload.id } }];
+    },
+  });
+
+  function ownerFieldOf(entity) {
+    for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
+      if (descriptor.type === 'ref' && descriptor.role && descriptor.readonly) {
+        return fieldName;
+      }
+    }
+    return null;
+  }
 
   const frozen = Object.freeze(record);
 

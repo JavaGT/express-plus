@@ -10,7 +10,7 @@ import { Note } from '../note.mjs';
 
 test('note.mjs imports, generates DDL, and note CRUD works', async () => {
   const db = new DatabaseSync(':memory:');
-  db.exec(`CREATE TABLE IF NOT EXISTS User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)`);
   db.exec("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'hash')");
   executeDDL(Note, db);
 
@@ -42,7 +42,7 @@ import { Doc as GDoc } from '../gdoc.mjs';
 
 test('gdoc.mjs imports, generates DDL, and gdoc CRUD works', async () => {
   const db = new DatabaseSync(':memory:');
-  db.exec(`CREATE TABLE IF NOT EXISTS User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)`);
   db.exec("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'hash')");
   executeDDL(GDoc, db);
 
@@ -89,7 +89,7 @@ import { Comment } from '../comment.mjs';
 
 test('doc.mjs + comment.mjs: parent-child FK inheritance works', async () => {
   const db = new DatabaseSync(':memory:');
-  db.exec(`CREATE TABLE IF NOT EXISTS User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)`);
   db.exec("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'hash')");
   executeDDL(Doc, db);
   executeDDL(Comment, db);

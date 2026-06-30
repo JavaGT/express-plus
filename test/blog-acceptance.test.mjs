@@ -116,11 +116,11 @@ function makeComment(Post) {
 
 function seed() {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE Blog (id INTEGER PRIMARY KEY, name TEXT, slug TEXT, owner TEXT)');
+  db.exec('CREATE TABLE Blog (id TEXT PRIMARY KEY, name TEXT, slug TEXT, owner TEXT)');
   db.exec(
-    'CREATE TABLE Post (id INTEGER PRIMARY KEY, title TEXT, body TEXT, published INTEGER, createdAt INTEGER, blog INTEGER, author TEXT)',
+    'CREATE TABLE Post (id TEXT PRIMARY KEY, title TEXT, body TEXT, published INTEGER, createdAt INTEGER, blog INTEGER, author TEXT)',
   );
-  db.exec('CREATE TABLE Comment (id INTEGER PRIMARY KEY, post INTEGER, body TEXT, author TEXT, createdAt INTEGER)');
+  db.exec('CREATE TABLE Comment (id TEXT PRIMARY KEY, post INTEGER, body TEXT, author TEXT, createdAt INTEGER)');
 
   db.exec("INSERT INTO Blog (id, name, slug, owner) VALUES (1,'Alice on Code','alice','alice')");
 

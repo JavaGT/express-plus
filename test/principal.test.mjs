@@ -97,8 +97,8 @@ test('the bound read-scope executes against node:sqlite and selects exactly the 
     grant: () => [scope(({ is }) => is.owner()).can(ownerCan)],
   });
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE Note (id INTEGER PRIMARY KEY, body TEXT, owner TEXT)');
-  db.exec("INSERT INTO Note (body, owner) VALUES ('a','user-1'),('b','user-2'),('c','user-1')");
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, body TEXT, owner TEXT)');
+  db.exec("INSERT INTO Note (id, body, owner) VALUES (1,'a','user-1'),(2,'b','user-2'),(3,'c','user-1')");
 
   const bound = bindReadScope(Note.readScope, principal({ type: 'user', id: 'user-1' }));
   const rows = db.prepare(`SELECT body FROM Note AS t0 WHERE ${bound.sql}`).all(bound.params);

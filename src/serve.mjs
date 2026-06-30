@@ -24,12 +24,14 @@ import { resolve } from 'node:path';
 
 import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
-import { validateMutation, ValidationError, serializeField } from './field-strategy.mjs';
-import { mayVerb } from './row-grant.mjs';
+import { ValidationError } from './field-strategy.mjs';
+import { mayVerb, hasOwnCanGrant } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError } from './middleware.mjs';
 import { sessionPrincipalOf } from './session.mjs';
 import { createLiveServer } from './live.mjs';
+import { executeFrameworkDDL } from './ddl.mjs';
+import { createServer } from './pipeline.mjs';
 import { resolveTemplate } from './views.mjs';
 import { readFileSync, existsSync } from 'node:fs';
 import { isSafePath, matchExtension } from './views.mjs';
@@ -141,40 +143,31 @@ class BodyError extends Error {
   }
 }
 
-// The owner field a row carries server-side: a readonly `ref` with a `role`. Its
-// value is assigned from the principal's id on create (the client may not set it
-// — validateMutation already rejects a readonly key in the payload). SPEC §158's
-// `from:'req.user.id'` is the explicit form; a readonly role-ref is the default.
-function ownerFieldOf(entity) {
-  for (const [name, descriptor] of Object.entries(entity.fields)) {
-    if (descriptor.type === 'ref' && descriptor.role && descriptor.readonly) {
-      return name;
-    }
-  }
-  return null;
-}
-
-// Serialize a payload's declared fields to their stored representation (booleans
-// to 1/0, Dates to epoch — node:sqlite refuses JS booleans). Only declared
-// fields are serialized; validateMutation already rejected undeclared keys.
-function serializeRow(entity, payload) {
-  const row = {};
-  const { fields } = entity;
-  for (const [key, descriptor] of Object.entries(fields)) {
-    // Derived fields have no stored column — they are computed on read.
-    if (descriptor.derived) continue;
-    // map / store / presence / state fields are NOT stored in the main table.
-    if (descriptor.kind === 'store' || descriptor.kind === 'presence' || descriptor.kind === 'state') continue;
-    if (Object.hasOwn(payload, key)) {
-      row[key] = serializeField(descriptor, payload[key]);
-    } else if (Object.hasOwn(descriptor, 'default')) {
-      const def = typeof descriptor.default === 'function' ? descriptor.default() : descriptor.default;
-      row[key] = serializeField(descriptor, def);
-    }
-    // No default and not in payload → omit (SQLite stores NULL, which is correct
-    // for truly optional fields with no declared default).
-  }
-  return row;
+// Read a raw (binary) request body into a Buffer, capped at `limit` bytes. Used
+// by the /blobs upload route: a blob upload is opaque bytes, not JSON. The same
+// cap-and-refuse contract as readJsonBody (a baked-in default) — an oversized
+// upload rejects with a 413 and drains to a clean response, never an abrupt
+// socket close that would race the response.
+function readRawBody(req, limit) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let aborted = false;
+    req.on('data', (chunk) => {
+      if (aborted) return;
+      size += chunk.length;
+      if (size > limit) {
+        aborted = true;
+        req.pause();
+        reject(new BodyError('upload exceeds the size limit', 413));
+        req.resume();
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
 }
 
 // DB-backed dispatch for one admitted verb. The route gate already admitted the
@@ -187,7 +180,6 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     sendJson(res, 500, { error: 'no database configured for entity dispatch' });
     return;
   }
-  const live = app?.live;
   const actionId = randomUUID();
   const { entity, verb } = route;
   const table = entity.name;
@@ -197,7 +189,21 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
 
   if (verb === 'list') {
     const rows = db.prepare(`SELECT * FROM ${table} AS t0 WHERE ${where}`).all(scopeParams);
-    sendJson(res, 200, rows);
+    // Post-filter through the SAME mayVerb('list') engine `read` uses — the SQL
+    // scope decides VISIBILITY, the .can body decides the read CAPABILITY. A
+    // grant can admit a row via scope yet deny read in .can; without this list
+    // would leak it (one auth path: list + read agree). Entities with no own
+    // `.can` (scope-only / inherit children resolved at the parent seam) are
+    // NOT filtered — mayVerb denies them (no clause) and would wrongly empty
+    // the list; their scope already decided visibility.
+    let listed = rows;
+    if (hasOwnCanGrant(entity)) {
+      listed = [];
+      for (const row of rows) {
+        if (await mayVerb(entity, 'list', row, principal)) listed.push(row);
+      }
+    }
+    sendJson(res, 200, listed);
     return;
   }
 
@@ -215,30 +221,27 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
   }
 
   if (verb === 'create') {
-    let payload;
+    const kernel = app?.kernel;
+    if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
+    let result;
     try {
-      payload = validateMutation(entity, body);
+      result = await kernel.dispatch({ actionId, type: `${table}.create`, payload: body, principal });
     } catch (err) {
       if (err instanceof ValidationError) return void sendJson(res, 400, { error: err.message });
       throw err;
     }
-    const ownerField = ownerFieldOf(entity);
-    const row = serializeRow(entity, payload);
-    if (ownerField) row[ownerField] = principal.id;
-    const cols = Object.keys(row);
-    const placeholders = cols.map((c) => `:${c}`).join(', ');
-    const info = db
-      .prepare(`INSERT INTO ${table} (${cols.join(', ')}) VALUES (${placeholders})`)
-      .run(row);
+    if (!result.granted) return void sendJson(res, 403, { error: 'forbidden' });
+    const id = result.events[0].data.id;
     const created = db
-      .prepare(`SELECT * FROM ${table} WHERE id = ?`)
-      .get(info.lastInsertRowid);
+      .prepare(`SELECT * FROM ${table} AS t0 WHERE t0.id = :id`)
+      .get({ id });
     sendJson(res, 201, created);
-    if (live) live.emit(entity.name, created.id, created, { verb: 'create', row: created }, actionId);
     return;
   }
 
   if (verb === 'update') {
+    const kernel = app?.kernel;
+    if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
@@ -246,32 +249,27 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     if (!(await mayVerb(entity, 'update', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
-    let payload;
+    let result;
     try {
-      payload = validateMutation(entity, body);
+      result = await kernel.dispatch({
+        actionId,
+        type: `${table}.update`,
+        payload: { ...body, id: params.id },
+        principal,
+      });
     } catch (err) {
       if (err instanceof ValidationError) return void sendJson(res, 400, { error: err.message });
       throw err;
     }
-    const updates = serializeRow(entity, payload);
-    // Touch fields auto-bump on every mutation: the client never sets them,
-    // and the framework writes the current instant server-side. The value is
-    // serialized through the field's descriptor (Date → epoch millis).
-    for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
-      if (descriptor.touch) updates[fieldName] = serializeField(descriptor, new Date());
-    }
-    const cols = Object.keys(updates);
-    if (cols.length > 0) {
-      const setClause = cols.map((c) => `${c} = :${c}`).join(', ');
-      db.prepare(`UPDATE ${table} SET ${setClause} WHERE id = :id`).run({ ...updates, id: params.id });
-    }
+    if (!result.granted) return void sendJson(res, 403, { error: 'forbidden' });
     const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
     sendJson(res, 200, updated);
-    if (live) live.emit(entity.name, updated.id, updated, { verb: 'update', row: updated }, actionId);
     return;
   }
 
   if (verb === 'remove') {
+    const kernel = app?.kernel;
+    if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
@@ -279,15 +277,152 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     if (!(await mayVerb(entity, 'remove', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
-    db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(params.id);
+    const result = await kernel.dispatch({
+      actionId,
+      type: `${table}.remove`,
+      payload: { id: params.id },
+      principal,
+    });
+    if (!result.granted) return void sendJson(res, 403, { error: 'forbidden' });
     res.writeHead(204);
     res.end();
-    if (live) live.emit(entity.name, String(params.id), row, { verb: 'remove', id: params.id }, actionId);
     return;
   }
 
   // an unknown verb is fail-closed (the routing table only mints the five).
   sendJson(res, 500, { error: `unknown verb '${verb}'` });
+}
+
+// Framework-owned snapshot + resync endpoints (spec #1, D6/D7). NOT mounted
+// routes — resolved at request time from `/snapshot/:entity/:id` and
+// `/events-since/:entity/:id`. The entity table IS the snapshot (scope's proven
+// shape); the committed `_Log` is the RESYNC source. Authorization runs the SAME
+// mayVerb('read') engine as REST `read` (the viewer bar), after the same
+// readScope row filter — one auth engine, no second path (SPEC §7, §7.1).
+//
+// Returns true when the request was handled (the caller short-circuits); false
+// when the path is not a framework resync route (fall through to matchRoute).
+async function handleResyncRoute(app, req, res, principal) {
+  const url = new URL(req.url, 'http://localhost');
+  const seg = url.pathname.split('/').filter(Boolean);
+  if (seg.length !== 3 || (seg[0] !== 'snapshot' && seg[0] !== 'events-since')) return false;
+  if (!app || !app.entities || !app.db) return false;
+  const [, entityName, id] = seg;
+  const entity = app.entities.get(entityName);
+  if (!entity) { sendJson(res, 404, { error: 'not found' }); return true; }
+  // route gate (requireUser) — fail closed for anonymous, same as a mounted route.
+  if (!principal || principal.id == null) {
+    sendJson(res, 401, { error: 'unauthorized' });
+    return true;
+  }
+  const scopeKey = `${entityName}:${id}`;
+  if (seg[0] === 'snapshot') return snapshotRoute(app, entity, id, scopeKey, principal, res);
+  const cursor = Number(url.searchParams.get('cursor') ?? 0);
+  return eventsSinceRoute(app, entity, scopeKey, principal, res, cursor);
+}
+
+// Load the materialized row through the readScope (fail closed: out-of-scope OR
+// absent → 404) and admit via mayVerb('read'). Shared by snapshot + events-since
+// — both prove the viewer can read THIS scope's current row before serving it.
+async function authorizeRead(app, entity, id, principal) {
+  const bound = bindReadScope(entity.readScope, principal);
+  const where = bound ? bound.sql : '1=1';
+  const scopeParams = bound ? bound.params : {};
+  const row = app.db
+    .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
+    .get({ ...scopeParams, id });
+  if (!row) return { status: 404 };
+  // The .can capability body runs only for entities that HAVE one; a scope-only
+  // / bare grant is admitted by its read-scope alone (hasOwnCanGrant gates the
+  // same false-positive deny that the list post-filter and create hook skip —
+  // one rule across every read path, no second authz logic). MayVerb on a no-`.can`
+  // grant denies (no clause to run); an entity AUTHORING a capability set always
+  // has a `.can`, so this skip never bypasses a real capability decision.
+  if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'read', row, principal))) return { status: 403 };
+  return { row };
+}
+
+async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
+  const auth = await authorizeRead(app, entity, id, principal);
+  if (auth.status) {
+    sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
+    return true;
+  }
+  const cursorRow = app.db
+    .prepare('SELECT lastSeq FROM _Cursor WHERE scope = ?')
+    .get(scopeKey);
+  sendJson(res, 200, { snapshot: auth.row, seq: cursorRow ? cursorRow.lastSeq : 0 });
+  return true;
+}
+
+async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
+  // events-since authorizes against the CURRENT row (fail closed: a deleted or
+  // out-of-scope row yields 404). The log is replayed for an admitted viewer.
+  const auth = await authorizeRead(app, entity, scopeKey.slice(scopeKey.indexOf(':') + 1), principal);
+  if (auth.status) {
+    sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
+    return true;
+  }
+  const oldest = app.db
+    .prepare('SELECT MIN(seq) AS min FROM _Log WHERE scope = ?')
+    .get(scopeKey);
+  const minSeq = oldest ? oldest.min : null;
+  // The client wants events > cursor; the first wanted is cursor+1. If that is
+  // older than the oldest RETAINED event, the gap can never be filled → HARD-FAIL.
+  // Never a silent truncate (SPEC §3.6 — the single non-negotiable property).
+  if (minSeq !== null && cursor + 1 < minSeq) {
+    sendJson(res, 200, { resync: 'stale', reason: 'cursor-behind-retention' });
+    return true;
+  }
+  const rows = app.db
+    .prepare('SELECT * FROM _Log WHERE scope = ? AND seq > ? ORDER BY seq')
+    .all(scopeKey, cursor);
+  const events = rows.map((r) => ({
+    type: r.eventType,
+    scope: r.scope,
+    seq: r.seq,
+    data: r.eventData ? JSON.parse(r.eventData) : null,
+    actionId: r.actionId,
+    committedAt: r.committedAt,
+  }));
+  sendJson(res, 200, { events });
+  return true;
+}
+
+// Framework-owned blob upload endpoint (spec #2, eng-review Walk 1b). NOT a
+// mounted route: `POST /blobs` streams the request body to the BlobStore as a
+// PENDING blob (`.pending` file + row), returning { id, md5, sha256, size, mime }.
+// The blob is ADOPTED later by the dispatch that references it (an entity field
+// marked `blob: true` carrying the blob id) — adopted IN that dispatch's
+// transaction, finalized post-commit. A rolled-back dispatch leaves it pending
+// for the reaper. Route-gate fail-closed: anonymous → 401 (same admission as a
+// mounted route — no second auth path). Returns true when handled; false to fall
+// through to matchRoute.
+const BLOB_LIMIT = 50_000_000; // ~50mb upload cap (SPEC §3 size-guard default).
+
+async function handleBlobUploadRoute(app, req, res, principal) {
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname !== '/blobs' || req.method !== 'POST') return false;
+  if (!app || !app.blobs) return false;
+  // route gate (requireUser) — fail closed for anonymous, same as a mounted route.
+  if (!principal || principal.id == null) {
+    sendJson(res, 401, { error: 'unauthorized' });
+    return true;
+  }
+  let bytes;
+  try {
+    bytes = await readRawBody(req, BLOB_LIMIT);
+  } catch (err) {
+    if (err instanceof BodyError) {
+      sendJson(res, err.status, { error: err.message });
+      return true;
+    }
+    throw err;
+  }
+  const mime = (req.headers['content-type'] ?? 'application/octet-stream').split(';')[0].trim();
+  const meta = app.blobs.upload({ bytes, mime });
+  sendJson(res, 201, meta);
+  return true;
 }
 
 // The imperative terminal: run a hand-written handler chain over an Express-like
@@ -302,7 +437,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
 // shape — defers to the single error renderer and stops the chain. A handler that
 // writes the response (res.json / res.sendStatus / res.send) and does not call
 // next() ends the chain by completing the request.
-async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, query, autoLoad }, { env }) {
+async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, query, autoLoad, app }, { env }) {
   // an Express-like request facade over the node request. The raw node request
   // remains reachable for handlers that need headers; the framework surfaces the
   // already-parsed body, the matched path params, the parsed query, and the
@@ -318,19 +453,19 @@ async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, q
     url: nodeReq.url,
   };
 
-  // Entity auto-load: a route under an entity's `:<entity>Id` subtree loads the
-  // parent row and attaches it as req.<entity> (doc.mjs: req.doc). A missing row
-  // is a 404 — the parent resource the handler operates on does not exist, so the
-  // request cannot be admitted (a null req.doc would null-deref to an opaque 500
-  // otherwise). This is not a second auth path: the row grant still applies to
-  // the entity's own CRUD verbs; auto-load is a read for the handler's benefit.
+  // Entity auto-load: a route under an entity's `:<entity>Id` subtree admits the
+  // parent row for THIS principal via the SAME authorizeRead path snapshot and
+  // events-since use (bindReadScope + mayVerb('read')) — never the unscoped
+  // trusted findById, which would bypass read-scope (H1). Out-of-scope = 404 (no
+  // existence leak); in-scope-but-denied = 403; in neither case does the handler
+  // run. An admitted row is hydrated (principal-aware map handles) for the handler.
   if (autoLoad) {
-    const row = autoLoad.entity.findById(params[autoLoad.param], principal);
-    if (!row) {
-      renderError(nodeRes, { status: 404, message: `${autoLoad.entity.name} ${params[autoLoad.param]} not found` }, { env });
+    const auth = await authorizeRead(app, autoLoad.entity, params[autoLoad.param], principal);
+    if (auth.status) {
+      renderError(nodeRes, { status: auth.status, message: auth.status === 404 ? 'not found' : 'forbidden' }, { env });
       return;
     }
-    req[autoLoad.key] = row;
+    req[autoLoad.key] = autoLoad.entity.hydrate(auth.row, principal);
   }
 
   // an Express-like response facade over the node response. `status(n)` records a
@@ -428,6 +563,22 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // from the filesystem with a content-type derived from the file extension.
       // Missing files → 404; path-traversal attempts → 404 (fail closed).
       const url = new URL(req.url, 'http://localhost');
+      // Framework-owned default endpoints — snapshot + resync (spec #1, D6/D7).
+      // Like the /events WS transport, these are framework defaults (not mounted
+      // routes): `/snapshot/:entity/:id` and `/events-since/:entity/:id` resolve
+      // the entity at request time from the path. Authorized through the SAME
+      // mayVerb ('read') as REST `read` — one auth engine, no second path.
+      if (isApp && req.method === 'GET') {
+        const handled = await handleResyncRoute(source, req, res, principalOf(req));
+        if (handled) return;
+      }
+      // Framework-owned blob upload (spec #2): `POST /blobs` is a framework
+      // default, not a mounted route — intercepted before route matching, like
+      // the snapshot/resync endpoints and the /events WS transport.
+      if (isApp && req.method === 'POST') {
+        const handled = await handleBlobUploadRoute(source, req, res, principalOf(req));
+        if (handled) return;
+      }
       if (isApp && source._static && req.method === 'GET') {
         const { prefix, dir } = source._static;
         if (url.pathname.startsWith(prefix)) {
@@ -495,7 +646,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // second auth path — the chain inherits the already-admitted principal and
       // never re-gates.
       if (route.handlers) {
-        await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad }, { env });
+        await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
       } else {
         await dispatch(req, res, route, principal, db, params, body, isApp ? source : null);
       }
@@ -521,6 +672,157 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
 // Graceful shutdown (SPEC §3) is framework-owned: SIGTERM/SIGINT close the live
 // server, and an unhandledRejection/uncaughtException is trapped. The app mounts
 // none of this — `app.shutdown()` is the close the traps call (and tests use).
+// Build the durable mutation kernel over the app's mounted entities. Every
+// entity's auto-generated crudHandlers (the handler map, keyed `${name}.create`
+// etc.) merge into one registry; every entity's projection merges into one
+// consumer list. The route gate (requireUser) already admitted the request —
+// the first default-on auth layer; the kernel's `authorize` is therefore
+// passthrough, and the second layer (bindReadScope + mayVerb) still runs in
+// `dispatch`'s pre-mutation read. There is no second auth path here.
+function buildKernel(app) {
+  const handlers = {};
+  const projections = [];
+  const entities = new Map();
+  for (const route of app.routes) {
+    const entity = route.entity;
+    if (entity && !entities.has(entity.name)) {
+      entities.set(entity.name, entity);
+      Object.assign(handlers, entity.crudHandlers);
+      projections.push(entity.projection);
+    }
+  }
+  // An entity-by-name registry for the framework-owned snapshot/resync endpoints —
+  // `/snapshot/:entity/:id` resolves the entity at request time from the path
+  // param, not from the mount (the snapshot is a framework default, not a
+  // per-entity route). One registry, derived from the resolved table.
+  app.entities = entities;
+  if (app.db && typeof app.db.exec === 'function') executeFrameworkDDL(app.db);
+
+  // Auto-wire the blob adopter from declared blob fields (spec #2). Every entity
+  // field marked `blob: true` holds a blob id; a dispatch committing an event
+  // that carries one adopts that blob IN the dispatch transaction (a rolled-back
+  // dispatch leaves it pending) and finalizes the file post-commit. `resolve`
+  // derives the blob ids from the event data by entity name — the event type's
+  // prefix — so the kernel owns no blob-field knowledge. One wiring, derived
+  // from the same field declarations the read/write paths use: no parallel
+  // registration. `app.blobColumns` exposes the same scan for the reaper's
+  // refcount sweep (reap needs the (table, column) pairs that hold blob ids).
+  let blobAdopter;
+  if (app.blobs) {
+    const blobFields = new Map(); // entityName -> [fieldName]
+    const blobColumns = [];
+    for (const [name, ent] of entities) {
+      const fields = [];
+      for (const [fname, descriptor] of Object.entries(ent.fields ?? {})) {
+        if (descriptor && descriptor.blob === true) fields.push(fname);
+      }
+      if (fields.length > 0) {
+        blobFields.set(name, fields);
+        for (const fName of fields) blobColumns.push({ table: name, column: fName });
+      }
+    }
+    app.blobColumns = blobColumns;
+    if (blobFields.size > 0) {
+      blobAdopter = {
+        resolve(ev) {
+          const dot = ev.type.indexOf('.');
+          const entityName = dot >= 0 ? ev.type.slice(0, dot) : '';
+          const fields = blobFields.get(entityName) ?? [];
+          const ids = [];
+          for (const fName of fields) {
+            const value = ev.data?.[fName];
+            if (value) ids.push(value);
+          }
+          return ids;
+        },
+        adopt: (txnDb, ids) => {
+          for (const id of ids) app.blobs.adopt(txnDb, id);
+        },
+        finalize: (id) => app.blobs.finalize(id),
+      };
+    }
+  }
+
+  // Post-commit consumers of the committed log (eng-review §D3). Both retirings
+  // of special-case wiring live here: blob file finalize (the post-commit FS
+  // rename, formerly an inline kernel call) and live WS fan-out (formerly three
+  // imperative `live.emit` call sites in dispatch). The kernel fans committed
+  // events to every registered consumer after COMMIT; a consumer error never
+  // rolls back the origin. live re-reads the materialized row post-commit — for
+  // a 'removed' event the row is gone, and `live.emit` skips re-authorization
+  // (the remove event IS the revocation signal, forwarded to current subs).
+  const postCommitConsumers = [];
+  if (blobAdopter) {
+    postCommitConsumers.push(async (events) => {
+      const ids = new Set();
+      for (const ev of events) {
+        for (const id of blobAdopter.resolve(ev)) ids.add(id);
+      }
+      for (const id of ids) {
+        try { blobAdopter.finalize(id); } catch { /* reaper reconciles */ }
+      }
+    });
+  }
+  if (app.live) {
+    postCommitConsumers.push(async (events, { db }) => {
+      for (const ev of events) {
+        const colon = ev.scope.indexOf(':');
+        if (colon < 0) continue;
+        const entityName = ev.scope.slice(0, colon);
+        const id = ev.scope.slice(colon + 1);
+        // The compiled entity RECORD — mayVerb needs it to run the grant's
+        // `.can` body. Unknown entity → undefined → emit fails closed (no
+        // delivery without a grant to authorize it).
+        const entity = app.entities?.get(entityName);
+        let row;
+        try {
+          row = db.prepare(`SELECT * FROM ${entityName} WHERE id = ?`).get(id);
+        } catch {
+          row = undefined;
+        }
+        app.live.emit(entity, id, row, ev);
+      }
+    });
+  }
+
+  return createServer({
+    handlers,
+    projections,
+    authorize: () => true,
+    postHandlerAuthorize: async ({ entityName, verb, principal, event }) => {
+      // CREATE has no pre-existing row, so dispatch's pre-check (serve.mjs)
+      // can't authorize it — this in-txn hook is the authoritative create
+      // row-grant (spec #5). update/remove are pre-authorized in dispatch
+      // against the pre-mutation row; owner is a readonly invariant, so the
+      // pre-check stands and is NOT re-run here — one check per verb, no
+      // second auth path. The SAME mayVerb engine REST + live use.
+      if (verb !== 'create') return true;
+      const entity = app.entities?.get(entityName);
+      if (!entity) return false;                  // unknown entity → fail closed
+      // Inherit children (grant is an `inherit` directive, no own `.can`
+      // clause) resolve their capability through the parent's read-scope join
+      // at the parent seam — mayVerb at the child returns denied (no clause to
+      // run), so the hook must NOT deny them. Authorize entities that own a
+      // `.can` body; inherit children are admitted (their create authz is the
+      // inherited-scope concern, not this hook).
+      if (!hasOwnCanGrant(entity)) return true;
+      const id = event?.data?.id;
+      if (id == null) return false;
+      let row = null;
+      try {
+        row = entity.findById(String(id), principal);   // in-txn projected row, hydrated
+      } catch {
+        row = null;
+      }
+      if (!row) return false;
+      return mayVerb(entity, verb, row, principal);
+    },
+    db: app.db,
+    blobAdopter,
+    postCommitConsumers,
+  });
+}
+
 export function listen(app, port, optionsOrCallback = {}) {
   const isCallback = typeof optionsOrCallback === 'function';
   const options = isCallback ? {} : optionsOrCallback;
@@ -563,12 +865,16 @@ export function listen(app, port, optionsOrCallback = {}) {
   app.live = createLiveServer(httpServer, {
     path: '/events',
     mayVerb: (entity, verb, row, principal) => mayVerb(entity, verb, row, principal),
+    principalOf,                        // the SAME principal resolver HTTP uses — no second auth identity
+    db: app.db,
+    resolveEntity: (name) => app.entities?.get(name),  // name → record, for subscribe-time authz
   });
 
   // Resolution runs in the background; `app.ready` completes once the table is
   // built AND the socket is listening, so a caller may await it before closing.
   app.ready = (async () => {
     await app.resolveRoutes();
+    app.kernel = buildKernel(app);
     if (!httpServer.listening) {
       await new Promise((resolve) => httpServer.once('listening', resolve));
     }

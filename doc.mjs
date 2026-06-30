@@ -10,7 +10,7 @@
 // (abstraction #5).
 import {
   entity, text, number, date, ref, map, presence, log, state, link,
-  grant, deny, read, write, subscribe, admin, anyOf, never, scope,
+  grant, deny, read, write, subscribe, admin, anyOf, scope,
   router, User, Inbox, now,
 } from 'express-plus';
 // comment.mjs is imported LAZILY inside the routes thunk (below), not here:
@@ -115,19 +115,17 @@ export const Doc = entity('Doc', {
     // DECISIONLOG #54). Only checks the framework does not derive live here.
     collaborator: ({ Doc, principal }) => Doc.collaborators.has(principal.id),
     // A link principal is admitted only if its token matches a linkShare token.
-    // `never()` compiles to SQL FALSE, so a non-link principal can never admit
-    // a row through this check. `.is(undefined)` compiles to FALSE (never
-    // SQL IS NULL), so an unminted/anonymous link can't match rows whose
-    // linkShare.token is null — fail-closed at the compiler, not hand-rolled.
-    linkHolder:   ({ Doc, principal }) =>
-                    principal.type === 'link'
-                      ? Doc.linkShare.token.is(principal.attributes?.token)
-                      // At harvest time principal.id is a Symbol (PRINCIPAL_ID_TOKEN);
-                      // at runtime it is a string. `never()` returns the SQL FALSE AST
-                      // node needed for scope compilation; at runtime we need boolean
-                      // false so the grant .can body does not enter the linkHolder arm
-                      // for non-link principals.
-                      : (typeof principal.id !== 'string' ? never() : false),
+    // This is a SYMBOLIC principal-attribute bind: at harvest, the registry
+    // injects `principal.attributes.token = PRINCIPAL_ATTR_TOKEN`, so
+    // `Doc.linkShare.token.is(token)` lowers to a rebindable
+    // `linkShare__token = :p_principalAttrToken` (NOT FALSE). bindReadScope fills
+    // it per request with `principal.attributes.token` — a real link principal
+    // matches rows with that token; a user/anonymous principal has no
+    // attributes.token → NULL → `col = NULL` is false → the linkHolder arm of
+    // the OR never admits a row. `.is(undefined)` is FALSE, so an unminted link
+    // can't match a null-token row either — fail-closed at the compiler and the
+    // binder, not hand-rolled.
+    linkHolder: ({ Doc, principal }) => Doc.linkShare.token.is(principal.attributes?.token),
     // Role lookups are runtime-only (a scalar on the collaborators payload,
     // not a compilable field-handle predicate) — so they are NEVER called in
     // `scope` (that would be a load-time error). They await via is.* inside

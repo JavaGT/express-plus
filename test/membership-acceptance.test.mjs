@@ -26,6 +26,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { setActiveDb } from '../src/db.mjs';
+import { randomUUID } from 'node:crypto';
 import { bindReadScope } from '../src/scope-sql.mjs';
 import { mayVerb } from '../src/row-grant.mjs';
 import {
@@ -69,9 +70,9 @@ function buildTodoListEntity() {
 function seed() {
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
-  db.exec('CREATE TABLE TodoList (id INTEGER PRIMARY KEY, title TEXT, owner TEXT)');
+  db.exec('CREATE TABLE TodoList (id TEXT PRIMARY KEY, title TEXT, owner TEXT)');
   db.exec(
-    'CREATE TABLE TodoList_collaborators (TodoList_id INTEGER, member_id TEXT, role TEXT)',
+    'CREATE TABLE TodoList_collaborators (TodoList_id TEXT, member_id TEXT, role TEXT)',
   );
   return db;
 }
@@ -83,10 +84,11 @@ function seed() {
 // principal.test.mjs both seed owned rows via raw INSERT), then loads it back
 // through the entity so the row carries its hydrated map write handle.
 function seedOwnedRow(db, TodoList, { title, owner }) {
-  const info = db
-    .prepare('INSERT INTO TodoList (title, owner) VALUES (:title, :owner)')
-    .run({ title, owner });
-  return TodoList.getOrFail(info.lastInsertRowid);
+  const id = randomUUID();
+  db
+    .prepare('INSERT INTO TodoList (id, title, owner) VALUES (:id, :title, :owner)')
+    .run({ id, title, owner });
+  return TodoList.getOrFail(id);
 }
 
 // Helper: which rows does the SCOPE SQL admit for this principal?

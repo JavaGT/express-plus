@@ -21,6 +21,13 @@ import { serializeField, structCellColumn } from './field-strategy.mjs';
 // one handle instead of an implicit string (house style: no magic strings).
 export const PRINCIPAL_ID_PARAM = 'principalId';
 
+// The logical name of the param a link-principal check (`is.linkHolder()`)
+// emits — the placeholder the query layer rebinds per request to the link
+// principal's `attributes.token`. Sibling to PRINCIPAL_ID_PARAM; one house
+// style, two named slots (a link principal is identified by its token, a user
+// principal by its id — never one field overloaded for both).
+export const PRINCIPAL_ATTR_PARAM = 'principalAttrToken';
+
 // Membership side-table naming convention (singular system: one helper each, so
 // the lowering, the write path, and the schema migration all agree).
 export const MEMBER_COLUMN = 'member_id';
@@ -31,6 +38,12 @@ export const membershipOwnerCol = (entityName) => `${entityName}_id`;
 // tell "this is the requesting principal → emit a rebindable principalId param"
 // from a literal value. Exported so the registry can reference it.
 export const PRINCIPAL_ID_TOKEN = Symbol('principalId');
+
+// A branded token the harvester injects as `principal.attributes.token` so a
+// struct sub-cell `.is()` can tell "this is the link principal's token → emit a
+// rebindable principalAttrToken param" from a literal value. Mirror of
+// PRINCIPAL_ID_TOKEN for the link-identity axis.
+export const PRINCIPAL_ATTR_TOKEN = Symbol('principalAttrToken');
 
 // A typed load-time failure, sibling to UnawaitedCheckError. Raised when a scope
 // predicate cannot be lowered to SQL.
@@ -224,10 +237,18 @@ export function fieldHandle(name, descriptor, entityName) {
     // (stored-cell) form via the field's strategy — a boolean becomes 1/0, a
     // Date epoch millis — so the param is bindable by node:sqlite, which refuses
     // a JS boolean. One serialize, used here and by the write path.
-    is: (value) =>
-      value === undefined
+    is: (value) => {
+      // The link-identity token: emit a rebindable principalAttrToken param (the
+      // struct sub-cell lives on a generated `<field>__<cell>` column, bound per
+      // request to principal.attributes.token). A literal value is baked in
+      // below — it is NOT the requesting principal, so it must not be rebound.
+      if (value === PRINCIPAL_ATTR_TOKEN) {
+        return makeNode({ node: 'eq', field: name, param: PRINCIPAL_ATTR_PARAM });
+      }
+      return value === undefined
         ? FALSE
-        : makeNode({ node: 'eq', field: name, value: serializeField(descriptor, value) }),
+        : makeNode({ node: 'eq', field: name, value: serializeField(descriptor, value) });
+    },
     in: (values) =>
       makeNode({ node: 'in', field: name, values: [...values].map((v) => serializeField(descriptor, v)) }),
     isNull: () => makeNode({ node: 'isNull', field: name }),
@@ -413,7 +434,16 @@ export function bindReadScope(readScope, principal) {
   if (readScope === undefined) return undefined;
   const params = {};
   for (const [key, value] of Object.entries(readScope.params)) {
-    params[key] = key.endsWith(`_${PRINCIPAL_ID_PARAM}`) ? principal.id : value;
+    if (key.endsWith(`_${PRINCIPAL_ID_PARAM}`)) {
+      params[key] = principal.id;            // the user principal's id
+    } else if (key.endsWith(`_${PRINCIPAL_ATTR_PARAM}`)) {
+      // The link principal's token (absent for a non-link principal → NULL →
+      // `col = NULL` is false in SQL → the linkHolder arm never admits a row:
+      // fail-closed, no special case for "no token").
+      params[key] = principal.attributes?.token ?? null;
+    } else {
+      params[key] = value;
+    }
   }
   return { sql: readScope.sql, params };
 }

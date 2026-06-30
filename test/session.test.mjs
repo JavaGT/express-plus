@@ -43,7 +43,7 @@ function ownedNote() {
 // framework reads to BUILD the principal — the client never sends type/id.
 function seed() {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE Note (id INTEGER PRIMARY KEY, body TEXT, owner TEXT)');
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, body TEXT, owner TEXT)');
   db.exec(
     'CREATE TABLE Session (token TEXT PRIMARY KEY, principalType TEXT, principalId TEXT)',
   );

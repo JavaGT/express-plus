@@ -12,7 +12,7 @@
 //   boolean                             → INTEGER (node:sqlite refuses JS booleans)
 //   number                              → REAL
 //   struct (link)                       → one column per struct cell
-//   id                                  → INTEGER PRIMARY KEY (auto-generated)
+//   id                                  → TEXT PRIMARY KEY (caller-owned UUID)
 //
 // Side-table naming (from scope-sql.mjs):
 //   map        → {Entity}_{field} ({Entity}_id, member_id [, role])
@@ -37,7 +37,7 @@ function sqlType(descriptor) {
 
 // Generate the main table DDL for one entity.
 function mainTableDDL(entity) {
-  const cols = ['id INTEGER PRIMARY KEY'];
+  const cols = ['id TEXT PRIMARY KEY'];
   const { fields } = entity;
   if (!fields) return cols;
 
@@ -120,6 +120,41 @@ export function generateDDL(entity) {
 // Execute the generated DDL statements against a DatabaseSync handle.
 export function executeDDL(entity, db) {
   for (const sql of generateDDL(entity)) {
+    db.exec(sql);
+  }
+}
+
+export function generateFrameworkDDL() {
+  return [
+    `CREATE TABLE IF NOT EXISTS BlobStore (
+  id TEXT PRIMARY KEY,
+  status TEXT NOT NULL,
+  md5 TEXT,
+  sha256 TEXT,
+  size INTEGER,
+  mime TEXT,
+  createdAt TEXT NOT NULL
+);`,
+    'CREATE INDEX IF NOT EXISTS idx_blob_status ON BlobStore(status);',
+    `CREATE TABLE IF NOT EXISTS _Log (
+  scope TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  eventType TEXT NOT NULL,
+  eventData TEXT NOT NULL,
+  actionId TEXT NOT NULL,
+  committedAt TEXT NOT NULL,
+  PRIMARY KEY (scope, seq)
+);`,
+    'CREATE INDEX IF NOT EXISTS idx__Log_actionId ON _Log (actionId);',
+    `CREATE TABLE IF NOT EXISTS _Cursor (
+  scope TEXT NOT NULL PRIMARY KEY,
+  lastSeq INTEGER NOT NULL
+);`,
+  ];
+}
+
+export function executeFrameworkDDL(db) {
+  for (const sql of generateFrameworkDDL()) {
     db.exec(sql);
   }
 }

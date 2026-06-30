@@ -73,8 +73,8 @@ test('the inherited scope executes against node:sqlite and selects exactly the c
   });
 
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE Doc (id INTEGER PRIMARY KEY, title TEXT, owner TEXT)');
-  db.exec('CREATE TABLE Comment (id INTEGER PRIMARY KEY, doc INTEGER, body TEXT)');
+  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY, title TEXT, owner TEXT)');
+  db.exec('CREATE TABLE Comment (id TEXT PRIMARY KEY, doc INTEGER, body TEXT)');
   db.exec("INSERT INTO Doc (id, title, owner) VALUES (1,'d1','user-1'),(2,'d2','user-2')");
   db.exec("INSERT INTO Comment (id, doc, body) VALUES (1,1,'c-on-d1'),(2,2,'c-on-d2'),(3,1,'c2-on-d1')");
 

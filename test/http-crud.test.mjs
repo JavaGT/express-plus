@@ -69,7 +69,7 @@ async function serve(t, db, Entity, base, who) {
   const app = expressPlus({ db });
   app.mount(base, Entity);
   app.listen(0, { principalOf: () => who });
-  await new Promise((resolve) => app.httpServer.once('listening', resolve));
+  await app.ready;
   t.after(() => {
     app.httpServer.close();
     db.close();
@@ -83,7 +83,7 @@ const bob = principal({ type: 'user', id: 'bob' });
 
 test('list returns only the rows the principal may SEE (SQL scope)', async (t) => {
   const db = seed(
-    'CREATE TABLE Note (id INTEGER PRIMARY KEY, body TEXT, owner TEXT)',
+    'CREATE TABLE Note (id TEXT PRIMARY KEY, body TEXT, owner TEXT)',
     [
       { sql: 'INSERT INTO Note (id, body, owner) VALUES (?, ?, ?)', params: [1, 'a', 'alice'] },
       { sql: 'INSERT INTO Note (id, body, owner) VALUES (?, ?, ?)', params: [2, 'b', 'bob'] },
@@ -99,7 +99,7 @@ test('list returns only the rows the principal may SEE (SQL scope)', async (t) =
 
 test('read of an unowned (invisible) row is 404 under owner scope', async (t) => {
   const db = seed(
-    'CREATE TABLE Note (id INTEGER PRIMARY KEY, body TEXT, owner TEXT)',
+    'CREATE TABLE Note (id TEXT PRIMARY KEY, body TEXT, owner TEXT)',
     [{ sql: 'INSERT INTO Note (id, body, owner) VALUES (?, ?, ?)', params: [1, 'a', 'alice'] }],
   );
   const b = await serve(t, db, ownedNote(), '/notes', bob);
@@ -108,7 +108,7 @@ test('read of an unowned (invisible) row is 404 under owner scope', async (t) =>
 });
 
 test('create inserts a row owned by the principal and 201s', async (t) => {
-  const db = seed('CREATE TABLE Note (id INTEGER PRIMARY KEY, body TEXT, owner TEXT)');
+  const db = seed('CREATE TABLE Note (id TEXT PRIMARY KEY, body TEXT, owner TEXT)');
   const a = await serve(t, db, ownedNote(), '/notes', alice);
   const res = await fetch(`${a.origin}/notes`, {
     method: 'POST',
@@ -124,7 +124,7 @@ test('create inserts a row owned by the principal and 201s', async (t) => {
 });
 
 test('create rejects a readonly field set by the client (400)', async (t) => {
-  const db = seed('CREATE TABLE Note (id INTEGER PRIMARY KEY, body TEXT, owner TEXT)');
+  const db = seed('CREATE TABLE Note (id TEXT PRIMARY KEY, body TEXT, owner TEXT)');
   const a = await serve(t, db, ownedNote(), '/notes', alice);
   const res = await fetch(`${a.origin}/notes`, {
     method: 'POST',
@@ -136,8 +136,8 @@ test('create rejects a readonly field set by the client (400)', async (t) => {
 
 test('public-read row is VISIBLE to a non-owner but not WRITABLE (capability axis)', async (t) => {
   const db = seed(
-    'CREATE TABLE Post (id INTEGER PRIMARY KEY, title TEXT, owner TEXT)',
-    [{ sql: 'INSERT INTO Post (id, title, owner) VALUES (?, ?, ?)', params: [1, 't', 'alice'] }],
+    'CREATE TABLE Post (id TEXT PRIMARY KEY, title TEXT, owner TEXT)',
+    [{ sql: 'INSERT INTO Post (id, title, owner) VALUES (?, ?, ?)', params: ['1', 't', 'alice'] }],
   );
   const b = await serve(t, db, publicPost(), '/posts', bob);
 
@@ -160,8 +160,8 @@ test('public-read row is VISIBLE to a non-owner but not WRITABLE (capability axi
 
 test('owner may update and remove a public-read row', async (t) => {
   const db = seed(
-    'CREATE TABLE Post (id INTEGER PRIMARY KEY, title TEXT, owner TEXT)',
-    [{ sql: 'INSERT INTO Post (id, title, owner) VALUES (?, ?, ?)', params: [1, 't', 'alice'] }],
+    'CREATE TABLE Post (id TEXT PRIMARY KEY, title TEXT, owner TEXT)',
+    [{ sql: 'INSERT INTO Post (id, title, owner) VALUES (?, ?, ?)', params: ['1', 't', 'alice'] }],
   );
   const a = await serve(t, db, publicPost(), '/posts', alice);
   const upd = await fetch(`${a.origin}/posts/1`, {
@@ -170,12 +170,12 @@ test('owner may update and remove a public-read row', async (t) => {
     body: JSON.stringify({ title: 'edited' }),
   });
   assert.equal(upd.status, 200);
-  const after = db.prepare('SELECT title FROM Post WHERE id = ?').get(1);
+  const after = db.prepare('SELECT title FROM Post WHERE id = ?').get('1');
   assert.equal(after.title, 'edited');
 
   const del = await fetch(`${a.origin}/posts/1`, { method: 'DELETE' });
   assert.equal(del.status, 204);
-  const gone = db.prepare('SELECT * FROM Post WHERE id = ?').get(1);
+  const gone = db.prepare('SELECT * FROM Post WHERE id = ?').get('1');
   assert.equal(gone, undefined);
 });
 

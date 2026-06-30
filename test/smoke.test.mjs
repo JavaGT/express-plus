@@ -28,7 +28,7 @@ test('doc entity resolves and DDL generates without error', () => {
 
   // Main table must have key columns
   const main = ddl[0];
-  assert.ok(main.includes('id INTEGER PRIMARY KEY'));
+  assert.ok(main.includes('id TEXT PRIMARY KEY'));
   assert.ok(main.includes('title TEXT'));
   assert.ok(main.includes('body')); // crdt text
 
@@ -47,10 +47,10 @@ test('app boots with Doc entity and serves the routing table', async () => {
   // framework-entities; Doc is the product entity; Comment is its child).
   for (const stmt of [
     `CREATE TABLE IF NOT EXISTS User (
-       id INTEGER PRIMARY KEY, username TEXT, password TEXT
+       id TEXT PRIMARY KEY, username TEXT, password TEXT
      )`,
     `CREATE TABLE IF NOT EXISTS Session (
-       id INTEGER PRIMARY KEY, token TEXT, userId TEXT, principalType TEXT,
+       id TEXT PRIMARY KEY, token TEXT, userId TEXT, principalType TEXT,
        principalId TEXT, kind TEXT, createdAt TEXT
      )`,
   ]) {
@@ -84,8 +84,8 @@ test('HTTP CRUD: create and read a Doc row through the server', async () => {
   const db = new DatabaseSync(':memory:');
 
   // Set up tables
-  db.exec(`CREATE TABLE IF NOT EXISTS User (id INTEGER PRIMARY KEY, username TEXT, password TEXT)`);
-  db.exec(`CREATE TABLE IF NOT EXISTS Session (id INTEGER PRIMARY KEY, token TEXT, userId TEXT, principalType TEXT, principalId TEXT, kind TEXT, createdAt TEXT)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS Session (id TEXT PRIMARY KEY, token TEXT, userId TEXT, principalType TEXT, principalId TEXT, kind TEXT, createdAt TEXT)`);
 
   const app = expressPlus({ db });
   app.mount('/docs', Doc);

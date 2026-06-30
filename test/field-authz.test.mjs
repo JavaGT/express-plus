@@ -7,7 +7,11 @@
 // also runs only in dispatch, never on the query API (DECISIONLOG #41).
 //
 // Tests 1-3 are the RED tests: they currently 201/200/204 because the access
-// function has never been evaluated. After implementation, they must 403.
+// function has never been evaluated. After implementation, a principal who
+// cannot even READ the doc is denied at the read-scope (404 — fail closed, no
+// existence leak, consistent with snapshot/events-since: tests 1+2); a principal
+// who CAN read but lacks the write/remove capability is denied by the field
+// `.can` body (403: test 3).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -50,38 +54,41 @@ async function createDoc(origin) {
 
 // ---- tests -----------------------------------------------------------------
 
-test('Non-owner cannot add a collaborator (403)', async () => {
+test('Non-owner (non-reader) cannot add a collaborator (404, denied at read-scope)', async () => {
   const db = setup();
   // Create doc as alice.
   const aliceApp = await startApp(db, '1');
   const doc = await createDoc(aliceApp.origin);
   aliceApp.app.httpServer.close();
 
-  // Try to add collaborator as bob.
+  // Try to add collaborator as bob. bob is neither owner nor collaborator, so
+  // the read-scope excludes the doc entirely → 404 (fail closed: bob must not
+  // even learn the doc exists), not 403 (which the pre-H1 bypass produced by
+  // loading the row unscoped then denying downstream).
   const bobApp = await startApp(db, '2');
   try {
     const added = await fetch(`${bobApp.origin}/docs/${doc.id}/shares`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ userId: 2, role: 'editor' }),
+      body: JSON.stringify({ userId: '2', role: 'editor' }),
     });
-    assert.equal(added.status, 403, 'non-owner adding collaborator must 403');
+    assert.equal(added.status, 404, 'non-reader must be denied at read-scope (404)');
   } finally {
     bobApp.app.httpServer.close();
   }
 });
 
-test('Non-owner cannot list shares (403)', async () => {
+test('Non-owner (non-reader) cannot list shares (404, denied at read-scope)', async () => {
   const db = setup();
   // Create doc as alice.
   const aliceApp = await startApp(db, '1');
   const doc = await createDoc(aliceApp.origin);
   aliceApp.app.httpServer.close();
 
-  // Try to list shares as bob.
+  // Try to list shares as bob (non-reader) → 404 at read-scope (fail closed).
   const bobApp = await startApp(db, '2');
   try {
     const listed = await fetch(`${bobApp.origin}/docs/${doc.id}/shares`);
-    assert.equal(listed.status, 403, 'non-owner listing shares must 403');
+    assert.equal(listed.status, 404, 'non-reader must be denied at read-scope (404)');
   } finally {
     bobApp.app.httpServer.close();
   }
@@ -94,7 +101,7 @@ test('Non-owner cannot remove a collaborator (403)', async () => {
   const doc = await createDoc(aliceApp.origin);
   const added = await fetch(`${aliceApp.origin}/docs/${doc.id}/shares`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ userId: 2, role: 'editor' }),
+    body: JSON.stringify({ userId: '2', role: 'editor' }),
   });
   assert.equal(added.status, 201, 'owner must be able to add collaborator');
   aliceApp.app.httpServer.close();
@@ -118,11 +125,11 @@ test('Owner can manage collaborators (regression guard)', async () => {
     // POST share bob → 201.
     const added = await fetch(`${origin}/docs/${doc.id}/shares`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ userId: 2, role: 'editor' }),
+      body: JSON.stringify({ userId: '2', role: 'editor' }),
     });
     assert.equal(added.status, 201);
     const addBody = await added.json();
-    assert.equal(addBody.sharedWith.id, 2);
+    assert.equal(addBody.sharedWith.id, '2');
     assert.equal(addBody.sharedWith.role, 'editor');
 
     // GET shares → 200 with bob.
@@ -130,7 +137,7 @@ test('Owner can manage collaborators (regression guard)', async () => {
     assert.equal(listed.status, 200);
     const shares = (await listed.json()).shares;
     assert.equal(shares.length, 1);
-    assert.equal(shares[0].id, 2);
+    assert.equal(shares[0].id, '2');
     assert.equal(shares[0].username, 'bob');
     assert.equal(shares[0].role, 'editor');
 
@@ -157,9 +164,9 @@ test('Trusted query API (no principal) bypasses field authz (mechanics)', async 
   // Insert a doc row directly — the trusted query API bypasses the create
   // dispatch, so owner must be set by raw SQL (the dispatch path owns the
   // principal→owner assignment; the query API is unscoped — DECISIONLOG #41).
-  db.prepare("INSERT INTO Doc (title, owner) VALUES ('Trusted Test', 1)").run();
+  db.prepare("INSERT INTO Doc (id, title, owner) VALUES (1, 'Trusted Test', 1)").run();
 
-  const doc = Doc.findById(1);
+  const doc = Doc.findById('1');
   assert.ok(doc, 'doc must exist');
 
   // set with no principal: field authz is bypassed (trusted query path).

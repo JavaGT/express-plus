@@ -66,6 +66,16 @@ export function ref(target, options = {}) {
   return makeDescriptor({ kind: 'value', type: 'ref', target, ...options });
 }
 
+// `blob()` — a value-kind TEXT holding a blob id (a reference into the
+// BlobStore). It is stored and validated as an ordinary text id; the `blob:
+// true` marker is what buildKernel reads to auto-wire the blob adopter — a
+// create/update carrying a blob id adopts that blob IN the dispatch commit
+// (spec #2). The marker rides the descriptor; one declared field feeds the
+// read/write/grant paths AND the adopter, not a parallel registration.
+export function blob(options = {}) {
+  return makeDescriptor({ kind: 'value', type: 'text', blob: true, ...options });
+}
+
 // `link({ tiers, tier, token })` — the framework's first STRUCTURED field: one
 // declared field owning several named STORED sub-cells plus declared CONFIG.
 // It is the `struct` KIND — a namespace of named value sub-cells, each a real

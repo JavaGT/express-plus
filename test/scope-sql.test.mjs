@@ -134,8 +134,8 @@ test('the lowered SQL + params execute against node:sqlite and select exactly th
     grant: () => [scope(({ is }) => is.owner()).can(ownerCan)],
   });
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE Note (id INTEGER PRIMARY KEY, body TEXT, owner TEXT)');
-  db.exec("INSERT INTO Note (body, owner) VALUES ('a','user-1'),('b','user-2'),('c','user-1')");
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, body TEXT, owner TEXT)');
+  db.exec("INSERT INTO Note (id, body, owner) VALUES (1,'a','user-1'),(2,'b','user-2'),(3,'c','user-1')");
 
   // bind the logical principalId param to a concrete principal
   const paramKey = Object.keys(Note.readScope.params).find((k) => k.endsWith('principalId'));
@@ -170,8 +170,8 @@ test('a boolean value literal (published.is(true)) binds to node:sqlite as 1 (no
   assert.equal(Post.readScope.params[litKey], 1, 'boolean literal baked as integer 1');
 
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE Post (id INTEGER PRIMARY KEY, title TEXT, published INTEGER, author TEXT)');
-  db.exec("INSERT INTO Post (title, published, author) VALUES ('hi',1,'alice'),('draft',0,'alice'),('bob-pub',1,'bob')");
+  db.exec('CREATE TABLE Post (id TEXT PRIMARY KEY, title TEXT, published INTEGER, author TEXT)');
+  db.exec("INSERT INTO Post (id, title, published, author) VALUES (1,'hi',1,'alice'),(2,'draft',0,'alice'),(3,'bob-pub',1,'bob')");
 
   const readFor = (prin) => {
     const bound = bindReadScope(Post.readScope, prin);

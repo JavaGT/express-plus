@@ -26,7 +26,10 @@
 import { resolveRouteGate, requireUser, isGate } from './route-gate.mjs';
 import { listen as serveListen } from './serve.mjs';
 import { setActiveDb } from './db.mjs';
-import { executeDDL } from './ddl.mjs';
+import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
+import { createBlobStore } from './blob-store.mjs';
+import path from 'node:path';
+import { mkdirSync } from 'node:fs';
 
 // The HTTP methods an imperative router verb maps to. `r.get/post/patch/delete`
 // build a hand-written route (a handler chain) rather than entity CRUD.
@@ -281,7 +284,7 @@ export function router(options = {}) {
 // (chainable). The server is exposed on `app.httpServer`. `options.principalOf`
 // overrides the request→principal source (default: anonymous, fail-closed). Both
 // chain.
-export default function expressPlus({ db } = {}) {
+export default function expressPlus({ db, blobs: blobOpts } = {}) {
   const app = makeMountable();
   // The DB handle is an app-level resource, supplied once at construction and
   // read by every transport (HTTP now, WS /events later) — not a per-transport
@@ -294,6 +297,17 @@ export default function expressPlus({ db } = {}) {
   // independently of any app) reaches this same handle with no db argument.
   // One shared db — the singular-system rule — not a second persistence path.
   if (db) setActiveDb(db);
+  // The blob store is an app-level resource, constructed when a db is engaged
+  // (blobs are adopted by dispatch commits — no db, no durable kernel, no
+  // blobs). The root defaults to a `.blobs` dir under cwd, durable across
+  // restarts (an adopted blob's final file must survive a reboot); `blobs:
+  // { root }` overrides. One store, reached by the /blobs upload route AND the
+  // kernel's blob adopter — not a second persistence path.
+  if (db) {
+    const root = blobOpts?.root ?? path.join(process.cwd(), '.blobs');
+    mkdirSync(root, { recursive: true });
+    app.blobs = createBlobStore({ root, db });
+  }
   app.port = undefined;
   app.httpServer = undefined;
 
@@ -308,6 +322,8 @@ export default function expressPlus({ db } = {}) {
   // each. A db handle must be set on the app.
   app.ddl = async () => {
     if (!app.db) throw new Error('cannot generate DDL — no db configured on the app');
+    // Framework tables come first — Log and Cursor are the durable event substrate.
+    executeFrameworkDDL(app.db);
     await app.resolveRoutes();
     const seen = new Set();
     for (const decl of app.declarations) {
