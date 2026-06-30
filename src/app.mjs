@@ -27,6 +27,7 @@ import { resolveRouteGate, requireUser, isGate } from './route-gate.mjs';
 import { listen as serveListen } from './serve.mjs';
 import { setActiveDb } from './db.mjs';
 import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
+import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -284,7 +285,7 @@ export function router(options = {}) {
 // (chainable). The server is exposed on `app.httpServer`. `options.principalOf`
 // overrides the request→principal source (default: anonymous, fail-closed). Both
 // chain.
-export default function expressPlus({ db, blobs: blobOpts, requireEnv = [] } = {}) {
+export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migrations = [] } = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
     const val = process.env[v];
@@ -318,6 +319,12 @@ export default function expressPlus({ db, blobs: blobOpts, requireEnv = [] } = {
   app.port = undefined;
   app.httpServer = undefined;
 
+  // Versioned schema migrations (eng-review spec #9, #17). Declared at
+  // construction; run at startup pre-traffic inside app.ddl() AFTER the entity
+  // tables exist, so each `up` may ALTER/backfill them. One migration txn =
+  // (DDL + meta-version bump) atomic; see src/migrations.mjs.
+  app.migrations = migrations;
+
   // Static accessor for the router constructor, so exemplars may write
   // `expressPlus.router({ mergeParams: true })` alongside the named import.
   // One constructor, two access paths — singular system.
@@ -342,6 +349,10 @@ export default function expressPlus({ db, blobs: blobOpts, requireEnv = [] } = {
         }
       }
     }
+    // Migrations run last, pre-traffic, after every entity table exists. Each
+    // is its own transaction (DDL + meta-version bump atomic). Runs only when
+    // declared — an app with no migrations is untouched (no _Migration table).
+    if (app.migrations?.length) runMigrations(app.db, app.migrations);
     return app;
   };
 
