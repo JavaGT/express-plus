@@ -35,6 +35,12 @@ export function dec(n) {
   return Object.freeze({ kind: 'dec', value: n });
 }
 
+// self — target-identity sentinel for in-place mutation (P6c-C).
+// When an effect declares `mutate: self`, the effect mutates the origin entity
+// itself (emits `:updated`), rather than creating a fresh row in a target entity.
+
+export const self = Object.freeze({ kind: 'self' });
+
 // ---- Compile-time validation ----
 
 // Validate an effect declaration at load time.
@@ -48,11 +54,12 @@ export function validateEffectDeclaration(effect, { triggerHandle, sourceEntityN
     );
   }
 
-  // mutate: must be a typed entity handle (e.g. Inbox)
-  if (!effect.mutate || typeof effect.mutate !== 'object' || !effect.mutate.name) {
+  // mutate: must be a typed entity handle (e.g. Inbox) OR the `self` sentinel
+  const isSelf = effect.mutate && typeof effect.mutate === 'object' && effect.mutate.kind === 'self';
+  if (!effect.mutate || typeof effect.mutate !== 'object' || (!effect.mutate.name && !isSelf)) {
     throw new Error(
       `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
-      `must have 'mutate' as a typed entity handle (e.g. mutate: Inbox).`,
+      `must have 'mutate' as a typed entity handle (e.g. mutate: Inbox) or the 'self' sentinel.`,
     );
   }
 
@@ -143,7 +150,12 @@ export function compileEntityEffects(entityRecord, allEntities) {
 
     if (validation.valid) {
       compiledEffects.set(triggerHandle, effect);
-      effectGraphEntry.add(validation.targetEntity.name);
+      // Self-target has no .name — guard to avoid adding undefined (the sentinel
+      // sidesteps cycle detection by producing no edge; a real self-edge would
+      // trip detectCrossEntityCycles at recStack.has(neighbor))
+      if (validation.targetEntity?.name) {
+        effectGraphEntry.add(validation.targetEntity.name);
+      }
     }
   }
 
@@ -156,7 +168,7 @@ export function compileEntityEffects(entityRecord, allEntities) {
 // ---- Runtime effect execution ----
 
 // Execute a single effect, creating target entity events.
-// Supports effects with mutate: TargetEntity and with: function/object.
+// Supports effects with mutate: TargetEntity/self and with: function/object.
 // Returns array of target events to apply through the in-txn path. Each target
 // event carries its EFFECT PRINCIPAL (gap #2: effects run as
 // `principal({type:'system', attributes:{effect:<sourceEntityName>}})`, NOT the
@@ -164,15 +176,24 @@ export function compileEntityEffects(entityRecord, allEntities) {
 // against the effect principal. The target's `admitsEffects` is the RUNTIME
 // admission gate (gap #3): a deny throws 403 → rolls back the origin (in-txn
 // atomic, ADR #6/#22).
-function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName }) {
+//
+// P6c-C: inc/dec operators perform read-modify-write using the in-txn db handle.
+// P6c-C: self target mutates the origin row (emits :updated) rather than creating fresh.
+function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName, db }) {
+  const isSelf = effect.mutate?.kind === 'self';
   const targetEntity = effect.mutate;
-  const targetName = targetEntity.name;
-  const targetId = randomUUID();
-  const scope = `${targetName}:${targetId}`;
 
   // Extract delta and origin from the trigger event
   const delta = triggerEvent.data || {};
-  const origin = { id: triggerEvent.scope.split(':')[1] };
+  const originId = triggerEvent.scope.split(':')[1];
+  const origin = { id: originId };
+
+  // Target resolution:
+  // - self: target is the origin entity/row (emits :updated, row exists)
+  // - plain mutate: fresh targetId (emits :created, row does not exist yet)
+  const targetName = isSelf ? sourceEntityName : targetEntity.name;
+  const targetId = isSelf ? originId : randomUUID();
+  const scope = `${targetName}:${targetId}`;
 
   // The effect principal — a bounded system principal tagged with its source
   // entity. NOT the triggering user, NOT a SYSTEM god-principal (ADR #6).
@@ -181,11 +202,10 @@ function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName }
     attributes: { effect: sourceEntityName },
   });
 
-  // Runtime admission handshake (gap #3). The target declares
-  // `admitsEffects: ({ effect, principal, delta, origin }) => boolean`. A deny
-  // throws 403 → the in-txn ROLLBACK undoes the ORIGIN (atomic). This is the
-  // runtime counterpart to the load-time verifyAdmissionHandshake.
-  if (typeof targetEntity.admitsEffects === 'function') {
+  // Runtime admission handshake (gap #3). For self-targets, this is still
+  // evaluated at runtime by postHandlerAuthorize in applyEventsToTxn; there is
+  // no load-time graph edge for self (guarded in compileEntityEffects).
+  if (!isSelf && typeof targetEntity.admitsEffects === 'function') {
     const admitted = targetEntity.admitsEffects({
       effect: sourceEntityName,
       principal: effectPrincipal,
@@ -205,22 +225,38 @@ function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName }
   if (typeof effect.with === 'function') {
     payload = effect.with({ delta, origin });
   } else if (typeof effect.with === 'object') {
+    // Operator-interpretation pass for inc/dec RMW (P6c-C)
+    const isOperatorMarker = (v) => v && typeof v === 'object' && (v.kind === 'inc' || v.kind === 'dec');
     payload = {};
     for (const [fieldName, value] of Object.entries(effect.with)) {
-      payload[fieldName] = value;
+      if (!isOperatorMarker(value)) {
+        payload[fieldName] = value;
+        continue;
+      }
+      // RMW: read current cell in-txn. For self, the origin row exists; for
+      // create, the freshly-minted targetId row does not exist yet → current
+      // defaults to 0 (SPEC §9.1: inc on create is degenerate literal, not an error).
+      const readRowId = isSelf ? originId : targetId;
+      const existing = readRowId && db
+        ? db.prepare(`SELECT ${fieldName} FROM ${targetName} WHERE id = ?`).get(readRowId)
+        : null;
+      const current = Number(existing?.[fieldName] ?? 0);
+      payload[fieldName] = value.kind === 'inc' ? current + value.value : current - value.value;
     }
   } else {
     payload = {};
   }
 
-  // Create CRUD events for the target entity (create only — inc/dec RMW +
-  // many() fan-out land with P6c, where ordered/log/list field strategies ship)
+  // Emit the event:
+  // - self: type is `{targetName}.updated`, carries originId
+  // - plain create: type is `{targetName}.created`, carries fresh targetId
+  const eventType = isSelf ? `${targetName}.updated` : `${targetName}.created`;
   return [{
-    type: `${targetName}.created`,
+    type: eventType,
     scope,
     data: { id: targetId, ...payload },
-    _effectSource: sourceEntityName, // the entity whose effect fired this event
-    _effectPrincipal: effectPrincipal, // gap #2: threaded into the in-txn recursion
+    _effectSource: sourceEntityName,
+    _effectPrincipal: effectPrincipal,
     _parentActionId: actionId,
   }];
 }
@@ -228,7 +264,8 @@ function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName }
 // Execute effects for a committed event.
 // Returns an array of target events to apply (not yet applied - caller does that via applyEventsToTxn).
 // depth/maxDepth: recursion tracking to cap runaway chains (ADR #22 runtime backstop).
-export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, depth = 0, maxDepth = 8 }) {
+// db: the in-txn database handle for RMW reads (P6c-C).
+export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, depth = 0, maxDepth = 8, db }) {
   // Check depth cap
   if (depth >= maxDepth) {
     throw new Error(
@@ -267,6 +304,7 @@ export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, 
       now,
       actionId,
       sourceEntityName: sourceEntity,
+      db,
     });
     allTargetEvents.push(...targetEvents);
   }

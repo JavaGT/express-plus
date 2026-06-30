@@ -116,3 +116,17 @@ naming, architecture, authorization, data, and live behavior.
   that's a leak — the framework owns it.
 - **Two default-on layers**: a route gate (auth required) and a row gate (grant).
   Both on by default; opt out explicitly, never implicitly.
+
+## Product stage
+
+- **This is a beta product.** Build for the long-term best version of the tool; the
+  shape may change as much as it needs to in order to get there. Do not default to
+  the short-term/least-effort path merely because the long-term move is more work —
+  the smallest change that *solves the problem* is the target, never the smallest
+  change that *preserves a path that will have to be torn out*.
+- **When unsure of the long-term-better move, consult an expensive model**
+  (`claude-opus-4-8-expensive` / `openai-gpt-5.5-expensive`) for *direction* before
+  defaulting to the minimal path — especially on architecture forks where a wrong
+  premise gets ratified by agreement. The consult reports a plan only; the lead
+  synthesizes it, verifies its load-bearing claims against the code, and owns the
+  decision. Use sparingly.

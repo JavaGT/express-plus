@@ -165,7 +165,7 @@ async function applyEventsToTxn(db, events, {
   // the SAME in-txn path (recursive, with depth tracking).
   if (effectsExecutor && depth < maxEffectDepth) {
     for (const ev of finalizedEvents) {
-      const effectEvents = effectsExecutor(ev, { now, actionId, depth: depth + 1, maxEffectDepth });
+      const effectEvents = effectsExecutor(ev, { now, actionId, depth: depth + 1, maxEffectDepth, db });
       if (effectEvents && effectEvents.length > 0) {
         // gap #2: effect target events run under their EFFECT PRINCIPAL
         // (`principal({type:'system', attributes:{effect:<sourceEntity>}})`,
@@ -231,9 +231,9 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
   // Build effects executor if effects registry is provided — fires effects in-txn
   // on committed CRUD events, re-entering through applyEventsToTxn.
   const effectsExecutor = effects
-    ? (event, { now, actionId, depth, maxDepth }) => {
+    ? (event, { now, actionId, depth, maxDepth, db }) => {
         const { executeEffectsForEvent } = _getEffectModule();
-        return executeEffectsForEvent(event, effects, { now, actionId, depth, maxDepth });
+        return executeEffectsForEvent(event, effects, { now, actionId, depth, maxDepth, db });
       }
     : null;
 

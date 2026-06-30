@@ -7,9 +7,9 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, text, ref, map, grant, read, write, subscribe,
+  entity, text, ref, map, number, grant, read, write, subscribe,
   generateDDL, generateFrameworkDDL, executeFrameworkDDL,
-  principal, inc, dec, action, event, createServer,
+  principal, inc, dec, self, action, event, createServer,
   createEffectContext, checkEffectDepth,
   buildEffectsRegistry, detectCrossEntityCycles,
 } from '../src/index.mjs';
@@ -287,4 +287,239 @@ test('effect principal has correct shape', () => {
 
   assert.equal(effectPrincipal.type, 'system');
   assert.deepEqual(effectPrincipal.attributes, { effect: 'SourceEntity' });
+});
+
+// ============================================================
+// P6c-C: RMW execution tests (inc/dec operators + self target)
+// ============================================================
+
+test('self inc: emits :updated with read-modify-write (seed=5, inc(2) → 7)', async () => {
+  const db = setupDb();
+
+  // Use Counter.created as trigger (fires once, not recursive like :updated → :updated)
+  const Counter = entity('Counter', {
+    fields: { count: number() },
+    grant: () => grant(read, write, subscribe),
+    admitsEffects: ({ effect, principal }) => true,
+    effects: {
+      ['Counter.created']: {
+        mutate: self,
+        with: { count: inc(2) },
+      },
+    },
+  });
+  for (const sql of generateDDL(Counter)) db.exec(sql);
+
+  const registry = buildEffectsRegistry([Counter]);
+  const server = createServer({
+    handlers: Counter.crudHandlers,
+    db,
+    projections: [Counter.projection],
+    effects: registry,
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+
+  // Create with count=5, self-effect inc(2) reads 5 and adds 2 → 7
+  await server.dispatch({
+    actionId: 'create-with-inc',
+    type: 'Counter.create',
+    payload: { count: 5 },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  const result = db.prepare('SELECT * FROM Counter').get();
+  assert.ok(result, 'counter row should exist');
+  assert.equal(result.count, 7, 'self inc effect should read 5 and add 2 → 7');
+});
+
+test('self dec: emits :updated with read-modify-write (seed=10, dec(3) → 7)', async () => {
+  const db = setupDb();
+
+  const Counter = entity('Counter', {
+    fields: { count: number() },
+    grant: () => grant(read, write, subscribe),
+    admitsEffects: ({ effect, principal }) => true,
+    effects: {
+      ['Counter.created']: {
+        mutate: self,
+        with: { count: dec(3) },
+      },
+    },
+  });
+  for (const sql of generateDDL(Counter)) db.exec(sql);
+
+  const registry = buildEffectsRegistry([Counter]);
+  const server = createServer({
+    handlers: Counter.crudHandlers,
+    db,
+    projections: [Counter.projection],
+    effects: registry,
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+
+  // Create with count=10, self-effect dec(3) reads 10 and subtracts 3 → 7
+  await server.dispatch({
+    actionId: 'create-with-dec',
+    type: 'Counter.create',
+    payload: { count: 10 },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  const result = db.prepare('SELECT * FROM Counter').get();
+  assert.ok(result, 'counter row should exist');
+  assert.equal(result.count, 7, 'self dec effect should read 10 and subtract 3 → 7');
+});
+
+test('inc-on-create (non-self): degenerate literal (0+4=4), emits :created', async () => {
+  const db = setupDb();
+
+  const Target = entity('Target', {
+    fields: { count: number() },
+    grant: () => grant(read, write, subscribe),
+    admitsEffects: ({ effect, principal }) => true,
+  });
+  for (const sql of generateDDL(Target)) db.exec(sql);
+
+  const Source = entity('Source', {
+    fields: { name: text() },
+    grant: () => grant(read, write, subscribe),
+    effects: {
+      ['Source.created']: {
+        mutate: Target,
+        with: { count: inc(4) },
+      },
+    },
+  });
+  for (const sql of generateDDL(Source)) db.exec(sql);
+
+  const registry = buildEffectsRegistry([Source, Target]);
+  const server = createServer({
+    handlers: Source.crudHandlers,
+    db,
+    projections: [Source.projection, Target.projection],
+    effects: registry,
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+
+  // Create source (triggers Target creation with inc(4))
+  await server.dispatch({
+    actionId: 'create-src',
+    type: 'Source.create',
+    payload: { name: 'test' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  // Verify: Target was created with count=4 (0+4, degenerate literal)
+  const targets = db.prepare('SELECT * FROM Target').all();
+  assert.equal(targets.length, 1, 'effect should create one Target row');
+  assert.equal(targets[0].count, 4, 'inc on create reads 0 (row does not exist) + 4 → 4');
+});
+
+test('depth cap: self-recursion bounded (Counter.updated → Counter.updated)', async () => {
+  const db = setupDb();
+
+  // Effect: every Counter.updated triggers another Counter.updated via self
+  // This would recurse forever without the depth cap
+  const Counter = entity('Counter', {
+    fields: { count: number(), phase: text() },
+    grant: () => grant(read, write, subscribe),
+    admitsEffects: ({ effect, principal }) => true,
+    effects: {
+      ['Counter.updated']: {
+        mutate: self,
+        with: { count: inc(1), phase: 'ticking' },
+      },
+    },
+  });
+  for (const sql of generateDDL(Counter)) db.exec(sql);
+
+  const registry = buildEffectsRegistry([Counter]);
+  const server = createServer({
+    handlers: Counter.crudHandlers,
+    db,
+    projections: [Counter.projection],
+    effects: registry,
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+
+  // Seed a row
+  await server.dispatch({
+    actionId: 'seed-rec',
+    type: 'Counter.create',
+    payload: { count: 0, phase: 'initial' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  const seeded = db.prepare('SELECT * FROM Counter').get();
+  const originId = seeded.id;
+
+  // This should NOT hang - depth cap should fire. Default maxDepth=8, each
+  // self-effect fires on :updated, creating a chain. After depth cap, throws.
+  // The test asserts it throws the depth-cap error rather than hanging.
+  let threw = false;
+  let errorMsg = '';
+  try {
+    await server.dispatch({
+      actionId: 'trigger-rec',
+      type: 'Counter.update',
+      payload: { id: originId, count: 0, phase: 'start' },
+      principal: principal({ type: 'user', id: 'u1' }),
+    });
+  } catch (err) {
+    threw = true;
+    errorMsg = err.message;
+  }
+
+  // The depth cap should fire before infinite recursion
+  assert.ok(threw, 'should throw depth-cap error, not hang');
+  assert.ok(/depth limit exceeded/i.test(errorMsg), `error should mention depth cap: ${errorMsg}`);
+});
+
+test('db threaded through effects executor: RMW read uses in-txn db handle', async () => {
+  // This test documents that `db` is threaded through the effects executor.
+  // Without db, the RMW select would fail or return stale data.
+  // The self inc/dec tests above already exercise this - this is a documentation
+  // test confirming the mechanism by asserting RMW works on self-target.
+
+  const db = setupDb();
+
+  const Counter = entity('Counter', {
+    fields: { count: number() },
+    grant: () => grant(read, write, subscribe),
+    admitsEffects: ({ effect, principal }) => true,
+    effects: {
+      ['Counter.created']: {
+        mutate: self,
+        with: { count: inc(100) }, // RMW: reads origin row's count, adds 100
+      },
+    },
+  });
+  for (const sql of generateDDL(Counter)) db.exec(sql);
+
+  const registry = buildEffectsRegistry([Counter]);
+  const server = createServer({
+    handlers: Counter.crudHandlers,
+    db,
+    projections: [Counter.projection],
+    effects: registry,
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+
+  // Create with count=50. Self-effect reads 50, inc(100) → 150.
+  // If db were NOT threaded, the RMW select would fail or use a different handle.
+  await server.dispatch({
+    actionId: 'test-db-threaded',
+    type: 'Counter.create',
+    payload: { count: 50 },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  const result = db.prepare('SELECT * FROM Counter').get();
+  assert.ok(result, 'counter should exist');
+  assert.equal(result.count, 150, 'db threading enables RMW: 50 (from create) + 100 → 150');
 });
