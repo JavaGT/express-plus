@@ -59,6 +59,36 @@ const VERB_FROM_EVENT = Object.freeze({ created: 'create', updated: 'update', re
 // Executes effects (if provided) and applies their target events recursively.
 // All inside the caller's open transaction — does NOT begin/commit.
 // Returns the finalized events array.
+// ADR #24 — `now` resolves at COMMIT, never by the handler calling `new Date()`.
+// A handler emits this token where it wants a timestamp; applyEventsToTxn
+// substitutes the commit-time ISO for every occurrence (deep walk) before the
+// row hits _Log. The token itself never persists. Handlers stay pure of the
+// clock (consult #24).
+export const NOW = Symbol('expressPlus.now');
+
+// Deep-walk an event's `data`, replacing every NOW token with the commit-time
+// `now` ISO string. Returns a fresh structure (does not mutate the handler's
+// emitted object — which may be frozen). Only recurses into PLAIN objects and
+// arrays — a Date, Buffer, or class instance passes through untouched (a Date's
+// ISO form comes from its toJSON at serialization; flattening it to {} would
+// lose the value).
+function isPlainObject(v) {
+  if (!v || typeof v !== 'object') return false;
+  const proto = Object.getPrototypeOf(v);
+  return proto === Object.prototype || proto === null;
+}
+
+function resolveNowTokens(value, now) {
+  if (value === NOW) return now;
+  if (Array.isArray(value)) return value.map((v) => resolveNowTokens(v, now));
+  if (isPlainObject(value)) {
+    const out = {};
+    for (const k of Object.keys(value)) out[k] = resolveNowTokens(value[k], now);
+    return out;
+  }
+  return value;
+}
+
 async function applyEventsToTxn(db, events, {
   now,
   actionId,
@@ -73,14 +103,17 @@ async function applyEventsToTxn(db, events, {
 } = {}) {
   const finalizedEvents = [];
 
-  // Append events to _Log with per-scope sequence numbers
+  // Append events to _Log with per-scope sequence numbers. NOW tokens in the
+  // event data are resolved to the commit-time ISO here (ADR #24) — before
+  // serialization, so the token never reaches _Log.
   for (const e of events) {
     const scope = e.scope;
     const seq = nextSeq(scope);
+    const data = resolveNowTokens(e.data ?? {}, now);
     db.prepare(
       'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
-    ).run(scope, seq, e.type, JSON.stringify(e.data ?? {}), actionId, now);
-    finalizedEvents.push(Object.freeze({ ...e, seq, actionId, committedAt: now }));
+    ).run(scope, seq, e.type, JSON.stringify(data), actionId, now);
+    finalizedEvents.push(Object.freeze({ ...e, data, seq, actionId, committedAt: now }));
   }
 
   // Projection consumers — materialize entity rows from events

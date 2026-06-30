@@ -15,7 +15,7 @@ export { User, Session, Inbox } from './auth-entities.mjs';
 export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope } from './scope-sql.mjs';
 export { principal, anonymous, UnknownPrincipalTypeError } from './principal.mjs';
 export { requireUser, allowAnonymous, open, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
-export { action, event, createServer, createClient } from './pipeline.mjs';
+export { action, event, createServer, createClient, NOW } from './pipeline.mjs';
 export { createLiveServer } from './live.mjs';
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
 export { resolveTemplate, matchExtension, isSafePath } from './views.mjs';
