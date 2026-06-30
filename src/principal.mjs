@@ -50,3 +50,32 @@ export function principal({ type, id = null, attributes = {} } = {}) {
 // The canonical unauthenticated principal. Every anonymous request shares this
 // frozen value; there is nothing per-request to vary (it has no identity).
 export const anonymous = principal({ type: 'anonymous', id: null });
+
+// Mint a bounded system principal tagged with a source identifier. Used by the
+// scheduler/tick analogue to re-enter dispatch with a traceable system identity.
+// Fail-closed: source must be a non-empty string (Error otherwise).
+// NOTE: This uses `attributes.source` — distinct from effects which use
+// `attributes.effect` (effect-compiler.mjs:282) to avoid breaking effect tests.
+export function principalFrom(source) {
+  if (typeof source !== 'string' || source === '') {
+    throw new Error('principalFrom(source): source must be a non-empty string');
+  }
+  return principal({ type: 'system', attributes: { source } });
+}
+
+// A check-expression helper that admits a principal whose `attributes.source`
+// matches the given source. Returns a function: ({principal}) => boolean.
+// Fail-closed at construction (source must be non-empty string) AND at runtime:
+// returns false for nullish principal, non-system principal, or mismatched source.
+// Intended use inside admitsEffects:
+//   admitsEffects: ({principal}) => effectSource('Blog.publish')({principal})
+export function effectSource(source) {
+  if (typeof source !== 'string' || source === '') {
+    throw new Error('effectSource(source): source must be a non-empty string');
+  }
+  return ({ principal }) => {
+    if (!principal || typeof principal !== 'object') return false;
+    if (principal.type !== 'system') return false;
+    return principal.attributes?.source === source;
+  };
+}

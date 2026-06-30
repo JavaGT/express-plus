@@ -13,7 +13,7 @@ export { scope } from './scope.mjs';
 export { entity } from './entity.mjs';
 export { User, Session, Inbox } from './auth-entities.mjs';
 export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope } from './scope-sql.mjs';
-export { principal, anonymous, UnknownPrincipalTypeError } from './principal.mjs';
+export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectSource } from './principal.mjs';
 export { requireUser, allowAnonymous, open, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient, NOW } from './pipeline.mjs';
 export { createLiveServer } from './live.mjs';
