@@ -14,20 +14,40 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { entity, text, list, generateDDL } from '../src/index.mjs';
+
 import { setActiveDb } from '../src/db.mjs';
+import {
+  entity,
+  text,
+  list,
+  generateDDL,
+  createServer,
+  executeFrameworkDDL,
+} from '../src/index.mjs';
 
 const Items = entity('Items', {
   fields: { parts: list(text()) },
   grant: () => [],
 });
 
-function setup() {
+async function setup() {
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
+  executeFrameworkDDL(db);
   for (const sql of generateDDL(Items)) db.exec(sql);
   db.prepare("INSERT INTO Items (id) VALUES ('r1')").run();
-  return db;
+  const server = await createServer({
+    db,
+    handlers: Items.crudHandlers,
+    projections: [Items.projection],
+    authorize: async () => true,
+    postHandlerAuthorize: async () => true,
+  });
+  return { db, server };
+}
+
+function rowWith(server, id) {
+  return Items.hydrate({ id }, null, server.dispatch);
 }
 
 function keyOf(db, id) {
@@ -37,9 +57,10 @@ function keyOf(db, id) {
   return row?.key;
 }
 
-test('insertAt mints a fractional key between neighbors — sibling keys unchanged', async () => {
-  const db = setup();
-  const row = Items.getOrFail('r1');
+test('insertAt mints a fractional key between neighbors — sibling keys unchanged', async (t) => {
+  const { db, server } = await setup();
+  t.after(() => db.close());
+  const row = rowWith(server, 'r1');
   const aId = await row.parts.insertAt(0, 'a');
   const cId = await row.parts.insertAt(1, 'c');
   const aKey = keyOf(db, aId);
@@ -55,9 +76,10 @@ test('insertAt mints a fractional key between neighbors — sibling keys unchang
   assert.ok(aKey < bKey && bKey < cKey, 'b keyed strictly between its neighbors');
 });
 
-test('move(id, i) re-keys only the moved element; unaffected siblings keep their keys', async () => {
-  const db = setup();
-  const row = Items.getOrFail('r1');
+test('move(id, i) re-keys only the moved element; unaffected siblings keep their keys', async (t) => {
+  const { db, server } = await setup();
+  t.after(() => db.close());
+  const row = rowWith(server, 'r1');
   const aId = await row.parts.insertAt(0, 'a');
   const bId = await row.parts.insertAt(1, 'b');
   const cId = await row.parts.insertAt(2, 'c');
@@ -74,9 +96,10 @@ test('move(id, i) re-keys only the moved element; unaffected siblings keep their
   assert.ok(keyOf(db, bId) > cKey, 'b now sorts after c');
 });
 
-test('reorder([ids]) reorders to the given sequence — sugar over per-element re-key', async () => {
-  const db = setup();
-  const row = Items.getOrFail('r1');
+test('reorder([ids]) reorders to the given sequence — sugar over per-element re-key', async (t) => {
+  const { db, server } = await setup();
+  t.after(() => db.close());
+  const row = rowWith(server, 'r1');
   const aId = await row.parts.insertAt(0, 'a');
   const bId = await row.parts.insertAt(1, 'b');
   const cId = await row.parts.insertAt(2, 'c');
@@ -91,9 +114,10 @@ test('reorder([ids]) reorders to the given sequence — sugar over per-element r
   assert.deepEqual(ids, [aId, bId, cId].map(String).sort());
 });
 
-test('remove(id) deletes one element without disturbing the others', async () => {
-  const db = setup();
-  const row = Items.getOrFail('r1');
+test('remove(id) deletes one element without disturbing the others', async (t) => {
+  const { db, server } = await setup();
+  t.after(() => db.close());
+  const row = rowWith(server, 'r1');
   const aId = await row.parts.insertAt(0, 'a');
   const bId = await row.parts.insertAt(1, 'b');
   const cId = await row.parts.insertAt(2, 'c');

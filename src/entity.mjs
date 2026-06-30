@@ -402,8 +402,8 @@ export function entity(name, declaration = {}) {
     };
   };
 
-  // makeOrderedListHandle(entityName, fieldName, row, principal) — returns a
-  // write handle for an `ordered`/`list` field over a fractional-index
+  // makeOrderedListHandle(entityName, fieldName, row, principal, dispatch) —
+  // returns a write handle for an `ordered`/`list` field over a fractional-index
   // side-table (owner, id, key, item). Order is derived by ORDER BY key, so a
   // between-insert or a move re-keys ONLY the affected row — siblings keep their
   // keys (no renumber, the hallmark of fractional indexing). `insertAt` mints a
@@ -412,7 +412,10 @@ export function entity(name, declaration = {}) {
   // re-keys the lot to an evenly-spaced sequence (sugar over move). The element
   // value is stored as a JSON `item` cell (A2: scalar items; FK hydration of a
   // ref `of` is a later refinement).
-  const makeOrderedListHandle = (entityName, fieldName, row, principal) => {
+  // Mutations re-enter dispatch as `<Entity>.<field>.insert`/`.move`/`.reorder`/
+  // `.remove`; the projection applies the event to the side-table (one
+  // reconciliation path — no direct writes from the handle).
+  const makeOrderedListHandle = (entityName, fieldName, row, principal, dispatch) => {
     const table = membershipTable(entityName, fieldName);
     const ownerCol = membershipOwnerCol(entityName);
     const oid = String(row.id);
@@ -433,48 +436,78 @@ export function entity(name, declaration = {}) {
       return (low + high) / 2;
     };
 
+    const requireDispatch = () => {
+      if (!dispatch) {
+        throw new Error(
+          `cannot mutate ${entityName}.${fieldName} without a dispatch ref ` +
+            `(hydrate with dispatch inside a handler/route)`,
+        );
+      }
+    };
+
     return {
       insertAt: async (index, value) => {
         if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
           throw { status: 403, message: 'forbidden' };
         }
-        const db = getActiveDb();
         const rows = rowsOrdered();
         const low = index > 0 ? rows[index - 1].key : null;
         const high = index < rows.length ? rows[index].key : null;
-        const id = randomUUID();
-        db.prepare(`INSERT INTO ${table} (${ownerCol}, id, key, item) VALUES (:owner, :id, :key, :item)`)
-          .run({ owner: oid, id, key: keyBetween(low, high), item: JSON.stringify(value) });
-        return id;
+        const key = keyBetween(low, high);
+        requireDispatch();
+        const result = await dispatch({
+          actionId: randomUUID(),
+          type: `${entityName}.${fieldName}.insert`,
+          payload: { owner: oid, key, value },
+          principal,
+        });
+        if (!result.granted) throw { status: 403, message: 'forbidden' };
+        return result.events?.find((e) => e.type === `${entityName}.${fieldName}.inserted`)?.data?.id;
       },
       move: async (id, index) => {
         if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
           throw { status: 403, message: 'forbidden' };
         }
-        const db = getActiveDb();
         const sid = String(id);
         const others = rowsOrdered().filter((r) => r.id !== sid);
         const low = index > 0 ? others[index - 1].key : null;
         const high = index < others.length ? others[index].key : null;
-        db.prepare(`UPDATE ${table} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`)
-          .run({ owner: oid, id: sid, key: keyBetween(low, high) });
+        const key = keyBetween(low, high);
+        requireDispatch();
+        const result = await dispatch({
+          actionId: randomUUID(),
+          type: `${entityName}.${fieldName}.move`,
+          payload: { owner: oid, id: sid, key },
+          principal,
+        });
+        if (!result.granted) throw { status: 403, message: 'forbidden' };
       },
       reorder: async (ids) => {
         if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
           throw { status: 403, message: 'forbidden' };
         }
-        const db = getActiveDb();
-        const stmt = db.prepare(`UPDATE ${table} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`);
-        // evenly-spaced keys so ORDER BY key matches the requested id sequence
-        ids.forEach((id, i) => stmt.run({ owner: oid, id: String(id), key: i }));
+        const entries = ids.map((entryId, i) => ({ id: String(entryId), key: i }));
+        requireDispatch();
+        const result = await dispatch({
+          actionId: randomUUID(),
+          type: `${entityName}.${fieldName}.reorder`,
+          payload: { owner: oid, entries },
+          principal,
+        });
+        if (!result.granted) throw { status: 403, message: 'forbidden' };
       },
       remove: async (id) => {
         if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
           throw { status: 403, message: 'forbidden' };
         }
-        const db = getActiveDb();
-        db.prepare(`DELETE FROM ${table} WHERE ${ownerCol} = :owner AND id = :id`)
-          .run({ owner: oid, id: String(id) });
+        requireDispatch();
+        const result = await dispatch({
+          actionId: randomUUID(),
+          type: `${entityName}.${fieldName}.remove`,
+          payload: { owner: oid, id: String(id) },
+          principal,
+        });
+        if (!result.granted) throw { status: 403, message: 'forbidden' };
       },
       has: (id) =>
         getActiveDb()
@@ -577,7 +610,7 @@ export function entity(name, declaration = {}) {
       row[fieldName] = makeMapHandle(name, fieldName, row, principal, dispatch);
     }
     for (const [fieldName] of orderedFields) {
-      row[fieldName] = makeOrderedListHandle(name, fieldName, row, principal);
+      row[fieldName] = makeOrderedListHandle(name, fieldName, row, principal, dispatch);
     }
     for (const [fieldName] of logFields) {
       row[fieldName] = makeLogHandle(name, fieldName, row, principal, dispatch);
@@ -740,6 +773,13 @@ export function entity(name, declaration = {}) {
         `${name}.${fieldName}.roleChanged`,
         `${name}.${fieldName}.removed`,
       ]),
+      // each ordered field's store events → side-table INSERT/UPDATE/DELETE
+      ...orderedFields.flatMap(([fieldName]) => [
+        `${name}.${fieldName}.inserted`,
+        `${name}.${fieldName}.moved`,
+        `${name}.${fieldName}.reordered`,
+        `${name}.${fieldName}.removed`,
+      ]),
     ],
     apply: (event, db) => {
       const table = name;
@@ -766,6 +806,35 @@ export function entity(name, declaration = {}) {
         if (event.type === `${name}.${mapField}.removed`) {
           db.prepare(`DELETE FROM ${sideTable} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
             .run({ owner: String(event.data?.owner), member: String(event.data?.member) });
+          return;
+        }
+      }
+      // ordered field events: each ordered field's store events → side-table
+      // INSERT/UPDATE/DELETE. The handle computes fractional keys and dispatches;
+      // the projection applies the event to the side-table (one reconciliation path).
+      for (const [ordField] of orderedFields) {
+        const sideTable = membershipTable(name, ordField);
+        const ownerCol = membershipOwnerCol(name);
+        if (event.type === `${name}.${ordField}.inserted`) {
+          db.prepare(`INSERT INTO ${sideTable} (${ownerCol}, id, key, item) VALUES (:owner, :id, :key, :item)`)
+            .run({ owner: String(event.data?.owner), id: event.data?.id, key: event.data?.key, item: JSON.stringify(event.data?.value) });
+          return;
+        }
+        if (event.type === `${name}.${ordField}.moved`) {
+          db.prepare(`UPDATE ${sideTable} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`)
+            .run({ owner: String(event.data?.owner), id: event.data?.id, key: event.data?.key });
+          return;
+        }
+        if (event.type === `${name}.${ordField}.reordered`) {
+          const stmt = db.prepare(`UPDATE ${sideTable} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`);
+          for (const e of (event.data?.entries ?? [])) {
+            stmt.run({ owner: String(event.data?.owner), id: e.id, key: e.key });
+          }
+          return;
+        }
+        if (event.type === `${name}.${ordField}.removed`) {
+          db.prepare(`DELETE FROM ${sideTable} WHERE ${ownerCol} = :owner AND id = :id`)
+            .run({ owner: String(event.data?.owner), id: event.data?.id });
           return;
         }
       }
@@ -874,6 +943,11 @@ export function entity(name, declaration = {}) {
     // already decided which action to dispatch (add vs roleChanged vs no-op),
     // so the handler trusts that + emits (consult #19, UNIT 2).
     ...mapMutateHandlers(name, fields, mapFields),
+    // ordered mutations: `<Entity>.<field>.insert`/`.move`/`.reorder`/`.remove` →
+    // emit `:inserted`/`:moved`/`:reordered`/`:removed`. The handle computes the
+    // fractional key(s) and dispatches the action; the handler validates payload
+    // (fail closed) and emits (consult #19, UNIT 3).
+    ...orderedMutateHandlers(name, fields, orderedFields),
   });
 
   function ownerFieldOf(entity) {
@@ -963,6 +1037,71 @@ export function entity(name, declaration = {}) {
           type: `${entityName}.${mapField}.removed`,
           scope: `${entityName}:${owner}`,
           data: { owner, member },
+        }];
+      };
+    }
+    return handlers;
+  }
+
+  // Ordered field mutation handlers. An ordered `.insertAt`/`.move`/`.reorder`/
+  // `.remove` is a committed pipeline action (consult #19, UNIT 3): the handle
+  // computes the key (fractional-index math) and dispatches
+  // `${entityName}.${field}.insert`/`.move`/`.reorder`/`.remove`. The handler
+  // validates payload (fail closed) and emits the corresponding `:inserted`/
+  // `:moved`/`:reordered`/`:removed` event; the projection applies the event to
+  // the side-table. Spread into crudHandlers so a dispatched ordered action
+  // lands in one handler map alongside create/update/remove/log-append/map.
+  function orderedMutateHandlers(entityName, fields, orderedFieldEntries) {
+    const handlers = {};
+    for (const [ordField] of orderedFieldEntries) {
+      const requireOwner = (payload) => {
+        const { owner } = payload ?? {};
+        if (owner == null) {
+          throw Object.assign(new Error(`${entityName}.${ordField} action requires an owner`), { status: 400 });
+        }
+        return String(owner);
+      };
+      handlers[`${entityName}.${ordField}.insert`] = ({ payload }) => {
+        const owner = requireOwner(payload);
+        if (payload.key == null) {
+          throw Object.assign(new Error(`${entityName}.${ordField}.insert requires a key`), { status: 400 });
+        }
+        const id = randomUUID();
+        return [{
+          type: `${entityName}.${ordField}.inserted`,
+          scope: `${entityName}:${owner}`,
+          data: { owner, id, key: payload.key, value: payload.value },
+        }];
+      };
+      handlers[`${entityName}.${ordField}.move`] = ({ payload }) => {
+        const owner = requireOwner(payload);
+        if (payload.id == null || payload.key == null) {
+          throw Object.assign(new Error(`${entityName}.${ordField}.move requires an id + key`), { status: 400 });
+        }
+        return [{
+          type: `${entityName}.${ordField}.moved`,
+          scope: `${entityName}:${owner}`,
+          data: { owner, id: String(payload.id), key: payload.key },
+        }];
+      };
+      handlers[`${entityName}.${ordField}.reorder`] = ({ payload }) => {
+        const owner = requireOwner(payload);
+        const entries = Array.isArray(payload.entries) ? payload.entries : [];
+        return [{
+          type: `${entityName}.${ordField}.reordered`,
+          scope: `${entityName}:${owner}`,
+          data: { owner, entries: entries.map((e) => ({ id: String(e.id), key: e.key })) },
+        }];
+      };
+      handlers[`${entityName}.${ordField}.remove`] = ({ payload }) => {
+        const owner = requireOwner(payload);
+        if (payload.id == null) {
+          throw Object.assign(new Error(`${entityName}.${ordField}.remove requires an id`), { status: 400 });
+        }
+        return [{
+          type: `${entityName}.${ordField}.removed`,
+          scope: `${entityName}:${owner}`,
+          data: { owner, id: String(payload.id) },
         }];
       };
     }

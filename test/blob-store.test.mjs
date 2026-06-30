@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
-import { rmSync, existsSync } from 'node:fs';
+import { rmSync, existsSync, openSync, closeSync } from 'node:fs';
 import path from 'node:path';
 
 import { generateFrameworkDDL } from '../src/ddl.mjs';
@@ -178,4 +178,49 @@ test('reaper refcount sweep', async () => {
   assert.ok(store.stat(refId), 'referenced row exists');
   
   rmSync(store.pathFor(refId), { force: true });
+});
+
+test('readRange closes the file descriptor (no leak)', async () => {
+  // Regression: readRange opened with openSync but never closeSync'd (a comment
+  // claimed "GC handles it" — sync fds are raw OS fds Node does NOT GC). A
+  // leaked fd blocks reuse of its number, so the next openSync returns a HIGHER
+  // fd. Detect deterministically (ulimit-independent): consecutive open/close
+  // cycles return the SAME fd unless readRange leaked one in between.
+  const { db, store } = await setupBlobStore();
+  const { id } = store.upload({ bytes: Buffer.from('0123456789') });
+  db.exec('BEGIN IMMEDIATE'); store.adopt(db, id); db.exec('COMMIT'); store.finalize(id);
+
+  const p = store.pathFor(id);
+  const fd0 = openSync(p, 'r'); closeSync(fd0);
+
+  store.readRange(id, [0, 3]); // must open+close internally
+  const fd1 = openSync(p, 'r'); closeSync(fd1);
+  assert.equal(fd1, fd0, `readRange leaked an fd (fd0=${fd0} fd1=${fd1})`);
+
+  store.readRange(id, [3, 6]);
+  const fd2 = openSync(p, 'r'); closeSync(fd2);
+  assert.equal(fd2, fd0, `second readRange leaked an fd (fd0=${fd0} fd2=${fd2})`);
+
+  rmSync(p, { force: true });
+});
+
+test('readRange rejects bogus ranges (negative / non-finite / inverted)', async () => {
+  const { db, store } = await setupBlobStore();
+  const { id } = store.upload({ bytes: Buffer.from('0123456789') });
+  db.exec('BEGIN IMMEDIATE'); store.adopt(db, id); db.exec('COMMIT'); store.finalize(id);
+
+  // Negative start must fail cleanly (not reach readSync with a negative position).
+  assert.throws(() => store.readRange(id, [-1, 5]), /invalid blob range/);
+  // Inverted range must fail cleanly (not reach Buffer.alloc with a negative length).
+  assert.throws(() => store.readRange(id, [5, 2]), /invalid blob range/);
+  // Negative end.
+  assert.throws(() => store.readRange(id, [0, -5]), /invalid blob range/);
+  // Non-finite.
+  assert.throws(() => store.readRange(id, [NaN, 5]), /invalid blob range/);
+  assert.throws(() => store.readRange(id, [0, NaN]), /invalid blob range/);
+
+  // Sanity: a valid empty range returns an empty buffer (no throw).
+  assert.deepStrictEqual(store.readRange(id, [5, 5]), Buffer.alloc(0));
+
+  rmSync(store.pathFor(id), { force: true });
 });

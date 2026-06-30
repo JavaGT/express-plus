@@ -204,3 +204,67 @@ test('createClient idempotently skips duplicates and folds the next event once',
   assert.equal(redup.duplicate, true);
   assert.equal(client.state('Note:n1').body, 'folded', 'a duplicate did not re-fold');
 });
+
+test('snapshot row + cursor are read atomically — no split pair across the auth await', async (t) => {
+  // A read `.can` that parks on a controllable promise, so a dispatch can COMMIT
+  // during the auth await. The (row, seq) pair returned must be a consistent
+  // snapshot: the cursor must match the row that was read, not advance past it
+  // while the auth yields (eng-review Tier-1 #2 — row + cursor in one read).
+  let releaseRead;
+  let parkOnce = true;
+  const yieldingNote = entity('Note', {
+    fields: { body: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+    grant: () => [
+      scope(({ is }) => is.owner()).can(async ({ is }) => {
+        // Park only on the FIRST .can call (the snapshot read). The commit below
+        // rides on the write path, whose dispatch auth is `authorize: () => true`
+        // (the in-txn postHandlerAuthorize does not re-enter this `.can`), so it
+        // is not blocked by this gate.
+        if (parkOnce) {
+          parkOnce = false;
+          await new Promise((r) => { releaseRead = r; });
+        }
+        return (await is.owner()) ? grant(read, write, subscribe) : grant(read);
+      }),
+    ],
+  });
+  const db = new DatabaseSync(':memory:');
+  const app = expressPlus({ db });
+  app.mount('/notes', yieldingNote);
+  await app.ddl();
+  app.listen(0, { principalOf: () => ({ id: 'u1' }) });
+  await app.ready;
+  const base = `http://127.0.0.1:${app.httpServer.address().port}`;
+  t.after(() => { app.httpServer.close(); db.close(); });
+
+  // Seed n1 at v0 (trusted insert → scope seq 0, no _Log entry).
+  app.entities.get('Note').insert({ id: 'n1', body: 'v0', owner: 'u1' });
+
+  // Start the snapshot — it reads the row (body 'v0') then parks inside `.can`.
+  const snapP = fetch(`${base}/snapshot/Note/n1`).then((r) => r.json());
+  // Wait until the snapshot's `.can` has parked (releaseRead is set).
+  for (let i = 0; i < 1000 && !releaseRead; i++) {
+    await new Promise((r) => setImmediate(r));
+  }
+  assert.ok(releaseRead, 'the snapshot read parked inside the auth .can');
+
+  // Commit an update DURING the auth await: v0 → v1, advancing n1's cursor 0 → 1.
+  // (update is a partial merge — owner is preserved, the row stays in scope.)
+  await app.writeQueue.run(() => app.kernel.dispatch({
+    actionId: 'atomic-split-test-update',
+    type: 'Note.update',
+    payload: { id: 'n1', body: 'v1' },
+    principal: { id: 'u1' },
+  }));
+
+  // Release the parked auth — the snapshot resumes and ( bug: reads the cursor
+  // AFTER the commit; fix: the cursor was already read with the row, pre-commit ).
+  releaseRead();
+  const snap = await snapP;
+
+  // The row was captured as 'v0' BEFORE the auth await. The cursor must therefore
+  // ALSO be pre-commit (0) — a (v0, seq 1) pair never coexisted. A bug that reads
+  // the cursor after the await yields seq 1 (split pair).
+  assert.equal(snap.snapshot.body, 'v0', 'row is the pre-commit snapshot');
+  assert.equal(snap.seq, 0, 'cursor matches the row — no split pair across the auth await');
+});

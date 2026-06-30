@@ -342,13 +342,28 @@ async function handleResyncRoute(app, req, res, principal) {
 // Load the materialized row through the readScope (fail closed: out-of-scope OR
 // absent → 404) and admit via mayVerb('read'). Shared by snapshot + events-since
 // — both prove the viewer can read THIS scope's current row before serving it.
-async function authorizeRead(app, entity, id, principal) {
+// Read the materialized row through the readScope (fail closed: out-of-scope OR
+// absent → null). Synchronous — no await — so /snapshot can read the scope cursor
+// in the SAME statement block and return a (row, seq) pair that actually
+// coexisted: a concurrent dispatch commit must not advance the cursor in the gap
+// between reading the row and reading the cursor (eng-review Tier-1 #2). node:sqlite
+// is single-writer + sync, and there is no yield between these two reads.
+function readScopedRow(app, entity, id, principal) {
   const bound = bindReadScope(entity.readScope, principal);
   const where = bound ? bound.sql : '1=1';
   const scopeParams = bound ? bound.params : {};
-  const row = app.db
+  return app.db
     .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
     .get({ ...scopeParams, id });
+}
+
+// Load the materialized row through the readScope (fail closed: out-of-scope OR
+// absent → 404) and admit via mayVerb('read'). Shared by snapshot + events-since
+// — both prove the viewer can read THIS scope's current row before serving it.
+// `preRow` is supplied only by /snapshot, which must read the row + cursor together
+// (see readScopedRow); every other caller reads the row here.
+async function authorizeRead(app, entity, id, principal, preRow = null) {
+  const row = preRow ?? readScopedRow(app, entity, id, principal);
   if (!row) return { status: 404 };
   // The .can capability body runs only for entities that HAVE one; a scope-only
   // / bare grant is admitted by its read-scope alone (hasOwnCanGrant gates the
@@ -361,14 +376,19 @@ async function authorizeRead(app, entity, id, principal) {
 }
 
 async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
-  const auth = await authorizeRead(app, entity, id, principal);
+  // Read the row + the scope cursor in ONE synchronous block — no await between
+  // them — then authorize. A concurrent dispatch commit cannot split the pair
+  // (eng-review Tier-1 #2): the cursor is captured alongside the row, before the
+  // async mayVerb yields. The pair we authorize is the pair we return.
+  const row = readScopedRow(app, entity, id, principal);
+  const cursorRow = app.db
+    .prepare('SELECT lastSeq FROM _Cursor WHERE scope = ?')
+    .get(scopeKey);
+  const auth = await authorizeRead(app, entity, id, principal, row);
   if (auth.status) {
     sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
     return true;
   }
-  const cursorRow = app.db
-    .prepare('SELECT lastSeq FROM _Cursor WHERE scope = ?')
-    .get(scopeKey);
   sendJson(res, 200, { snapshot: auth.row, seq: cursorRow ? cursorRow.lastSeq : 0 });
   return true;
 }
@@ -417,6 +437,14 @@ async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
 // mounted route — no second auth path). Returns true when handled; false to fall
 // through to matchRoute.
 const BLOB_LIMIT = 50_000_000; // ~50mb upload cap (SPEC §3 size-guard default).
+// Blob reaper cadence + stale threshold (eng-review spec #10, consult #17). A
+// pending upload whose adopt dispatch never came (client crash / abandonment) is
+// orphaned; once it is older than the TTL the reaper sweeps the .pending file +
+// row. Defaults baked into the framework — no app config (AGENTS.md: sensible
+// defaults are framework-owned). Interval chosen so a sweep lands well inside the
+// TTL window (6×/hour) so orphans don't linger far past the threshold.
+const BLOB_REAP_INTERVAL_MS = 10 * 60_000; // sweep every 10 minutes.
+const BLOB_REAP_TTL_MS = 60 * 60_000;       // a pending blob is stale after 1 hour.
 
 async function handleBlobUploadRoute(app, req, res, principal) {
   const url = new URL(req.url, 'http://localhost');
@@ -1120,6 +1148,29 @@ export function listen(app, port, optionsOrCallback = {}) {
   if (app.jobs) {
     app.jobs.startReaper();
     app.onShutdown('job-queue-reaper', () => app.jobs.stop(), { timeoutMs: 1000 });
+  }
+  // The blob reaper (eng-review spec #10, consult #17). `app.blobs` is built
+  // whenever a db is engaged (not opt-in), and POST /blobs is always live, so an
+  // abandoned upload leaks a .pending file + row forever with no operator lever
+  // — a fail-open default the framework must own (AGENTS.md: Defaults + Fail
+  // closed). The sweep runs UNDER the writeQueue mutex: reap() deletes DB rows
+  // AND unlinks files (a transaction does not serialize FS unlinks), and a
+  // dispatch txn spans an await, so an unsync'd reaper could delete a blob a
+  // concurrent dispatch just referenced / is mid-adopting. serialize it as one
+  // critical section against dispatch via writeQueue.run. app.blobColumns is set
+  // in buildKernel (app.ready); the sweep reads it lazily so it is always current
+  // even for apps whose blob fields register after listen() (buildKernel runs in
+  // app.ready, which tests await).
+  if (app.blobs) {
+    app.sweepBlobs = () => app.writeQueue.run(() =>
+      app.blobs.reap({ ttl: BLOB_REAP_TTL_MS, blobColumns: app.blobColumns ?? [] })
+    );
+    let blobTimer;
+    blobTimer = setInterval(() => {
+      app.sweepBlobs().catch((err) => process.stderr.write(`blob reap failed: ${err.message}\n`));
+    }, BLOB_REAP_INTERVAL_MS);
+    if (typeof blobTimer.unref === 'function') blobTimer.unref();
+    app.onShutdown('blob-reaper', () => { if (blobTimer) clearInterval(blobTimer); }, { timeoutMs: 1000 });
   }
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
   httpServer.listen(port);

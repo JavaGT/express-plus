@@ -6,7 +6,7 @@
 // and sweeps orphans/danglers.
 
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync, renameSync, unlinkSync, openSync, readSync, existsSync, statSync } from 'node:fs';
+import { mkdirSync, writeFileSync, renameSync, unlinkSync, openSync, readSync, closeSync, existsSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -79,21 +79,36 @@ export function createBlobStore({ root, db }) {
         filePath = pendingPath;
       }
     }
-    
+
     const fileStat = statSync(filePath);
     const fileSize = fileStat.size;
-    
+
     start = start ?? 0;
-    end = end ?? fileSize;
-    end = Math.min(end, fileSize);
-    
+    // Reject bogus bounds cleanly rather than handing a negative position to
+    // readSync (which reads from the current offset instead of throwing) or a
+    // negative / non-finite length to Buffer.alloc. The upper bound still clamps
+    // to the file size, so `null`/`undefined` end (and open-ended → EOF via
+    // Infinity) mean "to the end".
+    if (!Number.isFinite(start) || start < 0 || !Number.isInteger(start)) {
+      throw new Error('invalid blob range: start');
+    }
+    end = end == null ? fileSize : Math.min(end, fileSize);
+    if (!Number.isFinite(end) || end < 0 || !Number.isInteger(end)) {
+      throw new Error('invalid blob range: end');
+    }
+    if (end < start) {
+      throw new Error('invalid blob range: end < start');
+    }
+
     const length = end - start;
+    if (length === 0) return Buffer.alloc(0);
     const buffer = Buffer.alloc(length);
     const fd = openSync(filePath, 'r');
     try {
       readSync(fd, buffer, 0, length, start);
     } finally {
-      // fd close handled implicitly by GC in sync path
+      // sync fds are raw OS descriptors Node will NOT GC — close deterministically.
+      closeSync(fd);
     }
     return buffer;
   }
