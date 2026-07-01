@@ -37,8 +37,40 @@ export function text(options = {}) {
 text.crdt = (options = {}) =>
   makeDescriptor({ kind: 'crdt', type: 'text', ...options });
 
+// `raster.crdt()` — the crdt kind instance for collaborative pixel buffers
+// (photo-editor). Stores binary pixel data per-layer; per-region Porter-Duff
+// compositing merge is deferred (whole-value replace for MVP).
+export const raster = {
+  crdt: (options = {}) =>
+    makeDescriptor({ kind: 'crdt', type: 'raster', ...options }),
+};
+
+// `polyline.crdt()` — the crdt kind instance for collaborative vector drawing
+// (drawing-canvas). Stores an ordered array of point segments; per-element
+// merge is deferred (whole-value replace for MVP).
+export const polyline = {
+  crdt: (options = {}) =>
+    makeDescriptor({ kind: 'crdt', type: 'polyline', ...options }),
+};
+
 export function boolean(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'boolean', ...options });
+}
+
+// `enum_(values)` — a value-kind text field restricted to a closed set of
+// allowed string values. The built-in validate rejects any value outside the
+// set (fail-closed). Thin sugar over `text({ validate })`.
+export function enum_(values, options = {}) {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new Error('enum_(values) requires a non-empty array of allowed values');
+  }
+  const set = new Set(values);
+  return makeDescriptor({
+    kind: 'value',
+    type: 'text',
+    validate: (v) => set.has(v) ? true : `expected one of [${values.join(', ')}]`,
+    ...options,
+  });
 }
 
 export function date(options = {}) {
@@ -51,6 +83,13 @@ export function date(options = {}) {
 // owned by the write/materialization seam, not this declaration.
 export function number(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'number', ...options });
+}
+
+// `json(shape)` — a value-kind structured JSON cell stored as TEXT. `shape` is
+// declared config retained for future path/index support; app-specific runtime
+// validation still belongs in the ordinary `validate` option.
+export function json(shape = null, options = {}) {
+  return makeDescriptor({ kind: 'value', type: 'json', shape, ...options });
 }
 
 // `hash()` — a one-way salted password digest. Its own KIND (not `value`): a
@@ -194,6 +233,50 @@ export function list(of, options = {}) {
     ...options,
   });
 }
+
+// `projected.async({ compute })` — a stored computed field updated by a
+// post-commit projection over the committed event log (ADR #12, SPEC §5.3).
+// Unlike `derived` (read-time pull), the value is materialized in the main
+// table so it is queryable and sortable; unlike `projected.inline` (cheap
+// in-transaction compute), the compute MAY be expensive/async/external (e.g.
+// thumbnail generation, embedding compute, image export). The column stores
+// a JSON-serialized value; the compute function receives the current row
+// (hydrated) and returns a JSON-serializable result.
+//
+// The field is implied readonly — a client may NOT set it; the projection
+// writes it. A read sees the last-written value (may be stale between writes
+// — the staleness contract is explicit, not silently invisible).
+export const projected = {
+  async: ({ compute, from } = {}) => {
+    if (typeof compute !== 'function') {
+      throw new Error('projected.async requires a compute function');
+    }
+    return makeDescriptor({
+      kind: 'projected',
+      mode: 'async',
+      compute,
+      from: from ?? null,
+      readonly: true,
+    });
+  },
+  // `projected.inline({ compute })` — an in-transaction stored computed field.
+  // Unlike `.async` (post-commit), the compute runs INSIDE the originating
+  // transaction — it is atomic with the mutation. A compute failure rolls
+  // back the whole commit (fail closed). The compute is synchronous in the
+  // projection's apply handler; the field value is materialized immediately
+  // so sort keys like `hotRank` are transactionally consistent.
+  inline: ({ compute }) => {
+    if (typeof compute !== 'function') {
+      throw new Error('projected.inline requires a compute function');
+    }
+    return makeDescriptor({
+      kind: 'projected',
+      mode: 'inline',
+      compute,
+      readonly: true,
+    });
+  },
+};
 
 // `ephemeral(cells)` — the general NON-PERSISTING field kind. Accepts an author-
 // declared cell shape (richer than boolean toggles — e.g. a drawing canvas can

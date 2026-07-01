@@ -136,6 +136,19 @@ test('create rejects a readonly field set by the client (400)', async (t) => {
   assert.equal(res.status, 400);
 });
 
+test('entity CRUD rejects urlencoded form bodies instead of storing them', async (t) => {
+  const db = seed('CREATE TABLE Note (id TEXT PRIMARY KEY, body TEXT, owner TEXT)');
+  const a = await serve(t, db, ownedNote(), '/notes', alice);
+  const res = await fetch(`${a.origin}/notes`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: 'body=hello',
+  });
+  assert.equal(res.status, 415);
+  const rows = db.prepare('SELECT * FROM Note').all();
+  assert.deepEqual(rows, []);
+});
+
 test('public-read row is VISIBLE to a non-owner but not WRITABLE (capability axis)', async (t) => {
   const db = seed(
     'CREATE TABLE Post (id TEXT PRIMARY KEY, title TEXT, owner TEXT)',

@@ -19,7 +19,9 @@
 // post-commit fan-out loop calls `live.emit(entity, id, row, committedEvent)`
 // after commit. The fan-out:
 //   1. Finds every subscriber for (entity, id)
-//   2. Re-authorizes each via mayVerb(entity, 'subscribe', row, principal)
+//   2. Re-authorizes each via mayVerb(entity, 'subscribe', row, principal) when
+//      the entity owns a `.can` body; inherit children are admitted by read-scope
+//      at the parent seam.
 //   3. Forwards the kernel's committed event (carrying its per-scope seq) to
 //      every authorized subscriber
 //
@@ -100,7 +102,7 @@ export function createLiveServer(httpServer, {
     if (conn.closed) return;
 
     // Re-auth (fail-closed): a thrown check or !allowed → drop the buffer silently.
-    if (mayVerb) {
+    if (mayVerb && hasOwnCanGrant(entityRecord)) {
       let allowed = true;
       try {
         allowed = await mayVerb(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous);
@@ -490,7 +492,7 @@ export function createLiveServer(httpServer, {
         subs.delete(conn);
         continue;
       }
-      if (mayVerb && !removed) {
+      if (mayVerb && hasOwnCanGrant(entityRecord) && !removed) {
         // AWAIT — the bypass bug was calling mayVerb without await, so the
         // returned Promise was always truthy and the `!allowed` guard never
         // fired. The SAME mayVerb the REST dispatch uses (verb='subscribe') —

@@ -18,8 +18,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { entity, text, ref, boolean, date, grant, scope, read, write, subscribe } from '../src/index.mjs';
-import { resolveStrategy, validateMutation, ValidationError, serializeField } from '../src/field-strategy.mjs';
+import { entity, text, ref, boolean, date, json, grant, scope, read, write, subscribe, everyone } from '../src/index.mjs';
+import { resolveStrategy, validateMutation, ValidationError, serializeField, deserializeField } from '../src/field-strategy.mjs';
 
 // --- the strategy table is keyed by kind, framework-owned ---
 
@@ -117,6 +117,41 @@ test('validateMutation throws on a structural type mismatch (boolean given a str
   );
 });
 
+test('validateMutation accepts JSON values and rejects non-JSON payloads', () => {
+  const Document = entity('Document', {
+    fields: { meta: json() },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  assert.deepEqual(validateMutation(Document, {
+    meta: { tags: ['research'], score: 1, nested: { ok: true }, empty: null },
+  }), {
+    meta: { tags: ['research'], score: 1, nested: { ok: true }, empty: null },
+  });
+
+  assert.throws(
+    () => validateMutation(Document, { meta: { bad: undefined } }),
+    (err) => {
+      assert.ok(err instanceof ValidationError);
+      assert.match(err.message, /Document\.meta/);
+      assert.match(err.message, /JSON value/);
+      return true;
+    },
+  );
+
+  assert.throws(
+    () => validateMutation(Document, { meta: Number.POSITIVE_INFINITY }),
+    /JSON value/,
+  );
+
+  const circular = {};
+  circular.self = circular;
+  assert.throws(
+    () => validateMutation(Document, { meta: circular }),
+    /JSON value/,
+  );
+});
+
 test('validateMutation ignores fields absent from the payload (partial update)', () => {
   const Article = makeArticle();
   // a partial update touching only `published` must not trip `title`'s validate.
@@ -207,4 +242,14 @@ test('serializeField maps a Date to a bindable stored form (epoch millis)', () =
 test('serializeField leaves null/undefined untouched (a null cell is null)', () => {
   assert.equal(serializeField(boolean(), null), null);
   assert.equal(serializeField(text(), undefined), undefined);
+});
+
+test('json fields serialize to TEXT and deserialize back to JSON values', () => {
+  const descriptor = json({ tags: 'string[]' });
+  const value = { tags: ['research', 'scope'], score: 42, ok: true, nested: null };
+  const stored = serializeField(descriptor, value);
+
+  assert.equal(stored, JSON.stringify(value));
+  assert.deepEqual(deserializeField(descriptor, stored), value);
+  assert.equal(deserializeField(descriptor, null), null);
 });

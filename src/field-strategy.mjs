@@ -33,6 +33,29 @@ function isTextValue(v) {
   return typeof v === 'string';
 }
 
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isJsonValue(value, seen = new WeakSet()) {
+  if (value === null) return true;
+  if (typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return value.every((item) => isJsonValue(item, seen));
+  }
+  if (isPlainObject(value)) {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return Object.values(value).every((item) => isJsonValue(item, seen));
+  }
+  return false;
+}
+
 // crdt text diff — common-prefix + common-suffix detection yields the minimal
 // per-element delta. A pure insert → {insert:{at,text}}; a replace →
 // {delete:{at,length}, insert:{at,text}}. Never a whole-value `{ set }` (consult
@@ -121,6 +144,9 @@ const STRATEGIES = Object.freeze({
             return 'expected a date';
           }
           return true;
+        case 'json':
+          if (!isJsonValue(value)) return 'expected a JSON value';
+          return true;
         default:
           return true;
       }
@@ -147,6 +173,20 @@ const STRATEGIES = Object.freeze({
           return value instanceof Date ? value.getTime() : value;
         case 'ref':
           return String(value);
+        case 'json':
+          return JSON.stringify(value);
+        default:
+          return value;
+      }
+    },
+    deserialize(value, descriptor) {
+      if (value === null || value === undefined) return value;
+      switch (descriptor.type) {
+        case 'boolean':
+          return value ? true : false;
+        case 'json':
+          if (typeof value !== 'string') return value;
+          return JSON.parse(value);
         default:
           return value;
       }
@@ -187,7 +227,18 @@ const STRATEGIES = Object.freeze({
   // is the broadcast artifact — the "merge machinery" consult #18 names. The
   // concurrent-merge toolkit (reconciling concurrent edits) is deferred (#33).
   crdt: Object.freeze({
-    validate(value) {
+    validate(value, descriptor) {
+      if (descriptor?.type === 'raster') {
+        if (value === null || value === undefined) return true;
+        if (Buffer.isBuffer(value)) return true;
+        if (typeof value === 'string') return true;
+        return 'expected a raster value (Buffer, string, or null)';
+      }
+      if (descriptor?.type === 'polyline') {
+        if (value === null || value === undefined) return true;
+        if (Array.isArray(value)) return true;
+        return 'expected a polyline value (array or null)';
+      }
       if (!isTextValue(value)) return 'expected a crdt text value';
       return true;
     },
@@ -239,6 +290,35 @@ const STRATEGIES = Object.freeze({
     },
     apply(_previous, next) {
       return next;
+    },
+  }),
+
+  // `projected` — a stored computed field (projected.inline / projected.async).
+  // The column stores a JSON-serialized value produced by the compute function.
+  // The field is readonly (client cannot set it); the projection owns the write.
+  // Diff/apply are whole-value (same shape as value-kind); the serialized form is
+  // JSON TEXT so any JSON-serializable result (number, string, object, array) is
+  // storable. The structural validate accepts anything (null/undefined = empty
+  // cell; otherwise the compute result is trusted).
+  projected: Object.freeze({
+    validate() {
+      return true; // the compute result is trusted, not client-provided
+    },
+    apply(_previous, next) {
+      return next;
+    },
+    diff(previous, next) {
+      if (Object.is(previous, next)) return null;
+      return { set: next };
+    },
+    serialize(value) {
+      if (value === null || value === undefined) return value;
+      return JSON.stringify(value);
+    },
+    deserialize(value) {
+      if (value === null || value === undefined) return value;
+      if (typeof value !== 'string') return value;
+      try { return JSON.parse(value); } catch { return value; }
     },
   }),
 
@@ -331,7 +411,7 @@ export function resolveStrategy(kind) {
   if (!strategy) {
     throw new Error(
       `unknown field kind '${kind}'. The field kinds are: ` +
-        `value, crdt, hash, store, ordered, struct, state.`,
+        `value, crdt, hash, store, ordered, projected, struct, state.`,
     );
   }
   return strategy;
@@ -348,6 +428,15 @@ export function serializeField(descriptor, value) {
   const strategy = resolveStrategy(descriptor.kind);
   if (typeof strategy.serialize !== 'function') return value;
   return strategy.serialize(value, descriptor);
+}
+
+// Deserialize a stored cell back into the public row value owned by its field
+// strategy. Most stored cells are already public values; json is the first
+// value-kind type that needs a read-side mapping from TEXT back to object/array.
+export function deserializeField(descriptor, value) {
+  const strategy = resolveStrategy(descriptor.kind);
+  if (typeof strategy.deserialize !== 'function') return value;
+  return strategy.deserialize(value, descriptor);
 }
 
 // verifyHash(candidate, stored) — the one-way check behind a hydrated hash

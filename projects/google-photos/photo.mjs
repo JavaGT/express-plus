@@ -295,16 +295,14 @@ export const Photo = entity('Photo', {
     //   });
     // ===================================================================
 
-    // Date-range query — range predicates ship as part of the query compiler
-    // (SPEC §11: cursor pagination reuses the interest range machinery).
+    // Date-range query — range predicates shipped (Scope-support Slice 4).
     r.get('/timeline', async (req, res) => {
       const { from, to } = req.query;
-      // Real API (range predicate over date field):
-      //   const photos = await Photo.findAll(
-      //     Photo.capturedAt.gte(new Date(from)).and(
-      //     Photo.capturedAt.lte(new Date(to)))
-      //   ).sort(Photo.capturedAt, 'desc');
-      res.json({ note: 'date-range query requires .gte/.lte predicates (planned Phase 3)' });
+      const photos = await Photo.findAll(
+        Photo.capturedAt.gte(new Date(from)).and(
+        Photo.capturedAt.lte(new Date(to))),
+      ).sort(Photo.capturedAt, 'desc');
+      res.json(photos);
     });
 
     // Upload endpoint — blob is a built-in field type (SPEC §5.1, ADR #9).

@@ -110,6 +110,123 @@ test('req.body is the parsed JSON payload for a POST', async () => {
   }
 });
 
+test('req.body parses urlencoded form fields for imperative POST', async () => {
+  const r = router();
+  r.post('/echo-form', open(), (req, res) => res.json({ echo: req.body }));
+  const app = expressPlus().use('/api', r);
+  const { origin, close } = await listen(app);
+  try {
+    const res = await fetch(`${origin}/api/echo-form`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: 'title=Scope+notes&tag=one&tag=two&empty=',
+    });
+    assert.deepEqual(await res.json(), {
+      echo: { title: 'Scope notes', tag: ['one', 'two'], empty: '' },
+    });
+  } finally {
+    await close();
+  }
+});
+
+test('form fields named __proto__ remain ordinary own fields', async () => {
+  const r = router();
+  r.post('/safe-form', open(), (req, res) =>
+    res.json({
+      own: Object.prototype.hasOwnProperty.call(req.body, '__proto__'),
+      value: req.body.__proto__,
+      polluted: {}.polluted ?? null,
+    }),
+  );
+  const app = expressPlus().use('/api', r);
+  const { origin, close } = await listen(app);
+  try {
+    const res = await fetch(`${origin}/api/safe-form`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: '__proto__=plain&polluted=nope',
+    });
+    assert.deepEqual(await res.json(), {
+      own: true,
+      value: 'plain',
+      polluted: null,
+    });
+    assert.equal({}.polluted, undefined);
+  } finally {
+    await close();
+  }
+});
+
+test('req.body parses multipart text fields and file parts for imperative POST', async () => {
+  const r = router();
+  r.post('/upload', open(), (req, res) => {
+    res.json({
+      title: req.body.title,
+      file: {
+        name: req.body.photo.name,
+        filename: req.body.photo.filename,
+        type: req.body.photo.type,
+        size: req.body.photo.size,
+        text: req.body.photo.content.toString('utf8'),
+      },
+    });
+  });
+  const app = expressPlus().use('/api', r);
+  const { origin, close } = await listen(app);
+  const boundary = 'express-plus-test-boundary';
+  const body = [
+    `--${boundary}`,
+    'Content-Disposition: form-data; name="title"',
+    '',
+    'Summer photo',
+    `--${boundary}`,
+    'Content-Disposition: form-data; name="photo"; filename="hello.txt"',
+    'Content-Type: text/plain',
+    '',
+    'hello upload',
+    `--${boundary}--`,
+    '',
+  ].join('\r\n');
+
+  try {
+    const res = await fetch(`${origin}/api/upload`, {
+      method: 'POST',
+      headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+      body,
+    });
+    assert.equal(res.status, 200);
+    assert.deepEqual(await res.json(), {
+      title: 'Summer photo',
+      file: {
+        name: 'photo',
+        filename: 'hello.txt',
+        type: 'text/plain',
+        size: 12,
+        text: 'hello upload',
+      },
+    });
+  } finally {
+    await close();
+  }
+});
+
+test('imperative routes reject unsupported request body content types', async () => {
+  const r = router();
+  r.post('/echo-text', open(), (req, res) => res.json({ echo: req.body }));
+  const app = expressPlus().use('/api', r);
+  const { origin, close } = await listen(app);
+  try {
+    const res = await fetch(`${origin}/api/echo-text`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: 'hello',
+    });
+    assert.equal(res.status, 415);
+  } finally {
+    await close();
+  }
+});
+
 // --- the route gate is the only auth layer for an imperative route -----------
 
 test('an imperative route with no leading gate denies anonymous with 401 (fail closed)', async () => {

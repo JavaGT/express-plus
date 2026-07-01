@@ -68,6 +68,40 @@ test('field.in([...]) lowers to a parameterized IN with one param per value in o
   assert.match(sql(Post), /status IN \(:p\d+_0, :p\d+_1\)/);
 });
 
+test('field.gte/lte lower to serialized value comparisons', () => {
+  const from = new Date('2026-01-01T00:00:00.000Z');
+  const to = new Date('2026-01-31T23:59:59.999Z');
+  const Photo = entity('Photo', {
+    fields: { title: text(), capturedAt: date(), owner: ref('User', { role: 'owner' }) },
+    grant: () => [
+      scope(({ fields }) => fields.capturedAt.gte(from).and(fields.capturedAt.lte(to))).can(ownerCan),
+    ],
+  });
+
+  assert.match(sql(Photo), /capturedAt >= :p\d+_val/);
+  assert.match(sql(Photo), /capturedAt <= :p\d+_val/);
+  assert.deepEqual(
+    Object.values(Photo.readScope.params).sort((a, b) => a - b),
+    [from.getTime(), to.getTime()],
+  );
+});
+
+test('field.gte/lte(undefined) lower to FALSE, never an undefined SQL param', () => {
+  const From = entity('From', {
+    fields: { capturedAt: date(), owner: ref('User', { role: 'owner' }) },
+    grant: () => [scope(({ fields }) => fields.capturedAt.gte(undefined)).can(ownerCan)],
+  });
+  const To = entity('To', {
+    fields: { capturedAt: date(), owner: ref('User', { role: 'owner' }) },
+    grant: () => [scope(({ fields }) => fields.capturedAt.lte(undefined)).can(ownerCan)],
+  });
+
+  assert.equal(sql(From), '1 = 0');
+  assert.equal(sql(To), '1 = 0');
+  assert.deepEqual(From.readScope.params, {});
+  assert.deepEqual(To.readScope.params, {});
+});
+
 test('a.and(b) and a.not() compose', () => {
   const Post = entity('Post', {
     fields: { status: text(), owner: ref('User', { role: 'owner' }) },
@@ -123,6 +157,16 @@ test('a value op on a non-compilable field kind (crdt) is a load-time error', ()
     () => entity('Bad', {
       fields: { body: text.crdt(), owner: ref('User', { role: 'owner' }) },
       grant: () => [scope(({ fields }) => fields.body.is('x')).can(ownerCan)],
+    }),
+    NonCompilableError,
+  );
+});
+
+test('range ops on a non-compilable field kind (crdt) are load-time errors', () => {
+  assert.throws(
+    () => entity('Bad', {
+      fields: { body: text.crdt(), owner: ref('User', { role: 'owner' }) },
+      grant: () => [scope(({ fields }) => fields.body.gte('x')).can(ownerCan)],
     }),
     NonCompilableError,
   );

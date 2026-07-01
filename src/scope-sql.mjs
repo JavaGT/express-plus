@@ -143,12 +143,19 @@ function makeIsProxy(registry, where) {
 // hand-written handler can write `User.username.is(name)`. The handle also
 // carries its own `fieldName`, so it doubles as a `.select(...)` projection
 // handle. Ops on a non-compilable field kind (crdt/ordered/store) throw.
-export function fieldHandle(name, descriptor, entityName) {
+export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   if (descriptor === undefined) {
     const fail = (where) => {
       throw new NonCompilableError(`no field '${String(name)}' on this entity`, { where });
     };
-    return { fieldName: name, is: () => fail(), in: () => fail(), isNull: () => fail() };
+    return {
+      fieldName: name,
+      is: () => fail(),
+      in: () => fail(),
+      isNull: () => fail(),
+      gte: () => fail(),
+      lte: () => fail(),
+    };
   }
   // A structured field (the `link` kind) is a NAMESPACE of named value sub-cells.
   // The struct itself is not comparable (you compare a sub-cell, not the whole
@@ -164,7 +171,7 @@ export function fieldHandle(name, descriptor, entityName) {
           `compared as a whole — compare one of its sub-cells (e.g. ${String(name)}.token)`,
       );
     };
-    const handle = { fieldName: name, is: fail, in: fail, isNull: fail };
+    const handle = { fieldName: name, is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
     for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells)) {
       handle[cellName] = fieldHandle(structCellColumn(name, cellName), cellDescriptor);
     }
@@ -193,6 +200,8 @@ export function fieldHandle(name, descriptor, entityName) {
       is: fail,
       in: fail,
       isNull: fail,
+      gte: fail,
+      lte: fail,
       has: (value) => {
         if (tableName === null) {
           throw new NonCompilableError(
@@ -228,9 +237,9 @@ export function fieldHandle(name, descriptor, entityName) {
         `field '${String(name)}' is a ${descriptor.kind} field and cannot be compared in scope`,
       );
     };
-    return { fieldName: name, is: fail, in: fail, isNull: fail };
+    return { fieldName: name, is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
   }
-  return {
+  const handle = {
     fieldName: name,
     // .is(undefined) is the deliberate FALSE value (never IS NULL); .is(v) mints
     // a literal-valued equality. The literal is baked in its SERIALIZED
@@ -252,6 +261,68 @@ export function fieldHandle(name, descriptor, entityName) {
     in: (values) =>
       makeNode({ node: 'in', field: name, values: [...values].map((v) => serializeField(descriptor, v)) }),
     isNull: () => makeNode({ node: 'isNull', field: name }),
+    gte: (value) => value === undefined
+      ? FALSE
+      : makeNode({ node: 'gte', field: name, value: serializeField(descriptor, value) }),
+    lte: (value) => value === undefined
+      ? FALSE
+      : makeNode({ node: 'lte', field: name, value: serializeField(descriptor, value) }),
+  };
+  if (descriptor.type !== 'ref' || descriptor.role || typeof resolveEntity !== 'function') {
+    return handle;
+  }
+  const targetName = typeof descriptor.target === 'string'
+    ? descriptor.target
+    : descriptor.target?.name;
+  const target = targetName ? resolveEntity(targetName) : null;
+  if (!target?.fields) {
+    return handle;
+  }
+  for (const [targetFieldName, targetDescriptor] of Object.entries(target.fields)) {
+    if (targetDescriptor?.kind === 'store' && targetDescriptor.type === 'map') {
+      handle[targetFieldName] = relationMapHandle({
+        refFieldName: name,
+        targetEntityName: target.name ?? targetName,
+        targetFieldName,
+      });
+    }
+  }
+  return handle;
+}
+
+function relationMapHandle({ refFieldName, targetEntityName, targetFieldName }) {
+  const fail = () => {
+    throw new NonCompilableError(
+      `field '${String(refFieldName)}.${String(targetFieldName)}' is a map field and cannot be compared in scope`,
+    );
+  };
+  const tableName = membershipTable(targetEntityName, targetFieldName);
+  const ownerCol = membershipOwnerCol(targetEntityName);
+  return {
+    fieldName: targetFieldName,
+    is: fail,
+    in: fail,
+    isNull: fail,
+    gte: fail,
+    lte: fail,
+    has: (value) => {
+      if (value === PRINCIPAL_ID_TOKEN) {
+        return makeNode({
+          node: 'existsMembership',
+          table: tableName,
+          ownerCol,
+          ownerField: refFieldName,
+          param: PRINCIPAL_ID_PARAM,
+        });
+      }
+      return makeNode({
+        node: 'existsMembership',
+        table: tableName,
+        ownerCol,
+        ownerField: refFieldName,
+        value,
+      });
+    },
   };
 }
 
@@ -276,7 +347,7 @@ function makeFieldsProxy(fields, where) {
             { where },
           );
         };
-        return { is: fail, in: fail, isNull: fail };
+        return { is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
       }
       return fieldHandle(name, descriptor);
     },
@@ -341,6 +412,16 @@ export function lowerToSql(ast, ctx = {}) {
         return `${col(node.field)} IN (${keys.join(', ')})`;
       }
       case 'isNull': return `${col(node.field)} IS NULL`;
+      case 'gte': {
+        const key = freshParam('val');
+        params[key] = node.value;
+        return `${col(node.field)} >= :${key}`;
+      }
+      case 'lte': {
+        const key = freshParam('val');
+        params[key] = node.value;
+        return `${col(node.field)} <= :${key}`;
+      }
       case 'not': return `NOT (${lower(node.operand)})`;
       case 'and': return `(${node.operands.map(lower).join(' AND ')})`;
       // A child's inherited scope: the row is admitted iff a parent row exists
@@ -366,15 +447,16 @@ export function lowerToSql(ast, ctx = {}) {
       // in (not the requesting principal, so it must not be rebound per request).
       case 'existsMembership': {
         const mAlias = `j${state.n += 1}`;
+        const ownerExpr = `${alias}.${node.ownerField ?? 'id'}`;
         if ('param' in node) {
           const key = freshParam(node.param);
           params[key] = null;
-          return `EXISTS (SELECT 1 FROM ${node.table} AS ${mAlias} WHERE ${mAlias}.${node.ownerCol} = ${alias}.id AND ${mAlias}.${MEMBER_COLUMN} = :${key})`;
+          return `EXISTS (SELECT 1 FROM ${node.table} AS ${mAlias} WHERE ${mAlias}.${node.ownerCol} = ${ownerExpr} AND ${mAlias}.${MEMBER_COLUMN} = :${key})`;
         }
         // Literal value branch: bake the literal member id directly.
         const key = freshParam(MEMBER_COLUMN);
         params[key] = node.value;
-        return `EXISTS (SELECT 1 FROM ${node.table} AS ${mAlias} WHERE ${mAlias}.${node.ownerCol} = ${alias}.id AND ${mAlias}.${MEMBER_COLUMN} = :${key})`;
+        return `EXISTS (SELECT 1 FROM ${node.table} AS ${mAlias} WHERE ${mAlias}.${node.ownerCol} = ${ownerExpr} AND ${mAlias}.${MEMBER_COLUMN} = :${key})`;
       }
       default:
         throw new NonCompilableError(`cannot lower AST node '${node.node}'`, { where: ctx.where });

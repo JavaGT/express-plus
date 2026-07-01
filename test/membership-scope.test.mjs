@@ -16,7 +16,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { entity, ref, text, map, scope, grant, read, anyOf } from '../src/index.mjs';
+import { entity, ref, text, map, scope, grant, read, anyOf, never } from '../src/index.mjs';
 
 const norm = (sql) => sql.replace(/\s+/g, ' ').trim();
 
@@ -86,4 +86,54 @@ test('a map field is still NOT whole-value comparable in scope (.is throws, .has
   assert.throws(() => Doc.collaborators.isNull(), /store field and cannot be compared/);
   // ... but membership is a compilable op and must NOT throw at handle level.
   assert.doesNotThrow(() => Doc.collaborators.has('some-user-id'));
+});
+
+test('a typed FK can traverse to a target map membership in scope', () => {
+  entity('Album', {
+    fields: {
+      title: text(),
+      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+    },
+    grant: () => [scope(() => never()).can(() => grant(read))],
+  });
+
+  const Photo = entity('Photo', {
+    fields: {
+      title: text(),
+      album: ref('Album'),
+    },
+    checks: {
+      albumMember: ({ Photo, principal }) => Photo.album.collaborators.has(principal.id),
+    },
+    grant: () => [
+      scope(({ is }) => is.albumMember()).can(() => grant(read)),
+    ],
+  });
+
+  const s = norm(Photo.readScope.sql);
+  assert.match(s, /EXISTS \(/i);
+  assert.match(s, /FROM Album_collaborators/i);
+  assert.match(s, /Album_id = t0\.album/i);
+  assert.match(s, /member_id = :p\d+_principalId/i);
+});
+
+test('ref-role fields stay raw identity handles and do not traverse target maps', () => {
+  entity('TeamUser', {
+    fields: {
+      name: text(),
+      groups: map(ref('User'), { role: ['member'], default: {} }),
+    },
+    grant: () => [scope(() => never()).can(() => grant(read))],
+  });
+
+  const Doc = entity('RoleRefDoc', {
+    fields: {
+      title: text(),
+      owner: ref('TeamUser', { role: 'owner' }),
+    },
+    grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
+  });
+
+  assert.equal(Doc.owner.fieldName, 'owner');
+  assert.equal(Doc.owner.groups, undefined);
 });

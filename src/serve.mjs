@@ -24,7 +24,7 @@ import { resolve } from 'node:path';
 
 import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
-import { ValidationError } from './field-strategy.mjs';
+import { ValidationError, resolveStrategy } from './field-strategy.mjs';
 import { mayVerb, hasOwnCanGrant } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
@@ -37,6 +37,7 @@ import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects } from './effect-compiler.mjs';
 import { User, Session, Inbox } from './auth-entities.mjs';
+import { getActiveDb, setActiveDb } from './db.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -120,12 +121,12 @@ function committedEventHeaders(result, actionId, scope = null) {
   };
 }
 
-// Read and JSON-parse a request body (create/update payloads). Caps the body to
-// guard against an unbounded upload (a baked-in default; the formal middleware
-// stack in the next slice generalizes this). An empty body parses to {}.
+// Read and parse a request body. Caps the body to guard against unbounded uploads.
+// An empty body parses to {}. Entity CRUD still requires JSON; imperative routes
+// can also accept browser forms.
 const BODY_LIMIT = 1_000_000; // ~1mb, SPEC §3 body-parse cap.
 
-function readJsonBody(req) {
+function readCappedBody(req, limit = BODY_LIMIT, tooLargeMessage = 'request body exceeds the 1mb limit') {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -133,30 +134,134 @@ function readJsonBody(req) {
     req.on('data', (chunk) => {
       if (aborted) return;
       size += chunk.length;
-      if (size > BODY_LIMIT) {
+      if (size > limit) {
         // Stop consuming and reject so the handler can write a 413. Do NOT
         // destroy the socket — an abrupt close would race the response and the
         // client would see a dropped connection instead of the 413. Pausing and
         // resuming (drain-to-end) lets the response flush cleanly.
         aborted = true;
         req.pause();
-        reject(new BodyError('request body exceeds the 1mb limit', 413));
+        reject(new BodyError(tooLargeMessage, 413));
         req.resume();
         return;
       }
       chunks.push(chunk);
     });
-    req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8').trim();
-      if (raw === '') return resolve({});
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        reject(new BodyError('request body is not valid JSON', 400));
-      }
-    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
+}
+
+function contentType(req) {
+  return (req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+}
+
+function contentTypeParam(req, name) {
+  const parts = String(req.headers['content-type'] ?? '').split(';').slice(1);
+  for (const part of parts) {
+    const [key, ...valueParts] = part.split('=');
+    if (key?.trim().toLowerCase() !== name) continue;
+    const value = valueParts.join('=').trim();
+    if (value.startsWith('"') && value.endsWith('"')) return value.slice(1, -1);
+    return value;
+  }
+  return null;
+}
+
+function assignFormValue(body, name, value) {
+  if (Object.prototype.hasOwnProperty.call(body, name)) {
+    Object.defineProperty(body, name, {
+      value: Array.isArray(body[name]) ? [...body[name], value] : [body[name], value],
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  } else {
+    Object.defineProperty(body, name, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+}
+
+function parseUrlencodedBody(buffer) {
+  const body = {};
+  const params = new URLSearchParams(buffer.toString('utf8'));
+  for (const [name, value] of params) assignFormValue(body, name, value);
+  return body;
+}
+
+function parseMultipartHeaders(rawHeaders) {
+  const headers = {};
+  for (const line of rawHeaders.split('\r\n')) {
+    const colon = line.indexOf(':');
+    if (colon === -1) continue;
+    headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+  }
+  return headers;
+}
+
+function parseContentDisposition(value) {
+  const params = {};
+  for (const part of value.split(';').slice(1)) {
+    const [key, ...valueParts] = part.split('=');
+    const name = key?.trim().toLowerCase();
+    if (!name) continue;
+    let paramValue = valueParts.join('=').trim();
+    if (paramValue.startsWith('"') && paramValue.endsWith('"')) paramValue = paramValue.slice(1, -1);
+    params[name] = paramValue;
+  }
+  return params;
+}
+
+function parseMultipartBody(buffer, boundary) {
+  if (!boundary) throw new BodyError('multipart body is missing a boundary', 400);
+  const body = {};
+  const delimiter = `--${boundary}`;
+  const raw = buffer.toString('binary');
+  for (const section of raw.split(delimiter).slice(1)) {
+    if (section.startsWith('--')) break;
+    const trimmed = section.startsWith('\r\n') ? section.slice(2) : section;
+    const splitAt = trimmed.indexOf('\r\n\r\n');
+    if (splitAt === -1) continue;
+    const headers = parseMultipartHeaders(trimmed.slice(0, splitAt));
+    let content = Buffer.from(trimmed.slice(splitAt + 4), 'binary');
+    if (content.subarray(-2).toString('binary') === '\r\n') content = content.subarray(0, -2);
+    const disposition = parseContentDisposition(headers['content-disposition'] ?? '');
+    if (!disposition.name) continue;
+    if (Object.prototype.hasOwnProperty.call(disposition, 'filename')) {
+      assignFormValue(body, disposition.name, {
+        name: disposition.name,
+        filename: disposition.filename,
+        type: headers['content-type'] ?? 'application/octet-stream',
+        size: content.length,
+        content,
+      });
+    } else {
+      assignFormValue(body, disposition.name, content.toString('utf8'));
+    }
+  }
+  return body;
+}
+
+async function readRequestBody(req, { jsonOnly = false } = {}) {
+  const buffer = await readCappedBody(req);
+  if (buffer.length === 0) return {};
+  const type = contentType(req);
+  if (type === '' || type === 'application/json') {
+    const raw = buffer.toString('utf8').trim();
+    if (raw === '') return {};
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new BodyError('request body is not valid JSON', 400);
+    }
+  }
+  if (!jsonOnly && type === 'application/x-www-form-urlencoded') return parseUrlencodedBody(buffer);
+  if (!jsonOnly && type === 'multipart/form-data') return parseMultipartBody(buffer, contentTypeParam(req, 'boundary'));
+  throw new BodyError(jsonOnly ? 'request body must be JSON' : 'unsupported request body content type', 415);
 }
 
 // A request body the framework refuses to parse — distinct from a
@@ -172,29 +277,11 @@ class BodyError extends Error {
 
 // Read a raw (binary) request body into a Buffer, capped at `limit` bytes. Used
 // by the /blobs upload route: a blob upload is opaque bytes, not JSON. The same
-// cap-and-refuse contract as readJsonBody (a baked-in default) — an oversized
+// cap-and-refuse contract as readRequestBody (a baked-in default) — an oversized
 // upload rejects with a 413 and drains to a clean response, never an abrupt
 // socket close that would race the response.
 function readRawBody(req, limit) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    let aborted = false;
-    req.on('data', (chunk) => {
-      if (aborted) return;
-      size += chunk.length;
-      if (size > limit) {
-        aborted = true;
-        req.pause();
-        reject(new BodyError('upload exceeds the size limit', 413));
-        req.resume();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
+  return readCappedBody(req, limit, 'upload exceeds the size limit');
 }
 
 // DB-backed dispatch for one admitted verb. The route gate already admitted the
@@ -215,7 +302,8 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
   const scopeParams = bound ? bound.params : {};
 
   if (verb === 'list') {
-    const rows = db.prepare(`SELECT * FROM ${table} AS t0 WHERE ${where}`).all(scopeParams);
+    const rows = db.prepare(`SELECT * FROM ${table} AS t0 WHERE ${where}`).all(scopeParams)
+      .map((row) => entity.deserializeRow(row));
     // Post-filter through the SAME mayVerb('list') engine `read` uses — the SQL
     // scope decides VISIBILITY, the .can body decides the read CAPABILITY. A
     // grant can admit a row via scope yet deny read in .can; without this list
@@ -238,9 +326,10 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
+    entity.deserializeRow(row);
     // not visible under scope OR absent → 404 (do not distinguish, fail closed).
     if (!row) return void sendJson(res, 404, { error: 'not found' });
-    if (!(await mayVerb(entity, 'read', row, principal))) {
+    if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'read', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
     sendJson(res, 200, row);
@@ -263,6 +352,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const created = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE t0.id = :id`)
       .get({ id });
+    entity.deserializeRow(created);
     sendJson(res, 201, created, committedEventHeaders(result, actionId, `${table}:${id}`));
     return;
   }
@@ -273,6 +363,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
+    entity.deserializeRow(row);
     if (!row) return void sendJson(res, 404, { error: 'not found' });
     if (!(await mayVerb(entity, 'update', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
@@ -292,6 +383,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     }
     if (!result.granted) return void sendJson(res, 403, { error: 'forbidden' });
     const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
+    entity.deserializeRow(updated);
     sendJson(res, 200, updated, committedEventHeaders(result, actionId, `${table}:${params.id}`));
     return;
   }
@@ -302,6 +394,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
+    entity.deserializeRow(row);
     if (!row) return void sendJson(res, 404, { error: 'not found' });
     if (!(await mayVerb(entity, 'remove', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
@@ -369,9 +462,10 @@ function readScopedRow(app, entity, id, principal) {
   const bound = bindReadScope(entity.readScope, principal);
   const where = bound ? bound.sql : '1=1';
   const scopeParams = bound ? bound.params : {};
-  return app.db
+  const row = app.db
     .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
     .get({ ...scopeParams, id });
+  return entity.deserializeRow(row);
 }
 
 // Load the materialized row through the readScope (fail closed: out-of-scope OR
@@ -506,7 +600,7 @@ async function handleJobRoute(app, req, res) {
 
   if (url.pathname === '/workers/register') {
     let body;
-    try { body = await readJsonBody(req); } catch (err) {
+    try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
       if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
       throw err;
     }
@@ -540,7 +634,7 @@ async function handleJobRoute(app, req, res) {
     const workerId = jobs.authenticate(bearer);
     if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
     let body;
-    try { body = await readJsonBody(req); } catch (err) {
+    try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
       if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
       throw err;
     }
@@ -883,13 +977,12 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
         return;
       }
 
-      // read a JSON body for the mutating entity verbs and for every imperative
-      // route (a hand-written handler expects req.body populated Express-style);
-      // read-only entity verbs ignore it.
+      // read a body for mutating entity verbs and every imperative route. Entity
+      // CRUD stays JSON-only; handlers may accept browser form posts.
       let body = {};
       if (route.handlers || route.verb === 'create' || route.verb === 'update') {
         try {
-          body = await readJsonBody(req);
+          body = await readRequestBody(req, { jsonOnly: !route.handlers });
         } catch (err) {
           // a refused body carries its own status (413 oversized, 400 malformed).
           if (err instanceof BodyError) return void sendJson(res, err.status, { error: err.message });
@@ -1059,6 +1152,78 @@ function buildKernel(app) {
       }
     });
   }
+  // projected.async: post-commit projection over the committed log (ADR #12).
+  // The consumer resolves entities at *runtime* from app.entities (set by
+  // buildKernel during app.ready) so it always sees the fully-built registry.
+  //
+  // Resolve from triggers to full event types (e.g. 'created' → 'Post.created').
+  function resolveTriggerTypes(desc, entityName) {
+    if (!desc.from) return [`${entityName}.created`, `${entityName}.updated`];
+    if (typeof desc.from === 'string') {
+      const from = desc.from;
+      return from.includes('.') ? [from] : [`${entityName}.${from}`];
+    }
+    return desc.from.map((f) => f.includes('.') ? f : `${entityName}.${f}`);
+  }
+
+  postCommitConsumers.push(async (events, { db }) => {
+    for (const ev of events) {
+      const colon = ev.scope?.indexOf(':');
+      if (colon < 0) continue;
+      const entityName = ev.scope.slice(0, colon);
+      const rowId = ev.scope.slice(colon + 1);
+      const entityRecord = app.entities?.get(entityName);
+      if (!entityRecord || !entityRecord.projectedAsyncFields?.length) continue;
+      const projFields = entityRecord.projectedAsyncFields;
+      const eventType = ev.type;
+      const triggered = [];
+      for (const [fieldName, desc] of projFields) {
+        const triggerTypes = resolveTriggerTypes(desc, entityName);
+        if (triggerTypes.includes(eventType)) {
+          triggered.push({ fieldName, compute: desc.compute });
+        }
+      }
+      if (triggered.length === 0) continue;
+      const row = db.prepare(`SELECT * FROM ${entityName} WHERE id = :id`).get({ id: rowId });
+      if (!row) continue;
+      const filteredRow = {};
+      if (row.id !== undefined) filteredRow.id = row.id;
+      for (const [k, v] of Object.entries(row)) {
+        if (Object.prototype.hasOwnProperty.call(entityRecord.fields, k)) {
+          const desc = entityRecord.fields[k];
+          if (desc?.kind === 'value' || desc?.kind === 'projected') {
+            try { filteredRow[k] = resolveStrategy(desc.kind).deserialize?.(v, desc) ?? v; } catch { filteredRow[k] = v; }
+          } else {
+            filteredRow[k] = v;
+          }
+        }
+      }
+      for (const { fieldName, compute } of triggered) {
+        const prevDb = getActiveDb();
+        setActiveDb(db);
+        try {
+          const result = await compute(filteredRow);
+          const serialized = resolveStrategy('projected').serialize(result);
+          db.prepare(`UPDATE ${entityName} SET ${fieldName} = :val WHERE id = :id`).run({
+            val: serialized, id: rowId,
+          });
+          // Per-field monotonic cursor: tracks compute completions (staleness indicator).
+          const cursorKey = `${entityName}.${fieldName}`;
+          const cursorRow = db.prepare(
+            'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
+          ).get({ e: entityName, f: fieldName });
+          const next = (cursorRow?.lastSeq ?? 0) + 1;
+          db.prepare(
+            'INSERT OR REPLACE INTO _ProjectedCursor (entity, field, lastSeq) VALUES (:e, :f, :s)',
+          ).run({ e: entityName, f: fieldName, s: next });
+        } catch {
+          // compute failure leaves the projected column unchanged; cursor NOT advanced
+        } finally {
+          setActiveDb(prevDb);
+        }
+      }
+    }
+  });
 
   // The single-writer mutex over node:sqlite (D9, eng-review spec #6). A durable
   // dispatch holds BEGIN→…→COMMIT open across an async `postHandlerAuthorize`

@@ -8,7 +8,7 @@
 // migration file.
 //
 // Column type mappings (SQLite):
-//   text / ref / crdt / hash / date    → TEXT
+//   text / ref / crdt / hash / date / json → TEXT
 //   boolean                             → INTEGER (node:sqlite refuses JS booleans)
 //   number                              → REAL
 //   struct (link)                       → one column per struct cell
@@ -44,7 +44,7 @@ function mainTableDDL(entity) {
     // Derived fields have no stored column (computed on read).
     if (descriptor.derived) continue;
     // Fields that are stored in the main table (value, crdt, hash, struct)
-    if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash' || descriptor.kind === 'state') {
+    if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash' || descriptor.kind === 'state' || descriptor.kind === 'projected') {
       cols.push(`${name} ${sqlType(descriptor)}`);
     } else if (descriptor.kind === 'struct') {
       // struct fields (link) flatten to multiple columns
@@ -187,6 +187,12 @@ export function generateFrameworkDDL() {
   leaseUntil INTEGER
 );`,
     'CREATE INDEX IF NOT EXISTS idx__job_claim ON _Job (status, enqueuedAt);',
+    `CREATE TABLE IF NOT EXISTS _ProjectedCursor (
+  entity TEXT NOT NULL,
+  field TEXT NOT NULL,
+  lastSeq INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (entity, field)
+);`,
     `CREATE TABLE IF NOT EXISTS _Worker (
   id TEXT PRIMARY KEY,
   tokenHash TEXT NOT NULL,
