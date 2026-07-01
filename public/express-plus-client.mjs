@@ -825,18 +825,24 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
   function _clearConfirmedOverlays(id) {
     const list = _listCache.get(id);
     if (!list) return;
-    const state = list.state;
 
     for (const [opId, entry] of _overlay) {
       if (entry.id !== id || entry.status !== 'confirmed') continue;
-      if (entry.kind === 'update' && state !== null) {
-        _overlay.delete(opId);
-      } else if (entry.kind === 'remove' && state === null) {
-        _overlay.delete(opId);
-      } else if (entry.kind === 'create' && state !== null) {
+      if (entry.confirmedSeq != null && list.cursor >= entry.confirmedSeq) {
         _overlay.delete(opId);
       }
     }
+  }
+
+  function _responseHeader(res, name) {
+    return res?.headers?.get?.(name) ?? null;
+  }
+
+  function _confirmedSeq(res) {
+    const value = _responseHeader(res, 'x-express-plus-seq');
+    if (value == null || value === '') return null;
+    const seq = Number(value);
+    return Number.isFinite(seq) ? seq : null;
   }
 
   function _storeRender() {
@@ -945,7 +951,7 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
     // remove: optimistic stays null
 
     // Create overlay entry (status: pending)
-    const entry = { opId, id: id ?? null, kind, optimistic, status: 'pending', row: null };
+    const entry = { opId, id: id ?? null, kind, optimistic, status: 'pending', row: null, confirmedSeq: null };
     _overlay.set(opId, entry);
     _storeRender();
 
@@ -995,6 +1001,11 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
       entry.status = 'confirmed';
       entry.id = realId;
       entry.row = returnedRow ?? null;
+      entry.confirmedSeq = _confirmedSeq(res);
+
+      if (kind === 'create') {
+        _overlay.delete(opId);
+      }
       _storeRender();
 
       return {

@@ -116,6 +116,8 @@ test('create inserts a row owned by the principal and 201s', async (t) => {
     body: JSON.stringify({ body: 'hello' }),
   });
   assert.equal(res.status, 201);
+  assert.ok(Number(res.headers.get('x-express-plus-seq')) >= 1);
+  assert.ok(res.headers.get('x-express-plus-action-id'));
   const created = await res.json();
   assert.equal(created.body, 'hello');
   assert.equal(created.owner, 'alice');
@@ -170,11 +172,15 @@ test('owner may update and remove a public-read row', async (t) => {
     body: JSON.stringify({ title: 'edited' }),
   });
   assert.equal(upd.status, 200);
+  assert.ok(Number(upd.headers.get('x-express-plus-seq')) >= 1);
+  assert.ok(upd.headers.get('x-express-plus-action-id'));
   const after = db.prepare('SELECT title FROM Post WHERE id = ?').get('1');
   assert.equal(after.title, 'edited');
 
   const del = await fetch(`${a.origin}/posts/1`, { method: 'DELETE' });
   assert.equal(del.status, 204);
+  assert.ok(Number(del.headers.get('x-express-plus-seq')) >= 1);
+  assert.ok(del.headers.get('x-express-plus-action-id'));
   const gone = db.prepare('SELECT * FROM Post WHERE id = ?').get('1');
   assert.equal(gone, undefined);
 });

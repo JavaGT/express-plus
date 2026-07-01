@@ -50,7 +50,16 @@ function makeFakeFetch(routes) {
         const body = typeof route.responseFn === 'function'
           ? route.responseFn(urlStr)
           : route.response;
-        return { ok: true, json: async () => body };
+        return {
+          ok: true,
+          status: route.status ?? 200,
+          headers: {
+            get(name) {
+              return route.headers?.[name.toLowerCase()] ?? null;
+            },
+          },
+          json: async () => body,
+        };
       }
     }
     return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
@@ -321,7 +330,11 @@ describe('LiveStore', () => {
 
     const fetch = makeFakeFetch([
       { match: '/snapshot/Doc/1', response: { snapshot: { id: '1', title: 'old' }, seq: 1 } },
-      { match: '/docs/1', response: { id: '1', title: 'new-from-rest' } },
+      {
+        match: '/docs/1',
+        response: { id: '1', title: 'new-from-rest' },
+        headers: { 'x-express-plus-seq': '2' },
+      },
     ]);
 
     const store = createLiveStore({
@@ -371,8 +384,8 @@ describe('LiveStore', () => {
     store.close();
   });
 
-  // --- 8. create temp-id retarget to real id on 201 ---
-  it('create returns real id from server; overlay retargets to real id', async () => {
+  // --- 8. create temp-id resolves to real id on 201 ---
+  it('create returns real id from server; confirmed create overlay is retired', async () => {
     const channel = makeFakeChannel();
 
     const fetch = makeFakeFetch([
@@ -391,15 +404,120 @@ describe('LiveStore', () => {
     assert.equal(result.id, 'real-42');
     assert.deepEqual(result.row, { id: 'real-42', title: 'new-doc', status: 'active' });
 
-    // The overlay entry should have retargeted to real-42
-    // pendingCreates should be empty
+    // The create result is the durable way to learn the returned row. The overlay
+    // is only a temporary optimistic placeholder and is retired on confirmation.
     assert.equal(store.pendingCreates().length, 0);
-
-    // overlayFor('real-42') should return the confirmed row
-    // But the LiveList for real-42 hasn't been subscribed yet
-    // The overlay persists because no LiveList renders it away
     const ov = store.overlayFor('real-42');
-    assert.deepEqual(ov, { id: 'real-42', title: 'new-doc', status: 'active' });
+    assert.equal(ov, null);
+
+    store.close();
+  });
+
+  it('confirmed update overlay survives older live renders and clears at its confirmed seq', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 1 });
+
+    const fetch = makeFakeFetch([
+      { match: '/snapshot/Doc/1', response: { snapshot: { id: '1', title: 'old' }, seq: 1 } },
+      {
+        match: '/docs/1',
+        response: { id: '1', title: 'new-from-rest' },
+        headers: { 'x-express-plus-seq': '3' },
+      },
+    ]);
+
+    const store = createLiveStore({
+      baseUrl: 'http://test', name: 'Doc', path: '/docs',
+      channel, fetchImpl: fetch,
+    });
+
+    const list = store.subscribe('1');
+    await list.ready;
+
+    const result = await store.update('1', { title: 'new-from-rest' });
+    assert.ok(result.ok);
+    assert.deepEqual(store.overlayFor('1'), { id: '1', title: 'new-from-rest' });
+
+    channel.emit({
+      type: 'event', entity: 'Doc', id: '1',
+      seq: 2, seqSpan: [2, 2],
+      event: { type: 'Doc.updated', data: { title: 'older-live-event' } },
+      delta: { title: { set: 'older-live-event' } },
+    });
+    await tickAsync();
+
+    assert.deepEqual(list.state, { id: '1', title: 'older-live-event' });
+    assert.deepEqual(store.overlayFor('1'), { id: '1', title: 'new-from-rest' },
+      'overlay stays visible until the matching committed seq is folded');
+
+    channel.emit({
+      type: 'event', entity: 'Doc', id: '1',
+      seq: 3, seqSpan: [3, 3],
+      event: { type: 'Doc.updated', data: { title: 'new-from-rest' } },
+      delta: { title: { set: 'new-from-rest' } },
+    });
+    await tickAsync();
+
+    assert.deepEqual(list.state, { id: '1', title: 'new-from-rest' });
+    assert.deepEqual(store.overlayFor('1'), { id: '1', title: 'new-from-rest' },
+      'overlay cleared after cursor reaches the confirmed seq');
+
+    store.close();
+  });
+
+  it('confirmed remove overlay survives older live renders and clears at its confirmed seq', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 1 });
+
+    const fetch = async (url, opts) => {
+      if (String(url).includes('/snapshot')) {
+        return { ok: true, json: async () => ({ snapshot: { id: '1', title: 'old' }, seq: 1 }) };
+      }
+      if (String(url).includes('/docs/1') && opts?.method === 'DELETE') {
+        return {
+          ok: true,
+          status: 204,
+          headers: { get: (name) => name.toLowerCase() === 'x-express-plus-seq' ? '3' : null },
+          json: async () => {},
+        };
+      }
+      return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
+    };
+
+    const store = createLiveStore({
+      baseUrl: 'http://test', name: 'Doc', path: '/docs',
+      channel, fetchImpl: fetch,
+    });
+
+    const list = store.subscribe('1');
+    await list.ready;
+
+    const result = await store.remove('1');
+    assert.ok(result.ok);
+    assert.equal(store.overlayFor('1'), null);
+
+    channel.emit({
+      type: 'event', entity: 'Doc', id: '1',
+      seq: 2, seqSpan: [2, 2],
+      event: { type: 'Doc.updated', data: { title: 'still-present' } },
+      delta: { title: { set: 'still-present' } },
+    });
+    await tickAsync();
+
+    assert.deepEqual(list.state, { id: '1', title: 'still-present' });
+    assert.equal(store.overlayFor('1'), null,
+      'confirmed remove remains visible until the matching committed seq is folded');
+
+    channel.emit({
+      type: 'event', entity: 'Doc', id: '1',
+      seq: 3, seqSpan: [3, 3],
+      event: { type: 'Doc.removed', data: { id: '1' } },
+    });
+    await tickAsync();
+
+    assert.equal(list.state, null);
+    assert.equal(store.overlayFor('1'), null,
+      'remove overlay cleared after cursor reaches the confirmed seq');
 
     store.close();
   });

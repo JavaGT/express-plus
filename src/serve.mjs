@@ -97,13 +97,27 @@ function matchRoute(routes, method, pathname) {
 
 // Send a JSON response with a status code. One place owns the response shape so
 // every exit (404, 401, 200) is consistent.
-function sendJson(res, status, body) {
+function sendJson(res, status, body, headers = {}) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
     'content-length': Buffer.byteLength(payload),
+    ...headers,
   });
   res.end(payload);
+}
+
+function committedEventHeaders(result, actionId, scope = null) {
+  const events = Array.isArray(result?.events) ? result.events : [];
+  const relevantEvents = scope ? events.filter((event) => event.scope === scope) : events;
+  const seq = relevantEvents.reduce(
+    (max, event) => Number.isFinite(event.seq) ? Math.max(max, event.seq) : max,
+    -Infinity,
+  );
+  return {
+    'x-express-plus-action-id': actionId,
+    ...(Number.isFinite(seq) ? { 'x-express-plus-seq': String(seq) } : {}),
+  };
 }
 
 // Read and JSON-parse a request body (create/update payloads). Caps the body to
@@ -249,7 +263,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const created = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE t0.id = :id`)
       .get({ id });
-    sendJson(res, 201, created);
+    sendJson(res, 201, created, committedEventHeaders(result, actionId, `${table}:${id}`));
     return;
   }
 
@@ -278,7 +292,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     }
     if (!result.granted) return void sendJson(res, 403, { error: 'forbidden' });
     const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
-    sendJson(res, 200, updated);
+    sendJson(res, 200, updated, committedEventHeaders(result, actionId, `${table}:${params.id}`));
     return;
   }
 
@@ -305,7 +319,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
       throw err;
     }
     if (!result.granted) return void sendJson(res, 403, { error: 'forbidden' });
-    res.writeHead(204);
+    res.writeHead(204, committedEventHeaders(result, actionId, `${table}:${params.id}`));
     res.end();
     return;
   }
@@ -728,6 +742,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
     if (cors && cors.origins && Array.isArray(cors.origins) && origin) {
       if (cors.origins.includes(origin)) {
         res.setHeader('access-control-allow-origin', origin);
+        res.setHeader('access-control-expose-headers', 'x-express-plus-seq, x-express-plus-action-id');
         res.setHeader('vary', 'Origin');
       }
     }

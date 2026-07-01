@@ -170,6 +170,7 @@ test('CORS: configured origin in allowlist sets ACAO header', async (t) => {
   });
   assert.equal(r.status, 200);
   assert.equal(r.headers.get('access-control-allow-origin'), 'https://app.example.com');
+  assert.equal(r.headers.get('access-control-expose-headers'), 'x-express-plus-seq, x-express-plus-action-id');
   assert.equal(r.headers.get('vary'), 'Origin');
 });
 
