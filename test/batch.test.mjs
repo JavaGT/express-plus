@@ -155,3 +155,51 @@ test('empty batch is a no-op granted with no events', async (t) => {
   assert.equal(result.granted, true);
   assert.equal(result.events.length, 0);
 });
+
+// The deny in `a denied sub-action rolls back…` could come from either the
+// first-layer `authorize` OR the in-txn create row-grant (`postHandlerAuthorize`).
+// The kernel's `authorize` is `() => true` (serve.mjs), so a create deny reaches
+// the IN-TXAN post-grant — this test pins that: it confirms the ROLLBACK happens
+// mid-transaction (the first action's row is undone), proving the 403 came from
+// inside the open BEGIN→COMMIT, not a pre-txn gate. A pre-txn authorize deny
+// would leave the first action un-attempted; an in-txn deny leaves it rolled back.
+test('a post-grant deny rolls back the first action mid-transaction (in-txn ROLLBACK)', async (t) => {
+  // PostGrantDeny grants only read → create passes `authorize: () => true` and
+  // runs the handler, but the in-txn `postHandlerAuthorize` → mayVerb('create')
+  // denies → 403 thrown inside the open transaction → ROLLBACK.
+  const postGrantDeny = entity('PostGrantDeny', {
+    fields: { body: text() },
+    grant: () => [scope(() => everyone()).can(() => grant(read))],
+  });
+  const db = new DatabaseSync(':memory:');
+  const app = expressPlus({ db });
+  app.mount('/notes', ownedNote());
+  app.mount('/deny', postGrantDeny);
+  await app.ddl();
+  app.listen(0, { principalOf: () => alice });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+
+  // First action commits a BatchNote; second action is denied IN-TXN. If the
+  // rollback is mid-transaction, the BatchNote row is undone (count 0). The
+  // cursor/seq also must not advance past the rolled-back work.
+  const result = await app.batch([
+    { type: 'BatchNote.create', payload: { body: 'committed-then-rolled-back' } },
+    { type: 'PostGrantDeny.create', payload: { body: 'denied-in-txn' } },
+  ], { principal: alice });
+
+  assert.equal(result.granted, false, 'denied by the in-txn post-grant');
+  assert.equal(result.events.length, 0, 'no events escape a rolled-back batch');
+
+  // The first action's row must NOT survive — proving the 403 was thrown INSIDE
+  // the open transaction (ROLLBACK undid the projected BatchNote), not before it.
+  const noteCount = db.prepare('SELECT COUNT(*) AS c FROM BatchNote').get().c;
+  assert.equal(noteCount, 0, 'first action rolled back mid-transaction');
+
+  // And the _Log must hold no row for this actionId — the whole composed commit
+  // was undone, so nothing was appended to the durable log.
+  const logCount = db.prepare('SELECT COUNT(*) AS c FROM _Log WHERE actionId = ?').get(
+    result.events?.[0]?.actionId ?? '',
+  ).c;
+  assert.equal(logCount, 0, 'no _Log row survives a rolled-back batch');
+});
