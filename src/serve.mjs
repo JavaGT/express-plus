@@ -27,7 +27,7 @@ import { bindReadScope } from './scope-sql.mjs';
 import { ValidationError } from './field-strategy.mjs';
 import { mayVerb, hasOwnCanGrant } from './row-grant.mjs';
 import { config } from './config.mjs';
-import { applySecurityHeaders, renderError } from './middleware.mjs';
+import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
 import { admitScheduledMutation, tickSource, admitTickedMutation } from './schedule.mjs';
 import { startTickEngine } from './tick-engine.mjs';
@@ -675,24 +675,12 @@ async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, q
 // check; it runs before the route gate so a forged mutation never reaches it.
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-function sameOriginAsHost(headerValue, host) {
-  if (!headerValue) return null; // absent — caller falls back / allows
-  try {
-    return new URL(headerValue).host === host;
-  } catch {
-    return false; // present but unparseable → treat as foreign (fail closed)
-  }
-}
-
 // Returns true when the mutation is allowed, false when it is foreign (→ 403).
+// Safe methods carry no state change; the same-origin verdict (shared with the
+// WS upgrade handshake, middleware.mjs) gates every other method.
 function csrfGuard(req) {
   if (SAFE_METHODS.has(req.method)) return true;
-  const host = req.headers.host;
-  const origin = sameOriginAsHost(req.headers.origin, host);
-  if (origin !== null) return origin;         // Origin present → its verdict stands
-  const referer = sameOriginAsHost(req.headers.referer, host);
-  if (referer !== null) return referer;       // no Origin; Referer present → its verdict
-  return true;                                // neither present → non-browser client, allow
+  return isSameOriginRequest(req);
 }
 
 // Build the node:http request handler that serves a routing table. `principalOf`

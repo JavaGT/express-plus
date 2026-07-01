@@ -29,6 +29,7 @@
 // an app never mounts it.
 
 import { FrameSender, FrameParser, upgradeWebSocket } from './websocket.mjs';
+import { isSameOriginRequest } from './middleware.mjs';
 import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
 import { hasOwnCanGrant } from './row-grant.mjs';
@@ -582,6 +583,16 @@ export function createLiveServer(httpServer, {
     // Only upgrade on the configured path.
     const url = req.url ? new URL(req.url, 'http://localhost') : { pathname: '' };
     if (url.pathname !== path) {
+      socket.destroy();
+      return;
+    }
+
+    // Cross-Site WebSocket Hijacking (CSWSH) defense — the SAME same-origin
+    // verdict the REST CSRF guard uses (middleware.mjs). A browser ALWAYS
+    // attaches Origin to a cross-origin WS handshake, so a foreign Origin here
+    // is an attacker page connecting on the victim's cookies; reject it. An
+    // absent Origin is a non-browser client (no CSWSH vector) → allowed.
+    if (!isSameOriginRequest(req)) {
       socket.destroy();
       return;
     }

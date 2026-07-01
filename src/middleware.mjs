@@ -25,6 +25,37 @@ export function applySecurityHeaders(res) {
   }
 }
 
+// Same-origin verification — the ONE implementation used by both transports:
+// the REST CSRF guard (serve.mjs) and the WebSocket upgrade handshake (live.mjs).
+// A single mechanism so the two can never drift (AGENTS.md → no second auth path).
+//
+// `sameOriginAsHost` returns the verdict of ONE header against the request Host:
+//   null  — header absent (caller decides the fallback)
+//   true  — present and same-origin
+//   false — present and foreign OR unparseable (fail closed)
+export function sameOriginAsHost(headerValue, host) {
+  if (!headerValue) return null; // absent — caller falls back / allows
+  try {
+    return new URL(headerValue).host === host;
+  } catch {
+    return false; // present but unparseable → treat as foreign (fail closed)
+  }
+}
+
+// The composed same-origin admission used by state-changing transports. An
+// Origin header, when present, is authoritative; a Referer is the fallback;
+// neither present → a non-browser client (no CSRF/CSWSH vector) is allowed.
+// Browsers ALWAYS attach Origin to a cross-origin WebSocket handshake, so an
+// absent Origin cannot be a cross-site attack — the allow is safe.
+export function isSameOriginRequest(req) {
+  const host = req.headers.host;
+  const origin = sameOriginAsHost(req.headers.origin, host);
+  if (origin !== null) return origin;   // Origin present → its verdict stands
+  const referer = sameOriginAsHost(req.headers.referer, host);
+  if (referer !== null) return referer; // no Origin; Referer present → its verdict
+  return true;                          // neither present → non-browser client, allow
+}
+
 // The single error renderer — the SPEC §3 "4-argument JSON error handler". It is
 // the ONE place an error becomes a client response, so the dev/prod and
 // deliberate/unexpected decisions are all made in one spot.
