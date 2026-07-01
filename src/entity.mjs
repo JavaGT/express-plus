@@ -24,7 +24,7 @@ import { buildCheckRegistry } from './registry.mjs';
 import { mayFieldOp } from './row-grant.mjs';
 import { read, write } from './grant.mjs';
 import {
-  serializeField, validateMutation, ValidationError, verifyHash, flattenStruct, structCellColumn,
+  serializeField, deserializeField, validateMutation, ValidationError, verifyHash, flattenStruct, structCellColumn,
 } from './field-strategy.mjs';
 import { action, event } from './pipeline.mjs';
 import { generateDDL } from './ddl.mjs';
@@ -427,6 +427,8 @@ export function entity(name, declaration = {}) {
   const hashFields = Object.entries(fields)
     .filter(([, descriptor]) => descriptor.kind === 'hash')
     .map(([fieldName]) => fieldName);
+  const storedValueFields = Object.entries(fields)
+    .filter(([, descriptor]) => descriptor.kind === 'value');
   // struct fields store one flat `<field>__<cell>` column per sub-cell; on read
   // they reconstruct a namespace object (row.linkShare = { token, tier }) and the
   // raw generated columns are removed, so a handler sees the declared shape, not
@@ -821,6 +823,7 @@ export function entity(name, declaration = {}) {
   // compatible (store query handles + all reads work without it).
   const hydrate = (row, principal = null, dispatch = null) => {
     if (!row) return row;
+    deserializeStoredCells(row);
     for (const fieldName of hashFields) {
       const stored = row[fieldName];
       if (stored === null || stored === undefined) continue;
@@ -921,6 +924,21 @@ export function entity(name, declaration = {}) {
   // there is ONE admission path and hydration stays the entity's own concern
   // (not a second authz path). findById stays the unscoped trusted primitive.
   record.hydrate = (row, principal = null, dispatch = null) => hydrate(row, principal, dispatch);
+
+  // Deserialize raw main-table cells without attaching handles. HTTP CRUD and
+  // snapshot routes return plain JSON rows; store/map/log handles are server-only
+  // affordances and must not leak into those response bodies.
+  function deserializeStoredCells(row) {
+    if (!row) return row;
+    for (const [fieldName, descriptor] of storedValueFields) {
+      if (Object.prototype.hasOwnProperty.call(row, fieldName)) {
+        row[fieldName] = deserializeField(descriptor, row[fieldName]);
+      }
+    }
+    return row;
+  }
+
+  record.deserializeRow = (row) => deserializeStoredCells(row);
 
   record.getOrFail = (id) => {
     const row = record.findById(id);

@@ -14,7 +14,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { text, ref, boolean, date, read, write, subscribe, grant } from '../src/index.mjs';
+import { text, ref, boolean, date, json, read, write, subscribe, grant } from '../src/index.mjs';
 
 test('text() returns a value-kind field descriptor', () => {
   const f = text();
@@ -58,6 +58,18 @@ test('boolean({default}) and date({default}) record their default', () => {
   const now = () => new Date(0);
   const d = date({ default: now });
   assert.equal(d.default, now);
+});
+
+test('json(shape, options) returns a value-kind json descriptor', () => {
+  const shape = { embedding: 'number[]', meta: 'object' };
+  const fallback = () => ({ embedding: [], meta: {} });
+  const f = json(shape, { default: fallback });
+
+  assert.equal(f.kind, 'value');
+  assert.equal(f.type, 'json');
+  assert.equal(f.shape, shape);
+  assert.equal(f.default, fallback);
+  assert.ok(Object.isFrozen(f));
 });
 
 test('text({validate}) records its validate function', () => {

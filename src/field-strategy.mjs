@@ -33,6 +33,29 @@ function isTextValue(v) {
   return typeof v === 'string';
 }
 
+function isPlainObject(value) {
+  if (value === null || typeof value !== 'object') return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function isJsonValue(value, seen = new WeakSet()) {
+  if (value === null) return true;
+  if (typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (Array.isArray(value)) {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return value.every((item) => isJsonValue(item, seen));
+  }
+  if (isPlainObject(value)) {
+    if (seen.has(value)) return false;
+    seen.add(value);
+    return Object.values(value).every((item) => isJsonValue(item, seen));
+  }
+  return false;
+}
+
 // crdt text diff — common-prefix + common-suffix detection yields the minimal
 // per-element delta. A pure insert → {insert:{at,text}}; a replace →
 // {delete:{at,length}, insert:{at,text}}. Never a whole-value `{ set }` (consult
@@ -121,6 +144,9 @@ const STRATEGIES = Object.freeze({
             return 'expected a date';
           }
           return true;
+        case 'json':
+          if (!isJsonValue(value)) return 'expected a JSON value';
+          return true;
         default:
           return true;
       }
@@ -147,9 +173,17 @@ const STRATEGIES = Object.freeze({
           return value instanceof Date ? value.getTime() : value;
         case 'ref':
           return String(value);
+        case 'json':
+          return JSON.stringify(value);
         default:
           return value;
       }
+    },
+    deserialize(value, descriptor) {
+      if (value === null || value === undefined) return value;
+      if (descriptor.type !== 'json') return value;
+      if (typeof value !== 'string') return value;
+      return JSON.parse(value);
     },
   }),
 
@@ -348,6 +382,15 @@ export function serializeField(descriptor, value) {
   const strategy = resolveStrategy(descriptor.kind);
   if (typeof strategy.serialize !== 'function') return value;
   return strategy.serialize(value, descriptor);
+}
+
+// Deserialize a stored cell back into the public row value owned by its field
+// strategy. Most stored cells are already public values; json is the first
+// value-kind type that needs a read-side mapping from TEXT back to object/array.
+export function deserializeField(descriptor, value) {
+  const strategy = resolveStrategy(descriptor.kind);
+  if (typeof strategy.deserialize !== 'function') return value;
+  return strategy.deserialize(value, descriptor);
 }
 
 // verifyHash(candidate, stored) — the one-way check behind a hydrated hash

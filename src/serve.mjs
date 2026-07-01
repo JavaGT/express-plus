@@ -215,7 +215,8 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
   const scopeParams = bound ? bound.params : {};
 
   if (verb === 'list') {
-    const rows = db.prepare(`SELECT * FROM ${table} AS t0 WHERE ${where}`).all(scopeParams);
+    const rows = db.prepare(`SELECT * FROM ${table} AS t0 WHERE ${where}`).all(scopeParams)
+      .map((row) => entity.deserializeRow(row));
     // Post-filter through the SAME mayVerb('list') engine `read` uses — the SQL
     // scope decides VISIBILITY, the .can body decides the read CAPABILITY. A
     // grant can admit a row via scope yet deny read in .can; without this list
@@ -238,6 +239,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
+    entity.deserializeRow(row);
     // not visible under scope OR absent → 404 (do not distinguish, fail closed).
     if (!row) return void sendJson(res, 404, { error: 'not found' });
     if (!(await mayVerb(entity, 'read', row, principal))) {
@@ -263,6 +265,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const created = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE t0.id = :id`)
       .get({ id });
+    entity.deserializeRow(created);
     sendJson(res, 201, created, committedEventHeaders(result, actionId, `${table}:${id}`));
     return;
   }
@@ -273,6 +276,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
+    entity.deserializeRow(row);
     if (!row) return void sendJson(res, 404, { error: 'not found' });
     if (!(await mayVerb(entity, 'update', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
@@ -292,6 +296,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     }
     if (!result.granted) return void sendJson(res, 403, { error: 'forbidden' });
     const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
+    entity.deserializeRow(updated);
     sendJson(res, 200, updated, committedEventHeaders(result, actionId, `${table}:${params.id}`));
     return;
   }
@@ -302,6 +307,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
+    entity.deserializeRow(row);
     if (!row) return void sendJson(res, 404, { error: 'not found' });
     if (!(await mayVerb(entity, 'remove', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
@@ -369,9 +375,10 @@ function readScopedRow(app, entity, id, principal) {
   const bound = bindReadScope(entity.readScope, principal);
   const where = bound ? bound.sql : '1=1';
   const scopeParams = bound ? bound.params : {};
-  return app.db
+  const row = app.db
     .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
     .get({ ...scopeParams, id });
+  return entity.deserializeRow(row);
 }
 
 // Load the materialized row through the readScope (fail closed: out-of-scope OR

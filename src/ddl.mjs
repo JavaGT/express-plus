@@ -8,7 +8,7 @@
 // migration file.
 //
 // Column type mappings (SQLite):
-//   text / ref / crdt / hash / date    → TEXT
+//   text / ref / crdt / hash / date / json → TEXT
 //   boolean                             → INTEGER (node:sqlite refuses JS booleans)
 //   number                              → REAL
 //   struct (link)                       → one column per struct cell

@@ -53,6 +53,13 @@ export function number(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'number', ...options });
 }
 
+// `json(shape)` — a value-kind structured JSON cell stored as TEXT. `shape` is
+// declared config retained for future path/index support; app-specific runtime
+// validation still belongs in the ordinary `validate` option.
+export function json(shape = null, options = {}) {
+  return makeDescriptor({ kind: 'value', type: 'json', shape, ...options });
+}
+
 // `hash()` — a one-way salted password digest. Its own KIND (not `value`): a
 // plaintext password is digested on write and is NEVER queryable, so the scope
 // compiler refuses to compare it (a hash handle's .is throws — fail closed). A
