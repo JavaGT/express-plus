@@ -328,7 +328,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     entity.deserializeRow(row);
     // not visible under scope OR absent → 404 (do not distinguish, fail closed).
     if (!row) return void sendJson(res, 404, { error: 'not found' });
-    if (!(await mayVerb(entity, 'read', row, principal))) {
+    if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'read', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
     sendJson(res, 200, row);
