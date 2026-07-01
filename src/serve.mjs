@@ -1174,6 +1174,32 @@ function buildKernel(app) {
       }
     }
     if (projectedEntities.length > 0) {
+      // Per-field monotonic cursor: tracks how many times each projected.async
+      // field has been successfully computed. Stored in _ProjectedCursor to
+      // survive restart. The cursor is NOT used to skip events (per-scope seqs
+      // are not globally comparable) — it is a staleness indicator for the read
+      // path and a progress counter for external monitoring.
+      const cursorCache = new Map();
+      const getCursor = (db, entityName, fieldName) => {
+        const key = `${entityName}.${fieldName}`;
+        if (cursorCache.has(key)) return cursorCache.get(key);
+        const row = db.prepare(
+          'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
+        ).get({ e: entityName, f: fieldName });
+        const val = row?.lastSeq ?? 0;
+        cursorCache.set(key, val);
+        return val;
+      };
+      const advanceCursor = (db, entityName, fieldName) => {
+        const key = `${entityName}.${fieldName}`;
+        const next = (cursorCache.get(key) ?? 0) + 1;
+        cursorCache.set(key, next);
+        db.prepare(
+          'INSERT OR REPLACE INTO _ProjectedCursor (entity, field, lastSeq) VALUES (:e, :f, :s)',
+        ).run({ e: entityName, f: fieldName, s: next });
+        return next;
+      };
+
       postCommitConsumers.push(async (events, { db }) => {
         for (const ev of events) {
           const colon = ev.scope?.indexOf(':');
@@ -1183,7 +1209,6 @@ function buildKernel(app) {
           const proj = projectedEntities.find((p) => p.entity.name === entityName);
           if (!proj) continue;
           const eventType = ev.type;
-          // Only run fields whose trigger includes this event type
           const triggered = proj.fields.filter((f) => f.triggerTypes.includes(eventType));
           if (triggered.length === 0) continue;
           const row = db.prepare(`SELECT * FROM ${entityName} WHERE id = :id`).get({ id: rowId });
@@ -1206,8 +1231,9 @@ function buildKernel(app) {
               db.prepare(`UPDATE ${entityName} SET ${fieldName} = :val WHERE id = :id`).run({
                 val: serialized, id: rowId,
               });
+              advanceCursor(db, entityName, fieldName);
             } catch {
-              // compute failure leaves the projected column unchanged
+              // compute failure leaves the projected column unchanged; cursor NOT advanced
             }
           }
         }

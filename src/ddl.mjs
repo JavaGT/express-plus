@@ -187,6 +187,12 @@ export function generateFrameworkDDL() {
   leaseUntil INTEGER
 );`,
     'CREATE INDEX IF NOT EXISTS idx__job_claim ON _Job (status, enqueuedAt);',
+    `CREATE TABLE IF NOT EXISTS _ProjectedCursor (
+  entity TEXT NOT NULL,
+  field TEXT NOT NULL,
+  lastSeq INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (entity, field)
+);`,
     `CREATE TABLE IF NOT EXISTS _Worker (
   id TEXT PRIMARY KEY,
   tokenHash TEXT NOT NULL,

@@ -543,3 +543,120 @@ test('projected.async without from recomputes on both create and update (default
   row = db.prepare('SELECT hotRank FROM Post WHERE id = :id').get({ id: created.id });
   assert.equal(JSON.parse(row.hotRank), 100, 'computed on update');
 });
+
+// --- sequence watermarking ---
+
+test('compute counter advances with each successful compute, survives across events', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  let computeCount = 0;
+  const Post = entity('Post', {
+    fields: {
+      title: text(),
+      score: number(),
+      hotRank: projected.async({
+        compute: async (row) => {
+          computeCount++;
+          return (row.score ?? 0) * 2;
+        },
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const app = expressPlus({ db });
+  app.mount('/posts', Post);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  // First create
+  const r1 = await fetch(`${origin}/posts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Post1', score: 10 }),
+  });
+  await r1.json();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.equal(computeCount, 1, 'computed once');
+
+  let cursor = db.prepare(
+    "SELECT lastSeq FROM _ProjectedCursor WHERE entity = 'Post' AND field = 'hotRank'",
+  ).get();
+  assert.ok(cursor, 'cursor row exists');
+  assert.equal(cursor.lastSeq, 1, 'cursor = 1 after first compute');
+
+  // Second create — counter advances
+  computeCount = 0;
+  const r2 = await fetch(`${origin}/posts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Post2', score: 20 }),
+  });
+  await r2.json();
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.equal(computeCount, 1, 'computed exactly once on second create');
+  cursor = db.prepare(
+    "SELECT lastSeq FROM _ProjectedCursor WHERE entity = 'Post' AND field = 'hotRank'",
+  ).get();
+  assert.equal(cursor.lastSeq, 2, 'cursor advanced to 2');
+
+  // Update second post — counter advances again
+  computeCount = 0;
+  const rows = db.prepare('SELECT id FROM Post WHERE title = :t').all({ t: 'Post2' });
+  const post2Id = rows[0].id;
+  await fetch(`${origin}/posts/${post2Id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ score: 30 }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.equal(computeCount, 1, 'computed exactly once on update');
+  cursor = db.prepare(
+    "SELECT lastSeq FROM _ProjectedCursor WHERE entity = 'Post' AND field = 'hotRank'",
+  ).get();
+  assert.equal(cursor.lastSeq, 3, 'cursor advanced to 3');
+
+  // Compute failure does NOT advance cursor
+  computeCount = 0;
+  const PostWithFailure = entity('PostWithFail', {
+    fields: {
+      title: text(),
+      score: number(),
+      hotRank: projected.async({
+        compute: async () => { computeCount++; throw new Error('fail'); },
+        from: 'created',
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  const app2 = expressPlus({ db });
+  app2.mount('/failposts', PostWithFailure);
+  app2.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app2.ready;
+
+  db.exec('CREATE TABLE PostWithFail (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+  const origin2 = `http://127.0.0.1:${app2.httpServer.address().port}`;
+  await fetch(`${origin2}/failposts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Fail', score: 5 }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.equal(computeCount, 1, 'compute attempted once');
+  const failCursor = db.prepare(
+    "SELECT lastSeq FROM _ProjectedCursor WHERE entity = 'PostWithFail' AND field = 'hotRank'",
+  ).get();
+  assert.equal(failCursor, undefined, 'no cursor row — compute failure did not advance');
+
+  app2.httpServer.close();
+});
