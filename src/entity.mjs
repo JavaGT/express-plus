@@ -1116,7 +1116,18 @@ export function entity(name, declaration = {}) {
         for (const [key, value] of Object.entries(data)) {
           const descriptor = fields[key];
           if (descriptor && descriptor.kind === 'store') continue;
-          if (descriptor && descriptor.kind === 'struct') continue;
+          // A struct (link) field flattens to per-cell columns on UPDATE, exactly
+          // as on CREATE — only the cells present in the payload are set, so a
+          // partial struct update leaves the untouched cells intact. Skipping it
+          // here would commit the cell change to the log but never materialize it
+          // to the row (bootstrap read and log fold would disagree).
+          if (descriptor && descriptor.kind === 'struct') {
+            for (const [column, cell] of Object.entries(flattenStruct(key, descriptor, value))) {
+              updates.push(`${column} = :${column}`);
+              params[column] = cell;
+            }
+            continue;
+          }
           const stored = descriptor ? serializeField(descriptor, value) : value;
           updates.push(`${key} = :${key}`);
           params[key] = stored;

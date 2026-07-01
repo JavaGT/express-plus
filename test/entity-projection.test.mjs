@@ -10,7 +10,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 
 import {
-  entity, text, ref, grant, read, write, scope, everyone,
+  entity, text, ref, link, grant, read, write, scope, everyone,
   generateFrameworkDDL,
 } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
@@ -173,6 +173,62 @@ test('entity-projection: update — projection updates row', async () => {
     result.events[0],
   );
   assert.equal(reducerState.body, 'updated body');
+});
+
+// A struct (link) field's cells persist on CREATE via flattenStruct; they must
+// ALSO persist on UPDATE. The `.updated` projection reducer previously skipped
+// struct fields, so a struct-cell change committed to the log but never
+// materialized to the row — the row read (bootstrap) and the log fold (resync)
+// disagreed. This asserts the update path flattens struct cells like create.
+test('entity-projection: update — struct (link) cells persist to the row', async () => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  for (const sql of generateFrameworkDDL()) db.exec(sql);
+
+  const Doc = entity('Doc', {
+    fields: {
+      title: text(),
+      linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view' }),
+      owner: ref('User', { role: 'owner', readonly: true }),
+    },
+    grant: () => [
+      scope(({ is }) => is.owner()).can(async ({ is }) =>
+        (await is.owner()) ? grant(read, write) : grant(read)),
+    ],
+  });
+
+  for (const sql of Doc.generateDDL()) db.exec(sql);
+
+  const row = Doc.create({ title: 'memo', linkShare: { token: 'tok-1', tier: 'view' } });
+  assert.equal(row.linkShare.tier, 'view');
+
+  const { createServer } = await import('../src/pipeline.mjs');
+
+  const server = createServer({
+    handlers: {
+      'Doc.update': ({ payload }) => [
+        { type: 'Doc.updated', scope: `Doc:${row.id}`, data: { id: row.id, ...payload } },
+      ],
+    },
+    authorize: () => true,
+    db,
+    projections: [Doc.projection],
+  });
+
+  const result = await server.dispatch({
+    actionId: 'su1',
+    type: 'Doc.update',
+    payload: { linkShare: { tier: 'edit' } },
+    principal: { id: 'u1' },
+  });
+
+  assert.equal(result.granted, true);
+
+  // The row (bootstrap read) must reflect the struct-cell change.
+  const updated = Doc.findById(row.id);
+  assert.equal(updated.linkShare.tier, 'edit', 'struct cell persisted to row on update');
+  // Partial struct update leaves the untouched cell intact.
+  assert.equal(updated.linkShare.token, 'tok-1', 'untouched struct cell preserved');
 });
 
 test('entity-projection: remove — projection deletes row', async () => {
