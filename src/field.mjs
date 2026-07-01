@@ -226,6 +226,23 @@ export const projected = {
       readonly: true,
     });
   },
+  // `projected.inline({ compute })` — an in-transaction stored computed field.
+  // Unlike `.async` (post-commit), the compute runs INSIDE the originating
+  // transaction — it is atomic with the mutation. A compute failure rolls
+  // back the whole commit (fail closed). The compute is synchronous in the
+  // projection's apply handler; the field value is materialized immediately
+  // so sort keys like `hotRank` are transactionally consistent.
+  inline: ({ compute }) => {
+    if (typeof compute !== 'function') {
+      throw new Error('projected.inline requires a compute function');
+    }
+    return makeDescriptor({
+      kind: 'projected',
+      mode: 'inline',
+      compute,
+      readonly: true,
+    });
+  },
 };
 
 // `ephemeral(cells)` — the general NON-PERSISTING field kind. Accepts an author-

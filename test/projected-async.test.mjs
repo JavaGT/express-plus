@@ -261,3 +261,143 @@ test('projected.async field is rejected in client create payload (readonly)', as
   });
   assert.equal(res.status, 400, 'readonly projected field rejected');
 });
+
+// --- projected.inline tests ---
+
+test('projected.inline constructor validates compute is a function', () => {
+  assert.throws(() => projected.inline({}), /compute function/);
+  const d = projected.inline({ compute: (row) => row.score * 2 });
+  assert.equal(d.kind, 'projected');
+  assert.equal(d.mode, 'inline');
+  assert.equal(d.readonly, true);
+  assert.equal(typeof d.compute, 'function');
+});
+
+test('projected.inline value is stored immediately in the create response', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Blog = entity('Blog', {
+    fields: {
+      title: text(),
+      score: number(),
+      hotRank: projected.inline({
+        compute: (row) => (row.score ?? 0) * 2,
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const app = expressPlus({ db });
+  app.mount('/blogs', Blog);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const res = await fetch(`${origin}/blogs`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Post', score: 42 }),
+  });
+  assert.equal(res.status, 201);
+  const created = await res.json();
+
+  // Inline compute is synchronous with the transaction — value available immediately
+  assert.equal(created.hotRank, 84, `hotRank should be 84 in response, got ${created.hotRank}`);
+
+  const row = db.prepare('SELECT hotRank FROM Blog WHERE id = :id').get({ id: created.id });
+  assert.equal(JSON.parse(row.hotRank), 84, `hotRank should be 84 in DB`);
+});
+
+test('projected.inline value is recomputed on update', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Blog = entity('Blog', {
+    fields: {
+      title: text(),
+      score: number(),
+      hotRank: projected.inline({
+        compute: (row) => (row.score ?? 0) * 3,
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const app = expressPlus({ db });
+  app.mount('/blogs', Blog);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const r1 = await fetch(`${origin}/blogs`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Post', score: 10 }),
+  });
+  const created = await r1.json();
+  assert.equal(created.hotRank, 30);
+
+  const r2 = await fetch(`${origin}/blogs/${created.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ score: 20 }),
+  });
+  const updated = await r2.json();
+  assert.equal(updated.hotRank, 60, `after update should be 60, got ${updated.hotRank}`);
+
+  const row = db.prepare('SELECT hotRank FROM Blog WHERE id = :id').get({ id: created.id });
+  assert.equal(JSON.parse(row.hotRank), 60);
+});
+
+test('projected.inline compute failure rolls back the mutation', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Blog = entity('Blog', {
+    fields: {
+      title: text(),
+      score: number(),
+      hotRank: projected.inline({
+        compute: (row) => {
+          if (row.score < 0) throw new Error('negative score');
+          return row.score * 10;
+        },
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const app = expressPlus({ db });
+  app.mount('/blogs', Blog);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  // Create with positive score — succeeds
+  const r1 = await fetch(`${origin}/blogs`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'OK', score: 5 }),
+  });
+  assert.equal(r1.status, 201);
+
+  // Try to create with negative score — compute fails, transaction rolls back
+  const r2 = await fetch(`${origin}/blogs`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Bad', score: -1 }),
+  });
+  // The compute failure should result in a 500
+  assert.ok(r2.status >= 400, `expected error status, got ${r2.status}`);
+
+  // Row should NOT exist (rollback)
+  const rows = db.prepare('SELECT id FROM Blog WHERE title = :t').all({ t: 'Bad' });
+  assert.equal(rows.length, 0, 'failed create rolled back — no row');
+});

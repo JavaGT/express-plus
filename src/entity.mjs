@@ -24,7 +24,7 @@ import { buildCheckRegistry } from './registry.mjs';
 import { mayFieldOp } from './row-grant.mjs';
 import { read, write } from './grant.mjs';
 import {
-  serializeField, deserializeField, validateMutation, ValidationError, verifyHash, flattenStruct, structCellColumn,
+  serializeField, deserializeField, validateMutation, ValidationError, verifyHash, flattenStruct, structCellColumn, resolveStrategy,
 } from './field-strategy.mjs';
 import { action, event } from './pipeline.mjs';
 import { generateDDL } from './ddl.mjs';
@@ -399,6 +399,9 @@ export function entity(name, declaration = {}) {
   // post-commit consumer to iterate.
   const projectedAsyncFields = Object.entries(fields)
     .filter(([, d]) => d.kind === 'projected' && d.mode === 'async');
+  // projected.inline fields: run in-transaction in the projection's apply handler.
+  const projectedInlineFields = Object.entries(fields)
+    .filter(([, d]) => d.kind === 'projected' && d.mode === 'inline');
 
   const record = {
     name,
@@ -424,6 +427,7 @@ export function entity(name, declaration = {}) {
     admitsEffects,
     schedule: validatedSchedule,
     projectedAsyncFields: Object.freeze(projectedAsyncFields),
+    projectedInlineFields: Object.freeze(projectedInlineFields),
   };
 
   // hash-kind fields hydrate from their stored `salt:digest` cell into a
@@ -944,6 +948,20 @@ export function entity(name, declaration = {}) {
     return row;
   }
 
+  function buildProjectedComputeRow(storedRow, fields) {
+    const row = { ...storedRow };
+    for (const [fName, desc] of Object.entries(fields)) {
+      if (Object.prototype.hasOwnProperty.call(row, fName)) {
+        try {
+          row[fName] = resolveStrategy(desc.kind).deserialize?.(row[fName], desc) ?? row[fName];
+        } catch {
+          // leave as stored value
+        }
+      }
+    }
+    return row;
+  }
+
   record.deserializeRow = (row) => deserializeStoredCells(row);
 
   record.getOrFail = (id) => {
@@ -1158,6 +1176,17 @@ export function entity(name, declaration = {}) {
             row[key] = value;
           }
         }
+        // projected.inline: compute in-transaction and include in INSERT
+        for (const [pfName, { compute }] of projectedInlineFields) {
+          try {
+            const computeRow = buildProjectedComputeRow(row, fields);
+            const result = compute(computeRow);
+            row[pfName] = resolveStrategy('projected').serialize(result);
+          } catch {
+            // compute failure aborts — fail closed in-txn
+            throw new Error(`${name}.${pfName} projected.inline compute failed`);
+          }
+        }
         const cols = Object.keys(row);
         if (cols.length > 0) {
           db.prepare(
@@ -1172,11 +1201,6 @@ export function entity(name, declaration = {}) {
         for (const [key, value] of Object.entries(data)) {
           const descriptor = fields[key];
           if (descriptor && descriptor.kind === 'store') continue;
-          // A struct (link) field flattens to per-cell columns on UPDATE, exactly
-          // as on CREATE — only the cells present in the payload are set, so a
-          // partial struct update leaves the untouched cells intact. Skipping it
-          // here would commit the cell change to the log but never materialize it
-          // to the row (bootstrap read and log fold would disagree).
           if (descriptor && descriptor.kind === 'struct') {
             for (const [column, cell] of Object.entries(flattenStruct(key, descriptor, value))) {
               updates.push(`${column} = :${column}`);
@@ -1187,6 +1211,29 @@ export function entity(name, declaration = {}) {
           const stored = descriptor ? serializeField(descriptor, value) : value;
           updates.push(`${key} = :${key}`);
           params[key] = stored;
+        }
+        // projected.inline: read existing row, merge changes, compute, update
+        if (projectedInlineFields.length > 0) {
+          const existing = db.prepare(`SELECT * FROM ${table} WHERE id = :id`).get({ id });
+          if (existing) {
+            const merged = { ...existing };
+            for (const [key] of Object.entries(data)) {
+              if (Object.prototype.hasOwnProperty.call(fields, key)) {
+                merged[key] = Object.prototype.hasOwnProperty.call(params, key) ? params[key] : data[key];
+              }
+            }
+            for (const [pfName, { compute }] of projectedInlineFields) {
+              try {
+                const computeRow = buildProjectedComputeRow(merged, fields);
+                const result = compute(computeRow);
+                const stored = resolveStrategy('projected').serialize(result);
+                updates.push(`${pfName} = :${pfName}`);
+                params[pfName] = stored;
+              } catch {
+                throw new Error(`${name}.${pfName} projected.inline compute failed`);
+              }
+            }
+          }
         }
         if (updates.length > 0) {
           db.prepare(`UPDATE ${table} SET ${updates.join(', ')} WHERE id = :id`).run(params);
