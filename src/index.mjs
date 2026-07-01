@@ -5,7 +5,7 @@
 
 export { check, resolveDecision, UnawaitedCheckError } from './check.mjs';
 export { assertGuarded } from './guard/static.mjs';
-export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, presence, ephemeral, state } from './field.mjs';
+export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, presence, ephemeral, state, projected } from './field.mjs';
 export { now } from './deferred.mjs';
 export { resolveStrategy, validateMutation, ValidationError } from './field-strategy.mjs';
 export { computeDelta } from './field-delta.mjs';

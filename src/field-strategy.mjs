@@ -276,6 +276,35 @@ const STRATEGIES = Object.freeze({
     },
   }),
 
+  // `projected` — a stored computed field (projected.inline / projected.async).
+  // The column stores a JSON-serialized value produced by the compute function.
+  // The field is readonly (client cannot set it); the projection owns the write.
+  // Diff/apply are whole-value (same shape as value-kind); the serialized form is
+  // JSON TEXT so any JSON-serializable result (number, string, object, array) is
+  // storable. The structural validate accepts anything (null/undefined = empty
+  // cell; otherwise the compute result is trusted).
+  projected: Object.freeze({
+    validate() {
+      return true; // the compute result is trusted, not client-provided
+    },
+    apply(_previous, next) {
+      return next;
+    },
+    diff(previous, next) {
+      if (Object.is(previous, next)) return null;
+      return { set: next };
+    },
+    serialize(value) {
+      if (value === null || value === undefined) return value;
+      return JSON.stringify(value);
+    },
+    deserialize(value) {
+      if (value === null || value === undefined) return value;
+      if (typeof value !== 'string') return value;
+      try { return JSON.parse(value); } catch { return value; }
+    },
+  }),
+
   // `struct` — a namespace of named value sub-cells (the `link` field is the
   // first instance). The struct does not store a value of its own; it stores
   // ONE flat cell per declared sub-cell. diff is a PER-SUB-CELL delta — only
@@ -365,7 +394,7 @@ export function resolveStrategy(kind) {
   if (!strategy) {
     throw new Error(
       `unknown field kind '${kind}'. The field kinds are: ` +
-        `value, crdt, hash, store, ordered, struct, state.`,
+        `value, crdt, hash, store, ordered, projected, struct, state.`,
     );
   }
   return strategy;

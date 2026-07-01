@@ -202,6 +202,32 @@ export function list(of, options = {}) {
   });
 }
 
+// `projected.async({ compute })` — a stored computed field updated by a
+// post-commit projection over the committed event log (ADR #12, SPEC §5.3).
+// Unlike `derived` (read-time pull), the value is materialized in the main
+// table so it is queryable and sortable; unlike `projected.inline` (cheap
+// in-transaction compute), the compute MAY be expensive/async/external (e.g.
+// thumbnail generation, embedding compute, image export). The column stores
+// a JSON-serialized value; the compute function receives the current row
+// (hydrated) and returns a JSON-serializable result.
+//
+// The field is implied readonly — a client may NOT set it; the projection
+// writes it. A read sees the last-written value (may be stale between writes
+// — the staleness contract is explicit, not silently invisible).
+export const projected = {
+  async: ({ compute }) => {
+    if (typeof compute !== 'function') {
+      throw new Error('projected.async requires a compute function');
+    }
+    return makeDescriptor({
+      kind: 'projected',
+      mode: 'async',
+      compute,
+      readonly: true,
+    });
+  },
+};
+
 // `ephemeral(cells)` — the general NON-PERSISTING field kind. Accepts an author-
 // declared cell shape (richer than boolean toggles — e.g. a drawing canvas can
 // hold a 60Hz in-progress stroke). It is its own KIND (`ephemeral`), a namespace

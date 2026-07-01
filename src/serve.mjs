@@ -24,7 +24,7 @@ import { resolve } from 'node:path';
 
 import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
-import { ValidationError } from './field-strategy.mjs';
+import { ValidationError, resolveStrategy } from './field-strategy.mjs';
 import { mayVerb, hasOwnCanGrant } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
@@ -1150,6 +1150,58 @@ function buildKernel(app) {
         app.live.emit(entity, id, row, ev);
       }
     });
+  }
+  // projected.async: post-commit projection over the committed log (ADR #12).
+  // After each commit, for every created/updated row on an entity that declares
+  // projected.async fields, the compute function runs and writes its result back
+  // to the projected column. The write is NOT in-transaction — a compute failure
+  // or write failure never rolls back the origin commit. The projected value may
+  // be stale between writes (explicit staleness contract).
+  {
+    const projectedEntities = [];
+    for (const [entityName, entityRecord] of app.entities ?? []) {
+      if (entityRecord.projectedAsyncFields?.length > 0) {
+        projectedEntities.push(entityRecord);
+      }
+    }
+    if (projectedEntities.length > 0) {
+      postCommitConsumers.push(async (events, { db }) => {
+        for (const ev of events) {
+          const colon = ev.scope?.indexOf(':');
+          if (colon < 0) continue;
+          const entityName = ev.scope.slice(0, colon);
+          const rowId = ev.scope.slice(colon + 1);
+          const entity = app.entities?.get(entityName);
+          if (!entity?.projectedAsyncFields?.length) continue;
+          const eventType = ev.type;
+          if (eventType !== `${entityName}.created` && eventType !== `${entityName}.updated`) continue;
+          const row = db.prepare(`SELECT * FROM ${entityName} WHERE id = :id`).get({ id: rowId });
+          if (!row) continue;
+          const filteredRow = {};
+          for (const [k, v] of Object.entries(row)) {
+            if (Object.prototype.hasOwnProperty.call(entity.fields, k)) {
+              const desc = entity.fields[k];
+              if (desc?.kind === 'value' || desc?.kind === 'projected') {
+                try { filteredRow[k] = resolveStrategy(desc.kind).deserialize?.(v, desc) ?? v; } catch { filteredRow[k] = v; }
+              } else {
+                filteredRow[k] = v;
+              }
+            }
+          }
+          for (const [fieldName, { compute }] of entity.projectedAsyncFields) {
+            try {
+              const result = await compute(filteredRow);
+              const serialized = resolveStrategy('projected').serialize(result);
+              db.prepare(`UPDATE ${entityName} SET ${fieldName} = :val WHERE id = :id`).run({
+                val: serialized, id: rowId,
+              });
+            } catch {
+              // compute failure leaves the projected column unchanged
+            }
+          }
+        }
+      });
+    }
   }
 
   // The single-writer mutex over node:sqlite (D9, eng-review spec #6). A durable

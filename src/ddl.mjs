@@ -44,7 +44,7 @@ function mainTableDDL(entity) {
     // Derived fields have no stored column (computed on read).
     if (descriptor.derived) continue;
     // Fields that are stored in the main table (value, crdt, hash, struct)
-    if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash' || descriptor.kind === 'state') {
+    if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash' || descriptor.kind === 'state' || descriptor.kind === 'projected') {
       cols.push(`${name} ${sqlType(descriptor)}`);
     } else if (descriptor.kind === 'struct') {
       // struct fields (link) flatten to multiple columns

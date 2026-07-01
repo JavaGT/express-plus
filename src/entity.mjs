@@ -395,6 +395,11 @@ export function entity(name, declaration = {}) {
     validatedSchedule = Object.freeze(validatedSchedule);
   }
 
+  // projected.async fields: each entry is [fieldName, { compute }] for the
+  // post-commit consumer to iterate.
+  const projectedAsyncFields = Object.entries(fields)
+    .filter(([, d]) => d.kind === 'projected' && d.mode === 'async');
+
   const record = {
     name,
     fields: Object.freeze({ ...fields }),
@@ -418,6 +423,7 @@ export function entity(name, declaration = {}) {
     effects: validatedEffects,
     admitsEffects,
     schedule: validatedSchedule,
+    projectedAsyncFields: Object.freeze(projectedAsyncFields),
   };
 
   // hash-kind fields hydrate from their stored `salt:digest` cell into a
@@ -428,7 +434,7 @@ export function entity(name, declaration = {}) {
     .filter(([, descriptor]) => descriptor.kind === 'hash')
     .map(([fieldName]) => fieldName);
   const storedValueFields = Object.entries(fields)
-    .filter(([, descriptor]) => descriptor.kind === 'value');
+    .filter(([, descriptor]) => descriptor.kind === 'value' || descriptor.kind === 'projected');
   // struct fields store one flat `<field>__<cell>` column per sub-cell; on read
   // they reconstruct a namespace object (row.linkShare = { token, tier }) and the
   // raw generated columns are removed, so a handler sees the declared shape, not
@@ -965,6 +971,9 @@ export function entity(name, declaration = {}) {
       const descriptor = fields[key];
       if (descriptor && descriptor.kind === 'store' && descriptor.type === 'map') {
         continue;
+      }
+      if (descriptor && descriptor.kind === 'projected') {
+        continue; // computed by the projection, never set by client
       }
       if (descriptor && descriptor.kind === 'struct') {
         Object.assign(stored, flattenStruct(key, descriptor, value));
