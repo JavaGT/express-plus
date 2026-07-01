@@ -253,6 +253,71 @@ async function applyEventsToTxn(db, events, {
 //
 // `authorize` is REQUIRED and fails closed: there is no default. A default
 // `() => true` would admit every action (fail OPEN), the opposite of the route
+// rowToEvent — rebuild an event object from a durable `_Log` row. Used by the
+// dedupe path: a re-sent actionId returns its previously-committed events
+// without re-running the handler. Shared by `dispatch` and `dispatchBatch` so
+// the row→event shape has ONE definition (a second copy would be the exact seam
+// where the two paths drift — AGENTS.md → singular system).
+function rowToEvent(row) {
+  return Object.freeze({
+    type: row.eventType,
+    scope: row.scope,
+    seq: row.seq,
+    actionId: row.actionId,
+    committedAt: row.committedAt,
+    data: JSON.parse(row.eventData),
+  });
+}
+
+// commitEvents — the durable transaction brace shared by `dispatch` and
+// `dispatchBatch`: BEGIN IMMEDIATE → applyEventsToTxn → COMMIT → post-commit
+// fan-out, with ROLLBACK on error and a graceful 403 (a post-handler row-grant
+// deny is a deliberate denial, returned as `{granted:false}`, not thrown). The
+// `payload` argument is the authorize-hook context each caller threads through
+// to `applyEventsToTxn` — `dispatch` passes its single action's `payload`,
+// `dispatchBatch` passes the `actions` array. The two genuinely differ there
+// (the tick/schedule re-admission hooks destructure `payload` as one action's
+// payload), so the brace is extracted but the `payload` value stays per-caller.
+// Throws non-403 errors after rolling back; returns `{events}` on success or
+// `{granted:false, events:[]}` on a 403 mid-transaction.
+async function commitEvents(db, events, {
+  now, actionId, nextSeq, projectionConsumers, blobAdopter,
+  preProjectionAuthorize, postHandlerAuthorize, principal, effectsExecutor,
+  payload, postCommitConsumers,
+}) {
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const committed = await applyEventsToTxn(db, events, {
+      now, actionId, nextSeq, projectionConsumers, blobAdopter,
+      preProjectionAuthorize, postHandlerAuthorize, principal, effectsExecutor,
+      payload,
+    });
+    db.exec('COMMIT');
+    // Post-commit fan-out (eng-review §D3). Consumers run AFTER commit — an
+    // out-of-band effect (live WS fan-out, blob file finalize, job enqueue,
+    // webhook) cannot join the DB txn, so it runs here: independently durable
+    // and retried on its own, never rolling back the origin (AGENTS.md). A
+    // consumer error is caught — the commit stands, and a crashed effect is
+    // reconciled on its own pass (the reaper for blobs; a retry queue for jobs).
+    for (const consumer of postCommitConsumers) {
+      try {
+        await consumer(committed, { db, actionId });
+      } catch {
+        // a post-commit fan-out failure never undoes the committed dispatch
+      }
+    }
+    return { granted: true, events: committed };
+  } catch (err) {
+    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+    // A 403 from the post-handler row-grant hook is a deliberate denial
+    // (spec #5) — return denied gracefully rather than throwing.
+    if (err.status === 403) {
+      return { granted: false, events: [] };
+    }
+    throw err;
+  }
+}
+
 // gate's default-on requireUser(). Authorization is always an explicit function
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
@@ -360,8 +425,8 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
     return seq;
   }
 
-  // The durable dispatch: authorize (outside txn) → open txn → dedupe by
-  // actionId → run handler → assign per-scope seq → append to Log → commit.
+  // The durable dispatch: authorize (outside txn) → dedupe by actionId →
+  // run handler → commit events inside a write transaction.
   async function dispatch({ actionId, type, payload, principal }) {
     // Fork C — AUTHORIZE FIRST (outside the transaction). A retried action by a
     // since-revoked principal returns denied (403).
@@ -370,20 +435,13 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
       return { granted: false, events: [] };
     }
 
-    // Dedupe by actionId: check the _Log table for a previous dispatch.
+    // Dedupe by actionId: a re-sent action returns its committed events without
+    // re-running the handler (SPEC §7).
     const existing = db.prepare(
       'SELECT * FROM _Log WHERE actionId = ? ORDER BY scope, seq',
     ).all(actionId);
     if (existing.length > 0) {
-      const events = existing.map((row) => Object.freeze({
-        type: row.eventType,
-        scope: row.scope,
-        seq: row.seq,
-        actionId: row.actionId,
-        committedAt: row.committedAt,
-        data: JSON.parse(row.eventData),
-      }));
-      return { granted: true, deduped: true, events };
+      return { granted: true, deduped: true, events: existing.map(rowToEvent) };
     }
 
     const handler = handlers[type];
@@ -395,54 +453,16 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
     // The handler may be sync or async.
     const emitted = await handler({ payload, principal });
 
-    // Apply events inside a write transaction using the shared core.
+    // Apply events inside a write transaction using the shared brace.
     // node:sqlite's DatabaseSync is single-writer; BEGIN/COMMIT serialize writes.
     const now = new Date().toISOString();
-    const actionIdForLog = actionId || `dispatch-${Date.now()}`;
-    let events;
-
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      events = await applyEventsToTxn(db, emitted, {
-        now,
-        actionId: actionIdForLog,
-        nextSeq,
-        projectionConsumers,
-        blobAdopter,
-        preProjectionAuthorize,
-        postHandlerAuthorize,
-        principal,
-        effectsExecutor,
-        payload,
-      });
-      db.exec('COMMIT');
-      // Post-commit fan-out (eng-review §D3). Consumers run AFTER commit — an
-      // out-of-band effect (live WS fan-out, blob file finalize, job enqueue,
-      // webhook) cannot join the DB txn, so it runs here: independently durable
-      // and retried on its own, never rolling back the origin (AGENTS.md). A
-      // consumer error is caught — the commit stands, and a crashed effect is
-      // reconciled on its own pass (the reaper for blobs; a retry queue for
-      // jobs). This loop retires the special-case post-commit hooks: blob
-      // finalize and live fan-out are both registered consumers, not inline
-      // kernel calls.
-      for (const consumer of postCommitConsumers) {
-        try {
-          await consumer(events, { db, actionId: actionIdForLog });
-        } catch {
-          // a post-commit fan-out failure never undoes the committed dispatch
-        }
-      }
-    } catch (err) {
-      try { db.exec('ROLLBACK'); } catch { /* ignore */ }
-      // A 403 from the post-handler row-grant hook is a deliberate denial
-      // (spec #5) — return denied gracefully rather than throwing.
-      if (err.status === 403) {
-        return { granted: false, events: [] };
-      }
-      throw err;
-    }
-
-    return { granted: true, deduped: false, events };
+    const committed = await commitEvents(db, emitted, {
+      now, actionId, nextSeq, projectionConsumers, blobAdopter,
+      preProjectionAuthorize, postHandlerAuthorize, principal, effectsExecutor,
+      payload, postCommitConsumers,
+    });
+    if (!committed.granted) return committed;
+    return { granted: true, deduped: false, events: committed.events };
   }
 
   // dispatchBatch({ actionId, actions, principal }) — the batched mutation
@@ -455,7 +475,7 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
   // N actions but with ONE BEGIN/COMMIT bracketing the concatenated events — not
   // a second pipeline (AGENTS.md). Effects fire in-txn exactly as in `dispatch`.
   async function dispatchBatch({ actionId, actions = [], principal }) {
-    if (!Array.isArray(actions) || actions.length === 0) {
+    if (actions.length === 0) {
       return { granted: true, deduped: false, events: [] };
     }
 
@@ -472,20 +492,12 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
       'SELECT * FROM _Log WHERE actionId = ? ORDER BY scope, seq',
     ).all(actionId);
     if (existing.length > 0) {
-      const events = existing.map((row) => Object.freeze({
-        type: row.eventType,
-        scope: row.scope,
-        seq: row.seq,
-        actionId: row.actionId,
-        committedAt: row.committedAt,
-        data: JSON.parse(row.eventData),
-      }));
-      return { granted: true, deduped: true, events };
+      return { granted: true, deduped: true, events: existing.map(rowToEvent) };
     }
 
     // Run every handler, concatenating their emitted events. Handlers are pure
     // (events only, no DB writes — Fork A), so the batch runs them in order and
-    // folds all events into one applyEventsToTxn pass below.
+    // folds all events into one commitEvents pass below.
     const allEmitted = [];
     for (const a of actions) {
       const handler = handlers[a.type];
@@ -497,40 +509,13 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
     }
 
     const now = new Date().toISOString();
-    const actionIdForLog = actionId || `batch-${Date.now()}`;
-    let events;
-
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      events = await applyEventsToTxn(db, allEmitted, {
-        now,
-        actionId: actionIdForLog,
-        nextSeq,
-        projectionConsumers,
-        blobAdopter,
-        preProjectionAuthorize,
-        postHandlerAuthorize,
-        principal,
-        effectsExecutor,
-        payload: actions,
-      });
-      db.exec('COMMIT');
-      for (const consumer of postCommitConsumers) {
-        try {
-          await consumer(events, { db, actionId: actionIdForLog });
-        } catch {
-          // a post-commit fan-out failure never undoes the committed batch
-        }
-      }
-    } catch (err) {
-      try { db.exec('ROLLBACK'); } catch { /* ignore */ }
-      if (err.status === 403) {
-        return { granted: false, events: [] };
-      }
-      throw err;
-    }
-
-    return { granted: true, deduped: false, events };
+    const committed = await commitEvents(db, allEmitted, {
+      now, actionId, nextSeq, projectionConsumers, blobAdopter,
+      preProjectionAuthorize, postHandlerAuthorize, principal, effectsExecutor,
+      payload: actions, postCommitConsumers,
+    });
+    if (!committed.granted) return committed;
+    return { granted: true, deduped: false, events: committed.events };
   }
 
   return { dispatch, dispatchBatch, db, log: [] };  // log is the durable _Log table; empty array for compat
