@@ -566,15 +566,22 @@ export class LiveList {
           this._state = {};
           this._removed = false;
         }
-        // Assign scalar fields from event.data (exclude 'id' — it's an identity field).
+        // Value-XOR-delta: the server sends BOTH the whole new value (event.data)
+        // and a per-field delta for diff-eligible/native kinds. A field present
+        // in `delta` is applied ONLY via the delta below — assigning its whole
+        // value here too would double-apply (e.g. a crdt insert on top of the
+        // already-whole string). So skip any field the delta owns; event.data
+        // remains authoritative for scalar fields the delta does NOT carry
+        // (preserving the createClient app-reducer whole-value contract).
+        // Exclude 'id' — it's an identity field.
         if (event.data) {
           for (const key of Object.keys(event.data)) {
-            if (key !== 'id') {
-              this._state[key] = event.data[key];
-            }
+            if (key === 'id') continue;
+            if (delta && Object.prototype.hasOwnProperty.call(delta, key)) continue;
+            this._state[key] = event.data[key];
           }
         }
-        // Apply per-kind delta for sub-collection changes.
+        // Apply per-kind delta for the fields the delta owns.
         if (delta) {
           this._applyDelta(delta);
         }

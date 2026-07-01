@@ -315,6 +315,72 @@ describe('LiveList', () => {
     await list.close();
   });
 
+  // --- 6b. Value-XOR-delta: a field present in delta must NOT ALSO be
+  // whole-applied from event.data (the real server sends BOTH — event.data
+  // carries the whole new value, delta carries the diff for the same field).
+  // Applying both double-applies: 'hello' + whole 'hello world' + insert
+  // ' world' → 'hello world world'. delta is authoritative for delta fields;
+  // event.data whole-value assignment covers only fields NOT in delta.
+  it('value-XOR-delta: crdt field in delta is not double-applied from event.data', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 1 });
+    const fetch = makeFakeFetch([
+      { match: '/snapshot', response: { snapshot: { body: 'hello' }, seq: 1 } },
+    ]);
+
+    const list = new LiveList({
+      entity: 'ticket', id: '1', channel, fetchImpl: fetch,
+      snapshotUrl, eventsSinceUrl,
+    });
+    await list.subscribe();
+
+    // Real server envelope for 'hello' → 'hello world' on a crdt field:
+    //   event.data.body = 'hello world' (whole new value)   ← createClient reads this
+    //   delta.body      = {insert:{at:5,text:' world'}}      ← LiveList reads this
+    // LiveList must apply the delta and IGNORE the whole event.data.body,
+    // else it double-applies.
+    channel.emit({
+      type: 'event', entity: 'ticket', id: '1',
+      seq: 2, seqSpan: [2, 2],
+      event: { type: 'ticket.updated', data: { body: 'hello world' } },
+      delta: { body: { insert: { at: 5, text: ' world' } } },
+    });
+    assert.equal(list.state.body, 'hello world',
+      'crdt field applied ONCE via delta, not doubled by event.data whole value');
+
+    await list.close();
+  });
+
+  // --- 6c. Value-XOR-delta: a scalar field NOT in delta still applies from
+  // event.data (the createClient app-reducer contract — whole values remain
+  // authoritative for non-delta fields). Mixed envelope: one delta field, one
+  // plain event.data field.
+  it('value-XOR-delta: scalar field absent from delta still applies from event.data', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 1 });
+    const fetch = makeFakeFetch([
+      { match: '/snapshot', response: { snapshot: { body: 'hello', label: 'A' }, seq: 1 } },
+    ]);
+
+    const list = new LiveList({
+      entity: 'ticket', id: '1', channel, fetchImpl: fetch,
+      snapshotUrl, eventsSinceUrl,
+    });
+    await list.subscribe();
+
+    // body changes via delta (crdt); label changes via whole value (no delta).
+    channel.emit({
+      type: 'event', entity: 'ticket', id: '1',
+      seq: 2, seqSpan: [2, 2],
+      event: { type: 'ticket.updated', data: { body: 'hello world', label: 'B' } },
+      delta: { body: { insert: { at: 5, text: ' world' } } },
+    });
+    assert.equal(list.state.body, 'hello world', 'delta field applied once');
+    assert.equal(list.state.label, 'B', 'non-delta scalar still applied from event.data');
+
+    await list.close();
+  });
+
   // --- 7. Ordered ops ---
   it('ordered: inserted items sorted by fractional key; moved re-sorts; removed drops', async () => {
     const channel = makeFakeChannel();
