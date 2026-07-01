@@ -275,7 +275,7 @@ test('visible field .can admits editors/owners for hidden layers via mayFieldOp'
   setActiveDb(db);
 
   const l2 = RasterLayer.getOrFail('l2');
-  assert.equal(l2.visible, 0, 'l2 is hidden (stored as integer)');
+  assert.equal(l2.visible, false, 'l2 is hidden');
 
   const { mayFieldOp } = await import('../src/row-grant.mjs');
 
@@ -300,7 +300,7 @@ test('visible field .can passes for visible layers to all scoped members', async
   setActiveDb(db);
 
   const l1 = RasterLayer.getOrFail('l1');
-  assert.equal(l1.visible, 1, 'l1 is visible (stored as integer)');
+  assert.equal(l1.visible, true, 'l1 is visible');
 
   const { mayFieldOp } = await import('../src/row-grant.mjs');
 

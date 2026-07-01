@@ -181,9 +181,15 @@ const STRATEGIES = Object.freeze({
     },
     deserialize(value, descriptor) {
       if (value === null || value === undefined) return value;
-      if (descriptor.type !== 'json') return value;
-      if (typeof value !== 'string') return value;
-      return JSON.parse(value);
+      switch (descriptor.type) {
+        case 'boolean':
+          return value ? true : false;
+        case 'json':
+          if (typeof value !== 'string') return value;
+          return JSON.parse(value);
+        default:
+          return value;
+      }
     },
   }),
 
