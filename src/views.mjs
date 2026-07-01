@@ -1,24 +1,58 @@
 // views.mjs — a minimal, zero-deps view engine (SPEC §3).
 //
 // `resolveTemplate(viewsDir, name, data)` reads an HTML file from the views
-// directory and replaces `{{key}}` placeholders with values from `data`. No
-// template language, no evaluation, no includes — just key-value interpolation.
+// directory and replaces placeholders with values from `data`. No template
+// language, no evaluation, no includes — just key-value interpolation.
+//
+// Two placeholder forms, differing ONLY in whether the value is HTML-escaped:
+//   * `{{key}}`   — the SAFE DEFAULT. The value is HTML-escaped before it is
+//                   inserted, so a value containing `<script>` renders as inert
+//                   text. This is fail-closed: an app that interpolates
+//                   user-controlled data cannot accidentally emit an XSS sink.
+//   * `{{{key}}}` — the EXPLICIT opt-out. The value is inserted raw (unescaped),
+//                   for the rare case an app has already-trusted HTML to embed.
+//                   The extra brace is the app SAYING "I trust this is HTML".
+//
 // An unresolved placeholder stays as-is (it is NOT an error — a partial render
-// with visible `{{unknown}}` is the least-surprising default and never leaks
-// secrets).
+// with a visible `{{unknown}}` is the least-surprising default and never leaks
+// secrets). The triple-brace form is matched first so `{{{x}}}` is never
+// mis-read as a double-brace placeholder wrapped in stray braces.
 //
 // `matchExtension(filename)` returns a content-type for static file serving.
 
 import { readFileSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 
+// HTML-context escaping (OWASP): the five characters that can break out of text
+// or an attribute value. `&` is replaced first so an already-escaped entity is
+// not double-escaped by a later rule.
+const HTML_ESCAPES = Object.freeze({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+});
+
+export function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
+}
+
 export function resolveTemplate(viewsDir, name, data = {}) {
   const filePath = resolve(viewsDir, `${name}`);
   const source = readFileSync(filePath, 'utf-8');
-  return source.replace(/\{\{(.+?)\}\}/g, (_, key) => {
-    const k = key.trim();
-    return Object.hasOwn(data, k) ? String(data[k]) : `{{${k}}}`;
-  });
+  // Triple-brace (raw) is matched before double-brace (escaped) so the greedier
+  // form wins. `[^{}]` for the key forbids nested braces, keeping the two forms
+  // unambiguous.
+  return source
+    .replace(/\{\{\{([^{}]+?)\}\}\}/g, (_, key) => {
+      const k = key.trim();
+      return Object.hasOwn(data, k) ? String(data[k]) : `{{{${k}}}}`;
+    })
+    .replace(/\{\{([^{}]+?)\}\}/g, (_, key) => {
+      const k = key.trim();
+      return Object.hasOwn(data, k) ? escapeHtml(data[k]) : `{{${k}}}`;
+    });
 }
 
 // Simple content-type map for common static file extensions.

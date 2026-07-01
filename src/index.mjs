@@ -19,7 +19,7 @@ export { requireUser, allowAnonymous, open, isGate, resolveRouteGate, routeGateF
 export { action, event, createServer, createClient, NOW } from './pipeline.mjs';
 export { createLiveServer } from './live.mjs';
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
-export { resolveTemplate, matchExtension, isSafePath } from './views.mjs';
+export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views.mjs';
 export { mayVerb, mayFieldOp } from './row-grant.mjs';
 export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL } from './ddl.mjs';
 export { config } from './config.mjs';
