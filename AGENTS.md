@@ -55,6 +55,11 @@ naming, architecture, authorization, data, and live behavior.
   is built for the `projects/*` stress-test apps up front, not landed
   incrementally as each app stubs its toe. The bar is "a real app in the set needs
   this shape," never "build every conceivable knob" — proactive is not exhaustive.
+- **When several known-use-case gaps are all required, sequence and start.** Do
+  not ask the user to rank prerequisites that the current port clearly needs.
+  Pick the safest small order, implement one bridge at a time behind tests, and
+  escalate only real tradeoffs or blockers (for example, two incompatible public
+  API shapes), not obvious sequencing choices.
 - **Fail closed.** When a default carries a security opinion, the default is the
   restrictive one: auth-on, private-by-default. Allowlists, not denylists.
 - **One reconciliation path.** A client event becomes state in exactly one place
