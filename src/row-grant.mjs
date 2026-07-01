@@ -126,7 +126,7 @@ export async function fieldCapabilities(entityRecord, fieldName, row, principal)
   if (!access) return defaults;                       // strong-inherit row grant
   let decision;
   await resolveDecision(
-    async () => { decision = await access({ is }, defaults); return decision.granted; },
+    async () => { decision = await access({ is, entity: row }, defaults); return decision.granted; },
     [],
     { where: `the field .can body on entity('${entityRecord.name}').${fieldName}` },
   );
