@@ -28,7 +28,12 @@ import {
   scope,
   grant,
   read,
+  write,
+  subscribe,
+  deny,
   anyOf,
+  never,
+  mayVerb,
   NonCompilableError,
 } from '../src/index.mjs';
 import { principal, anonymous } from '../src/principal.mjs';
@@ -241,7 +246,134 @@ test('unknown check name in scope throws at entity load', () => {
   );
 });
 
-// ---- Test 7: declared check returning a non-AST value in scope → load error ----
+// ---- Test 7: ref handle thenable resolves to target scalar fields ----
+// When a declared check awaits a non-role ref field, the resolved object
+// exposes target scalar FK fields (e.g., canvas.owner) plus map handles
+// (e.g., canvas.collaborators.get(...).role).
+
+test('ref handle thenable resolves to target scalar fields and map handles', async () => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS Canvas (
+      id TEXT PRIMARY KEY,
+      owner TEXT,
+      title TEXT
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS Canvas_collaborators (
+      Canvas_id TEXT,
+      member_id TEXT,
+      role TEXT
+    )
+  `);
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS RasterLayer (
+      id TEXT PRIMARY KEY,
+      canvas TEXT,
+      name TEXT
+    )
+  `);
+
+  db.prepare('INSERT INTO Canvas (id, owner, title) VALUES (:id, :owner, :title)').run({
+    id: 'c1', owner: 'owner-1', title: 'My Canvas',
+  });
+  db.prepare('INSERT INTO Canvas_collaborators (Canvas_id, member_id, role) VALUES (:cid, :mid, :role)').run({
+    cid: 'c1', mid: 'editor-1', role: 'editor',
+  });
+  db.prepare('INSERT INTO RasterLayer (id, canvas, name) VALUES (:id, :canvas, :name)').run({
+    id: 'L1', canvas: 'c1', name: 'Layer 1',
+  });
+
+  const Canvas = entity('Canvas', {
+    fields: {
+      owner: ref('User', { role: 'owner' }),
+      title: text(),
+      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+    },
+    grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
+  });
+
+  const RasterLayer = entity('RasterLayer', {
+    fields: {
+      canvas: ref('Canvas'),
+      name: text(),
+    },
+    checks: {
+      layerOwner: async ({ entity, principal }) => {
+        const canvas = await entity.canvas;
+        return canvas.owner === principal.id;
+      },
+      layerEditor: async ({ entity, principal }) => {
+        const canvas = await entity.canvas;
+        return canvas.collaborators.get(principal.id)?.role === 'editor';
+      },
+    },
+    grant: () => [scope(() => never()).can(async ({ is }) => {
+      if (await is.layerEditor()) return grant(read, write);
+      if (await is.layerOwner()) return grant(read);
+      return deny('no access');
+    })],
+  });
+
+  const row = RasterLayer.getOrFail('L1');
+
+  const ownerP = principal({ type: 'user', id: 'owner-1' });
+  const editorP = principal({ type: 'user', id: 'editor-1' });
+  const strangerP = principal({ type: 'user', id: 'stranger-1' });
+
+  assert.equal(await mayVerb(RasterLayer, 'read', row, ownerP), true);
+  assert.equal(await mayVerb(RasterLayer, 'update', row, editorP), true);
+  assert.equal(await mayVerb(RasterLayer, 'read', row, editorP), true);
+  assert.equal(await mayVerb(RasterLayer, 'read', row, strangerP), false);
+});
+
+// ---- Test 8: entity key is present in declared check context ----
+// Photo-editor style checks destructure `{ entity, principal }` instead
+// of `{ EntityName, principal }`. The registry passes both keys so either
+// style works.
+
+test('entity key is available alongside entity-name key in check context', () => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+
+  db.exec(`CREATE TABLE IF NOT EXISTS Target (id TEXT PRIMARY KEY, label TEXT)`);
+  db.exec(`CREATE TABLE IF NOT EXISTS Doc (id TEXT PRIMARY KEY, target TEXT)`);
+
+  db.prepare('INSERT INTO Target (id, label) VALUES (:id, :label)').run({
+    id: 't1', label: 'hello',
+  });
+  db.prepare('INSERT INTO Doc (id, target) VALUES (:id, :target)').run({
+    id: 'd1', target: 't1',
+  });
+
+  entity('Target', {
+    fields: { label: text() },
+    grant: () => [scope(() => never()).can(() => grant(read))],
+  });
+
+  const Doc = entity('Doc', {
+    fields: {
+      target: ref('Target'),
+    },
+    checks: {
+      labelIsHello: ({ entity }) => entity.target.id === 't1',
+    },
+    grant: () => [scope(() => never()).can(async ({ is }) => {
+      if (await is.labelIsHello()) return grant(read);
+      return deny('nope');
+    })],
+  });
+
+  const row = Doc.getOrFail('d1');
+  assert.equal(Doc.registry.labelIsHello.run({
+    entity: row, principal: principal({ type: 'user', id: 'u1' }),
+  }), true);
+});
+
+// ---- Test 9: declared check returning a non-AST value in scope → load error ----
 // A declared check body that returns a raw value (a runtime-shaped boolean)
 // instead of composing framework field handles into an AST node cannot lower to
 // SQL. Using it in a scope predicate must fail at load — fail closed, never

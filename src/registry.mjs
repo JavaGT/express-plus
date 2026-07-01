@@ -136,6 +136,7 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
       }
       const entityContext = entityName ? { [entityName]: runtimeSelf } : {};
       return fn({
+        entity: runtimeSelf,
         ...entityContext,
         principal,
       });
@@ -206,12 +207,13 @@ function makeRuntimeRefHandle({ fieldName, descriptor, row }) {
   const refId = row[fieldName];
   if (!target?.fields) return refId;
 
-  const handle = { id: refId };
+  const mapEntries = [];
+  const mapHandles = {};
   for (const [targetFieldName, targetDescriptor] of Object.entries(target.fields)) {
     if (targetDescriptor?.kind === 'store' && targetDescriptor.type === 'map') {
       const table = membershipTable(target.name ?? targetName, targetFieldName);
       const ownerCol = membershipOwnerCol(target.name ?? targetName);
-      handle[targetFieldName] = {
+      const mh = {
         has: (memberId) => {
           if (refId == null) return false;
           const db = getActiveDb();
@@ -227,7 +229,41 @@ function makeRuntimeRefHandle({ fieldName, descriptor, row }) {
           ).get({ owner: refId, member: memberId }) ?? undefined;
         },
       };
+      mapEntries.push([targetFieldName, mh]);
+      mapHandles[targetFieldName] = mh;
     }
   }
+
+  const targetTable = target.name ?? targetName;
+
+  const handle = { id: refId, ...mapHandles };
+
+  handle.then = (resolve, reject) => {
+    try {
+      if (refId == null) {
+        const result = { id: refId };
+        for (const [k, v] of mapEntries) result[k] = v;
+        return resolve(result);
+      }
+      const db = getActiveDb();
+      const targetRow = db.prepare(
+        `SELECT * FROM ${targetTable} WHERE id = :id`,
+      ).get({ id: refId });
+      const result = { id: refId };
+      if (targetRow) {
+        for (const [k] of Object.entries(target.fields)) {
+          if (k === 'id') result[k] = targetRow[k];
+          else if (Object.prototype.hasOwnProperty.call(targetRow, k)) {
+            result[k] = targetRow[k];
+          }
+        }
+      }
+      for (const [k, v] of mapEntries) result[k] = v;
+      resolve(result);
+    } catch (e) {
+      reject(e);
+    }
+  };
+
   return handle;
 }

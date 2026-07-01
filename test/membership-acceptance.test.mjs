@@ -259,6 +259,75 @@ function scopedPhotoIds(db, Photo, who) {
     .map((r) => r.id);
 }
 
+test('runtime ref traversal resolves target scalar fields through await', async () => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+
+  db.exec(`CREATE TABLE Canvas (id TEXT, owner TEXT, title TEXT)`);
+  db.exec(`CREATE TABLE Canvas_collaborators (Canvas_id TEXT, member_id TEXT, role TEXT)`);
+  db.exec(`CREATE TABLE RasterLayer (id TEXT, canvas TEXT, name TEXT)`);
+
+  const Canvas = entity('Canvas', {
+    fields: {
+      owner: ref('User', { role: 'owner' }),
+      title: text(),
+      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+    },
+    grant: () => [scope(() => never()).can(() => grant(read))],
+  });
+
+  const RasterLayer = entity('RasterLayer', {
+    fields: {
+      canvas: ref('Canvas'),
+      name: text(),
+    },
+    checks: {
+      layerOwner: async ({ entity, principal }) => {
+        const c = await entity.canvas;
+        return c.owner === principal.id;
+      },
+      layerEditor: async ({ entity, principal }) => {
+        const c = await entity.canvas;
+        return c.collaborators.get(principal.id)?.role === 'editor';
+      },
+    },
+    grant: () => [scope(() => never()).can(async ({ is }) => {
+      if (await is.layerEditor()) return grant(read, write, subscribe);
+      if (await is.layerOwner()) return grant(read, subscribe);
+      return deny('no access');
+    })],
+  });
+
+  db.prepare('INSERT INTO Canvas (id, owner, title) VALUES (:id, :owner, :title)').run({
+    id: 'c1', owner: 'owner-1', title: 'My Canvas',
+  });
+  db.prepare('INSERT INTO Canvas_collaborators (Canvas_id, member_id, role) VALUES (:cid, :mid, :role)').run({
+    cid: 'c1', mid: 'editor-1', role: 'editor',
+  });
+  db.prepare('INSERT INTO RasterLayer (id, canvas, name) VALUES (:id, :canvas, :name)').run({
+    id: 'L1', canvas: 'c1', name: 'Layer 1',
+  });
+  db.prepare('INSERT INTO RasterLayer (id, canvas, name) VALUES (:id, :canvas, :name)').run({
+    id: 'L2', canvas: null, name: 'Orphan',
+  });
+
+  const owner = principal({ type: 'user', id: 'owner-1' });
+  const editor = principal({ type: 'user', id: 'editor-1' });
+  const stranger = principal({ type: 'user', id: 'stranger-1' });
+
+  const L1 = RasterLayer.getOrFail('L1');
+  const L2 = RasterLayer.getOrFail('L2');
+
+  assert.equal(await mayVerb(RasterLayer, 'read', L1, owner), true);
+  assert.equal(await mayVerb(RasterLayer, 'subscribe', L1, owner), true);
+  assert.equal(await mayVerb(RasterLayer, 'update', L1, editor), true);
+  assert.equal(await mayVerb(RasterLayer, 'read', L1, editor), true);
+  assert.equal(await mayVerb(RasterLayer, 'read', L1, stranger), false);
+
+  assert.equal(await mayVerb(RasterLayer, 'read', L2, owner), false);
+  assert.equal(await mayVerb(RasterLayer, 'read', L2, editor), false);
+});
+
 test('removing a collaborator revokes BOTH layers (scope + .can)', async (t) => {
   const { db, TodoList, server } = await seedWithServer();
   t.after(() => db.close());
