@@ -318,7 +318,32 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
       return { granted: true, deduped: false, events };
     }
 
-    return { dispatch, log };
+    function dispatchBatch({ actionId, actions = [], principal }) {
+      if (actions.length === 0) return { granted: true, deduped: false, events: [] };
+      for (const a of actions) {
+        if (!authorize({ type: a.type, payload: a.payload, principal })) {
+          return { granted: false, events: [] };
+        }
+      }
+      if (dispatched.has(actionId)) {
+        return { granted: true, deduped: true, events: dispatched.get(actionId) };
+      }
+      const allEmitted = [];
+      for (const a of actions) {
+        const handler = handlers[a.type];
+        if (typeof handler !== 'function') {
+          throw new Error(`no handler registered for action type '${a.type}'.`);
+        }
+        allEmitted.push(...handler({ payload: a.payload, principal }));
+      }
+      const events = allEmitted.map((e) =>
+        Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
+      for (const e of events) log.push(e);
+      dispatched.set(actionId, events);
+      return { granted: true, deduped: false, events };
+    }
+
+    return { dispatch, dispatchBatch, log };
   }
 
   // ---- durable path (db engaged) — async, SQLite-backed ----
@@ -420,7 +445,95 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
     return { granted: true, deduped: false, events };
   }
 
-  return { dispatch, db, log: [] };  // log is the durable _Log table; empty array for compat
+  // dispatchBatch({ actionId, actions, principal }) — the batched mutation
+  // (SPEC §11, ADR #13). N actions across one or more entities run in ONE
+  // transaction = ONE composed commit (one actionId, one `now`). The batch is
+  // all-or-nothing: any authorize/handler/post-grant denial rolls back the
+  // ENTIRE batch (a half-applied multi-entity mutation is exactly the split the
+  // one-transaction guarantee forbids). This is the singular-system extension
+  // of `dispatch`: the same authorize→handler→applyEventsToTxn path, looped over
+  // N actions but with ONE BEGIN/COMMIT bracketing the concatenated events — not
+  // a second pipeline (AGENTS.md). Effects fire in-txn exactly as in `dispatch`.
+  async function dispatchBatch({ actionId, actions = [], principal }) {
+    if (!Array.isArray(actions) || actions.length === 0) {
+      return { granted: true, deduped: false, events: [] };
+    }
+
+    // Authorize EVERY action FIRST (outside the txn). Fail fast before any
+    // write: a denied sub-action never opens the transaction, so a revoked
+    // principal cannot poison a partial batch.
+    for (const a of actions) {
+      const authResult = await authorize({ type: a.type, payload: a.payload, principal });
+      if (!authResult) return { granted: false, events: [] };
+    }
+
+    // Dedupe the whole batch by its single actionId.
+    const existing = db.prepare(
+      'SELECT * FROM _Log WHERE actionId = ? ORDER BY scope, seq',
+    ).all(actionId);
+    if (existing.length > 0) {
+      const events = existing.map((row) => Object.freeze({
+        type: row.eventType,
+        scope: row.scope,
+        seq: row.seq,
+        actionId: row.actionId,
+        committedAt: row.committedAt,
+        data: JSON.parse(row.eventData),
+      }));
+      return { granted: true, deduped: true, events };
+    }
+
+    // Run every handler, concatenating their emitted events. Handlers are pure
+    // (events only, no DB writes — Fork A), so the batch runs them in order and
+    // folds all events into one applyEventsToTxn pass below.
+    const allEmitted = [];
+    for (const a of actions) {
+      const handler = handlers[a.type];
+      if (typeof handler !== 'function') {
+        throw new Error(`no handler registered for action type '${a.type}'.`);
+      }
+      const emitted = await handler({ payload: a.payload, principal });
+      allEmitted.push(...emitted);
+    }
+
+    const now = new Date().toISOString();
+    const actionIdForLog = actionId || `batch-${Date.now()}`;
+    let events;
+
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      events = await applyEventsToTxn(db, allEmitted, {
+        now,
+        actionId: actionIdForLog,
+        nextSeq,
+        projectionConsumers,
+        blobAdopter,
+        preProjectionAuthorize,
+        postHandlerAuthorize,
+        principal,
+        effectsExecutor,
+        payload: actions,
+      });
+      db.exec('COMMIT');
+      for (const consumer of postCommitConsumers) {
+        try {
+          await consumer(events, { db, actionId: actionIdForLog });
+        } catch {
+          // a post-commit fan-out failure never undoes the committed batch
+        }
+      }
+    } catch (err) {
+      try { db.exec('ROLLBACK'); } catch { /* ignore */ }
+      if (err.status === 403) {
+        return { granted: false, events: [] };
+      }
+      throw err;
+    }
+
+    return { granted: true, deduped: false, events };
+  }
+
+  return { dispatch, dispatchBatch, db, log: [] };  // log is the durable _Log table; empty array for compat
 }
 
 // createClient({ events }) — the client-side reconciliation path (SPEC §7 stage

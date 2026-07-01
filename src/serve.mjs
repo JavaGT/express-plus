@@ -1474,6 +1474,14 @@ export function listen(app, port, optionsOrCallback = {}) {
     await app.resolveRoutes();
     app.kernel = buildKernel(app);
     const dispatchThroughWriteQueue = (args) => app.writeQueue.run(() => app.kernel.dispatch(args));
+    // app.batch(actions, { principal }) — a server-side composed mutation
+    // (SPEC §11, ADR #13). N actions run as ONE transaction = ONE composed
+    // commit (one actionId, one `now`), all-or-nothing. This reuses the SAME
+    // kernel path (authorize→handler→applyEventsToTxn) wrapped once in the
+    // writeQueue — not a second pipeline. Exposed for server code that needs
+    // an atomic multi-entity write outside the per-route HTTP handlers.
+    app.batch = (actions, { principal } = {}) =>
+      app.writeQueue.run(() => app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal }));
     // Start the tick engine now that `app.kernel.dispatch` exists. Only starts
     // if some entity declares a tick trigger (tick.hz / tick.every); otherwise
     // startTickEngine returns a no-op and no timer is created.
