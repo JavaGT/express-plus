@@ -302,6 +302,20 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
   const where = bound ? bound.sql : '1=1';
   const scopeParams = bound ? bound.params : {};
 
+  // Staleness indicators for projected.async fields. Each projected field has a
+  // monotonic counter in _ProjectedCursor tracking how many times the compute has
+  // run successfully. The read/list response includes a header per field so the
+  // client can detect staleness by comparing with its last-known cursor value.
+  function addProjectedCursors(res, db, entity) {
+    if (!entity.projectedAsyncFields || entity.projectedAsyncFields.length === 0) return;
+    for (const [fieldName] of entity.projectedAsyncFields) {
+      const row = db.prepare(
+        'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
+      ).get({ e: entity.name, f: fieldName });
+      if (row) res.setHeader(`x-express-plus-projected-${fieldName}`, String(row.lastSeq));
+    }
+  }
+
   if (verb === 'list') {
     const rows = db.prepare(`SELECT * FROM ${table} AS t0 WHERE ${where}`).all(scopeParams)
       .map((row) => entity.deserializeRow(row));
@@ -319,6 +333,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
         if (await mayVerb(entity, 'list', row, principal)) listed.push(row);
       }
     }
+    addProjectedCursors(res, db, entity);
     sendJson(res, 200, listed);
     return;
   }
@@ -333,6 +348,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'read', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
+    addProjectedCursors(res, db, entity);
     sendJson(res, 200, row);
     return;
   }

@@ -825,3 +825,54 @@ test('projected.async compute can findAll related entities', async (t) => {
   const rank = JSON.parse(row.commentRank);
   assert.equal(rank, 5, `commentRank expected 5, got ${rank}`);
 });
+
+// --- projected.async staleness indicators (x-express-plus-projected-<field>) ---
+
+test('read response includes projected cursor headers for staleness detection', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+
+  const Post = entity('Post_Stale', {
+    fields: {
+      title: text(),
+      hotRank: projected.async({
+        from: ['created', 'updated'],
+        compute: (row) => (row.title?.length ?? 0),
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const app = expressPlus({ db });
+  app.mount('/posts', Post);
+  await app.ddl();
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const r1 = await fetch(`${origin}/posts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 't' }),
+  });
+  assert.equal(r1.status, 201);
+  const { id } = await r1.json();
+
+  // Wait for post-commit consumer to compute hotRank
+  await new Promise((r) => setTimeout(r, 300));
+
+  // Read the post — should have a projected cursor header
+  const r2 = await fetch(`${origin}/posts/${id}`);
+  assert.equal(r2.status, 200);
+  const cursorHeader = r2.headers.get('x-express-plus-projected-hotRank');
+  assert.ok(cursorHeader, 'projected cursor header is present');
+  assert.ok(Number(cursorHeader) >= 1, `expected cursor >= 1, got ${cursorHeader}`);
+
+  // List responses carry the same staleness header
+  const r3 = await fetch(`${origin}/posts`);
+  assert.equal(r3.status, 200);
+  const listHeader = r3.headers.get('x-express-plus-projected-hotRank');
+  assert.ok(listHeader, 'list response carries projected cursor header');
+  assert.ok(Number(listHeader) >= 1, `list cursor >= 1, got ${listHeader}`);
+});
