@@ -468,6 +468,13 @@ export function createLiveServer(httpServer, {
         prevSeed(scope, authzRow);
       } else if (parts?.length === 2 && parts[1] === 'created') {
         prevSeed(scope, authzRow);
+      } else if (parts?.length === 3 && ephemeralField === null) {
+        // P6e-2 B2: store/ordered native events are delta-native — their event.data
+        // IS the structural delta (no diff computed, #71 risk #7). Normalize under
+        // the same `delta` map key so a client dispatches one uniform delta shape
+        // regardless of kind. (ephemeralField===null excludes the paced ephemeral
+        // .set, which is 1b's path — its delta stays undefined.)
+        delta = { [parts[1]]: committedEvent.data };
       }
     }
 
