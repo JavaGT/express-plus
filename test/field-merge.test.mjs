@@ -11,6 +11,13 @@
 // writer dispatch stores `next` (apply = replace); the per-element DELTA (diff) is
 // the broadcast artifact — the "merge machinery" consult #18 names. Concurrent-
 // merge toolkit is deferred (#33), not this.
+//
+// NOTE: `ordered` has NO `strategy.diff` (DECISIONLOG #74 — VESTIGIAL, deleted
+// orderedListDiff). Ordered's delta contract is the native identity-keyed per-op
+// EVENTS from orderedMutateHandlers (`.inserted`/`.moved`/`.reordered`/`.removed`),
+// exercised in list-field.test.mjs + live-delta-native.test.mjs — not a snapshot
+// diff over `{key,...}` objects. So there are no ordered strategy.diff unit tests
+// here; crdt/store/struct diffs are the snapshot-diff-bearing kinds.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -18,7 +25,6 @@ import { resolveStrategy } from '../src/field-strategy.mjs';
 
 const crdt = resolveStrategy('crdt');
 const store = resolveStrategy('store');
-const ordered = resolveStrategy('ordered');
 const struct = resolveStrategy('struct');
 
 // A struct descriptor's `cells` map mirrors the link field shape (field.mjs struct).
@@ -56,28 +62,6 @@ test('store (map) diff: a role change is {changed}, NOT {added} (idempotent re-s
 test('store (map) diff: a member remove yields {removed}', () => {
   const delta = store.diff({ u1: 'viewer', u2: 'editor' }, { u2: 'editor' });
   assert.deepEqual(delta, { added: [], removed: ['u1'], changed: [] });
-});
-
-test('ordered diff: an insertAt yields {added} and leaves sibling keys untouched (no renumber)', () => {
-  const prev = [{ key: 'a', id: 1 }, { key: 'c', id: 3 }];
-  const next = [{ key: 'a', id: 1 }, { key: 'b', id: 2 }, { key: 'c', id: 3 }];
-  const delta = ordered.diff(prev, next);
-  assert.deepEqual(delta, { added: [{ at: 1, key: 'b', item: { id: 2 } }], removed: [], moved: [] });
-});
-
-test('ordered diff: a move reorders by key without re-keying siblings', () => {
-  const prev = [{ key: 'b', id: 2 }, { key: 'a', id: 1 }, { key: 'c', id: 3 }];
-  const next = [{ key: 'a', id: 1 }, { key: 'b', id: 2 }, { key: 'c', id: 3 }];
-  const delta = ordered.diff(prev, next);
-  // 'a' moved 1->0 and 'b' shifted 0->1; 'c' stable. Keys unchanged — no renumber.
-  assert.deepEqual(delta.moved, [
-    { key: 'a', from: 1, to: 0 },
-    { key: 'b', from: 0, to: 1 },
-  ]);
-  assert.deepEqual(delta.added, []);
-  assert.deepEqual(delta.removed, []);
-  // no sibling keys were re-keyed (a/b/c all present, unchanged)
-  assert.deepEqual(next.map((e) => e.key), ['a', 'b', 'c']);
 });
 
 test('structured diff: a single sub-cell change yields a per-sub-cell {cells} delta', () => {

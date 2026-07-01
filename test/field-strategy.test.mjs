@@ -2,9 +2,12 @@
 //
 // SPEC §5.1 (named-whole plugin contracts), §7 stage 1 (validate), §7.2 (the
 // field-type plugin owns the persistence strategy). Each KIND (value/store/crdt/
-// ordered) is a named whole owning its own {validate, apply, diff} machinery,
+// ordered/struct) is a named whole owning its own {validate, apply} machinery,
 // resolved by kind from one framework-owned table — the descriptor carries only
 // its kind (deletion test: kind ABSORBS the strategy, no per-field config object).
+// NOTE: only value/state/crdt/store/struct carry a `diff` (snapshot delta);
+// `ordered` has NO `strategy.diff` — its delta contract is the native per-op
+// identity-keyed events (DECISIONLOG #74 — VESTIGIAL, deleted orderedListDiff).
 //
 // The mutation pipeline's stage 1 (validate) runs each field's structural +
 // declared validate over a payload and throws a typed ValidationError naming the
@@ -21,12 +24,23 @@ import { resolveStrategy, validateMutation, ValidationError, serializeField } fr
 // --- the strategy table is keyed by kind, framework-owned ---
 
 test('resolveStrategy(kind) returns the named-whole strategy for each kind', () => {
-  for (const kind of ['value', 'store', 'crdt', 'ordered']) {
+  // value/store/crdt are snapshot-diff-bearing kinds: {validate, apply, diff}.
+  for (const kind of ['value', 'store', 'crdt']) {
     const strategy = resolveStrategy(kind);
     assert.equal(typeof strategy.validate, 'function', `${kind}.validate`);
     assert.equal(typeof strategy.apply, 'function', `${kind}.apply`);
     assert.equal(typeof strategy.diff, 'function', `${kind}.diff`);
   }
+  // ordered has NO strategy.diff — its delta contract is the native per-op
+  // identity-keyed events (.inserted/.moved/.reordered/.removed), NOT a
+  // whole-list snapshot diff (DECISIONLOG #74 — VESTIGIAL: deleted
+  // orderedListDiff). The absent `.diff` is the structural declaration of
+  // "ordered is per-op, not snapshot"; computeDelta's DIFF_ELIGIBLE set
+  // (field-delta.mjs) enforces it never reaches this (absent) `.diff`.
+  const ordered = resolveStrategy('ordered');
+  assert.equal(typeof ordered.validate, 'function', 'ordered.validate');
+  assert.equal(typeof ordered.apply, 'function', 'ordered.apply');
+  assert.equal(ordered.diff, undefined, 'ordered has no strategy.diff (per-op events, not snapshot)');
 });
 
 test('resolveStrategy throws on an unknown kind (fail closed, not a silent default)', () => {

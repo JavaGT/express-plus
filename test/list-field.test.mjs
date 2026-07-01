@@ -8,8 +8,11 @@
 // each element to a fresh evenly-spaced sequence.
 //
 // These are HANDLE behavior tests against the side-table (the storage path).
-// The per-element diff (orderedListDiff) reconciles to this stored model in P6e's
-// delta broadcast; A2 ships the storage + handle, additive (no diff change).
+// Ordered's delta contract is the native per-op identity-keyed EVENTS
+// (`.inserted`/`.moved`/`.reordered`/`.removed`) — NOT a `strategy.diff`
+// snapshot diff (DECISIONLOG #74 — VESTIGIAL, deleted orderedListDiff; a
+// fractional-index keyspace is intrinsically per-op, not whole-state-snapshot).
+// A2 ships the storage + handle; the events' live normalization landed in P6e-1b.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';

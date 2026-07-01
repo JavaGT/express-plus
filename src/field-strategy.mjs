@@ -78,33 +78,6 @@ function storeMapDiff(previous, next) {
   return { added, removed, changed };
 }
 
-// ordered (list) diff over keyed-element lists { key, ...item }. The delta is
-// computed by KEY: a sibling keeps its key across an insert/move (no renumber).
-// Moves are reported only on a pure reorder (key set unchanged) — index shifts
-// caused by a structural add are NOT moves (consult #20: fractional-index).
-function orderedListDiff(previous, next) {
-  const prev = Array.isArray(previous) ? previous : [];
-  const nxt = Array.isArray(next) ? next : [];
-  const prevByKey = new Map(prev.map((e, i) => [e.key, i]));
-  const nextByKey = new Map(nxt.map((e, i) => [e.key, i]));
-  const added = [], removed = [], moved = [];
-  for (let i = 0; i < nxt.length; i++) {
-    const { key, ...item } = nxt[i];
-    if (!prevByKey.has(key)) added.push({ at: i, key, item });
-  }
-  for (const e of prev) {
-    if (!nextByKey.has(e.key)) removed.push({ key: e.key });
-  }
-  if (added.length === 0 && removed.length === 0) {
-    for (let i = 0; i < nxt.length; i++) {
-      const from = prevByKey.get(nxt[i].key);
-      if (from !== i) moved.push({ key: nxt[i].key, from, to: i });
-    }
-  }
-  if (!added.length && !removed.length && !moved.length) return null;
-  return { added, removed, moved };
-}
-
 // struct per-sub-cell diff. Only changed declared sub-cells appear in `cells`
 // as { set: value }; an unchanged sub-cell is absent. A cleared cell → { set: null }.
 function structDiff(previous, next, descriptor) {
@@ -242,11 +215,23 @@ const STRATEGIES = Object.freeze({
     },
   }),
 
-  // `ordered` — a fractional-index keyspace (list). diff is an element delta
-  // {added, removed, moved} computed by KEY: a sibling keeps its key across an
-  // insert/move (no renumber). Moves are reported only on a pure reorder (key set
-  // unchanged); an insert/move's index shifts of siblings are a CONSEQUENCE of
-  // the structural add, not reported as moves.
+  // `ordered` — a fractional-index keyspace (list). Ordered has NO `strategy.diff`:
+  // its delta contract is the native identity-keyed per-op EVENTS emitted by
+  // orderedMutateHandlers (`.inserted`/`.moved`/`.reordered`/`.removed`, each
+  // carrying the stable element `id` + the fractional `key`), normalized under
+  // `delta:{[field]:event.data}` in live.mjs (P6e-1b B2). A whole-list snapshot
+  // diff is the wrong shape for a fractional-index keyspace — `key` is a volatile
+  // sort position that changes on every insert/move, so a snapshot-diff would
+  // reinvent the per-op events from the wrong input shape ({key,...} objects vs the
+  // side-table's `(id,key,item)` rows). Ordered is intrinsically per-op-identity,
+  // not whole-state-snapshot. `validate` ensures the payload is an array;
+  // `apply` replaces (single-writer dispatch — the side-table is the authority,
+  // mutated by the native events' projection, not by an `.updated` main-column
+  // write). SPEC §5.3 names ordered's "diff + index + inverse machinery" — that
+  // machinery is the operation API (insertAt/move/reorder/remove) + the events it
+  // dispatches, NOT a `strategy.diff` function. computeDelta's DIFF_ELIGIBLE set
+  // (field-delta.mjs) structurally enforces that ordered never reaches this
+  // strategy's (absent) `.diff` (DECISIONLOG #74 — VESTIGIAL: deleted orderedListDiff).
   ordered: Object.freeze({
     validate(value) {
       if (!Array.isArray(value)) return 'expected an ordered list';
@@ -254,9 +239,6 @@ const STRATEGIES = Object.freeze({
     },
     apply(_previous, next) {
       return next;
-    },
-    diff(previous, next) {
-      return orderedListDiff(previous, next);
     },
   }),
 
