@@ -154,19 +154,19 @@ export const Album = entity('Album', {
     });
 
     // =================================================================
-    // Album photo listing — EXPRESSIBLE but SHARP EDGE on compound queries
+    // Album photo listing — compound queries are NOW expressible
     //
-    // The `.is()`/`.has()` predicate system can express "photos in this
-    // album" (`Photo.album.is(albumId)`). But combined predicates like
-    // "photos in album X AND tagged 'dog' AND taken in December" require
-    // `.and()` chaining — planned (Phase 1 step 6) but not in exemplars.
+    // `.and()` chaining and `.gte()`/`.lte()` range predicates shipped
+    // (Scope-support Slices 4–5), so compound queries like "photos in
+    // album X AND taken in December" work: `.is(id).and(.gte(from)).and(.lte(to))`.
     // =================================================================
     r.get('/photos', async (req, res) => {
       const photos = await Photo.findAll(Photo.album.is(req.album.id))
         .sort(Photo.capturedAt, 'desc').limit(50);
       res.json(photos);
     });
-    // IDEALIZED compound query (needs .and(), .gte(), .lte()):
+    // Compound query example (all predicates available):
+    //   const { from, to } = req.query;
     //   const photos = await Photo.findAll(
     //     Photo.album.is(req.album.id)
     //       .and(Photo.capturedAt.gte(new Date(from)))
