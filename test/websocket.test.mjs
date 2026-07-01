@@ -131,6 +131,32 @@ test('FrameParser parses a close frame', () => {
   assert.equal(msgs[0].closeReason, 'bye');
 });
 
+// REGRESSION: a graceful WS client (undici's global WebSocket) closes by
+// sending a MASKED, ZERO-LENGTH close frame — 6 bytes: `88 80 <4-byte mask>`.
+// The parser's #processBuffer loop previously ran `while (buffer.length > 0)`,
+// which exited after the MASK state consumed the final 4 mask bytes (buffer
+// now empty) BEFORE the PAYLOAD state could finalize the zero-length frame. The
+// close frame was therefore never emitted, the server never acked the close,
+// and the client socket stuck in CLOSING forever (event-loop leak). The loop
+// now also runs when PAYLOAD is fully read, so a zero-length frame finalizes.
+test('FrameParser parses a masked ZERO-LENGTH close frame (graceful-client leak regression)', () => {
+  const parser = new FrameParser();
+  const mask = Buffer.from([0x11, 0x22, 0x33, 0x44]);
+
+  // No body at all: FIN=1 opcode=0x8, MASK=1 len=0, then the 4 mask bytes.
+  const frame = Buffer.alloc(2 + 4);
+  frame[0] = 0x88;   // FIN=1, opcode=0x8 (close)
+  frame[1] = 0x80;   // MASK=1, len=0
+  frame.set(mask, 2);
+
+  parser.feed(frame);
+  const msgs = parser.drainMessages();
+  assert.equal(msgs.length, 1, 'zero-length close frame must be emitted');
+  assert.equal(msgs[0].opcode, 0x8);
+  assert.equal(msgs[0].closeCode, 1005, 'empty payload → 1005 (no status received)');
+  assert.equal(msgs[0].closeReason, '');
+});
+
 test('FrameParser parses a ping frame (automatic pong response)', () => {
   const parser = new FrameParser();
   const mask = Buffer.from([0xaa, 0xbb, 0xcc, 0xdd]);

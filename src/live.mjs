@@ -185,9 +185,15 @@ export function createLiveServer(httpServer, {
       const msgs = this.#parser.drainMessages();
       for (const msg of msgs) {
         if (msg.opcode === 0x8) {
-          // Client-initiated close — acknowledge it.
-          this.#socket.write(this.#sender.close(msg.closeCode ?? 1000, msg.closeReason));
-          this.#cleanup();
+          // Client-initiated close — acknowledge with a close frame, then tear
+          // the TCP socket down. Writing the close frame WITHOUT destroying the
+          // socket leaves the connection half-open: a well-behaved WS client
+          // (e.g. undici's WebSocket) waits for the TCP FIN before releasing its
+          // socket handle, so a bare #cleanup() here leaks the client socket for
+          // the OS keep-alive lifetime. Route through #close() so the socket is
+          // destroyed (idempotent — #closed guards double-entry).
+          try { this.#socket.write(this.#sender.close(msg.closeCode ?? 1000, msg.closeReason)); } catch { /* ignore */ }
+          this.#close();
           return;
         }
         if (msg.opcode === 0x1) {

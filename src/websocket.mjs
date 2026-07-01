@@ -145,7 +145,17 @@ export class FrameParser {
   }
 
   #processBuffer() {
-    while (this.#buffer.length > 0) {
+    // Loop while there is buffered data OR we are sitting in the PAYLOAD state
+    // with a zero-length payload still to finalize. A masked close frame with an
+    // empty body (undici sends `88 80 <mask>` — 6 bytes, no payload) consumes its
+    // last byte in the MASK state, emptying the buffer; a bare `length > 0` loop
+    // would then exit BEFORE the PAYLOAD state completes the zero-length frame,
+    // dropping the close frame entirely (server never acks → client hangs in
+    // CLOSING forever → leaked socket). Keep looping so PAYLOAD can finalize.
+    while (
+      this.#buffer.length > 0 ||
+      (this.#state === STATE.PAYLOAD && this.#payloadRead === this.#payloadLen)
+    ) {
       // Drain skip-bytes from a malformed frame we already reported.
       if (this.#skipBytes > 0) {
         const drain = Math.min(this.#skipBytes, this.#buffer.length);
