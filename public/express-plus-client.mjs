@@ -759,3 +759,312 @@ export class LiveList {
     }
   }
 }
+
+// ---------------------------------------------------------------------------
+// createLiveStore — client SDK store: LiveList cache + optimistic dispatch + overlays.
+// ---------------------------------------------------------------------------
+
+/**
+ * Shared HTTP response decoder.
+ *  - 204 (remove): returns `{ ok: true }`
+ *  - non-ok:       returns `{ ok: false, error: 'http ' + res.status }`
+ *  - ok with body: returns the parsed JSON body as-is
+ */
+export async function decodeResult(res) {
+  if (res.status === 204) return { ok: true };
+  if (!res.ok) return { ok: false, error: 'http ' + res.status };
+  return res.json();
+}
+
+/**
+ * Create a live store for one entity type.
+ *
+ * Options:
+ *   baseUrl     – server origin (e.g. 'http://127.0.0.1:5432')
+ *   name        – entity name (e.g. 'Doc')
+ *   path        – CRUD mount path (e.g. '/docs')
+ *   channel     – LiveChannel instance (optional, defaults to new LiveChannel(baseUrl))
+ *   fetchImpl   – fetch function (optional, defaults to globalThis.fetch)
+ *
+ * Returns a store object with: subscribe, dispatch, create, update, remove,
+ * action, close, overlayFor, pendingCreates, onRender.
+ */
+export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
+  const resolvedChannel = channel ?? new LiveChannel(baseUrl);
+  const resolvedFetch = fetchImpl ?? globalThis.fetch;
+
+  let _opIdCounter = 0;
+  const _listCache = new Map();     // id → LiveList
+  const _overlay = new Map();       // opId → overlay entry
+  const _renderCallbacks = new Set();
+  const _listUnsubs = new Map();    // id → LiveList.onRender unsub
+  const _actionRoutes = new Map();  // actionType → { method, path }
+  let _closed = false;
+
+  function _nextOpId() {
+    return 'op_' + (++_opIdCounter);
+  }
+
+  function _snapshotUrl(entity, id) {
+    return `${baseUrl}/snapshot/${entity}/${id}`;
+  }
+
+  function _eventsSinceUrl(entity, id, cursor) {
+    return `${baseUrl}/events-since/${entity}/${id}?cursor=${cursor}`;
+  }
+
+  // --- Overlay helpers ---
+
+  function _clearConfirmedOverlays(id) {
+    const list = _listCache.get(id);
+    if (!list) return;
+    const state = list.state;
+
+    for (const [opId, entry] of _overlay) {
+      if (entry.id !== id || entry.status !== 'confirmed') continue;
+      if (entry.kind === 'update' && state !== null) {
+        _overlay.delete(opId);
+      } else if (entry.kind === 'remove' && state === null) {
+        _overlay.delete(opId);
+      } else if (entry.kind === 'create' && state !== null) {
+        _overlay.delete(opId);
+      }
+    }
+  }
+
+  function _storeRender() {
+    for (const cb of _renderCallbacks) {
+      try { cb(); } catch { /* swallow */ }
+    }
+  }
+
+  // --- Subscribe ---
+
+  function _subscribeLiveList(id) {
+    if (_closed) throw new Error('store is closed');
+    if (_listCache.has(id)) return _listCache.get(id);
+
+    const list = new LiveList({
+      entity: name,
+      id,
+      channel: resolvedChannel,
+      fetchImpl: resolvedFetch,
+      snapshotUrl: _snapshotUrl,
+      eventsSinceUrl: _eventsSinceUrl,
+    });
+
+    _listCache.set(id, list);
+
+    // Subscribe to LiveList onRender for overlay clearing + store render propagation
+    const unsub = list.onRender(() => {
+      _clearConfirmedOverlays(id);
+      _storeRender();
+    });
+    _listUnsubs.set(id, unsub);
+
+    // Boot strap (do not await — caller may await list.ready)
+    list.subscribe().catch(() => {});
+
+    return list;
+  }
+
+  // --- Overlay queries ---
+
+  function overlayFor(id) {
+    // Find the most recent (insertion-order) non-failed overlay for this id
+    let entry = null;
+    for (const e of _overlay.values()) {
+      if (e.status === 'failed') continue;
+      if (e.id === id) entry = e;
+    }
+
+    if (!entry) {
+      const list = _listCache.get(id);
+      return list ? list.state : null;
+    }
+
+    if (entry.kind === 'remove') return null;
+    // Return authoritative row if confirmed, else optimistic guess
+    return entry.row ?? entry.optimistic;
+  }
+
+  function pendingCreates() {
+    const result = [];
+    for (const entry of _overlay.values()) {
+      if (entry.kind === 'create' && entry.status === 'pending') {
+        result.push(entry);
+      }
+    }
+    return result;
+  }
+
+  // --- Dispatch (optimistic CRUD) ---
+
+  async function dispatch(type, payload) {
+    const opId = _nextOpId();
+
+    // dispatch NEVER throws — a closed store returns a failed Result like any
+    // other failure (contract: the returned Promise resolves to committed or
+    // failed-rolled-back, never rejects).
+    if (_closed) {
+      return { ok: false, status: 'failed-rolled-back', opId, error: 'store is closed' };
+    }
+
+    let kind, id;
+    if (type === `${name}.create`) {
+      kind = 'create';
+    } else if (type === `${name}.update`) {
+      kind = 'update';
+      id = payload.id;
+    } else if (type === `${name}.remove`) {
+      kind = 'remove';
+      id = payload.id;
+    } else {
+      return { ok: false, status: 'failed-rolled-back', opId, error: 'unknown action type: ' + type };
+    }
+
+    // Capture preimage for rollback (the effective state before this op)
+    const preimage = id ? overlayFor(id) : null;
+
+    // Build optimistic overlay row
+    let optimistic = null;
+    if (kind === 'create') {
+      optimistic = { ...payload };
+    } else if (kind === 'update') {
+      optimistic = { ...(preimage ?? {}), ...payload };
+      delete optimistic.id;
+      optimistic = { id, ...optimistic };
+    }
+    // remove: optimistic stays null
+
+    // Create overlay entry (status: pending)
+    const entry = { opId, id: id ?? null, kind, optimistic, status: 'pending', row: null };
+    _overlay.set(opId, entry);
+    _storeRender();
+
+    // Fire REST
+    try {
+      let method, url, body;
+      if (kind === 'create') {
+        method = 'POST';
+        url = `${baseUrl}${path}`;
+        body = JSON.stringify(payload);
+      } else if (kind === 'update') {
+        method = 'PATCH';
+        url = `${baseUrl}${path}/${id}`;
+        body = JSON.stringify(payload);
+      } else {
+        method = 'DELETE';
+        url = `${baseUrl}${path}/${id}`;
+        body = undefined;
+      }
+
+      const fetchOpts = { method, credentials: 'include' };
+      if (body !== undefined) {
+        fetchOpts.headers = { 'Content-Type': 'application/json' };
+        fetchOpts.body = body;
+      }
+
+      const res = await resolvedFetch(url, fetchOpts);
+      const decoded = await decodeResult(res);
+
+      if (decoded && decoded.ok === false) {
+        // Failure — roll back
+        _overlay.delete(opId);
+        _storeRender();
+        return { ok: false, status: 'failed-rolled-back', opId, error: decoded.error };
+      }
+
+      // Success
+      const is204 = res.status === 204;
+      const returnedRow = is204 ? undefined : decoded;
+      let realId = id;
+
+      if (kind === 'create') {
+        realId = returnedRow && returnedRow.id;
+      }
+
+      // Update overlay entry
+      entry.status = 'confirmed';
+      entry.id = realId;
+      entry.row = returnedRow ?? null;
+      _storeRender();
+
+      return {
+        ok: true,
+        status: 'committed',
+        opId,
+        id: realId,
+        row: kind === 'remove' ? undefined : returnedRow,
+      };
+    } catch (err) {
+      // Network / exception error — roll back
+      _overlay.delete(opId);
+      _storeRender();
+      return { ok: false, status: 'failed-rolled-back', opId, error: err.message ?? String(err) };
+    }
+  }
+
+  // --- Action route registry ---
+
+  function action(actionType, { method, path: actionPath }) {
+    _actionRoutes.set(actionType, { method, path: actionPath });
+
+    // Return a helper function the caller can invoke
+    const fn = async (body) => {
+      const route = _actionRoutes.get(actionType);
+      if (!route) throw new Error(`unknown action: ${actionType}`);
+
+      const opts = { method: route.method, credentials: 'include' };
+      if (body !== undefined) {
+        opts.headers = { 'Content-Type': 'application/json' };
+        opts.body = JSON.stringify(body);
+      }
+
+      try {
+        const res = await resolvedFetch(`${baseUrl}${route.path}`, opts);
+        return decodeResult(res);
+      } catch (err) {
+        return { ok: false, error: err.message ?? String(err) };
+      }
+    };
+
+    // Also attach to the store object so store.<actionType>() works
+    store[actionType] = fn;
+    return fn;
+  }
+
+  // --- Close ---
+
+  function close() {
+    _closed = true;
+    resolvedChannel.close();
+    for (const unsub of _listUnsubs.values()) {
+      unsub();
+    }
+    _listCache.clear();
+    _listUnsubs.clear();
+    _overlay.clear();
+    _renderCallbacks.clear();
+  }
+
+  // --- Store object ---
+
+  const store = {
+    subscribe: _subscribeLiveList,
+    dispatch,
+    create(payload) { return dispatch(`${name}.create`, payload); },
+    update(id, payload) { return dispatch(`${name}.update`, { id, ...payload }); },
+    remove(id) { return dispatch(`${name}.remove`, { id }); },
+    action,
+    close,
+    overlayFor,
+    pendingCreates,
+    onRender(cb) {
+      _renderCallbacks.add(cb);
+      return () => _renderCallbacks.delete(cb);
+    },
+  };
+
+  return store;
+}
