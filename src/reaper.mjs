@@ -11,6 +11,7 @@
 import { randomUUID } from 'node:crypto';
 import { principalFrom } from './principal.mjs';
 import { discoverDueSchedules, schedulerSource } from './schedule.mjs';
+import { getLog } from './log.mjs';
 
 const SCAN_INTERVAL_MS = 1000;
 
@@ -72,7 +73,7 @@ export function startReaper({ db, entities, dispatch, now = Date.now }) {
         const principal = principalFrom(source);
         dispatch({ actionId: randomUUID(), type: `${entityName}.${verb}`, principal, payload: { id: rowId, ...payload } });
       } catch (err) {
-        process.stderr.write(`reaper dispatch ${entityName}.${verb} ${rowId} failed: ${err.message}\n`);
+        getLog().warn('system', 'reaper dispatch failed', { err, entity: entityName, verb, rowId });
       }
     }
   }
@@ -82,7 +83,7 @@ export function startReaper({ db, entities, dispatch, now = Date.now }) {
       try {
         scan();
       } catch (err) {
-        process.stderr.write(`reaper scan failed: ${err.message}\n`);
+        getLog().warn('system', 'reaper scan failed', { err });
       }
     }, SCAN_INTERVAL_MS);
     if (typeof timer.unref === 'function') timer.unref();

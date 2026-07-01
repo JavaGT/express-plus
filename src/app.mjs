@@ -30,6 +30,7 @@ import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
 import { createJobQueue } from './job-queue.mjs';
+import { createLog, setAmbientLog, getLog } from './log.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 
@@ -286,7 +287,8 @@ export function router(options = {}) {
 // (chainable). The server is exposed on `app.httpServer`. `options.principalOf`
 // overrides the request→principal source (default: anonymous, fail-closed). Both
 // chain.
-export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts } = {}) {
+export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts, log: logOpts } = {}) {
+  // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
     const val = process.env[v];
@@ -295,6 +297,12 @@ export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migr
     }
   }
   const app = makeMountable();
+  // Set up the framework-wide structured logger BEFORE any module imports log.
+  // The ambient logger is used by every layer — auth, dispatch, HTTP, live.
+  // Callers pass `expressPlus({ log: { level: 'debug', channels: {...} } })`.
+  const log = createLog(logOpts);
+  setAmbientLog(log);
+  log.info('system', 'expressPlus() constructed', { db: !!db, jobs: !!jobOpts, migrations: migrations.length });
   // The DB handle is an app-level resource, supplied once at construction and
   // read by every transport (HTTP now, WS /events later) — not a per-transport
   // listen option (DECISIONLOG: the SQLite handle lives on the app because

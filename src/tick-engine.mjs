@@ -14,6 +14,7 @@
 import { randomUUID } from 'node:crypto';
 import { principalFrom } from './principal.mjs';
 import { tickSource, discoverTickedRows, admitTickedMutation } from './schedule.mjs';
+import { getLog } from './log.mjs';
 
 /**
  * startTickEngine — start the per-interval tick-dispatch loop.
@@ -72,7 +73,7 @@ export function startTickEngine({ db, entities, dispatch, now = Date.now }) {
         // declared-`with` payload compare.
         dispatch({ actionId: randomUUID(), type: `${entityName}.${verb}`, principal, payload: { id: rowId, ...payload } });
       } catch (err) {
-        process.stderr.write(`tick-engine dispatch ${entityName}.${verb} ${rowId} failed: ${err.message}\n`);
+        getLog().warn('system', 'tick-engine dispatch failed', { err, entity: entityName, verb, rowId });
       }
     }
   }
@@ -85,7 +86,7 @@ export function startTickEngine({ db, entities, dispatch, now = Date.now }) {
       try {
         scan();
       } catch (err) {
-        process.stderr.write(`tick-engine scan failed: ${err.message}\n`);
+        getLog().warn('system', 'tick-engine scan failed', { err });
       }
     }, scanInterval);
     if (typeof timer.unref === 'function') timer.unref();

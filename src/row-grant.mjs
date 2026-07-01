@@ -17,6 +17,7 @@
 
 import { check, resolveDecision } from './check.mjs';
 import { read, write, subscribe } from './grant.mjs';
+import { getLog } from './log.mjs';
 
 // Build the `is` proxy the .can body destructures: each entity check, bound to
 // this row + principal, wrapped as an awaitable check so `await is.owner()`
@@ -103,8 +104,15 @@ export async function mayVerb(entityRecord, verb, row, principal) {
   const required = VERB_CAPABILITY[verb];
   if (!required) return false;
   const decision = await rowCapabilities(entityRecord, row, principal);
-  if (!decision.granted) return false;
-  return decision.capabilities.includes(required);
+  if (!decision.granted) {
+    getLog().debug('auth', `${verb} denied`, { entity: entityRecord.name, id: row?.id, principal: principal?.id ?? 'anon', verb, reason: 'grant returned no capabilities' });
+    return false;
+  }
+  const allowed = decision.capabilities.includes(required);
+  if (!allowed) {
+    getLog().debug('auth', `${verb} denied`, { entity: entityRecord.name, id: row?.id, principal: principal?.id ?? 'anon', verb, reason: `missing ${required.capability}` });
+  }
+  return allowed;
 }
 
 // Field-level capability authority (SPEC §6, AGENTS Authorization § "one auth

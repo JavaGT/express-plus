@@ -27,6 +27,7 @@
 // write the app projects from a result is never double-applied).
 
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
+import { getLog } from './log.mjs';
 
 const STATES = { QUEUED: 'queued', CLAIMED: 'claimed', RUNNING: 'running', COMPLETED: 'completed', FAILED: 'failed' };
 const TERMINAL = new Set([STATES.COMPLETED, STATES.FAILED]);
@@ -191,7 +192,7 @@ export function createJobQueue({
   function startReaper() {
     if (timer) return;
     timer = setInterval(() => {
-      try { reap(); } catch (err) { process.stderr.write(`job-queue reap failed: ${err.message}\n`); }
+      try { reap(); } catch (err) { getLog().warn('system', 'job-queue reap failed', { err }); }
     }, reapIntervalMs);
     if (typeof timer.unref === 'function') timer.unref();
   }

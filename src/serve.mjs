@@ -38,6 +38,7 @@ import { createServer } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects } from './effect-compiler.mjs';
 import { User, Session, Inbox } from './auth-entities.mjs';
 import { getActiveDb, setActiveDb } from './db.mjs';
+import { getLog } from './log.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -804,10 +805,10 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
   // request first awaits `app.ready` so the socket may accept connections before
   // resolution completes without ever dispatching against a partial table.
   const isApp = source && typeof source.resolveRoutes === 'function';
-  // Request log (opt-in via `listen(port, {requestLog:true})`) — writes
-  // `METHOD path status durationMs` to stderr at response end. The requestCount
-  // counter feeding /health/stats runs on every app request regardless.
+  // Request log (opt-in via `listen(port, {requestLog:true})`). The structured
+  // logger also captures every request at info-level on the 'http' channel.
   const shouldLogRequest = requestLog;
+  const log = getLog();
   const requestCount = { count: 0 };
   return async function handle(req, res) {
     const startTime = Date.now();
@@ -822,7 +823,10 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       res.on('finish', () => {
         const path = new URL(req.url, 'http://localhost').pathname;
         const durationMs = Date.now() - startTime;
-        process.stderr.write(`${req.method} ${path} ${statusCode} ${durationMs}ms\n`);
+        if (shouldLogRequest) {
+          process.stderr.write(`${req.method} ${path} ${statusCode} ${durationMs}ms\n`);
+        }
+        log.info('http', `${req.method} ${path} ${statusCode}`, { method: req.method, path, status: statusCode, durationMs });
       });
     }
     // Security headers are a baked-in default on EVERY response, set before any
@@ -1341,6 +1345,7 @@ export function listen(app, port, optionsOrCallback = {}) {
   const isCallback = typeof optionsOrCallback === 'function';
   const options = isCallback ? {} : optionsOrCallback;
   const onListening = isCallback ? optionsOrCallback : options.onListening;
+  const log = getLog();
 
   // The default principal source is session hydration when the app has a db: the
   // principal is built server-side from the request's session cookie (SPEC §572).
@@ -1399,7 +1404,7 @@ export function listen(app, port, optionsOrCallback = {}) {
     );
     let blobTimer;
     blobTimer = setInterval(() => {
-      app.sweepBlobs().catch((err) => process.stderr.write(`blob reap failed: ${err.message}\n`));
+      app.sweepBlobs().catch((err) => log.warn('system', 'blob reap failed', { err }));
     }, blobReapIntervalMs);
     if (typeof blobTimer.unref === 'function') blobTimer.unref();
     app.onShutdown('blob-reaper', () => { if (blobTimer) clearInterval(blobTimer); }, { timeoutMs: 1000 });
@@ -1419,7 +1424,7 @@ export function listen(app, port, optionsOrCallback = {}) {
     });
     let logTimer;
     logTimer = setInterval(() => {
-      app.sweepLog().catch((err) => process.stderr.write(`log retention sweep failed: ${err.message}\n`));
+      app.sweepLog().catch((err) => log.warn('system', 'log retention sweep failed', { err }));
     }, options.logRetentionIntervalMs ?? BLOB_REAP_INTERVAL_MS);
     if (typeof logTimer.unref === 'function') logTimer.unref();
     app.onShutdown('log-reaper', () => { if (logTimer) clearInterval(logTimer); }, { timeoutMs: 1000 });
@@ -1470,6 +1475,7 @@ export function listen(app, port, optionsOrCallback = {}) {
     if (!httpServer.listening) {
       await new Promise((resolve) => httpServer.once('listening', resolve));
     }
+    log.info('system', `server listening on port ${app.httpServer.address()?.port ?? port}`);
     return app;
   })();
 
@@ -1494,10 +1500,13 @@ function installProcessTraps() {
   process.once('SIGTERM', onSignal);
   process.once('SIGINT', onSignal);
   process.on('unhandledRejection', (reason) => {
-    // surface, do not crash silently; fail closed by logging to stderr.
+    const log = getLog();
+    log.error('system', 'unhandledRejection', { reason });
     process.stderr.write(`unhandledRejection: ${reason}\n`);
   });
   process.on('uncaughtException', (err) => {
+    const log = getLog();
+    log.error('system', 'uncaughtException', { err });
     process.stderr.write(`uncaughtException: ${err?.stack ?? err}\n`);
   });
 }
@@ -1536,6 +1545,7 @@ function installGracefulShutdown(app) {
             try {
               await Promise.race([hook.fn(), timer]);
             } catch (err) {
+              getLog().warn('system', `onShutdown hook '${hook.name}' failed`, { err, hook: hook.name });
               process.stderr.write(`onShutdown hook '${hook.name}' failed: ${err.message}\n`);
               // Continue to next hook (force-abandon on timeout)
             }

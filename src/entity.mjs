@@ -23,6 +23,7 @@ import { getActiveDb, getActiveEntity, setActiveEntity } from './db.mjs';
 import { buildCheckRegistry } from './registry.mjs';
 import { mayFieldOp } from './row-grant.mjs';
 import { read, write } from './grant.mjs';
+import { getLog } from './log.mjs';
 import {
   serializeField, deserializeField, validateMutation, ValidationError, verifyHash, flattenStruct, structCellColumn, resolveStrategy,
 } from './field-strategy.mjs';
@@ -1207,6 +1208,7 @@ export function entity(name, declaration = {}) {
           db.prepare(
             `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`,
           ).run(row);
+          getLog().debug('dispatch', `${name}.created`, { id: row.id ?? event.data?.id });
         }
       } else if (event.type === `${name}.updated`) {
         const { id, ...data } = event.data ?? {};
@@ -1252,9 +1254,11 @@ export function entity(name, declaration = {}) {
         }
         if (updates.length > 0) {
           db.prepare(`UPDATE ${table} SET ${updates.join(', ')} WHERE id = :id`).run(params);
+          getLog().debug('dispatch', `${name}.updated`, { id: params.id });
         }
       } else if (event.type === `${name}.removed`) {
         db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(event.data?.id);
+        getLog().debug('dispatch', `${name}.removed`, { id: event.data?.id });
       }
     },
   });
