@@ -37,6 +37,7 @@ import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects } from './effect-compiler.mjs';
 import { User, Session, Inbox } from './auth-entities.mjs';
+import { getActiveDb, setActiveDb } from './db.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -1152,94 +1153,77 @@ function buildKernel(app) {
     });
   }
   // projected.async: post-commit projection over the committed log (ADR #12).
-  // Each field may specify `from` (a short event name like 'created' or a full
-  // event type) to limit recomputation to specific triggers. Without `from`,
-  // the field recomputes on every create and update (default).
-  {
-    const projectedEntities = [];
-    for (const [entityName, entityRecord] of app.entities ?? []) {
-      if (entityRecord.projectedAsyncFields?.length > 0) {
-        // Resolve from triggers to full event types per field
-        const fields = entityRecord.projectedAsyncFields.map(([fieldName, desc]) => {
-          let triggerTypes;
-          if (desc.from) {
-            const from = String(desc.from);
-            triggerTypes = from.includes('.') ? [from] : [`${entityName}.${from}`];
-          } else {
-            triggerTypes = [`${entityName}.created`, `${entityName}.updated`];
-          }
-          return { fieldName, compute: desc.compute, triggerTypes };
-        });
-        projectedEntities.push({ entity: entityRecord, fields });
-      }
+  // The consumer resolves entities at *runtime* from app.entities (set by
+  // buildKernel during app.ready) so it always sees the fully-built registry.
+  //
+  // Resolve from triggers to full event types (e.g. 'created' → 'Post.created').
+  function resolveTriggerTypes(desc, entityName) {
+    if (!desc.from) return [`${entityName}.created`, `${entityName}.updated`];
+    if (typeof desc.from === 'string') {
+      const from = desc.from;
+      return from.includes('.') ? [from] : [`${entityName}.${from}`];
     }
-    if (projectedEntities.length > 0) {
-      // Per-field monotonic cursor: tracks how many times each projected.async
-      // field has been successfully computed. Stored in _ProjectedCursor to
-      // survive restart. The cursor is NOT used to skip events (per-scope seqs
-      // are not globally comparable) — it is a staleness indicator for the read
-      // path and a progress counter for external monitoring.
-      const cursorCache = new Map();
-      const getCursor = (db, entityName, fieldName) => {
-        const key = `${entityName}.${fieldName}`;
-        if (cursorCache.has(key)) return cursorCache.get(key);
-        const row = db.prepare(
-          'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
-        ).get({ e: entityName, f: fieldName });
-        const val = row?.lastSeq ?? 0;
-        cursorCache.set(key, val);
-        return val;
-      };
-      const advanceCursor = (db, entityName, fieldName) => {
-        const key = `${entityName}.${fieldName}`;
-        const next = (cursorCache.get(key) ?? 0) + 1;
-        cursorCache.set(key, next);
-        db.prepare(
-          'INSERT OR REPLACE INTO _ProjectedCursor (entity, field, lastSeq) VALUES (:e, :f, :s)',
-        ).run({ e: entityName, f: fieldName, s: next });
-        return next;
-      };
+    return desc.from.map((f) => f.includes('.') ? f : `${entityName}.${f}`);
+  }
 
-      postCommitConsumers.push(async (events, { db }) => {
-        for (const ev of events) {
-          const colon = ev.scope?.indexOf(':');
-          if (colon < 0) continue;
-          const entityName = ev.scope.slice(0, colon);
-          const rowId = ev.scope.slice(colon + 1);
-          const proj = projectedEntities.find((p) => p.entity.name === entityName);
-          if (!proj) continue;
-          const eventType = ev.type;
-          const triggered = proj.fields.filter((f) => f.triggerTypes.includes(eventType));
-          if (triggered.length === 0) continue;
-          const row = db.prepare(`SELECT * FROM ${entityName} WHERE id = :id`).get({ id: rowId });
-          if (!row) continue;
-          const filteredRow = {};
-          for (const [k, v] of Object.entries(row)) {
-            if (Object.prototype.hasOwnProperty.call(proj.entity.fields, k)) {
-              const desc = proj.entity.fields[k];
-              if (desc?.kind === 'value' || desc?.kind === 'projected') {
-                try { filteredRow[k] = resolveStrategy(desc.kind).deserialize?.(v, desc) ?? v; } catch { filteredRow[k] = v; }
-              } else {
-                filteredRow[k] = v;
-              }
-            }
-          }
-          for (const { fieldName, compute } of triggered) {
-            try {
-              const result = await compute(filteredRow);
-              const serialized = resolveStrategy('projected').serialize(result);
-              db.prepare(`UPDATE ${entityName} SET ${fieldName} = :val WHERE id = :id`).run({
-                val: serialized, id: rowId,
-              });
-              advanceCursor(db, entityName, fieldName);
-            } catch {
-              // compute failure leaves the projected column unchanged; cursor NOT advanced
-            }
+  postCommitConsumers.push(async (events, { db }) => {
+    for (const ev of events) {
+      const colon = ev.scope?.indexOf(':');
+      if (colon < 0) continue;
+      const entityName = ev.scope.slice(0, colon);
+      const rowId = ev.scope.slice(colon + 1);
+      const entityRecord = app.entities?.get(entityName);
+      if (!entityRecord || !entityRecord.projectedAsyncFields?.length) continue;
+      const projFields = entityRecord.projectedAsyncFields;
+      const eventType = ev.type;
+      const triggered = [];
+      for (const [fieldName, desc] of projFields) {
+        const triggerTypes = resolveTriggerTypes(desc, entityName);
+        if (triggerTypes.includes(eventType)) {
+          triggered.push({ fieldName, compute: desc.compute });
+        }
+      }
+      if (triggered.length === 0) continue;
+      const row = db.prepare(`SELECT * FROM ${entityName} WHERE id = :id`).get({ id: rowId });
+      if (!row) continue;
+      const filteredRow = {};
+      if (row.id !== undefined) filteredRow.id = row.id;
+      for (const [k, v] of Object.entries(row)) {
+        if (Object.prototype.hasOwnProperty.call(entityRecord.fields, k)) {
+          const desc = entityRecord.fields[k];
+          if (desc?.kind === 'value' || desc?.kind === 'projected') {
+            try { filteredRow[k] = resolveStrategy(desc.kind).deserialize?.(v, desc) ?? v; } catch { filteredRow[k] = v; }
+          } else {
+            filteredRow[k] = v;
           }
         }
-      });
+      }
+      for (const { fieldName, compute } of triggered) {
+        const prevDb = getActiveDb();
+        setActiveDb(db);
+        try {
+          const result = await compute(filteredRow);
+          const serialized = resolveStrategy('projected').serialize(result);
+          db.prepare(`UPDATE ${entityName} SET ${fieldName} = :val WHERE id = :id`).run({
+            val: serialized, id: rowId,
+          });
+          // Per-field monotonic cursor: tracks compute completions (staleness indicator).
+          const cursorKey = `${entityName}.${fieldName}`;
+          const cursorRow = db.prepare(
+            'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
+          ).get({ e: entityName, f: fieldName });
+          const next = (cursorRow?.lastSeq ?? 0) + 1;
+          db.prepare(
+            'INSERT OR REPLACE INTO _ProjectedCursor (entity, field, lastSeq) VALUES (:e, :f, :s)',
+          ).run({ e: entityName, f: fieldName, s: next });
+        } catch {
+          // compute failure leaves the projected column unchanged; cursor NOT advanced
+        } finally {
+          setActiveDb(prevDb);
+        }
+      }
     }
-  }
+  });
 
   // The single-writer mutex over node:sqlite (D9, eng-review spec #6). A durable
   // dispatch holds BEGIN→…→COMMIT open across an async `postHandlerAuthorize`

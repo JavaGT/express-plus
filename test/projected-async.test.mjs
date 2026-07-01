@@ -13,6 +13,7 @@ import expressPlus, {
   raster,
   polyline,
   enum_,
+  ref,
   scope,
   grant,
   read,
@@ -737,4 +738,90 @@ test('enum_() validates through the pipeline', () => {
     () => validateMutation(Shape, { type: 'triangle' }),
     { message: /expected one of/ },
   );
+});
+
+// --- projected.async compute can query related entities ---
+
+// The post-commit consumer runs compute with the active DB set, so
+// findAll / getOrFail on related entities work from inside compute.
+
+test('projected.async compute can findAll related entities', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+
+  const TComment = entity('TComment_FindAll', {
+    fields: {
+      post: ref('TPost_FindAll'),
+      body: text(),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const TPost = entity('TPost_FindAll', {
+    fields: {
+      title: text(),
+      score: number({ default: 0 }),
+      commentRank: projected.async({
+        from: ['created', 'updated'],
+        compute: async (post) => {
+          const cmts = await TComment.findAll(TComment.post.is(post.id));
+          return cmts.length + (post.score ?? 0);
+        },
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const app = expressPlus({ db });
+  app.mount('/tpost', TPost);
+  app.mount('/tcomment', TComment);
+  await app.ddl();
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  // Create post
+  const r1 = await fetch(`${origin}/tpost`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'test', score: 3 }),
+  });
+  assert.equal(r1.status, 201);
+  const { id: postId } = await r1.json();
+
+  await new Promise((r) => setTimeout(r, 500));
+
+  // Verify initial compute fired (0 comments + 3 score = 3)
+  let row = db.prepare('SELECT commentRank FROM TPost_FindAll WHERE id = :id').get({ id: postId });
+  assert.ok(row, 'post row exists');
+  assert.ok(row.commentRank, 'commentRank should be set after create');
+  assert.equal(JSON.parse(row.commentRank), 3, 'rank after create = score');
+
+  // Create comments
+  for (const body of ['c1', 'c2']) {
+    const r = await fetch(`${origin}/tcomment`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ post: postId, body }),
+    });
+    assert.equal(r.status, 201);
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  // Update post to trigger recompute (Comment.created doesn't trigger Post's projected.async)
+  const r4 = await fetch(`${origin}/tpost/${postId}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'updated' }),
+  });
+  assert.equal(r4.status, 200);
+
+  await new Promise((r) => setTimeout(r, 500));
+
+  row = db.prepare('SELECT commentRank FROM TPost_FindAll WHERE id = :id').get({ id: postId });
+  assert.ok(row, 'post row exists');
+  assert.ok(row.commentRank, 'commentRank should not be null');
+  const rank = JSON.parse(row.commentRank);
+  assert.equal(rank, 5, `commentRank expected 5, got ${rank}`);
 });
