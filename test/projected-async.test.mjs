@@ -12,6 +12,7 @@ import expressPlus, {
   projected,
   raster,
   polyline,
+  enum_,
   scope,
   grant,
   read,
@@ -704,4 +705,36 @@ test('raster and polyline fields compile into an entity', () => {
   assert.equal(Canvas.fields.imageData.mergeStrategy, 'blend');
   assert.equal(Canvas.fields.stroke.kind, 'crdt');
   assert.equal(Canvas.fields.stroke.type, 'polyline');
+});
+
+// --- enum_() field constructor ---
+
+test('enum_(values) returns a value/text descriptor with validate', () => {
+  const d = enum_(['rect', 'ellipse', 'freedraw']);
+  assert.equal(d.kind, 'value');
+  assert.equal(d.type, 'text');
+  assert.equal(typeof d.validate, 'function');
+  assert.equal(d.validate('rect'), true);
+  assert.equal(d.validate('ellipse'), true);
+  assert.notEqual(d.validate('triangle'), true);
+});
+
+test('enum_() throws on empty or non-array values', () => {
+  assert.throws(() => enum_(), { message: /requires a non-empty array/ });
+  assert.throws(() => enum_([]), { message: /requires a non-empty array/ });
+});
+
+test('enum_() validates through the pipeline', () => {
+  const Shape = entity('Shape', {
+    fields: {
+      type: enum_(['rect', 'ellipse', 'freedraw', 'text', 'arrow']),
+    },
+    grant: () => [scope(() => never()).can(() => grant(read))],
+  });
+
+  assert.doesNotThrow(() => validateMutation(Shape, { type: 'rect' }));
+  assert.throws(
+    () => validateMutation(Shape, { type: 'triangle' }),
+    { message: /expected one of/ },
+  );
 });

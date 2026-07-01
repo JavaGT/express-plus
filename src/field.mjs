@@ -57,6 +57,22 @@ export function boolean(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'boolean', ...options });
 }
 
+// `enum_(values)` — a value-kind text field restricted to a closed set of
+// allowed string values. The built-in validate rejects any value outside the
+// set (fail-closed). Thin sugar over `text({ validate })`.
+export function enum_(values, options = {}) {
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new Error('enum_(values) requires a non-empty array of allowed values');
+  }
+  const set = new Set(values);
+  return makeDescriptor({
+    kind: 'value',
+    type: 'text',
+    validate: (v) => set.has(v) ? true : `expected one of [${values.join(', ')}]`,
+    ...options,
+  });
+}
+
 export function date(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'date', ...options });
 }
