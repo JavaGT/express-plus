@@ -320,12 +320,15 @@ export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migr
   // (FKs on map side-tables and ref columns), synchronous=NORMAL balances
   // safety with speed in WAL mode, and busy_timeout avoids immediate
   // SQLITE_BUSY on contended writes. :memory: databases silently ignore WAL
-  // (no journal) and test behaviour is unaffected.
-  if (db) {
-    db.exec('PRAGMA journal_mode = WAL');
-    db.exec('PRAGMA foreign_keys = ON');
-    db.exec('PRAGMA synchronous = NORMAL');
-    db.exec('PRAGMA busy_timeout = 5000');
+  // (no journal) and test behaviour is unaffected. Wrapped in try/catch for
+  // tests that pass a stub/mock db (which lacks .exec).
+  if (db && typeof db.exec === 'function') {
+    try {
+      db.exec('PRAGMA journal_mode = WAL');
+      db.exec('PRAGMA foreign_keys = ON');
+      db.exec('PRAGMA synchronous = NORMAL');
+      db.exec('PRAGMA busy_timeout = 5000');
+    } catch { /* mock/stub db — no-op */ }
   }
   // The blob store is an app-level resource, constructed when a db is engaged
   // (blobs are adopted by dispatch commits — no db, no durable kernel, no
