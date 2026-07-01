@@ -145,3 +145,36 @@ test('a .can body with an unawaited is.* call is rejected at load (ADR #16 stati
     'an unawaited is.* in a .can body must be a load-time error',
   );
 });
+
+test('an entity name that is not a valid SQL identifier is a load-time error (fail-closed)', () => {
+  // The entity name is interpolated verbatim into `FROM ${name}` / CREATE TABLE.
+  assert.throws(
+    () => entity('Drop; DROP TABLE Note;--', { fields: { body: text() }, grant: ownerGrant }),
+    /valid SQL identifier/i,
+    'a non-identifier entity name must throw at load time',
+  );
+  assert.throws(
+    () => entity('123bad', { fields: { body: text() }, grant: ownerGrant }),
+    /valid SQL identifier/i,
+    'a name starting with a digit must throw',
+  );
+});
+
+test('a field name that is not a valid SQL identifier is a load-time error (fail-closed)', () => {
+  // A field name becomes a column, interpolated into SQL.
+  assert.throws(
+    () => entity('Note', { fields: { 'bad-col': text() }, grant: ownerGrant }),
+    /valid SQL identifier/i,
+    'a non-identifier field name must throw at load time',
+  );
+});
+
+test('a valid identifier entity/field name compiles (the guard does not reject legal names)', () => {
+  const Note = entity('Note_2', {
+    fields: { body_text: text(), _internal: text(), owner: ref('User', { role: 'owner' }) },
+    grant: ownerGrant,
+  });
+  assert.equal(Note.name, 'Note_2');
+  assert.ok(Note.fields.body_text);
+  assert.ok(Note.fields._internal);
+});

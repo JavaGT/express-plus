@@ -92,8 +92,31 @@ function resolveGrantClauses(grant) {
   return grant;
 }
 
+// A declared name (entity, field, struct sub-cell) is interpolated verbatim into
+// SQL identifiers — `FROM ${name}`, `CREATE TABLE ${entity.name}`, generated
+// `<field>__<cell>` columns. Those names come from framework/app code at load
+// time, never from a request, so this is not a runtime injection surface — but a
+// name that is not a plain SQL identifier is a load-time FOOTGUN that would emit
+// broken or dangerous DDL/DML. Fail closed at compile time: a name must be a
+// bare identifier (letter or `_` first, then letters/digits/`_`).
+const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function assertSqlIdentifier(kind, value) {
+  if (typeof value !== 'string' || !SQL_IDENTIFIER.test(value)) {
+    throw new Error(
+      `${kind} name ${JSON.stringify(value)} is not a valid SQL identifier. A ` +
+        `name is interpolated directly into SQL and must match ` +
+        `/^[A-Za-z_][A-Za-z0-9_]*$/ (a letter or underscore, then letters, ` +
+        `digits, or underscores). Rename it (fail closed).`,
+    );
+  }
+}
+
 export function entity(name, declaration = {}) {
   const { fields = {}, grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {} } = declaration;
+
+  // The entity name becomes a table name interpolated into SQL — validate first.
+  assertSqlIdentifier('entity', name);
 
   // Fail closed: an entity with no grant cannot be mounted (ADR #7).
   if (grant === undefined || grant === null) {
@@ -109,6 +132,11 @@ export function entity(name, declaration = {}) {
   // column, so it is a load-time error (fail closed — the generated namespace
   // and the declared namespace must never alias).
   for (const [fieldName, descriptor] of Object.entries(fields)) {
+    // A field name becomes a column (and, for a struct, a `<field>__<cell>`
+    // column) interpolated into SQL — validate it is a bare identifier first,
+    // then reject the reserved '__' separator that would alias the generated
+    // struct-column namespace.
+    assertSqlIdentifier(`entity('${name}') field`, fieldName);
     if (fieldName.includes('__')) {
       throw new Error(
         `entity('${name}') field '${fieldName}' contains the reserved '__' separator, ` +
@@ -117,6 +145,7 @@ export function entity(name, declaration = {}) {
     }
     if (descriptor.kind === 'struct') {
       for (const cellName of Object.keys(descriptor.cells)) {
+        assertSqlIdentifier(`entity('${name}') field '${fieldName}' sub-cell`, cellName);
         if (cellName.includes('__')) {
           throw new Error(
             `entity('${name}') field '${fieldName}' has a sub-cell '${cellName}' containing ` +
