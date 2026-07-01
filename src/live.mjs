@@ -33,6 +33,7 @@ import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
 import { hasOwnCanGrant } from './row-grant.mjs';
 import { PACE_STRATEGIES, validatePaceSelection } from './field-pace.mjs';
+import { computeDelta } from './field-delta.mjs';
 
 // Bounds on subscriptions: a single connection can't register unbounded keys
 // (memory DoS), and a scope id can't be an unbounded string (-parse/storage
@@ -71,6 +72,15 @@ export function createLiveServer(httpServer, {
   // SEPARATE from SubSpec (DECISIONLOG #69 F2: folding a draining timer into the registry value
   // re-creates a two-lifetime smell).
   const paceBuffers = new Map();
+
+  // P6e-2: delivery-layer prev-shadow for `.updated` delta computation (DECISIONLOG
+  // #71 F1). Per-scope (`${entity}:${id}`), NOT per-conn — committed state shared
+  // across subs. Seeded on created/updated, evicted on remove + clear. NOT purged
+  // on disconnect (other subs may share the scope).
+  const prevState = new Map();
+  function prevGet(scope) { return prevState.get(scope) ?? {}; }
+  function prevSeed(scope, row) { prevState.set(scope, row); }
+  function prevEvict(scope) { prevState.delete(scope); }
 
   // Flush one paced buffer: re-auth, coalesce, send ONE envelope, then clear.
   // Called from setTimeout. Async with internal error handling (never rejects the
@@ -436,6 +446,31 @@ export function createLiveServer(httpServer, {
       }
     }
 
+    // P6e-2: compute per-field delta for `.updated` events (DECISIONLOG #71 F1).
+    // Delta is per-(scope, event) — same for all subs, computed once. Computed from
+    // the hydrated authzRow (committed state) vs the prior committed shadow. A cold
+    // shadow → set-from-empty delta (NOT a whole-state bootstrap event — #71 F2
+    // dual-reconciliation-path trap). `delta` attaches alongside `event.data` (one-path
+    // backward-compat, #71 F5). removed → evict shadow (delete-then-recreate safety,
+    // #71 risk #3). created → seed (no delta envelope — created already carries whole
+    // state, #71 F5). 3-part/ephemeral/store/ordered events → no delta (B2 normalizes
+    // store/ordered; ephemeral is 1b's paced path).
+    const scope = `${name}:${String(id)}`;
+    let delta = undefined;
+    if (removed) {
+      prevEvict(scope);
+    } else {
+      const parts = committedEvent.type?.split('.');
+      if (parts?.length === 2 && parts[1] === 'updated') {
+        const prev = prevGet(scope);
+        const changed = Object.keys(committedEvent.data ?? {}).filter((k) => k !== 'id');
+        delta = computeDelta(entityRecord, prev, authzRow, changed);
+        prevSeed(scope, authzRow);
+      } else if (parts?.length === 2 && parts[1] === 'created') {
+        prevSeed(scope, authzRow);
+      }
+    }
+
     for (const [conn, subSpec] of subs) {
       if (conn.closed) {
         subs.delete(conn);
@@ -475,11 +510,13 @@ export function createLiveServer(httpServer, {
       // window>0 = enqueue + timer (coalesced on flush).
       if (pace.window === 0) {
         // Pass-through: send immediately with single-event seqSpan.
-        conn.send({
+        const envelope = {
           type: 'event', entity: name, id, seq: committedEvent.seq,
           seqSpan: [committedEvent.seq, committedEvent.seq],
           event: committedEvent,
-        });
+        };
+        if (delta !== undefined) envelope.delta = delta;
+        conn.send(envelope);
       } else {
         // Paced: enqueue into per-(conn, scope, field) buffer.
         const scope = `${name}:${String(id)}`;
@@ -524,6 +561,7 @@ export function createLiveServer(httpServer, {
       if (entry.timer !== null) { clearTimeout(entry.timer); entry.timer = null; }
     }
     paceBuffers.clear();
+    prevState.clear();
   }
 
   // Attach the upgrade handler.
