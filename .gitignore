@@ -1,4 +1,5 @@
 .opencode/
+.worktrees/
 node_modules/
 *.log
 .DS_Storetodo.db*
