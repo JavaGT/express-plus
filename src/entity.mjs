@@ -1488,7 +1488,7 @@ export function entity(name, declaration = {}) {
       }
       if (key === 'id') return { fieldName: 'id' };
       if (Object.prototype.hasOwnProperty.call(fields, key)) {
-        return fieldHandle(key, fields[key], name);
+        return fieldHandle(key, fields[key], name, getActiveEntity);
       }
       return undefined;
     },

@@ -45,7 +45,7 @@ import {
   membershipOwnerCol,
   MEMBER_COLUMN,
 } from './scope-sql.mjs';
-import { getActiveDb } from './db.mjs';
+import { getActiveDb, getActiveEntity } from './db.mjs';
 
 export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityName }) {
   const registry = {};
@@ -66,7 +66,7 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
   const compileSelfHandle = {};
   if (entityName) {
     for (const [fName, desc] of Object.entries(fields)) {
-      compileSelfHandle[fName] = fieldHandle(fName, desc, entityName);
+      compileSelfHandle[fName] = fieldHandle(fName, desc, entityName, getActiveEntity);
     }
   }
 
@@ -120,8 +120,15 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
             }
             runtimeSelf[fName] = handle;
           }
-          // For value/ref fields, expose the raw column value so a check can read
-          // other columns if it needs to (the check destructures the entity).
+          // For non-role typed FKs, expose target map handles so declared checks
+          // can traverse ownership in the same shape the compiler sees:
+          // Photo.album.collaborators.has(principal.id). Ref-role fields stay raw
+          // because their identity check is already the single derived role face.
+          else if (desc?.kind === 'value' && desc.type === 'ref' && !desc.role) {
+            runtimeSelf[fName] = makeRuntimeRefHandle({ fieldName: fName, descriptor: desc, row });
+          }
+          // For value/ref-role fields, expose the raw column value so a check can
+          // read other columns if it needs to (the check destructures the entity).
           else {
             runtimeSelf[fName] = row[fName];
           }
@@ -189,4 +196,38 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
   }
 
   return Object.freeze(registry);
+}
+
+function makeRuntimeRefHandle({ fieldName, descriptor, row }) {
+  const targetName = typeof descriptor.target === 'string'
+    ? descriptor.target
+    : descriptor.target?.name;
+  const target = targetName ? getActiveEntity(targetName) : null;
+  const refId = row[fieldName];
+  if (!target?.fields) return refId;
+
+  const handle = { id: refId };
+  for (const [targetFieldName, targetDescriptor] of Object.entries(target.fields)) {
+    if (targetDescriptor?.kind === 'store' && targetDescriptor.type === 'map') {
+      const table = membershipTable(target.name ?? targetName, targetFieldName);
+      const ownerCol = membershipOwnerCol(target.name ?? targetName);
+      handle[targetFieldName] = {
+        has: (memberId) => {
+          if (refId == null) return false;
+          const db = getActiveDb();
+          return db.prepare(
+            `SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
+          ).get({ owner: refId, member: memberId }) !== undefined;
+        },
+        get: (memberId) => {
+          if (refId == null) return undefined;
+          const db = getActiveDb();
+          return db.prepare(
+            `SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
+          ).get({ owner: refId, member: memberId }) ?? undefined;
+        },
+      };
+    }
+  }
+  return handle;
 }

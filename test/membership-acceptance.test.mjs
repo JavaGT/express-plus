@@ -41,6 +41,7 @@ import {
   subscribe,
   deny,
   anyOf,
+  never,
   createServer,
   executeFrameworkDDL,
 } from '../src/index.mjs';
@@ -177,6 +178,86 @@ test('a non-member is denied by BOTH layers (the two agree)', async () => {
   // Layer 2: the runtime .can denies read on the row.
   assert.equal(await mayVerb(TodoList, 'read', row, stranger), false);
 });
+
+test('a photo can inherit album membership through a typed FK in BOTH layers', async () => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  db.exec('CREATE TABLE Album (id TEXT PRIMARY KEY, title TEXT)');
+  db.exec('CREATE TABLE Album_collaborators (Album_id TEXT, member_id TEXT, role TEXT)');
+  db.exec('CREATE TABLE Photo (id TEXT PRIMARY KEY, title TEXT, album TEXT)');
+
+  entity('Album', {
+    fields: {
+      title: text(),
+      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+    },
+    grant: () => [scope(() => never()).can(() => grant(read))],
+  });
+
+  const Photo = entity('Photo', {
+    fields: {
+      title: text(),
+      album: ref('Album'),
+    },
+    checks: {
+      albumMember: ({ Photo, principal: p }) => Photo.album.collaborators.has(p.id),
+      albumEditor: ({ Photo, principal: p }) =>
+        Photo.album.collaborators.get(p.id)?.role === 'editor',
+    },
+    grant: () => [
+      scope(({ is }) => is.albumMember()).can(async ({ is }) => {
+        if (await is.albumEditor()) return grant(read, write, subscribe);
+        if (await is.albumMember()) return grant(read, subscribe);
+        return deny('not an album member');
+      }),
+    ],
+  });
+
+  db.prepare('INSERT INTO Album (id, title) VALUES (:id, :title)').run({ id: 'a1', title: 'Shared' });
+  db.prepare('INSERT INTO Photo (id, title, album) VALUES (:id, :title, :album)').run({
+    id: 'p1',
+    title: 'Lake',
+    album: 'a1',
+  });
+  db.prepare('INSERT INTO Photo (id, title, album) VALUES (:id, :title, :album)').run({
+    id: 'p-null',
+    title: 'Loose photo',
+    album: null,
+  });
+  db.prepare('INSERT INTO Photo (id, title, album) VALUES (:id, :title, :album)').run({
+    id: 'p-dangling',
+    title: 'Missing album',
+    album: 'missing-album',
+  });
+  db.prepare('INSERT INTO Album_collaborators (Album_id, member_id, role) VALUES (:owner, :member, :role)').run({
+    owner: 'a1',
+    member: 'member-1',
+    role: 'editor',
+  });
+
+  const member = principal({ type: 'user', id: 'member-1' });
+  const stranger = principal({ type: 'user', id: 'stranger-1' });
+  const row = Photo.getOrFail('p1');
+  const nullAlbumRow = Photo.getOrFail('p-null');
+  const danglingAlbumRow = Photo.getOrFail('p-dangling');
+
+  assert.deepEqual(scopedPhotoIds(db, Photo, member), ['p1']);
+  assert.equal(await mayVerb(Photo, 'read', row, member), true);
+  assert.equal(await mayVerb(Photo, 'update', row, member), true);
+  assert.equal(await mayVerb(Photo, 'read', nullAlbumRow, member), false);
+  assert.equal(await mayVerb(Photo, 'read', danglingAlbumRow, member), false);
+
+  assert.deepEqual(scopedPhotoIds(db, Photo, stranger), []);
+  assert.equal(await mayVerb(Photo, 'read', row, stranger), false);
+});
+
+function scopedPhotoIds(db, Photo, who) {
+  const bound = bindReadScope(Photo.readScope, who);
+  return db
+    .prepare(`SELECT id FROM Photo AS t0 WHERE ${bound.sql}`)
+    .all(bound.params)
+    .map((r) => r.id);
+}
 
 test('removing a collaborator revokes BOTH layers (scope + .can)', async (t) => {
   const { db, TodoList, server } = await seedWithServer();
