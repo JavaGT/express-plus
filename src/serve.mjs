@@ -120,12 +120,12 @@ function committedEventHeaders(result, actionId, scope = null) {
   };
 }
 
-// Read and JSON-parse a request body (create/update payloads). Caps the body to
-// guard against an unbounded upload (a baked-in default; the formal middleware
-// stack in the next slice generalizes this). An empty body parses to {}.
+// Read and parse a request body. Caps the body to guard against unbounded uploads.
+// An empty body parses to {}. Entity CRUD still requires JSON; imperative routes
+// can also accept browser forms.
 const BODY_LIMIT = 1_000_000; // ~1mb, SPEC §3 body-parse cap.
 
-function readJsonBody(req) {
+function readCappedBody(req, limit = BODY_LIMIT, tooLargeMessage = 'request body exceeds the 1mb limit') {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
@@ -133,30 +133,134 @@ function readJsonBody(req) {
     req.on('data', (chunk) => {
       if (aborted) return;
       size += chunk.length;
-      if (size > BODY_LIMIT) {
+      if (size > limit) {
         // Stop consuming and reject so the handler can write a 413. Do NOT
         // destroy the socket — an abrupt close would race the response and the
         // client would see a dropped connection instead of the 413. Pausing and
         // resuming (drain-to-end) lets the response flush cleanly.
         aborted = true;
         req.pause();
-        reject(new BodyError('request body exceeds the 1mb limit', 413));
+        reject(new BodyError(tooLargeMessage, 413));
         req.resume();
         return;
       }
       chunks.push(chunk);
     });
-    req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8').trim();
-      if (raw === '') return resolve({});
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        reject(new BodyError('request body is not valid JSON', 400));
-      }
-    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
     req.on('error', reject);
   });
+}
+
+function contentType(req) {
+  return (req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
+}
+
+function contentTypeParam(req, name) {
+  const parts = String(req.headers['content-type'] ?? '').split(';').slice(1);
+  for (const part of parts) {
+    const [key, ...valueParts] = part.split('=');
+    if (key?.trim().toLowerCase() !== name) continue;
+    const value = valueParts.join('=').trim();
+    if (value.startsWith('"') && value.endsWith('"')) return value.slice(1, -1);
+    return value;
+  }
+  return null;
+}
+
+function assignFormValue(body, name, value) {
+  if (Object.prototype.hasOwnProperty.call(body, name)) {
+    Object.defineProperty(body, name, {
+      value: Array.isArray(body[name]) ? [...body[name], value] : [body[name], value],
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  } else {
+    Object.defineProperty(body, name, {
+      value,
+      enumerable: true,
+      configurable: true,
+      writable: true,
+    });
+  }
+}
+
+function parseUrlencodedBody(buffer) {
+  const body = {};
+  const params = new URLSearchParams(buffer.toString('utf8'));
+  for (const [name, value] of params) assignFormValue(body, name, value);
+  return body;
+}
+
+function parseMultipartHeaders(rawHeaders) {
+  const headers = {};
+  for (const line of rawHeaders.split('\r\n')) {
+    const colon = line.indexOf(':');
+    if (colon === -1) continue;
+    headers[line.slice(0, colon).trim().toLowerCase()] = line.slice(colon + 1).trim();
+  }
+  return headers;
+}
+
+function parseContentDisposition(value) {
+  const params = {};
+  for (const part of value.split(';').slice(1)) {
+    const [key, ...valueParts] = part.split('=');
+    const name = key?.trim().toLowerCase();
+    if (!name) continue;
+    let paramValue = valueParts.join('=').trim();
+    if (paramValue.startsWith('"') && paramValue.endsWith('"')) paramValue = paramValue.slice(1, -1);
+    params[name] = paramValue;
+  }
+  return params;
+}
+
+function parseMultipartBody(buffer, boundary) {
+  if (!boundary) throw new BodyError('multipart body is missing a boundary', 400);
+  const body = {};
+  const delimiter = `--${boundary}`;
+  const raw = buffer.toString('binary');
+  for (const section of raw.split(delimiter).slice(1)) {
+    if (section.startsWith('--')) break;
+    const trimmed = section.startsWith('\r\n') ? section.slice(2) : section;
+    const splitAt = trimmed.indexOf('\r\n\r\n');
+    if (splitAt === -1) continue;
+    const headers = parseMultipartHeaders(trimmed.slice(0, splitAt));
+    let content = Buffer.from(trimmed.slice(splitAt + 4), 'binary');
+    if (content.subarray(-2).toString('binary') === '\r\n') content = content.subarray(0, -2);
+    const disposition = parseContentDisposition(headers['content-disposition'] ?? '');
+    if (!disposition.name) continue;
+    if (Object.prototype.hasOwnProperty.call(disposition, 'filename')) {
+      assignFormValue(body, disposition.name, {
+        name: disposition.name,
+        filename: disposition.filename,
+        type: headers['content-type'] ?? 'application/octet-stream',
+        size: content.length,
+        content,
+      });
+    } else {
+      assignFormValue(body, disposition.name, content.toString('utf8'));
+    }
+  }
+  return body;
+}
+
+async function readRequestBody(req, { jsonOnly = false } = {}) {
+  const buffer = await readCappedBody(req);
+  if (buffer.length === 0) return {};
+  const type = contentType(req);
+  if (type === '' || type === 'application/json') {
+    const raw = buffer.toString('utf8').trim();
+    if (raw === '') return {};
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new BodyError('request body is not valid JSON', 400);
+    }
+  }
+  if (!jsonOnly && type === 'application/x-www-form-urlencoded') return parseUrlencodedBody(buffer);
+  if (!jsonOnly && type === 'multipart/form-data') return parseMultipartBody(buffer, contentTypeParam(req, 'boundary'));
+  throw new BodyError(jsonOnly ? 'request body must be JSON' : 'unsupported request body content type', 415);
 }
 
 // A request body the framework refuses to parse — distinct from a
@@ -172,29 +276,11 @@ class BodyError extends Error {
 
 // Read a raw (binary) request body into a Buffer, capped at `limit` bytes. Used
 // by the /blobs upload route: a blob upload is opaque bytes, not JSON. The same
-// cap-and-refuse contract as readJsonBody (a baked-in default) — an oversized
+// cap-and-refuse contract as readRequestBody (a baked-in default) — an oversized
 // upload rejects with a 413 and drains to a clean response, never an abrupt
 // socket close that would race the response.
 function readRawBody(req, limit) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    let aborted = false;
-    req.on('data', (chunk) => {
-      if (aborted) return;
-      size += chunk.length;
-      if (size > limit) {
-        aborted = true;
-        req.pause();
-        reject(new BodyError('upload exceeds the size limit', 413));
-        req.resume();
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
-  });
+  return readCappedBody(req, limit, 'upload exceeds the size limit');
 }
 
 // DB-backed dispatch for one admitted verb. The route gate already admitted the
@@ -513,7 +599,7 @@ async function handleJobRoute(app, req, res) {
 
   if (url.pathname === '/workers/register') {
     let body;
-    try { body = await readJsonBody(req); } catch (err) {
+    try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
       if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
       throw err;
     }
@@ -547,7 +633,7 @@ async function handleJobRoute(app, req, res) {
     const workerId = jobs.authenticate(bearer);
     if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
     let body;
-    try { body = await readJsonBody(req); } catch (err) {
+    try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
       if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
       throw err;
     }
@@ -890,13 +976,12 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
         return;
       }
 
-      // read a JSON body for the mutating entity verbs and for every imperative
-      // route (a hand-written handler expects req.body populated Express-style);
-      // read-only entity verbs ignore it.
+      // read a body for mutating entity verbs and every imperative route. Entity
+      // CRUD stays JSON-only; handlers may accept browser form posts.
       let body = {};
       if (route.handlers || route.verb === 'create' || route.verb === 'update') {
         try {
-          body = await readJsonBody(req);
+          body = await readRequestBody(req, { jsonOnly: !route.handlers });
         } catch (err) {
           // a refused body carries its own status (413 oversized, 400 malformed).
           if (err instanceof BodyError) return void sendJson(res, err.status, { error: err.message });
