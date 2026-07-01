@@ -44,7 +44,7 @@ function mintToken() {
 // run it). `sort` takes a field handle (its declared fieldName — a safe column
 // name, never client input) and a direction; `limit` is bound as a param. The
 // builder mutates as it chains and is single-use (await consumes it).
-function makeQueryBuilder({ name, predicate, hydrate }) {
+function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null }) {
   const where = lowerToSql(predicate);
   const state = { orderBy: null, limit: null, selectCols: null };
   const builder = {
@@ -67,9 +67,10 @@ function makeQueryBuilder({ name, predicate, hydrate }) {
         let sql = `SELECT ${cols} FROM ${name} AS t0 WHERE ${where.sql}`;
         const params = { ...where.params };
         if (state.orderBy) sql += ` ORDER BY ${state.orderBy}`;
-        if (state.limit !== null) {
+        const limit = state.limit !== null ? state.limit : defaultLimit;
+        if (limit !== null) {
           sql += ` LIMIT :limit`;
-          params.limit = state.limit;
+          params.limit = limit;
         }
         const rows = getActiveDb().prepare(sql).all(params).map(hydrate);
         resolve(rows);
@@ -594,7 +595,19 @@ export function entity(name, declaration = {}) {
           .all({ owner: oid });
         const target = targetName ? getActiveEntity(targetName) : null;
         if (!target) return rows.map((r) => [null, hasRole ? r.role : null]);
-        return rows.map((r) => [target.findById(r.member_id), hasRole ? r.role : null]);
+        // Batch-load all members in one query to avoid N+1.
+        const memberIds = rows.map((r) => r.member_id);
+        const members = [];
+        for (let i = 0; i < memberIds.length; i += 500) {
+          const batch = memberIds.slice(i, i + 500);
+          const placeholders = batch.map(() => '?').join(',');
+          members.push(...db.prepare(
+            `SELECT * FROM ${targetName} WHERE id IN (${placeholders})`,
+          ).all(...batch));
+        }
+        for (const m of members) target.hydrate(m, principal);
+        const memberMap = Object.fromEntries(members.map((m) => [m.id, m]));
+        return rows.map((r) => [memberMap[r.member_id] ?? null, hasRole ? r.role : null]);
       },
     };
   };
@@ -915,7 +928,9 @@ export function entity(name, declaration = {}) {
       };
       return rows;
     }
-    return makeQueryBuilder({ name, predicate, hydrate });
+    // Query builder with a safety cap: when no explicit .limit() is set, the
+    // builder defaults to 1000 rows to prevent unbounded in-memory collection.
+    return makeQueryBuilder({ name, predicate, hydrate, defaultLimit: 1000 });
   };
 
   // getOrFail throws a 404-status error so renderError renders it through the

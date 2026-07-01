@@ -123,7 +123,13 @@ function structDiff(previous, next, descriptor) {
 }
 
 // The four named-whole strategies. value is fully implemented (whole-value diff);
-// crdt/store/ordered validate structurally and defer their merge to Phase 2.
+// The FIELD-TYPE CONTRACTS table. A field descriptor carries only `kind`; the
+// strategy is resolved at call time from this frozen table. This is a CLOSED set
+// of framework-owned types (SPEC §5.1's "open registry" is aspirational — there is
+// no external registration API in this beta). Adding a new kind means editing this
+// table, the field constructors in field.mjs, and the resolveStrategy error
+// message. The deletion test (AGENTS.md) confirms that kind absorbs strategy
+// (concentrates), rather than relocating it onto each descriptor.
 const STRATEGIES = Object.freeze({
   // `value` — a single stored value with whole-value diff. apply replaces;
   // diff is a whole-value set, null when unchanged.

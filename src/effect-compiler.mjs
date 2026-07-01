@@ -137,7 +137,11 @@ export function validateEffectDeclaration(effect, { triggerHandle, sourceEntityN
   return { valid: true, targetEntity: effect.mutate };
 }
 
-// Validate a when predicate — must not reference anything beyond delta+origin.
+// Validate a when predicate — developer guardrail, not a security boundary.
+// Effect bodies are app-developer code registered at entity declaration time, not
+// runtime user input. An attacker who can inject code into the entity declaration
+// already controls the process. The regex check is a best-effort lint to catch
+// accidental I/O or external state access in a when clause.
 function validateWhenPredicate(fn, { triggerHandle, sourceEntityName }) {
   const fnStr = fn.toString();
   // Forbidden patterns: anything that suggests I/O or external scope access

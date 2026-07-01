@@ -146,3 +146,16 @@ test('a request to an undeclared path returns 404', async () => {
     await close();
   }
 });
+
+test('a request with an unsupported method on a known path returns 405', async () => {
+  const app = expressPlus().mount('/notes', makePublicListNote());
+  const { origin, close } = await listen(app);
+  try {
+    const res = await fetch(`${origin}/notes`, { method: 'PUT' });
+    assert.equal(res.status, 405);
+    const body = await res.json();
+    assert.equal(body.error, 'method not allowed');
+  } finally {
+    await close();
+  }
+});

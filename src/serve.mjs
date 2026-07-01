@@ -326,9 +326,9 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
-    entity.deserializeRow(row);
     // not visible under scope OR absent → 404 (do not distinguish, fail closed).
     if (!row) return void sendJson(res, 404, { error: 'not found' });
+    entity.deserializeRow(row);
     if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'read', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
@@ -363,9 +363,9 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
-    entity.deserializeRow(row);
     if (!row) return void sendJson(res, 404, { error: 'not found' });
-    if (!(await mayVerb(entity, 'update', row, principal))) {
+    entity.deserializeRow(row);
+    if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'update', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
     let result;
@@ -394,9 +394,9 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     const row = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE ${where} AND t0.id = :id`)
       .get({ ...scopeParams, id: params.id });
-    entity.deserializeRow(row);
     if (!row) return void sendJson(res, 404, { error: 'not found' });
-    if (!(await mayVerb(entity, 'remove', row, principal))) {
+    entity.deserializeRow(row);
+    if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'remove', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
     let result;
@@ -1156,6 +1156,13 @@ function buildKernel(app) {
   // The consumer resolves entities at *runtime* from app.entities (set by
   // buildKernel during app.ready) so it always sees the fully-built registry.
   //
+  // NOTE: The computed value is written via UPDATE, not appended to _Log —
+  // the event-sourcing invariant "the log is the source of truth" holds for
+  // authored fields but NOT for projected.async fields. A disaster-recovery
+  // rebuild from _Log alone would miss these columns; they must be recomputed
+  // by re-running every projected.async compute function. The _ProjectedCursor
+  // tracks progress as a staleness indicator, not a replay checkpoint.
+  //
   // Resolve from triggers to full event types (e.g. 'created' → 'Post.created').
   function resolveTriggerTypes(desc, entityName) {
     if (!desc.from) return [`${entityName}.created`, `${entityName}.updated`];
@@ -1384,16 +1391,38 @@ export function listen(app, port, optionsOrCallback = {}) {
   // in buildKernel (app.ready); the sweep reads it lazily so it is always current
   // even for apps whose blob fields register after listen() (buildKernel runs in
   // app.ready, which tests await).
+  const blobReapIntervalMs = options.blobReapIntervalMs ?? BLOB_REAP_INTERVAL_MS;
+  const blobReapTtlMs = options.blobReapTtlMs ?? BLOB_REAP_TTL_MS;
   if (app.blobs) {
     app.sweepBlobs = () => app.writeQueue.run(() =>
-      app.blobs.reap({ ttl: BLOB_REAP_TTL_MS, blobColumns: app.blobColumns ?? [] })
+      app.blobs.reap({ ttl: blobReapTtlMs, blobColumns: app.blobColumns ?? [] })
     );
     let blobTimer;
     blobTimer = setInterval(() => {
       app.sweepBlobs().catch((err) => process.stderr.write(`blob reap failed: ${err.message}\n`));
-    }, BLOB_REAP_INTERVAL_MS);
+    }, blobReapIntervalMs);
     if (typeof blobTimer.unref === 'function') blobTimer.unref();
     app.onShutdown('blob-reaper', () => { if (blobTimer) clearInterval(blobTimer); }, { timeoutMs: 1000 });
+  }
+  // _Log retention reaper (eng-review #42). The event log grows forever; when a
+  // logRetentionDays option is set, the reaper prunes entries older than the
+  // configured horizon. Runs at the same cadence as the blob reaper by default,
+  // under the writeQueue mutex so concurrent dispatches don't race. The log is
+  // eviction-safe: events-since delivers a gap → recover bundle (SPEC §D6); a
+  // pruned entry that arrived after the subscriber's cursor is a legitimate gap.
+  const logRetentionDays = options.logRetentionDays;
+  if (logRetentionDays > 0) {
+    app.sweepLog = () => app.writeQueue.run(() => {
+      const cutoff = new Date(Date.now() - logRetentionDays * 86_400_000).toISOString();
+      app.db.prepare('DELETE FROM _Log WHERE committedAt < :cutoff').run({ cutoff });
+      app.db.prepare('DELETE FROM _ProjectedCursor WHERE lastSeq = 0').run();
+    });
+    let logTimer;
+    logTimer = setInterval(() => {
+      app.sweepLog().catch((err) => process.stderr.write(`log retention sweep failed: ${err.message}\n`));
+    }, options.logRetentionIntervalMs ?? BLOB_REAP_INTERVAL_MS);
+    if (typeof logTimer.unref === 'function') logTimer.unref();
+    app.onShutdown('log-reaper', () => { if (logTimer) clearInterval(logTimer); }, { timeoutMs: 1000 });
   }
   // Start the tick engine if any entity declares a tick trigger. DEFERRED into
   // `app.ready` below — `app.kernel` (and thus `dispatch`) is not built until

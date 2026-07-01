@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import expressPlus, {
-  entity, text, ref, scope, grant, deny, read, write, subscribe, everyone,
+  entity, text, ref, scope, grant, deny, read, write, subscribe, everyone, inherit,
 } from '../src/index.mjs';
 import { principal } from '../src/principal.mjs';
 
@@ -196,6 +196,128 @@ test('owner may update and remove a public-read row', async (t) => {
   assert.ok(del.headers.get('x-express-plus-action-id'));
   const gone = db.prepare('SELECT * FROM Post WHERE id = ?').get('1');
   assert.equal(gone, undefined);
+});
+
+// Inherit-child entity for testing the hasOwnCanGrant guard on update/remove.
+// The child inherits the parent's scope; it has no own .can clause, so the
+// new hasOwnCanGrant guard in serve.mjs must skip mayVerb for update/remove.
+function makeDoc() {
+  return entity('Doc', {
+    fields: {
+      title: text(),
+      owner: ref('User', { role: 'owner', readonly: true }),
+    },
+    grant: () => [
+      scope(({ is }) => is.owner()).can(async ({ is }) =>
+        (await is.owner()) ? grant(read, write, subscribe) : deny('not owner'),
+      ),
+    ],
+  });
+}
+
+function makeDocComment(doc) {
+  return entity('DocComment', {
+    fields: {
+      doc: ref('Doc', { required: true }),
+      body: text(),
+    },
+    grant: inherit(doc, { via: 'doc' }),
+  });
+}
+
+test('inherit-child is updateable and removable by the parent owner via HTTP', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Doc = makeDoc();
+  const Comment = makeDocComment(Doc);
+  const app = expressPlus({ db });
+  app.mount('/docs', Doc);
+  app.mount('/comments', Comment);
+  await app.ddl();
+  app.listen(0, { principalOf: () => alice });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const { port } = app.httpServer.address();
+  const origin = `http://127.0.0.1:${port}`;
+
+  // Create a doc
+  const cr = await fetch(`${origin}/docs`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'draft' }),
+  });
+  assert.equal(cr.status, 201);
+  const { id: docId } = await cr.json();
+
+  // Create a comment on that doc
+  const comment = await fetch(`${origin}/comments`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ doc: docId, body: 'hello' }),
+  });
+  assert.equal(comment.status, 201);
+  const { id: commentId } = await comment.json();
+
+  // Alice (the doc owner) should be able to update the comment
+  const upd = await fetch(`${origin}/comments/${commentId}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body: 'edited' }),
+  });
+  assert.equal(upd.status, 200, 'inherit-child update admitted');
+  assert.ok(Number(upd.headers.get('x-express-plus-seq')) >= 1);
+
+  // And remove it
+  const del = await fetch(`${origin}/comments/${commentId}`, { method: 'DELETE' });
+  assert.equal(del.status, 204, 'inherit-child remove admitted');
+
+  // Gone from DB
+  const stored = db.prepare('SELECT * FROM DocComment WHERE id = ?').get(commentId);
+  assert.equal(stored, undefined);
+});
+
+test('non-owner cannot see or mutate an inherit-child row (scope hides it)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Doc = makeDoc();
+  const Comment = makeDocComment(Doc);
+
+  // Alice creates the doc + comment (alice is the owner)
+  const aApp = expressPlus({ db });
+  aApp.mount('/docs', Doc);
+  aApp.mount('/comments', Comment);
+  await aApp.ddl();
+  aApp.listen(0, { principalOf: () => alice });
+  await aApp.ready;
+  const aOrigin = `http://127.0.0.1:${aApp.httpServer.address().port}`;
+
+  const cr = await fetch(`${aOrigin}/docs`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'shared' }),
+  });
+  const { id: docId } = await cr.json();
+  const cm = await fetch(`${aOrigin}/comments`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ doc: docId, body: 'note' }),
+  });
+  const { id: commentId } = await cm.json();
+  aApp.httpServer.close();
+
+  // Bob (non-owner) tries to update/remove — should get 403
+  const bApp = expressPlus({ db });
+  bApp.mount('/docs', Doc);
+  bApp.mount('/comments', Comment);
+  bApp.listen(0, { principalOf: () => bob });
+  await bApp.ready;
+  t.after(() => { bApp.httpServer.close(); db.close(); });
+  const bOrigin = `http://127.0.0.1:${bApp.httpServer.address().port}`;
+
+  const upd = await fetch(`${bOrigin}/comments/${commentId}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body: 'hijack' }),
+  });
+  assert.equal(upd.status, 404, 'non-owner cannot see inherit-child row (scope hides it)');
+
+  const del = await fetch(`${bOrigin}/comments/${commentId}`, { method: 'DELETE' });
+  assert.equal(del.status, 404, 'non-owner cannot see inherit-child row');
 });
 
 test('serving an entity CRUD route without a db fails closed', async (t) => {

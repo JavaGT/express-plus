@@ -57,6 +57,8 @@ export function createJobQueue({
   if (sharedSecret == null || sharedSecret === '') {
     throw new Error('createJobQueue: sharedSecret is required (fail-closed — worker registration needs a secret)');
   }
+  // Store only the hash — the plaintext never persists past construction.
+  const secretHash = sha256hex(sharedSecret);
   let timer = null;
 
   function parseJob(row) {
@@ -68,7 +70,7 @@ export function createJobQueue({
   // compared constant-time; a mismatch returns null (fail-closed). On success a
   // Worker row is inserted with tokenHash = sha256(token) + lastHeartbeat=now.
   function registerWorker(presentedSecret) {
-    if (typeof presentedSecret !== 'string' || !ctEqualHex(sha256hex(presentedSecret), sha256hex(sharedSecret))) {
+    if (typeof presentedSecret !== 'string' || !ctEqualHex(sha256hex(presentedSecret), secretHash)) {
       return null;
     }
     const workerId = randomUUID();

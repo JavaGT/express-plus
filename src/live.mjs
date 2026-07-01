@@ -80,9 +80,20 @@ export function createLiveServer(httpServer, {
   // #71 F1). Per-scope (`${entity}:${id}`), NOT per-conn — committed state shared
   // across subs. Seeded on created/updated, evicted on remove + clear. NOT purged
   // on disconnect (other subs may share the scope).
+  // LRU-cap: a row that is updated but never removed grows this map forever.
+  // When the cap is hit the oldest entry (by insertion order) is evicted. A
+  // cold-start after eviction produces a set-from-empty delta, which is a safe
+  // fallback (the subscriber receives the full row).
+  const PREV_STATE_MAX = 10_000;
   const prevState = new Map();
   function prevGet(scope) { return prevState.get(scope) ?? {}; }
-  function prevSeed(scope, row) { prevState.set(scope, row); }
+  function prevSeed(scope, row) {
+    prevState.set(scope, row);
+    if (prevState.size > PREV_STATE_MAX) {
+      const oldest = prevState.keys().next().value;
+      prevState.delete(oldest);
+    }
+  }
   function prevEvict(scope) { prevState.delete(scope); }
 
   // Flush one paced buffer: re-auth, coalesce, send ONE envelope, then clear.
