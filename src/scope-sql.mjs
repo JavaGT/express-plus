@@ -148,7 +148,14 @@ export function fieldHandle(name, descriptor, entityName) {
     const fail = (where) => {
       throw new NonCompilableError(`no field '${String(name)}' on this entity`, { where });
     };
-    return { fieldName: name, is: () => fail(), in: () => fail(), isNull: () => fail() };
+    return {
+      fieldName: name,
+      is: () => fail(),
+      in: () => fail(),
+      isNull: () => fail(),
+      gte: () => fail(),
+      lte: () => fail(),
+    };
   }
   // A structured field (the `link` kind) is a NAMESPACE of named value sub-cells.
   // The struct itself is not comparable (you compare a sub-cell, not the whole
@@ -164,7 +171,7 @@ export function fieldHandle(name, descriptor, entityName) {
           `compared as a whole — compare one of its sub-cells (e.g. ${String(name)}.token)`,
       );
     };
-    const handle = { fieldName: name, is: fail, in: fail, isNull: fail };
+    const handle = { fieldName: name, is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
     for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells)) {
       handle[cellName] = fieldHandle(structCellColumn(name, cellName), cellDescriptor);
     }
@@ -193,6 +200,8 @@ export function fieldHandle(name, descriptor, entityName) {
       is: fail,
       in: fail,
       isNull: fail,
+      gte: fail,
+      lte: fail,
       has: (value) => {
         if (tableName === null) {
           throw new NonCompilableError(
@@ -228,7 +237,7 @@ export function fieldHandle(name, descriptor, entityName) {
         `field '${String(name)}' is a ${descriptor.kind} field and cannot be compared in scope`,
       );
     };
-    return { fieldName: name, is: fail, in: fail, isNull: fail };
+    return { fieldName: name, is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
   }
   return {
     fieldName: name,
@@ -252,6 +261,12 @@ export function fieldHandle(name, descriptor, entityName) {
     in: (values) =>
       makeNode({ node: 'in', field: name, values: [...values].map((v) => serializeField(descriptor, v)) }),
     isNull: () => makeNode({ node: 'isNull', field: name }),
+    gte: (value) => value === undefined
+      ? FALSE
+      : makeNode({ node: 'gte', field: name, value: serializeField(descriptor, value) }),
+    lte: (value) => value === undefined
+      ? FALSE
+      : makeNode({ node: 'lte', field: name, value: serializeField(descriptor, value) }),
   };
 }
 
@@ -276,7 +291,7 @@ function makeFieldsProxy(fields, where) {
             { where },
           );
         };
-        return { is: fail, in: fail, isNull: fail };
+        return { is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
       }
       return fieldHandle(name, descriptor);
     },
@@ -341,6 +356,16 @@ export function lowerToSql(ast, ctx = {}) {
         return `${col(node.field)} IN (${keys.join(', ')})`;
       }
       case 'isNull': return `${col(node.field)} IS NULL`;
+      case 'gte': {
+        const key = freshParam('val');
+        params[key] = node.value;
+        return `${col(node.field)} >= :${key}`;
+      }
+      case 'lte': {
+        const key = freshParam('val');
+        params[key] = node.value;
+        return `${col(node.field)} <= :${key}`;
+      }
       case 'not': return `NOT (${lower(node.operand)})`;
       case 'and': return `(${node.operands.map(lower).join(' AND ')})`;
       // A child's inherited scope: the row is admitted iff a parent row exists

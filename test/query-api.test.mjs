@@ -13,7 +13,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import expressPlus, { entity, text, scope, grant, read, everyone } from '../src/index.mjs';
+import expressPlus, { entity, text, date, scope, grant, read, everyone } from '../src/index.mjs';
 import { lowerToSql } from '../src/scope-sql.mjs';
 
 // A trivial public-read entity (the query API is unscoped, so the grant's scope
@@ -31,6 +31,24 @@ function seedDb() {
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   db.prepare("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'pw-a')").run();
   db.prepare("INSERT INTO User (id, username, password) VALUES (2, 'bob', 'pw-b')").run();
+  return db;
+}
+
+function makeEvent() {
+  return entity('Event', {
+    fields: { title: text(), startsAt: date() },
+    grant: () => [scope(() => everyone()).can(() => grant(read))],
+  });
+}
+
+function seedEventDb() {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE Event (id TEXT PRIMARY KEY, title TEXT, startsAt INTEGER)');
+  const insert = db.prepare('INSERT INTO Event (id, title, startsAt) VALUES (?, ?, ?)');
+  insert.run('before', 'Before', new Date('2026-01-01T00:00:00.000Z').getTime());
+  insert.run('first', 'First', new Date('2026-01-02T00:00:00.000Z').getTime());
+  insert.run('second', 'Second', new Date('2026-01-03T00:00:00.000Z').getTime());
+  insert.run('after', 'After', new Date('2026-01-04T00:00:00.000Z').getTime());
   return db;
 }
 
@@ -115,4 +133,20 @@ test('the query API runs UNSCOPED — it bypasses the read-scope (trusted server
   expressPlus({ db: seedDb() });
   // unscoped: both seeded rows come back despite the restrictive scope
   assert.equal(Hidden.findAll().length, 2);
+});
+
+test('findAll(predicate) supports date range predicates for timeline queries', async () => {
+  const Event = makeEvent();
+  expressPlus({ db: seedEventDb() });
+
+  const rows = await Event
+    .findAll(
+      Event.startsAt
+        .gte(new Date('2026-01-02T00:00:00.000Z'))
+        .and(Event.startsAt.lte(new Date('2026-01-03T23:59:59.999Z'))),
+    )
+    .sort(Event.startsAt, 'asc');
+
+  assert.deepEqual(rows.map((r) => r.id), ['first', 'second']);
+  assert.equal(rows[0].startsAt, new Date('2026-01-02T00:00:00.000Z').getTime());
 });
