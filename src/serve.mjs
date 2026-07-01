@@ -1152,16 +1152,25 @@ function buildKernel(app) {
     });
   }
   // projected.async: post-commit projection over the committed log (ADR #12).
-  // After each commit, for every created/updated row on an entity that declares
-  // projected.async fields, the compute function runs and writes its result back
-  // to the projected column. The write is NOT in-transaction — a compute failure
-  // or write failure never rolls back the origin commit. The projected value may
-  // be stale between writes (explicit staleness contract).
+  // Each field may specify `from` (a short event name like 'created' or a full
+  // event type) to limit recomputation to specific triggers. Without `from`,
+  // the field recomputes on every create and update (default).
   {
     const projectedEntities = [];
     for (const [entityName, entityRecord] of app.entities ?? []) {
       if (entityRecord.projectedAsyncFields?.length > 0) {
-        projectedEntities.push(entityRecord);
+        // Resolve from triggers to full event types per field
+        const fields = entityRecord.projectedAsyncFields.map(([fieldName, desc]) => {
+          let triggerTypes;
+          if (desc.from) {
+            const from = String(desc.from);
+            triggerTypes = from.includes('.') ? [from] : [`${entityName}.${from}`];
+          } else {
+            triggerTypes = [`${entityName}.created`, `${entityName}.updated`];
+          }
+          return { fieldName, compute: desc.compute, triggerTypes };
+        });
+        projectedEntities.push({ entity: entityRecord, fields });
       }
     }
     if (projectedEntities.length > 0) {
@@ -1171,16 +1180,18 @@ function buildKernel(app) {
           if (colon < 0) continue;
           const entityName = ev.scope.slice(0, colon);
           const rowId = ev.scope.slice(colon + 1);
-          const entity = app.entities?.get(entityName);
-          if (!entity?.projectedAsyncFields?.length) continue;
+          const proj = projectedEntities.find((p) => p.entity.name === entityName);
+          if (!proj) continue;
           const eventType = ev.type;
-          if (eventType !== `${entityName}.created` && eventType !== `${entityName}.updated`) continue;
+          // Only run fields whose trigger includes this event type
+          const triggered = proj.fields.filter((f) => f.triggerTypes.includes(eventType));
+          if (triggered.length === 0) continue;
           const row = db.prepare(`SELECT * FROM ${entityName} WHERE id = :id`).get({ id: rowId });
           if (!row) continue;
           const filteredRow = {};
           for (const [k, v] of Object.entries(row)) {
-            if (Object.prototype.hasOwnProperty.call(entity.fields, k)) {
-              const desc = entity.fields[k];
+            if (Object.prototype.hasOwnProperty.call(proj.entity.fields, k)) {
+              const desc = proj.entity.fields[k];
               if (desc?.kind === 'value' || desc?.kind === 'projected') {
                 try { filteredRow[k] = resolveStrategy(desc.kind).deserialize?.(v, desc) ?? v; } catch { filteredRow[k] = v; }
               } else {
@@ -1188,7 +1199,7 @@ function buildKernel(app) {
               }
             }
           }
-          for (const [fieldName, { compute }] of entity.projectedAsyncFields) {
+          for (const { fieldName, compute } of triggered) {
             try {
               const result = await compute(filteredRow);
               const serialized = resolveStrategy('projected').serialize(result);

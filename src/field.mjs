@@ -215,7 +215,7 @@ export function list(of, options = {}) {
 // writes it. A read sees the last-written value (may be stale between writes
 // — the staleness contract is explicit, not silently invisible).
 export const projected = {
-  async: ({ compute }) => {
+  async: ({ compute, from } = {}) => {
     if (typeof compute !== 'function') {
       throw new Error('projected.async requires a compute function');
     }
@@ -223,6 +223,7 @@ export const projected = {
       kind: 'projected',
       mode: 'async',
       compute,
+      from: from ?? null,
       readonly: true,
     });
   },

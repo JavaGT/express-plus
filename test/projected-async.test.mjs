@@ -401,3 +401,145 @@ test('projected.inline compute failure rolls back the mutation', async (t) => {
   const rows = db.prepare('SELECT id FROM Blog WHERE title = :t').all({ t: 'Bad' });
   assert.equal(rows.length, 0, 'failed create rolled back — no row');
 });
+
+// --- from trigger filtering ---
+
+test('projected.async with from:created only recomputes on create, not update', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Post = entity('Post', {
+    fields: {
+      title: text(),
+      score: number(),
+      hotRank: projected.async({
+        from: 'created',
+        compute: async (row) => (row.score ?? 0) * 2,
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const app = expressPlus({ db });
+  app.mount('/posts', Post);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const r1 = await fetch(`${origin}/posts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Post', score: 10 }),
+  });
+  const created = await r1.json();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  let row = db.prepare('SELECT hotRank FROM Post WHERE id = :id').get({ id: created.id });
+  assert.equal(JSON.parse(row.hotRank), 20, 'computed on create');
+
+  // Update — should NOT trigger recompute because from is only 'created'
+  await fetch(`${origin}/posts/${created.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ score: 50 }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  row = db.prepare('SELECT hotRank FROM Post WHERE id = :id').get({ id: created.id });
+  assert.equal(JSON.parse(row.hotRank), 20, 'unchanged — from:created excludes update');
+});
+
+test('projected.async with from:updated only recomputes on update', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Post = entity('Post', {
+    fields: {
+      title: text(),
+      score: number(),
+      hotRank: projected.async({
+        from: 'Post.updated',
+        compute: async (row) => (row.score ?? 0) * 3,
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const app = expressPlus({ db });
+  app.mount('/posts', Post);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  // Create — should NOT trigger (from is only 'updated')
+  const r1 = await fetch(`${origin}/posts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Post', score: 10 }),
+  });
+  const created = await r1.json();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  let row = db.prepare('SELECT hotRank FROM Post WHERE id = :id').get({ id: created.id });
+  assert.equal(row.hotRank, null, 'null — from:updated excludes create');
+
+  // Update — should trigger
+  await fetch(`${origin}/posts/${created.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ score: 50 }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  row = db.prepare('SELECT hotRank FROM Post WHERE id = :id').get({ id: created.id });
+  assert.equal(JSON.parse(row.hotRank), 150, 'computed on update');
+});
+
+test('projected.async without from recomputes on both create and update (default)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Post = entity('Post', {
+    fields: {
+      title: text(),
+      score: number(),
+      hotRank: projected.async({
+        compute: async (row) => (row.score ?? 0) * 5,
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const app = expressPlus({ db });
+  app.mount('/posts', Post);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const r1 = await fetch(`${origin}/posts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Post', score: 10 }),
+  });
+  const created = await r1.json();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  let row = db.prepare('SELECT hotRank FROM Post WHERE id = :id').get({ id: created.id });
+  assert.equal(JSON.parse(row.hotRank), 50, 'computed on create');
+
+  await fetch(`${origin}/posts/${created.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ score: 20 }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  row = db.prepare('SELECT hotRank FROM Post WHERE id = :id').get({ id: created.id });
+  assert.equal(JSON.parse(row.hotRank), 100, 'computed on update');
+});
