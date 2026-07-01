@@ -10,6 +10,8 @@ import expressPlus, {
   text,
   number,
   projected,
+  raster,
+  polyline,
   scope,
   grant,
   read,
@@ -659,4 +661,47 @@ test('compute counter advances with each successful compute, survives across eve
   assert.equal(failCursor, undefined, 'no cursor row — compute failure did not advance');
 
   app2.httpServer.close();
+});
+
+// --- raster.crdt / polyline.crdt constructors ---
+
+test('raster.crdt() returns a crdt-kind descriptor', () => {
+  const d = raster.crdt({ mergeStrategy: 'blend' });
+  assert.equal(d.kind, 'crdt');
+  assert.equal(d.type, 'raster');
+  assert.equal(d.mergeStrategy, 'blend');
+});
+
+test('polyline.crdt() returns a crdt-kind descriptor', () => {
+  const d = polyline.crdt();
+  assert.equal(d.kind, 'crdt');
+  assert.equal(d.type, 'polyline');
+});
+
+test('raster.crdt and polyline.crdt validate structurally', () => {
+  const ras = resolveStrategy('crdt');
+  assert.equal(ras.validate(Buffer.from('pixels'), { type: 'raster' }), true);
+  assert.equal(ras.validate('base64string', { type: 'raster' }), true);
+  assert.equal(ras.validate(null, { type: 'raster' }), true);
+  assert.equal(ras.validate(42, { type: 'raster' }), 'expected a raster value (Buffer, string, or null)');
+
+  assert.equal(ras.validate([{ x: 1, y: 2 }], { type: 'polyline' }), true);
+  assert.equal(ras.validate([], { type: 'polyline' }), true);
+  assert.equal(ras.validate(null, { type: 'polyline' }), true);
+  assert.equal(ras.validate('not-array', { type: 'polyline' }), 'expected a polyline value (array or null)');
+});
+
+test('raster and polyline fields compile into an entity', () => {
+  const Canvas = entity('Canvas', {
+    fields: {
+      imageData: raster.crdt({ mergeStrategy: 'blend' }),
+      stroke: polyline.crdt(),
+    },
+    grant: () => [scope(() => never()).can(() => grant(read))],
+  });
+  assert.equal(Canvas.fields.imageData.kind, 'crdt');
+  assert.equal(Canvas.fields.imageData.type, 'raster');
+  assert.equal(Canvas.fields.imageData.mergeStrategy, 'blend');
+  assert.equal(Canvas.fields.stroke.kind, 'crdt');
+  assert.equal(Canvas.fields.stroke.type, 'polyline');
 });

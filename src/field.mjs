@@ -37,6 +37,22 @@ export function text(options = {}) {
 text.crdt = (options = {}) =>
   makeDescriptor({ kind: 'crdt', type: 'text', ...options });
 
+// `raster.crdt()` — the crdt kind instance for collaborative pixel buffers
+// (photo-editor). Stores binary pixel data per-layer; per-region Porter-Duff
+// compositing merge is deferred (whole-value replace for MVP).
+export const raster = {
+  crdt: (options = {}) =>
+    makeDescriptor({ kind: 'crdt', type: 'raster', ...options }),
+};
+
+// `polyline.crdt()` — the crdt kind instance for collaborative vector drawing
+// (drawing-canvas). Stores an ordered array of point segments; per-element
+// merge is deferred (whole-value replace for MVP).
+export const polyline = {
+  crdt: (options = {}) =>
+    makeDescriptor({ kind: 'crdt', type: 'polyline', ...options }),
+};
+
 export function boolean(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'boolean', ...options });
 }

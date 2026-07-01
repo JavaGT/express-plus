@@ -221,7 +221,18 @@ const STRATEGIES = Object.freeze({
   // is the broadcast artifact — the "merge machinery" consult #18 names. The
   // concurrent-merge toolkit (reconciling concurrent edits) is deferred (#33).
   crdt: Object.freeze({
-    validate(value) {
+    validate(value, descriptor) {
+      if (descriptor?.type === 'raster') {
+        if (value === null || value === undefined) return true;
+        if (Buffer.isBuffer(value)) return true;
+        if (typeof value === 'string') return true;
+        return 'expected a raster value (Buffer, string, or null)';
+      }
+      if (descriptor?.type === 'polyline') {
+        if (value === null || value === undefined) return true;
+        if (Array.isArray(value)) return true;
+        return 'expected a polyline value (array or null)';
+      }
       if (!isTextValue(value)) return 'expected a crdt text value';
       return true;
     },
