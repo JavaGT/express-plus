@@ -4,7 +4,7 @@
 // interval it calls `discoverTickedRows` to find rows whose `while` predicate
 // still holds, then dispatches `update` under a system principal whose `source`
 // is `${entityName}.${verb}`. The dispatch spine routes this through
-// `preProjectionAuthorize` → `admitTickedMutation` (not the engine itself
+// `preProjectionAuthorize` → `admitSystemMutation` (not the engine itself
 // admitting). ONE reconciliation path — no second auth path.
 //
 // Each dispatch try/catch mirrors the reaper's per-iteration pattern: a single
@@ -13,7 +13,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { principalFrom } from './principal.mjs';
-import { tickSource, discoverTickedRows, admitTickedMutation } from './schedule.mjs';
+import { tickSource, discoverTickedRows } from './schedule.mjs';
 import { getLog } from './log.mjs';
 
 /**
@@ -59,7 +59,7 @@ export function startTickEngine({ db, entities, dispatch, now = Date.now }) {
     for (const { entity: entityName, verb, rowId, payload } of rows) {
       // Per-row try/catch — one row's deny/throw NEVER aborts the sweep
       // (mirror reaper: stderr + continue). A deny here means the in-txn
-      // admission (`admitTickedMutation`) rejected this row — a normal skip.
+      // admission (`admitSystemMutation`) rejected this row — a normal skip.
       try {
         const source = tickSource(entityName, verb);
         const principal = principalFrom(source);

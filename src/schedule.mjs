@@ -118,85 +118,6 @@ export function schedulerSource(entityName, verb, fieldName) {
   return `${entityName}.${verb}.${fieldName}`;
 }
 
-// admitScheduledMutation — IN-TXN admission for a scheduler system principal
-// (Option A, DECISIONLOG #62). Called from the dispatch spine's in-txn hook
-// (postHandlerAuthorize) ONLY for principals of kind system with attributes.source.
-// The scheduler principal is NOT a user with a row grant: its authority is the
-// entity's declared schedule. This re-checks, against the CURRENT in-txn row:
-//   (1) the principal's source binds to a declared schedule on this entity/verb;
-//   (2) the row is STILL due (TOCTOU: it was due at discovery, may not be now);
-//   (3) the compiled `while` predicate STILL holds on the current row;
-//   (4) the dispatched payload matches the `with` payload recomputed from the
-//       CURRENT row — a scheduler principal may NEVER send an arbitrary payload
-//       (else "due" = "system write-anything").
-// Admits only when ALL hold; denies (returns false) on any mismatch — fail-closed.
-// This is a SIBLING to postHandlerAuthorize's create row-grant, NOT a widened
-// admitsEffects and NOT a second auth path (same dispatch spine, branch on kind).
-export function admitScheduledMutation({ entity, verb, rowId, payload, principal, db, now }) {
-  // Fail closed: only a bound scheduler system principal reaches this gate.
-  if (!principal || typeof principal !== 'object') return false;
-  if (principal.type !== 'system') return false;
-  const source = principal.attributes?.source;
-  if (typeof source !== 'string' || source === '') return false;
-
-  // The entity must declare a schedule for this verb.
-  const trigger = entity?.schedule?.[verb];
-  if (!trigger || !trigger.fieldName) return false;
-
-  // The principal's source must bind to THIS declared schedule (derived id).
-  if (source !== schedulerSource(entity.name, verb, trigger.fieldName)) return false;
-
-  // Re-read the CURRENT row (in-txn): it may have been deleted/mutated between
-  // discovery and this dispatch. A missing row → deny (TOCTOU-safe).
-  const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(rowId);
-  if (!row) return false;
-
-  // Re-check DUE against the current row value + the original delay semantics.
-  // Date/number fields store epoch-ms integers (field-strategy.mjs serialize).
-  const fieldVal = Number(row[trigger.fieldName]);
-  if (!Number.isFinite(fieldVal)) return false;
-  const dueAt = trigger.kind === 'schedule.after' ? fieldVal + (trigger.delay ?? 0) : fieldVal;
-  if (dueAt > now) return false; // no longer due at dispatch time
-
-  // Re-check the compiled `while` predicate against the current row, using the
-  // t0 alias discoverDueSchedules/compileReadScope established. No row = while
-  // no longer holds → deny (the declared will still governs).
-  if (trigger.whileSql) {
-    const params = { ...(trigger.whileParams ?? {}), __rowId: rowId };
-    const held = db.prepare(
-      `SELECT 1 FROM ${entity.name} AS t0 WHERE t0.id = :__rowId AND (${trigger.whileSql})`,
-    ).get(params);
-    if (!held) return false;
-  }
-
-  // Recompute the declared `with` payload from the CURRENT row, then COMPARE the
-  // dispatched payload against it. The scheduler may send ONLY this payload.
-  let declaredPayload;
-  if (typeof trigger.with === 'function') {
-    declaredPayload = trigger.with({ row });
-  } else if (trigger.with && typeof trigger.with === 'object') {
-    declaredPayload = { ...trigger.with };
-  } else {
-    declaredPayload = {};
-  }
-  // The dispatched payload carries the structural `id` (the row's primary key)
-  // which the `update` handler REQUIRES to locate the row ('update requires an
-  // id'); the declared `with` never includes it. The rowId is the TARGET, not a
-  // field the schedule writes. Strip `id` from the dispatched payload before
-  // comparing, so the write-anything guard matches on the DECLARED FIELD SET.
-  const { id: _rowId, ...payloadFields } = payload ?? {};
-  // Deep structural equality (values, nested objects/arrays) — a mismatched
-  // payload (a field the schedule did not declare, or a stale recomputed value)
-  // is a deny. JSON.stringify round-trip is sufficient for the payload grammar
-  // (plain objects/values; functions are not valid payload members).
-  try {
-    if (JSON.stringify(payloadFields) !== JSON.stringify(declaredPayload)) return false;
-  } catch {
-    return false; // unserializable payload → fail closed
-  }
-
-  return true; // due + while + bound source + exact payload → admitted
-}
 
 // tick — interval trigger constructors for row-set ticks.
 // A tick fires `update` against EVERY row matching `while` per interval.
@@ -270,42 +191,49 @@ export function discoverTickedRows(db, entities, now) {
   return results;
 }
 
-// admitTickedMutation — IN-TXN admission for a ticked system principal
-// (sibling to admitScheduledMutation). Called from the dispatch spine's in-txn
-// hook AFTER a tick trigger fired. It SKIPS the due-check (a tick is due-by-firing)
-// but KEEPS source-binding + while-recheck + payload-compare.
-// A ticked principal may NEVER send an arbitrary payload. Fail-closed on any mismatch.
-export function admitTickedMutation({ entity, verb, rowId, payload, principal, db, now }) {
-  // Fail closed: only a bound ticked system principal reaches this gate.
+// admitSystemMutation — IN-TXN admission for scheduled/ticked system principals.
+// Called from the dispatch spine's in-txn hook after a declared clock trigger
+// fired. The trigger's declared kind decides the source binding and checks:
+// tick.hz/tick.every require while and skip due; schedule.at/schedule.after bind
+// to fieldName, re-check due, and allow while to be absent. Fail-closed on every
+// mismatch.
+export function admitSystemMutation({ entity, verb, rowId, payload, principal, db, now }) {
   if (!principal || typeof principal !== 'object') return false;
   if (principal.type !== 'system') return false;
   const source = principal.attributes?.source;
   if (typeof source !== 'string' || source === '') return false;
 
-  // The entity must declare a tick schedule for this verb.
   const trigger = entity?.schedule?.[verb];
   if (!trigger) return false;
-  if (trigger.kind !== 'tick.hz' && trigger.kind !== 'tick.every') return false;
 
-  // The principal's source must bind to THIS entity/verb (derived id, no fieldName).
-  if (source !== tickSource(entity.name, verb)) return false;
+  if (trigger.kind === 'tick.hz' || trigger.kind === 'tick.every') {
+    if (source !== tickSource(entity.name, verb)) return false;
+    if (!trigger.whileSql) return false;
+  } else if (trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after') {
+    if (!trigger.fieldName) return false;
+    if (source !== schedulerSource(entity.name, verb, trigger.fieldName)) return false;
+  } else {
+    return false;
+  }
 
-  // Re-read the CURRENT row (in-txn): it may have been deleted/mutated between
-  // discovery and this dispatch. A missing row → deny (TOCTOU-safe).
   const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(rowId);
-  if (!row || !row.id) return false;
+  if (!row) return false;
 
-  // While recheck — ticks MUST have whileSql (enforced at entity-load-time).
-  // No row = while no longer holds → deny (the declared will still governs).
-  if (!trigger.whileSql) return false;
-  const whileParams = { ...(trigger.whileParams ?? {}), __rowId: rowId };
-  const held = db.prepare(
-    `SELECT 1 FROM ${entity.name} AS t0 WHERE t0.id = :__rowId AND (${trigger.whileSql})`,
-  ).get(whileParams);
-  if (!held) return false;
+  if (trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after') {
+    const fieldVal = Number(row[trigger.fieldName]);
+    if (!Number.isFinite(fieldVal)) return false;
+    const dueAt = trigger.kind === 'schedule.after' ? fieldVal + (trigger.delay ?? 0) : fieldVal;
+    if (dueAt > now) return false;
+  }
 
-  // Recompute the declared `with` payload from the CURRENT row, then COMPARE the
-  // dispatched payload against it. The ticked principal may send ONLY this payload.
+  if (trigger.whileSql) {
+    const params = { ...(trigger.whileParams ?? {}), __rowId: rowId };
+    const held = db.prepare(
+      `SELECT 1 FROM ${entity.name} AS t0 WHERE t0.id = :__rowId AND (${trigger.whileSql})`,
+    ).get(params);
+    if (!held) return false;
+  }
+
   let declaredPayload;
   if (typeof trigger.with === 'function') {
     declaredPayload = trigger.with({ row });
@@ -314,14 +242,12 @@ export function admitTickedMutation({ entity, verb, rowId, payload, principal, d
   } else {
     declaredPayload = {};
   }
-  // Strip `id` from dispatched payload (the row's primary key) before comparing
-  // against the declared `with` — the ticked principal may never write-anything.
   const { id: _id, ...payloadFields } = payload ?? {};
   try {
     if (JSON.stringify(payloadFields) !== JSON.stringify(declaredPayload)) return false;
   } catch {
-    return false; // unserializable payload → fail closed
+    return false;
   }
 
-  return true; // source-bound + while-holds + exact payload → admitted
+  return true;
 }

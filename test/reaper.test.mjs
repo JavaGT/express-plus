@@ -5,7 +5,7 @@ import { entity, scope, everyone, grant, read, tick, date, schedule } from '../s
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
-import { admitScheduledMutation, admitTickedMutation, discoverDueSchedules, schedulerSource } from '../src/schedule.mjs';
+import { admitSystemMutation, discoverDueSchedules, schedulerSource } from '../src/schedule.mjs';
 import { startReaper } from '../src/reaper.mjs';
 
 // ============================================================
@@ -15,7 +15,7 @@ import { startReaper } from '../src/reaper.mjs';
 // #19, #62). Each interval it discovers due rows via
 // discoverDueSchedules, dispatches `update` under a scheduler
 // system principal, and the dispatch spine routes through
-// preProjectionAuthorize → admitScheduledMutation (the admission
+// preProjectionAuthorize → admitSystemMutation (the admission
 // gate). ONE reconciliation path — no second auth path.
 //
 // Each dispatch has try/catch + stderr — one row's deny/throw
@@ -30,9 +30,7 @@ function seededDb() {
   return db;
 }
 
-// Build an app with schedule wiring that mirrors serve.mjs:
-// tick branch (tickSource 2-part) then scheduler branch
-// (admitScheduledMutation for system principals with a source).
+// Build an app with system-mutation wiring that mirrors serve.mjs.
 function makeAppWithSchedule(entityDef) {
   const db = seededDb();
   for (const sql of generateDDL(entityDef)) db.exec(sql);
@@ -46,23 +44,10 @@ function makeAppWithSchedule(entityDef) {
     projections: [entityDef.projection],
     authorize: () => true,
     preProjectionAuthorize: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
-      // Tick branch first (2-segment source) — same order as serve.mjs
-      const src = p?.attributes?.source;
-      if (p?.type === 'system' && src) {
-        const tickExpected = `${en}.${verb}`;
-        if (src === tickExpected) {
-          const ent = entities.get(en) ?? entityDef;
-          return admitTickedMutation({
-            entity: ent, verb, rowId: event?.data?.id,
-            payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
-          });
-        }
-      }
-      // Scheduler branch — system principal with 3-part source
       if (p?.type !== 'system' || !p.attributes?.source) return true;
       const ent = entities.get(en);
       if (!ent) return false;
-      return admitScheduledMutation({
+      return admitSystemMutation({
         entity: ent, verb, rowId: event?.data?.id,
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
       });
@@ -217,9 +202,9 @@ test('startReaper calls dispatch with correct scheduler principal and payload', 
 });
 
 // ============================================================
-// unit: admitScheduledMutation direct (gate unit test)
+// unit: admitSystemMutation direct (gate unit test)
 // ============================================================
-test('admitScheduledMutation admits an exact-match scheduler dispatch', () => {
+test('admitSystemMutation admits an exact-match scheduler dispatch', () => {
   const db = new DatabaseSync(':memory:');
   const publishedAt = date();
   const Blog = entity('AdmitSched', {
@@ -236,14 +221,14 @@ test('admitScheduledMutation admits an exact-match scheduler dispatch', () => {
   db.prepare('INSERT INTO AdmitSched (id, status, publishedAt) VALUES (?, ?, ?)').run('x1', 'draft', Date.now() - 1000);
 
   const principal = makePrincipal({ type: 'system', attributes: { source: schedulerSource('AdmitSched', 'update', 'publishedAt') } });
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x1',
     payload: { id: 'x1', status: 'published' }, principal, db, now: Date.now(),
   });
   assert.equal(granted, true, 'exact source + due + while-holds + exact with → admitted');
 });
 
-test('admitScheduledMutation DENIES wrong payload', () => {
+test('admitSystemMutation DENIES wrong payload', () => {
   const db = new DatabaseSync(':memory:');
   const publishedAt = date();
   const Blog = entity('AdmitWrongPayload', {
@@ -260,14 +245,14 @@ test('admitScheduledMutation DENIES wrong payload', () => {
   db.prepare('INSERT INTO AdmitWrongPayload (id, status, publishedAt) VALUES (?, ?, ?)').run('x2', 'draft', Date.now() - 1000);
 
   const principal = makePrincipal({ type: 'system', attributes: { source: schedulerSource('AdmitWrongPayload', 'update', 'publishedAt') } });
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x2',
     payload: { id: 'x2', status: 'hijacked' }, principal, db, now: Date.now(),
   });
   assert.equal(granted, false, 'undeclared payload → deny (no write-anything)');
 });
 
-test('admitScheduledMutation DENIES row deleted between discover + dispatch', () => {
+test('admitSystemMutation DENIES row deleted between discover + dispatch', () => {
   const db = new DatabaseSync(':memory:');
   const publishedAt = date();
   const Blog = entity('AdmitTOCTOU', {
@@ -284,14 +269,14 @@ test('admitScheduledMutation DENIES row deleted between discover + dispatch', ()
   // No row inserted — row was "deleted" after discovery.
 
   const principal = makePrincipal({ type: 'system', attributes: { source: schedulerSource('AdmitTOCTOU', 'update', 'publishedAt') } });
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'gone',
     payload: { id: 'gone', status: 'published' }, principal, db, now: Date.now(),
   });
   assert.equal(granted, false, 'TOCTOU: row vanished → deny');
 });
 
-test('admitScheduledMutation DENIES non-system principal', () => {
+test('admitSystemMutation DENIES non-system principal', () => {
   const db = new DatabaseSync(':memory:');
   const publishedAt = date();
   const Blog = entity('AdmitNonSystem', {
@@ -307,7 +292,7 @@ test('admitScheduledMutation DENIES non-system principal', () => {
   for (const sql of generateDDL(Blog)) db.exec(sql);
 
   const principal = makePrincipal({ type: 'user', id: 'someone' });
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x1',
     payload: { id: 'x1', status: 'published' }, principal, db, now: Date.now(),
   });
