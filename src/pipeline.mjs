@@ -12,6 +12,7 @@
 
 // Lazy import of effect compiler (avoids circular dependency at module load time).
 import { readSeq } from './cursor.mjs';
+import { lifecycleVerb, parseEventType } from './event-handle.mjs';
 
 // Use createRequire for dynamic import in ES module context.
 import { createRequire } from 'node:module';
@@ -33,15 +34,17 @@ export function action(type) {
 // `event(type, reduce)` — declare a past-tense fact and the reducer that folds
 // it into state. The reducer is required; omitting it fails closed at load.
 export function event(type, reduce) {
+  const handle = type?.brand === 'event-handle' ? type : undefined;
+  const eventType = handle ? handle.type : type;
   if (typeof reduce !== 'function') {
     throw new Error(
-      `event('${type}') has no reducer. An event with no reducer is a ` +
+      `event('${eventType}') has no reducer. An event with no reducer is a ` +
         `load-time error (SPEC §7): ingest is the only place an event becomes ` +
         `state, and it folds the event through this reducer. Declare one: ` +
-        `event('${type}', (state, payload) => next).`,
+        `event('${eventType}', (state, payload) => next).`,
     );
   }
-  return Object.freeze({ brand: 'event', type, reduce });
+  return Object.freeze({ brand: 'event', handle, type: eventType, reduce });
 }
 
 // ---- Shared in-txn event application core ----
@@ -54,7 +57,20 @@ export function event(type, reduce) {
 // This is the "singular system" implementation (AGENTS.md): one event-application
 // path, called by both the outer dispatch and in-txn effects (ADR #6, #22).
 
-const VERB_FROM_EVENT = Object.freeze({ created: 'create', updated: 'update', removed: 'remove' });
+function eventWithHandle(event, handle) {
+  const out = { ...event };
+  Object.defineProperty(out, 'handle', { value: handle, enumerable: false });
+  return Object.freeze(out);
+}
+
+function eventWithParsedHandle(event) {
+  if (event?.handle?.brand === 'event-handle') return eventWithHandle(event, event.handle);
+  try {
+    return eventWithHandle(event, parseEventType(event.type));
+  } catch {
+    return event;
+  }
+}
 
 // applyEventsToTxn(db, events, { now, actionId, nextSeq, projectionConsumers, blobAdopter, postHandlerAuthorize, principal, effectsExecutor, depth, maxEffectDepth })
 // Appends events to _Log, runs projections, blob adopt, and post-handler authorize.
@@ -117,25 +133,21 @@ async function applyEventsToTxn(db, events, {
   // the freshly-projected row) — so the two are distinct hook phases, not one.
   if (preProjectionAuthorize) {
     for (const e of events) {
-      const dotIdx = e.type.indexOf('.');
-      if (dotIdx > 0) {
-        const entityName = e.type.slice(0, dotIdx);
-        const suffix = e.type.slice(dotIdx + 1);
-        const verb = VERB_FROM_EVENT[suffix];
-        if (!verb) continue;
-        const granted = await preProjectionAuthorize({
-          entityName,
-          verb,
-          principal,
-          eventType: e.type,
-          event: e,
-          db,
-          now,
-          payload,
-        });
-        if (!granted) {
-          throw Object.assign(new Error('forbidden'), { status: 403 });
-        }
+      const withHandle = eventWithParsedHandle(e);
+      const verb = lifecycleVerb(withHandle.handle);
+      if (!verb) continue;
+      const granted = await preProjectionAuthorize({
+        entityName: withHandle.handle.entity,
+        verb,
+        principal,
+        eventType: withHandle.type,
+        event: withHandle,
+        db,
+        now,
+        payload,
+      });
+      if (!granted) {
+        throw Object.assign(new Error('forbidden'), { status: 403 });
       }
     }
   }
@@ -144,13 +156,14 @@ async function applyEventsToTxn(db, events, {
   // event data are resolved to the commit-time ISO here (ADR #24) — before
   // serialization, so the token never reaches _Log.
   for (const e of events) {
-    const scope = e.scope;
+    const withHandle = eventWithParsedHandle(e);
+    const scope = withHandle.scope;
     const seq = nextSeq(scope);
-    const data = resolveNowTokens(e.data ?? {}, now);
+    const data = resolveNowTokens(withHandle.data ?? {}, now);
     db.prepare(
       'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
-    ).run(scope, seq, e.type, JSON.stringify(data), actionId, now);
-    finalizedEvents.push(Object.freeze({ ...e, data, seq, actionId, committedAt: now }));
+    ).run(scope, seq, withHandle.type, JSON.stringify(data), actionId, now);
+    finalizedEvents.push(eventWithHandle({ ...withHandle, data, seq, actionId, committedAt: now }, withHandle.handle));
   }
 
   // Projection consumers — materialize entity rows from events
@@ -177,25 +190,20 @@ async function applyEventsToTxn(db, events, {
   // (for effects, this is the effect principal)
   if (postHandlerAuthorize) {
     for (const ev of finalizedEvents) {
-      const dotIdx = ev.type.indexOf('.');
-      if (dotIdx > 0) {
-        const entityName = ev.type.slice(0, dotIdx);
-        const suffix = ev.type.slice(dotIdx + 1);
-        const verb = VERB_FROM_EVENT[suffix];
-        if (!verb) continue;
-        const granted = await postHandlerAuthorize({
-          entityName,
-          verb,
-          principal,
-          eventType: ev.type,
-          event: ev,
-          db,
-          now,
-          payload,
-        });
-        if (!granted) {
-          throw Object.assign(new Error('forbidden'), { status: 403 });
-        }
+      const verb = lifecycleVerb(ev.handle);
+      if (!verb) continue;
+      const granted = await postHandlerAuthorize({
+        entityName: ev.handle.entity,
+        verb,
+        principal,
+        eventType: ev.type,
+        event: ev,
+        db,
+        now,
+        payload,
+      });
+      if (!granted) {
+        throw Object.assign(new Error('forbidden'), { status: 403 });
       }
     }
   }
@@ -261,14 +269,21 @@ async function applyEventsToTxn(db, events, {
 // the row→event shape has ONE definition (a second copy would be the exact seam
 // where the two paths drift — AGENTS.md → singular system).
 function rowToEvent(row) {
-  return Object.freeze({
+  let handle;
+  try {
+    handle = parseEventType(row.eventType);
+  } catch {
+    handle = undefined;
+  }
+  const event = {
     type: row.eventType,
     scope: row.scope,
     seq: row.seq,
     actionId: row.actionId,
     committedAt: row.committedAt,
     data: JSON.parse(row.eventData),
-  });
+  };
+  return handle ? eventWithHandle(event, handle) : Object.freeze(event);
 }
 
 // commitEvents — the durable transaction brace shared by `dispatch` and

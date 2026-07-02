@@ -7,6 +7,7 @@ import { anonymous } from './principal.mjs';
 import { mayRow } from './row-grant.mjs';
 import { PACE_STRATEGIES } from './field-pace.mjs';
 import { computeDelta } from './field-delta.mjs';
+import { EventKind, parseEventType } from './event-handle.mjs';
 
 const PREV_STATE_MAX = 10_000;
 
@@ -147,6 +148,16 @@ export function createLiveFanout({ mayVerb = null } = {}) {
   async function emit(entityRecord, id, row, committedEvent) {
     const name = entityRecord?.name;
     if (!name) return;                       // unknown entity -> can't authorize -> fail closed
+    let committed = committedEvent;
+    if (committed.handle?.brand !== 'event-handle') {
+      try {
+        committed = { ...committedEvent };
+        Object.defineProperty(committed, 'handle', { value: parseEventType(committedEvent.type), enumerable: false });
+        Object.freeze(committed);
+      } catch { return; }
+    }
+    const handle = committed.handle;
+    if (handle.entity !== name) return;
     const byId = byEntity.get(name);
     if (!byId) return;
     const subs = byId.get(String(id));
@@ -162,17 +173,11 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     }
 
     // Determine if this is an ephemeral field event that requires opt-in.
-    // An ephemeral event has type `<Entity>.<field>.set` where `<field>` is a
-    // declared ephemeral field. Split on `.`; 3 parts -> Entity.field.set.
     let ephemeralField = null;
-    if (!removed) {
-      const parts = committedEvent.type?.split('.');
-      if (parts?.length === 3 && parts[2] === 'set') {
-        const fieldName = parts[1];
-        const fd = entityRecord.fields?.[fieldName];
-        if (fd?.kind === 'ephemeral') {
-          ephemeralField = fieldName;
-        }
+    if (!removed && handle.kind === EventKind.fieldSet) {
+      const fd = entityRecord.fields?.[handle.field];
+      if (fd?.kind === 'ephemeral') {
+        ephemeralField = handle.field;
       }
     }
 
@@ -183,20 +188,17 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     let delta = undefined;
     if (removed) {
       prevEvict(scope);
-    } else {
-      const parts = committedEvent.type?.split('.');
-      if (parts?.length === 2 && parts[1] === 'updated') {
-        const prev = prevGet(scope);
-        const changed = Object.keys(committedEvent.data ?? {}).filter((k) => k !== 'id');
-        delta = computeDelta(entityRecord, prev, authzRow, changed);
-        prevSeed(scope, authzRow);
-      } else if (parts?.length === 2 && parts[1] === 'created') {
-        prevSeed(scope, authzRow);
-      } else if (parts?.length === 3 && ephemeralField === null) {
-        // P6e-2 B2: store/ordered native events are delta-native — their event.data
-        // IS the structural delta. Normalize under the same `delta` map key.
-        delta = { [parts[1]]: committedEvent.data };
-      }
+    } else if (handle.kind === EventKind.updated) {
+      const prev = prevGet(scope);
+      const changed = Object.keys(committed.data ?? {}).filter((k) => k !== 'id');
+      delta = computeDelta(entityRecord, prev, authzRow, changed);
+      prevSeed(scope, authzRow);
+    } else if (handle.kind === EventKind.created) {
+      prevSeed(scope, authzRow);
+    } else if (handle.kind === EventKind.native) {
+      // P6e-2 B2: store/ordered native events are delta-native — their event.data
+      // IS the structural delta. Normalize under the same `delta` map key.
+      delta = { [handle.field]: committed.data };
     }
 
     for (const [conn, subSpec] of subs) {
@@ -231,9 +233,9 @@ export function createLiveFanout({ mayVerb = null } = {}) {
       // window>0 = enqueue + timer (coalesced on flush).
       if (pace.window === 0) {
         const envelope = {
-          type: 'event', entity: name, id, seq: committedEvent.seq,
-          seqSpan: [committedEvent.seq, committedEvent.seq],
-          event: committedEvent,
+          type: 'event', entity: name, id, seq: committed.seq,
+          seqSpan: [committed.seq, committed.seq],
+          event: committed,
         };
         if (delta !== undefined) envelope.delta = delta;
         conn.send(envelope);
@@ -254,7 +256,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
           };
           paceBuffers.set(bufKey, entry);
         }
-        entry.events.push(committedEvent);
+        entry.events.push(committed);
         // Refresh authzRow with latest re-read so flush-time re-auth is current.
         entry.authzRow = authzRow;
         if (entry.timer === null) {

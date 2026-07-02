@@ -28,6 +28,7 @@ import {
   serializeField, deserializeField, validateMutation, ValidationError, verifyHash, flattenStruct, structCellColumn, resolveStrategy,
 } from './field-strategy.mjs';
 import { action, event } from './pipeline.mjs';
+import * as eventHandle from './event-handle.mjs';
 import { generateDDL } from './ddl.mjs';
 import { validateEffectDeclaration } from './effect-compiler.mjs';
 
@@ -1022,48 +1023,51 @@ export function entity(name, declaration = {}) {
 
   record.verbs = Object.freeze({
     create: action(`${name}.create`),
-    created: event(`${name}.created`, (state, { data }) => ({ ...state, ...data })),
+    created: event(eventHandle.created(name), (state, { data }) => ({ ...state, ...data })),
     update: action(`${name}.update`),
-    updated: event(`${name}.updated`, (state, { data }) => ({ ...state, ...data })),
+    updated: event(eventHandle.updated(name), (state, { data }) => ({ ...state, ...data })),
     remove: action(`${name}.remove`),
-    removed: event(`${name}.removed`, (state) => ({ ...state, _removed: true })),
+    removed: event(eventHandle.removed(name), (state) => ({ ...state, _removed: true })),
   });
 
   record.projection = Object.freeze({
     eventTypes: [
-      `${name}.created`,
-      `${name}.updated`,
-      `${name}.removed`,
+      record.verbs.created.type,
+      record.verbs.updated.type,
+      record.verbs.removed.type,
       // each log field's append event → side-table INSERT (consult #19)
-      ...logFields.map(([fieldName]) => `${name}.${fieldName}.appended`),
+      ...logFields.map(([fieldName]) => eventHandle.native(name, fieldName, 'appended').type),
       // each map field's store events → side-table INSERT/UPDATE/DELETE (consult
       // #19, UNIT 2: store mutations are committed pipeline actions; the handle
       // dispatches, the projection applies — one reconciliation path).
       ...mapFields.flatMap(([fieldName]) => [
-        `${name}.${fieldName}.added`,
-        `${name}.${fieldName}.roleChanged`,
-        `${name}.${fieldName}.removed`,
+        eventHandle.native(name, fieldName, 'added').type,
+        eventHandle.native(name, fieldName, 'roleChanged').type,
+        eventHandle.native(name, fieldName, 'removed').type,
       ]),
       // each ordered field's store events → side-table INSERT/UPDATE/DELETE
       ...orderedFields.flatMap(([fieldName]) => [
-        `${name}.${fieldName}.inserted`,
-        `${name}.${fieldName}.moved`,
-        `${name}.${fieldName}.reordered`,
-        `${name}.${fieldName}.removed`,
+        eventHandle.native(name, fieldName, 'inserted').type,
+        eventHandle.native(name, fieldName, 'moved').type,
+        eventHandle.native(name, fieldName, 'reordered').type,
+        eventHandle.native(name, fieldName, 'removed').type,
       ]),
       // each ephemeral field's per-connection .set → side-table upsert (P6e-1a).
-      ...ephemeralFields.map(([fieldName]) => `${name}.${fieldName}.set`),
+      ...ephemeralFields.map(([fieldName]) => eventHandle.fieldSet(name, fieldName).type),
     ],
     apply: (event, db) => {
       const table = name;
+      const handle = event.handle;
+      if (handle?.brand !== 'event-handle' || handle.entity !== name) return;
       // map store events: the owning entity's membership side-table is mutated
       // by the projection applying the `:added`/`:roleChanged`/`:removed` event
       // the `.set`/`.remove` handle dispatched.
       for (const [mapField, descriptor] of mapFields) {
+        if (handle.field !== mapField || handle.kind !== eventHandle.EventKind.native) continue;
         const sideTable = membershipTable(name, mapField);
         const ownerCol = membershipOwnerCol(name);
         const hasRole = Array.isArray(descriptor.roles) && descriptor.roles.length > 0;
-        if (event.type === `${name}.${mapField}.added`) {
+        if (handle.nativeName === 'added') {
           const cols = [ownerCol, MEMBER_COLUMN];
           const vals = [':owner', ':member'];
           const params = { owner: String(event.data?.owner), member: String(event.data?.member) };
@@ -1071,12 +1075,12 @@ export function entity(name, declaration = {}) {
           db.prepare(`INSERT INTO ${sideTable} (${cols.join(', ')}) VALUES (${vals.join(', ')})`).run(params);
           return;
         }
-        if (event.type === `${name}.${mapField}.roleChanged` && hasRole) {
+        if (handle.nativeName === 'roleChanged' && hasRole) {
           db.prepare(`UPDATE ${sideTable} SET role = :role WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
             .run({ owner: String(event.data?.owner), member: String(event.data?.member), role: event.data?.role ?? null });
           return;
         }
-        if (event.type === `${name}.${mapField}.removed`) {
+        if (handle.nativeName === 'removed') {
           db.prepare(`DELETE FROM ${sideTable} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
             .run({ owner: String(event.data?.owner), member: String(event.data?.member) });
           return;
@@ -1086,26 +1090,27 @@ export function entity(name, declaration = {}) {
       // INSERT/UPDATE/DELETE. The handle computes fractional keys and dispatches;
       // the projection applies the event to the side-table (one reconciliation path).
       for (const [ordField] of orderedFields) {
+        if (handle.field !== ordField || handle.kind !== eventHandle.EventKind.native) continue;
         const sideTable = membershipTable(name, ordField);
         const ownerCol = membershipOwnerCol(name);
-        if (event.type === `${name}.${ordField}.inserted`) {
+        if (handle.nativeName === 'inserted') {
           db.prepare(`INSERT INTO ${sideTable} (${ownerCol}, id, key, item) VALUES (:owner, :id, :key, :item)`)
             .run({ owner: String(event.data?.owner), id: event.data?.id, key: event.data?.key, item: JSON.stringify(event.data?.value) });
           return;
         }
-        if (event.type === `${name}.${ordField}.moved`) {
+        if (handle.nativeName === 'moved') {
           db.prepare(`UPDATE ${sideTable} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`)
             .run({ owner: String(event.data?.owner), id: event.data?.id, key: event.data?.key });
           return;
         }
-        if (event.type === `${name}.${ordField}.reordered`) {
+        if (handle.nativeName === 'reordered') {
           const stmt = db.prepare(`UPDATE ${sideTable} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`);
           for (const e of (event.data?.entries ?? [])) {
             stmt.run({ owner: String(event.data?.owner), id: e.id, key: e.key });
           }
           return;
         }
-        if (event.type === `${name}.${ordField}.removed`) {
+        if (handle.nativeName === 'removed') {
           db.prepare(`DELETE FROM ${sideTable} WHERE ${ownerCol} = :owner AND id = :id`)
             .run({ owner: String(event.data?.owner), id: event.data?.id });
           return;
@@ -1115,7 +1120,7 @@ export function entity(name, declaration = {}) {
       // writing client_id (P6e-1a: latest snapshot wins — P6e-1b's pace will retire
       // the verbatim delivery into coalesced delivery, not change this projection).
       for (const [ephField] of ephemeralFields) {
-        if (event.type === `${name}.${ephField}.set`) {
+        if (handle.field === ephField && handle.kind === eventHandle.EventKind.fieldSet) {
           const sideTable = membershipTable(name, ephField);
           const ownerCol = membershipOwnerCol(name);
           db.prepare(`INSERT OR REPLACE INTO ${sideTable} (${ownerCol}, client_id, cells) VALUES (:owner, :client, :cells)`)
@@ -1131,7 +1136,7 @@ export function entity(name, declaration = {}) {
       // the minted entry id + the declared entry sub-fields (serialized). The
       // owner becomes the owning entity's FK (the row the log hangs off of).
       for (const [logField] of logFields) {
-        if (event.type === `${name}.${logField}.appended`) {
+        if (handle.field === logField && handle.kind === eventHandle.EventKind.native && handle.nativeName === 'appended') {
           const entryDescriptor = fields[logField].entry ?? {};
           const sideTable = membershipTable(name, logField);
           const ownerCol = membershipOwnerCol(name);
@@ -1151,7 +1156,7 @@ export function entity(name, declaration = {}) {
           return;
         }
       }
-      if (event.type === `${name}.created`) {
+      if (handle.kind === eventHandle.EventKind.created) {
         const row = {};
         for (const [key, value] of Object.entries(event.data ?? {})) {
           const descriptor = fields[key];
@@ -1184,7 +1189,7 @@ export function entity(name, declaration = {}) {
           ).run(row);
           getLog().debug('dispatch', `${name}.created`, { id: row.id ?? event.data?.id });
         }
-      } else if (event.type === `${name}.updated`) {
+      } else if (handle.kind === eventHandle.EventKind.updated) {
         const { id, ...data } = event.data ?? {};
         if (!id) return;
         const updates = [];
@@ -1230,7 +1235,7 @@ export function entity(name, declaration = {}) {
           db.prepare(`UPDATE ${table} SET ${updates.join(', ')} WHERE id = :id`).run(params);
           getLog().debug('dispatch', `${name}.updated`, { id: params.id });
         }
-      } else if (event.type === `${name}.removed`) {
+      } else if (handle.kind === eventHandle.EventKind.removed) {
         db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(event.data?.id);
         getLog().debug('dispatch', `${name}.removed`, { id: event.data?.id });
       }
@@ -1248,7 +1253,7 @@ export function entity(name, declaration = {}) {
       const id = randomUUID();
       const data = { ...payload, id };
       if (ownerField) data[ownerField] = principal?.id;
-      return [{ type: record.verbs.created.type, scope: `${name}:${id}`, data }];
+      return [{ handle: record.verbs.created.handle, type: record.verbs.created.type, scope: `${name}:${id}`, data }];
     },
     [`${name}.update`]: ({ payload, principal: _p }) => {
       const { id, ...rest } = payload;
@@ -1297,11 +1302,11 @@ export function entity(name, declaration = {}) {
       for (const [fieldName, descriptor] of Object.entries(fields)) {
         if (descriptor.touch) data[fieldName] = new Date();
       }
-      return [{ type: record.verbs.updated.type, scope: `${name}:${id}`, data }];
+      return [{ handle: record.verbs.updated.handle, type: record.verbs.updated.type, scope: `${name}:${id}`, data }];
     },
     [`${name}.remove`]: ({ payload, principal: _p }) => {
       if (!payload.id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
-      return [{ type: record.verbs.removed.type, scope: `${name}:${payload.id}`, data: { id: payload.id } }];
+      return [{ handle: record.verbs.removed.handle, type: record.verbs.removed.type, scope: `${name}:${payload.id}`, data: { id: payload.id } }];
     },
     // log append: `<Entity>.<field>.append` → validate the entry shape (fail
     // closed on an unknown sub-field), mint a stable entry id, emit `:appended`.
@@ -1356,8 +1361,10 @@ export function entity(name, declaration = {}) {
           }
         }
         const id = randomUUID();
+        const handle = eventHandle.native(entityName, logField, 'appended');
         return [{
-          type: `${entityName}.${logField}.appended`,
+          handle,
+          type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, id, ...entry },
         }];
@@ -1389,8 +1396,10 @@ export function entity(name, declaration = {}) {
       };
       handlers[`${entityName}.${mapField}.add`] = ({ payload }) => {
         const { owner, member } = requireOwnerMember(payload);
+        const handle = eventHandle.native(entityName, mapField, 'added');
         return [{
-          type: `${entityName}.${mapField}.added`,
+          handle,
+          type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, member, role: hasRole ? (payload.role ?? null) : undefined },
         }];
@@ -1400,16 +1409,20 @@ export function entity(name, declaration = {}) {
         if (!hasRole) {
           throw Object.assign(new Error(`${entityName}.${mapField}.setRole on a role-less map`), { status: 400 });
         }
+        const handle = eventHandle.native(entityName, mapField, 'roleChanged');
         return [{
-          type: `${entityName}.${mapField}.roleChanged`,
+          handle,
+          type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, member, role: payload.role ?? null },
         }];
       };
       handlers[`${entityName}.${mapField}.remove`] = ({ payload }) => {
         const { owner, member } = requireOwnerMember(payload);
+        const handle = eventHandle.native(entityName, mapField, 'removed');
         return [{
-          type: `${entityName}.${mapField}.removed`,
+          handle,
+          type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, member },
         }];
@@ -1442,8 +1455,10 @@ export function entity(name, declaration = {}) {
           throw Object.assign(new Error(`${entityName}.${ordField}.insert requires a key`), { status: 400 });
         }
         const id = randomUUID();
+        const handle = eventHandle.native(entityName, ordField, 'inserted');
         return [{
-          type: `${entityName}.${ordField}.inserted`,
+          handle,
+          type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, id, key: payload.key, value: payload.value },
         }];
@@ -1453,8 +1468,10 @@ export function entity(name, declaration = {}) {
         if (payload.id == null || payload.key == null) {
           throw Object.assign(new Error(`${entityName}.${ordField}.move requires an id + key`), { status: 400 });
         }
+        const handle = eventHandle.native(entityName, ordField, 'moved');
         return [{
-          type: `${entityName}.${ordField}.moved`,
+          handle,
+          type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, id: String(payload.id), key: payload.key },
         }];
@@ -1462,8 +1479,10 @@ export function entity(name, declaration = {}) {
       handlers[`${entityName}.${ordField}.reorder`] = ({ payload }) => {
         const owner = requireOwner(payload);
         const entries = Array.isArray(payload.entries) ? payload.entries : [];
+        const handle = eventHandle.native(entityName, ordField, 'reordered');
         return [{
-          type: `${entityName}.${ordField}.reordered`,
+          handle,
+          type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, entries: entries.map((e) => ({ id: String(e.id), key: e.key })) },
         }];
@@ -1473,8 +1492,10 @@ export function entity(name, declaration = {}) {
         if (payload.id == null) {
           throw Object.assign(new Error(`${entityName}.${ordField}.remove requires an id`), { status: 400 });
         }
+        const handle = eventHandle.native(entityName, ordField, 'removed');
         return [{
-          type: `${entityName}.${ordField}.removed`,
+          handle,
+          type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, id: String(payload.id) },
         }];
@@ -1505,8 +1526,10 @@ export function entity(name, declaration = {}) {
       };
       handlers[`${entityName}.${ephField}.set`] = ({ payload }) => {
         const { owner, client } = requireOwnerClient(payload);
+        const handle = eventHandle.fieldSet(entityName, ephField);
         return [{
-          type: `${entityName}.${ephField}.set`,
+          handle,
+          type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, client, cells: payload.cells ?? {} },
         }];
