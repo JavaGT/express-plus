@@ -30,3 +30,4 @@ export { inc, dec, self, many, effect, validateEffectDeclaration, createEffectCo
 export { schedule, tick, tickSource, discoverTickedRows, admitTickedMutation, discoverDueSchedules } from './schedule.mjs';
 export { startTickEngine } from './tick-engine.mjs';
 export { startReaper } from './reaper.mjs';
+export { createJobQueue } from './job-queue.mjs';
