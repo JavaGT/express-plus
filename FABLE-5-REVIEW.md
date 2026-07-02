@@ -522,3 +522,27 @@ when photo-editor / drawing-canvas becomes the active spine and proves the need.
 D1 is the only item that is urgent on its own merits; everything after is
 quality/ergonomics/feature work that can land in the order above behind the green
 suite.
+
+## Progress log
+
+- **D1 DONE** — `inherit`-child write authz fixed (`src/row-grant.mjs` `mayRow`):
+  an inherit child loads the parent row via the `inherited.via` FK and recursively
+  runs the parent's `.can`. RED-first test added. Committed `2338b97`.
+- **D5 DONE** — `hasOwnCanGrant` skip consolidated in `mayRow` (single home); a
+  shared denial-coverage battery (`test/row-auth-transport-battery.test.mjs`)
+  runs against every transport (list-filter, snapshot, create-hook, live-fanout).
+  Committed `192ad56`.
+- **D-cleanup DONE** — retired duplicate public aliases; `enum_` → `text({oneOf})`;
+  DDL prepared during `app.ready`. Commits `437fceb`, `6fc29c4`, `55e2111`.
+- **serve.mjs split DONE** — extracted `http-body`, `http-handler-chain`,
+  `http-response`, `http-route-match`, `http-row-read` (serve.mjs 1315 → 875).
+  Commits through `c899488`.
+- **D2 map-first DONE** — created `src/side-table-strategy.mjs` owning the map
+  kind's `{ handle, mutateHandlers, projectionApply, eventTypes, ddl }`, resolved
+  like `field-strategy.mjs`. Removed the map handle factory, map mutate handlers,
+  map projection-apply branch, map eventTypes spread, and `mapTableDDL` from
+  `entity.mjs`/`ddl.mjs`; both now call the strategy table. Ordered/log/ephemeral
+  remain inline pending their own slices (never two write paths alive). Suite
+  green (948/0). entity.mjs 1484 → 1273. Committed `40e1c89`. **Next: ordered,
+  then log, then ephemeral; then the entity/ 5-module split.**
+
