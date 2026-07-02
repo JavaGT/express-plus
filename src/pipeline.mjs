@@ -72,16 +72,6 @@ function eventWithParsedHandle(event) {
   }
 }
 
-// applyEventsToTxn(db, events, { now, actionId, nextSeq, projectionConsumers, blobAdopter, postHandlerAuthorize, principal, effectsExecutor, depth, maxEffectDepth })
-// Appends events to _Log, runs projections, blob adopt, and post-handler authorize.
-// Executes effects (if provided) and applies their target events recursively.
-// All inside the caller's open transaction — does NOT begin/commit.
-// Returns the finalized events array.
-// ADR #24 — `now` resolves at COMMIT, never by the handler calling `new Date()`.
-// A handler emits this token where it wants a timestamp; applyEventsToTxn
-// substitutes the commit-time ISO for every occurrence (deep walk) before the
-// row hits _Log. The token itself never persists. Handlers stay pure of the
-// clock (consult #24).
 export const NOW = Symbol('expressPlus.now');
 
 // Deep-walk an event's `data`, replacing every NOW token with the commit-time
@@ -107,141 +97,151 @@ function resolveNowTokens(value, now) {
   return value;
 }
 
-async function applyEventsToTxn(db, events, {
-  now,
-  actionId,
-  nextSeq,
+export function noAdmission() {
+  return Object.freeze({
+    beforeProjection: async () => true,
+    afterProjection: async () => true,
+  });
+}
+
+export function noBlobAdapter() {
+  return Object.freeze({
+    adoptInTxn: async () => {},
+  });
+}
+
+function requireAdmission(granted) {
+  if (!granted) throw Object.assign(new Error('forbidden'), { status: 403 });
+}
+
+function effectEventsFor(registry) {
+  if (!registry) return null;
+  return (event, { now, actionId, depth, maxEffectDepth, db }) => {
+    const { executeEffectsForEvent } = _getEffectModule();
+    return executeEffectsForEvent(event, registry, { now, actionId, depth, maxDepth: maxEffectDepth, db });
+  };
+}
+
+export function durableMutationVariant({
   projectionConsumers = [],
-  blobAdopter,
-  preProjectionAuthorize,
-  postHandlerAuthorize,
-  principal,
-  effectsExecutor,
-  depth = 0,
-  maxEffectDepth = 8,
-  payload,
+  admission = noAdmission(),
+  blobAdapter = noBlobAdapter(),
+  effectsRegistry = null,
+  postCommitConsumers = [],
 } = {}) {
-  const finalizedEvents = [];
+  const effectsExecutor = effectEventsFor(effectsRegistry);
+  const variant = {
+    name: 'durable.mutation',
+    async applyInTxn(db, events, {
+      now,
+      actionId,
+      nextSeq,
+      principal,
+      depth = 0,
+      maxEffectDepth = 8,
+      payload,
+    } = {}) {
+      const finalizedEvents = [];
 
-  // Pre-projection admission — runs IN-TXN against the PRE-mutation row, BEFORE
-  // the event is appended to _Log or projected. Denial leaves zero footprint
-  // (no _Log row, no projection write). This is the phase scheduler admission
-  // needs: its `while`/due/with re-checks are against the row as it stood when
-  // the schedule was discovered, NOT after THIS dispatch's own projection has
-  // applied the payload. The POST-projection create row-grant (below, in
-  // postHandlerAuthorize) has the OPPOSITE visibility need (authorize against
-  // the freshly-projected row) — so the two are distinct hook phases, not one.
-  if (preProjectionAuthorize) {
-    for (const e of events) {
-      const withHandle = eventWithParsedHandle(e);
-      const verb = lifecycleVerb(withHandle.handle);
-      if (!verb) continue;
-      const granted = await preProjectionAuthorize({
-        entityName: withHandle.handle.entity,
-        verb,
-        principal,
-        eventType: withHandle.type,
-        event: withHandle,
-        db,
-        now,
-        payload,
-      });
-      if (!granted) {
-        throw Object.assign(new Error('forbidden'), { status: 403 });
-      }
-    }
-  }
-
-  // Append events to _Log with per-scope sequence numbers. NOW tokens in the
-  // event data are resolved to the commit-time ISO here (ADR #24) — before
-  // serialization, so the token never reaches _Log.
-  for (const e of events) {
-    const withHandle = eventWithParsedHandle(e);
-    const scope = withHandle.scope;
-    const seq = nextSeq(scope);
-    const data = resolveNowTokens(withHandle.data ?? {}, now);
-    db.prepare(
-      'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
-    ).run(scope, seq, withHandle.type, JSON.stringify(data), actionId, now);
-    finalizedEvents.push(eventWithHandle({ ...withHandle, data, seq, actionId, committedAt: now }, withHandle.handle));
-  }
-
-  // Projection consumers — materialize entity rows from events
-  for (const consumer of projectionConsumers) {
-    for (const ev of finalizedEvents) {
-      if (consumer.eventTypes.includes(ev.type)) {
-        consumer.apply(ev, db);
-      }
-    }
-  }
-
-  // Blob adopt (in-txn) — atomic with log append + projection writes
-  if (blobAdopter) {
-    const blobIds = new Set();
-    for (const ev of finalizedEvents) {
-      for (const id of blobAdopter.resolve(ev)) blobIds.add(id);
-    }
-    if (blobIds.size > 0) {
-      blobAdopter.adopt(db, [...blobIds]);
-    }
-  }
-
-  // In-txn post-handler row-grant hook — authorizes against the principal
-  // (for effects, this is the effect principal)
-  if (postHandlerAuthorize) {
-    for (const ev of finalizedEvents) {
-      const verb = lifecycleVerb(ev.handle);
-      if (!verb) continue;
-      const granted = await postHandlerAuthorize({
-        entityName: ev.handle.entity,
-        verb,
-        principal,
-        eventType: ev.type,
-        event: ev,
-        db,
-        now,
-        payload,
-      });
-      if (!granted) {
-        throw Object.assign(new Error('forbidden'), { status: 403 });
-      }
-    }
-  }
-
-  // Execute effects (in-txn reentrancy) — ADR #6, #22
-  // Effects fire on committed events and apply their target events through
-  // the SAME in-txn path (recursive, with depth tracking).
-  if (effectsExecutor && depth < maxEffectDepth) {
-    for (const ev of finalizedEvents) {
-      const effectEvents = effectsExecutor(ev, { now, actionId, depth: depth + 1, maxEffectDepth, db });
-      if (effectEvents && effectEvents.length > 0) {
-        // gap #2: effect target events run under their EFFECT PRINCIPAL
-        // (`principal({type:'system', attributes:{effect:<sourceEntity>}})`,
-        // carried on each target event as `_effectPrincipal`), NOT the outer
-        // request principal. So postHandlerAuthorize below evaluates the target
-        // row's grant against the effect principal — a target deny rolls back
-        // the origin (in-txn atomic, ADR #6). Fall back to the outer principal
-        // only if an effect event lacks the tag (defensive).
-        const effectPrincipal = effectEvents[0]?._effectPrincipal ?? principal;
-        // Recursively apply effect events through the same path
-        await applyEventsToTxn(db, effectEvents, {
+      // Pre-projection admission — runs IN-TXN against the PRE-mutation row,
+      // before the _Log append and before projection. Denial leaves zero
+      // footprint. This shallow module interface keeps scheduler admission on
+      // the durable variant instead of exporting low-level append/authorize
+      // primitives across the seam.
+      for (const e of events) {
+        const withHandle = eventWithParsedHandle(e);
+        const verb = lifecycleVerb(withHandle.handle);
+        if (!verb) continue;
+        requireAdmission(await admission.beforeProjection({
+          entityName: withHandle.handle.entity,
+          verb,
+          principal,
+          eventType: withHandle.type,
+          event: withHandle,
+          db,
           now,
-          actionId,
-          nextSeq,
-          projectionConsumers,
-          blobAdopter,
-          preProjectionAuthorize,
-          postHandlerAuthorize,
-          principal: effectPrincipal,
-          effectsExecutor,
-          depth: depth + 1,
           payload,
-        });
+        }));
       }
-    }
-  }
 
-  return finalizedEvents;
+      // Append events to _Log with per-scope sequence numbers. NOW tokens in the
+      // event data are resolved to the commit-time ISO here (ADR #24) — before
+      // serialization, so the token never reaches _Log.
+      for (const e of events) {
+        const withHandle = eventWithParsedHandle(e);
+        const scope = withHandle.scope;
+        const seq = nextSeq(scope);
+        const data = resolveNowTokens(withHandle.data ?? {}, now);
+        db.prepare(
+          'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
+        ).run(scope, seq, withHandle.type, JSON.stringify(data), actionId, now);
+        finalizedEvents.push(eventWithHandle({ ...withHandle, data, seq, actionId, committedAt: now }, withHandle.handle));
+      }
+
+      // Projection consumers — materialize entity rows from events.
+      for (const consumer of projectionConsumers) {
+        for (const ev of finalizedEvents) {
+          if (consumer.eventTypes.includes(ev.type)) {
+            consumer.apply(ev, db);
+          }
+        }
+      }
+
+      // Blob adoption is in-txn and atomic with the log + projection writes.
+      await blobAdapter.adoptInTxn(db, finalizedEvents);
+
+      // Post-projection admission — runs IN-TXN after projection. Create
+      // row-grants need this deep visibility: the row exists only after the
+      // projection consumer has materialized it.
+      for (const ev of finalizedEvents) {
+        const verb = lifecycleVerb(ev.handle);
+        if (!verb) continue;
+        requireAdmission(await admission.afterProjection({
+          entityName: ev.handle.entity,
+          verb,
+          principal,
+          eventType: ev.type,
+          event: ev,
+          db,
+          now,
+          payload,
+        }));
+      }
+
+      // Effects recurse through this SAME named variant. The implementation is
+      // local to the variant so dispatch and batch get identical depth behavior
+      // and leverage one pipeline interface rather than an options lattice.
+      if (effectsExecutor && depth < maxEffectDepth) {
+        for (const ev of finalizedEvents) {
+          const effectEvents = effectsExecutor(ev, { now, actionId, depth: depth + 1, maxEffectDepth, db });
+          if (effectEvents && effectEvents.length > 0) {
+            const effectPrincipal = effectEvents[0]?._effectPrincipal ?? principal;
+            await variant.applyInTxn(db, effectEvents, {
+              now,
+              actionId,
+              nextSeq,
+              principal: effectPrincipal,
+              depth: depth + 1,
+              maxEffectDepth,
+              payload,
+            });
+          }
+        }
+      }
+
+      return finalizedEvents;
+    },
+    async afterCommit(events, context) {
+      for (const consumer of postCommitConsumers) {
+        try {
+          await consumer(events, context);
+        } catch {
+          // a post-commit fan-out failure never undoes the committed dispatch
+        }
+      }
+    },
+  };
+  return Object.freeze(variant);
 }
 
 // createServer({ handlers, authorize, db, effects }) — the server-side mutation handler
@@ -256,10 +256,9 @@ async function applyEventsToTxn(db, events, {
 // (backwards-compatible, for clients that don't need durability). Both paths share
 // the same shape — the persistence seam changes WHERE state lands, never HOW.
 //
-// Effects (optional): pass `effects: registry` where registry is built via
-// buildEffectsRegistry(entities). Effects fire in-txn on committed CRUD events,
-// re-entering through the SAME applyEventsToTxn path (ADR #6, #22). A target grant
-// DENY rolls back the origin (in-txn atomic). Depth cap prevents runaway chains.
+// Effects fire in-txn on committed CRUD events, re-entering through the SAME
+// durable variant interface (ADR #6, #22). A target grant DENY rolls back the
+// origin (in-txn atomic). Depth cap prevents runaway chains.
 //
 // `authorize` is REQUIRED and fails closed: there is no default. A default
 // `() => true` would admit every action (fail OPEN), the opposite of the route
@@ -287,47 +286,31 @@ function rowToEvent(row) {
 }
 
 // commitEvents — the durable transaction brace shared by `dispatch` and
-// `dispatchBatch`: BEGIN IMMEDIATE → applyEventsToTxn → COMMIT → post-commit
-// fan-out, with ROLLBACK on error and a graceful 403 (a post-handler row-grant
-// deny is a deliberate denial, returned as `{granted:false}`, not thrown). The
-// `payload` argument is the authorize-hook context each caller threads through
-// to `applyEventsToTxn` — `dispatch` passes its single action's `payload`,
-// `dispatchBatch` passes the `actions` array. The two genuinely differ there
-// (the tick/schedule re-admission hooks destructure `payload` as one action's
-// payload), so the brace is extracted but the `payload` value stays per-caller.
-// Throws non-403 errors after rolling back; returns `{events}` on success or
-// `{granted:false, events:[]}` on a 403 mid-transaction.
-async function commitEvents(db, events, {
-  now, actionId, nextSeq, projectionConsumers, blobAdopter,
-  preProjectionAuthorize, postHandlerAuthorize, principal, effectsExecutor,
-  payload, postCommitConsumers,
-}) {
+// `dispatchBatch`: BEGIN IMMEDIATE → durable variant applyInTxn → COMMIT →
+// post-commit fan-out, with ROLLBACK on error and a graceful 403. A denial from
+// the admission seam is deliberate and returned as `{granted:false}`, not thrown.
+// The `payload` argument is the admission context each caller threads through:
+// `dispatch` passes its single action's `payload`, `dispatchBatch` passes the
+// `actions` array. The two genuinely differ there, so the brace is extracted but
+// the `payload` value stays per-caller. Throws non-403 errors after rolling back;
+// returns `{events}` on success or `{granted:false, events:[]}` on a 403 in-txn.
+async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline }) {
   db.exec('BEGIN IMMEDIATE');
   try {
-    const committed = await applyEventsToTxn(db, events, {
-      now, actionId, nextSeq, projectionConsumers, blobAdopter,
-      preProjectionAuthorize, postHandlerAuthorize, principal, effectsExecutor,
-      payload,
+    const committed = await pipeline.applyInTxn(db, events, {
+      now, actionId, nextSeq, principal, payload,
     });
     db.exec('COMMIT');
     // Post-commit fan-out (eng-review §D3). Consumers run AFTER commit — an
     // out-of-band effect (live WS fan-out, blob file finalize, job enqueue,
-    // webhook) cannot join the DB txn, so it runs here: independently durable
-    // and retried on its own, never rolling back the origin (AGENTS.md). A
-    // consumer error is caught — the commit stands, and a crashed effect is
-    // reconciled on its own pass (the reaper for blobs; a retry queue for jobs).
-    for (const consumer of postCommitConsumers) {
-      try {
-        await consumer(committed, { db, actionId });
-      } catch {
-        // a post-commit fan-out failure never undoes the committed dispatch
-      }
-    }
+    // webhook) cannot join the DB txn, so the named variant owns it here:
+    // independently durable and retried on its own, never rolling back origin.
+    await pipeline.afterCommit(committed, { db, actionId });
     return { granted: true, events: committed };
   } catch (err) {
     try { db.exec('ROLLBACK'); } catch { /* ignore */ }
-    // A 403 from the post-handler row-grant hook is a deliberate denial
-    // (spec #5) — return denied gracefully rather than throwing.
+    // A 403 from the in-txn admission seam is a deliberate denial (spec #5) —
+    // return denied gracefully rather than throwing.
     if (err.status === 403) {
       return { granted: false, events: [] };
     }
@@ -339,7 +322,7 @@ async function commitEvents(db, events, {
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
 // gate + grant engine compose — it is not a second, looser auth path.
-export function createServer({ handlers = {}, authorize, db, projections: projectionConsumers = [], preProjectionAuthorize, postHandlerAuthorize, blobAdopter, postCommitConsumers: postCommitConsumers = [], effects = null } = {}) {
+export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant() } = {}) {
   if (typeof authorize !== 'function') {
     throw new Error(
       `createServer requires an authorize function. There is no default — a ` +
@@ -348,15 +331,9 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
         `authorize: ({ type, payload, principal }) => boolean.`,
     );
   }
-
-  // Build effects executor if effects registry is provided — fires effects in-txn
-  // on committed CRUD events, re-entering through applyEventsToTxn.
-  const effectsExecutor = effects
-    ? (event, { now, actionId, depth, maxEffectDepth, db }) => {
-        const { executeEffectsForEvent } = _getEffectModule();
-        return executeEffectsForEvent(event, effects, { now, actionId, depth, maxDepth: maxEffectDepth, db });
-      }
-    : null;
+  if (db && pipeline?.name !== 'durable.mutation') {
+    throw new Error(`durable createServer requires the 'durable.mutation' pipeline variant.`);
+  }
 
   // ---- ephemeral path (no db) — synchronous, in-memory ----
   if (!db) {
@@ -470,9 +447,7 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
     // node:sqlite's DatabaseSync is single-writer; BEGIN/COMMIT serialize writes.
     const now = new Date().toISOString();
     const committed = await commitEvents(db, emitted, {
-      now, actionId, nextSeq, projectionConsumers, blobAdopter,
-      preProjectionAuthorize, postHandlerAuthorize, principal, effectsExecutor,
-      payload, postCommitConsumers,
+      now, actionId, nextSeq, principal, payload, pipeline,
     });
     if (!committed.granted) return committed;
     return { granted: true, deduped: false, events: committed.events };
@@ -484,7 +459,7 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
   // all-or-nothing: any authorize/handler/post-grant denial rolls back the
   // ENTIRE batch (a half-applied multi-entity mutation is exactly the split the
   // one-transaction guarantee forbids). This is the singular-system extension
-  // of `dispatch`: the same authorize→handler→applyEventsToTxn path, looped over
+  // of `dispatch`: the same authorize→handler→durable variant path, looped over
   // N actions but with ONE BEGIN/COMMIT bracketing the concatenated events — not
   // a second pipeline (AGENTS.md). Effects fire in-txn exactly as in `dispatch`.
   async function dispatchBatch({ actionId, actions = [], principal }) {
@@ -523,9 +498,7 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
 
     const now = new Date().toISOString();
     const committed = await commitEvents(db, allEmitted, {
-      now, actionId, nextSeq, projectionConsumers, blobAdopter,
-      preProjectionAuthorize, postHandlerAuthorize, principal, effectsExecutor,
-      payload: actions, postCommitConsumers,
+      now, actionId, nextSeq, principal, payload: actions, pipeline,
     });
     if (!committed.granted) return committed;
     return { granted: true, deduped: false, events: committed.events };

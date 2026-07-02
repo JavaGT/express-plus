@@ -1,6 +1,6 @@
 // Priority 4 — the writeQueue serializes concurrent in-flight mutations (D9,
 // eng-review spec #6). A durable dispatch holds BEGIN→…→COMMIT open across an
-// async `postHandlerAuthorize` (the in-txn create row-grant); without a
+// async afterProjection admission step (the in-txn create row-grant); without a
 // single-writer mutex, a second concurrent mutation would BEGIN on the open
 // connection → "cannot start a transaction within a transaction" → 500. With the
 // writeQueue, the second waits for the first to COMMIT, then proceeds. This is

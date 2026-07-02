@@ -6,7 +6,7 @@
 // them with BEHAVIORAL E2E (not structural `assert.ok`), proving:
 //   #2 — effect target events run under the EFFECT PRINCIPAL
 //        `principal({type:'system', attributes:{effect:<sourceEntity>}})`,
-//        NOT the triggering user. A postHandlerAuthorize spy records the
+//        NOT the triggering user. An afterProjection admission spy records the
 //        principal seen for the target's created event.
 //   #3 — the target's `admitsEffects` is CALLED at runtime; a deny throws 403 →
 //        rolls back the ORIGIN (in-txn atomic); an admit lets the effect apply.
@@ -23,7 +23,7 @@ import expressPlus, {
   principal, buildEffectsRegistry, validateEffects,
   generateDDL, generateFrameworkDDL, executeFrameworkDDL,
 } from '../src/index.mjs';
-import { createServer } from '../src/pipeline.mjs';
+import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 function setupDb() {
@@ -56,13 +56,18 @@ test('#2 effect target event is authorized under the effect principal, not the u
   const server = createServer({
     handlers: Source.crudHandlers,
     db,
-    projections: [Source.projection, Target.projection],
-    effects: buildEffectsRegistry([Source, Target]),
     authorize: () => true,
-    postHandlerAuthorize: async ({ entityName, verb, principal: p }) => {
-      recorded.push({ entityName, verb, type: p.type, effect: p.attributes?.effect, id: p.id });
-      return true;
-    },
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Source.projection, Target.projection],
+      effectsRegistry: buildEffectsRegistry([Source, Target]),
+      admission: {
+        beforeProjection: async () => true,
+        afterProjection: async ({ entityName, verb, principal: p }) => {
+          recorded.push({ entityName, verb, type: p.type, effect: p.attributes?.effect, id: p.id });
+          return true;
+        },
+      },
+    }),
   });
 
   await server.dispatch({
@@ -107,14 +112,19 @@ test('#2 target row-grant deny of effect principal rolls back origin (in-txn ato
   const server = createServer({
     handlers: Source.crudHandlers,
     db,
-    projections: [Source.projection, Target.projection],
-    effects: buildEffectsRegistry([Source, Target]),
     authorize: () => true,
-    // Deny ONLY the effect principal's create on Target — proves the effect
-    // event was presented to this hook under the effect principal (#2), and
-    // that the deny rolls back the ORIGIN (atomic, ADR #6).
-    postHandlerAuthorize: async ({ entityName, principal: p }) =>
-      !(entityName === 'Target' && p.type === 'system'),
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Source.projection, Target.projection],
+      effectsRegistry: buildEffectsRegistry([Source, Target]),
+      admission: {
+        beforeProjection: async () => true,
+        // Deny ONLY the effect principal's create on Target — proves the effect
+        // event was presented to this hook under the effect principal (#2), and
+        // that the deny rolls back the ORIGIN (atomic, ADR #6).
+        afterProjection: async ({ entityName, principal: p }) =>
+          !(entityName === 'Target' && p.type === 'system'),
+      },
+    }),
   });
 
   const result = await server.dispatch({
@@ -152,10 +162,12 @@ test('#3 admitsEffects deny rolls back origin', async () => {
   const server = createServer({
     handlers: Source.crudHandlers,
     db,
-    projections: [Source.projection, Target.projection],
-    effects: buildEffectsRegistry([Source, Target]),
     authorize: () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Source.projection, Target.projection],
+      effectsRegistry: buildEffectsRegistry([Source, Target]),
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   const result = await server.dispatch({
@@ -193,10 +205,12 @@ test('#3 admitsEffects admit applies the effect', async () => {
   const server = createServer({
     handlers: Source.crudHandlers,
     db,
-    projections: [Source.projection, Target.projection],
-    effects: buildEffectsRegistry([Source, Target]),
     authorize: () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Source.projection, Target.projection],
+      effectsRegistry: buildEffectsRegistry([Source, Target]),
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   await server.dispatch({

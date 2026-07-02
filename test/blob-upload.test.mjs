@@ -126,7 +126,7 @@ test('a create referencing a blob adopts + finalizes it in the dispatch commit',
 
 // NOTE: the rollback contract (a denied dispatch leaves the blob pending) is
 // covered by test/blob-atomicity.test.mjs, which exercises the kernel's
-// blobAdopter with a postHandlerAuthorize that denies. The HTTP app.kernel
-// (buildKernel) omits postHandlerAuthorize on the create path — a dispatched
+// blob adapter with afterProjection admission that denies. The HTTP app.kernel
+// (buildKernel) admits the create path through its own afterProjection seam — a dispatched
 // create always commits there — so that contract is not reachable via HTTP and
 // is not re-tested here.

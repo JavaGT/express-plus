@@ -6,7 +6,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
-import { createServer } from '../src/pipeline.mjs';
+import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { createBlobStore } from '../src/blob-store.mjs';
 import { executeFrameworkDDL } from '../src/ddl.mjs';
 
@@ -24,6 +24,16 @@ function blobAdopterFor(store, field) {
 // The post-commit blob-finalize consumer — mirrors what buildKernel registers for
 // a real app. finalize is a post-commit consumer now (the inline kernel call was
 // retired by the fan-out registry), so a fixture test must register it.
+function blobAdapterFor(adopter) {
+  return {
+    async adoptInTxn(txnDb, events) {
+      const ids = new Set();
+      for (const ev of events) for (const id of adopter.resolve(ev)) ids.add(id);
+      adopter.adopt(txnDb, [...ids]);
+    },
+  };
+}
+
 function blobFinalizeFor(adopter) {
   return async (events) => {
     const ids = new Set();
@@ -61,10 +71,12 @@ test('a denied dispatch rolls its blob adopt back — the blob stays pending', a
     handlers,
     authorize: () => true,
     db,
-    blobAdopter: adopter,
-    postCommitConsumers: [blobFinalizeFor(adopter)],
-    // The row-grant hook DENIES — the whole txn, including the blob adopt, rolls back.
-    postHandlerAuthorize: () => false,
+    pipeline: durableMutationVariant({
+      blobAdapter: blobAdapterFor(adopter),
+      postCommitConsumers: [blobFinalizeFor(adopter)],
+      // The row-grant admission DENIES — the whole txn, including the blob adopt, rolls back.
+      admission: { beforeProjection: () => true, afterProjection: () => false },
+    }),
   });
 
   const res = await kernel.dispatch({
@@ -90,9 +102,11 @@ test('a granted dispatch adopts + finalizes the blob in the same commit', async 
     handlers,
     authorize: () => true,
     db,
-    blobAdopter: adopter,
-    postCommitConsumers: [blobFinalizeFor(adopter)],
-    postHandlerAuthorize: () => true,
+    pipeline: durableMutationVariant({
+      blobAdapter: blobAdapterFor(adopter),
+      postCommitConsumers: [blobFinalizeFor(adopter)],
+      admission: { beforeProjection: () => true, afterProjection: () => true },
+    }),
   });
 
   const res = await kernel.dispatch({

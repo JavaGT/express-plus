@@ -2,7 +2,7 @@
 // #19/#23). A map `.set(member, {role})` is a committed pipeline ACTION: it
 // re-enters dispatch as `<Entity>.<field>.add` (a fresh txn) → emits `:added` →
 // the general P6b effect compiler fires the declared `[collaborators.onAdded]`
-// effect → the effect re-enters applyEventsToTxn recursively as `Inbox.created`
+// effect → the effect re-enters the durable variant recursively as `Inbox.created`
 // (effect principal, JOINS the .add txn) → the Inbox row is created atomic with
 // the add. The fireMapEffects side path + the direct mutate.create call are
 // RETIRED — the general mechanism fires off the store event (one reconciliation
@@ -16,7 +16,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   entity, text, ref, map, grant, read, write, subscribe, generateDDL,
-  createServer, principal, executeFrameworkDDL, buildEffectsRegistry,
+  createServer, durableMutationVariant, principal, executeFrameworkDDL, buildEffectsRegistry,
 } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -59,10 +59,15 @@ async function makeServer(db, postAuth) {
   return createServer({
     db,
     handlers: Doc.crudHandlers,
-    projections: [Doc.projection, Inbox.projection],
-    effects: buildEffectsRegistry([Doc, Inbox]),
     authorize: async () => true,
-    postHandlerAuthorize: postAuth ?? (async () => true),
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Doc.projection, Inbox.projection],
+      effectsRegistry: buildEffectsRegistry([Doc, Inbox]),
+      admission: {
+        beforeProjection: async () => true,
+        afterProjection: postAuth ?? (async () => true),
+      },
+    }),
   });
 }
 
@@ -70,8 +75,8 @@ test('map .set on a NEW member fires onAdded as the effect principal, creating t
   const db = setup();
   // Spy: capture every principal seen for an Inbox.created event. The OLD
   // fireMapEffects path calls Inbox.create DIRECTLY (no dispatch), so the spy
-  // would see NO Inbox.created event. The new compiler path re-enters
-  // applyEventsToTxn as Inbox.created under the EFFECT principal.
+  // would see NO Inbox.created event. The new compiler path re-enters the
+  // durable variant as Inbox.created under the EFFECT principal.
   const inboxCreatedPrincipals = [];
   const server = await makeServer(db, async (auth) => {
     if (auth.eventType === 'Inbox.created') inboxCreatedPrincipals.push(auth.event._effectPrincipal);

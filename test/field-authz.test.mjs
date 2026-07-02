@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { executeDDL, User, Inbox, createServer, executeFrameworkDDL } from '../src/index.mjs';
+import expressPlus, { executeDDL, User, Inbox, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/index.mjs';
 import { Doc } from '../doc.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -170,9 +170,11 @@ test('Trusted query API (no principal) bypasses field authz (mechanics)', async 
   const server = await createServer({
     db,
     handlers: Doc.crudHandlers,
-    projections: [Doc.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Doc.projection],
+      admission: { beforeProjection: () => true, afterProjection: async () => true },
+    }),
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
   });
   t.after(() => db.close());
 

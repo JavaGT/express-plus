@@ -24,7 +24,7 @@ import {
   text,
   list,
   generateDDL,
-  createServer,
+  createServer, durableMutationVariant,
   executeFrameworkDDL,
 } from '../src/index.mjs';
 
@@ -42,9 +42,11 @@ async function setup() {
   const server = await createServer({
     db,
     handlers: Items.crudHandlers,
-    projections: [Items.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Items.projection],
+      admission: { beforeProjection: () => true, afterProjection: async () => true },
+    }),
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
   });
   return { db, server };
 }

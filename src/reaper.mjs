@@ -1,8 +1,8 @@
 // Schedule reaper — per-interval discovery of due schedule.at/schedule.after
 // rows + dispatch under scheduler system principals. A CLOCK TRIGGER, not an
 // authority (DECISIONLOG #19, #62). Mirrors startTickEngine. ONE reconciliation
-// path — preProjectionAuthorize re-admits in-txn (TOCTOU-safe; stale candidates
-// deny as normal skips, zero footprint).
+// path — the durable variant's admission.beforeProjection seam re-admits in-txn
+// (TOCTOU-safe; stale candidates deny as normal skips, zero footprint).
 //
 // Each dispatch try/catch mirrors the tick engine's per-iteration pattern: a
 // single row's deny/throw logs to stderr and CONTINUES the sweep — never aborts

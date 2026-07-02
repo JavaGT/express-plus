@@ -13,8 +13,8 @@ import { admitSystemMutation } from '../src/schedule.mjs';
 // and dispatch) and admits ONLY the payload derived from the declared `with`.
 // A scheduler principal may NEVER send an arbitrary payload (else "due" =
 // "system write-anything"). Fail-closed on every mismatch. This is a SIBLING to
-// postHandlerAuthorize's in-txn create row-grant — NOT a widened admitsEffects,
-// NOT a second auth path (same dispatch spine, branch on principal kind).
+// the durable variant's afterProjection create row-grant — NOT a widened
+// admitsEffects, NOT a second auth path (same dispatch spine, branch on principal kind).
 
 function setupEntity(now) {
   const db = new DatabaseSync(':memory:');
@@ -205,9 +205,9 @@ test('admitSystemMutation: schedule.after due = row.field + delay <= now', () =>
 
 // ============================================================
 // END-TO-END: the wired dispatch spine admits / denies a scheduler principal
-// (Option A — postHandlerAuthorize branches to admitSystemMutation).
+// through the durable variant's beforeProjection admission seam.
 // ============================================================
-import { createServer } from '../src/pipeline.mjs';
+import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
 
 function setupAppServer() {
@@ -227,24 +227,28 @@ function setupAppServer() {
   });
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.exec('CREATE TABLE _Cursor (scope TEXT PRIMARY KEY, lastSeq INTEGER)');
-  // The real serve.mjs hook (mirrored here): scheduler branch → admitSystemMutation.
-  // The real serve.mjs hook (mirrored here): scheduler admission runs in the
-  // PRE-projection phase so admitSystemMutation re-checks due/while/with
+  // The production durable variant seam (mirrored here): scheduler admission
+  // runs before projection so admitSystemMutation re-checks due/while/with
   // against the row as it stood at discovery — NOT after this dispatch's own
   // projection has applied the payload. On denial it throws 403 with zero
   // footprint (no _Log row, no projection write).
   const server = createServer({
     handlers: Blog.crudHandlers,
     db,
-    projections: [Blog.projection],
     authorize: () => true,
-    preProjectionAuthorize: async ({ entityName, verb, principal: p, event, payload, db: hookDb, now }) => {
-      if (p?.type !== 'system' || !p.attributes?.source) return true;
-      return admitSystemMutation({
-        entity: Blog, verb, rowId: event?.data?.id,
-        payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
-      });
-    },
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Blog.projection],
+      admission: {
+        beforeProjection: async ({ entityName, verb, principal: p, event, payload, db: hookDb, now }) => {
+          if (p?.type !== 'system' || !p.attributes?.source) return true;
+          return admitSystemMutation({
+            entity: Blog, verb, rowId: event?.data?.id,
+            payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
+          });
+        },
+        afterProjection: async () => true,
+      },
+    }),
   });
   return { db, Blog, server };
 }

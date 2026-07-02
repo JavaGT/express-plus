@@ -256,7 +256,7 @@ function resolveManyMembers(effect, { originId, sourceEntityName, db, overFieldN
 // Returns array of target events to apply through the in-txn path. Each target
 // event carries its EFFECT PRINCIPAL (gap #2: effects run as
 // `principal({type:'system', attributes:{effect:<sourceEntityName>}})`, NOT the
-// triggering user) so the recursive applyEventsToTxn authorizes the target event
+// triggering user) so the recursive durable variant authorizes the target event
 // against the effect principal. The target's `admitsEffects` is the RUNTIME
 // admission gate (gap #3): a deny throws 403 → rolls back the origin (in-txn
 // atomic, ADR #6/#22).
@@ -374,7 +374,7 @@ function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName, 
 }
 
 // Execute effects for a committed event.
-// Returns an array of target events to apply (not yet applied - caller does that via applyEventsToTxn).
+// Returns an array of target events to apply through the caller's durable variant.
 // depth/maxDepth: recursion tracking to cap runaway chains (ADR #22 runtime backstop).
 // db: the in-txn database handle for RMW reads (P6c-C).
 export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, depth = 0, maxDepth = 8, db }) {

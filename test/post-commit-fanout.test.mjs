@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-import { createServer } from '../src/pipeline.mjs';
+import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { executeFrameworkDDL } from '../src/ddl.mjs';
 
 // A minimal durable kernel: a Note projection (events → rows) + CRUD handlers
@@ -68,14 +68,16 @@ test('a registered post-commit consumer receives committed events after dispatch
 
   const kernel = createServer({
     handlers,
-    projections,
     authorize: () => true,
     db,
-    postCommitConsumers: [
-      (events, ctx) => {
-        for (const ev of events) seen.push({ type: ev.type, seq: ev.seq, actionId: ctx.actionId });
-      },
-    ],
+    pipeline: durableMutationVariant({
+      projectionConsumers: projections,
+      postCommitConsumers: [
+        (events, ctx) => {
+          for (const ev of events) seen.push({ type: ev.type, seq: ev.seq, actionId: ctx.actionId });
+        },
+      ],
+    }),
   });
 
   const actionId = randomUUID();
@@ -100,10 +102,12 @@ test('a deduped dispatch does not re-fire post-commit consumers (the commit is t
 
   const kernel = createServer({
     handlers,
-    projections,
     authorize: () => true,
     db,
-    postCommitConsumers: [() => { count += 1; }],
+    pipeline: durableMutationVariant({
+      projectionConsumers: projections,
+      postCommitConsumers: [() => { count += 1; }],
+    }),
   });
 
   const actionId = randomUUID();
@@ -130,13 +134,15 @@ test('a throwing post-commit consumer does not roll back the commit or block lat
 
   const kernel = createServer({
     handlers,
-    projections,
     authorize: () => true,
     db,
-    postCommitConsumers: [
-      () => { throw new Error('boom'); },        // first consumer throws
-      (events) => { seen.push(events.length); }, // second consumer still runs
-    ],
+    pipeline: durableMutationVariant({
+      projectionConsumers: projections,
+      postCommitConsumers: [
+        () => { throw new Error('boom'); },        // first consumer throws
+        (events) => { seen.push(events.length); }, // second consumer still runs
+      ],
+    }),
   });
 
   const result = await kernel.dispatch({

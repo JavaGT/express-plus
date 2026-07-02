@@ -1,13 +1,13 @@
 // ADR #24 — the `now` token resolves at COMMIT, never by the handler calling
 // `new Date()`. A handler emits the framework NOW token where it wants a
-// timestamp; applyEventsToTxn substitutes the commit-time ISO for every
+// timestamp; the durable variant substitutes the commit-time ISO for every
 // occurrence (deep walk of event data) before the row hits _Log. The token
 // itself never reaches the log — handlers stay pure of the clock (consult #24).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { createServer, NOW, principal, executeFrameworkDDL } from '../src/index.mjs';
+import { createServer, durableMutationVariant, NOW, principal, executeFrameworkDDL } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
@@ -24,7 +24,9 @@ test('now-token: a handler-emitted NOW resolves to the commit-time ISO in event 
   const server = createServer({
     db,
     authorize: () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      admission: { beforeProjection: () => true, afterProjection: async () => true },
+    }),
     handlers: {
       'Stamped.create': ({ payload }) => [{
         type: 'Stamped.created',
@@ -60,7 +62,9 @@ test('now-token: a NOW nested in an array + object resolves at every level', asy
   const server = createServer({
     db,
     authorize: () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      admission: { beforeProjection: () => true, afterProjection: async () => true },
+    }),
     handlers: {
       'Audit.create': ({ payload }) => [{
         type: 'Audit.created',

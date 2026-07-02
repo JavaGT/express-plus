@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   entity, text, ref, map, number, grant, read, write, subscribe,
   generateDDL, generateFrameworkDDL, executeFrameworkDDL,
-  principal, inc, dec, self, many, effect, action, event, createServer,
+  principal, inc, dec, self, many, effect, action, event, createServer, durableMutationVariant,
   createEffectContext, checkEffectDepth,
   buildEffectsRegistry, detectCrossEntityCycles, validateEffects,
 } from '../src/index.mjs';
@@ -50,10 +50,12 @@ test('CRUD-trigger effect: Note.created → creates one Counter row', async () =
   const server = createServer({
     handlers: Note.crudHandlers,
     db,
-    projections: [Note.projection, Counter.projection],
-    effects: registry,
     authorize: () => true, // Allow all for test
-    postHandlerAuthorize: async () => true, // Allow all for test
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Note.projection, Counter.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Dispatch a create through the pipeline (not direct entity.create).
@@ -98,10 +100,12 @@ test('effect with set operator: with: { title: "x" }', async () => {
   const server = createServer({
     handlers: Source.crudHandlers,
     db,
-    projections: [Source.projection, Target.projection],
-    effects: registry,
     authorize: () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Source.projection, Target.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Dispatch a create through the pipeline
@@ -314,10 +318,12 @@ test('self inc: emits :updated with read-modify-write (seed=5, inc(2) → 7)', a
   const server = createServer({
     handlers: Counter.crudHandlers,
     db,
-    projections: [Counter.projection],
-    effects: registry,
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Counter.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Create with count=5, self-effect inc(2) reads 5 and adds 2 → 7
@@ -353,10 +359,12 @@ test('self dec: emits :updated with read-modify-write (seed=10, dec(3) → 7)', 
   const server = createServer({
     handlers: Counter.crudHandlers,
     db,
-    projections: [Counter.projection],
-    effects: registry,
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Counter.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Create with count=10, self-effect dec(3) reads 10 and subtracts 3 → 7
@@ -398,10 +406,12 @@ test('inc-on-create (non-self): degenerate literal (0+4=4), emits :created', asy
   const server = createServer({
     handlers: Source.crudHandlers,
     db,
-    projections: [Source.projection, Target.projection],
-    effects: registry,
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Source.projection, Target.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Create source (triggers Target creation with inc(4))
@@ -440,10 +450,12 @@ test('depth cap: self-recursion bounded (Counter.updated → Counter.updated)', 
   const server = createServer({
     handlers: Counter.crudHandlers,
     db,
-    projections: [Counter.projection],
-    effects: registry,
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Counter.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Seed a row
@@ -504,10 +516,12 @@ test('db threaded through effects executor: RMW read uses in-txn db handle', asy
   const server = createServer({
     handlers: Counter.crudHandlers,
     db,
-    projections: [Counter.projection],
-    effects: registry,
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Counter.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Create with count=50. Self-effect reads 50, inc(100) → 150.
@@ -571,10 +585,12 @@ test('many fan-out: creates N target rows (one per collection member at trigger 
   const server = createServer({
     handlers: User.crudHandlers,
     db,
-    projections: [User.projection, Inbox.projection],
-    effects: registry,
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [User.projection, Inbox.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Create 2 collaborator users first
@@ -674,10 +690,12 @@ test('many fan-out: create-only (no dedup, two origins each add member → separ
   const server = createServer({
     handlers: User.crudHandlers,
     db,
-    projections: [User.projection, Inbox.projection],
-    effects: registry,
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [User.projection, Inbox.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Create collaborator
@@ -785,10 +803,12 @@ test('Fan-IN: anyOf(Source.created, Source.updated) fires on EITHER event', asyn
   const server = createServer({
     handlers: Source.crudHandlers,
     db,
-    projections: [Source.projection, Target.projection],
-    effects: registry,
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Source.projection, Target.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Create source - fires anyOf on .created
@@ -881,10 +901,12 @@ test('Dedupe: anyOf(X.created, X.created) registers effect ONCE', async () => {
   const server = createServer({
     handlers: Source.crudHandlers,
     db,
-    projections: [Source.projection, Target.projection],
-    effects: registry,
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Source.projection, Target.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   await server.dispatch({
@@ -919,10 +941,12 @@ test('Self-recursion depth cap: anyOf effect with self-mutate bounded by maxDept
   const server = createServer({
     handlers: Counter.crudHandlers,
     db,
-    projections: [Counter.projection],
-    effects: registry,
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Counter.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
   });
 
   // Seed a row

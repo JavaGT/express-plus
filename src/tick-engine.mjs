@@ -3,9 +3,9 @@
 // A tick engine is a CLOCK TRIGGER, not an authority (DECISIONLOG #19). Each
 // interval it calls `discoverTickedRows` to find rows whose `while` predicate
 // still holds, then dispatches `update` under a system principal whose `source`
-// is `${entityName}.${verb}`. The dispatch spine routes this through
-// `preProjectionAuthorize` → `admitSystemMutation` (not the engine itself
-// admitting). ONE reconciliation path — no second auth path.
+// is `${entityName}.${verb}`. The dispatch spine routes this through the durable
+// variant's admission.beforeProjection seam (not the engine itself admitting).
+// ONE reconciliation path — no second auth path.
 //
 // Each dispatch try/catch mirrors the reaper's per-iteration pattern: a single
 // row's deny/throw logs to stderr and CONTINUES the sweep — never aborts it.

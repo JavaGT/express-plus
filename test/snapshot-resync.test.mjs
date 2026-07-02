@@ -218,8 +218,8 @@ test('snapshot row + cursor are read atomically — no split pair across the aut
       scope(({ is }) => is.owner()).can(async ({ is }) => {
         // Park only on the FIRST .can call (the snapshot read). The commit below
         // rides on the write path, whose dispatch auth is `authorize: () => true`
-        // (the in-txn postHandlerAuthorize does not re-enter this `.can`), so it
-        // is not blocked by this gate.
+        // (the in-txn afterProjection admission does not re-enter this `.can`),
+        // so it is not blocked by this gate.
         if (parkOnce) {
           parkOnce = false;
           await new Promise((r) => { releaseRead = r; });

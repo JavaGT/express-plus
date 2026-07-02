@@ -23,7 +23,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   entity, log, ref, text, scope, everyone, grant, read,
-  createServer, principal, executeFrameworkDDL, generateDDL,
+  createServer, durableMutationVariant, principal, executeFrameworkDDL, generateDDL,
 } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -106,9 +106,11 @@ async function makeServer(db) {
   return createServer({
     db,
     handlers: DocLogB.crudHandlers,
-    projections: [DocLogB.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [DocLogB.projection],
+      admission: { beforeProjection: () => true, afterProjection: async () => true },
+    }),
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
   });
 }
 
