@@ -1159,8 +1159,7 @@ function buildKernel(app) {
     if (blobFields.size > 0) {
       blobAdopter = {
         resolve(ev) {
-          const dot = ev.type.indexOf('.');
-          const entityName = dot >= 0 ? ev.type.slice(0, dot) : '';
+          const entityName = ev.handle?.brand === 'event-handle' ? ev.handle.entity : (() => { const dot = ev.type.indexOf('.'); return dot >= 0 ? ev.type.slice(0, dot) : ''; })();
           const fields = blobFields.get(entityName) ?? [];
           const ids = [];
           for (const fName of fields) {

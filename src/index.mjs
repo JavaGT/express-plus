@@ -18,6 +18,7 @@ export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope } fr
 export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectSource } from './principal.mjs';
 export { requireUser, allowAnonymous, open, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient, NOW } from './pipeline.mjs';
+export { EventKind, created, updated, removed, fieldSet, native, parseEventType, lifecycleVerb } from './event-handle.mjs';
 export { createLiveServer } from './live.mjs';
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
 export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views.mjs';
