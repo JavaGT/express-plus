@@ -83,23 +83,6 @@ function ephemeralTableDDL(entity, name) {
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
-// Generate side-table DDL for ordered (list) fields. Each element has a stable
-// `id` (identity) + a fractional `key` (sort position) + an `item` JSON cell.
-// Order is derived by ORDER BY key (not an array shift), so a between-insert or
-// a move re-keys only the affected row — siblings keep their keys (no renumber).
-function orderedTableDDL(entity, name) {
-  const tableName = `${entity.name}_${name}`;
-  const ownerCol = `${entity.name}_id`;
-  const cols = [
-    `${ownerCol} TEXT NOT NULL`,
-    'id TEXT NOT NULL',
-    'key REAL NOT NULL',
-    'item TEXT',
-    `PRIMARY KEY (${ownerCol}, id)`,
-  ];
-  return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
-}
-
 // Generate a complete, ordered sequence of CREATE TABLE statements for one
 // compiled entity: the main table, then each side-table.
 export function generateDDL(entity) {
@@ -120,7 +103,8 @@ export function generateDDL(entity) {
     } else if (descriptor.kind === 'ephemeral') {
       statements.push(ephemeralTableDDL(entity, name));
     } else if (descriptor.kind === 'ordered') {
-      statements.push(orderedTableDDL(entity, name));
+      const orderedDDL = sideTableDDL(entity, name, descriptor);
+      if (orderedDDL) statements.push(orderedDDL);
     }
   }
 

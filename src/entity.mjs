@@ -391,14 +391,9 @@ export function entity(name, declaration = {}) {
   // the storage shape (doc.mjs reads entity.linkShare.tier).
   const structFields = Object.entries(fields).filter(([, d]) => d.kind === 'struct');
   // Side-table strategies concentrate a field kind's handle, mutate handlers,
-  // projection apply, event types, and DDL behind one resolved table. Map is the
-  // first migrated kind; ordered/log/ephemeral remain inline until their slices.
+  // projection apply, event types, and DDL behind one resolved table. Map and
+  // ordered are migrated; log/ephemeral remain inline until their slices.
   const sideTableStrategyEntries = collectSideTableStrategies(fields);
-  // ordered (list) fields hydrate from a fractional-index side-table into a write
-  // handle exposing .insertAt/.move/.reorder/.remove/.toArray. Like map, the main
-  // table has no column for them — they live entirely in the <Entity>_<field>
-  // side-table (ddl.mjs orderedTableDDL), ordered by a fractional REAL `key`.
-  const orderedFields = Object.entries(fields).filter(([, d]) => d.kind === 'ordered');
   // ephemeral (non-persisting) fields hydrate a per-connection write handle exposing
   // .set(cells). Like map/ordered/log, the main table has no column for them — they
   // live entirely in the <Entity>_<field> side-table keyed ({Entity}_id, client_id)
@@ -418,113 +413,6 @@ export function entity(name, declaration = {}) {
   // projection writes the side-table. The handle needs a `dispatch` ref to
   // re-enter; without one it throws (fail closed, no silent direct-SQL fallback).
   const logFields = Object.entries(fields).filter(([, d]) => d.kind === 'store' && d.type === 'log');
-
-  // makeOrderedListHandle(entityName, fieldName, row, principal, dispatch) —
-  // returns a write handle for an `ordered`/`list` field over a fractional-index
-  // side-table (owner, id, key, item). Order is derived by ORDER BY key, so a
-  // between-insert or a move re-keys ONLY the affected row — siblings keep their
-  // keys (no renumber, the hallmark of fractional indexing). `insertAt` mints a
-  // stable `id` (returned to the caller) + a fractional key between the
-  // neighbor keys; `move(id, i)` re-keys the one element; `reorder([ids])`
-  // re-keys the lot to an evenly-spaced sequence (sugar over move). The element
-  // value is stored as a JSON `item` cell (A2: scalar items; FK hydration of a
-  // ref `of` is a later refinement).
-  // Mutations re-enter dispatch as `<Entity>.<field>.insert`/`.move`/`.reorder`/
-  // `.remove`; the projection applies the event to the side-table (one
-  // reconciliation path — no direct writes from the handle).
-  const makeOrderedListHandle = (entityName, fieldName, row, principal, dispatch) => {
-    const table = membershipTable(entityName, fieldName);
-    const ownerCol = membershipOwnerCol(entityName);
-    const oid = String(row.id);
-
-    const rowsOrdered = () =>
-      getActiveDb()
-        .prepare(`SELECT id, key, item FROM ${table} WHERE ${ownerCol} = :owner ORDER BY key`)
-        .all({ owner: oid });
-
-    // Mint a fractional key between two neighbor keys (or before-first /
-    // after-last when a side is absent). Float keys are bounded-but-sufficient
-    // for A2 (production-grade string fractional indexing avoids float-precision
-    // limits after ~52 levels; the contract + no-renumber semantics are what ship).
-    const keyBetween = (low, high) => {
-      if (low == null && high == null) return 0;
-      if (low == null) return high - 1;
-      if (high == null) return low + 1;
-      return (low + high) / 2;
-    };
-
-    return {
-      insertAt: async (index, value) => {
-        await authorizeFieldOp(record, fieldName, write, row, principal);
-        const rows = rowsOrdered();
-        const low = index > 0 ? rows[index - 1].key : null;
-        const high = index < rows.length ? rows[index].key : null;
-        const key = keyBetween(low, high);
-        requireFieldDispatch(entityName, fieldName, dispatch);
-        const result = await dispatch({
-          actionId: randomUUID(),
-          type: `${entityName}.${fieldName}.insert`,
-          payload: { owner: oid, key, value },
-          principal,
-        });
-        if (!result.granted) throw { status: 403, message: 'forbidden' };
-        return result.events?.find((e) => e.type === `${entityName}.${fieldName}.inserted`)?.data?.id;
-      },
-      move: async (id, index) => {
-        await authorizeFieldOp(record, fieldName, write, row, principal);
-        const sid = String(id);
-        const others = rowsOrdered().filter((r) => r.id !== sid);
-        const low = index > 0 ? others[index - 1].key : null;
-        const high = index < others.length ? others[index].key : null;
-        const key = keyBetween(low, high);
-        requireFieldDispatch(entityName, fieldName, dispatch);
-        const result = await dispatch({
-          actionId: randomUUID(),
-          type: `${entityName}.${fieldName}.move`,
-          payload: { owner: oid, id: sid, key },
-          principal,
-        });
-        if (!result.granted) throw { status: 403, message: 'forbidden' };
-      },
-      reorder: async (ids) => {
-        await authorizeFieldOp(record, fieldName, write, row, principal);
-        const entries = ids.map((entryId, i) => ({ id: String(entryId), key: i }));
-        requireFieldDispatch(entityName, fieldName, dispatch);
-        const result = await dispatch({
-          actionId: randomUUID(),
-          type: `${entityName}.${fieldName}.reorder`,
-          payload: { owner: oid, entries },
-          principal,
-        });
-        if (!result.granted) throw { status: 403, message: 'forbidden' };
-      },
-      remove: async (id) => {
-        await authorizeFieldOp(record, fieldName, write, row, principal);
-        requireFieldDispatch(entityName, fieldName, dispatch);
-        const result = await dispatch({
-          actionId: randomUUID(),
-          type: `${entityName}.${fieldName}.remove`,
-          payload: { owner: oid, id: String(id) },
-          principal,
-        });
-        if (!result.granted) throw { status: 403, message: 'forbidden' };
-      },
-      has: (id) =>
-        getActiveDb()
-          .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND id = :id`)
-          .get({ owner: oid, id: String(id) }) !== undefined,
-      get: (id) => {
-        const r = getActiveDb()
-          .prepare(`SELECT item FROM ${table} WHERE ${ownerCol} = :owner AND id = :id`)
-          .get({ owner: oid, id: String(id) });
-        return r ? JSON.parse(r.item) : undefined;
-      },
-      toArray: async () => {
-        await authorizeFieldOp(record, fieldName, read, row, principal);
-        return rowsOrdered().map((r) => JSON.parse(r.item));
-      },
-    };
-  };
 
   // makeLogHandle(entityName, fieldName, row, principal, dispatch) — returns a
   // write handle for a `store/log` field. An `.append(entry)` RE-ENTERS dispatch
@@ -637,9 +525,6 @@ export function entity(name, declaration = {}) {
       for (const [fieldName, descriptor] of strategyFields) {
         row[fieldName] = strategy.handle({ record, entityName: name, fieldName, descriptor, row, principal, dispatch });
       }
-    }
-    for (const [fieldName] of orderedFields) {
-      row[fieldName] = makeOrderedListHandle(name, fieldName, row, principal, dispatch);
     }
     for (const [fieldName] of logFields) {
       row[fieldName] = makeLogHandle(name, fieldName, row, principal, dispatch);
@@ -833,13 +718,6 @@ export function entity(name, declaration = {}) {
       ...logFields.map(([fieldName]) => eventHandle.native(name, fieldName, 'appended').type),
       ...sideTableStrategyEntries.flatMap(({ strategy, fields: strategyFields }) =>
         strategy.eventTypes(name, strategyFields)),
-      // each ordered field's store events → side-table INSERT/UPDATE/DELETE
-      ...orderedFields.flatMap(([fieldName]) => [
-        eventHandle.native(name, fieldName, 'inserted').type,
-        eventHandle.native(name, fieldName, 'moved').type,
-        eventHandle.native(name, fieldName, 'reordered').type,
-        eventHandle.native(name, fieldName, 'removed').type,
-      ]),
       // each ephemeral field's per-connection .set → side-table upsert (P6e-1a).
       ...ephemeralFields.map(([fieldName]) => eventHandle.fieldSet(name, fieldName).type),
     ],
@@ -849,36 +727,6 @@ export function entity(name, declaration = {}) {
       if (handle?.brand !== 'event-handle' || handle.entity !== name) return;
       for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
         if (strategy.projectionApply({ entityName: name, fieldEntries: strategyFields, handle, event, db })) return;
-      }
-      // ordered field events: each ordered field's store events → side-table
-      // INSERT/UPDATE/DELETE. The handle computes fractional keys and dispatches;
-      // the projection applies the event to the side-table (one reconciliation path).
-      for (const [ordField] of orderedFields) {
-        if (handle.field !== ordField || handle.kind !== eventHandle.EventKind.native) continue;
-        const sideTable = membershipTable(name, ordField);
-        const ownerCol = membershipOwnerCol(name);
-        if (handle.nativeName === 'inserted') {
-          db.prepare(`INSERT INTO ${sideTable} (${ownerCol}, id, key, item) VALUES (:owner, :id, :key, :item)`)
-            .run({ owner: String(event.data?.owner), id: event.data?.id, key: event.data?.key, item: JSON.stringify(event.data?.value) });
-          return;
-        }
-        if (handle.nativeName === 'moved') {
-          db.prepare(`UPDATE ${sideTable} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`)
-            .run({ owner: String(event.data?.owner), id: event.data?.id, key: event.data?.key });
-          return;
-        }
-        if (handle.nativeName === 'reordered') {
-          const stmt = db.prepare(`UPDATE ${sideTable} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`);
-          for (const e of (event.data?.entries ?? [])) {
-            stmt.run({ owner: String(event.data?.owner), id: e.id, key: e.key });
-          }
-          return;
-        }
-        if (handle.nativeName === 'removed') {
-          db.prepare(`DELETE FROM ${sideTable} WHERE ${ownerCol} = :owner AND id = :id`)
-            .run({ owner: String(event.data?.owner), id: event.data?.id });
-          return;
-        }
       }
       // ephemeral per-connection .set → upsert the latest cells snapshot for the
       // writing client_id (P6e-1a: latest snapshot wins — P6e-1b's pace will retire
@@ -1080,11 +928,6 @@ export function entity(name, declaration = {}) {
     ...appendLogHandlers(name, fields, logFields),
     ...Object.assign({}, ...sideTableStrategyEntries.map(({ strategy, fields: strategyFields }) =>
       strategy.mutateHandlers(name, strategyFields))),
-    // ordered mutations: `<Entity>.<field>.insert`/`.move`/`.reorder`/`.remove` →
-    // emit `:inserted`/`:moved`/`:reordered`/`:removed`. The handle computes the
-    // fractional key(s) and dispatches the action; the handler validates payload
-    // (fail closed) and emits (consult #19, UNIT 3).
-    ...orderedMutateHandlers(name, fields, orderedFields),
     // ephemeral mutations: `<Entity>.<field>.set` → emit `<Entity>.<field>.set`
     // (per-connection cells snapshot). The handle has already resolved client_id
     // + done the write-grant check; the handler trusts that + emits (P6e-1a).
@@ -1128,79 +971,6 @@ export function entity(name, declaration = {}) {
           type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, id, ...entry },
-        }];
-      };
-    }
-    return handlers;
-  }
-
-  // Ordered field mutation handlers. An ordered `.insertAt`/`.move`/`.reorder`/
-  // `.remove` is a committed pipeline action (consult #19, UNIT 3): the handle
-  // computes the key (fractional-index math) and dispatches
-  // `${entityName}.${field}.insert`/`.move`/`.reorder`/`.remove`. The handler
-  // validates payload (fail closed) and emits the corresponding `:inserted`/
-  // `:moved`/`:reordered`/`:removed` event; the projection applies the event to
-  // the side-table. Spread into crudHandlers so a dispatched ordered action
-  // lands in one handler map alongside create/update/remove/log-append/map.
-  function orderedMutateHandlers(entityName, fields, orderedFieldEntries) {
-    const handlers = {};
-    for (const [ordField] of orderedFieldEntries) {
-      const requireOwner = (payload) => {
-        const { owner } = payload ?? {};
-        if (owner == null) {
-          throw Object.assign(new Error(`${entityName}.${ordField} action requires an owner`), { status: 400 });
-        }
-        return String(owner);
-      };
-      handlers[`${entityName}.${ordField}.insert`] = ({ payload }) => {
-        const owner = requireOwner(payload);
-        if (payload.key == null) {
-          throw Object.assign(new Error(`${entityName}.${ordField}.insert requires a key`), { status: 400 });
-        }
-        const id = randomUUID();
-        const handle = eventHandle.native(entityName, ordField, 'inserted');
-        return [{
-          handle,
-          type: handle.type,
-          scope: `${entityName}:${owner}`,
-          data: { owner, id, key: payload.key, value: payload.value },
-        }];
-      };
-      handlers[`${entityName}.${ordField}.move`] = ({ payload }) => {
-        const owner = requireOwner(payload);
-        if (payload.id == null || payload.key == null) {
-          throw Object.assign(new Error(`${entityName}.${ordField}.move requires an id + key`), { status: 400 });
-        }
-        const handle = eventHandle.native(entityName, ordField, 'moved');
-        return [{
-          handle,
-          type: handle.type,
-          scope: `${entityName}:${owner}`,
-          data: { owner, id: String(payload.id), key: payload.key },
-        }];
-      };
-      handlers[`${entityName}.${ordField}.reorder`] = ({ payload }) => {
-        const owner = requireOwner(payload);
-        const entries = Array.isArray(payload.entries) ? payload.entries : [];
-        const handle = eventHandle.native(entityName, ordField, 'reordered');
-        return [{
-          handle,
-          type: handle.type,
-          scope: `${entityName}:${owner}`,
-          data: { owner, entries: entries.map((e) => ({ id: String(e.id), key: e.key })) },
-        }];
-      };
-      handlers[`${entityName}.${ordField}.remove`] = ({ payload }) => {
-        const owner = requireOwner(payload);
-        if (payload.id == null) {
-          throw Object.assign(new Error(`${entityName}.${ordField}.remove requires an id`), { status: 400 });
-        }
-        const handle = eventHandle.native(entityName, ordField, 'removed');
-        return [{
-          handle,
-          type: handle.type,
-          scope: `${entityName}:${owner}`,
-          data: { owner, id: String(payload.id) },
         }];
       };
     }
