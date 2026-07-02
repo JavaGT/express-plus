@@ -729,7 +729,6 @@ test('compute counter advances with each successful compute, survives across eve
   app2.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app2.ready;
 
-  db.exec('CREATE TABLE PostWithFail (id TEXT, title TEXT, score REAL, hotRank TEXT)');
   const origin2 = `http://127.0.0.1:${app2.httpServer.address().port}`;
   await fetch(`${origin2}/failposts`, {
     method: 'POST',

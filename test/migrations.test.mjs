@@ -110,18 +110,42 @@ test('migrations: run in version order regardless of declaration order', () => {
   db.close();
 });
 
-test('migrations: wired through app.ddl() at startup (pre-traffic)', async () => {
+test('migrations: wired through app.ready at startup (pre-traffic)', async (t) => {
   const db = new DatabaseSync(':memory:');
   const Note = entity('Note', { fields: { body: text() }, grant: () => [] });
   const app = workbench({
     db,
     migrations: [{ version: 1, up: (d) => d.exec('ALTER TABLE Note ADD COLUMN archived INTEGER DEFAULT 0') }],
   });
+  app.mount('/notes', Note).listen(0);
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+
+  const cols = db.prepare("SELECT name FROM pragma_table_info('Note')").all().map((r) => r.name);
+  assert.ok(cols.includes('archived'), 'app.ready ran the migration after creating the entity table');
+  assert.equal(appliedVersion(db), 1);
+});
+
+test('migrations: app.ddl compatibility path and app.ready share one schema preparation', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Note = entity('Note', { fields: { body: text() }, grant: () => [] });
+  let calls = 0;
+  const app = workbench({
+    db,
+    migrations: [{
+      version: 1,
+      up: (d) => {
+        calls += 1;
+        d.exec('ALTER TABLE Note ADD COLUMN archived INTEGER DEFAULT 0');
+      },
+    }],
+  });
   app.mount('/notes', Note);
   await app.ddl();
-  const cols = db.prepare("SELECT name FROM pragma_table_info('Note')").all().map((r) => r.name);
-  assert.ok(cols.includes('archived'), 'app.ddl() ran the migration after creating the entity table');
+  app.listen(0);
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+
+  assert.equal(calls, 1, 'schema preparation is cached across app.ddl() and app.ready');
   assert.equal(appliedVersion(db), 1);
-  app.httpServer?.close?.();
-  db.close();
 });

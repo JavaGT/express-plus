@@ -348,9 +348,9 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
   app.httpServer = undefined;
 
   // Versioned schema migrations (eng-review spec #9, #17). Declared at
-  // construction; run at startup pre-traffic inside app.ddl() AFTER the entity
-  // tables exist, so each `up` may ALTER/backfill them. One migration txn =
-  // (DDL + meta-version bump) atomic; see src/migrations.mjs.
+  // construction; run at startup pre-traffic during schema preparation AFTER the
+  // entity tables exist, so each `up` may ALTER/backfill them. One migration txn
+  // = (DDL + meta-version bump) atomic; see src/migrations.mjs.
   app.migrations = migrations;
 
   // Static accessor for the router constructor, so exemplars may write
@@ -358,31 +358,37 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
   // One constructor, two access paths — singular system.
   workbench.router = router;
 
-  // Auto-create tables for mounted entities. Must be called AFTER all mounts
-  // and AFTER resolveRoutes (so declarations are resolved). Reads the entity
-  // list from the resolved declarations and generates+executes CREATE TABLE for
-  // each. A db handle must be set on the app.
-  app.ddl = async () => {
-    if (!app.db) throw new Error('cannot generate DDL — no db configured on the app');
-    // Framework tables come first — Log and Cursor are the durable event substrate.
-    executeFrameworkDDL(app.db);
-    await app.resolveRoutes();
-    const seen = new Set();
-    for (const decl of app.declarations) {
-      if (decl.kind === 'mount') {
-        const entity = decl.target;
-        if (entity && typeof entity.name === 'string' && !seen.has(entity.name)) {
-          seen.add(entity.name);
-          executeDDL(entity, app.db);
+  // Auto-create tables for mounted entities. Runs during `app.ready` before
+  // traffic, after routes resolve and before the kernel starts. The method stays
+  // callable for server-only/tests that prepare schema without listening, but it
+  // is the same cached path `app.ready` uses — not a second DDL algorithm.
+  app.prepareSchema = async () => {
+    if (!app.schemaReady) {
+      app.schemaReady = (async () => {
+        if (!app.db) throw new Error('cannot generate DDL — no db configured on the app');
+        // Framework tables come first — Log and Cursor are the durable event substrate.
+        executeFrameworkDDL(app.db);
+        await app.resolveRoutes();
+        const seen = new Set();
+        for (const decl of app.declarations) {
+          if (decl.kind === 'mount') {
+            const entity = decl.target;
+            if (entity && typeof entity.name === 'string' && !seen.has(entity.name)) {
+              seen.add(entity.name);
+              executeDDL(entity, app.db);
+            }
+          }
         }
-      }
+        // Migrations run last, pre-traffic, after every entity table exists. Each
+        // is its own transaction (DDL + meta-version bump atomic). Runs only when
+        // declared — an app with no migrations is untouched (no _Migration table).
+        if (app.migrations?.length) runMigrations(app.db, app.migrations);
+        return app;
+      })();
     }
-    // Migrations run last, pre-traffic, after every entity table exists. Each
-    // is its own transaction (DDL + meta-version bump atomic). Runs only when
-    // declared — an app with no migrations is untouched (no _Migration table).
-    if (app.migrations?.length) runMigrations(app.db, app.migrations);
-    return app;
+    return app.schemaReady;
   };
+  app.ddl = () => app.prepareSchema();
 
   app.listen = (port, optionsOrCallback) => {
     app.port = port;

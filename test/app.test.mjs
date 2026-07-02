@@ -347,3 +347,15 @@ test('listen(0) boots the app; app.ready resolves after routes resolved + server
   assert.equal(app.routes.length, 5);
   app.httpServer.close();
 });
+
+test('app.ready prepares framework and entity schema before traffic', async (t) => {
+  const { DatabaseSync } = await import('node:sqlite');
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/notes', makeNote()).listen(0);
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+
+  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_Log'").get());
+  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_Cursor'").get());
+  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='Note'").get());
+});

@@ -1178,10 +1178,12 @@ export function listen(app, port, optionsOrCallback = {}) {
     resolveEntity: (name) => app.entities?.get(name),  // name → record, for subscribe-time authz
   });
 
-  // Resolution runs in the background; `app.ready` completes once the table is
-  // built AND the socket is listening, so a caller may await it before closing.
+  // Resolution runs in the background; `app.ready` completes once routes,
+  // schema, kernel, background consumers, and the socket are ready, so a caller
+  // may await it before traffic or shutdown.
   app.ready = (async () => {
     await app.resolveRoutes();
+    if (app.db && typeof app.db.exec === 'function') await app.prepareSchema();
     app.kernel = buildKernel(app);
     const dispatchThroughWriteQueue = (args) => app.writeQueue.run(() => app.kernel.dispatch(args));
     // app.batch(actions, { principal }) — a server-side composed mutation

@@ -1,6 +1,5 @@
 import { mayRow } from './row-grant.mjs';
 import { admitSystemMutation } from './schedule.mjs';
-import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer, durableMutationVariant } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects } from './effect-compiler.mjs';
 import { User, Session, Inbox } from './auth-entities.mjs';
@@ -99,7 +98,6 @@ function buildDurableAdmission(app) {
 export function buildKernel(app) {
   const { handlers, projections, entities } = collectAppEntities(app);
   app.entities = entities;
-  if (app.db && typeof app.db.exec === 'function') executeFrameworkDDL(app.db);
 
   const effectsRegistry = buildEffects(entities);
   const { blobAdapter, blobFinalizeConsumer, blobColumns } = createBlobLifecycle({
