@@ -1,15 +1,13 @@
 // Live fan-out core — subscription registry, delivery-time re-authorization,
-// pace buffers, and delivery-layer delta shadows. The WebSocket transport and
-// subscribe-time admission stay in live.mjs; this module owns what happens after
-// a subscription has been admitted and after a committed event is ready to fan out.
+// pace buffers, and event delivery. The WebSocket transport and subscribe-time
+// admission stay in live.mjs; this module owns what happens after a subscription
+// has been admitted and after a committed event is ready to fan out.
 
 import { anonymous } from './principal.mjs';
 import { mayRow } from './row-grant.mjs';
 import { PACE_STRATEGIES } from './field-pace.mjs';
-import { computeDelta } from './field-delta.mjs';
+import { createDeltaProjector } from './field-delta.mjs';
 import { EventKind, parseEventType } from './event-handle.mjs';
-
-const PREV_STATE_MAX = 10_000;
 
 export function createLiveFanout({ mayVerb = null } = {}) {
   // Subscription registry: Map<entity, Map<id, Map<conn, SubSpec>>>
@@ -26,21 +24,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
   // re-creates a two-lifetime smell).
   const paceBuffers = new Map();
 
-  // P6e-2: delivery-layer prev-shadow for `.updated` delta computation
-  // (DECISIONLOG #71 F1). Per-scope (`${entity}:${id}`), NOT per-conn — committed
-  // state shared across subs. Seeded on created/updated, evicted on remove +
-  // clear. NOT purged on disconnect (other subs may share the scope).
-  const prevState = new Map();
-
-  function prevGet(scope) { return prevState.get(scope) ?? {}; }
-  function prevSeed(scope, row) {
-    prevState.set(scope, row);
-    if (prevState.size > PREV_STATE_MAX) {
-      const oldest = prevState.keys().next().value;
-      prevState.delete(oldest);
-    }
-  }
-  function prevEvict(scope) { prevState.delete(scope); }
+  const deltaProjector = createDeltaProjector();
 
   function subscriptionCount(conn) {
     return connSubs.get(conn)?.size ?? 0;
@@ -181,25 +165,8 @@ export function createLiveFanout({ mayVerb = null } = {}) {
       }
     }
 
-    // P6e-2: compute per-field delta for `.updated` events (DECISIONLOG #71 F1).
-    // Delta is per-(scope, event) — same for all subs, computed once. Computed from
-    // the hydrated authzRow (committed state) vs the prior committed shadow.
     const scope = `${name}:${String(id)}`;
-    let delta = undefined;
-    if (removed) {
-      prevEvict(scope);
-    } else if (handle.kind === EventKind.updated) {
-      const prev = prevGet(scope);
-      const changed = Object.keys(committed.data ?? {}).filter((k) => k !== 'id');
-      delta = computeDelta(entityRecord, prev, authzRow, changed);
-      prevSeed(scope, authzRow);
-    } else if (handle.kind === EventKind.created) {
-      prevSeed(scope, authzRow);
-    } else if (handle.kind === EventKind.native) {
-      // P6e-2 B2: store/ordered native events are delta-native — their event.data
-      // IS the structural delta. Normalize under the same `delta` map key.
-      delta = { [handle.field]: committed.data };
-    }
+    const delta = deltaProjector.project(entityRecord, id, authzRow, committed);
 
     for (const [conn, subSpec] of subs) {
       if (conn.closed) {
@@ -273,7 +240,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
       if (entry.timer !== null) { clearTimeout(entry.timer); entry.timer = null; }
     }
     paceBuffers.clear();
-    prevState.clear();
+    deltaProjector.clear();
   }
 
   return {

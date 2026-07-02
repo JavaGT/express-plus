@@ -1,53 +1,78 @@
-// P6e-2 Slice A — pure delta-computation core for durable-field-delta-live.
-//
-// `computeDelta` diffs two committed rows field-by-field and produces a
-// `{[fieldName]: deltaObj}` map. Only diff-eligible kinds (value, state, crdt,
-// struct) are checked — kinds whose events ride the `<Entity>.updated` channel.
-// Kinds that emit their own native delta events (store, ordered, map) or whose
-// delta is meaningless (hash) are skipped.
-//
-// PURE: no side effects, no DB reads, no mutation of args.
-
+import { EventKind } from './event-handle.mjs';
 import { resolveStrategy } from './field-strategy.mjs';
 
-// The kinds whose diff is meaningful on the `.updated` envelope.
 const DIFF_ELIGIBLE = new Set(['value', 'state', 'crdt', 'struct']);
+const DEFAULT_MAX_SCOPES = 10_000;
 
-/**
- * Computes the per-field delta map for one committed update.
- *
- * @param {object} entityRecord — the compiled entity (has .fields: {fieldName: descriptor})
- * @param {object|null|undefined} prevRow — the prior committed row, or {} / null / undefined for cold
- * @param {object|null|undefined} nextRow — the new committed row
- * @param {Iterable<string>|null|undefined} changedFieldNames — optional iterable of field names to check;
- *        if omitted/null, iterate ALL fields in entityRecord.fields
- * @returns {object} — { [fieldName]: deltaObj } only for diff-eligible kinds with non-null deltas. May be {}.
- */
 export function computeDelta(entityRecord, prevRow, nextRow, changedFieldNames) {
   const prev = prevRow ?? {};
   const next = nextRow ?? {};
   const fields = entityRecord.fields ?? {};
   const result = {};
-
-  // Determine which field names to iterate.
   const fieldNames = changedFieldNames != null
     ? changedFieldNames
     : Object.keys(fields);
 
   for (const fieldName of fieldNames) {
     const descriptor = fields[fieldName];
-    if (!descriptor) continue; // defensive: unknown field name in changedFieldNames
-
+    if (!descriptor) continue;
     const kind = descriptor.kind;
-    if (!DIFF_ELIGIBLE.has(kind)) continue; // skip excluded kinds
-
+    if (!DIFF_ELIGIBLE.has(kind)) continue;
     const strategy = resolveStrategy(kind);
     const delta = strategy.diff(prev[fieldName], next[fieldName], descriptor);
-
-    if (delta != null) {
-      result[fieldName] = delta;
-    }
+    if (delta != null) result[fieldName] = delta;
   }
 
   return result;
+}
+
+export function createDeltaProjector({ maxScopes = DEFAULT_MAX_SCOPES } = {}) {
+  const prevState = new Map();
+
+  function scopeFor(entityRecord, id) {
+    return `${entityRecord.name}:${String(id)}`;
+  }
+
+  function seed(scope, row) {
+    prevState.set(scope, row);
+    if (prevState.size > maxScopes) {
+      const oldest = prevState.keys().next().value;
+      prevState.delete(oldest);
+    }
+  }
+
+  function project(entityRecord, id, row, committedEvent) {
+    const handle = committedEvent?.handle;
+    if (handle?.brand !== 'event-handle') return undefined;
+    const scope = scopeFor(entityRecord, id);
+
+    if (row === undefined || handle.kind === EventKind.removed) {
+      prevState.delete(scope);
+      return undefined;
+    }
+
+    if (handle.kind === EventKind.created) {
+      seed(scope, row);
+      return undefined;
+    }
+
+    if (handle.kind === EventKind.updated) {
+      const changed = Object.keys(committedEvent.data ?? {}).filter((key) => key !== 'id');
+      const delta = computeDelta(entityRecord, prevState.get(scope) ?? {}, row, changed);
+      seed(scope, row);
+      return delta;
+    }
+
+    if (handle.kind === EventKind.native) {
+      return { [handle.field]: committedEvent.data };
+    }
+
+    return undefined;
+  }
+
+  function clear() {
+    prevState.clear();
+  }
+
+  return Object.freeze({ project, clear });
 }
