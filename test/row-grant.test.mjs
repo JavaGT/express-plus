@@ -10,12 +10,12 @@
 // conferred capability set. The HTTP dispatcher consults it on every admitted
 // verb so route admission (gate) and row capability (grant) are BOTH enforced.
 
+import { text, ref, scope, grant, deny, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  entity, text, ref, scope, grant, deny, read, write, subscribe,
-} from '../src/index.mjs';
+  entity } from '../src/internal.mjs';
 import { rowCapabilities, mayVerb } from '../src/row-grant.mjs';
 import { principal, anonymous } from '../src/principal.mjs';
 

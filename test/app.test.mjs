@@ -17,24 +17,12 @@
 //   update PATCH  /base/:id
 //   remove DELETE /base/:id
 
+import { entity, text, ref, boolean, grant, read, write, subscribe, scope, allowAnonymous, requireUser, principal, anonymous } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import workbench, {
-  router,
-  entity,
-  text,
-  ref,
-  boolean,
-  grant,
-  read,
-  write,
-  subscribe,
-  scope,
-  allowAnonymous,
-  requireUser,
-} from '../src/index.mjs';
-import { principal, anonymous } from '../src/principal.mjs';
+  router } from '../src/internal.mjs';
 
 const user = principal({ type: 'user', id: 'user-1' });
 

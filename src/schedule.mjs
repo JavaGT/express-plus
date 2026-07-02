@@ -58,50 +58,57 @@ export const schedule = Object.freeze({
 // discoverDueSchedules — PURE discovery function for P6d step 4a.
 // Returns an array of { entity, verb, rowId, payload } for all due schedule triggers.
 // Does NOT dispatch, write, or mutate — only reads.
+function triggerList(triggerOrTriggers) {
+  if (triggerOrTriggers == null) return [];
+  return Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
+}
+
 export function discoverDueSchedules(db, entities, now) {
   const results = [];
   for (const record of entities) {
     if (!record || !record.schedule) continue;
-    for (const [verb, trigger] of Object.entries(record.schedule)) {
-      const fieldName = trigger.fieldName;
-      if (!fieldName) continue; // should not happen if entity validation ran
+    for (const [verb, triggerOrTriggers] of Object.entries(record.schedule)) {
+      for (const trigger of triggerList(triggerOrTriggers)) {
+        const fieldName = trigger.fieldName;
+        if (!fieldName) continue; // should not happen if entity validation ran
 
-      let sql, params;
-      if (trigger.kind === 'schedule.at') {
-        // Date fields store epoch-ms integers (field-strategy.mjs serialize).
-        // Direct integer comparison: row is due when field <= now.
-        // Table alias 't0' matches the scope-sql.mjs convention for while predicates.
-        sql = `SELECT id FROM ${record.name} AS t0 WHERE t0.${fieldName} <= :now`;
-        params = { now };
-      } else if (trigger.kind === 'schedule.after') {
-        // Due when field + delay <= now. CAST ensures string-stored epochs still add.
-        sql = `SELECT id, t0.${fieldName} FROM ${record.name} AS t0 WHERE CAST(t0.${fieldName} AS INTEGER) + :delay <= :now`;
-        params = { now, delay: trigger.delay };
-      } else {
-        continue;
-      }
-
-      // Add while clause if present (scope SQL already uses t0. prefix)
-      if (trigger.whileSql) {
-        sql += ` AND (${trigger.whileSql})`;
-        Object.assign(params, trigger.whileParams);
-      }
-
-      const rows = db.prepare(sql).all(params);
-      for (const row of rows) {
-        // Resolve payload from 'with'
-        let payload = {};
-        if (trigger.with !== undefined && trigger.with !== null) {
-          if (typeof trigger.with === 'function') {
-            // Re-fetch the full row for the function
-            const fullRow = db.prepare(`SELECT * FROM ${record.name} WHERE id = :id`).get({ id: row.id });
-            payload = trigger.with({ row: fullRow });
-          } else {
-            // Object literal: shallow copy per row
-            payload = { ...trigger.with };
-          }
+        let sql, params;
+        if (trigger.kind === 'schedule.at') {
+          // Date fields store epoch-ms integers (field-strategy.mjs serialize).
+          // Direct integer comparison: row is due when field <= now.
+          // Table alias 't0' matches the scope-sql.mjs convention for while predicates.
+          sql = `SELECT id FROM ${record.name} AS t0 WHERE t0.${fieldName} <= :now`;
+          params = { now };
+        } else if (trigger.kind === 'schedule.after') {
+          // Due when field + delay <= now. CAST ensures string-stored epochs still add.
+          sql = `SELECT id, t0.${fieldName} FROM ${record.name} AS t0 WHERE CAST(t0.${fieldName} AS INTEGER) + :delay <= :now`;
+          params = { now, delay: trigger.delay };
+        } else {
+          continue;
         }
-        results.push({ entity: record.name, verb, rowId: row.id, payload });
+
+        // Add while clause if present (scope SQL already uses t0. prefix)
+        if (trigger.whileSql) {
+          sql += ` AND (${trigger.whileSql})`;
+          Object.assign(params, trigger.whileParams);
+        }
+
+        const rows = db.prepare(sql).all(params);
+        for (const row of rows) {
+          // Resolve payload from 'with'
+          let payload = {};
+          if (trigger.with !== undefined && trigger.with !== null) {
+            if (typeof trigger.with === 'function') {
+              // Re-fetch the full row for the function
+              const fullRow = db.prepare(`SELECT * FROM ${record.name} WHERE id = :id`).get({ id: row.id });
+              payload = trigger.with({ row: fullRow });
+            } else {
+              // Object literal: shallow copy per row
+              payload = { ...trigger.with };
+            }
+          }
+          results.push({ entity: record.name, verb, rowId: row.id, payload, sourceName: trigger.sourceName ?? fieldName });
+        }
       }
     }
   }
@@ -159,32 +166,35 @@ export function discoverTickedRows(db, entities, now) {
   const results = [];
   for (const entity of entities) {
     if (!entity || !entity.schedule) continue;
-    for (const [verb, trigger] of Object.entries(entity.schedule)) {
-      if (trigger.kind !== 'tick.hz' && trigger.kind !== 'tick.every') continue;
+    for (const [verb, triggerOrTriggers] of Object.entries(entity.schedule)) {
+      const triggers = triggerOrTriggers == null ? [] : Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
+      for (const trigger of triggers) {
+        if (trigger.kind !== 'tick.hz' && trigger.kind !== 'tick.every') continue;
 
-      // Defensive: skip rows without a compiled while predicate (the empty-while
-      // guard at entity-load-time guarantees this, but guard here too).
-      if (!trigger.whileSql) continue;
+        // Defensive: skip rows without a compiled while predicate (the empty-while
+        // guard at entity-load-time guarantees this, but guard here too).
+        if (!trigger.whileSql) continue;
 
-      // Build: SELECT id FROM <name> AS t0 WHERE <whileSql>
-      const sql = `SELECT id FROM ${entity.name} AS t0 WHERE ${trigger.whileSql}`;
-      const params = { ...(trigger.whileParams ?? {}) };
-      const rows = db.prepare(sql).all(params);
+        // Build: SELECT id FROM <name> AS t0 WHERE <whileSql>
+        const sql = `SELECT id FROM ${entity.name} AS t0 WHERE ${trigger.whileSql}`;
+        const params = { ...(trigger.whileParams ?? {}) };
+        const rows = db.prepare(sql).all(params);
 
-      for (const row of rows) {
-        // Resolve payload from `with` (IDENTICAL to discoverDueSchedules)
-        let payload = {};
-        if (trigger.with !== undefined && trigger.with !== null) {
-          if (typeof trigger.with === 'function') {
-            // Re-fetch the full row for the function
-            const fullRow = db.prepare(`SELECT * FROM ${entity.name} WHERE id = :id`).get({ id: row.id });
-            payload = trigger.with({ row: fullRow });
-          } else {
-            // Object literal: shallow copy per row
-            payload = { ...trigger.with };
+        for (const row of rows) {
+          // Resolve payload from `with` (IDENTICAL to discoverDueSchedules)
+          let payload = {};
+          if (trigger.with !== undefined && trigger.with !== null) {
+            if (typeof trigger.with === 'function') {
+              // Re-fetch the full row for the function
+              const fullRow = db.prepare(`SELECT * FROM ${entity.name} WHERE id = :id`).get({ id: row.id });
+              payload = trigger.with({ row: fullRow });
+            } else {
+              // Object literal: shallow copy per row
+              payload = { ...trigger.with };
+            }
           }
+          results.push({ entity: entity.name, verb, rowId: row.id, payload });
         }
-        results.push({ entity: entity.name, verb, rowId: row.id, payload });
       }
     }
   }
@@ -203,15 +213,19 @@ export function admitSystemMutation({ entity, verb, rowId, payload, principal, d
   const source = principal.attributes?.source;
   if (typeof source !== 'string' || source === '') return false;
 
-  const trigger = entity?.schedule?.[verb];
+  const verbTriggers = entity?.schedule?.[verb];
+  const triggers = verbTriggers == null ? [] : Array.isArray(verbTriggers) ? verbTriggers : [verbTriggers];
+  const trigger = triggers.find((t) => {
+    if (t.kind === 'tick.hz' || t.kind === 'tick.every') return source === tickSource(entity.name, verb);
+    const sourceName = t.sourceName ?? t.fieldName;
+    return sourceName != null && source === schedulerSource(entity.name, verb, sourceName);
+  });
   if (!trigger) return false;
 
   if (trigger.kind === 'tick.hz' || trigger.kind === 'tick.every') {
-    if (source !== tickSource(entity.name, verb)) return false;
     if (!trigger.whileSql) return false;
   } else if (trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after') {
     if (!trigger.fieldName) return false;
-    if (source !== schedulerSource(entity.name, verb, trigger.fieldName)) return false;
   } else {
     return false;
   }

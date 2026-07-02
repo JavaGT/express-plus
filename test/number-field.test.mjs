@@ -1,13 +1,12 @@
 // `number()` field constructor (SPEC §5). A value-kind scalar field for
-// integers/floats — the gdocs exemplar declares `wordCount: number({ derived })`.
-// At import time it must be a valid value-kind descriptor the entity compiler
-// accepts and the scope compiler can compare like any other value field; the
-// `derived` materialization (recomputing from other fields on write) is a later
-// write-path behavior piece, carried on the descriptor for now.
+// integers/floats. At import time it must be a valid value-kind descriptor the
+// entity compiler accepts and the scope compiler can compare like any other
+// value field.
 
+import { entity, scope, everyone, grant, read, computed } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { number, entity, scope, everyone, grant, read } from '../src/index.mjs';
+import { number } from '../src/internal.mjs';
 
 test('number is a value-kind descriptor typed number', () => {
   const d = number();
@@ -16,10 +15,15 @@ test('number is a value-kind descriptor typed number', () => {
   assert.ok(Object.isFrozen(d));
 });
 
-test('number carries declared options (derived) on the descriptor', () => {
-  const derive = (row) => (row.body ? row.body.length : 0);
-  const d = number({ derived: derive });
-  assert.equal(d.derived, derive);
+
+test('computed() returns a pull computed descriptor', () => {
+  const compute = (row) => (row.body ? row.body.length : 0);
+  const d = computed({ compute });
+  assert.equal(d.kind, 'computed');
+  assert.equal(d.mode, 'pull');
+  assert.equal(d.compute, compute);
+  assert.equal(d.readonly, true);
+  assert.ok(Object.isFrozen(d));
 });
 
 test('a number field compiles into an entity and exposes a value query handle', () => {

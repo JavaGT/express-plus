@@ -1,8 +1,9 @@
+import { state, text, date, schedule, scope, everyone, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { entity, state, text, date, scope, everyone, grant, read } from '../src/index.mjs';
+import { entity } from '../src/internal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 // `state({ values, transitions, effects, auto })` — a finite-state-machine field.
@@ -24,16 +25,10 @@ test('state() returns a frozen state-kind descriptor', () => {
 
 test('state carries its declared values, transitions, effects, and auto', () => {
   const field = state({
-    values: ['draft', 'shared', 'archived'],
-    transitions: { draft: ['shared'], shared: ['archived', 'draft'], archived: ['draft'] },
-    auto: { when: 'shared', after: '90d', to: 'archived' },
-  });
+    values: ['draft', 'shared', 'archived'], transitions: { draft: ['shared'], shared: ['archived', 'draft'], archived: ['draft'] }, auto: { when: 'shared', after: '90d', to: 'archived' }, });
   assert.deepEqual(field.values, ['draft', 'shared', 'archived']);
   assert.deepEqual(field.transitions, {
-    draft: ['shared'],
-    shared: ['archived', 'draft'],
-    archived: ['draft'],
-  });
+    draft: ['shared'], shared: ['archived', 'draft'], archived: ['draft'], });
   assert.deepEqual(field.auto, { when: 'shared', after: '90d', to: 'archived' });
   assert.ok(Object.isFrozen(field.values));
   assert.ok(Object.isFrozen(field.transitions));
@@ -56,8 +51,7 @@ test('state.transition(from, to) is a static method returning a stable, stringif
 
 test('a transition handle works as a computed key in an effects map', () => {
   const effects = {
-    [state.transition('shared', 'archived')]: { with: { archivedAt: 'now' } },
-  };
+    [state.transition('shared', 'archived')]: { with: { archivedAt: 'now' } }, };
   const key = String(state.transition('shared', 'archived'));
   assert.deepEqual(effects[key], { with: { archivedAt: 'now' } });
 });
@@ -72,38 +66,69 @@ test('.can(fn) returns a new frozen state descriptor carrying the access fn', ()
 });
 
 test('a state field compiles into an entity at import', () => {
+  const updatedAt = date({ touch: true });
   const Doc = entity('DocWithState', {
+    grant: scope(() => everyone()).can(() => grant(read)), fields: {
+      status: state({
+        values: ['draft', 'shared', 'archived'], transitions: { draft: ['shared'], shared: ['archived', 'draft'], archived: ['draft'] }, effects: { [state.transition('shared', 'archived')]: { with: { archivedAt: date() } } }, auto: { when: 'shared', after: '90d', to: 'archived', from: updatedAt }, }), updatedAt, } });
+  assert.ok(Doc);
+});
+
+test('state.auto lowers to a schedule.after update trigger', () => {
+  const updatedAt = date({ touch: true });
+  const Doc = entity('DocStateAutoSchedule', {
     grant: scope(() => everyone()).can(() => grant(read)),
     fields: {
       status: state({
         values: ['draft', 'shared', 'archived'],
-        transitions: { draft: ['shared'], shared: ['archived', 'draft'], archived: ['draft'] },
-        effects: { [state.transition('shared', 'archived')]: { with: { archivedAt: date() } } },
-        auto: { when: 'shared', after: '90d', to: 'archived' },
+        transitions: { draft: ['shared'], shared: ['archived', 'draft'] },
+        auto: { when: 'shared', after: '90d', to: 'archived', from: updatedAt },
       }),
+      updatedAt,
     },
   });
-  assert.ok(Doc);
+  assert.equal(Doc.schedule.update.kind, 'schedule.after');
+  assert.equal(Doc.schedule.update.fieldName, 'updatedAt');
+  assert.equal(Doc.schedule.update.sourceName, 'updatedAt.status.auto');
+  assert.deepEqual(Doc.schedule.update.with, { status: 'archived' });
+  assert.match(Doc.schedule.update.whileSql, /status/);
+  assert.deepEqual(Doc.schedule.update.whileParams, { __auto_status: 'shared' });
+});
+
+test('state.auto coexists with an explicit update schedule', () => {
+  const dueAt = date();
+  const updatedAt = date({ touch: true });
+  const Doc = entity('DocStateAutoAndSchedule', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    fields: {
+      status: state({
+        values: ['draft', 'shared', 'archived'],
+        transitions: { draft: ['shared'], shared: ['archived', 'draft'] },
+        auto: { when: 'shared', after: '90d', to: 'archived', from: updatedAt },
+      }),
+      dueAt,
+      updatedAt,
+    },
+    schedule: { update: schedule.at(dueAt, { with: { status: 'shared' } }) },
+  });
+  assert.ok(Array.isArray(Doc.schedule.update));
+  assert.equal(Doc.schedule.update.length, 2);
+  assert.deepEqual(Doc.schedule.update.map((trigger) => trigger.sourceName), ['dueAt', 'updatedAt.status.auto']);
 });
 
 test('a state handle cannot be compared in scope (fail closed)', () => {
   const Doc = entity('DocStateScopeGuard', {
-    grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      status: state({ values: ['draft', 'shared'] }),
-    },
-  });
+    grant: scope(() => everyone()).can(() => grant(read)), fields: {
+      status: state({ values: ['draft', 'shared'] }), }, });
   assert.throws(
-    () => Doc.status.is('draft'),
-    /state field and cannot be compared/,
-  );
+    () => Doc.status.is('draft'), /state field and cannot be compared/, );
 });
 
 // ---- RUNTIME tests (Spine C8: strategy + DDL + transition guard) ----
 
 import { resolveStrategy, ValidationError } from '../src/field-strategy.mjs';
 import { generateDDL } from '../src/ddl.mjs';
-import { executeFrameworkDDL, createServer, durableMutationVariant } from '../src/index.mjs';
+import { executeFrameworkDDL, createServer, durableMutationVariant } from '../src/internal.mjs';
 
 function setupDoc() {
   const Doc = entity('DocState', {

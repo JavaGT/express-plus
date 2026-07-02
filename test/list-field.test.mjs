@@ -14,19 +14,14 @@
 // fractional-index keyspace is intrinsically per-op, not whole-state-snapshot).
 // A2 ships the storage + handle; the events' live normalization landed in P6e-1b.
 
+import { text, list } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { setActiveDb } from '../src/db.mjs';
 import {
-  entity,
-  text,
-  list,
-  generateDDL,
-  createServer, durableMutationVariant,
-  executeFrameworkDDL,
-} from '../src/index.mjs';
+  entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
 
 const Items = entity('Items', {
   fields: { parts: list(text()) },

@@ -4,14 +4,13 @@
 // The kernel runs the row-grant hook INSIDE the write txn, after projections,
 // and rolls back on deny. bindReadScope stays pure outside the txn.
 
+import { text, ref, grant, read, write, scope, everyone } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, text, ref, grant, read, write, scope, everyone,
-  generateFrameworkDDL, mayVerb,
-} from '../src/index.mjs';
+  entity, generateFrameworkDDL, mayVerb } from '../src/internal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 test('in-txn row-grant hook: deny after projections roll back the txn', async () => {

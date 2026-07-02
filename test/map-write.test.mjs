@@ -2,22 +2,14 @@
 // A map field (e.g. collaborators) exposes add/remove/has on the hydrated row
 // instance, writing to a side-table named <Entity>_<field>.
 
+import { ref, text, map, scope, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { setActiveDb } from '../src/db.mjs';
 import {
-  entity,
-  ref,
-  text,
-  map,
-  scope,
-  grant,
-  read,
-  createServer, durableMutationVariant,
-  executeFrameworkDDL,
-} from '../src/index.mjs';
+  entity, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
 import { ValidationError } from '../src/field-strategy.mjs';
 
 // ---- Setup ----------------------------------------------------------------

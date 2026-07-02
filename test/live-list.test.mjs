@@ -21,7 +21,8 @@ function makeFakeChannel() {
 
   const channel = {
     _setAck(ack) { subscribeAck = ack; },
-    subscribe(entity, id, onEvent) {
+    subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
+      const onEvent = typeof optionsOrOnEvent === 'function' ? optionsOrOnEvent : maybeOnEvent;
       const key = `${entity}\0${String(id)}`;
       if (subs.has(key)) throw new Error(`already subscribed to ${entity}:${id}`);
       subs.set(key, onEvent);
@@ -89,6 +90,37 @@ describe('LiveList', () => {
     await list.close();
   });
 
+  it('passes field interest and pace to the channel subscribe call', async () => {
+    const calls = [];
+    const channel = {
+      subscribe(entity, id, options, onEvent) {
+        calls.push({ entity, id, options, hasOnEvent: typeof onEvent === 'function' });
+        return Promise.resolve({ currentSeq: 1 });
+      },
+      unsubscribe() { return Promise.resolve(); },
+      close() {},
+    };
+    const fetch = makeFakeFetch([
+      { match: '/snapshot', response: { snapshot: { title: 'hello' }, seq: 1 } },
+    ]);
+
+    const list = new LiveList({
+      entity: 'ticket', id: '1', channel, fetchImpl: fetch,
+      snapshotUrl, eventsSinceUrl,
+      fields: { cursor: true },
+      pace: { profile: '15fps' },
+    });
+
+    await list.subscribe();
+    assert.deepEqual(calls, [{
+      entity: 'ticket',
+      id: '1',
+      options: { fields: { cursor: true }, pace: { profile: '15fps' } },
+      hasOnEvent: true,
+    }]);
+    await list.close();
+  });
+
   // --- 2. Live .updated value delta ---
   it('live .updated value delta applies + advances cursor + re-renders', async () => {
     const channel = makeFakeChannel();
@@ -126,7 +158,8 @@ describe('LiveList', () => {
     const deferredAck = deferred();
 
     const channel = {
-      subscribe(e, id, onEvent) {
+      subscribe(e, id, optionsOrOnEvent, maybeOnEvent) {
+        const onEvent = typeof optionsOrOnEvent === 'function' ? optionsOrOnEvent : maybeOnEvent;
         subs.set(`${e}\0${id}`, onEvent);
         return deferredAck.promise;
       },

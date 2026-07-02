@@ -1,15 +1,16 @@
 // Hardening: auth edge cases — gate rejection, row-grant denial, validation errors.
+import { text, ref, computed, date, grant, read, write, scope, requireUser, allowAnonymous } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, text, ref, number, date, grant, read, write, scope, requireUser, allowAnonymous, generateDDL } from '../src/index.mjs';
+import workbench, { entity, generateDDL } from '../src/internal.mjs';
 
 function makeNote() {
   return entity('Note', {
     fields: {
       body: text(),
-      wordCount: number({ derived: (d) => d.body ? d.body.length : 0 }),
+      wordCount: computed({ compute: (d) => d.body ? d.body.length : 0 }),
       updatedAt: date({ touch: true }),
       owner: ref('User', { role: 'owner', readonly: true }),
     },
@@ -89,13 +90,13 @@ test('row grant denies a different user (403)', async () => {
   app2.httpServer.close();
 });
 
-test('client sending derived/touch/readonly field in payload → 400', async () => {
+test('client sending computed/touch/readonly field in payload → 400', async () => {
   const { app } = setup({ principal: { type: 'user', id: '1' } });
   await app.ready;
   const { port } = app.httpServer.address();
   const origin = `http://127.0.0.1:${port}`;
 
-  // Derived field
+  // Computed field
   const r1 = await fetch(`${origin}/notes`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ body: 'x', wordCount: 5 }),

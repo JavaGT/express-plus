@@ -11,10 +11,7 @@
 //
 // REVIEW EXEMPLAR: imports from the (not-yet-built) `workbench` package.
 
-import workbench, {
-  entity, text, number, date, ref, map,
-  grant, deny, read, write, subscribe, admin, scope, anyOf,
-} from 'workbench';
+import workbench, { entity, text, computed, date, ref, map, grant, deny, read, write, subscribe, admin, scope, anyOf } from 'workbench';
 
 // Capability tiers, named once. `subscribe` is a peer of `read` (sustained live
 // push vs one-shot fetch); `admin` is reserved for the owner (manage sharing).
@@ -31,10 +28,10 @@ export const Doc = entity('Doc', {
     // the app writes no socket code.
     body: text.crdt(),
 
-    // A pure pull-derived field: recomputed from `body` on read, never stored,
+    // A pure computed field: recomputed from `body` on read, never stored,
     // never hand-maintained.
-    wordCount: number({
-      derived: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0,
+    wordCount: computed({
+      compute: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0,
     }),
 
     owner: ref('User', { role: 'owner', readonly: true }),  // auto-derives checks.owner

@@ -115,10 +115,13 @@ function computeTickInterval(entities) {
   let min = Infinity;
   for (const entity of entities) {
     if (!entity || !entity.schedule) continue;
-    for (const trigger of Object.values(entity.schedule)) {
-      if (!trigger) continue;
-      const iv = computeIntervalFromTrigger(trigger);
-      if (Number.isFinite(iv) && iv < min) min = iv;
+    for (const triggerOrTriggers of Object.values(entity.schedule)) {
+      const triggers = triggerOrTriggers == null ? [] : Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
+      for (const trigger of triggers) {
+        if (!trigger) continue;
+        const iv = computeIntervalFromTrigger(trigger);
+        if (Number.isFinite(iv) && iv < min) min = iv;
+      }
     }
   }
   return min === Infinity ? 0 : min;

@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { Inbox, bindReadScope } from '../src/index.mjs';
+import workbench, { Inbox, bindReadScope } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
 
 // A real in-memory DB seeded with the Inbox table + two recipients' rows.

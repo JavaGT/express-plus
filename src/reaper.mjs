@@ -47,12 +47,16 @@ export function startReaper({ db, entities, dispatch, now = Date.now }) {
   let hasDeadlineTrigger = false;
   for (const entity of entityList) {
     if (!entity || !entity.schedule) continue;
-    for (const trigger of Object.values(entity.schedule)) {
-      if (!trigger) continue;
-      if (trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after') {
-        hasDeadlineTrigger = true;
-        break;
+    for (const triggerOrTriggers of Object.values(entity.schedule)) {
+      const triggers = triggerOrTriggers == null ? [] : Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
+      for (const trigger of triggers) {
+        if (!trigger) continue;
+        if (trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after') {
+          hasDeadlineTrigger = true;
+          break;
+        }
       }
+      if (hasDeadlineTrigger) break;
     }
     if (hasDeadlineTrigger) break;
   }
@@ -63,13 +67,15 @@ export function startReaper({ db, entities, dispatch, now = Date.now }) {
 
   function scan() {
     const rows = discoverDueSchedules(db, entityList, now());
-    for (const { entity: entityName, verb, rowId, payload } of rows) {
+    for (const { entity: entityName, verb, rowId, payload, sourceName } of rows) {
       try {
         const entity = entityMap.get(entityName);
         if (!entity) continue;
-        const trigger = entity.schedule?.[verb];
+        const triggers = entity.schedule?.[verb] ?? [];
+        const arr = Array.isArray(triggers) ? triggers : [triggers];
+        const trigger = arr.find((t) => (t.sourceName ?? t.fieldName) === sourceName);
         if (!trigger?.fieldName) continue;
-        const source = schedulerSource(entityName, verb, trigger.fieldName);
+        const source = schedulerSource(entityName, verb, sourceName ?? trigger.fieldName);
         const principal = principalFrom(source);
         dispatch({ actionId: randomUUID(), type: `${entityName}.${verb}`, principal, payload: { id: rowId, ...payload } });
       } catch (err) {

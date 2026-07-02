@@ -6,10 +6,11 @@
 // failed migration (e.g. a unique index on duplicate data) leaves the schema and
 // the meta-table untouched.
 
+import { text } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity, text } from '../src/index.mjs';
+import workbench, { entity } from '../src/internal.mjs';
 import { runMigrations, appliedVersion, ensureMigrationTable } from '../src/migrations.mjs';
 
 function freshDb() {

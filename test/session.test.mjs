@@ -10,13 +10,13 @@
 // default-on route gate then denies it. This is the SAME admission path as the
 // `principalOf` default it replaces, never a second auth path.
 
+import { text, ref, scope, grant, deny, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, text, ref, scope, grant, deny, read, write, subscribe,
-} from '../src/index.mjs';
+  entity } from '../src/internal.mjs';
 import {
   parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE,
 } from '../src/session.mjs';

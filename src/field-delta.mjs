@@ -1,10 +1,26 @@
 import { EventKind } from './event-handle.mjs';
 import { resolveStrategy } from './field-strategy.mjs';
+import { config } from './config.mjs';
+import { getLog } from './log.mjs';
 
 const DIFF_ELIGIBLE = new Set(['value', 'state', 'crdt', 'struct']);
 const DEFAULT_MAX_SCOPES = 10_000;
 
-export function computeDelta(entityRecord, prevRow, nextRow, changedFieldNames) {
+function isReplaceStubCrdt(descriptor) {
+  return descriptor?.kind === 'crdt' && (descriptor.type === 'raster' || descriptor.type === 'polyline');
+}
+
+function reportReplaceStubDelta(entityRecord, fieldName, descriptor, diagnostics) {
+  if (config.env === 'production') return;
+  const ctx = { entity: entityRecord.name, field: fieldName, type: descriptor.type };
+  if (typeof diagnostics === 'function') {
+    diagnostics(ctx);
+    return;
+  }
+  getLog().warn('live', 'replace-stub crdt field updated with last-write-wins semantics; concurrent edits will not merge', ctx);
+}
+
+export function computeDelta(entityRecord, prevRow, nextRow, changedFieldNames, { diagnostics = null } = {}) {
   const prev = prevRow ?? {};
   const next = nextRow ?? {};
   const fields = entityRecord.fields ?? {};
@@ -20,13 +36,16 @@ export function computeDelta(entityRecord, prevRow, nextRow, changedFieldNames) 
     if (!DIFF_ELIGIBLE.has(kind)) continue;
     const strategy = resolveStrategy(kind);
     const delta = strategy.diff(prev[fieldName], next[fieldName], descriptor);
-    if (delta != null) result[fieldName] = delta;
+    if (delta != null) {
+      result[fieldName] = delta;
+      if (isReplaceStubCrdt(descriptor)) reportReplaceStubDelta(entityRecord, fieldName, descriptor, diagnostics);
+    }
   }
 
   return result;
 }
 
-export function createDeltaProjector({ maxScopes = DEFAULT_MAX_SCOPES } = {}) {
+export function createDeltaProjector({ maxScopes = DEFAULT_MAX_SCOPES, diagnostics = null } = {}) {
   const prevState = new Map();
 
   function scopeFor(entityRecord, id) {
@@ -58,7 +77,7 @@ export function createDeltaProjector({ maxScopes = DEFAULT_MAX_SCOPES } = {}) {
 
     if (handle.kind === EventKind.updated) {
       const changed = Object.keys(committedEvent.data ?? {}).filter((key) => key !== 'id');
-      const delta = computeDelta(entityRecord, prevState.get(scope) ?? {}, row, changed);
+      const delta = computeDelta(entityRecord, prevState.get(scope) ?? {}, row, changed, { diagnostics });
       seed(scope, row);
       return delta;
     }

@@ -15,10 +15,11 @@
 // closed). Grounded against note.mjs (text.crdt body, ref owner) and the blog
 // spine's value fields.
 
+import { text, ref, boolean, date, json, grant, scope, read, write, subscribe, everyone } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { entity, text, ref, boolean, date, json, grant, scope, read, write, subscribe, everyone } from '../src/index.mjs';
+import { entity } from '../src/internal.mjs';
 import { resolveStrategy, validateMutation, ValidationError, serializeField, deserializeField } from '../src/field-strategy.mjs';
 
 // --- the strategy table is keyed by kind, framework-owned ---

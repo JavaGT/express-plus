@@ -5,11 +5,25 @@
 // external dependencies — uses Node's global WebSocket (Node 22+).
 //
 // Protocol (matches src/live.mjs verbatim):
-//   client → server: {type:'subscribe', entity, id} / {type:'unsubscribe', entity, id}
+//   client → server: {type:'subscribe', entity, id, fields?, pace?} / {type:'unsubscribe', entity, id}
 //   server → client: {type:'subscribed', entity, id, currentSeq}
 //                    {type:'unsubscribed', entity, id}
 //                    {type:'event', entity, id, seq, seqSpan, event, delta?}
 //                    {type:'error', message}
+
+function normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent) {
+  if (typeof optionsOrOnEvent === 'function' || optionsOrOnEvent === undefined || optionsOrOnEvent === null) {
+    return { options: {}, onEvent: optionsOrOnEvent };
+  }
+  return { options: optionsOrOnEvent, onEvent: maybeOnEvent };
+}
+
+function subscribeEnvelope(entity, id, { fields, pace } = {}) {
+  const envelope = { type: 'subscribe', entity, id };
+  if (fields !== undefined) envelope.fields = fields;
+  if (pace !== undefined) envelope.pace = pace;
+  return envelope;
+}
 
 export class LiveChannel {
   // `baseUrl` is e.g. 'http://127.0.0.1:5432'. Derives ws:// URL by swapping
@@ -26,7 +40,7 @@ export class LiveChannel {
     }
     this._wsUrl = wsUrl;
 
-    // Subscription registry: `${entity}\0${id}` → { onEvent }
+    // Subscription registry: `${entity}\0${id}` → { onEvent, fields, pace }
     this._subs = new Map();
     // Pending subscribe promises: key → { resolve, reject }
     this._pendingSubs = new Map();
@@ -47,7 +61,8 @@ export class LiveChannel {
   // Returns a handle `{ currentSeq }` from the server's `subscribed` ack.
   // Rejects with `new Error(message)` if the server sends an `error` envelope
   // before the `subscribed` ack.
-  async subscribe(entity, id, onEvent) {
+  async subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
+    const { options, onEvent } = normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent);
     const key = `${entity}\0${String(id)}`;
     if (this._subs.has(key)) {
       throw new Error(`already subscribed to ${entity}:${id}`);
@@ -59,9 +74,9 @@ export class LiveChannel {
     }
 
     return new Promise((resolve, reject) => {
-      this._subs.set(key, { onEvent });
+      this._subs.set(key, { onEvent, fields: options.fields, pace: options.pace });
       this._pendingSubs.set(key, { resolve, reject });
-      this._send({ type: 'subscribe', entity, id });
+      this._send(subscribeEnvelope(entity, id, options));
     });
   }
 
@@ -279,11 +294,11 @@ export class LiveChannel {
         await this._openSocket();
         // Re-subscribe every active subscription (the server lost state on
         // socket close).
-        for (const [key] of this._subs) {
+        for (const [key, sub] of this._subs) {
           const sep = key.indexOf('\0');
           const entity = key.slice(0, sep);
           const id = key.slice(sep + 1);
-          this._send({ type: 'subscribe', entity, id });
+          this._send(subscribeEnvelope(entity, id, sub));
         }
       } catch {
         if (!this._closed) this._scheduleReconnect();
@@ -311,13 +326,15 @@ export class LiveChannel {
 // Zero external deps — uses injected fetch and channel (no real server needed
 // for tests).
 export class LiveList {
-  constructor({ entity, id, channel, fetchImpl, snapshotUrl, eventsSinceUrl }) {
+  constructor({ entity, id, channel, fetchImpl, snapshotUrl, eventsSinceUrl, fields, pace }) {
     this._entity = entity;
     this._id = id;
     this._channel = channel;
     this._fetchImpl = fetchImpl ?? globalThis.fetch;
     this._snapshotUrl = snapshotUrl;
     this._eventsSinceUrl = eventsSinceUrl;
+    this._fields = fields;
+    this._pace = pace;
 
     this._state = null;
     this._cursor = 0;
@@ -369,7 +386,10 @@ export class LiveList {
       // 2. Subscribe to live channel.
       //    During the subscribe await, any live envelopes arrive via _onLiveEnvelope,
       //    which queues them because _ready is still false.
-      const ack = await this._channel.subscribe(this._entity, this._id, (envelope) => {
+      const ack = await this._channel.subscribe(this._entity, this._id, {
+        fields: this._fields,
+        pace: this._pace,
+      }, (envelope) => {
         this._onLiveEnvelope(envelope);
       });
 
@@ -802,6 +822,7 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
 
   let _opIdCounter = 0;
   const _listCache = new Map();     // id → LiveList
+  const _listOptions = new Map();   // id → serialized subscribe options
   const _overlay = new Map();       // opId → overlay entry
   const _renderCallbacks = new Set();
   const _listUnsubs = new Map();    // id → LiveList.onRender unsub
@@ -853,9 +874,16 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
 
   // --- Subscribe ---
 
-  function _subscribeLiveList(id) {
+  function _subscribeLiveList(id, options = {}) {
     if (_closed) throw new Error('store is closed');
-    if (_listCache.has(id)) return _listCache.get(id);
+    if (_listCache.has(id)) {
+      const prev = _listOptions.get(id);
+      const cur = JSON.stringify({ fields: options.fields ?? null, pace: options.pace ?? null });
+      if (prev !== cur) {
+        throw new Error(`conflicting subscribe options for ${id}: already subscribed with different interest`);
+      }
+      return _listCache.get(id);
+    }
 
     const list = new LiveList({
       entity: name,
@@ -864,9 +892,12 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
       fetchImpl: resolvedFetch,
       snapshotUrl: _snapshotUrl,
       eventsSinceUrl: _eventsSinceUrl,
+      fields: options.fields,
+      pace: options.pace,
     });
 
     _listCache.set(id, list);
+    _listOptions.set(id, JSON.stringify({ fields: options.fields ?? null, pace: options.pace ?? null }));
 
     // Subscribe to LiveList onRender for overlay clearing + store render propagation
     const unsub = list.onRender(() => {
@@ -1061,6 +1092,7 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
       unsub();
     }
     _listCache.clear();
+    _listOptions.clear();
     _listUnsubs.clear();
     _overlay.clear();
     _renderCallbacks.clear();

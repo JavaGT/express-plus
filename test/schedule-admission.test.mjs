@@ -1,7 +1,8 @@
+import { schedule, date, scope, everyone, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { entity, schedule, date, scope, everyone, grant, read } from '../src/index.mjs';
+import { entity } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { admitSystemMutation } from '../src/schedule.mjs';
 

@@ -13,22 +13,11 @@
 // Source of truth: SPEC §6.2, §13 Phase 1.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { anonymous, entity, text, ref, scope, grant, deny, read, write, subscribe } from 'workbench';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  principal,
-  anonymous,
-  UnknownPrincipalTypeError,
-  entity,
-  text,
-  ref,
-  scope,
-  grant,
-  deny,
-  read,
-  write,
-  subscribe,
-} from 'workbench';
+  principal, UnknownPrincipalTypeError } from 'workbench/internal';
 import { bindReadScope } from '../src/scope-sql.mjs';
 
 const ownerCan = async ({ is }) =>

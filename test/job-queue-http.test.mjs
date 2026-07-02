@@ -5,10 +5,11 @@
 // (intercepted before matchRoute, like /blobs), only present when the app engaged
 // the job-queue substrate.
 
+import { text, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity, text, grant, read } from '../src/index.mjs';
+import workbench, { entity } from '../src/internal.mjs';
 
 const SECRET = 's3cret-shared';
 

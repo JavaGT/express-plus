@@ -8,7 +8,8 @@
 // Persisted product domains are entities (`app.mount('/docs', Doc)`); the
 // child Comment entity is mounted as a sub-resource of Doc (grant inherits
 // through the typed FK). Cross-cutting auth is plain routers (`app.use`).
-import workbench, { config } from 'workbench';
+import workbench from 'workbench';
+import { config } from 'workbench/internal';
 import { Doc } from './doc.mjs';
 import { sessionRoutes, userRoutes } from './session.mjs';
 

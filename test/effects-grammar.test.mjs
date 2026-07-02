@@ -2,17 +2,13 @@
 // Tests for: CRUD-trigger effects, field operators, when guards, admission handshake,
 // cycle detection, and runtime depth cap.
 
+import { text, ref, map, number, grant, read, write, subscribe, principal, inc, dec, self, many, effect } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, text, ref, map, number, grant, read, write, subscribe,
-  generateDDL, generateFrameworkDDL, executeFrameworkDDL,
-  principal, inc, dec, self, many, effect, action, event, createServer, durableMutationVariant,
-  createEffectContext, checkEffectDepth,
-  buildEffectsRegistry, detectCrossEntityCycles, validateEffects, native,
-} from '../src/index.mjs';
+  entity, generateDDL, generateFrameworkDDL, executeFrameworkDDL, action, event, createServer, durableMutationVariant, createEffectContext, checkEffectDepth, buildEffectsRegistry, detectCrossEntityCycles, validateEffects, created, updated } from '../src/internal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 // Helper to set up a fresh in-memory db with framework tables
@@ -36,12 +32,12 @@ test('CRUD-trigger effect: Note.created → creates one Counter row', async () =
   const Note = entity('Note', {
     fields: { title: text(), owner: ref('User', { role: 'owner', readonly: true }) },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      ['Note.created']: {
+    effects: (Note) => [
+      [Note.created, {
         mutate: Counter,
         with: { value: '1' },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Note)) db.exec(sql);
 
@@ -86,12 +82,12 @@ test('effect with set operator: with: { title: "x" }', async () => {
   const Source = entity('Source', {
     fields: { name: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      ['Source.created']: {
+    effects: (Source) => [
+      [Source.created, {
         mutate: Target,
         with: { title: 'x' },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
@@ -136,13 +132,13 @@ test('effect when guard: prevents effect when predicate returns false', () => {
   const Note = entity('Note', {
     fields: { title: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      ['Note.created']: {
+    effects: (Note) => [
+      [Note.created, {
         mutate: Counter,
         with: { value: inc(1) },
         when: ({ delta }) => delta.title === 'trigger',
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Note)) db.exec(sql);
 
@@ -160,8 +156,8 @@ test('non-compilable when predicate (references I/O) throws at entity() compile'
     entity('BadEntity', {
       fields: { name: text() },
       grant: () => grant(read, write, subscribe),
-      effects: {
-        ['BadEntity.created']: {
+      effects: (BadEntity) => [
+        [BadEntity.created, {
           mutate: entity('Target', { fields: { x: text() }, grant: () => grant(read, write, subscribe) }),
           with: { x: 'y' },
           when: ({ delta }) => {
@@ -169,8 +165,8 @@ test('non-compilable when predicate (references I/O) throws at entity() compile'
             fetch('http://example.com');
             return true;
           },
-        },
-      },
+        }],
+      ],
     });
   }, /when.*predicate.*references forbidden scope/);
 });
@@ -206,12 +202,12 @@ test('missing admitsEffects on target entity throws at compile', () => {
   const Source = entity('Source', {
     fields: { name: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      ['Source.created']: {
+    effects: (Source) => [
+      [Source.created, {
         mutate: TargetNoAdmit,
         with: { name: 'test' },
-      },
-    },
+      }],
+    ],
   });
 
   for (const sql of generateDDL(TargetNoAdmit)) db.exec(sql);
@@ -237,12 +233,12 @@ test('target grant denial rolls back origin (in-txn atomic)', () => {
   const Source = entity('Source', {
     fields: { name: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      ['Source.created']: {
+    effects: (Source) => [
+      [Source.created, {
         mutate: RestrictedTarget,
         with: { name: 'test' },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
@@ -305,12 +301,12 @@ test('self inc: emits :updated with read-modify-write (seed=5, inc(2) → 7)', a
     fields: { count: number() },
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
-    effects: {
-      ['Counter.created']: {
+    effects: (Counter) => [
+      [Counter.created, {
         mutate: self,
         with: { count: inc(2) },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
@@ -346,12 +342,12 @@ test('self dec: emits :updated with read-modify-write (seed=10, dec(3) → 7)', 
     fields: { count: number() },
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
-    effects: {
-      ['Counter.created']: {
+    effects: (Counter) => [
+      [Counter.created, {
         mutate: self,
         with: { count: dec(3) },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
@@ -393,12 +389,12 @@ test('inc-on-create (non-self): degenerate literal (0+4=4), emits :created', asy
   const Source = entity('Source', {
     fields: { name: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      ['Source.created']: {
+    effects: (Source) => [
+      [Source.created, {
         mutate: Target,
         with: { count: inc(4) },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
@@ -437,12 +433,12 @@ test('depth cap: self-recursion bounded (Counter.updated → Counter.updated)', 
     fields: { count: number(), phase: text() },
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
-    effects: {
-      ['Counter.updated']: {
+    effects: (Counter) => [
+      [Counter.updated, {
         mutate: self,
         with: { count: inc(1), phase: 'ticking' },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
@@ -503,12 +499,12 @@ test('db threaded through effects executor: RMW read uses in-txn db handle', asy
     fields: { count: number() },
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
-    effects: {
-      ['Counter.created']: {
+    effects: (Counter) => [
+      [Counter.created, {
         mutate: self,
         with: { count: inc(100) }, // RMW: reads origin row's count, adds 100
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
@@ -568,16 +564,16 @@ test('many fan-out: creates N target rows (one per collection member at trigger 
     },
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
-    effects: {
-      [native('User', 'collaborators', 'added')]: {
+    effects: (User) => [
+      [User.collaborators.added, {
         mutate: many(Inbox, { over: collaboratorsField }),
         with: ({ origin, member }) => ({
           recipient: member.id,
           post: origin.id,
           kind: 'notify',
         }),
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(User)) db.exec(sql);
 
@@ -673,16 +669,16 @@ test('many fan-out: create-only (no dedup, two origins each add member → separ
     },
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
-    effects: {
-      [native('User', 'collaborators', 'added')]: {
+    effects: (User) => [
+      [User.collaborators.added, {
         mutate: many(Inbox, { over: collaboratorsField }),
         with: ({ origin, member }) => ({
           recipient: member.id,
           post: origin.id,
           kind: 'notify',
         }),
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(User)) db.exec(sql);
 
@@ -764,7 +760,7 @@ test('many() operator creates correct sentinel object', () => {
 // ============================================================
 
 test('effect.anyOf() returns a symbol (sentinel shape)', () => {
-  const sym = effect.anyOf('A.created', 'B.updated');
+  const sym = effect.anyOf(created('A'), updated('B'));
   assert.equal(typeof sym, 'symbol', 'anyOf should return a symbol');
   assert.ok(sym.toString().includes('effect.anyOf'), 'symbol description should include effect.anyOf');
 });
@@ -790,12 +786,12 @@ test('Fan-IN: anyOf(Source.created, Source.updated) fires on EITHER event', asyn
   const Source = entity('Source', {
     fields: { name: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      [effect.anyOf('Source.created', 'Source.updated')]: {
+    effects: (Source) => [
+      [effect.anyOf(Source.created, Source.updated), {
         mutate: Target,
         with: { count: inc(1) },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
@@ -849,12 +845,12 @@ test('Admission coverage: anyOf effect targeting non-admitting entity throws at 
   const Source = entity('Source', {
     fields: { name: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      [effect.anyOf('Source.created', 'Source.updated')]: {
+    effects: (Source) => [
+      [effect.anyOf(Source.created, Source.updated), {
         mutate: TargetNoAdmit,
         with: { name: 'test' },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
@@ -881,12 +877,12 @@ test('Dedupe: anyOf(X.created, X.created) registers effect ONCE', async () => {
   const Source = entity('Source', {
     fields: { name: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      [effect.anyOf('Source.created', 'Source.created')]: {
+    effects: (Source) => [
+      [effect.anyOf(Source.created, Source.created), {
         mutate: Target,
         with: { count: inc(1) },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
@@ -927,13 +923,13 @@ test('Self-recursion depth cap: anyOf effect with self-mutate bounded by maxDept
     fields: { count: number(), phase: text() },
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
-    effects: {
+    effects: (Counter) => [
       // anyOf triggers on Counter.updated - self-effect creates recursion
-      [effect.anyOf('Counter.updated')]: {
+      [effect.anyOf(Counter.updated), {
         mutate: self,
         with: { count: inc(1), phase: 'ticking' },
-      },
-    },
+      }],
+    ],
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 

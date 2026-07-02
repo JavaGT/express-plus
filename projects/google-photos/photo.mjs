@@ -5,18 +5,13 @@
 //
 // IMPORTS: the framework exports we WISH existed are imported with a
 // "MISSING" comment — these are the gaps this stress-test documents.
+import { entity, text, number, date, ref, link, map, boolean, grant, deny, read, write, subscribe, admin, anyOf, never, scope, router, User } from 'workbench';
 import {
-  entity, text, number, date, ref, link, map, boolean,
-  grant, deny, read, write, subscribe, admin, anyOf, never, scope,
-  router, User,
-  // --- imports now in the designed API (resolved per SPEC.md) ---
-  blob,              // RESOLVED: binary field type built-in (SPEC §5.1, ADR #9)
-  projected,          // RESOLVED: projected.async for async computed+persisted (SPEC §5.3, ADR #12)
-  json,              // RESOLVED: structured sub-object field type built-in (SPEC §5.1, ADR #9)
-  // point,          // DEFERRED: geo-point — predicate seam ships (SPEC §11), rtree engine deferred
-  // fulltext,       // DEFERRED: full-text — predicate seam ships (SPEC §11), FTS engine deferred
-  list,              // RESOLVED: ordered list field type built-in (SPEC §5.1, ADR #9)
-} from 'workbench';
+  blob,
+  projected,
+  json,
+  list,
+} from 'workbench/internal';
 
 // ==========================================================================
 // Capability sets
@@ -58,11 +53,11 @@ export const Photo = entity('Photo', {
     // ONCE on upload (not recomputed on every read), and PERSISTED + INDEXED
     // (so queries can use them). The grilled API has:
     //
-    // The grilled `derived` (synchronous read-time pull) and in-transaction
+    // The grilled `computed()` (synchronous read-time pull) and in-transaction
     // `{ mutate, with }` effects (cannot shell out to ImageMagick/sharp) were
     // the wrong primitives for async compute. The designed API provides:
     //
-    //   - `derived(fn)` — synchronous, recompute-on-read (unchanged).
+    //   - `computed({ compute })` — synchronous, recompute-on-read.
     //   - `projected.async` — post-commit projection over the committed log,
     //     with a sequence watermark and explicit staleness (SPEC §9.3, ADR #8).
     //     This IS the core upload workflow for a photo app.

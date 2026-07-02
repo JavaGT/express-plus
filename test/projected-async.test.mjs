@@ -1,31 +1,13 @@
 // projected.async — stored computed fields updated by post-commit projection
 // (ADR #12, SPEC §5.3).
 
+import { text, number, computed, projected, raster, polyline, ref, scope, grant, read, write, subscribe, never, everyone } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity,
-  text,
-  number,
-  projected,
-  raster,
-  polyline,
-  ref,
-  scope,
-  grant,
-  read,
-  write,
-  subscribe,
-  never,
-  everyone,
-  resolveStrategy,
-  validateMutation,
-  ValidationError,
-  createProjectedAsyncConsumer,
-  resolveProjectedAsyncTriggerTypes,
-} from '../src/index.mjs';
+  entity, resolveStrategy, validateMutation, ValidationError, createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -348,18 +330,18 @@ test('projected.async field is rejected in client create payload (readonly)', as
   assert.equal(res.status, 400, 'readonly projected field rejected');
 });
 
-// --- projected.inline tests ---
+// --- computed.stored tests ---
 
-test('projected.inline constructor validates compute is a function', () => {
-  assert.throws(() => projected.inline({}), /compute function/);
-  const d = projected.inline({ compute: (row) => row.score * 2 });
-  assert.equal(d.kind, 'projected');
-  assert.equal(d.mode, 'inline');
+test('computed.stored constructor validates compute is a function', () => {
+  assert.throws(() => computed.stored({}), /compute function/);
+  const d = computed.stored({ compute: (row) => row.score * 2 });
+  assert.equal(d.kind, 'computed');
+  assert.equal(d.mode, 'stored');
   assert.equal(d.readonly, true);
   assert.equal(typeof d.compute, 'function');
 });
 
-test('projected.inline value is stored immediately in the create response', async (t) => {
+test('computed.stored value is stored immediately in the create response', async (t) => {
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
   db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
@@ -368,7 +350,7 @@ test('projected.inline value is stored immediately in the create response', asyn
     fields: {
       title: text(),
       score: number(),
-      hotRank: projected.inline({
+      hotRank: computed.stored({
         compute: (row) => (row.score ?? 0) * 2,
       }),
     },
@@ -397,7 +379,7 @@ test('projected.inline value is stored immediately in the create response', asyn
   assert.equal(JSON.parse(row.hotRank), 84, `hotRank should be 84 in DB`);
 });
 
-test('projected.inline value is recomputed on update', async (t) => {
+test('computed.stored value is recomputed on update', async (t) => {
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
   db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
@@ -406,7 +388,7 @@ test('projected.inline value is recomputed on update', async (t) => {
     fields: {
       title: text(),
       score: number(),
-      hotRank: projected.inline({
+      hotRank: computed.stored({
         compute: (row) => (row.score ?? 0) * 3,
       }),
     },
@@ -440,7 +422,7 @@ test('projected.inline value is recomputed on update', async (t) => {
   assert.equal(JSON.parse(row.hotRank), 60);
 });
 
-test('projected.inline compute failure rolls back the mutation', async (t) => {
+test('computed.stored compute failure rolls back the mutation', async (t) => {
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
   db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
@@ -449,7 +431,7 @@ test('projected.inline compute failure rolls back the mutation', async (t) => {
     fields: {
       title: text(),
       score: number(),
-      hotRank: projected.inline({
+      hotRank: computed.stored({
         compute: (row) => {
           if (row.score < 0) throw new Error('negative score');
           return row.score * 10;

@@ -226,12 +226,10 @@ const STRATEGIES = Object.freeze({
     },
   }),
 
-  // `crdt` — a custom merge with per-element deltas. Validates structurally
-  // (note.mjs body is a string); diff is a per-element text delta (insert /
-  // delete) computed from common prefix + suffix, NOT a whole-value `{ set }`.
-  // Single-writer dispatch stores `next` (apply = replace); the per-element DELTA
-  // is the broadcast artifact — the "merge machinery" consult #18 names. The
-  // concurrent-merge toolkit (reconciling concurrent edits) is deferred (#33).
+  // `crdt` — a custom merge contract. Text emits per-element insert/delete deltas;
+  // raster/polyline are explicitly whole-value replace stubs until their merge
+  // toolkit lands. Single-writer dispatch stores `next` (apply = replace); the
+  // delta is the broadcast artifact. The concurrent-merge toolkit is deferred.
   crdt: Object.freeze({
     validate(value, descriptor) {
       if (descriptor?.type === 'raster') {
@@ -251,7 +249,10 @@ const STRATEGIES = Object.freeze({
     apply(_previous, next) {
       return next;
     },
-    diff(previous, next) {
+    diff(previous, next, descriptor) {
+      if (descriptor?.type === 'raster' || descriptor?.type === 'polyline') {
+        return Object.is(previous, next) ? null : { set: next };
+      }
       return crdtTextDiff(previous, next);
     },
   }),
@@ -299,16 +300,35 @@ const STRATEGIES = Object.freeze({
     },
   }),
 
-  // `projected` — a stored computed field (projected.inline / projected.async).
-  // The column stores a JSON-serialized value produced by the compute function.
-  // The field is readonly (client cannot set it); the projection owns the write.
-  // Diff/apply are whole-value (same shape as value-kind); the serialized form is
-  // JSON TEXT so any JSON-serializable result (number, string, object, array) is
-  // storable. The structural validate accepts anything (null/undefined = empty
-  // cell; otherwise the compute result is trusted).
-  projected: Object.freeze({
+  // `computed` — a computed field. `computed()` is read-time only and never
+  // reaches this persistence strategy; `computed.stored()` stores a JSON cell
+  // written by the projection.
+  computed: Object.freeze({
     validate() {
       return true; // the compute result is trusted, not client-provided
+    },
+    apply(_previous, next) {
+      return next;
+    },
+    diff(previous, next) {
+      if (Object.is(previous, next)) return null;
+      return { set: next };
+    },
+    serialize(value) {
+      if (value === null || value === undefined) return value;
+      return JSON.stringify(value);
+    },
+    deserialize(value) {
+      if (value === null || value === undefined) return value;
+      if (typeof value !== 'string') return value;
+      try { return JSON.parse(value); } catch { return value; }
+    },
+  }),
+
+  // `projected` — a stored computed field updated by a post-commit projection.
+  projected: Object.freeze({
+    validate() {
+      return true;
     },
     apply(_previous, next) {
       return next;
@@ -417,7 +437,7 @@ export function resolveStrategy(kind) {
   if (!strategy) {
     throw new Error(
       `unknown field kind '${kind}'. The field kinds are: ` +
-        `value, crdt, hash, store, ordered, projected, struct, state.`,
+        `value, crdt, hash, store, ordered, computed, projected, struct, state.`,
     );
   }
   return strategy;
@@ -490,15 +510,15 @@ export function validateMutation(entityRecord, payload) {
       );
     }
 
-    // Derived fields are computed on read — a client may not set them.
-    if (descriptor.derived) {
-      throw new ValidationError(
-        `${name}.${key} is a derived field and may not be set by the client.`,
-      );
-    }
 
     // readonly: the field's mere presence in an untrusted payload is rejected —
     // the client cannot set it; the framework assigns it server-side.
+    if (descriptor.kind === 'computed') {
+      throw new ValidationError(
+        `${name}.${key} is a computed field and may not be set by the client.`,
+      );
+    }
+
     if (descriptor.readonly === true || descriptor.touch === true) {
       throw new ValidationError(
         `${name}.${key} is ${descriptor.touch ? 'a touch field' : 'readonly'}: a client may not set or ` +

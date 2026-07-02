@@ -3,9 +3,10 @@
 // distinct, typed, frozen capability token exported from the package, on par
 // with read/write/subscribe (authorization is typed tokens, never strings).
 
+import { read, write, subscribe, grant } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { admin, read, write, subscribe, grant } from '../src/index.mjs';
+import { admin } from '../src/internal.mjs';
 
 test('admin is a distinct frozen capability token', () => {
   assert.ok(admin, 'admin is exported');

@@ -3,11 +3,12 @@
 // re-enters writeQueue.run through the dispatchRef. The re-entry hits the
 // fast-path (running=false, waiters=0) and completes without deadlock.
 
+import { text, ref, map, grant, read, write, scope } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, text, ref, map, grant, read, write, scope, generateDDL } from '../src/index.mjs';
+import workbench, { entity, generateDDL } from '../src/internal.mjs';
 
 function makeDoc() {
   return entity('Doc', {

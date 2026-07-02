@@ -8,7 +8,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
-import { resolveTemplate, escapeHtml } from '../src/index.mjs';
+import { resolveTemplate, escapeHtml } from '../src/internal.mjs';
 
 function withTemplate(source, run) {
   const dir = path.join(os.tmpdir(), 'express-views-' + randomUUID());

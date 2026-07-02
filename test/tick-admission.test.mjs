@@ -3,10 +3,11 @@
 // source binding, verb declaration, row existence, while predicate,
 // payload match, tick-kind gating.
 
+import { text, scope, everyone, grant, read, schedule, date, tick } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { entity, text, scope, everyone, grant, read, generateDDL, schedule, date, tick } from '../src/index.mjs';
+import { entity, generateDDL } from '../src/internal.mjs';
 import { admitSystemMutation, tickSource } from '../src/schedule.mjs';
 
 // ============================================================

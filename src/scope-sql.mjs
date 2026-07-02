@@ -14,6 +14,7 @@
 // entity-load from the frozen field descriptors; there is no per-request cost.
 
 import { serializeField, structCellColumn } from './field-strategy.mjs';
+import * as eventHandle from './event-handle.mjs';
 
 // The logical name of the param a role check (`is.<role>()`) emits — the one
 // placeholder the query layer rebinds per request to the concrete principal id.
@@ -195,7 +196,7 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
     // error rather than silently emitting a wrong table.
     const tableName = entityName ? membershipTable(entityName, name) : null;
     const ownerCol = entityName ? membershipOwnerCol(entityName) : null;
-    return {
+    const handle = {
       fieldName: name,
       is: fail,
       in: fail,
@@ -229,6 +230,65 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
         });
       },
     };
+    // Typed native event handles for the map field's mutations: the derived
+    // identifiers the effect compiler matches against (a field handle is the
+    // single source — no separate `native('E','f','added')` string path). Only
+    // attached when the entity name is known (entity-handle access), since the
+    // handle needs the entity name to build the event type.
+    if (entityName) {
+      handle.added = eventHandle.native(entityName, name, 'added');
+      handle.roleChanged = eventHandle.native(entityName, name, 'roleChanged');
+      handle.removed = eventHandle.native(entityName, name, 'removed');
+    }
+    return handle;
+  }
+
+  // An ordered list field (the `ordered` kind) exposes typed native event
+  // handles for its mutations, like the map field. Whole-value comparison is
+  // still forbidden (an ordered collection is not a scalar).
+  if (descriptor.kind === 'ordered') {
+    const fail = () => {
+      throw new NonCompilableError(
+        `field '${String(name)}' is an ${descriptor.kind} field and cannot be compared in scope`,
+      );
+    };
+    const handle = {
+      fieldName: name,
+      is: fail,
+      in: fail,
+      isNull: fail,
+      gte: fail,
+      lte: fail,
+    };
+    if (entityName) {
+      handle.inserted = eventHandle.native(entityName, name, 'inserted');
+      handle.moved = eventHandle.native(entityName, name, 'moved');
+      handle.reordered = eventHandle.native(entityName, name, 'reordered');
+      handle.removed = eventHandle.native(entityName, name, 'removed');
+    }
+    return handle;
+  }
+
+  // A log field (the `store` kind, `type: 'log'`) exposes its typed native
+  // `appended` event handle. Whole-value comparison is forbidden.
+  if (descriptor.kind === 'store' && descriptor.type === 'log') {
+    const fail = () => {
+      throw new NonCompilableError(
+        `field '${String(name)}' is a ${descriptor.kind} field and cannot be compared in scope`,
+      );
+    };
+    const handle = {
+      fieldName: name,
+      is: fail,
+      in: fail,
+      isNull: fail,
+      gte: fail,
+      lte: fail,
+    };
+    if (entityName) {
+      handle.appended = eventHandle.native(entityName, name, 'appended');
+    }
+    return handle;
   }
 
   if (descriptor.kind !== 'value') {

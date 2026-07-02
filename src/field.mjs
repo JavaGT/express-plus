@@ -80,9 +80,7 @@ export function date(options = {}) {
 }
 
 // `number()` — a value-kind scalar (integer or float), stored as-is (SQLite
-// binds JS numbers directly). `derived` (a recompute-from-row function, e.g.
-// wordCount from body) rides the descriptor; its write-path materialization is
-// owned by the write/materialization seam, not this declaration.
+// binds JS numbers directly).
 export function number(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'number', ...options });
 }
@@ -217,10 +215,36 @@ export function list(of, options = {}) {
   });
 }
 
+// `computed({ compute })` — a read-time computed field. It stores no column;
+// hydration recomputes it from the row every time.
+export function computed({ compute } = {}) {
+  if (typeof compute !== 'function') {
+    throw new Error('computed requires a compute function');
+  }
+  return makeDescriptor({
+    kind: 'computed',
+    mode: 'pull',
+    compute,
+    readonly: true,
+  });
+}
+
+computed.stored = ({ compute } = {}) => {
+  if (typeof compute !== 'function') {
+    throw new Error('computed.stored requires a compute function');
+  }
+  return makeDescriptor({
+    kind: 'computed',
+    mode: 'stored',
+    compute,
+    readonly: true,
+  });
+};
+
 // `projected.async({ compute })` — a stored computed field updated by a
 // post-commit projection over the committed event log (ADR #12, SPEC §5.3).
-// Unlike `derived` (read-time pull), the value is materialized in the main
-// table so it is queryable and sortable; unlike `projected.inline` (cheap
+// Unlike `computed()` (read-time pull), the value is materialized in the main
+// table so it is queryable and sortable; unlike `computed.stored()` (cheap
 // in-transaction compute), the compute MAY be expensive/async/external (e.g.
 // thumbnail generation, embedding compute, image export). The column stores
 // a JSON-serialized value; the compute function receives the current row
@@ -239,23 +263,6 @@ export const projected = {
       mode: 'async',
       compute,
       from: from ?? null,
-      readonly: true,
-    });
-  },
-  // `projected.inline({ compute })` — an in-transaction stored computed field.
-  // Unlike `.async` (post-commit), the compute runs INSIDE the originating
-  // transaction — it is atomic with the mutation. A compute failure rolls
-  // back the whole commit (fail closed). The compute is synchronous in the
-  // projection's apply handler; the field value is materialized immediately
-  // so sort keys like `hotRank` are transactionally consistent.
-  inline: ({ compute }) => {
-    if (typeof compute !== 'function') {
-      throw new Error('projected.inline requires a compute function');
-    }
-    return makeDescriptor({
-      kind: 'projected',
-      mode: 'inline',
-      compute,
       readonly: true,
     });
   },
@@ -295,18 +302,15 @@ export function ephemeral(cells = {}) {
 //   - transitions — the legal-move graph { from: [to, …] } (frozen)
 //   - effects      — keyed by a `state.transition(from, to)` handle → an
 //                    in-transaction effect ({ with } / { mutate, with })
-//   - auto         — a time-driven auto-transition ({ when, after, to }), sugar
-//                    over the schedule time-source (ADR #19), deferred behavior
+//   - auto         — a time-driven auto-transition ({ when, after, to, from }),
+//                    sugar lowered by the entity compiler into schedule.after
+//                    using the explicit `from` date/number anchor (ADR #19)
 //
 // `state.transition(from, to)` is a STATIC method returning a typed, stable,
-// stringifiable transition handle used as a COMPUTED OBJECT KEY in `effects`.
-// It is NOT a magic string (AGENTS: authorization/identifiers are never magic
-// strings): two calls for the same pair stringify to the SAME key, so the effect
-// map is keyed by a derived identifier, not a hand-authored string literal.
+// stringifiable transition handle for transition-keyed effects.
 //
 // Import-surface scope: this constructor delivers the descriptor the entity
-// compiler accepts. The transition enforcement (reject illegal moves), the
-// effect wiring, and the `auto` scheduler are the state kind's deferred behavior.
+// compiler accepts. The compiler owns transition enforcement and auto lowering.
 export function state({ values, transitions, effects, auto } = {}) {
   return makeDescriptor({
     kind: 'state',
@@ -320,14 +324,12 @@ export function state({ values, transitions, effects, auto } = {}) {
 // A typed transition handle. It stringifies to a stable identifier encoding the
 // from→to pair, so the same pair always yields the same computed-object key in
 // an `effects` map — a derived identifier, never a magic string literal.
-state.transition = (from, to) =>
-  Object.freeze({
-    from,
-    to,
-    toString() {
-      return `transition:${from}->${to}`;
-    },
-  });
+state.transition = (from, to) => {
+  const handle = { brand: 'state-transition-handle', from, to };
+  Object.defineProperty(handle, 'type', { value: `transition:${from}->${to}`, enumerable: true });
+  Object.defineProperty(handle, 'toString', { value: () => handle.type, enumerable: false });
+  return Object.freeze(handle);
+};
 
 export function link({ tiers, tier, token } = {}) {
   return makeDescriptor({

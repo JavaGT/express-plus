@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { principal, principalFrom, effectSource } from '../src/index.mjs';
+import { principal, principalFrom, effectSource } from '../src/internal.mjs';
 
 // ---- principalFrom construction ----
 

@@ -29,6 +29,7 @@
 //      (SQL scope AND runtime mayVerb) — inherit children resolve capabilities
 //      by recursing through the parent seam.
 
+import { text, map, ref, scope, grant, read, write, subscribe, deny, inherit } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -37,8 +38,7 @@ import { setActiveDb } from '../src/db.mjs';
 import { bindReadScope } from '../src/scope-sql.mjs';
 import { mayVerb } from '../src/row-grant.mjs';
 import {
-  entity, text, map, ref, scope, grant, read, write, subscribe, deny, inherit,
-} from '../src/index.mjs';
+  entity } from '../src/internal.mjs';
 import { principal, anonymous } from '../src/principal.mjs';
 
 // The parent: Feed is readable only by a subscriber (membership recorded in the

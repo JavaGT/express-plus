@@ -18,13 +18,14 @@
 // — a legitimately-subscribed viewer who is then REVOKED — is the one
 // remaining guard that the fan-out `await` still does its work.
 
+import { text, ref, grant, read, write, subscribe, scope, everyone, User, Inbox } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import workbench, { entity, text, ref, grant, read, write, subscribe, scope, everyone, generateDDL, executeDDL, User, Inbox } from '../src/index.mjs';
+import workbench, { entity, generateDDL, executeDDL } from '../src/internal.mjs';
 import { Doc } from '../doc.mjs';
 import { setActiveDb } from '../src/db.mjs';
 

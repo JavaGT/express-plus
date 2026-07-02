@@ -2,15 +2,13 @@
 // Priority 1 Step 3a: durable dispatch with per-scope seq, dedupe by actionId,
 // and restart-survival via persisted Cursor (eng-review specs #20, D2, D6).
 
+import { text, ref, grant, read, write, scope } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, text, ref, grant, read, write, scope,
-  action, event, createServer,
-  generateFrameworkDDL,
-} from '../src/index.mjs';
+  entity, action, event, createServer, generateFrameworkDDL } from '../src/internal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 test('durable dispatch appends events to the _Log table with per-scope seq', async () => {

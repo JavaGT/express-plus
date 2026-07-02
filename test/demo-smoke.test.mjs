@@ -1,9 +1,10 @@
 // Demo smoke tests — each demo entity imports, generates DDL, and serves CRUD.
+import { User } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { generateDDL, User } from '../src/index.mjs';
+import workbench, { generateDDL } from '../src/internal.mjs';
 
 // --- Note demo ---
 import { Note } from '../note.mjs';

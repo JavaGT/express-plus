@@ -12,11 +12,7 @@
 //   field .can        — per-field visibility gating
 //   subscribe(Entity,id,{fields}) — field-keyed interest
 
-import {
-  entity, text, number, date, ref, map, boolean, polyline, ephemeral, list,
-  grant, deny, read, write, subscribe, admin, anyOf, scope, never,
-  inherit, router,
-} from 'workbench';
+import { entity, text, number, date, ref, map, boolean, polyline, ephemeral, list, grant, deny, read, write, subscribe, admin, anyOf, scope, never, inherit, router } from 'workbench';
 
 const VIEWER  = [read, subscribe];
 const EDITOR  = [read, write, subscribe];

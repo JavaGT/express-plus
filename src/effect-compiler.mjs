@@ -1,10 +1,11 @@
 // Effect compiler and runtime — declarative in-transaction effects (ADR #6, #22).
 //
-// Effects are declared on an entity as a map from trigger handles to `{ mutate, with, when }`:
-//   effects: {
-//     [Note.created]: { mutate: Inbox, with: ({ delta, origin }) => ({...}) },
-//     [native('Doc', 'collaborators', 'added')]: { mutate: Counter, with: { count: inc(1) } },
-//   }
+// Effects are declared on an entity as array pairs so typed trigger handles are
+// preserved rather than stringified by JavaScript object-key coercion:
+//   effects: (Note) => [
+//     [Note.created, { mutate: Inbox, with: ({ delta, origin }) => ({...}) }],
+//     [Note.collaborators.added, { mutate: Counter, with: { count: inc(1) } }],
+//   ]
 //
 // For P6b Part 1: CRUD-trigger effects only (Note.created/updated/removed). The effect
 // fires on the COMMITTED event, re-entering the SAME in-txn event-application path
@@ -55,6 +56,35 @@ export function many(target, { over }) {
 // Backing store for anyOf symbol → original handles (module lifetime).
 const anyOfTriggers = new Map();
 
+function isEventHandle(handle) {
+  return handle && typeof handle === 'object' && handle.brand === 'event-handle' && typeof handle.type === 'string';
+}
+
+function isStateTransitionHandle(handle) {
+  return handle && typeof handle === 'object' && handle.brand === 'state-transition-handle' && typeof handle.type === 'string';
+}
+
+function isTriggerHandle(handle) {
+  return isEventHandle(handle) || isStateTransitionHandle(handle) || typeof handle === 'symbol';
+}
+
+export function effectEntries(effects, { sourceEntityName } = {}) {
+  if (effects === null || effects === undefined) return [];
+  if (!Array.isArray(effects)) {
+    throw new Error(
+      `effects on entity '${sourceEntityName ?? '<unknown>'}' must be an array of ` +
+      `[triggerHandle, effect] pairs. Object-keyed effects stringify typed handles; ` +
+      `use effects: (Self) => [[Self.created, { ... }]].`,
+    );
+  }
+  return effects.map((entry, index) => {
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      throw new Error(`effects[${index}] on entity '${sourceEntityName ?? '<unknown>'}' must be [triggerHandle, effect].`);
+    }
+    return entry;
+  });
+}
+
 // effect.anyOf(...triggers) — mints a Symbol key for compound fan-IN.
 // The N original triggers are stored keyed by the symbol, and fanned out
 // at registry-build time to N event-type slots.
@@ -66,6 +96,14 @@ export const effect = Object.freeze({
         'effect.anyOf() requires at least one trigger handle — ' +
         'a compound trigger with zero members is meaningless.',
       );
+    }
+    for (const trigger of triggers) {
+      if (!isEventHandle(trigger) && !isStateTransitionHandle(trigger)) {
+        throw new Error(
+          `effect.anyOf() trigger '${stringifyTrigger(trigger)}' must be a typed event handle ` +
+          `or state transition handle. Strings are not accepted.`,
+        );
+      }
     }
     const sym = Symbol('effect.anyOf');
     anyOfTriggers.set(sym, Object.freeze([...triggers]));
@@ -83,6 +121,12 @@ export function validateEffectDeclaration(effect, { triggerHandle, sourceEntityN
     throw new Error(
       `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
       `must be an object with { mutate, with, when? }.`,
+    );
+  }
+  if (!isTriggerHandle(triggerHandle)) {
+    throw new Error(
+      `effect trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+      `must be a typed event handle, state transition handle, or effect.anyOf(...). Strings are not accepted.`,
     );
   }
 
@@ -194,17 +238,14 @@ export function compileEntityEffects(entityRecord, allEntities) {
   const compiledEffects = new Map();
   const effectGraphEntry = new Set(); // target entities for cycle detection
 
-  // P6c-C step 3: iterate over symbol-keyed effects too (Object.entries skips symbols)
-  for (const key of Reflect.ownKeys(effects)) {
-    const effect = effects[key];
-    // Validate the effect declaration
+  for (const [triggerHandle, effect] of effectEntries(effects, { sourceEntityName: name })) {
     const validation = validateEffectDeclaration(effect, {
-      triggerHandle: key,
+      triggerHandle,
       sourceEntityName: name,
     });
 
     if (validation.valid) {
-      compiledEffects.set(key, effect);
+      compiledEffects.set(triggerHandle, effect);
 
       // Graph edge: self has no edge, many uses .target.name, plain uses .name
       let edgeName;
@@ -425,29 +466,18 @@ export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, 
   return allTargetEvents;
 }
 
-// Resolve a trigger handle to an event-type string.
-// - string → as-is
-// - object with .toString → .toString()
-// - then :→. normalization iff : present and . absent
+// Resolve a typed trigger handle to an event-type string.
 function resolveTriggerEventType(handle, { entityRecord }) {
-  let eventType;
-  if (typeof handle === 'string') {
-    eventType = handle;
-  } else if (handle && typeof handle.toString === 'function') {
-    eventType = handle.toString();
-  } else {
-    throw new Error(
-      `effect trigger handle on entity '${entityRecord.name}' is not a string ` +
-      `and has no .toString() — cannot resolve to event type.`,
-    );
+  if (isEventHandle(handle)) {
+    return handle.type;
   }
-
-  // Normalize: some handles use colon form, convert to dot form for matching
-  if (eventType.includes(':') && !eventType.includes('.')) {
-    eventType = eventType.replace(':', '.');
+  if (isStateTransitionHandle(handle)) {
+    return handle.type;
   }
-
-  return eventType;
+  throw new Error(
+    `effect trigger handle on entity '${entityRecord.name}' must be a typed event handle ` +
+    `or state transition handle. Strings are not accepted.`,
+  );
 }
 
 // Build an effects registry from compiled entities.
@@ -459,14 +489,15 @@ export function buildEffectsRegistry(entities) {
     const { name, effects } = entityRecord;
     if (!effects) continue;
 
-    // Iterate over BOTH string keys and symbol keys (P6c-C step 3: anyOf)
-    for (const key of Reflect.ownKeys(effects)) {
-      const effect = effects[key];
+    for (const [key, effect] of effectEntries(effects, { sourceEntityName: name })) {
       const isSymbol = typeof key === 'symbol';
+      if (!isTriggerHandle(key)) {
+        throw new Error(
+          `Effect declaration on entity '${name}' uses trigger '${stringifyTrigger(key)}'; ` +
+          `use a typed event handle, state transition handle, or effect.anyOf(...).`,
+        );
+      }
 
-      // Resolve triggers to event types:
-      // - string key: single trigger (existing path)
-      // - symbol key: fan-out to N triggers from anyOfTriggers
       const triggerHandles = isSymbol
         ? (anyOfTriggers.has(key) ? anyOfTriggers.get(key) : (() => {
             throw new Error(
@@ -617,11 +648,10 @@ export function buildEffectsGraph(entities) {
     const { name, effects } = entityRecord;
     if (!effects) continue;
     const targets = new Set();
-    // P6c-C step 3: iterate over symbol-keyed effects too (Object.values skips symbols)
-    for (const effect of Reflect.ownKeys(effects).map(k => effects[k])) {
+    for (const [, effect] of effectEntries(effects, { sourceEntityName: name })) {
       const tgt = effect && effect.mutate;
       if (tgt) {
-        // self: skip (no edge), many: use .target.name, plain: use .name
+        // self: skip (no edge), many: use .target.name, plain use .name
         if (tgt.name) {
           targets.add(tgt.name);
         } else if (tgt.kind === 'many' && tgt.target?.name) {

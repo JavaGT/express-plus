@@ -6,13 +6,13 @@
 // writeQueue, the second waits for the first to COMMIT, then proceeds. This is
 // the integration guard over the already-unit-tested write-queue module.
 
+import { text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, text, ref, scope, grant, read, write, subscribe,
-} from '../src/index.mjs';
+  entity } from '../src/internal.mjs';
 
 function ownedNote() {
   return entity('Note', {

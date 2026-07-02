@@ -1,7 +1,8 @@
+import { scope, everyone, grant, read, tick, date, schedule } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity, scope, everyone, grant, read, tick, date, schedule } from '../src/index.mjs';
+import workbench, { entity } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';

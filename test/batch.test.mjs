@@ -2,11 +2,12 @@
 // N actions run as ONE transaction = ONE composed commit (one actionId, one
 // `now`), all-or-nothing. Any sub-action denial rolls back the ENTIRE batch.
 
+import { text, ref, scope, grant, read, write, subscribe, everyone } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, text, ref, scope, grant, read, write, subscribe, everyone } from '../src/index.mjs';
+import workbench, { entity } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
 
 // An owner-scoped Note: only the owner may write/remove.

@@ -16,15 +16,14 @@
 // fail closed loud Phase-2). A `store`-kind field is correctly NOT whole-value
 // comparable in scope (the existing fieldHandle non-value gate throws).
 
+import { log, ref, text, scope, everyone, grant, read, principal } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, log, ref, text, scope, everyone, grant, read,
-  createServer, durableMutationVariant, principal, executeFrameworkDDL, generateDDL,
-} from '../src/index.mjs';
+  entity, createServer, durableMutationVariant, executeFrameworkDDL, generateDDL } from '../src/internal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 test('log() returns a frozen store-kind descriptor of type log', () => {

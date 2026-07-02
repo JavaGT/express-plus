@@ -12,13 +12,13 @@
 // OBJECT, not a string name — `inherit(Doc, { via })`, never `inherit('Doc')`.
 // No registry, no global namespace; the parent must be defined above the child.
 
+import { text, ref, scope, grant, deny, read, write, subscribe, inherit } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, text, ref, scope, grant, deny, read, write, subscribe, inherit,
-} from '../src/index.mjs';
+  entity } from '../src/internal.mjs';
 
 import { bindReadScope } from '../src/scope-sql.mjs';
 import { principal, anonymous } from '../src/principal.mjs';

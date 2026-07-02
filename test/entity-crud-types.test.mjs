@@ -2,12 +2,12 @@
 // entity('Note',{...}) auto-generates Note.create/.update/.remove action types
 // and Note.created/.updated/.removed event types with generic reducers.
 
+import { text, ref, grant, read, write, scope, everyone } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  entity, text, ref, grant, read, write, scope, everyone,
-} from '../src/index.mjs';
+  entity } from '../src/internal.mjs';
 
 test('entity auto-generates verbs.create/.update/.remove action types', () => {
   const Note = entity('Note', {

@@ -2,11 +2,7 @@
 // with per-member collaborator roles and link-share for non-users.
 // Exercises the `map` plugin for valued-set membership and the `link`
 // field type for non-user principals.
-import {
-  entity, text, date, ref, map, link,
-  grant, deny, read, write, subscribe, admin, anyOf, never, scope,
-  router, User, native,
-} from 'workbench';
+import { entity, text, date, ref, map, link, grant, deny, read, write, subscribe, admin, anyOf, never, scope, router, User } from 'workbench';
 import { Photo } from './photo.mjs';
 
 const VIEWER     = [read, subscribe];
@@ -127,11 +123,12 @@ export const Album = entity('Album', {
   // When a collaborator is added, notify them via Inbox.
   // Same pattern as doc.mjs L185-188.
   // ===================================================================
-  effects: {
-    [native('Album', 'collaborators', 'added')]: { mutate: Inbox, with: {
-      recipient: delta.member, album: entity.id, kind: 'albumInvite',
-    } },
-  },
+  effects: (Album) => [
+    [Album.collaborators.added, {
+      mutate: Inbox,
+      with: ({ delta, origin }) => ({ recipient: delta.member, album: origin.id, kind: 'albumInvite' }),
+    }],
+  ],
 
   routes: (r, Album) => {
     r.resource();  // CRUD through grant

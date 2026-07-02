@@ -10,10 +10,11 @@
 // The db handle is ambient: workbench({ db }) binds it via setActiveDb so a
 // standalone entity (declared before any app) can run queries with no db arg.
 
+import { text, date, scope, grant, read, everyone } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity, text, date, scope, grant, read, everyone } from '../src/index.mjs';
+import workbench, { entity } from '../src/internal.mjs';
 import { lowerToSql } from '../src/scope-sql.mjs';
 
 // A trivial public-read entity (the query API is unscoped, so the grant's scope

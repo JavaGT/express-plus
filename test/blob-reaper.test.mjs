@@ -9,6 +9,7 @@
 // abandoned upload leaks .pending forever with no operator lever — fail-closed
 // default baked into the framework, not an app responsibility).
 
+import { text, ref, blob, scope, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -17,8 +18,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import workbench, {
-  entity, text, ref, blob, scope, grant, read, write, subscribe,
-} from '../src/index.mjs';
+  entity } from '../src/internal.mjs';
 
 function photoNote() {
   return entity('Note', {

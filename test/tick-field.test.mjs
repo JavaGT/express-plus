@@ -2,9 +2,10 @@
 // Tests for: tick.hz / tick.every frozen shape, while/with validation,
 // entity-mission compile for tick triggers, empty-while guard, 'when' rejection.
 
+import { date, text, scope, everyone, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { entity, date, text, scope, everyone, grant, read, generateDDL } from '../src/index.mjs';
+import { entity, generateDDL } from '../src/internal.mjs';
 import { tick, tickSource } from '../src/schedule.mjs';
 
 // ============================================================

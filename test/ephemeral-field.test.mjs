@@ -1,6 +1,7 @@
+import { ephemeral, scope, everyone, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { entity, ephemeral, scope, everyone, grant, read, generateDDL } from '../src/index.mjs';
+import { entity, generateDDL } from '../src/internal.mjs';
 
 // `ephemeral(cells)` — the general NON-PERSISTING field kind (DECISIONLOG #51).
 // Accepts an author-declared cell shape (richer than boolean toggles — e.g. a

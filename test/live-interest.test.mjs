@@ -9,6 +9,7 @@
 // The `pace` param is deferred (Slice B2) — reject with error if present.
 // Coordinate narrowing is deferred (P6e-3) — reject range/in/is shapes.
 
+import { text, ephemeral, grant, read, write, subscribe, scope, everyone } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -16,9 +17,7 @@ import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import workbench, {
-  entity, text, ephemeral, grant, read, write, subscribe, scope, everyone,
-  generateDDL,
-} from '../src/index.mjs';
+  entity, generateDDL } from '../src/internal.mjs';
 
 // --- test entity ---
 

@@ -13,11 +13,12 @@
 // `ev.type.slice(dotIdx+1).replace('d','')` removed the FIRST 'd', so
 // 'updated' → 'upated' (broken), which would make the hook deny every update.
 
+import { text, ref, grant, deny, read, write, subscribe, scope } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, text, ref, grant, deny, read, write, subscribe, scope, generateDDL } from '../src/index.mjs';
+import workbench, { entity, generateDDL } from '../src/internal.mjs';
 
 // A Widget whose row grant DENIES write to a 'banned' principal (via a declared
 // run-only check — the .can body receives { is, entity }, not principal, so a

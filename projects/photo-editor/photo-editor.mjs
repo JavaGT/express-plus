@@ -20,11 +20,7 @@
 //   - Effects = `{ mutate, with }`; in-transaction effect-principal reentrancy.
 //   - NO DEFAULT GRANT: entity with no grant = LOAD-TIME ERROR.
 
-import {
-  entity, text, number, date, ref, map, boolean, blob, raster, projected, ephemeral,
-  grant, deny, read, write, subscribe, admin, anyOf, scope, never,
-  inherit, router,
-} from 'workbench';
+import { entity, text, number, date, ref, map, boolean, blob, raster, projected, ephemeral, grant, deny, read, write, subscribe, admin, anyOf, scope, never, inherit, router } from 'workbench';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CAPABILITY BUNDLES — typed, imported, never strings.

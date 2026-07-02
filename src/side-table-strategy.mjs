@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { read, write } from './grant.mjs';
+import { serializeField } from './field-strategy.mjs';
 import { mayFieldOp } from './row-grant.mjs';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
 import { getActiveDb, getActiveEntity } from './db.mjs';
@@ -394,6 +395,178 @@ function orderedDDL(entityName, fieldName) {
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
+function logHandle({ record, entityName, fieldName, descriptor, row, principal, dispatch }) {
+  const table = membershipTable(entityName, fieldName);
+  const ownerCol = membershipOwnerCol(entityName);
+  const oid = String(row.id);
+  return {
+    append: async (entry) => {
+      await authorizeFieldOp(record, fieldName, write, row, principal);
+      requireFieldDispatch(entityName, fieldName, dispatch);
+      const result = await dispatch({
+        actionId: randomUUID(),
+        type: `${entityName}.${fieldName}.append`,
+        payload: { owner: oid, ...(entry ?? {}) },
+        principal,
+      });
+      if (!result.granted) throw { status: 403, message: 'forbidden' };
+      const appended = result.events?.find((e) => e.type === `${entityName}.${fieldName}.appended`);
+      return appended?.data?.id;
+    },
+    entries: async () => {
+      await authorizeFieldOp(record, fieldName, read, row, principal);
+      const rows = getActiveDb()
+        .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner ORDER BY rowid`)
+        .all({ owner: oid });
+      return rows.map((r) => {
+        const rest = { ...r };
+        delete rest[ownerCol];
+        return rest;
+      });
+    },
+  };
+}
+
+function logMutateHandlers(entityName, fieldEntries) {
+  const handlers = {};
+  for (const [logField, descriptor] of fieldEntries) {
+    const entryDescriptor = descriptor.entry ?? {};
+    handlers[`${entityName}.${logField}.append`] = ({ payload }) => {
+      const { owner, ...entry } = payload ?? {};
+      if (owner == null) {
+        throw Object.assign(new Error(`${entityName}.${logField}.append requires an owner`), { status: 400 });
+      }
+      for (const key of Object.keys(entry)) {
+        if (!Object.prototype.hasOwnProperty.call(entryDescriptor, key)) {
+          throw Object.assign(new Error(`unknown entry field: ${key}`), { status: 400 });
+        }
+      }
+      const id = randomUUID();
+      const handle = eventHandles.native(entityName, logField, 'appended');
+      return [{
+        handle,
+        type: handle.type,
+        scope: `${entityName}:${owner}`,
+        data: { owner, id, ...entry },
+      }];
+    };
+  }
+  return handlers;
+}
+
+function logProjectionApply({ entityName, fieldEntries, handle, event, db }) {
+  for (const [logField, descriptor] of fieldEntries) {
+    if (handle.field !== logField || handle.kind !== eventHandles.EventKind.native || handle.nativeName !== 'appended') continue;
+    const entryDescriptor = descriptor.entry ?? {};
+    const sideTable = membershipTable(entityName, logField);
+    const ownerCol = membershipOwnerCol(entityName);
+    const cols = [ownerCol, 'id'];
+    const vals = [':owner', ':id'];
+    const params = { owner: event.data?.owner != null ? String(event.data.owner) : null, id: event.data?.id };
+    for (const [subField, entryDescriptorField] of Object.entries(entryDescriptor)) {
+      if (Object.prototype.hasOwnProperty.call(event.data ?? {}, subField)) {
+        cols.push(subField);
+        vals.push(`:${subField}`);
+        params[subField] = serializeField(entryDescriptorField, event.data[subField]);
+      }
+    }
+    db.prepare(
+      `INSERT INTO ${sideTable} (${cols.join(', ')}) VALUES (${vals.join(', ')})`,
+    ).run(params);
+    return true;
+  }
+  return false;
+}
+
+function logDDL(entityName, fieldName, descriptor) {
+  const tableName = `${entityName}_${fieldName}`;
+  const ownerCol = `${entityName}_id`;
+  const entryCols = Object.keys(descriptor.entry ?? {});
+  const cols = [`${ownerCol} TEXT NOT NULL`, 'id TEXT NOT NULL'];
+  for (const subField of entryCols) {
+    cols.push(`${subField} TEXT`);
+  }
+  cols.push(`PRIMARY KEY (${ownerCol}, id)`);
+  return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
+}
+
+function ephemeralHandle({ record, entityName, fieldName, row, principal, dispatch }) {
+  const table = membershipTable(entityName, fieldName);
+  const ownerCol = membershipOwnerCol(entityName);
+  const oid = String(row.id);
+  const clientId = String(principal?.id ?? 'anonymous');
+
+  return {
+    set: async (cells) => {
+      await authorizeFieldOp(record, fieldName, write, row, principal);
+      requireFieldDispatch(entityName, fieldName, dispatch);
+      const result = await dispatch({
+        actionId: randomUUID(),
+        type: `${entityName}.${fieldName}.set`,
+        payload: { owner: oid, client: clientId, cells: cells ?? {} },
+        principal,
+      });
+      if (!result.granted) throw { status: 403, message: 'forbidden' };
+    },
+    get: () => {
+      const r = getActiveDb()
+        .prepare(`SELECT cells FROM ${table} WHERE ${ownerCol} = :owner AND client_id = :client`)
+        .get({ owner: oid, client: clientId });
+      return r ? JSON.parse(r.cells ?? '{}') : {};
+    },
+  };
+}
+
+function ephemeralMutateHandlers(entityName, fieldEntries) {
+  const handlers = {};
+  for (const [ephField] of fieldEntries) {
+    const requireOwnerClient = (payload) => {
+      const { owner, client } = payload ?? {};
+      if (owner == null || client == null) {
+        throw Object.assign(
+          new Error(`${entityName}.${ephField}.set requires an owner + client`),
+          { status: 400 },
+        );
+      }
+      return { owner: String(owner), client: String(client) };
+    };
+    handlers[`${entityName}.${ephField}.set`] = ({ payload }) => {
+      const { owner, client } = requireOwnerClient(payload);
+      const handle = eventHandles.fieldSet(entityName, ephField);
+      return [{
+        handle,
+        type: handle.type,
+        scope: `${entityName}:${owner}`,
+        data: { owner, client, cells: payload.cells ?? {} },
+      }];
+    };
+  }
+  return handlers;
+}
+
+function ephemeralProjectionApply({ entityName, fieldEntries, handle, event, db }) {
+  for (const [ephField] of fieldEntries) {
+    if (handle.field !== ephField || handle.kind !== eventHandles.EventKind.fieldSet) continue;
+    const sideTable = membershipTable(entityName, ephField);
+    const ownerCol = membershipOwnerCol(entityName);
+    db.prepare(`INSERT OR REPLACE INTO ${sideTable} (${ownerCol}, client_id, cells) VALUES (:owner, :client, :cells)`)
+      .run({
+        owner: String(event.data?.owner),
+        client: String(event.data?.client),
+        cells: JSON.stringify(event.data?.cells ?? {}),
+      });
+    return true;
+  }
+  return false;
+}
+
+function ephemeralDDL(entityName, fieldName) {
+  const tableName = `${entityName}_${fieldName}`;
+  const ownerCol = `${entityName}_id`;
+  const cols = [`${ownerCol} TEXT NOT NULL`, 'client_id TEXT NOT NULL', 'cells TEXT', `PRIMARY KEY (${ownerCol}, client_id)`];
+  return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
+}
+
 const MAP_SIDE_TABLE_STRATEGY = Object.freeze({
   matches: (descriptor) => descriptor.kind === 'store' && descriptor.type === 'map',
   handle: mapHandle,
@@ -421,7 +594,32 @@ const ORDERED_SIDE_TABLE_STRATEGY = Object.freeze({
   ddl: orderedDDL,
 });
 
-const SIDE_TABLE_STRATEGIES = Object.freeze([MAP_SIDE_TABLE_STRATEGY, ORDERED_SIDE_TABLE_STRATEGY]);
+const LOG_SIDE_TABLE_STRATEGY = Object.freeze({
+  matches: (descriptor) => descriptor.kind === 'store' && descriptor.type === 'log',
+  handle: logHandle,
+  eventTypes: (entityName, fieldEntries) => fieldEntries.map(([fieldName]) =>
+    eventHandles.native(entityName, fieldName, 'appended').type),
+  mutateHandlers: logMutateHandlers,
+  projectionApply: logProjectionApply,
+  ddl: logDDL,
+});
+
+const EPHEMERAL_SIDE_TABLE_STRATEGY = Object.freeze({
+  matches: (descriptor) => descriptor.kind === 'ephemeral',
+  handle: ephemeralHandle,
+  eventTypes: (entityName, fieldEntries) => fieldEntries.map(([fieldName]) =>
+    eventHandles.fieldSet(entityName, fieldName).type),
+  mutateHandlers: ephemeralMutateHandlers,
+  projectionApply: ephemeralProjectionApply,
+  ddl: ephemeralDDL,
+});
+
+const SIDE_TABLE_STRATEGIES = Object.freeze([
+  MAP_SIDE_TABLE_STRATEGY,
+  ORDERED_SIDE_TABLE_STRATEGY,
+  LOG_SIDE_TABLE_STRATEGY,
+  EPHEMERAL_SIDE_TABLE_STRATEGY,
+]);
 
 export function collectSideTableStrategies(fields) {
   return SIDE_TABLE_STRATEGIES

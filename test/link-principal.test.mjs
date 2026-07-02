@@ -10,14 +10,13 @@
 // principal reads exactly what its token grants, and everyone else is
 // fail-closed (SQL NULL semantics + a runtime false).
 
+import { ref, text, map, link, scope, grant, deny, read, write, subscribe, anyOf } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, ref, text, map, link, scope, grant, deny, read, write, subscribe, anyOf,
-  executeDDL, bindReadScope,
-} from '../src/index.mjs';
+  entity, executeDDL, bindReadScope } from '../src/internal.mjs';
 import { mayVerb } from '../src/row-grant.mjs';
 import { principal } from '../src/principal.mjs';
 import { setActiveDb } from '../src/db.mjs';

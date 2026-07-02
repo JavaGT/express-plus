@@ -6,11 +6,12 @@
 // SELECT on await. The no-arg `findAll()` stays synchronous (a plain array +
 // .select) — the two call shapes are distinct.
 
+import { text, ref, number, date, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { entity, text, ref, number, date, grant, read, generateDDL } from '../src/index.mjs';
+import { entity, generateDDL } from '../src/internal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 const Note = entity('Note', {

@@ -11,14 +11,13 @@
 // The DB handle is an app-level resource read by the transport (DECISIONLOG: the
 // SQLite handle is supplied at workbench({ db }), shared by every transport).
 
+import { text, ref, scope, grant, deny, read, write, subscribe, everyone, inherit, principal } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, text, ref, scope, grant, deny, read, write, subscribe, everyone, inherit,
-} from '../src/index.mjs';
-import { principal } from '../src/principal.mjs';
+  entity } from '../src/internal.mjs';
 
 // An owner-scoped Note: only the owner may SEE a row (SQL scope is.owner()), and
 // the owner may read+write+subscribe.

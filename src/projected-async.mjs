@@ -15,7 +15,7 @@ function projectedAsyncRow(entityRecord, row) {
   for (const [k, v] of Object.entries(row)) {
     if (Object.prototype.hasOwnProperty.call(entityRecord.fields, k)) {
       const desc = entityRecord.fields[k];
-      if (desc?.kind === 'value' || desc?.kind === 'projected') {
+      if (desc?.kind === 'value' || desc?.kind === 'projected' || (desc?.kind === 'computed' && desc?.mode === 'stored')) {
         try { filteredRow[k] = resolveStrategy(desc.kind).deserialize?.(v, desc) ?? v; } catch { filteredRow[k] = v; }
       } else {
         filteredRow[k] = v;

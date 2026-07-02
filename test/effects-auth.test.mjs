@@ -14,15 +14,13 @@
 //        global validateEffects pass at boot (cycle → app.ready rejects;
 //        missing admitsEffects → app.ready rejects; valid → resolves + fires).
 
+import { text, grant, read, write, subscribe, principal } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, text, grant, read, write, subscribe,
-  principal, buildEffectsRegistry, validateEffects,
-  generateDDL, generateFrameworkDDL, executeFrameworkDDL,
-} from '../src/index.mjs';
+  entity, buildEffectsRegistry, validateEffects, generateDDL, generateFrameworkDDL, executeFrameworkDDL, created } from '../src/internal.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -46,9 +44,9 @@ test('#2 effect target event is authorized under the effect principal, not the u
   const Source = entity('Source', {
     fields: { title: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      ['Source.created']: { mutate: Target, with: { name: 'from-effect' } },
-    },
+    effects: (Source) => [
+      [Source.created, { mutate: Target, with: { name: 'from-effect' } },],
+    ],
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
@@ -103,9 +101,9 @@ test('#2 target row-grant deny of effect principal rolls back origin (in-txn ato
   const Source = entity('Source', {
     fields: { title: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      ['Source.created']: { mutate: Target, with: { name: 'x' } },
-    },
+    effects: (Source) => [
+      [Source.created, { mutate: Target, with: { name: 'x' } },],
+    ],
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
@@ -153,9 +151,9 @@ test('#3 admitsEffects deny rolls back origin', async () => {
   const Source = entity('Source', {
     fields: { title: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      ['Source.created']: { mutate: Target, with: { name: 'x' } },
-    },
+    effects: (Source) => [
+      [Source.created, { mutate: Target, with: { name: 'x' } },],
+    ],
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
@@ -196,9 +194,9 @@ test('#3 admitsEffects admit applies the effect', async () => {
   const Source = entity('Source', {
     fields: { title: text() },
     grant: () => grant(read, write, subscribe),
-    effects: {
-      ['Source.created']: { mutate: Target, with: { name: 'made' } },
-    },
+    effects: (Source) => [
+      [Source.created, { mutate: Target, with: { name: 'made' } },],
+    ],
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
@@ -234,8 +232,8 @@ test('#3 admitsEffects admit applies the effect', async () => {
 // boot (missing admitsEffects → app.ready rejects); together they cover the
 // boot-cycle claim.
 test('#4 validateEffects detects a structural cycle (A→B→A)', () => {
-  const a = { name: 'A', effects: { e: { mutate: { name: 'B' }, with: {} } } };
-  const b = { name: 'B', effects: { e: { mutate: { name: 'A' }, with: {} } } };
+  const a = { name: 'A', effects: [[created('A'), { mutate: { name: 'B' }, with: {} }]] };
+  const b = { name: 'B', effects: [[created('B'), { mutate: { name: 'A' }, with: {} }]] };
   assert.throws(() => validateEffects([a, b]), /cycle/i);
 });
 
@@ -243,7 +241,7 @@ test('#4 validateEffects passes a valid (acyclic, admitted) effect graph', () =>
   const target = { name: 'Target', admitsEffects: () => true };
   const source = {
     name: 'Source',
-    effects: { e: { mutate: target, with: {} } },
+    effects: [[created('Source'), { mutate: target, with: {} }]],
   };
   // Does not throw.
   validateEffects([source, target]);
@@ -262,7 +260,7 @@ test('#4 boot: missing admitsEffects on target rejects app.ready', async (t) => 
   const Source = entity('Source', {
     fields: { title: text() },
     grant: () => grant(read, write, subscribe),
-    effects: { ['Source.created']: { mutate: TargetNoAdmit, with: { name: 'x' } } },
+    effects: (Source) => [[Source.created, { mutate: TargetNoAdmit, with: { name: 'x' } }]],
   });
 
   const app = workbench({ db });
@@ -286,7 +284,7 @@ test('#4 boot: valid effects resolve app.ready + fire through the wired kernel',
   const Source = entity('Source', {
     fields: { title: text() },
     grant: () => grant(read, write, subscribe),
-    effects: { ['Source.created']: { mutate: Target, with: { name: 'wired' } } },
+    effects: (Source) => [[Source.created, { mutate: Target, with: { name: 'wired' } }]],
   });
 
   const app = workbench({ db });

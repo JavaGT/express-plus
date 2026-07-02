@@ -5,13 +5,13 @@
 // already returns before the kernel so it never held the write lock). The bare
 // module is covered by test/rate-limit.test.mjs.
 
+import { text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, text, ref, scope, grant, read, write, subscribe,
-} from '../src/index.mjs';
+  entity } from '../src/internal.mjs';
 
 function ownedNote() {
   return entity('Note', {

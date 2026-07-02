@@ -4,15 +4,14 @@
 // events into entity rows. A re-bootstrap (row read) and a resync (log fold via
 // reducer) MUST agree — because the row IS the reducer fold materialized.
 
+import { text, ref, link, grant, read, write, scope, everyone } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 
 import {
-  entity, text, ref, link, grant, read, write, scope, everyone,
-  generateFrameworkDDL,
-} from '../src/index.mjs';
+  entity, generateFrameworkDDL } from '../src/internal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 test('entity-projection: create — handler emits event — entity.projection writes row', async () => {

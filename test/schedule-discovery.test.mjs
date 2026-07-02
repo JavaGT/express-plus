@@ -1,14 +1,13 @@
 // P6d step 4a: schedule `with` payload grammar + CRUD-verb validation + field identity resolution + discoverDueSchedules
 // Tests for: with object/function, CRUD verb restriction, field identity matching, and pure due-discovery function.
 
+import { date, text, scope, everyone, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, date, text, scope, everyone, grant, read,
-  generateDDL, executeFrameworkDDL,
-} from '../src/index.mjs';
+  entity, generateDDL, executeFrameworkDDL } from '../src/internal.mjs';
 import { schedule, discoverDueSchedules } from '../src/schedule.mjs';
 import { setActiveDb } from '../src/db.mjs';
 

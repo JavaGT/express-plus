@@ -1,8 +1,9 @@
+import { json, scope, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, json, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import workbench, { entity } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
 
 function documentEntity() {

@@ -6,9 +6,10 @@
 // native map event handles, the viewer/editor role-derived checks) is DEFERRED
 // to later behavior pieces.
 
+import { ref, entity, scope, grant, read, never } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { map, ref, entity, scope, grant, read, never, native } from '../src/index.mjs';
+import { map, native } from '../src/internal.mjs';
 
 test('map(ref(...), options) returns a frozen store-kind descriptor', () => {
   const descriptor = map(ref('User'), { role: ['viewer', 'editor'], default: {} });

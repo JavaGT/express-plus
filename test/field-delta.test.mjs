@@ -2,10 +2,11 @@
 //
 // Tests the pure delta-computation core: no I/O, no DB, no live.mjs change.
 
+import { text, ref, hash, link, map, list, log, state, raster, polyline, everyone, grant, scope, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { entity, text, ref, hash, link, map, list, log, state, everyone, grant, scope, read, computeDelta, createDeltaProjector, created, updated, removed, native } from '../src/index.mjs';
+import { entity, computeDelta, createDeltaProjector, created, updated, removed, native } from '../src/internal.mjs';
 
 // --- test entity with one field of each diff-eligible kind plus excluded kinds ---
 
@@ -52,6 +53,32 @@ test('crdt field: changed body produces an insert delta (NOT a {set})', () => {
   assert.equal(result.body.insert.at, 5);
   assert.equal(result.body.insert.text, ' world');
   assert.equal(result.body.set, undefined, 'crdt delta must NOT be a { set }');
+});
+
+test('raster/polyline crdt stubs produce replace deltas and dev diagnostics', () => {
+  const Drawing = entity('Drawing', {
+    fields: {
+      pixels: raster.crdt(),
+      stroke: polyline.crdt(),
+    },
+    grant: () => [scope(everyone()).can(() => grant(read))],
+  });
+  const diagnostics = [];
+  const result = computeDelta(
+    Drawing,
+    { pixels: 'old-pixels', stroke: [{ x: 0, y: 0 }] },
+    { pixels: 'new-pixels', stroke: [{ x: 1, y: 1 }] },
+    undefined,
+    { diagnostics: (ctx) => diagnostics.push(ctx) },
+  );
+  assert.deepEqual(result, {
+    pixels: { set: 'new-pixels' },
+    stroke: { set: [{ x: 1, y: 1 }] },
+  });
+  assert.deepEqual(diagnostics, [
+    { entity: 'Drawing', field: 'pixels', type: 'raster' },
+    { entity: 'Drawing', field: 'stroke', type: 'polyline' },
+  ]);
 });
 
 test('struct field: changed sub-cell produces { cells: { <subCell>: { set: value } } }', () => {

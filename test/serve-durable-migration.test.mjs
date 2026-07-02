@@ -5,13 +5,13 @@
 // bindReadScope + mayVerb still run (the two default-on auth layers, unchanged);
 // only the WRITE mechanism moved onto the kernel (eng-review spec #5, #7, D1).
 
+import { text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, text, ref, scope, grant, read, write, subscribe,
-} from '../src/index.mjs';
+  entity } from '../src/internal.mjs';
 
 // An owner-scoped Note: only the owner may SEE a row, and the owner may
 // read+write+subscribe. The owner field is server-assigned on create (readonly).

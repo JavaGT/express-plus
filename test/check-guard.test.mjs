@@ -1,11 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  check,
-  resolveDecision,
-  assertGuarded,
-  UnawaitedCheckError,
-} from '../src/index.mjs';
+  check, resolveDecision, assertGuarded, UnawaitedCheckError } from '../src/internal.mjs';
 
 // Phase 0 — the async `is.*` guard (SPEC §6.1, §13; ADR #16).
 //

@@ -14,12 +14,13 @@
 //
 // Source of truth: SPEC §5–§6, §13 Phase 1. Grounded against note.mjs.
 
+import { text, ref, scope, grant, deny, read, write, subscribe, admin, owner } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  entity, text, ref, scope, grant, deny, read, write, subscribe,
-} from '../src/index.mjs';
+  entity } from '../src/internal.mjs';
+import { rowCapabilities } from '../src/row-grant.mjs';
 
 const ownerGrant = () => [
   scope(({ is }) => is.owner()).can(
@@ -52,6 +53,47 @@ test('a ref field with role derives a check is.<role>() (the one thing the FK de
     grant: ownerGrant,
   });
   assert.equal(typeof Note.checks.owner, 'function');
+});
+
+test('owner() expands to the owner ref-role field descriptor', () => {
+  const descriptor = owner();
+  assert.equal(descriptor.kind, 'value');
+  assert.equal(descriptor.type, 'ref');
+  assert.equal(descriptor.target, 'User');
+  assert.equal(descriptor.role, 'owner');
+  assert.equal(descriptor.readonly, true);
+  assert.ok(Object.isFrozen(descriptor));
+});
+
+test('owner.only() compiles like the explicit owner-only grant', async () => {
+  const Manual = entity('ManualOwnerOnly', {
+    fields: { body: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+    grant: () => [
+      scope(({ is }) => is.owner()).can(
+        async ({ is }) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not the owner'),
+      ),
+    ],
+  });
+  const Sugared = entity('SugaredOwnerOnly', {
+    fields: { body: text(), owner: owner() },
+    grant: owner.only,
+  });
+
+  assert.equal(Sugared.readScope.sql, Manual.readScope.sql.replaceAll('ManualOwnerOnly', 'SugaredOwnerOnly'));
+  assert.deepEqual(Sugared.readScope.params, Manual.readScope.params);
+  assert.deepEqual(
+    { node: Sugared.scopeAst.node, field: Sugared.scopeAst.field, param: Sugared.scopeAst.param },
+    { node: Manual.scopeAst.node, field: Manual.scopeAst.field, param: Manual.scopeAst.param },
+  );
+  assert.equal(typeof Sugared.checks.owner, 'function');
+
+  const ownerDecision = await rowCapabilities(Sugared, { id: 'd1', owner: 'u1' }, { id: 'u1' });
+  assert.equal(ownerDecision.granted, true);
+  assert.deepEqual(ownerDecision.capabilities, [read, write, subscribe, admin]);
+
+  const otherDecision = await rowCapabilities(Sugared, { id: 'd1', owner: 'u1' }, { id: 'u2' });
+  assert.equal(otherDecision.granted, false);
+  assert.deepEqual(otherDecision.capabilities, []);
 });
 
 test('the derived role check tests principal identity against the ref column', () => {

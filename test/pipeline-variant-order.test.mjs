@@ -79,9 +79,9 @@ test('durable variant: effects recurse through the same variant interface', asyn
   const Source = entity('SourceVariant', {
     fields: { body: text() },
     grant: () => [scope(() => everyone()).can(() => grant(read, write))],
-    effects: {
-      'SourceVariant.created': { mutate: { name: 'TargetVariant' }, with: { body: 'from-effect' } },
-    },
+    effects: (SourceVariant) => [
+      [SourceVariant.created, { mutate: { name: 'TargetVariant' }, with: { body: 'from-effect' } }],
+    ],
   });
   const Target = entity('TargetVariant', {
     fields: { body: text() },

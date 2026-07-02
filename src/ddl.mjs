@@ -42,10 +42,10 @@ function mainTableDDL(entity) {
   if (!fields) return cols;
 
   for (const [name, descriptor] of Object.entries(fields)) {
-    // Derived fields have no stored column (computed on read).
-    if (descriptor.derived) continue;
+    // Pull computed fields have no stored column (computed on read).
+    if (descriptor.kind === 'computed' && descriptor.mode === 'pull') continue;
     // Fields that are stored in the main table (value, crdt, hash, struct)
-    if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash' || descriptor.kind === 'state' || descriptor.kind === 'projected') {
+    if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash' || descriptor.kind === 'state' || descriptor.kind === 'projected' || (descriptor.kind === 'computed' && descriptor.mode === 'stored')) {
       cols.push(`${name} ${sqlType(descriptor)}`);
     } else if (descriptor.kind === 'struct') {
       // struct fields (link) flatten to multiple columns
@@ -56,31 +56,6 @@ function mainTableDDL(entity) {
     // map / log / ephemeral / store → NOT stored in main table
   }
   return `CREATE TABLE IF NOT EXISTS ${entity.name} (\n  ${cols.join(',\n  ')}\n);`;
-}
-
-// Generate side-table DDL for log fields (append-only entries with sub-fields).
-// Each entry has a stable `id` (identity) + one stored cell per declared entry
-// sub-field. Like map/ordered, the main table has no column for a log — it lives
-// entirely in the <Entity>_<field> side-table, ordered by rowid (append order).
-function logTableDDL(entity, name, descriptor) {
-  const tableName = `${entity.name}_${name}`;
-  const ownerCol = `${entity.name}_id`;
-  const entryCols = Object.keys(descriptor.entry ?? {});
-  const cols = [`${ownerCol} TEXT NOT NULL`, 'id TEXT NOT NULL'];
-  for (const subField of entryCols) {
-    cols.push(`${subField} TEXT`);
-  }
-  cols.push(`PRIMARY KEY (${ownerCol}, id)`);
-  return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
-}
-
-// Generate side-table DDL for ephemeral fields (per-connection cell tracking).
-// `ephemeral` is the one non-persisting kind.
-function ephemeralTableDDL(entity, name) {
-  const tableName = `${entity.name}_${name}`;
-  const ownerCol = `${entity.name}_id`;
-  const cols = [`${ownerCol} TEXT NOT NULL`, 'client_id TEXT NOT NULL', 'cells TEXT', `PRIMARY KEY (${ownerCol}, client_id)`];
-  return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
 // Generate a complete, ordered sequence of CREATE TABLE statements for one
@@ -94,14 +69,13 @@ export function generateDDL(entity) {
 
   for (const [name, descriptor] of Object.entries(fields)) {
     if (descriptor.kind === 'store') {
-      if (descriptor.type === 'map') {
-        const mapDDL = sideTableDDL(entity, name, descriptor);
-        if (mapDDL) statements.push(mapDDL);
-      } else if (descriptor.type === 'log') {
-        statements.push(logTableDDL(entity, name, descriptor));
+      if (descriptor.type === 'map' || descriptor.type === 'log') {
+        const storeDDL = sideTableDDL(entity, name, descriptor);
+        if (storeDDL) statements.push(storeDDL);
       }
     } else if (descriptor.kind === 'ephemeral') {
-      statements.push(ephemeralTableDDL(entity, name));
+      const ephemeralDDL = sideTableDDL(entity, name, descriptor);
+      if (ephemeralDDL) statements.push(ephemeralDDL);
     } else if (descriptor.kind === 'ordered') {
       const orderedDDL = sideTableDDL(entity, name, descriptor);
       if (orderedDDL) statements.push(orderedDDL);

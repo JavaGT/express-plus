@@ -20,11 +20,15 @@ function makeFakeChannel() {
   let subscribeAck = { currentSeq: 1 };
 
   const channel = {
+    calls: [],
     _setAck(ack) { subscribeAck = ack; },
-    subscribe(entity, id, onEvent) {
+    subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
+      const options = typeof optionsOrOnEvent === 'function' ? {} : (optionsOrOnEvent ?? {});
+      const onEvent = typeof optionsOrOnEvent === 'function' ? optionsOrOnEvent : maybeOnEvent;
       const key = `${entity}\0${String(id)}`;
       if (subs.has(key)) throw new Error(`already subscribed to ${entity}:${id}`);
       subs.set(key, onEvent);
+      this.calls.push({ entity, id, options });
       return Promise.resolve(subscribeAck);
     },
     unsubscribe(entity, id) {
@@ -107,6 +111,32 @@ describe('LiveStore', () => {
     // Ensure they bootstrap properly
     await list1.ready;
     assert.deepEqual(list1.state, { id: '1', title: 'a' });
+
+    store.close();
+  });
+
+  it('subscribe passes field interest and pace into the LiveList channel subscription', async () => {
+    const channel = makeFakeChannel();
+    const fetch = makeFakeFetch([
+      { match: '/snapshot/Doc/1', response: { snapshot: { id: '1', title: 'a' }, seq: 1 } },
+    ]);
+
+    const store = createLiveStore({
+      baseUrl: 'http://test', name: 'Doc', path: '/docs',
+      channel, fetchImpl: fetch,
+    });
+
+    const list = store.subscribe('1', {
+      fields: { cursor: true },
+      pace: { profile: '15fps' },
+    });
+
+    await list.ready;
+    assert.deepEqual(channel.calls, [{
+      entity: 'Doc',
+      id: '1',
+      options: { fields: { cursor: true }, pace: { profile: '15fps' } },
+    }]);
 
     store.close();
   });

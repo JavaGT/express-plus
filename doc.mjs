@@ -8,11 +8,7 @@
 // `effects`, and batched mutation. Comment (see comment.mjs) is a child entity
 // whose grant INHERITS this entity's — the typed-FK-traversal compilation
 // (abstraction #5).
-import {
-  entity, text, number, date, ref, map, ephemeral, log, state, link,
-  grant, deny, read, write, subscribe, admin, anyOf, scope,
-  router, User, Inbox, now, native,
-} from 'workbench';
+import { entity, text, computed, date, ref, map, ephemeral, log, state, link, grant, deny, read, write, subscribe, admin, anyOf, scope, router, User, Inbox, now } from 'workbench';
 // comment.mjs is imported LAZILY inside the routes thunk (below), not here:
 // comment.mjs reads `Doc` at module-eval (`inherit(Doc, ...)`), so an eager
 // top-level import here would form a cycle and hit `Doc` in its temporal dead
@@ -36,11 +32,14 @@ const collaborators = map(ref('User'), {
 }).can(async ({ is }) =>
   (await is.owner()) ? grant(...OWNER) : deny('only the owner may manage collaborators'));
 
+// Anchor for the status.auto timer: auto-archive fires `updatedAt + 90d`.
+const updatedAt = date({ touch: true });
+
 export const Doc = entity('Doc', {
   fields: {
     title:      text({ validate: (v) => v.length <= 200 || 'title too long' }),
     body:       text.crdt(),                                       // CRDT; emits :changed + :delta
-    wordCount:  number({ derived: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0 }),
+    wordCount:  computed({ compute: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0 }),
 
     owner: ref('User', { role: 'owner', readonly: true }),       // auto-derives checks.owner
     // Valued set: membership keyed by User, each member carries a role.
@@ -89,13 +88,14 @@ export const Doc = entity('Doc', {
       auto: {
         // A doc idle in `shared` for 90 days auto-archives. Scheduled mutation
         // runs through the pipeline as a system principal — no cron, no leak.
-        when: 'shared', after: '90d', to: 'archived',
+        // `from` is the explicit anchor field: the timer fires `from + after`.
+        when: 'shared', after: '90d', to: 'archived', from: updatedAt,
       },
     }).can(async ({ is }) =>
       (await is.owner()) ? grant(...OWNER) : deny('only the owner may change status')),
 
     createdAt: date({ default: () => new Date() }),
-    updatedAt: date({ touch: true }),                              // auto-bumps on any mutation
+    updatedAt,                                                    // auto-bumps on any mutation
     archivedAt: date({ optional: true }),
   },
 
@@ -195,15 +195,15 @@ export const Doc = entity('Doc', {
   // authorized against Inbox's OWN grant (Inbox stays sovereign; its deny rolls
   // back the batch), data interpolated only from the trigger delta + origin row.
   // See DECISIONLOG.md.
-  effects: {
-    [native('Doc', 'collaborators', 'added')]: {
+  effects: (Doc) => [
+    [Doc.collaborators.added, {
       mutate: Inbox,
       // `with` runs over { delta, origin }: delta is the :added event data
       // ({owner, member, role}); origin is the triggering row ({id: <owner>})
       // — the canonical effect contract (consult #22, ADR #6).
       with: ({ delta, origin }) => ({ recipient: delta.member, doc: origin.id, kind: 'invite' }),
-    },
-  },
+    }],
+  ],
 
   routes: async (r, Doc) => {
     r.resource();                                                 // CRUD through grant

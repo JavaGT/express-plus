@@ -3,10 +3,11 @@
 // 6 tests exercising connect, subscribe, event delivery, unsubscribe,
 // multiplex, reconnect, and close cleanup.
 
+import { text, ephemeral, scope, everyone, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity, text, scope, everyone, grant, read, write, subscribe } from '../src/index.mjs';
+import workbench, { entity } from '../src/internal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 import { LiveChannel } from '../public/workbench-client.mjs';
 
@@ -14,7 +15,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // A public Doc entity — everyone can read, write, and subscribe.
 const Doc = entity('Doc', {
-  fields: { title: text() },
+  fields: { title: text(), cursor: ephemeral({ x: true, y: true }) },
   grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
 
@@ -154,6 +155,29 @@ test('multiplex — two subs both receive only their own events', async () => {
   }
 });
 
+test('reconnect resubscribe preserves field interest and pace', async () => {
+  const channel = new LiveChannel('ws://127.0.0.1:1', { backoffBase: 1, maxBackoff: 1 });
+  const sent = [];
+  channel._socket = { readyState: 1, send() {} };
+  channel._subs.set('Doc\0d1', {
+    onEvent() {},
+    fields: { cursor: true },
+    pace: { profile: '15fps' },
+  });
+  channel._openSocket = async () => { channel._socket = { readyState: 1, send() {} }; };
+  channel._send = (data) => { sent.push(data); };
+
+  channel._scheduleReconnect();
+  await sleep(30);
+
+  assert.deepEqual(sent, [{
+    type: 'subscribe', entity: 'Doc', id: 'd1',
+    fields: { cursor: true },
+    pace: { profile: '15fps' },
+  }]);
+  channel.close();
+});
+
 test('reconnect after socket drop — re-subscribes and resumes receiving', async () => {
   const { app, origin, db } = await bootApp();
   const channel = new LiveChannel(origin);
@@ -183,6 +207,39 @@ test('reconnect after socket drop — re-subscribes and resumes receiving', asyn
 
     assert.ok(received, 'onEvent fired after reconnect');
     assert.equal(received.event.data.title, 'after-reconnect');
+  } finally {
+    channel.close();
+    app.httpServer.close();
+    db.close();
+  }
+});
+
+test('subscribe sends field interest and pace to server fanout', async () => {
+  const { app, origin, db } = await bootApp();
+  const channel = new LiveChannel(origin);
+  try {
+    const doc = await createDoc(origin, 'drawing');
+    const received = [];
+    await channel.subscribe('Doc', doc.id, {
+      fields: { cursor: true },
+      pace: { profile: '15fps' },
+    }, (envelope) => { received.push(envelope); });
+
+    const entityRecord = app.entities.get('Doc');
+    await app.live.emit(entityRecord, doc.id, { id: doc.id, title: 'drawing' }, {
+      type: 'Doc.cursor.set', seq: 1,
+      data: { owner: doc.id, client: 'test', cells: { x: 1, y: 1 } },
+    });
+    await app.live.emit(entityRecord, doc.id, { id: doc.id, title: 'drawing' }, {
+      type: 'Doc.cursor.set', seq: 2,
+      data: { owner: doc.id, client: 'test', cells: { x: 2, y: 2 } },
+    });
+    await sleep(250);
+
+    assert.equal(received.length, 1);
+    assert.equal(received[0].event.type, 'Doc.cursor.set');
+    assert.equal(received[0].seq, 2);
+    assert.deepEqual(received[0].seqSpan, [1, 2]);
   } finally {
     channel.close();
     app.httpServer.close();

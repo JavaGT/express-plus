@@ -3,11 +3,12 @@
 // route. A missing parent row is a 404 (the resource the handler operates on
 // does not exist), not an opaque 500 from a null deref.
 
+import { text, ref, map, grant, read, write, scope, allowAnonymous } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, text, ref, map, grant, read, write, scope, allowAnonymous, generateDDL } from '../src/index.mjs';
+import workbench, { entity, generateDDL } from '../src/internal.mjs';
 
 function makeDoc() {
   return entity('Doc', {

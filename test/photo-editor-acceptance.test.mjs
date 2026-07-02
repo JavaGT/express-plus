@@ -11,34 +11,14 @@
 //   projected.async render pipeline,
 //   raster.crdt and blob field constructors (slice 14).
 
+import { text, number, date, ref, map, boolean, blob, raster, projected, scope, grant, deny, read, write, subscribe, anyOf, never, inherit } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity,
-  text,
-  number,
-  date,
-  ref,
-  map,
-  boolean,
-  blob,
-  raster,
-  projected,
-  scope,
-  grant,
-  deny,
-  read,
-  write,
-  subscribe,
-  anyOf,
-  never,
-  inherit,
-  bindReadScope,
-  mayVerb,
-} from '../src/index.mjs';
+  entity, bindReadScope, mayVerb } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 

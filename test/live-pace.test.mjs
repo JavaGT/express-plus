@@ -8,6 +8,7 @@
 // All paths share ONE emit path — pass-through is window=0 on the same branch,
 // not a separate raw-send path.
 
+import { text, ephemeral, grant, read, write, subscribe, scope, everyone } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -15,9 +16,7 @@ import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import workbench, {
-  entity, text, ephemeral, grant, read, write, subscribe, scope, everyone,
-  generateDDL, executeFrameworkDDL,
-} from '../src/index.mjs';
+  entity, generateDDL, executeFrameworkDDL } from '../src/internal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 // --- test entity ---

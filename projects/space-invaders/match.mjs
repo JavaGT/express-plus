@@ -7,15 +7,7 @@
 //
 // Where a construct does not yet exist in the API surface, the code imports
 // it from 'workbench' as an idealized handle and documents the gap.
-import {
-  entity, text, number, date, ref, map, state,
-  grant, deny, read, write, subscribe, anyOf, never, scope, native,
-  // ── aspirational imports (not yet in API surface) ──
-  // grid    — 2D boolean grid, delta-broadcast, ephemeral
-  // list    — ordered mutable collection, delta-broadcast
-  // tick    — recurring entity lifecycle hook
-  // Player    — per-connection principal with session
-} from 'workbench';
+import { entity, text, number, date, ref, map, state, grant, deny, read, write, subscribe, anyOf, never, scope } from 'workbench';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Capability bundles — typed, imported, never strings.
@@ -121,13 +113,13 @@ export const Match = entity('Match', {
   // (SPEC §9.2, ADR #13). The auto-start effect fires only when the roster
   // is full — a non-compilable `when` is a load-time error, same discipline
   // as a non-compilable `scope`.
-  effects: {
-    [native('Match', 'players', 'added')]: {
+  effects: (Match) => [
+    [Match.players.added, {
       mutate: self,
       with: { phase: 'playing' },
-      when: (delta, origin) => origin.players.size >= origin.maxPlayers,
-    },
-  },
+      when: ({ origin }) => origin.players.size >= origin.maxPlayers,
+    }],
+  ],
 
   // ── tick (aspirational) ────────────────────────────────────────────────────
   // GAP: entity-level tick construct exists in the plan (Phase 2 item 9) but

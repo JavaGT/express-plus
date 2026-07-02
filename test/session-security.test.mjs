@@ -1,10 +1,11 @@
 // Priority 4 SLICE C — Session security fixes (cso M1, M2).
 
+import { text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import workbench, { entity } from '../src/internal.mjs';
 import { parseCookies, sessionCookie } from '../src/session.mjs';
 
 // M1: Malformed cookie does not throw → anonymous principal, not 500

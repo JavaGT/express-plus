@@ -1,6 +1,7 @@
+import { schedule, date, scope, everyone, grant, read, text } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { entity, schedule, date, scope, everyone, grant, read, text } from '../src/index.mjs';
+import { entity } from '../src/internal.mjs';
 
 // P6d Spine A step 1: time-driven sources (ADR #10). Import-surface only —
 // constructuring + entity-slot acceptance. Firing/dispatch/reaper wiring

@@ -14,9 +14,10 @@
 // the harvester (the same name the developer wrote), so `.has()` knows which
 // entity owns the membership table.
 
+import { ref, text, map, scope, grant, read, anyOf, never } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { entity, ref, text, map, scope, grant, read, anyOf, never } from '../src/index.mjs';
+import { entity } from '../src/internal.mjs';
 
 const norm = (sql) => sql.replace(/\s+/g, ' ').trim();
 

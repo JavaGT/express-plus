@@ -1,11 +1,10 @@
+import { ref, map, scope, grant, deny, read, write, subscribe, inherit } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { compileEntityAuthz } from '../src/authz.mjs';
 import {
-  text, ref, map, scope, grant, deny, read, write, subscribe, inherit,
-  NonCompilableError,
-} from '../src/index.mjs';
+  text, NonCompilableError } from '../src/internal.mjs';
 
 const ownerCan = async ({ is }) => (await is.owner()) ? grant(read, write, subscribe) : deny('no');
 

@@ -7,11 +7,8 @@
 // and seed data so the demo works out of the box. The framework owns the auth,
 // CRUD, error handling, and graceful shutdown — nothing to mount here.
 
-import workbench, {
-  config,
-  generateDDL,
-  User,
-} from 'workbench';
+import workbench, { User } from 'workbench';
+import { config, generateDDL } from 'workbench/internal';
 
 import { Todo, TodoList, SharedTodo } from './todo.mjs';
 import { DatabaseSync } from 'node:sqlite';

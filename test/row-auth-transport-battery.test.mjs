@@ -1,3 +1,4 @@
+import { deny, entity, everyone, grant, inherit, map, read, ref, scope, subscribe, text, write } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -5,20 +6,7 @@ import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import workbench, {
-  anyOf,
-  deny,
-  entity,
-  everyone,
-  grant,
-  inherit,
-  map,
-  read,
-  ref,
-  scope,
-  subscribe,
-  text,
-  write,
-} from '../src/index.mjs';
+  anyOf } from '../src/internal.mjs';
 
 const alice = { type: 'user', id: 'alice' };
 const bob = { type: 'user', id: 'bob' };

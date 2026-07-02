@@ -25,29 +25,13 @@
 // declared ABOVE the child — this file is the migration reference for the
 // object form.
 
+import { entity, text, boolean, date, ref, scope, grant, deny, read, write, subscribe, everyone, anyOf, inherit, allowAnonymous } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  router,
-  entity,
-  text,
-  boolean,
-  date,
-  ref,
-  scope,
-  grant,
-  deny,
-  read,
-  write,
-  subscribe,
-  everyone,
-  anyOf,
-  inherit,
-  allowAnonymous,
-  bindReadScope,
-} from '../src/index.mjs';
+  router, bindReadScope } from '../src/internal.mjs';
 import { principal, anonymous } from '../src/principal.mjs';
 
 // bind an entity's compiled read-scope to a principal (the read-path seam)

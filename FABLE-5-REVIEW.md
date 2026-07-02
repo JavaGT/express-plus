@@ -185,11 +185,11 @@ responsibility, not by field kind:
 
 | New module | Owns | Pulled from |
 |---|---|---|
-| `entity/compile.mjs` | name/field validation, authz assembly call, freeze, the Proxy | entity.mjs top + bottom |
-| `entity/query.mjs` | `findOne/findAll/findById/getOrFail/create/insert/delete`, `makeQueryBuilder` | ~69-112, 807-961 |
-| `entity/hydrate.mjs` | `hydrate`, struct/hash/derived assembly, `deserializeStoredCells` | ~755-895 |
-| `entity/handles.mjs` | `makeMapHandle`/`makeOrderedListHandle`/`makeLogHandle`/`makeEphemeralHandle` | ~446-753 |
-| `entity/projection.mjs` | `record.projection.apply`, `crudHandlers`, the `*MutateHandlers` families | ~972-1478 |
+| `entity/compile.mjs` | name/field validation, authz assembly call, write core (`create`/`insert`/`delete`), CRUD handler assembly, freeze/orchestration | entity.mjs top + write section + bottom |
+| `entity/query.mjs` | `findOne/findAll/findById/getOrFail`, `hydrate` exposure, `deserializeRow`, `makeQueryBuilder` | query API section |
+| `entity/hydrate.mjs` | `hydrate`, struct/hash/derived assembly, `deserializeStoredCells` | hydration section |
+| `entity/handles.mjs` | typed field-handle Proxy registration | proxy/field handle bottom |
+| `entity/projection.mjs` | `record.projection.eventTypes` and `record.projection.apply` | projection section |
 
 The five handle factories and their matching projection-apply branches and their
 matching `*MutateHandlers` are **three parallel switch statements over the same
@@ -475,7 +475,7 @@ Decision: **Ship the sugar, defined by what it expands to, recognized structural
 - `owner()` expands to `ref('User', { role: 'owner', readonly: true })` — one
   concept for the relation+ownership+write-policy triple the handoff flagged.
 - `owner.only()` expands to
-  `[ scope(({is}) => is.owner()).can(({is}) => is.owner() ? grant(read, write, subscribe, admin) : deny('not the owner')) ]`
+  `[ scope(({is}) => is.owner()).can(async ({is}) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not the owner')) ]`
   — a visible, overridable authorization *function*, printable in a dev diagnostic.
 An entity that writes `owner.only()` and an entity that writes the expansion by hand
 must compile to the identical record. ADR #7 (no default grant, authorization is
@@ -505,8 +505,9 @@ app is the active spine for it, and "proactive ≠ exhaustive" (AGENTS.md).
 Decision: **Do not build the CRDT-authoring toolkit yet.** Keep `text.crdt` (real
 merge) as the shipped proof; keep `raster`/`polyline` as explicitly labeled
 replace-not-merge stubs. Add a dev-mode diagnostic when a replace-stub field is
-mutated concurrently (last-write-wins is silent data loss otherwise). Revisit only
-when photo-editor / drawing-canvas becomes the active spine and proves the need.
+updated, warning that concurrent edits are last-write-wins and will not merge.
+Revisit only when photo-editor / drawing-canvas becomes the active spine and proves
+the need.
 
 ### Ordering of the settled work
 
@@ -541,8 +542,89 @@ suite.
   kind's `{ handle, mutateHandlers, projectionApply, eventTypes, ddl }`, resolved
   like `field-strategy.mjs`. Removed the map handle factory, map mutate handlers,
   map projection-apply branch, map eventTypes spread, and `mapTableDDL` from
-  `entity.mjs`/`ddl.mjs`; both now call the strategy table. Ordered/log/ephemeral
-  remain inline pending their own slices (never two write paths alive). Suite
-  green (948/0). entity.mjs 1484 → 1273. Committed `40e1c89`. **Next: ordered,
-  then log, then ephemeral; then the entity/ 5-module split.**
+  `entity.mjs`/`ddl.mjs`; both now call the strategy table. Suite green (948/0).
+  entity.mjs 1484 → 1273. Committed `40e1c89`.
+- **D2 ordered DONE** — migrated ordered handles, mutate handlers, projection apply,
+  eventTypes, and DDL into the side-table strategy table. Removed the old ordered
+  handle/projection/mutate/DDL path in the same change (no duplicate write path).
+  Suite green (948/0). entity.mjs 1273 → 1043. Committed `e78c4df`.
+- **D2 log + ephemeral DONE** — migrated the remaining side-table kinds into
+  `src/side-table-strategy.mjs`. Removed `logFields`/`makeLogHandle`/
+  `appendLogHandlers`/log projection/`logTableDDL` and `ephemeralFields`/
+  `makeEphemeralHandle`/`ephemeralMutateHandlers`/ephemeral projection/
+  `ephemeralTableDDL` from `entity.mjs`/`ddl.mjs`. `entity.mjs` now resolves all
+  side-table behavior through one strategy table; `ddl.mjs` delegates every side
+  table to `sideTableDDL`. Syntax checks and full suite green (948/0). Current
+  line counts: entity.mjs 786, side-table-strategy.mjs 636, ddl.mjs 157.
+- **D2 entity split DONE** — kept `src/entity.mjs` as the stable public import and
+  moved the compiler body into `src/entity/compile.mjs`, with query, hydration,
+  projection, and field-handle registration extracted to `src/entity/query.mjs`,
+  `src/entity/hydrate.mjs`, `src/entity/projection.mjs`, and
+  `src/entity/handles.mjs`. `compile.mjs` is now the orchestrator; side-table
+  behavior remains owned by the strategy table. Syntax checks and full suite green
+  (948/0). Current line counts: entity.mjs 1, entity/compile.mjs 472,
+  entity/query.mjs 80, entity/hydrate.mjs 56, entity/projection.mjs 115,
+  entity/handles.mjs 20.
+- **D3 client subscribe interest/pace DONE** — wired SPEC §8.1's
+  `subscribe(entity, id, { fields, pace })` through the SDK while preserving old
+  calls. `LiveChannel.subscribe` now sends `fields`/`pace` and stores them for
+  reconnect re-subscribe; `LiveList` and `createLiveStore().subscribe(id,
+  options)` pass the same options through. Server admission/fanout already owned
+  validation/filtering/pace, so no second delivery path was added. Focused
+  client/live tests green (38/0); syntax checks, diff check, and full suite green
+  (952/0).
+- **D4 owner sugar DONE** — added public `owner()` / `owner.only()` as transparent
+  expansion, not a hidden grant. `owner()` returns the ordinary owner ref-role field
+  (`ref('User', { role: 'owner', readonly: true })`); `owner.only` is the explicit
+  owner-only grant thunk and compiles through the same scope/can/static-guard path.
+  Focused entity tests green (13/0); syntax checks, diff check, and full suite green
+  (954/0).
+- **index.mjs shrink DONE** — `src/index.mjs` now exports only the app-facing public
+  surface, while the former full barrel moved to `src/internal.mjs` and the
+  `workbench/internal` package subpath. Tests and exemplars that reach internal
+  compiler/transport/auth/effect helpers now import the unstable internal barrel;
+  no symbol was deleted. All `.mjs` files pass `node --check`; diff check and full
+  suite green (954/0). Current line counts: index.mjs 14, internal.mjs 33.
+- **D6 replace-stub diagnostic DONE** — kept `raster.crdt()` / `polyline.crdt()` as
+  CRDT-kind field constructors but made their delta contract explicit whole-value
+  `{ set }` replace rather than text-style insert/delete. In development,
+  replace-stub updates emit a diagnostic warning that concurrent edits are
+  last-write-wins and will not merge. Focused field-delta tests green (25/0).
+- **Effects/time simplification DONE** (review §8; the hard version, no aliases):
+  - **Typed effect handles** — entity effects are now array pairs `[[handle, { mutate,
+    with, when }]]` (or `effects: (Self) => [...]`), not object keys; object keys
+    silently stringified typed handles, which the compiler could not distinguish from
+    literal strings. `effect.anyOf(...)` accepts branded event/state-transition handles
+    only; `src/effect-compiler.mjs` no longer accepts strings or does colon→dot
+    normalization. `src/entity/handles.mjs` exposes typed lifecycle handles
+    (`Doc.created`/`.updated`/`.removed`); `src/scope-sql.mjs` map/ordered/log field
+    handles expose typed native handles (`.added`/`.inserted`/`.appended`…).
+    `state.transition(from,to)` is now a branded `state-transition-handle`. Reserved
+    `created`/`updated`/`removed` as field names (lifecycle collision → load-time
+    error). All in-repo entity-level effect declarations migrated to array pairs;
+    state-field transition effects remain the separate `state({ effects: {
+    [state.transition(...)]: ... } })` descriptor map. `native(...)` is internal-only
+    (projection projector handles + `native()` unit tests).
+  - **computed() / computed.stored()** — collapsed `derived` (read-time, unstored) and
+    `projected.inline` (stored compute) into one `computed` concept: `computed({ compute })`
+    (read-time pull, no column) and `computed.stored({ compute })` (stored, has a column,
+    recomputed in projection). `projected.async` is unchanged. No aliases: the old
+    `derived` option and `projected.inline` are gone. Hydrator, DDL, field-strategy,
+    projection, and compile.mjs migrated to the new `kind:'computed'`/`mode` descriptors.
+    Exemplars (`doc.mjs`, `gdoc.mjs`) and tests migrated.
+  - **state.auto → schedule.after** — `state.auto({ when, after, to, from })` now lowers
+    at compile time into a real `schedule.after` trigger on the update verb, keyed by an
+    explicit declared anchor field `from` (date/number, e.g. `updatedAt` with `touch:true`).
+    No hidden timestamp column. `record.schedule[verb]` is now array-capable so an
+    explicit `schedule.update` and an auto-lowered trigger can coexist (stored scalar
+    when a verb has exactly one trigger, to preserve existing `Entity.schedule.update.kind`
+    test access). schedule discovery/admission, reaper, and tick-engine iterate trigger
+    arrays and carry a stable `sourceName` per trigger. Removed the redundant special-case
+    path: `state.auto` now fires through the same schedule mechanism as explicit schedules.
+  - Decision notes: this was a risky slice (public field API + state runtime + effect
+    keying, 5+ modules, exemplars) executed as three verified slices behind the green
+    suite. No second path was left alive for any sub-goal. Added two new tests proving
+    `state.auto` lowers to `schedule.after` and coexists with an explicit update schedule.
+  - Verification: `node --check` on all touched src/test/exemplar files, full `.mjs`
+    syntax sweep, `git diff --check` clean, full `npm test` → **957 pass / 0 fail**.
 

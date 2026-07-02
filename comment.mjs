@@ -8,10 +8,7 @@
 // by the inherited Doc-scope gets read/subscribe only. The Doc's link-tier
 // (view/comment/edit) flows through automatically: a `view`-only link holder
 // can read comments, a `comment`-tier holder can create them.
-import {
-  entity, text, date, ref, boolean, grant, read, write, subscribe,
-  inherit, router,
-} from 'workbench';
+import { entity, text, date, ref, boolean, grant, read, write, subscribe, inherit, router } from 'workbench';
 import { Doc } from './doc.mjs';
 
 // Declarative inherit directive: the compiler resolves it through `doc`,

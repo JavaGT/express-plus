@@ -13,11 +13,12 @@
 // who CAN read but lacks the write/remove capability is denied by the field
 // `.can` body (403: test 3).
 
+import { User, Inbox } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { executeDDL, User, Inbox, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/index.mjs';
+import workbench, { executeDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
 import { Doc } from '../doc.mjs';
 import { setActiveDb } from '../src/db.mjs';
 

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createLiveFanout } from '../src/live-fanout.mjs';
-import { scope } from '../src/index.mjs';
+import { scope } from '../src/internal.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 

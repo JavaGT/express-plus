@@ -19,10 +19,7 @@
 //   - a denied read REMOVES the row from the result set (no separate visibility
 //     axis); there is no `hide()`.
 
-import workbench, {
-  entity, text, number, boolean, date, ref, map,
-  grant, deny, read, write, subscribe, scope, anyOf, inherit,
-} from 'workbench';
+import workbench, { entity, text, number, boolean, date, ref, map, grant, deny, read, write, subscribe, scope, anyOf, inherit } from 'workbench';
 
 // ---------------------------------------------------------------------------
 // TIER 1 — the floor. A private, single-user todo. ~20 honest lines.
