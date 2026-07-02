@@ -17,7 +17,7 @@
 //    `is.*` calls are correctly un-awaited (SPEC §6.1).
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import { compileReadScope, lowerToSql, fieldHandle, membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
+import { compileReadScope, lowerToSql, fieldHandle, membershipTable, membershipOwnerCol } from './scope-sql.mjs';
 import { getActiveDb, getActiveEntity, setActiveEntity } from './db.mjs';
 import { compileEntityAuthz } from './authz.mjs';
 import { mayFieldOp } from './row-grant.mjs';
@@ -30,6 +30,7 @@ import { action, event } from './pipeline.mjs';
 import * as eventHandle from './event-handle.mjs';
 import { generateDDL } from './ddl.mjs';
 import { validateEffectDeclaration } from './effect-compiler.mjs';
+import { collectSideTableStrategies } from './side-table-strategy.mjs';
 
 // mintToken — a cryptographically random opaque session token. Handed to a
 // create policy so a framework entity that mints session-like rows (Session)
@@ -389,10 +390,10 @@ export function entity(name, declaration = {}) {
   // raw generated columns are removed, so a handler sees the declared shape, not
   // the storage shape (doc.mjs reads entity.linkShare.tier).
   const structFields = Object.entries(fields).filter(([, d]) => d.kind === 'struct');
-  // map fields (store/map) hydrate from a side-table into a write handle that
-  // exposes add/remove/has. The main-table has no column for them — they live
-  // entirely in the membership side-table named <Entity>_<field>.
-  const mapFields = Object.entries(fields).filter(([, d]) => d.kind === 'store' && d.type === 'map');
+  // Side-table strategies concentrate a field kind's handle, mutate handlers,
+  // projection apply, event types, and DDL behind one resolved table. Map is the
+  // first migrated kind; ordered/log/ephemeral remain inline until their slices.
+  const sideTableStrategyEntries = collectSideTableStrategies(fields);
   // ordered (list) fields hydrate from a fractional-index side-table into a write
   // handle exposing .insertAt/.move/.reorder/.remove/.toArray. Like map, the main
   // table has no column for them — they live entirely in the <Entity>_<field>
@@ -417,129 +418,6 @@ export function entity(name, declaration = {}) {
   // projection writes the side-table. The handle needs a `dispatch` ref to
   // re-enter; without one it throws (fail closed, no silent direct-SQL fallback).
   const logFields = Object.entries(fields).filter(([, d]) => d.kind === 'store' && d.type === 'log');
-
-  // makeMapHandle(entityName, fieldName, row, principal, dispatch) — returns a
-  // write handle for a map field. The canonical mutation `.set(memberId,
-  // { role })` is a committed pipeline ACTION (consult #19, UNIT 2): it RE-ENTERS
-  // dispatch as `<Entity>.<field>.add` (a new member) or `.setRole` (a role
-  // change — DECISIONLOG #57: idempotent re-share is roleChanged, NOT a fresh
-  // add, so native added does not re-fire); `.remove` dispatches `.remove`. The
-  // projection applies the `:added`/`:roleChanged`/`:removed` event to the
-  // side-table — the handle does NOT write the side-table directly (no second
-  // reconciliation path). A repeat share with the SAME role is a no-op (no
-  // dispatch). READS (`has`/`get`/`toArray`) stay direct-SQL (the trusted query
-  // API; a read is not a mutation, DECISIONLOG #41); `.toArray()` populates each
-  // member through `of: ref(Target)` so a share list returns hydrated member
-  // rows (a hash password stays a {verify} handle, not a raw digest) as
-  // `[member, role]` pairs.
-  //
-  // The 5th `dispatch` arg is REQUIRED for mutations (a handle hydrated without
-  // one — the trusted query API — throws on `.set`/`.remove` rather than falling
-  // back to direct SQL, which would recreate a forbidden dual path). Field-level
-  // `.can()` authorization runs BEFORE the mechanics when `principal` is present
-  // (the request path); bypassed when null (trusted query API). No second auth
-  // path: the field `.can` body receives the SAME check registry as the row
-  // grant; `has`/`get` are read primitives used inside check evaluation and stay
-  // synchronous + unguarded.
-  const makeMapHandle = (entityName, fieldName, row, principal, dispatch) => {
-    const table = membershipTable(entityName, fieldName);
-    const ownerCol = membershipOwnerCol(entityName);
-    // The side-table's owner/member columns are TEXT (ddl.mjs mapTableDDL),
-    // and an owner id is a numeric SQLite PK. A ref field stores String(value)
-    // for the same reason; the map handle does the same so a row reloaded by id
-    // matches its membership (a numeric 10 stored as text '10', not '10.0',
-    // and the upsert existence probe finds the prior row).
-    const oid = String(row.id);
-    const ofDescriptor = fields[fieldName].of;
-    const targetName = ofDescriptor && ofDescriptor.kind === 'value' && ofDescriptor.type === 'ref'
-      ? ofDescriptor.target
-      : null;
-    // The side-table has a `role` column only when roles are declared on the
-    // map (ddl.mjs mapTableDDL). Branch the mutation SQL on that so a role-less
-    // map stores just (owner, member) and a role update never references a
-    // column that does not exist.
-    const hasRole = Array.isArray(fields[fieldName].roles) && fields[fieldName].roles.length > 0;
-
-    const probe = (memberId) =>
-      getActiveDb()
-        .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
-        .get({ owner: oid, member: String(memberId) });
-
-    const probeRow = (memberId) =>
-      getActiveDb()
-        .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
-        .get({ owner: oid, member: String(memberId) });
-
-    return {
-      // `.set(memberId, { role })` — a committed pipeline ACTION. A NEW member
-      // dispatches `<Entity>.<field>.add` (emits `:added`, fires native added via the
-      // compiler); an EXISTING member with a DIFFERENT role dispatches `.setRole`
-      // (emits `:roleChanged`, does NOT re-fire native added — DECISIONLOG #57); the
-      // SAME role is a no-op (no dispatch). The side-table is written by the
-      // projection applying the emitted event, NOT by the handle.
-      set: async (memberId, { role } = {}) => {
-        await authorizeFieldOp(record, fieldName, write, row, principal);
-        const mid = String(memberId);
-        const existing = probeRow(memberId);
-        const actionType =
-          !existing ? `${entityName}.${fieldName}.add`
-          : hasRole && existing.role !== (role ?? null) ? `${entityName}.${fieldName}.setRole`
-          : null;
-        if (actionType === null) return; // same-role repeat share: no-op
-        requireFieldDispatch(entityName, fieldName, dispatch);
-        const result = await dispatch({
-          actionId: randomUUID(),
-          type: actionType,
-          payload: { owner: oid, member: mid, role },
-          principal,
-        });
-        if (!result.granted) throw { status: 403, message: 'forbidden' };
-      },
-      remove: async (memberId) => {
-        await authorizeFieldOp(record, fieldName, write, row, principal);
-        const mid = String(memberId);
-        if (!probe(memberId)) return; // idempotent remove: nothing to dispatch
-        requireFieldDispatch(entityName, fieldName, dispatch);
-        const result = await dispatch({
-          actionId: randomUUID(),
-          type: `${entityName}.${fieldName}.remove`,
-          payload: { owner: oid, member: mid },
-          principal,
-        });
-        if (!result.granted) throw { status: 403, message: 'forbidden' };
-      },
-      has: (memberId) => probe(memberId) !== undefined,
-      get: (memberId) => {
-        const mid = String(memberId);
-        return getActiveDb()
-          .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
-          .get({ owner: oid, member: mid }) ?? undefined;
-      },
-      toArray: async () => {
-        await authorizeFieldOp(record, fieldName, read, row, principal);
-        const db = getActiveDb();
-        const selectCols = hasRole ? `${MEMBER_COLUMN} AS member_id, role` : `${MEMBER_COLUMN} AS member_id`;
-        const rows = db
-          .prepare(`SELECT ${selectCols} FROM ${table} WHERE ${ownerCol} = :owner`)
-          .all({ owner: oid });
-        const target = targetName ? getActiveEntity(targetName) : null;
-        if (!target) return rows.map((r) => [null, hasRole ? r.role : null]);
-        // Batch-load all members in one query to avoid N+1.
-        const memberIds = rows.map((r) => r.member_id);
-        const members = [];
-        for (let i = 0; i < memberIds.length; i += 500) {
-          const batch = memberIds.slice(i, i + 500);
-          const placeholders = batch.map(() => '?').join(',');
-          members.push(...db.prepare(
-            `SELECT * FROM ${targetName} WHERE id IN (${placeholders})`,
-          ).all(...batch));
-        }
-        for (const m of members) target.hydrate(m, principal);
-        const memberMap = Object.fromEntries(members.map((m) => [m.id, m]));
-        return rows.map((r) => [memberMap[r.member_id] ?? null, hasRole ? r.role : null]);
-      },
-    };
-  };
 
   // makeOrderedListHandle(entityName, fieldName, row, principal, dispatch) —
   // returns a write handle for an `ordered`/`list` field over a fractional-index
@@ -755,8 +633,10 @@ export function entity(name, declaration = {}) {
       }
       row[fieldName] = any || Object.keys(namespace).length > 0 ? namespace : null;
     }
-    for (const [fieldName] of mapFields) {
-      row[fieldName] = makeMapHandle(name, fieldName, row, principal, dispatch);
+    for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
+      for (const [fieldName, descriptor] of strategyFields) {
+        row[fieldName] = strategy.handle({ record, entityName: name, fieldName, descriptor, row, principal, dispatch });
+      }
     }
     for (const [fieldName] of orderedFields) {
       row[fieldName] = makeOrderedListHandle(name, fieldName, row, principal, dispatch);
@@ -951,14 +831,8 @@ export function entity(name, declaration = {}) {
       record.verbs.removed.type,
       // each log field's append event → side-table INSERT (consult #19)
       ...logFields.map(([fieldName]) => eventHandle.native(name, fieldName, 'appended').type),
-      // each map field's store events → side-table INSERT/UPDATE/DELETE (consult
-      // #19, UNIT 2: store mutations are committed pipeline actions; the handle
-      // dispatches, the projection applies — one reconciliation path).
-      ...mapFields.flatMap(([fieldName]) => [
-        eventHandle.native(name, fieldName, 'added').type,
-        eventHandle.native(name, fieldName, 'roleChanged').type,
-        eventHandle.native(name, fieldName, 'removed').type,
-      ]),
+      ...sideTableStrategyEntries.flatMap(({ strategy, fields: strategyFields }) =>
+        strategy.eventTypes(name, strategyFields)),
       // each ordered field's store events → side-table INSERT/UPDATE/DELETE
       ...orderedFields.flatMap(([fieldName]) => [
         eventHandle.native(name, fieldName, 'inserted').type,
@@ -973,32 +847,8 @@ export function entity(name, declaration = {}) {
       const table = name;
       const handle = event.handle;
       if (handle?.brand !== 'event-handle' || handle.entity !== name) return;
-      // map store events: the owning entity's membership side-table is mutated
-      // by the projection applying the `:added`/`:roleChanged`/`:removed` event
-      // the `.set`/`.remove` handle dispatched.
-      for (const [mapField, descriptor] of mapFields) {
-        if (handle.field !== mapField || handle.kind !== eventHandle.EventKind.native) continue;
-        const sideTable = membershipTable(name, mapField);
-        const ownerCol = membershipOwnerCol(name);
-        const hasRole = Array.isArray(descriptor.roles) && descriptor.roles.length > 0;
-        if (handle.nativeName === 'added') {
-          const cols = [ownerCol, MEMBER_COLUMN];
-          const vals = [':owner', ':member'];
-          const params = { owner: String(event.data?.owner), member: String(event.data?.member) };
-          if (hasRole) { cols.push('role'); vals.push(':role'); params.role = event.data?.role ?? null; }
-          db.prepare(`INSERT INTO ${sideTable} (${cols.join(', ')}) VALUES (${vals.join(', ')})`).run(params);
-          return;
-        }
-        if (handle.nativeName === 'roleChanged' && hasRole) {
-          db.prepare(`UPDATE ${sideTable} SET role = :role WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
-            .run({ owner: String(event.data?.owner), member: String(event.data?.member), role: event.data?.role ?? null });
-          return;
-        }
-        if (handle.nativeName === 'removed') {
-          db.prepare(`DELETE FROM ${sideTable} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
-            .run({ owner: String(event.data?.owner), member: String(event.data?.member) });
-          return;
-        }
+      for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
+        if (strategy.projectionApply({ entityName: name, fieldEntries: strategyFields, handle, event, db })) return;
       }
       // ordered field events: each ordered field's store events → side-table
       // INSERT/UPDATE/DELETE. The handle computes fractional keys and dispatches;
@@ -1228,11 +1078,8 @@ export function entity(name, declaration = {}) {
     // of). Field-level `.can()` authz runs in the HANDLE (the convenient-API
     // path); a direct dispatch is trusted server code (parity with create).
     ...appendLogHandlers(name, fields, logFields),
-    // map mutations: `<Entity>.<field>.add`/`.setRole`/`.remove` → emit
-    // `:added`/`:roleChanged`/`:removed`. The handle's existence probe has
-    // already decided which action to dispatch (add vs roleChanged vs no-op),
-    // so the handler trusts that + emits (consult #19, UNIT 2).
-    ...mapMutateHandlers(name, fields, mapFields),
+    ...Object.assign({}, ...sideTableStrategyEntries.map(({ strategy, fields: strategyFields }) =>
+      strategy.mutateHandlers(name, strategyFields))),
     // ordered mutations: `<Entity>.<field>.insert`/`.move`/`.reorder`/`.remove` →
     // emit `:inserted`/`:moved`/`:reordered`/`:removed`. The handle computes the
     // fractional key(s) and dispatches the action; the handler validates payload
@@ -1281,64 +1128,6 @@ export function entity(name, declaration = {}) {
           type: handle.type,
           scope: `${entityName}:${owner}`,
           data: { owner, id, ...entry },
-        }];
-      };
-    }
-    return handlers;
-  }
-
-  // Map mutation handlers. A map `.set`/`.remove` is a committed pipeline action
-  // (consult #19, UNIT 2): the handle's existence probe decides add vs roleChanged
-  // vs no-op, then dispatches `${entityName}.${field}.add`/`.setRole`/`.remove`.
-  // The handler validates owner + member are present (fail closed) and emits
-  // `${entityName}.${field}.added`/`.roleChanged`/`.removed`; the projection
-  // applies the event to the side-table. Spread into crudHandlers so a dispatched
-  // map action lands in one handler map alongside create/update/remove/log-append.
-  function mapMutateHandlers(entityName, fields, mapFieldEntries) {
-    const handlers = {};
-    for (const [mapField, descriptor] of mapFieldEntries) {
-      const hasRole = Array.isArray(descriptor.roles) && descriptor.roles.length > 0;
-      const requireOwnerMember = (payload) => {
-        const { owner, member } = payload ?? {};
-        if (owner == null || member == null) {
-          throw Object.assign(
-            new Error(`${entityName}.${mapField} action requires owner + member`),
-            { status: 400 },
-          );
-        }
-        return { owner: String(owner), member: String(member) };
-      };
-      handlers[`${entityName}.${mapField}.add`] = ({ payload }) => {
-        const { owner, member } = requireOwnerMember(payload);
-        const handle = eventHandle.native(entityName, mapField, 'added');
-        return [{
-          handle,
-          type: handle.type,
-          scope: `${entityName}:${owner}`,
-          data: { owner, member, role: hasRole ? (payload.role ?? null) : undefined },
-        }];
-      };
-      handlers[`${entityName}.${mapField}.setRole`] = ({ payload }) => {
-        const { owner, member } = requireOwnerMember(payload);
-        if (!hasRole) {
-          throw Object.assign(new Error(`${entityName}.${mapField}.setRole on a role-less map`), { status: 400 });
-        }
-        const handle = eventHandle.native(entityName, mapField, 'roleChanged');
-        return [{
-          handle,
-          type: handle.type,
-          scope: `${entityName}:${owner}`,
-          data: { owner, member, role: payload.role ?? null },
-        }];
-      };
-      handlers[`${entityName}.${mapField}.remove`] = ({ payload }) => {
-        const { owner, member } = requireOwnerMember(payload);
-        const handle = eventHandle.native(entityName, mapField, 'removed');
-        return [{
-          handle,
-          type: handle.type,
-          scope: `${entityName}:${owner}`,
-          data: { owner, member },
         }];
       };
     }

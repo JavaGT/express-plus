@@ -378,28 +378,28 @@ unblock; 6–8 are ergonomics.
 ## 10. Highest-risk decisions (most likely to hurt if wrong)
 
 1. **The inherit-child capability hole (§6).** If shipped, it's a silent
-authorization bypass on the framework's flagship inheritance pattern. #1 by a
-wide margin.
+   authorization bypass on the framework's flagship inheritance pattern. #1 by a
+   wide margin.
 2. **Splitting `entity.mjs` (step 4).** The Proxy, the frozen record, the
-projection reducers, and the query API are entangled. A bad split reintroduces a
-second write path. Do it kind-by-kind behind tests; never leave two side-table
-paths alive (AGENTS.md's own rule).
+   projection reducers, and the query API are entangled. A bad split reintroduces a
+   second write path. Do it kind-by-kind behind tests; never leave two side-table
+   paths alive (AGENTS.md's own rule).
 3. **Client subscribe interest.** If the wire protocol for `{fields, pace}` is
-designed wrong now, every Phase 2 app inherits it. Design the interest grammar
-(AND-only, indexed, data-not-code) into the protocol *before* building consumers.
+   designed wrong now, every Phase 2 app inherits it. Design the interest grammar
+   (AND-only, indexed, data-not-code) into the protocol *before* building consumers.
 4. **`owner()` / `owner.only()` sugar.** If it becomes a magic string or a hidden
-default grant, it violates the load-bearing "authorization is always a function,
-no default grant" value (ADR #7). Must expand to a visible, overridable function
-— sugar, never a trapdoor.
+   default grant, it violates the load-bearing "authorization is always a function,
+   no default grant" value (ADR #7). Must expand to a visible, overridable function
+   — sugar, never a trapdoor.
 5. **The `hasOwnCanGrant` skip pattern generally.** Copied conceptually across
-list-filter, snapshot, create-hook, and live-fanout. It's the "drop it and
-admit/deny flips" landmine `row-grant.mjs` warns about. Any refactor touching
-capability resolution must treat this as one concept with one test battery, or
-the four call sites drift.
+   list-filter, snapshot, create-hook, and live-fanout. It's the "drop it and
+   admit/deny flips" landmine `row-grant.mjs` warns about. Any refactor touching
+   capability resolution must treat this as one concept with one test battery, or
+   the four call sites drift.
 6. **Deferring the field-kind toolkit while shipping four CRDT instances.**
-`raster`/`polyline` are whole-value-replace stubs (DECISIONLOG #262). If an app
-ships on them expecting merge, the "CRDT" promise is false. Keep them clearly
-labeled as replace-not-merge until the toolkit lands.
+   `raster`/`polyline` are whole-value-replace stubs (DECISIONLOG #262). If an app
+   ships on them expecting merge, the "CRDT" promise is false. Keep them clearly
+   labeled as replace-not-merge until the toolkit lands.
 
 ---
 
@@ -417,3 +417,108 @@ verified via a direct probe, and the `serve.mjs` update/remove path that consume
 it was traced — but a full HTTP server was not stood up to observe an end-to-end
 403-vs-200. An end-to-end test next to the fix would make the bug (and then the
 fix) concrete.
+
+
+---
+
+## Decisions (Fable 5 review — settled direction)
+
+The full review lives in `FABLE-5-REVIEW.md`. The ten sections there are analysis;
+this section is the part that is now **decided**. Section 10 of the review named
+the highest-risk forks; the calls below resolve each one so a future implementer
+does not re-litigate them. Treat these as binding direction (same status as
+AGENTS.md), overridable only by the user.
+
+### D1 — Inherit-child write authorization: FIX, and it is the first task.
+
+An `inherit`-child entity (`comment.mjs`, `SharedTodo`) has no own `.can`, so
+`mayRow` short-circuits to `true` for every verb — verified live: any principal
+who can *read* the row can *write and delete* it. This is a security bug on the
+framework's flagship inheritance pattern, not a design tradeoff.
+
+Decision: **`inherit` lowers the parent's capability half the same way
+`compileInheritScope` already lowers the parent's scope.** The child's `mayVerb`
+loads the parent row via the `via` FK and runs the *parent's* `.can`. Land it
+RED-first: a test where a non-owner updates another user's comment on a published
+post must 403, then GREEN. This ships before any refactor, sugar, or new feature.
+Non-negotiable.
+
+### D2 — Splitting `entity.mjs`: DO IT, incrementally, never big-bang.
+
+Decision: **Concentrate the map/ordered/log/ephemeral triplication into one
+per-kind side-table strategy object** (`{ handle, mutateHandlers, projectionApply,
+ddl }`), resolved like `field-strategy.mjs` resolves value strategies — then split
+`entity.mjs` into the five modules named in review §4. Do it **one field kind at a
+time behind the green suite** (map first — most tests). At no point may two
+side-table write paths coexist (AGENTS.md: a working second path is still a second
+path). This is the large irreversible migration; pay it deliberately, not as a
+rewrite. Sequence: after D1 and after the duplicate deletions (D-cleanup).
+
+### D3 — Client subscribe interest/pace: DESIGN THE WIRE PROTOCOL NOW, wire end-to-end as one unit.
+
+The server has interest filtering + pace buffers; the client `LiveChannel.subscribe`
+sends none of it. Every Phase 2 app (minecraft, canvas, invaders) inherits whatever
+protocol ships.
+
+Decision: **Commit to SPEC §8.1's grammar as the wire contract before building any
+consumer** — field-keyed interest, AND across dimensions, per-dimension one
+`range` OR one finite `.in([...])` OR `.is(v)`, no cross-dimension OR, no closures,
+data-not-code, indexed-or-subscribe-time-error. Implement `subscribe(entity, id,
+{ fields, pace })` end to end (client `LiveChannel` → `live-connection` admission →
+`live-fanout` filter) in one change; do not land a half-wired surface. This unblocks
+Phase 2 and must precede any new field kind.
+
+### D4 — `owner()` / `owner.only()` sugar: BUILD IT, as a transparent expansion.
+
+Decision: **Ship the sugar, defined by what it expands to, recognized structurally
+(never a magic string, never a hidden default grant).**
+- `owner()` expands to `ref('User', { role: 'owner', readonly: true })` — one
+  concept for the relation+ownership+write-policy triple the handoff flagged.
+- `owner.only()` expands to
+  `[ scope(({is}) => is.owner()).can(({is}) => is.owner() ? grant(read, write, subscribe, admin) : deny('not the owner')) ]`
+  — a visible, overridable authorization *function*, printable in a dev diagnostic.
+An entity that writes `owner.only()` and an entity that writes the expansion by hand
+must compile to the identical record. ADR #7 (no default grant, authorization is
+always a function) stands: the sugar is a shorthand the developer chose to type, not
+a default the framework injects when they typed nothing. A no-grant entity is still
+a load-time error.
+
+### D5 — The `hasOwnCanGrant` skip: ONE concept, ONE denial-coverage test battery.
+
+The admit-when-no-own-`.can` skip is copied conceptually across list-filter,
+snapshot, create-hook, and live-fanout — the "drop it and admit↔deny flips"
+landmine `row-grant.mjs` warns about. D1 changes what "no own `.can`" means for
+inherit-children, so this must move in lockstep.
+
+Decision: **`mayRow` is the single home for the skip; the four transports call only
+`mayRow`, never re-derive the skip.** Add one shared denial-coverage battery (a
+readable-but-not-writable row, an inherit-child, a scope-only grant) run against
+every transport, so the four sites cannot drift. Any future change to capability
+resolution touches `mayRow` + this battery, nowhere else.
+
+### D6 — CRDT stubs (`raster`/`polyline`): KEEP AS LABELED REPLACE-NOT-MERGE, defer the toolkit.
+
+`raster.crdt()` / `polyline.crdt()` are whole-value-replace, not merging CRDTs
+(DECISIONLOG #262). Building the merge toolkit now is speculative — no `projects/*`
+app is the active spine for it, and "proactive ≠ exhaustive" (AGENTS.md).
+
+Decision: **Do not build the CRDT-authoring toolkit yet.** Keep `text.crdt` (real
+merge) as the shipped proof; keep `raster`/`polyline` as explicitly labeled
+replace-not-merge stubs. Add a dev-mode diagnostic when a replace-stub field is
+mutated concurrently (last-write-wins is silent data loss otherwise). Revisit only
+when photo-editor / drawing-canvas becomes the active spine and proves the need.
+
+### Ordering of the settled work
+
+1. **D1** — inherit-child write authz (security; RED-first).
+2. **D-cleanup** — delete `presence`/`open`/`.use`/dead `onAdded`; `enum_` → `text({oneOf})`; DDL into `app.ready` (review §2).
+3. **D5** — consolidate the skip + denial battery (rides on D1).
+4. **serve.mjs split** (review §4) — mechanical, no behavior change.
+5. **D2** — entity.mjs concentration + split, one kind at a time.
+6. **D3** — client subscribe interest/pace, end-to-end.
+7. **D4** — `owner()` / `owner.only()` sugar + the rest of the ergonomics layer (review §3), additive.
+8. **index.mjs shrink** (review §5) + **D6 dev diagnostic** + effects/time simplification (review §8).
+
+D1 is the only item that is urgent on its own merits; everything after is
+quality/ergonomics/feature work that can land in the order above behind the green
+suite.

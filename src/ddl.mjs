@@ -19,6 +19,7 @@
 //   log          → {Entity}_{field} ({Entity}_id, ...entry sub-fields)
 //   ephemeral   → {Entity}_{field} ({Entity}_id, client_id)
 import { structCellColumn } from './field-strategy.mjs';
+import { sideTableDDL } from './side-table-strategy.mjs';
 
 // Map a field's kind+type to its SQLite column type.
 function sqlType(descriptor) {
@@ -55,19 +56,6 @@ function mainTableDDL(entity) {
     // map / log / ephemeral / store → NOT stored in main table
   }
   return `CREATE TABLE IF NOT EXISTS ${entity.name} (\n  ${cols.join(',\n  ')}\n);`;
-}
-
-// Generate side-table DDL for map membership fields.
-function mapTableDDL(entity, name, descriptor) {
-  const tableName = `${entity.name}_${name}`;
-  const ownerCol = `${entity.name}_id`;
-  const cols = [`${ownerCol} TEXT NOT NULL`, 'member_id TEXT NOT NULL'];
-  // Role column: if roles are declared, add a TEXT role column
-  if (Array.isArray(descriptor.roles) && descriptor.roles.length > 0) {
-    cols.push('role TEXT NOT NULL');
-  }
-  cols.push(`PRIMARY KEY (${ownerCol}, member_id)`);
-  return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
 // Generate side-table DDL for log fields (append-only entries with sub-fields).
@@ -124,7 +112,8 @@ export function generateDDL(entity) {
   for (const [name, descriptor] of Object.entries(fields)) {
     if (descriptor.kind === 'store') {
       if (descriptor.type === 'map') {
-        statements.push(mapTableDDL(entity, name, descriptor));
+        const mapDDL = sideTableDDL(entity, name, descriptor);
+        if (mapDDL) statements.push(mapDDL);
       } else if (descriptor.type === 'log') {
         statements.push(logTableDDL(entity, name, descriptor));
       }
