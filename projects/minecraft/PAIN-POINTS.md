@@ -131,7 +131,7 @@ export const World = entity('World', {
   },
 
   effects: {
-    [players.onAdded]: { mutate: Inbox, with: {
+    [native('World', 'players', 'added')]: { mutate: Inbox, with: {
       recipient: delta.member, world: entity.id, kind: 'world_join',
     } },
   },

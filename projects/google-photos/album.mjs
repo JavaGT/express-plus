@@ -5,7 +5,7 @@
 import {
   entity, text, date, ref, map, link,
   grant, deny, read, write, subscribe, admin, anyOf, never, scope,
-  router, User,
+  router, User, native,
 } from 'workbench';
 import { Photo } from './photo.mjs';
 
@@ -128,7 +128,7 @@ export const Album = entity('Album', {
   // Same pattern as doc.mjs L185-188.
   // ===================================================================
   effects: {
-    [collaborators.onAdded]: { mutate: Inbox, with: {
+    [native('Album', 'collaborators', 'added')]: { mutate: Inbox, with: {
       recipient: delta.member, album: entity.id, kind: 'albumInvite',
     } },
   },

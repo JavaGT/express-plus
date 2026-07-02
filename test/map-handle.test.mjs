@@ -4,7 +4,7 @@
 // doc.mjs/gdoc.mjs use it for share routes). It is a committed pipeline ACTION
 // (consult #19): `.set` RE-ENTERS dispatch as `<Entity>.<field>.add` (a new
 // member) or `.setRole` (a role change — DECISIONLOG #57: idempotent re-share is
-// roleChanged, NOT a fresh add so onAdded does not re-fire); `.remove` dispatches
+// roleChanged, NOT a fresh add so native added does not re-fire); `.remove` dispatches
 // `.remove`; the projection applies the `:added`/`:roleChanged`/`:removed` event
 // to the side-table. The handle needs a `dispatch` ref (threaded via hydrate); a
 // repeat share with the SAME role is a no-op (no dispatch). READS (has/get/

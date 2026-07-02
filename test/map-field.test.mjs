@@ -3,13 +3,12 @@
 // Import-surface scope only: map() must return a valid frozen field descriptor
 // the entity compiler accepts at import, carrying its per-member value descriptor
 // and its declared roles. The membership-mutation behavior (collaborators.set,
-// the collaborators.onAdded event handle, the viewer/editor role-derived checks)
-// is DEFERRED to a later behavior piece — this piece only delivers the symbol
-// doc.mjs needs at import time, mirroring Inbox import-surface-now/wiring-later.
+// native map event handles, the viewer/editor role-derived checks) is DEFERRED
+// to later behavior pieces.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { map, ref, entity, scope, grant, read, never } from '../src/index.mjs';
+import { map, ref, entity, scope, grant, read, never, native } from '../src/index.mjs';
 
 test('map(ref(...), options) returns a frozen store-kind descriptor', () => {
   const descriptor = map(ref('User'), { role: ['viewer', 'editor'], default: {} });
@@ -47,21 +46,17 @@ test('a map field compiles into an entity at import (does not throw at load)', (
   });
 });
 
-test('map exposes a frozen onAdded event handle with stable toString', () => {
+test('map does not expose generic collection trigger aliases', () => {
   const d = map(ref('User'), { role: ['viewer'], default: {} });
-  assert.ok(Object.isFrozen(d.onAdded), 'onAdded should be frozen');
-  assert.equal(String(d.onAdded), 'map:onAdded');
+  assert.equal(d.onAdded, undefined);
+  assert.equal(d.onRemoved, undefined);
 });
 
-test('({ [d.onAdded]: 1 }) key is the stable string', () => {
-  const d = map(ref('User'), { role: ['viewer'], default: {} });
-  assert.equal(({ [d.onAdded]: 1 })['map:onAdded'], 1);
-});
-
-test('map(...).can(fn) preserves onAdded', () => {
-  const d = map(ref('User'), { role: ['viewer'] }).can(() => {});
-  assert.ok(Object.isFrozen(d.onAdded), 'onAdded should survive .can');
-  assert.equal(String(d.onAdded), 'map:onAdded');
+test('native map event handles are frozen stable computed keys', () => {
+  const added = native('Doc', 'collaborators', 'added');
+  assert.ok(Object.isFrozen(added));
+  assert.equal(String(added), 'Doc.collaborators.added');
+  assert.equal(({ [added]: 1 })['Doc.collaborators.added'], 1);
 });
 
 test('a map field is not whole-value comparable in scope (fail closed)', () => {

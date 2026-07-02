@@ -252,7 +252,7 @@ effects: {
 ```
 
 **What fails:** Even if `blob` + render computation existed, effects are
-triggered by a single typed event handle (e.g., `collaborators.onAdded`).
+triggered by a single typed event handle (e.g., `native('Doc', 'collaborators', 'added')`).
 There is no compound trigger like "any field on any child RasterLayer
 changes." The canvas render should recompute when imageData, visibility,
 opacity, blendMode, or order changes — on ANY of its layers. That is N

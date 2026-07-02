@@ -18,12 +18,14 @@ import {
 } from '../src/index.mjs';
 
 test('event handle constructors derive stable persisted event types', () => {
-  assert.deepEqual(created('Project'), {
+  const createdHandle = created('Project');
+  assert.deepEqual(createdHandle, {
     brand: 'event-handle',
     entity: 'Project',
     kind: EventKind.created,
     type: 'Project.created',
   });
+  assert.equal(String(createdHandle), 'Project.created');
   assert.deepEqual(updated('Project'), {
     brand: 'event-handle',
     entity: 'Project',

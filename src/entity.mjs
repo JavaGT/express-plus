@@ -184,36 +184,11 @@ export function entity(name, declaration = {}) {
   // Validate declared effects at load time (but not cycle detection — that runs
   // globally after all entities are defined). Each effect must have valid
   // { mutate, with, when? } shape. A non-compilable 'when' predicate is a load-
-  // time error (ADR #22).
-  // Bind store/map effect handles to entity+field-specific event types. An effect
-  // keyed by the GENERIC map handle (`collaborators.onAdded` → 'map:onAdded') is
-  // RE-KEYED to the specific event the `.set` handle EMITS (`Doc.collaborators.
-  // added`) — otherwise the general compiler (effect-compiler.mjs buildEffectsRegistry)
-  // keys the effect under 'map:onAdded' while the handle dispatches
-  // 'Doc.collaborators.added', so the effect would never fire (consult #19/#23,
-  // UNIT 2). CRUD string-key triggers ('Note.created') + already-specific string
-  // keys pass through unchanged. The field's own onAdded/onRemoved handle is dead
-  // below (fireMapEffects retired); only the re-keyed effects object carries the
-  // binding. Each effect still validates its declared { mutate, with, when? } shape
-  // at load time (cycle/admission detection runs globally after all entities).
+  // time error (ADR #22). Trigger handles resolve through the effect compiler;
+  // map mutations use entity-specific native handles such as
+  // native('Doc', 'collaborators', 'added'), not generic field-local aliases.
   let validatedEffects = effects ? { ...effects } : null;
   if (validatedEffects) {
-    for (const [fieldName, descriptor] of Object.entries(fields)) {
-      if (descriptor.kind === 'store' && descriptor.type === 'map') {
-        const addedKey = `${name}.${fieldName}.added`;
-        const removedKey = `${name}.${fieldName}.removed`;
-        const oldAdded = descriptor.onAdded ? String(descriptor.onAdded) : null;
-        const oldRemoved = descriptor.onRemoved ? String(descriptor.onRemoved) : null;
-        if (oldAdded && Object.prototype.hasOwnProperty.call(validatedEffects, oldAdded)) {
-          validatedEffects[addedKey] = validatedEffects[oldAdded];
-          delete validatedEffects[oldAdded];
-        }
-        if (oldRemoved && Object.prototype.hasOwnProperty.call(validatedEffects, oldRemoved)) {
-          validatedEffects[removedKey] = validatedEffects[oldRemoved];
-          delete validatedEffects[oldRemoved];
-        }
-      }
-    }
     // Validate string-keyed effects (existing path)
     for (const [triggerHandle, effect] of Object.entries(validatedEffects)) {
       validateEffectDeclaration(effect, { triggerHandle, sourceEntityName: name });
@@ -448,7 +423,7 @@ export function entity(name, declaration = {}) {
   // { role })` is a committed pipeline ACTION (consult #19, UNIT 2): it RE-ENTERS
   // dispatch as `<Entity>.<field>.add` (a new member) or `.setRole` (a role
   // change — DECISIONLOG #57: idempotent re-share is roleChanged, NOT a fresh
-  // add, so onAdded does not re-fire); `.remove` dispatches `.remove`. The
+  // add, so native added does not re-fire); `.remove` dispatches `.remove`. The
   // projection applies the `:added`/`:roleChanged`/`:removed` event to the
   // side-table — the handle does NOT write the side-table directly (no second
   // reconciliation path). A repeat share with the SAME role is a no-op (no
@@ -497,9 +472,9 @@ export function entity(name, declaration = {}) {
 
     return {
       // `.set(memberId, { role })` — a committed pipeline ACTION. A NEW member
-      // dispatches `<Entity>.<field>.add` (emits `:added`, fires onAdded via the
+      // dispatches `<Entity>.<field>.add` (emits `:added`, fires native added via the
       // compiler); an EXISTING member with a DIFFERENT role dispatches `.setRole`
-      // (emits `:roleChanged`, does NOT re-fire onAdded — DECISIONLOG #57); the
+      // (emits `:roleChanged`, does NOT re-fire native added — DECISIONLOG #57); the
       // SAME role is a no-op (no dispatch). The side-table is written by the
       // projection applying the emitted event, NOT by the handle.
       set: async (memberId, { role } = {}) => {

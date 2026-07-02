@@ -85,7 +85,7 @@ function crdtTextDiff(previous, next) {
 
 // store (map) membership diff over { member: role } materializations. A member
 // add → added; a member gone → removed; a same-member role change → changed
-// (NOT added — only a NEW member fires onAdded, DECISIONLOG #57).
+// (NOT added — only a NEW member fires native added, DECISIONLOG #57).
 function storeMapDiff(previous, next) {
   const prev = previous && typeof previous === 'object' ? previous : {};
   const nxt = next && typeof next === 'object' ? next : {};
@@ -258,7 +258,7 @@ const STRATEGIES = Object.freeze({
 
   // `store` — an internally-keyed owned collection (map). diff is a membership
   // delta: {added, removed, changed}. A role change is `changed`, NOT `added` —
-  // only a NEW member fires onAdded (idempotent re-share, DECISIONLOG #57).
+  // only a NEW member fires native added (idempotent re-share, DECISIONLOG #57).
   store: Object.freeze({
     validate(value) {
       if (value === null || typeof value !== 'object') return 'expected a store value';

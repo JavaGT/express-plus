@@ -20,7 +20,9 @@ function assertName(label, value) {
 }
 
 function freezeHandle(parts) {
-  return Object.freeze({ brand: 'event-handle', ...parts });
+  const handle = { brand: 'event-handle', ...parts };
+  Object.defineProperty(handle, 'toString', { value: () => handle.type });
+  return Object.freeze(handle);
 }
 
 export function created(entity) {

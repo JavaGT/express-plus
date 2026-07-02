@@ -1,5 +1,5 @@
 // Slice A2 — the framework-provided Inbox entity. doc.mjs declares an effect
-// `effects: { [collaborators.onAdded]: { mutate: Inbox, with: { recipient:
+// `effects: { [native('Doc', 'collaborators', 'added')]: { mutate: Inbox, with: { recipient:
 // delta.member, doc: entity.id, kind: 'invite' } } }` — when a collaborator is
 // added to a Doc, a row is projected into the recipient's Inbox. Inbox is the
 // framework's concern (a uniform per-user notification store every app reuses),

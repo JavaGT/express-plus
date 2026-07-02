@@ -11,7 +11,7 @@
 import {
   entity, text, number, date, ref, map, ephemeral, log, state, link,
   grant, deny, read, write, subscribe, admin, anyOf, scope,
-  router, User, Inbox, now,
+  router, User, Inbox, now, native,
 } from 'workbench';
 // comment.mjs is imported LAZILY inside the routes thunk (below), not here:
 // comment.mjs reads `Doc` at module-eval (`inherit(Doc, ...)`), so an eager
@@ -21,8 +21,8 @@ import {
 
 // Handles — typed, frozen, never magic strings. `now` is the imported deferred
 // commit-instant token. Effect `with` functions receive `{ delta, entity }` as
-// parameters (per-mutation runtime values). `collaborators.onAdded` is the map
-// field's typed event handle (usable as a computed effect key).
+// parameters (per-mutation runtime values). Native event handles are typed,
+// frozen computed effect keys.
 
 // Capability handles are typed, imported — never strings. `subscribe` is a
 // peer of `read` (sustained WS push vs one-shot REST fetch).
@@ -196,7 +196,7 @@ export const Doc = entity('Doc', {
   // back the batch), data interpolated only from the trigger delta + origin row.
   // See DECISIONLOG.md.
   effects: {
-    [collaborators.onAdded]: {
+    [native('Doc', 'collaborators', 'added')]: {
       mutate: Inbox,
       // `with` runs over { delta, origin }: delta is the :added event data
       // ({owner, member, role}); origin is the triggering row ({id: <owner>})

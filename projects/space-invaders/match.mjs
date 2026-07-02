@@ -9,7 +9,7 @@
 // it from 'workbench' as an idealized handle and documents the gap.
 import {
   entity, text, number, date, ref, map, state,
-  grant, deny, read, write, subscribe, anyOf, never, scope,
+  grant, deny, read, write, subscribe, anyOf, never, scope, native,
   // ── aspirational imports (not yet in API surface) ──
   // grid    — 2D boolean grid, delta-broadcast, ephemeral
   // list    — ordered mutable collection, delta-broadcast
@@ -122,7 +122,7 @@ export const Match = entity('Match', {
   // is full — a non-compilable `when` is a load-time error, same discipline
   // as a non-compilable `scope`.
   effects: {
-    [players.onAdded]: {
+    [native('Match', 'players', 'added')]: {
       mutate: self,
       with: { phase: 'playing' },
       when: (delta, origin) => origin.players.size >= origin.maxPlayers,

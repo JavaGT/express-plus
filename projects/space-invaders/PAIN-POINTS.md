@@ -201,7 +201,7 @@ Tests: ADR #8 (declarative effects: bounded, in-transaction, effect-principal).
 // Auto-start: when a player joins, if the roster is full, transition to
 // 'playing'. But effects fire on EVERY trigger:
 effects: {
-  [players.onAdded]: { mutate: self, with: { phase: 'playing' } },
+  [native('Match', 'players', 'added')]: { mutate: self, with: { phase: 'playing' } },
   // ^ fires on EVERY player join — even when roster has 1 player.
   //   There's no `if` condition: "only when players.size >= maxPlayers".
   //   The `with` template only interpolates trigger-delta fields (delta.member,

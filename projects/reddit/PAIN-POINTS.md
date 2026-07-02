@@ -184,7 +184,7 @@ export const Post = entity('Post', {
   //   { mutate: Post, with: { field: <data-interpolation> } }
   //
   // What we NEED to express:
-  //   [votes.onAdded]:  { mutate: Post, with: { upvoteCount: Post.upvoteCount + delta.direction } }
+  //   [native('Post', 'votes', 'added')]:  { mutate: Post, with: { upvoteCount: Post.upvoteCount + delta.direction } }
   //   [votes.onChanged]: { mutate: Post, with: { score: Post.score + (newDir - oldDir) } }
   //
   // But `with` only supports data interpolation from delta + entity — no arithmetic,
@@ -192,7 +192,7 @@ export const Post = entity('Post', {
   //
   // FAILING CODE (would not compile — arithmetic in template is unsupported):
   //   effects: {
-  //     [Post.votes.onAdded]: { mutate: Post, with: {
+  //     [Post.native('Post', 'votes', 'added')]: { mutate: Post, with: {
   //       upvoteCount: Post.upvoteCount + delta.direction  // ❌ NOT VALID
   //     } },
   //   },
@@ -401,7 +401,7 @@ model doesn't address.
 
 // What we NEED (arithmetic in template — NOT SUPPORTED):
 effects: {
-  [Post.votes.onAdded]: { mutate: Post, with: {
+  [Post.native('Post', 'votes', 'added')]: { mutate: Post, with: {
     upvoteCount: Post.upvoteCount + delta.direction,   // ❌ NO ARITHMETIC
     score: Post.upvoteCount - Post.downvoteCount,       // ❌ CAN'T READ TARGET
   } },

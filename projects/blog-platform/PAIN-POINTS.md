@@ -444,7 +444,7 @@ Failing code:
 // When a post transitions from scheduled → published, notify ALL blog
 // subscribers. The doc.mjs exemplar shows:
 effects: {
-  [collaborators.onAdded]: { mutate: Inbox, with: {
+  [native('Post', 'collaborators', 'added')]: { mutate: Inbox, with: {
     recipient: delta.member,  // ONE recipient — the single collaborator added
     doc: entity.id,
     kind: 'invite',

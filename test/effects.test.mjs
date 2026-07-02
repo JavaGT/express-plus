@@ -1,13 +1,13 @@
 // Effects pipeline test — a map add fires a declared effect IN-TXN (consult
 // #19/#23). A map `.set(member, {role})` is a committed pipeline ACTION: it
 // re-enters dispatch as `<Entity>.<field>.add` (a fresh txn) → emits `:added` →
-// the general P6b effect compiler fires the declared `[collaborators.onAdded]`
+// the general P6b effect compiler fires the declared native collaborators added
 // effect → the effect re-enters the durable variant recursively as `Inbox.created`
 // (effect principal, JOINS the .add txn) → the Inbox row is created atomic with
 // the add. The fireMapEffects side path + the direct mutate.create call are
 // RETIRED — the general mechanism fires off the store event (one reconciliation
 // path). A role CHANGE is `.roleChanged`, NOT a fresh `:added` (DECISIONLOG #57:
-// idempotent re-share re-fire of onAdded would double-deliver), so the effect
+// idempotent re-share re-fire of native added would double-deliver), so the effect
 // does NOT re-fire on a repeat share.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -16,7 +16,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   entity, text, ref, map, grant, read, write, subscribe, generateDDL,
-  createServer, durableMutationVariant, principal, executeFrameworkDDL, buildEffectsRegistry,
+  createServer, durableMutationVariant, principal, executeFrameworkDDL, buildEffectsRegistry, native,
 } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -35,7 +35,7 @@ const Doc = entity('Doc', {
   },
   grant: () => grant(read, write, subscribe),
   effects: {
-    [collaborators.onAdded]: {
+    [native('Doc', 'collaborators', 'added')]: {
       mutate: Inbox,
       // `with` runs as a function over { delta, origin }: delta is the :added
       // event data ({owner, member, role}); origin is the triggering row
@@ -71,7 +71,7 @@ async function makeServer(db, postAuth) {
   });
 }
 
-test('map .set on a NEW member fires onAdded as the effect principal, creating the target row in-txn', async () => {
+test('map .set on a NEW member fires native added effect as the effect principal, creating the target row in-txn', async () => {
   const db = setup();
   // Spy: capture every principal seen for an Inbox.created event. The OLD
   // fireMapEffects path calls Inbox.create DIRECTLY (no dispatch), so the spy
@@ -88,12 +88,12 @@ test('map .set on a NEW member fires onAdded as the effect principal, creating t
 
   // the effect ran THROUGH dispatch (under the effect principal, not the raw
   // user, not a direct Inbox.create bypass) — consult #6/#23.
-  assert.equal(inboxCreatedPrincipals.length, 1, 'onAdded fired via the compiler, in-dispatch');
+  assert.equal(inboxCreatedPrincipals.length, 1, 'native added fired via the compiler, in-dispatch');
   assert.equal(inboxCreatedPrincipals[0].type, 'system');
   assert.equal(inboxCreatedPrincipals[0].attributes.effect, 'Doc');
 
   const inboxes = db.prepare('SELECT * FROM Inbox').all();
-  assert.equal(inboxes.length, 1, 'the onAdded effect created one Inbox row');
+  assert.equal(inboxes.length, 1, 'the native added effect created one Inbox row');
   assert.equal(inboxes[0].recipient, 'u2');
   assert.equal(inboxes[0].doc, '1');
   assert.equal(inboxes[0].kind, 'invite');
@@ -105,7 +105,7 @@ test('map .set on a NEW member fires onAdded as the effect principal, creating t
   assert.equal(members[0].role, 'viewer');
 });
 
-test('a role CHANGE is roleChanged, NOT a fresh onAdded (idempotent re-share, DECISIONLOG #57)', async () => {
+test('a role CHANGE is roleChanged, NOT a fresh native added (idempotent re-share, DECISIONLOG #57)', async () => {
   const db = setup();
   const server = await makeServer(db);
 
@@ -118,9 +118,9 @@ test('a role CHANGE is roleChanged, NOT a fresh onAdded (idempotent re-share, DE
   assert.equal(members.length, 1, 'no duplicate member row');
   assert.equal(members[0].role, 'editor');
 
-  // onAdded fired ONCE (for the new member) — the role change did NOT re-fire it
+  // native added fired ONCE (for the new member) — the role change did NOT re-fire it
   const inboxes = db.prepare('SELECT * FROM Inbox').all();
-  assert.equal(inboxes.length, 1, 'onAdded did not re-fire on the role change');
+  assert.equal(inboxes.length, 1, 'native added did not re-fire on the role change');
 });
 
 test('a repeat share with the SAME role is a no-op (no dispatch, no event)', async () => {
@@ -134,10 +134,10 @@ test('a repeat share with the SAME role is a no-op (no dispatch, no event)', asy
   const members = db.prepare('SELECT member_id, role FROM Doc_collaborators WHERE Doc_id = ?').all('1');
   assert.equal(members.length, 1, 'still one member row');
   assert.equal(members[0].role, 'viewer');
-  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM Inbox').get().n, 1, 'onAdded fired once');
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM Inbox').get().n, 1, 'native added fired once');
 });
 
-test('.remove fires onRemoved (declared effect off the :removed store event)', async () => {
+test('.remove applies the native removed store event projection', async () => {
   const db = setup();
   const server = await makeServer(db);
 

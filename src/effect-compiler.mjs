@@ -3,7 +3,7 @@
 // Effects are declared on an entity as a map from trigger handles to `{ mutate, with, when }`:
 //   effects: {
 //     [Note.created]: { mutate: Inbox, with: ({ delta, origin }) => ({...}) },
-//     [collaborators.onAdded]: { mutate: Counter, with: { count: inc(1) } },
+//     [native('Doc', 'collaborators', 'added')]: { mutate: Counter, with: { count: inc(1) } },
 //   }
 //
 // For P6b Part 1: CRUD-trigger effects only (Note.created/updated/removed). The effect
@@ -429,22 +429,12 @@ export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, 
 // - string → as-is
 // - object with .toString → .toString()
 // - then :→. normalization iff : present and . absent
-// Map-handle-in-anyOf rejection: throw if handle is a generic map marker.
 function resolveTriggerEventType(handle, { entityRecord }) {
   let eventType;
   if (typeof handle === 'string') {
     eventType = handle;
   } else if (handle && typeof handle.toString === 'function') {
-    const str = handle.toString();
-    // Reject generic map markers in anyOf (lead decision, option b)
-    if (str === 'map:onAdded' || str === 'map:onRemoved') {
-      throw new Error(
-        `effect.anyOf on entity '${entityRecord.name}' does not support ` +
-        `map-collection triggers ('map:onAdded'/'map:onRemoved') — ` +
-        `use a CRUD trigger (e.g. '${entityRecord.name}.updated').`,
-      );
-    }
-    eventType = str;
+    eventType = handle.toString();
   } else {
     throw new Error(
       `effect trigger handle on entity '${entityRecord.name}' is not a string ` +

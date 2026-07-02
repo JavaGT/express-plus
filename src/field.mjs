@@ -155,10 +155,8 @@ export function blob(options = {}) {
 // compiler accepts. On a loaded row the field hydrates into a write handle
 // exposing `.set(memberId, { role })`/`.remove(memberId)`/`.has(memberId)`/
 // `.toArray()` against the `<Entity>_<field>` side-table (entity.mjs
-// makeMapHandle). The `onAdded` event handle (present so effect keys can
-// reference it) and the role-derived checks (is.viewer()/is.editor(),
-// runtime-only) remain the `store` kind's deferred behavior — the handles
-// exist at import, their firing is deferred.
+// makeMapHandle). Map mutation events are entity-specific native event handles
+// (`native('Doc', 'collaborators', 'added')`), not generic descriptor properties.
 export function map(of, { role, default: fallback } = {}) {
   return makeDescriptor({
     kind: 'store',
@@ -168,8 +166,6 @@ export function map(of, { role, default: fallback } = {}) {
     // per-row column — frozen so a later layer cannot mutate the declared set.
     roles: Object.freeze([...(role ?? [])]),
     default: fallback,
-    onAdded: Object.freeze({ event: 'added', toString() { return 'map:onAdded'; } }),
-    onRemoved: Object.freeze({ event: 'removed', toString() { return 'map:onRemoved'; } }),
   });
 }
 

@@ -11,7 +11,7 @@ import {
   generateDDL, generateFrameworkDDL, executeFrameworkDDL,
   principal, inc, dec, self, many, effect, action, event, createServer, durableMutationVariant,
   createEffectContext, checkEffectDepth,
-  buildEffectsRegistry, detectCrossEntityCycles, validateEffects,
+  buildEffectsRegistry, detectCrossEntityCycles, validateEffects, native,
 } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -560,7 +560,7 @@ test('many fan-out: creates N target rows (one per collection member at trigger 
   for (const sql of generateDDL(Inbox)) db.exec(sql);
 
   // User has a map of members (collaborators)
-  // Effect on collaborators.onAdded: when a collaborator is added, fan-out to ALL current members
+  // Effect on the native collaborators added event: fan-out to ALL current members
   const User = entity('User', {
     fields: {
       name: text(),
@@ -569,7 +569,7 @@ test('many fan-out: creates N target rows (one per collection member at trigger 
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
     effects: {
-      [collaboratorsField.onAdded]: {
+      [native('User', 'collaborators', 'added')]: {
         mutate: many(Inbox, { over: collaboratorsField }),
         with: ({ origin, member }) => ({
           recipient: member.id,
@@ -674,7 +674,7 @@ test('many fan-out: create-only (no dedup, two origins each add member → separ
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
     effects: {
-      [collaboratorsField.onAdded]: {
+      [native('User', 'collaborators', 'added')]: {
         mutate: many(Inbox, { over: collaboratorsField }),
         with: ({ origin, member }) => ({
           recipient: member.id,
@@ -978,27 +978,3 @@ test('Self-recursion depth cap: anyOf effect with self-mutate bounded by maxDept
   assert.ok(/depth limit exceeded/i.test(errorMsg), `error should mention depth cap: ${errorMsg}`);
 });
 
-test('Map-handle rejection: anyOf with map:onAdded throws at registry-build', () => {
-  const collaboratorsField = map(ref('User', { role: 'collaborator', readonly: true }));
-
-  const BadEntity = entity('BadEntityAnyOf', {
-    fields: {
-      name: text(),
-      collaborators: collaboratorsField,
-    },
-    grant: () => grant(read, write, subscribe),
-    effects: {
-      [effect.anyOf(collaboratorsField.onAdded, 'BadEntityAnyOf.updated')]: {
-        mutate: entity('TargetAnyOf', { fields: { x: text() }, grant: () => grant(read, write, subscribe) }),
-        with: { x: 'y' },
-      },
-    },
-  });
-
-  // The error is thrown at registry-build time (resolveTriggerEventType), not entity() compile
-  assert.throws(
-    () => buildEffectsRegistry([BadEntity]),
-    /does not support map-collection triggers/,
-    'anyOf with map:onAdded should throw clear error at registry-build',
-  );
-});
