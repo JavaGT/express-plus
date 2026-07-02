@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import expressPlus, {
+import workbench, {
   entity, text, ref, blob, scope, grant, read, write, subscribe,
 } from '../src/index.mjs';
 
@@ -37,7 +37,7 @@ function photoNote() {
 async function harness(t) {
   const db = new DatabaseSync(':memory:');
   const root = mkdtempSync(path.join(tmpdir(), 'express-blobreap-'));
-  const app = expressPlus({ db, blobs: { root } });
+  const app = workbench({ db, blobs: { root } });
   app.mount('/notes', photoNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });

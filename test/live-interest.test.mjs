@@ -15,7 +15,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import expressPlus, {
+import workbench, {
   entity, text, ephemeral, grant, read, write, subscribe, scope, everyone,
   generateDDL,
 } from '../src/index.mjs';
@@ -134,7 +134,7 @@ function bootCanvas() {
   db.prepare('INSERT INTO Canvas (id, title) VALUES (?, ?)').run('c3', 'Drawing 3');
   db.prepare('INSERT INTO Canvas (id, title) VALUES (?, ?)').run('c4', 'Drawing 4');
   db.prepare('INSERT INTO Canvas (id, title) VALUES (?, ?)').run('c5', 'Drawing 5');
-  const app = expressPlus({ db }).mount('/canvases', Canvas);
+  const app = workbench({ db }).mount('/canvases', Canvas);
   app.listen(0, { principalOf: (req) => ({ type: 'user', id: req.headers?.['x-test-user'] ?? 'test' }) });
   return { app };
 }

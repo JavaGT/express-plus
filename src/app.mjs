@@ -1,6 +1,6 @@
 // The app assembly layer — Todo C (SPEC §3, §4, §6.2; ADR #20).
 //
-// `expressPlus()` is the default export: a chainable app. Assembly is TWO-PHASE.
+// `workbench()` is the default export: a chainable app. Assembly is TWO-PHASE.
 // `app.mount(path, Entity)` RECORDS an ordered mount declaration and returns the
 // app synchronously, so the fluent `app.mount(...).mount(...).listen()` chain is
 // preserved. The concrete routing table is RESOLVED later by `resolveRoutes()`:
@@ -281,13 +281,13 @@ export function router(options = {}) {
   return makeMountable({ mergeParams: options.mergeParams === true });
 }
 
-// expressPlus() — the default export. A chainable app. `.mount(path, Entity)`
+// workbench() — the default export. A chainable app. `.mount(path, Entity)`
 // resolves and accumulates routes; `.listen(port, options)` opens a real
 // node:http server serving the resolved routing table and returns the app
 // (chainable). The server is exposed on `app.httpServer`. `options.principalOf`
 // overrides the request→principal source (default: anonymous, fail-closed). Both
 // chain.
-export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts, log: logOpts } = {}) {
+export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts, log: logOpts } = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
@@ -299,10 +299,10 @@ export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migr
   const app = makeMountable();
   // Set up the framework-wide structured logger BEFORE any module imports log.
   // The ambient logger is used by every layer — auth, dispatch, HTTP, live.
-  // Callers pass `expressPlus({ log: { level: 'debug', channels: {...} } })`.
+  // Callers pass `workbench({ log: { level: 'debug', channels: {...} } })`.
   const log = createLog(logOpts);
   setAmbientLog(log);
-  log.info('system', 'expressPlus() constructed', { db: !!db, jobs: !!jobOpts, migrations: migrations.length });
+  log.info('system', 'workbench() constructed', { db: !!db, jobs: !!jobOpts, migrations: migrations.length });
   // The DB handle is an app-level resource, supplied once at construction and
   // read by every transport (HTTP now, WS /events later) — not a per-transport
   // listen option (DECISIONLOG: the SQLite handle lives on the app because
@@ -360,9 +360,9 @@ export default function expressPlus({ db, blobs: blobOpts, requireEnv = [], migr
   app.migrations = migrations;
 
   // Static accessor for the router constructor, so exemplars may write
-  // `expressPlus.router({ mergeParams: true })` alongside the named import.
+  // `workbench.router({ mergeParams: true })` alongside the named import.
   // One constructor, two access paths — singular system.
-  expressPlus.router = router;
+  workbench.router = router;
 
   // Auto-create tables for mounted entities. Must be called AFTER all mounts
   // and AFTER resolveRoutes (so declarations are resolved). Reads the entity

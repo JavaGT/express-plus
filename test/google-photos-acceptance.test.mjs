@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity,
   text,
   date,
@@ -49,7 +49,7 @@ function scopedIds(db, entityRecord, prin) {
 }
 
 async function serve(t, db, routes, who) {
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   for (const { path, entity } of routes) app.mount(path, entity);
   app.listen(0, { principalOf: () => who });
   await app.ready;

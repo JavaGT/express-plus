@@ -6,7 +6,7 @@ import {
   entity, text, date, ref, map, link,
   grant, deny, read, write, subscribe, admin, anyOf, never, scope,
   router, User,
-} from 'express-plus';
+} from 'workbench';
 import { Photo } from './photo.mjs';
 
 const VIEWER     = [read, subscribe];

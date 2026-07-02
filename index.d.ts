@@ -1,4 +1,4 @@
-// Type definitions for express+ — the stable public handler contract.
+// Type definitions for workbench — the stable public handler contract.
 //
 // The .mjs source remains the sole source of truth; this is a projection for
 // TypeScript app authors. JS app authors see nothing change. `req.raw` and

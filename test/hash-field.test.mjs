@@ -8,7 +8,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import expressPlus, {
+import workbench, {
   entity,
   text,
   hash,
@@ -56,7 +56,7 @@ test('the digest is salted — the same plaintext stores differently each time',
 
 test('a hydrated row exposes password.verify(plaintext): true for the right one, false for a wrong one', () => {
   const User = makeUser();
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   const created = User.create({ username: 'alice', password: 'hunter2' });
   assert.equal(typeof created.password.verify, 'function');
   assert.equal(created.password.verify('hunter2'), true);
@@ -65,7 +65,7 @@ test('a hydrated row exposes password.verify(plaintext): true for the right one,
 
 test('verify survives a round-trip through findOne (the stored digest hydrates on read)', () => {
   const User = makeUser();
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   User.create({ username: 'bob', password: 's3cret' });
   const found = User.findOne(User.username.is('bob'));
   assert.equal(found.password.verify('s3cret'), true);

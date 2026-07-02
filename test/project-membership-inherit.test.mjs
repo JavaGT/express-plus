@@ -11,7 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import expressPlus, {
+import workbench, {
   anyOf,
   entity,
   executeDDL,
@@ -82,7 +82,7 @@ function seedProjectDocuments() {
 
 async function serveProjectDocuments(t, who) {
   const { db, Project, ProjectDocument } = seedProjectDocuments();
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/projects', Project);
   app.mount('/documents', ProjectDocument);
   app.listen(0, { principalOf: () => who });
@@ -97,7 +97,7 @@ async function serveProjectDocuments(t, who) {
 
 async function serveProjectDocumentsByHeader(t) {
   const { db, Project, ProjectDocument } = seedProjectDocuments();
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/projects', Project);
   app.mount('/documents', ProjectDocument);
   app.listen(0, {

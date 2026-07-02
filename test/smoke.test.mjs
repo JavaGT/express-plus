@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity, text, ref, grant, read, write, subscribe, scope,
   generateDDL, User,
 } from '../src/index.mjs';
@@ -58,7 +58,7 @@ test('app boots with Doc entity and serves the routing table', async () => {
   }
 
   // Generate and execute DDL for Doc (and Comment, transitively)
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/docs', Doc);
   generateDDL(Comment).forEach(sql => db.exec(sql));
   await app.ddl();
@@ -87,7 +87,7 @@ test('HTTP CRUD: create and read a Doc row through the server', async () => {
   db.exec(`CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)`);
   db.exec(`CREATE TABLE IF NOT EXISTS Session (id TEXT PRIMARY KEY, token TEXT, userId TEXT, principalType TEXT, principalId TEXT, kind TEXT, createdAt TEXT)`);
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/docs', Doc);
   generateDDL(Comment).forEach(sql => db.exec(sql));
   await app.ddl();

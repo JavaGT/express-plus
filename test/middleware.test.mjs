@@ -19,7 +19,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import expressPlus, {
+import workbench, {
   config,
   entity,
   text,
@@ -71,7 +71,7 @@ test('config exposes env-sourced port and env', () => {
 });
 
 test('security headers are present on every response, including a 404', async (t) => {
-  const app = expressPlus().mount('/notes', makePublicListNote());
+  const app = workbench().mount('/notes', makePublicListNote());
   const { origin } = await serve(t, app);
 
   const res = await fetch(`${origin}/nonexistent`); // a 404
@@ -87,7 +87,7 @@ test('security headers are present on a 401 from the route gate', async (t) => {
     fields: { body: text(), owner: ref('User', { role: 'owner', readonly: true }) },
     grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
   });
-  const app = expressPlus().mount('/notes', Note);
+  const app = workbench().mount('/notes', Note);
   const { origin } = await serve(t, app);
 
   const res = await fetch(`${origin}/notes`);
@@ -96,7 +96,7 @@ test('security headers are present on a 401 from the route gate', async (t) => {
 });
 
 test('an oversized request body is rejected, not buffered', async (t) => {
-  const app = expressPlus().mount('/notes', makePublicListNote());
+  const app = workbench().mount('/notes', makePublicListNote());
   const { origin } = await serve(t, app);
 
   // > 1mb of JSON. The body-parse cap rejects it before the handler runs.
@@ -110,7 +110,7 @@ test('an oversized request body is rejected, not buffered', async (t) => {
 });
 
 test('a malformed JSON body returns 400', async (t) => {
-  const app = expressPlus().mount('/notes', makePublicListNote());
+  const app = workbench().mount('/notes', makePublicListNote());
   const { origin } = await serve(t, app);
 
   const res = await fetch(`${origin}/notes`, {
@@ -137,7 +137,7 @@ test('the error renderer is prod-safe (no stack leak) in production', async (t) 
   // stack, no internal message leaked. The env is a SERVER-owned listen option
   // (never a client header — a client must never be able to force a stack
   // trace), defaulting to config.env.
-  const app = expressPlus({ db: throwingDb() }).mount('/notes', makePublicListNote());
+  const app = workbench({ db: throwingDb() }).mount('/notes', makePublicListNote());
   const { origin } = await serve(t, app, { env: 'production' });
 
   const res = await fetch(`${origin}/notes`);
@@ -152,7 +152,7 @@ test('the error renderer is prod-safe (no stack leak) in production', async (t) 
 });
 
 test('the error renderer includes a stack trace in development', async (t) => {
-  const app = expressPlus({ db: throwingDb() }).mount('/notes', makePublicListNote());
+  const app = workbench({ db: throwingDb() }).mount('/notes', makePublicListNote());
   const { origin } = await serve(t, app, { env: 'development' });
 
   const res = await fetch(`${origin}/notes`);
@@ -162,7 +162,7 @@ test('the error renderer includes a stack trace in development', async (t) => {
 });
 
 test('graceful shutdown closes the live server', async (t) => {
-  const app = expressPlus().mount('/notes', makePublicListNote());
+  const app = workbench().mount('/notes', makePublicListNote());
   app.listen(0);
   await new Promise((resolve) => {
     if (app.httpServer.listening) resolve();
@@ -175,7 +175,7 @@ test('graceful shutdown closes the live server', async (t) => {
 });
 
 test('app.listen(port, callback) fires the listening callback', async (t) => {
-  const app = expressPlus().mount('/notes', makePublicListNote());
+  const app = workbench().mount('/notes', makePublicListNote());
   await new Promise((resolve) => {
     app.listen(0, () => resolve());
   });

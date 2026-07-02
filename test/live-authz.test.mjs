@@ -24,7 +24,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
-import expressPlus, { entity, text, ref, grant, read, write, subscribe, scope, everyone, generateDDL, executeDDL, User, Inbox } from '../src/index.mjs';
+import workbench, { entity, text, ref, grant, read, write, subscribe, scope, everyone, generateDDL, executeDDL, User, Inbox } from '../src/index.mjs';
 import { Doc } from '../doc.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -144,7 +144,7 @@ function bootNote() {
   const Note = makeNote();
   for (const sql of generateDDL(Note)) db.exec(sql);
   db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'hello', '1')").run();
-  const app = expressPlus({ db }).mount('/notes', Note);
+  const app = workbench({ db }).mount('/notes', Note);
   app.listen(0, { principalOf });
   return { app, origin: '' };
 }
@@ -240,7 +240,7 @@ test('H2: a REVOKED subscriber is denied at fan-out (the await guard)', async ()
   db.prepare("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'salt:a')").run();
   db.prepare("INSERT INTO User (id, username, password) VALUES (2, 'bob', 'salt:b')").run();
 
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   app.listen(0, { principalOf });
   await app.ready;
   const { port } = app.httpServer.address();

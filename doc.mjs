@@ -12,7 +12,7 @@ import {
   entity, text, number, date, ref, map, presence, log, state, link,
   grant, deny, read, write, subscribe, admin, anyOf, scope,
   router, User, Inbox, now,
-} from 'express-plus';
+} from 'workbench';
 // comment.mjs is imported LAZILY inside the routes thunk (below), not here:
 // comment.mjs reads `Doc` at module-eval (`inherit(Doc, ...)`), so an eager
 // top-level import here would form a cycle and hit `Doc` in its temporal dead

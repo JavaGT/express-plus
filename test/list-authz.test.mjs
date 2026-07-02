@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { entity, text, grant, deny, read, scope, everyone, generateDDL } from '../src/index.mjs';
+import workbench, { entity, text, grant, deny, read, scope, everyone, generateDDL } from '../src/index.mjs';
 
 // A Secret visible to everyone (scope = everyone) but readable only by `vip`
 // (the .can body denies read to non-vip). This is the admits-then-denies-read
@@ -40,7 +40,7 @@ function setup() {
   // Seed directly (the create-hook would deny non-vip, and vip grants only
   // read, not write) — the point is the LIST path, not create.
   db.prepare("INSERT INTO Secret (id, label) VALUES ('1', 'hidden')").run();
-  const app = expressPlus({ db }).mount('/secrets', Secret);
+  const app = workbench({ db }).mount('/secrets', Secret);
   app.listen(0, {
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'];

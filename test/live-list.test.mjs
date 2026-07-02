@@ -1,7 +1,7 @@
 // LiveList tests — pure JS, NO real server. Injects a fake channel + fake fetch.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { LiveList } from '../public/express-plus-client.mjs';
+import { LiveList } from '../public/workbench-client.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers

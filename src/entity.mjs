@@ -812,7 +812,7 @@ export function entity(name, declaration = {}) {
   // login lookup is inherently pre-principal and an admitted handler is trusted
   // server code (like Express + an ORM), not a request path — so this is not a
   // second auth path (DECISIONLOG #41). The db handle is ambient (getActiveDb),
-  // bound once by expressPlus({ db }); the same app.db handle, one shared db.
+  // bound once by workbench({ db }); the same app.db handle, one shared db.
   //
   record.findOne = (predicate) => {
     const { sql, params } = lowerToSql(predicate);

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { entity, text, ref, number, date, grant, read, write, scope, requireUser, allowAnonymous, generateDDL } from '../src/index.mjs';
+import workbench, { entity, text, ref, number, date, grant, read, write, scope, requireUser, allowAnonymous, generateDDL } from '../src/index.mjs';
 
 function makeNote() {
   return entity('Note', {
@@ -24,7 +24,7 @@ function setup({ principal } = {}) {
   db.exec("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'hash')");
   const Note = makeNote();
   for (const sql of generateDDL(Note)) db.exec(sql);
-  const app = expressPlus({ db }).mount('/notes', Note);
+  const app = workbench({ db }).mount('/notes', Note);
   app.listen(0, { principalOf: () => principal ?? { type: 'anonymous', id: null } });
   return { app, db };
 }
@@ -56,7 +56,7 @@ test('row grant denies a different user (403)', async () => {
   const Note = makeNote();
   for (const sql of generateDDL(Note)) db.exec(sql);
 
-  const app = expressPlus({ db }).mount('/notes', Note);
+  const app = workbench({ db }).mount('/notes', Note);
   // Create as alice
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
@@ -73,7 +73,7 @@ test('row grant denies a different user (403)', async () => {
   // Now create a new app with bob as principal
   app.httpServer.close();
 
-  const app2 = expressPlus({ db }).mount('/notes', Note);
+  const app2 = workbench({ db }).mount('/notes', Note);
   app2.listen(0, { principalOf: () => ({ type: 'user', id: '2' }) });
   await app2.ready;
   const port2 = app2.httpServer.address().port;

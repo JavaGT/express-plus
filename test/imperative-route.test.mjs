@@ -20,7 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import expressPlus, { router, open } from '../src/index.mjs';
+import workbench, { router, open } from '../src/index.mjs';
 
 // Start a server on an ephemeral port and return { origin, close }.
 async function listen(app) {
@@ -39,7 +39,7 @@ async function listen(app) {
 test('an open imperative GET runs its handler and returns res.json', async () => {
   const r = router();
   r.get('/ping', open(), (req, res) => res.json({ pong: true }));
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/ping`);
@@ -53,7 +53,7 @@ test('an open imperative GET runs its handler and returns res.json', async () =>
 test('res.status(n).json(obj) sets the status code', async () => {
   const r = router();
   r.post('/things', open(), (req, res) => res.status(201).json({ created: true }));
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/things`, { method: 'POST' });
@@ -67,7 +67,7 @@ test('res.status(n).json(obj) sets the status code', async () => {
 test('res.sendStatus(204) ends with no body', async () => {
   const r = router();
   r.delete('/things/:id', open(), (req, res) => res.sendStatus(204));
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/things/abc`, { method: 'DELETE' });
@@ -83,7 +83,7 @@ test('req.params binds the path parameter; req.query the search string', async (
   r.get('/things/:id', open(), (req, res) =>
     res.json({ id: req.params.id, q: req.query.q ?? null }),
   );
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/things/xyz?q=hi`);
@@ -96,7 +96,7 @@ test('req.params binds the path parameter; req.query the search string', async (
 test('req.body is the parsed JSON payload for a POST', async () => {
   const r = router();
   r.post('/echo', open(), (req, res) => res.json({ echo: req.body }));
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/echo`, {
@@ -113,7 +113,7 @@ test('req.body is the parsed JSON payload for a POST', async () => {
 test('req.body parses urlencoded form fields for imperative POST', async () => {
   const r = router();
   r.post('/echo-form', open(), (req, res) => res.json({ echo: req.body }));
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/echo-form`, {
@@ -138,7 +138,7 @@ test('form fields named __proto__ remain ordinary own fields', async () => {
       polluted: {}.polluted ?? null,
     }),
   );
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/safe-form`, {
@@ -171,9 +171,9 @@ test('req.body parses multipart text fields and file parts for imperative POST',
       },
     });
   });
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
-  const boundary = 'express-plus-test-boundary';
+  const boundary = 'workbench-test-boundary';
   const body = [
     `--${boundary}`,
     'Content-Disposition: form-data; name="title"',
@@ -213,7 +213,7 @@ test('req.body parses multipart text fields and file parts for imperative POST',
 test('imperative routes reject unsupported request body content types', async () => {
   const r = router();
   r.post('/echo-text', open(), (req, res) => res.json({ echo: req.body }));
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/echo-text`, {
@@ -233,7 +233,7 @@ test('an imperative route with no leading gate denies anonymous with 401 (fail c
   const r = router();
   // no `open` → inherits requireUser(); no principal source → anonymous → 401
   r.get('/secret', (req, res) => res.json({ secret: true }));
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/secret`);
@@ -250,7 +250,7 @@ test('next({status, message}) renders a deliberate client error with that status
   r.post('/login', open(), (req, res, next) =>
     next({ status: 401, message: 'bad credentials' }),
   );
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/login`, { method: 'POST' });
@@ -268,7 +268,7 @@ test('a thrown exception in a handler renders an opaque 500 (no leaked message i
     throw new Error('secret internal detail');
   });
   // env defaults to config.env; force production semantics via a listen option.
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await (async () => {
     const server = app.listen(0, { env: 'production' });
     await new Promise((resolve) => {
@@ -299,7 +299,7 @@ test('chain middleware runs in order and can short-circuit via next(err)', async
   const reject = (req, res, next) => next({ status: 403, message: 'nope' });
   const never = (req, res) => res.json({ reached: true });
   r.get('/guarded', open(), reject, never);
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/guarded`);

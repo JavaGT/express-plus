@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { entity, text, ref, grant, deny, read, write, subscribe, scope, generateDDL } from '../src/index.mjs';
+import workbench, { entity, text, ref, grant, deny, read, write, subscribe, scope, generateDDL } from '../src/index.mjs';
 
 // A Widget whose row grant DENIES write to a 'banned' principal (via a declared
 // run-only check — the .can body receives { is, entity }, not principal, so a
@@ -40,7 +40,7 @@ function setup() {
   db.exec("INSERT INTO User (id, username, password) VALUES ('alice', 'alice', 'hash')");
   const Widget = makeWidget();
   for (const sql of generateDDL(Widget)) db.exec(sql);
-  const app = expressPlus({ db }).mount('/widgets', Widget);
+  const app = workbench({ db }).mount('/widgets', Widget);
   app.listen(0, {
     principalOf: (req) => {
       const u = req.headers?.['x-test-user'];

@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity, text, ref, scope, grant, read, write, subscribe,
 } from '../src/index.mjs';
 
@@ -29,7 +29,7 @@ function ownedNote() {
 
 test('writeQueue: concurrent in-flight creates all commit (no BEGIN-on-open-txn 500)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });

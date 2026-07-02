@@ -13,7 +13,7 @@
 // construction: the smoothest path is the safe path. With `routes` omitted the
 // framework auto-CRUDs through the grant and live-subscribes the body field's
 // CRDT events over the baked-in WS /events stream.
-import expressPlus, { entity, text, ref, grant, deny, read, write, subscribe, scope } from 'express-plus';
+import workbench, { entity, text, ref, grant, deny, read, write, subscribe, scope } from 'workbench';
 
 export const Note = entity('Note', {
   fields: { body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }) },
@@ -25,5 +25,5 @@ export const Note = entity('Note', {
 
 import { fileURLToPath } from 'node:url';
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  expressPlus().mount('/notes', Note).listen(3000);
+  workbench().mount('/notes', Note).listen(3000);
 }

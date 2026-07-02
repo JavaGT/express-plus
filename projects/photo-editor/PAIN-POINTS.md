@@ -1,4 +1,4 @@
-# Pain Points: Collaborative Photo Editor on express-plus (post-grill)
+# Pain Points: Collaborative Photo Editor on workbench (post-grill)
 
 > **Stress-test of the grilled API** (7 ADRs, DECISIONLOG.md).  
 > **Persona:** "The Pixel Pusher" — cares about CRDTs beyond text, binary

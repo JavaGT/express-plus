@@ -8,7 +8,7 @@ content without ceremony on every public route.
 ## Attempted entity shape
 
 ```js
-// blog.mjs — multi-tenant blog platform in the grilled express-plus API.
+// blog.mjs — multi-tenant blog platform in the grilled workbench API.
 // Entities: Blog, Post, Comment, Reader.
 //
 // Grilled constructs exercised:
@@ -23,14 +23,14 @@ content without ceremony on every public route.
 //   - enum (category)                          — tests enum plugin
 //
 // Where a construct does not yet exist in the API surface, the code imports
-// it from 'express-plus' as an idealized handle and documents the gap.
+// it from 'workbench' as an idealized handle and documents the gap.
 import {
   entity, text, date, ref, set, map, state, enum_ as enumType,
   grant, deny, read, write, subscribe, admin, anyOf, never, scope,
   inherit, router,
   // ── aspirational imports (not yet in API surface) ──
   // principalType — declare a domain-specific principal type ('reader')
-} from 'express-plus';
+} from 'workbench';
 
 const VIEWER    = [read, subscribe];
 const AUTHOR    = [read, write, subscribe];
@@ -287,8 +287,8 @@ export const Comment = entity('Comment', {
 // ────────────────────────────────────────────────────────────────────────────
 // Global wiring (aspirational)
 // ────────────────────────────────────────────────────────────────────────────
-// import expressPlus from 'express-plus';
-// const app = expressPlus();
+// import workbench from 'workbench';
+// const app = workbench();
 // app.mount('/blogs', Blog);
 // // Posts mount under /blogs/:blogId/posts. publicRead: true auto-opens GET.
 // app.mount('/blogs/:blogId/posts', Post, { publicRead: true });
@@ -416,7 +416,7 @@ Failing code:
 //    proxy for every Reader — still merges identities.
 
 // ASPIRATIONAL: declare a domain-specific principal type
-// import { principalType } from 'express-plus';
+// import { principalType } from 'workbench';
 // export const ReaderPrincipal = principalType('reader', { fields: { name, email } });
 
 // Then Comment can use:

@@ -1,10 +1,10 @@
 // Phase 1 — Todo C: the app resolution layer (SPEC §3, §4, §6.2).
 //
-// `expressPlus()` is the default export: a chainable app. `app.mount(path, Entity)`
+// `workbench()` is the default export: a chainable app. `app.mount(path, Entity)`
 // RECORDS a mount declaration; the entity's `routes:(r)=>...` thunk is NOT invoked
 // eagerly. Resolution (including the possibly-async thunk) happens later at
 // `app.resolveRoutes()` / `app.ready`. This two-phase design preserves the fluent
-// `expressPlus().mount(...).mount(...).listen()` chain while allowing an entity's
+// `workbench().mount(...).mount(...).listen()` chain while allowing an entity's
 // `routes` thunk to be async (e.g. a parent lazily dynamic-importing a child at
 // wiring time to break a circular import). `listen` returns the app synchronously
 // (chainable) and sets `app.httpServer` synchronously; full boot signals on
@@ -20,7 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import expressPlus, {
+import workbench, {
   router,
   entity,
   text,
@@ -80,8 +80,8 @@ function makePost() {
 
 // --- the default export is a chainable app ---
 
-test('expressPlus() returns a chainable app; mount and listen return the app', async () => {
-  const app = expressPlus();
+test('workbench() returns a chainable app; mount and listen return the app', async () => {
+  const app = workbench();
   assert.equal(typeof app.mount, 'function');
   assert.equal(typeof app.listen, 'function');
   const Note = makeNote();
@@ -95,7 +95,7 @@ test('expressPlus() returns a chainable app; mount and listen return the app', a
 // --- mounting an entity with omitted routes auto-CRUDs all five verbs ---
 
 test('mounting an entity with no `routes` auto-CRUDs all five verbs, each default-on', async () => {
-  const app = expressPlus().mount('/notes', makeNote());
+  const app = workbench().mount('/notes', makeNote());
   const routes = await resolved(app);
   const verbs = routes.map((r) => r.verb).sort();
   assert.deepEqual(verbs, ['create', 'list', 'read', 'remove', 'update']);
@@ -109,7 +109,7 @@ test('mounting an entity with no `routes` auto-CRUDs all five verbs, each defaul
 // --- the routing table maps each verb to the right method + path ---
 
 test('the routing table maps the five verbs to Express resource method+path', async () => {
-  const app = expressPlus().mount('/notes', makeNote());
+  const app = workbench().mount('/notes', makeNote());
   const routes = await resolved(app);
   const byVerb = Object.fromEntries(routes.map((r) => [r.verb, r]));
   assert.equal(byVerb.list.method, 'GET');
@@ -128,7 +128,7 @@ test('the routing table maps the five verbs to Express resource method+path', as
 
 test('each route entry carries the entity it was mounted for', async () => {
   const Note = makeNote();
-  const app = expressPlus().mount('/notes', Note);
+  const app = workbench().mount('/notes', Note);
   const routes = await resolved(app);
   for (const route of routes) {
     assert.equal(route.entity, Note);
@@ -138,7 +138,7 @@ test('each route entry carries the entity it was mounted for', async () => {
 // --- r.resource({gate}) wires the per-verb gate into the table ---
 
 test('r.resource({gate}) relaxes only the named verb; other verbs stay default-on', async () => {
-  const app = expressPlus().mount('/posts', makePost());
+  const app = workbench().mount('/posts', makePost());
   const routes = await resolved(app);
   const byVerb = Object.fromEntries(routes.map((r) => [r.verb, r]));
   // list is relaxed: anonymous admitted to the list ROUTE
@@ -154,7 +154,7 @@ test('r.resource({gate}) relaxes only the named verb; other verbs stay default-o
 // --- mounting multiple entities accumulates their routes under their base paths ---
 
 test('mounting two entities accumulates both route sets under their base paths', async () => {
-  const app = expressPlus()
+  const app = workbench()
     .mount('/notes', makeNote())
     .mount('/posts', makePost());
   const routes = await resolved(app);
@@ -174,7 +174,7 @@ test('router({mergeParams}) builds a mini-app; app.mount(path, router) merges ro
   await r.resolveRoutes();
   assert.equal(r.routes.length, 5);
   // mounting the router into a parent app re-bases every route under the mount path
-  const app = expressPlus().mount('/docs/:docId/notes', r);
+  const app = workbench().mount('/docs/:docId/notes', r);
   const routes = await resolved(app);
   assert.equal(routes.length, 5);
   for (const route of routes) {
@@ -276,7 +276,7 @@ test('the four verbs map to their HTTP methods', async () => {
 // Re-basing carries the imperative `handlers` tail through unchanged.
 
 test('app.use is an alias for mount; both re-base a mounted router under the path', async () => {
-  const app = expressPlus();
+  const app = workbench();
   assert.equal(typeof app.use, 'function');
   const r = router();
   const handler = (req, res) => res.json({});
@@ -293,7 +293,7 @@ test('app.use is an alias for mount; both re-base a mounted router under the pat
 });
 
 test('app.use re-bases a multi-route imperative router and preserves each tail', async () => {
-  const app = expressPlus();
+  const app = workbench();
   const h = (req, res) => res.json({});
   const r = router();
   r.get('/', h);
@@ -321,7 +321,7 @@ test('mount does NOT invoke an entity routes thunk eagerly; it runs at resolutio
       r.resource();
     },
   });
-  const app = expressPlus().mount('/lazy', E);
+  const app = workbench().mount('/lazy', E);
   assert.equal(invoked, false, 'routes thunk not invoked at mount time');
   await app.resolveRoutes();
   assert.equal(invoked, true, 'routes thunk invoked at resolution');
@@ -338,7 +338,7 @@ test('an async routes thunk is awaited at resolution', async () => {
       r.resource();
     },
   });
-  const app = expressPlus().mount('/async', E);
+  const app = workbench().mount('/async', E);
   assert.equal(resolved, false);
   await app.resolveRoutes();
   assert.equal(resolved, true);
@@ -347,7 +347,7 @@ test('an async routes thunk is awaited at resolution', async () => {
 });
 
 test('listen(0) boots the app; app.ready resolves after routes resolved + server listening', async () => {
-  const app = expressPlus().mount('/notes', makeNote()).listen(0);
+  const app = workbench().mount('/notes', makeNote()).listen(0);
   await app.ready;
   assert.equal(app.routes.length, 5);
   app.httpServer.close();

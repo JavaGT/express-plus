@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { entity, text, ref, map, grant, read, write, scope, generateDDL } from '../src/index.mjs';
+import workbench, { entity, text, ref, map, grant, read, write, scope, generateDDL } from '../src/index.mjs';
 
 function makeDoc() {
   return entity('Doc', {
@@ -22,7 +22,7 @@ function makeDoc() {
     routes: (r) => {
       r.resource();
       // Custom handler under /:docId/collab — req.doc is auto-loaded.
-      const collab = expressPlus.router();
+      const collab = workbench.router();
       collab.post('/add-viewer', async (req, res) => {
         // This .set re-enters dispatch via dispatchRef, wrapped in writeQueue.run.
         // Since custom handlers run OUTSIDE writeQueue.run (src/serve.mjs:900),
@@ -43,7 +43,7 @@ test('custom handler .set() re-entry completes without deadlock', async (t) => {
   // Seed a doc owned by u1
   db.prepare("INSERT INTO Doc (id, title, owner) VALUES ('d1', 'Test Doc', 'u1')").run();
 
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
   await app.ready;
   const port = app.httpServer.address().port;
@@ -90,7 +90,7 @@ test('custom handler .set() re-entry with held writeQueue lock completes after r
   for (const sql of generateDDL(Doc)) db.exec(sql);
   db.prepare("INSERT INTO Doc (id, title, owner) VALUES ('d2', 'Test Doc 2', 'u1')").run();
 
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
   await app.ready;
   const port = app.httpServer.address().port;

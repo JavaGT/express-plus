@@ -15,7 +15,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-import expressPlus, {
+import workbench, {
   entity, text, ref, blob, scope, grant, read, write, subscribe, createBlobLifecycle,
 } from '../src/index.mjs';
 
@@ -36,7 +36,7 @@ function photoNote() {
 async function harness(t) {
   const db = new DatabaseSync(':memory:');
   const root = mkdtempSync(path.join(tmpdir(), 'express-blob-'));
-  const app = expressPlus({ db, blobs: { root } });
+  const app = workbench({ db, blobs: { root } });
   app.mount('/notes', photoNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
@@ -76,7 +76,7 @@ test('POST /blobs is fail-closed for anonymous', async (t) => {
   // exercise the anonymous path with a bare app whose principalOf returns nobody.
   const db = new DatabaseSync(':memory:');
   const root = mkdtempSync(path.join(tmpdir(), 'express-blob-'));
-  const app = expressPlus({ db, blobs: { root } });
+  const app = workbench({ db, blobs: { root } });
   app.mount('/notes', photoNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: null }) });

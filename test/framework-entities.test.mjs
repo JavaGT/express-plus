@@ -22,7 +22,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { User, Session } from '../src/index.mjs';
+import workbench, { User, Session } from '../src/index.mjs';
 import { sessionPrincipalOf, SESSION_COOKIE } from '../src/session.mjs';
 
 // Seed the two framework tables. The framework does not generate DDL in Phase 1;
@@ -46,7 +46,7 @@ test('User is a compiled entity with username and a hash password', () => {
 });
 
 test('User.create digests the password; user.password.verify checks it', () => {
-  expressPlus({ db: seed() });
+  workbench({ db: seed() });
   const user = User.create({ username: 'alice', password: 'hunter2' });
   assert.ok(user.id);
   assert.equal(user.username, 'alice');
@@ -57,7 +57,7 @@ test('User.create digests the password; user.password.verify checks it', () => {
 });
 
 test('User.findOne(User.username.is(name)) round-trips with a verifiable password', () => {
-  expressPlus({ db: seed() });
+  workbench({ db: seed() });
   User.create({ username: 'bob', password: 'sekret' });
   const found = User.findOne(User.username.is('bob'));
   assert.equal(found.username, 'bob');
@@ -66,7 +66,7 @@ test('User.findOne(User.username.is(name)) round-trips with a verifiable passwor
 });
 
 test('User.findAll().select(User.id, User.username) projects without the password', () => {
-  expressPlus({ db: seed() });
+  workbench({ db: seed() });
   User.create({ username: 'alice', password: 'a' });
   User.create({ username: 'bob', password: 'b' });
   const rows = User.findAll().select(User.id, User.username);
@@ -86,7 +86,7 @@ test('Session declares its stored cells as readonly framework-owned fields', () 
 });
 
 test('Session.create({ userId }) mints a token and a user principal row', () => {
-  expressPlus({ db: seed() });
+  workbench({ db: seed() });
   const session = Session.create({ userId: 'alice' });
   assert.ok(session.token, 'a session token is minted');
   assert.equal(session.principalType, 'user');
@@ -94,14 +94,14 @@ test('Session.create({ userId }) mints a token and a user principal row', () => 
 });
 
 test('two Session.create calls mint distinct tokens', () => {
-  expressPlus({ db: seed() });
+  workbench({ db: seed() });
   const a = Session.create({ userId: 'alice' });
   const b = Session.create({ userId: 'alice' });
   assert.notEqual(a.token, b.token);
 });
 
 test('Session.create({ kind: "link", token }) mints a link principal carrying the share token', () => {
-  expressPlus({ db: seed() });
+  workbench({ db: seed() });
   const shareToken = 'share-abc';
   const session = Session.create({ kind: 'link', token: shareToken });
   assert.ok(session.token, 'a fresh session token is minted (distinct from the share token)');
@@ -112,13 +112,13 @@ test('Session.create({ kind: "link", token }) mints a link principal carrying th
 });
 
 test('Session.create rejects an unknown intent (fail closed)', () => {
-  expressPlus({ db: seed() });
+  workbench({ db: seed() });
   assert.throws(() => Session.create({ bogus: 1 }), /session/i);
 });
 
 test('a minted user session resolves through sessionPrincipalOf', () => {
   const db = seed();
-  expressPlus({ db });
+  workbench({ db });
   const session = Session.create({ userId: 'alice' });
   const principalOf = sessionPrincipalOf(db);
   const req = { headers: { cookie: `${SESSION_COOKIE}=${session.token}` } };
@@ -129,7 +129,7 @@ test('a minted user session resolves through sessionPrincipalOf', () => {
 
 test('a minted link session resolves to a link principal through sessionPrincipalOf', () => {
   const db = seed();
-  expressPlus({ db });
+  workbench({ db });
   const session = Session.create({ kind: 'link', token: 'share-xyz' });
   const principalOf = sessionPrincipalOf(db);
   const req = { headers: { cookie: `${SESSION_COOKIE}=${session.token}` } };
@@ -142,7 +142,7 @@ test('a minted link session resolves to a link principal through sessionPrincipa
 });
 
 test('Session.delete(id) removes the session row', () => {
-  expressPlus({ db: seed() });
+  workbench({ db: seed() });
   const session = Session.create({ userId: 'alice' });
   const row = Session.findOne(Session.token.is(session.token));
   assert.ok(row);

@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity, text, ref, scope, grant, read, write, subscribe,
 } from '../src/index.mjs';
 
@@ -25,7 +25,7 @@ function ownedNote() {
 
 test('rate-limit (opt-in): the Nth+1 request in the window is 429 with Retry-After', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, {
@@ -63,7 +63,7 @@ test('rate-limit: a configured per-session window is enforced against the sessio
   // rateLimit runs first/cheaply — no DB lookup; the token is read from the
   // cookie, the IP gate stays the non-spoofable base.)
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, {

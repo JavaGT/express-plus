@@ -2,20 +2,20 @@
 //
 // Slice 1 opened a socket, matched a route, ran the route GATE, and returned a
 // stub. This slice replaces the stub with real per-verb dispatch against a
-// node:sqlite DatabaseSync handle the app owns (expressPlus({ db })). Both
+// node:sqlite DatabaseSync handle the app owns (workbench({ db })). Both
 // default-on auth layers now run end to end:
 //   - the route GATE admits the request (slice 1);
 //   - the row GRANT's SQL scope filters which rows are VISIBLE (list/read), and
 //     its .can capability decides write/remove (the row-grant runtime, slice 2).
 //
 // The DB handle is an app-level resource read by the transport (DECISIONLOG: the
-// SQLite handle is supplied at expressPlus({ db }), shared by every transport).
+// SQLite handle is supplied at workbench({ db }), shared by every transport).
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity, text, ref, scope, grant, deny, read, write, subscribe, everyone, inherit,
 } from '../src/index.mjs';
 import { principal } from '../src/principal.mjs';
@@ -66,7 +66,7 @@ function seed(ddl, rows = []) {
 // test's `after` hook so an assertion failure never leaks an open handle (which
 // would hang node:test).
 async function serve(t, db, Entity, base, who) {
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount(base, Entity);
   app.listen(0, { principalOf: () => who });
   await app.ready;
@@ -116,8 +116,8 @@ test('create inserts a row owned by the principal and 201s', async (t) => {
     body: JSON.stringify({ body: 'hello' }),
   });
   assert.equal(res.status, 201);
-  assert.ok(Number(res.headers.get('x-express-plus-seq')) >= 1);
-  assert.ok(res.headers.get('x-express-plus-action-id'));
+  assert.ok(Number(res.headers.get('x-workbench-seq')) >= 1);
+  assert.ok(res.headers.get('x-workbench-action-id'));
   const created = await res.json();
   assert.equal(created.body, 'hello');
   assert.equal(created.owner, 'alice');
@@ -185,15 +185,15 @@ test('owner may update and remove a public-read row', async (t) => {
     body: JSON.stringify({ title: 'edited' }),
   });
   assert.equal(upd.status, 200);
-  assert.ok(Number(upd.headers.get('x-express-plus-seq')) >= 1);
-  assert.ok(upd.headers.get('x-express-plus-action-id'));
+  assert.ok(Number(upd.headers.get('x-workbench-seq')) >= 1);
+  assert.ok(upd.headers.get('x-workbench-action-id'));
   const after = db.prepare('SELECT title FROM Post WHERE id = ?').get('1');
   assert.equal(after.title, 'edited');
 
   const del = await fetch(`${a.origin}/posts/1`, { method: 'DELETE' });
   assert.equal(del.status, 204);
-  assert.ok(Number(del.headers.get('x-express-plus-seq')) >= 1);
-  assert.ok(del.headers.get('x-express-plus-action-id'));
+  assert.ok(Number(del.headers.get('x-workbench-seq')) >= 1);
+  assert.ok(del.headers.get('x-workbench-action-id'));
   const gone = db.prepare('SELECT * FROM Post WHERE id = ?').get('1');
   assert.equal(gone, undefined);
 });
@@ -229,7 +229,7 @@ test('inherit-child is updateable and removable by the parent owner via HTTP', a
   const db = new DatabaseSync(':memory:');
   const Doc = makeDoc();
   const Comment = makeDocComment(Doc);
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/docs', Doc);
   app.mount('/comments', Comment);
   await app.ddl();
@@ -264,7 +264,7 @@ test('inherit-child is updateable and removable by the parent owner via HTTP', a
     body: JSON.stringify({ body: 'edited' }),
   });
   assert.equal(upd.status, 200, 'inherit-child update admitted');
-  assert.ok(Number(upd.headers.get('x-express-plus-seq')) >= 1);
+  assert.ok(Number(upd.headers.get('x-workbench-seq')) >= 1);
 
   // And remove it
   const del = await fetch(`${origin}/comments/${commentId}`, { method: 'DELETE' });
@@ -281,7 +281,7 @@ test('non-owner cannot see or mutate an inherit-child row (scope hides it)', asy
   const Comment = makeDocComment(Doc);
 
   // Alice creates the doc + comment (alice is the owner)
-  const aApp = expressPlus({ db });
+  const aApp = workbench({ db });
   aApp.mount('/docs', Doc);
   aApp.mount('/comments', Comment);
   await aApp.ddl();
@@ -302,7 +302,7 @@ test('non-owner cannot see or mutate an inherit-child row (scope hides it)', asy
   aApp.httpServer.close();
 
   // Bob (non-owner) tries to update/remove — should get 403
-  const bApp = expressPlus({ db });
+  const bApp = workbench({ db });
   bApp.mount('/docs', Doc);
   bApp.mount('/comments', Comment);
   bApp.listen(0, { principalOf: () => bob });
@@ -321,7 +321,7 @@ test('non-owner cannot see or mutate an inherit-child row (scope hides it)', asy
 });
 
 test('serving an entity CRUD route without a db fails closed', async (t) => {
-  const app = expressPlus();
+  const app = workbench();
   app.mount('/notes', ownedNote());
   app.listen(0, { principalOf: () => alice });
   await new Promise((resolve) => app.httpServer.once('listening', resolve));

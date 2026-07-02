@@ -3,7 +3,7 @@
 // delta.member, doc: entity.id, kind: 'invite' } } }` — when a collaborator is
 // added to a Doc, a row is projected into the recipient's Inbox. Inbox is the
 // framework's concern (a uniform per-user notification store every app reuses),
-// imported `from 'express-plus'`, never app-declared.
+// imported `from 'workbench'`, never app-declared.
 //
 // This piece lands Inbox as a working entity: its declared shape, its
 // recipient-scoped grant (a user reads ONLY their own inbox rows — fail-closed,
@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import expressPlus, { Inbox, bindReadScope } from '../src/index.mjs';
+import workbench, { Inbox, bindReadScope } from '../src/index.mjs';
 import { principal } from '../src/principal.mjs';
 
 // A real in-memory DB seeded with the Inbox table + two recipients' rows.
@@ -31,7 +31,7 @@ function seedDb() {
 }
 
 test('Inbox is a framework-exported entity with recipient / doc / kind fields', () => {
-  assert.ok(Inbox, 'Inbox is exported from express-plus');
+  assert.ok(Inbox, 'Inbox is exported from workbench');
   assert.equal(Inbox.name, 'Inbox');
   // recipient is a User ref carrying the `recipient` role (the scope key);
   // doc is a Doc ref; kind is a plain text field.
@@ -51,7 +51,7 @@ test('Inbox grant compiles to a recipient-scoped read filter (own rows only)', (
 });
 
 test('the bound recipient scope selects only the principal\'s own inbox rows', () => {
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   const db = seedDb();
   for (const who of ['alice', 'bob']) {
     const bound = bindReadScope(Inbox.readScope, principal({ type: 'user', id: who }));
@@ -62,7 +62,7 @@ test('the bound recipient scope selects only the principal\'s own inbox rows', (
 });
 
 test('Inbox.create + findOne round-trips through the generic query API', () => {
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   const created = Inbox.create({ recipient: 'carol', doc: 'doc-9', kind: 'invite' });
   assert.equal(created.recipient, 'carol');
   assert.equal(created.doc, 'doc-9');

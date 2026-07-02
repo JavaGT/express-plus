@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import expressPlus, { router, open } from '../src/index.mjs';
+import workbench, { router, open } from '../src/index.mjs';
 
 async function listen(app) {
   const server = app.listen(0);
@@ -34,7 +34,7 @@ test('res.stream pumps a bare ReadableStream as text/event-stream with X-Accel-B
     });
     return res.stream(stream);
   });
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/events`);
@@ -57,7 +57,7 @@ test('res.stream copies a Web Response headers + status and pumps its body', asy
     });
     return res.stream(web);
   });
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/backup`);
@@ -80,7 +80,7 @@ test('res.status(n).stream(...) carries the pending status code', async () => {
     });
     return res.status(206).stream(stream);
   });
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/partial`);
@@ -102,7 +102,7 @@ test('res.stream opts out of X-Accel-Buffering with { buffering: false }', async
     });
     return res.stream(stream, { buffering: false });
   });
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/raw`);
@@ -130,7 +130,7 @@ test('res.stream tears down the socket on a mid-stream pump error (no JSON junk 
     });
     return res.stream(stream);
   });
-  const app = expressPlus().use('/api', r);
+  const app = workbench().use('/api', r);
   const { origin, close } = await listen(app);
   try {
     // The stream errors mid-flight. Either the socket is torn down (fetch

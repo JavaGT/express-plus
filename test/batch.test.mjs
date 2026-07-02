@@ -6,7 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { entity, text, ref, scope, grant, read, write, subscribe, everyone } from '../src/index.mjs';
+import workbench, { entity, text, ref, scope, grant, read, write, subscribe, everyone } from '../src/index.mjs';
 import { principal } from '../src/principal.mjs';
 
 // An owner-scoped Note: only the owner may write/remove.
@@ -40,7 +40,7 @@ function ownedCounter() {
 
 async function setup(t, Entity, who) {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', Entity);
   await app.ddl();
   app.listen(0, { principalOf: () => who });
@@ -79,7 +79,7 @@ test('a denied sub-action rolls back the ENTIRE batch (all-or-nothing)', async (
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   app.mount('/deny', alwaysDeny);
   await app.ddl();
@@ -125,7 +125,7 @@ test('re-sending the same actionId is a dedupe (returns the committed events)', 
 
 test('batch spans multiple entity types in one composed commit', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   app.mount('/counters', ownedCounter());
   await app.ddl();
@@ -172,7 +172,7 @@ test('a post-grant deny rolls back the first action mid-transaction (in-txn ROLL
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   app.mount('/deny', postGrantDeny);
   await app.ddl();

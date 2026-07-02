@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { generateDDL, executeDDL, User, Inbox } from '../src/index.mjs';
+import workbench, { generateDDL, executeDDL, User, Inbox } from '../src/index.mjs';
 import { Doc } from '../doc.mjs';
 
 function setup() {
@@ -26,7 +26,7 @@ function setup() {
 
 test('doc.mjs share routes: list (empty), add, list (populated), remove', async () => {
   const db = setup();
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -79,7 +79,7 @@ test('doc.mjs share routes: list (empty), add, list (populated), remove', async 
 
 test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', async () => {
   const db = setup();
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -95,7 +95,7 @@ test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', asyn
 
     // bob creates a doc by swapping the principal via a second app on the same db.
     app.httpServer.close();
-    const app2 = expressPlus({ db }).mount('/docs', Doc);
+    const app2 = workbench({ db }).mount('/docs', Doc);
     app2.listen(0, { principalOf: () => ({ type: 'user', id: '2' }) });
     await app2.ready;
     const port2 = app2.httpServer.address().port;
@@ -115,7 +115,7 @@ test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', asyn
     app2.httpServer.close();
 
     // Back as alice: /feed lists her owned doc AND the doc bob shared with her.
-    const app3 = expressPlus({ db }).mount('/docs', Doc);
+    const app3 = workbench({ db }).mount('/docs', Doc);
     app3.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
     await app3.ready;
     const port3 = app3.httpServer.address().port;

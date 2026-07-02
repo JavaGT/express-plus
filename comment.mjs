@@ -11,7 +11,7 @@
 import {
   entity, text, date, ref, boolean, grant, read, write, subscribe,
   inherit, router,
-} from 'express-plus';
+} from 'workbench';
 import { Doc } from './doc.mjs';
 
 // Declarative inherit directive: the compiler resolves it through `doc`,

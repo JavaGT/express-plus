@@ -1,4 +1,4 @@
-# Pain Points — express-plus grilled API vs. Minecraft Voxel Clone
+# Pain Points — workbench grilled API vs. Minecraft Voxel Clone
 
 Stress-testing the grilled API (DECISIONLOG.md ADRs #1–#7) by attempting to
 implement a Minecraft multiplayer clone using the exemplar style of doc.mjs / comment.mjs.
@@ -50,7 +50,7 @@ import {
   // Children
   inherit,              // grant inheritance through typed FK
   User, Inbox,          // built-in entities
-} from 'express-plus';
+} from 'workbench';
 
 // ─── Capabilities ───
 const PLAYER = [read, write, subscribe];

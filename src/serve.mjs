@@ -106,8 +106,8 @@ function committedEventHeaders(result, actionId, scope = null) {
     -Infinity,
   );
   return {
-    'x-express-plus-action-id': actionId,
-    ...(Number.isFinite(seq) ? { 'x-express-plus-seq': String(seq) } : {}),
+    'x-workbench-action-id': actionId,
+    ...(Number.isFinite(seq) ? { 'x-workbench-seq': String(seq) } : {}),
   };
 }
 
@@ -301,7 +301,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
       const row = db.prepare(
         'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
       ).get({ e: entity.name, f: fieldName });
-      if (row) res.setHeader(`x-express-plus-projected-${fieldName}`, String(row.lastSeq));
+      if (row) res.setHeader(`x-workbench-projected-${fieldName}`, String(row.lastSeq));
     }
   }
 
@@ -890,7 +890,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
     if (cors && cors.origins && Array.isArray(cors.origins) && origin) {
       if (cors.origins.includes(origin)) {
         res.setHeader('access-control-allow-origin', origin);
-        res.setHeader('access-control-expose-headers', 'x-express-plus-seq, x-express-plus-action-id');
+        res.setHeader('access-control-expose-headers', 'x-workbench-seq, x-workbench-action-id');
         res.setHeader('vary', 'Origin');
       }
     }

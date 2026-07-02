@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { entity, json, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import workbench, { entity, json, scope, grant, read, write, subscribe } from '../src/index.mjs';
 import { principal } from '../src/principal.mjs';
 
 function documentEntity() {
@@ -19,7 +19,7 @@ function documentEntity() {
 
 async function serveJsonDocuments(t) {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   const JsonDocument = documentEntity();
   app.mount('/json-documents', JsonDocument);
   await app.ddl();

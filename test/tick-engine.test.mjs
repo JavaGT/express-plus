@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import expressPlus, { entity, scope, everyone, grant, read, tick, date, schedule } from '../src/index.mjs';
+import workbench, { entity, scope, everyone, grant, read, tick, date, schedule } from '../src/index.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
@@ -311,7 +311,7 @@ test('listen tick dispatch waits behind the app write queue', async (t) => {
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.prepare('INSERT INTO BlogTickQueue (id, status) VALUES (?, ?)').run('bq1', 'alive');
 
-  const app = expressPlus({ db }).mount('/ticks', Blog).listen(0, {
+  const app = workbench({ db }).mount('/ticks', Blog).listen(0, {
     principalOf: () => makePrincipal({ type: 'user', id: 'u1' }),
   });
   t.after(async () => {

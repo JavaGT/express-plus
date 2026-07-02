@@ -1,4 +1,4 @@
-// LiveChannel — WebSocket transport layer for express+ live sync.
+// LiveChannel — WebSocket transport layer for workbench live sync.
 //
 // Slice A of the client SDK. ONE WebSocket per channel, multiplexed across
 // entity/id subscriptions. Auto-reconnects with exponential backoff. Zero
@@ -839,7 +839,7 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
   }
 
   function _confirmedSeq(res) {
-    const value = _responseHeader(res, 'x-express-plus-seq');
+    const value = _responseHeader(res, 'x-workbench-seq');
     if (value == null || value === '') return null;
     const seq = Number(value);
     return Number.isFinite(seq) ? seq : null;

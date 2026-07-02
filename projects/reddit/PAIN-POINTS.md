@@ -13,7 +13,7 @@ The Social Scale Engineer — cares about tree traversal, stored aggregates, ran
 // (hotRank index), public-by-default reads (anonymous), moderation log (effects),
 // compound queries (.in/.and), cursor pagination.
 //
-// Imports express-plus as an idealized framework (no runtime).
+// Imports workbench as an idealized framework (no runtime).
 // Missing symbols are named where the API lacks them — that IS the point.
 
 import {
@@ -21,7 +21,7 @@ import {
   grant, deny, read, write, subscribe, admin, anyOf, never, scope,
   inherit, router, // publicRead NOT YET EXEMPLIFIED (plan: Phase 1, ~10 lines)
   User,
-} from 'express-plus';
+} from 'workbench';
 
 // ---------------------------------------------------------------------------
 // Capability handles

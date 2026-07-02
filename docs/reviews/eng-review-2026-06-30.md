@@ -1,8 +1,8 @@
-# Engineering Architecture Review — express+ Foundation Build Phase (2026-06-30)
+# Engineering Architecture Review — workbench Foundation Build Phase (2026-06-30)
 
 **Scope:** lock the technical architecture for the next major build phase — the seven
 priorities that replace the majority of scope's backend infrastructure and turn
-express+ from a demo into a real collaborative backend.
+workbench from a demo into a real collaborative backend.
 
 **Method:** plan-eng-review (the 7-step skill). This is PLANNING ONLY — no source code
 or tests are written here. Every design choice obeys the hard constraints in
@@ -79,7 +79,7 @@ slices 1–4) are marked `[shipped]`.
                                           │ HTTP (REST + WS upgrade)
                                           ▼
 ┌───────────────────────────────────────────────────────────────────────────┐
-│                          express+  SERVER PROCESS                          │
+│                          workbench SERVER PROCESS                          │
 │                                                                            │
 │  ┌──────────────────────────────────────────────────────────────────────┐  │
 │  │ HTTP transport  serve.mjs [shipped: socket, gate, body, err, static]│  │
@@ -296,7 +296,7 @@ the dispatch's event must reference a blob id that already exists on disk:
 1. **Enqueue.** A projection consumer (Walk 1 step 12) or an imperative handler or a
    `schedule` inserts a row into `Job`: `{id, kind, payload, status:'queued',
    enqueuedAt}`. (The job *work* — transcription, embeddings — is the app's domain;
-   express+ only stores the row.)
+   workbench only stores the row.)
 2. **Worker registers.** A worker process starts, `POST /workers/register` with a
    **shared secret** (constant-time compared) → server issues a per-worker **bearer
    token** and inserts a `Worker` row `{id, tokenHash, lastHeartbeat}`. The shared

@@ -1,6 +1,6 @@
-# Express+ Framework
+# Workbench Framework
 
-Express+ is a framework for collaborative, persisted, realtime applications. Its language names the seams app authors declare and the framework executes.
+Workbench is a framework for collaborative, persisted, realtime applications. Its language names the seams app authors declare and the framework executes.
 
 ## Language
 

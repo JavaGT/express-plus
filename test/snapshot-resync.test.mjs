@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity, text, ref, scope, grant, read, write, subscribe, event,
 } from '../src/index.mjs';
 import { createClient } from '../src/pipeline.mjs';
@@ -30,7 +30,7 @@ function ownedNote() {
 
 async function harness(t, principalId = 'u1') {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: principalId }) });
@@ -70,7 +70,7 @@ test('snapshot endpoint returns the materialized row + the per-scope seq, author
   // (the harness principal is fixed at u1; a readScope miss is the authz path here)
   // A second app as a non-owner sees the row out of scope → 404.
   const db2 = new DatabaseSync(':memory:');
-  const other = expressPlus({ db: db2 });
+  const other = workbench({ db: db2 });
   other.mount('/notes', ownedNote());
   await other.ddl();
   other.listen(0, { principalOf: () => ({ id: 'u2' }) });
@@ -229,7 +229,7 @@ test('snapshot row + cursor are read atomically — no split pair across the aut
     ],
   });
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', yieldingNote);
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });

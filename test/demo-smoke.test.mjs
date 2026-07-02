@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { generateDDL, User } from '../src/index.mjs';
+import workbench, { generateDDL, User } from '../src/index.mjs';
 
 // --- Note demo ---
 import { Note } from '../note.mjs';
@@ -14,7 +14,7 @@ test('note.mjs imports, generates DDL, and note CRUD works', async () => {
   db.exec("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'hash')");
   executeDDL(Note, db);
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', Note);
 
   const alice = { type: 'user', id: '1' };
@@ -46,7 +46,7 @@ test('gdoc.mjs imports, generates DDL, and gdoc CRUD works', async () => {
   db.exec("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'hash')");
   executeDDL(GDoc, db);
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/docs', GDoc);
 
   // Start server (avoid conflict with note.mjs port 3000 export-side listen)
@@ -94,7 +94,7 @@ test('doc.mjs + comment.mjs: parent-child FK inheritance works', async () => {
   executeDDL(Doc, db);
   executeDDL(Comment, db);
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/docs', Doc);
 
   const alice = { type: 'user', id: '1' };

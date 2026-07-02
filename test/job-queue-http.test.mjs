@@ -8,13 +8,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import expressPlus, { entity, text, grant, read } from '../src/index.mjs';
+import workbench, { entity, text, grant, read } from '../src/index.mjs';
 
 const SECRET = 's3cret-shared';
 
 function makeApp() {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({
+  const app = workbench({
     db,
     jobs: { sharedSecret: SECRET, leaseMs: 60_000, heartbeatGraceMs: 60_000, reapIntervalMs: 1_000_000 },
   });
@@ -34,7 +34,7 @@ function bearer(workerId, token) {
 
 test('jobs routes absent when substrate not engaged (falls through to 404)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db }); // no `jobs` config
+  const app = workbench({ db }); // no `jobs` config
   app.mount('/notes', entity('Note', { fields: { body: text() }, grant: () => [grant(read)] }));
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });

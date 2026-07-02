@@ -1,7 +1,7 @@
 // LiveStore tests — pure JS, NO real server. Injects a fake channel + fake fetch.
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLiveStore, LiveList, LiveChannel, decodeResult } from '../public/express-plus-client.mjs';
+import { createLiveStore, LiveList, LiveChannel, decodeResult } from '../public/workbench-client.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -333,7 +333,7 @@ describe('LiveStore', () => {
       {
         match: '/docs/1',
         response: { id: '1', title: 'new-from-rest' },
-        headers: { 'x-express-plus-seq': '2' },
+        headers: { 'x-workbench-seq': '2' },
       },
     ]);
 
@@ -422,7 +422,7 @@ describe('LiveStore', () => {
       {
         match: '/docs/1',
         response: { id: '1', title: 'new-from-rest' },
-        headers: { 'x-express-plus-seq': '3' },
+        headers: { 'x-workbench-seq': '3' },
       },
     ]);
 
@@ -477,7 +477,7 @@ describe('LiveStore', () => {
         return {
           ok: true,
           status: 204,
-          headers: { get: (name) => name.toLowerCase() === 'x-express-plus-seq' ? '3' : null },
+          headers: { get: (name) => name.toLowerCase() === 'x-workbench-seq' ? '3' : null },
           json: async () => {},
         };
       }

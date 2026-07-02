@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { entity, text, ref, scope, grant, read, write } from '../src/index.mjs';
+import workbench, { entity, text, ref, scope, grant, read, write } from '../src/index.mjs';
 
 function ownedNote() {
   return entity('Note', {
@@ -20,7 +20,7 @@ function ownedNote() {
 // Piece 1: /health framework endpoint
 test('GET /health returns 200 with status and env', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
@@ -38,7 +38,7 @@ test('GET /health returns 200 with status and env', async (t) => {
 
 test('GET /health/stats returns 200 with metrics', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
@@ -66,7 +66,7 @@ test('GET /health/stats returns 200 with metrics', async (t) => {
 test('envGate: missing required env at construction throws', () => {
   const db = new DatabaseSync(':memory:');
   assert.throws(
-    () => expressPlus({ db, requireEnv: ['NONEXISTENT_VAR_ZZZ'] }),
+    () => workbench({ db, requireEnv: ['NONEXISTENT_VAR_ZZZ'] }),
     /missing required env/i,
   );
   db.close();
@@ -75,7 +75,7 @@ test('envGate: missing required env at construction throws', () => {
 test('envGate: present env passes', () => {
   const db = new DatabaseSync(':memory:');
   // PATH should always exist
-  const app = expressPlus({ db, requireEnv: ['PATH'] });
+  const app = workbench({ db, requireEnv: ['PATH'] });
   assert.ok(app);
   db.close();
 });
@@ -83,7 +83,7 @@ test('envGate: present env passes', () => {
 // Piece 4: CSP / HSTS / CORS — ALL OPT-IN via listen()
 test('CSP: opt-in via listen sets Content-Security-Policy header', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { 
@@ -102,7 +102,7 @@ test('CSP: opt-in via listen sets Content-Security-Policy header', async (t) => 
 
 test('CSP: not configured → no CSP header (opt-in)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
@@ -118,7 +118,7 @@ test('CSP: not configured → no CSP header (opt-in)', async (t) => {
 
 test('HSTS: opt-in via listen sets Strict-Transport-Security header', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { 
@@ -137,7 +137,7 @@ test('HSTS: opt-in via listen sets Strict-Transport-Security header', async (t) 
 
 test('HSTS: not configured → no HSTS header (opt-in, default off)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
@@ -153,7 +153,7 @@ test('HSTS: not configured → no HSTS header (opt-in, default off)', async (t) 
 
 test('CORS: configured origin in allowlist sets ACAO header', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { 
@@ -170,13 +170,13 @@ test('CORS: configured origin in allowlist sets ACAO header', async (t) => {
   });
   assert.equal(r.status, 200);
   assert.equal(r.headers.get('access-control-allow-origin'), 'https://app.example.com');
-  assert.equal(r.headers.get('access-control-expose-headers'), 'x-express-plus-seq, x-express-plus-action-id');
+  assert.equal(r.headers.get('access-control-expose-headers'), 'x-workbench-seq, x-workbench-action-id');
   assert.equal(r.headers.get('vary'), 'Origin');
 });
 
 test('CORS: origin NOT in allowlist → no ACAO header', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { 
@@ -197,7 +197,7 @@ test('CORS: origin NOT in allowlist → no ACAO header', async (t) => {
 
 test('CORS: OPTIONS preflight returns 204 with ACAO/ACAM/ACAH', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { 
@@ -226,7 +226,7 @@ test('CORS: OPTIONS preflight returns 204 with ACAO/ACAM/ACAH', async (t) => {
 // Piece 5: requestLog + basic metrics
 test('requestCount in /health/stats increments per request', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
@@ -250,7 +250,7 @@ test('requestCount in /health/stats increments per request', async (t) => {
 // Piece 3: onShutdown deadline registry
 test('onShutdown: registered hooks run on shutdown', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
@@ -268,7 +268,7 @@ test('onShutdown: registered hooks run on shutdown', async (t) => {
 
 test('onShutdown: hooks run in registration order', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
@@ -286,7 +286,7 @@ test('onShutdown: hooks run in registration order', async (t) => {
 
 test('onShutdown: hook exceeding timeout is force-abandoned', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });

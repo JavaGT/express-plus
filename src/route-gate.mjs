@@ -24,7 +24,7 @@ export const ROUTE_VERBS = Object.freeze(['list', 'read', 'create', 'update', 'r
 // would be a magic convention, and a handler that happens to take one argument
 // would be mistaken for a gate). A gate stays a callable `(principal) => boolean`;
 // the brand is invisible to callers. This mirrors the pipeline action/event brand.
-const GATE_BRAND = Symbol('express-plus.gate');
+const GATE_BRAND = Symbol('workbench.gate');
 
 // brand(fn) — stamp an authorization function as a gate. Internal; the public
 // surface is the named gate factories below plus isGate() for the peeler.

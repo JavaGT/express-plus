@@ -5,7 +5,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity,
   text,
   number,
@@ -145,7 +145,7 @@ test('projected.async value is computed and stored after create dispatch', async
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/posts', Post);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -189,7 +189,7 @@ test('projected.async compute receives the committed db handle', async (t) => {
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db: appDb });
+  const app = workbench({ db: appDb });
   app.mount('/postctx', PostCtx);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -226,7 +226,7 @@ test('projected.async value is recomputed after update', async (t) => {
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/posts', Post);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -280,7 +280,7 @@ test('projected.async compute failure leaves the column unchanged', async (t) =>
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/posts', Post);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -334,7 +334,7 @@ test('projected.async field is rejected in client create payload (readonly)', as
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/posts', Post);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -376,7 +376,7 @@ test('projected.inline value is stored immediately in the create response', asyn
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/blogs', Blog);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -414,7 +414,7 @@ test('projected.inline value is recomputed on update', async (t) => {
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/blogs', Blog);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -460,7 +460,7 @@ test('projected.inline compute failure rolls back the mutation', async (t) => {
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/blogs', Blog);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -508,7 +508,7 @@ test('projected.async with from:created only recomputes on create, not update', 
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/posts', Post);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -555,7 +555,7 @@ test('projected.async with from:updated only recomputes on update', async (t) =>
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/posts', Post);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -602,7 +602,7 @@ test('projected.async without from recomputes on both create and update (default
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/posts', Post);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -655,7 +655,7 @@ test('compute counter advances with each successful compute, survives across eve
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/posts', Post);
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;
@@ -725,7 +725,7 @@ test('compute counter advances with each successful compute, survives across eve
     },
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
-  const app2 = expressPlus({ db });
+  const app2 = workbench({ db });
   app2.mount('/failposts', PostWithFailure);
   app2.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app2.ready;
@@ -855,7 +855,7 @@ test('projected.async compute can findAll related entities', async (t) => {
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/tpost', TPost);
   app.mount('/tcomment', TComment);
   await app.ddl();
@@ -909,7 +909,7 @@ test('projected.async compute can findAll related entities', async (t) => {
   assert.equal(rank, 5, `commentRank expected 5, got ${rank}`);
 });
 
-// --- projected.async staleness indicators (x-express-plus-projected-<field>) ---
+// --- projected.async staleness indicators (x-workbench-projected-<field>) ---
 
 test('read response includes projected cursor headers for staleness detection', async (t) => {
   const db = new DatabaseSync(':memory:');
@@ -926,7 +926,7 @@ test('read response includes projected cursor headers for staleness detection', 
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/posts', Post);
   await app.ddl();
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
@@ -948,14 +948,14 @@ test('read response includes projected cursor headers for staleness detection', 
   // Read the post — should have a projected cursor header
   const r2 = await fetch(`${origin}/posts/${id}`);
   assert.equal(r2.status, 200);
-  const cursorHeader = r2.headers.get('x-express-plus-projected-hotRank');
+  const cursorHeader = r2.headers.get('x-workbench-projected-hotRank');
   assert.ok(cursorHeader, 'projected cursor header is present');
   assert.ok(Number(cursorHeader) >= 1, `expected cursor >= 1, got ${cursorHeader}`);
 
   // List responses carry the same staleness header
   const r3 = await fetch(`${origin}/posts`);
   assert.equal(r3.status, 200);
-  const listHeader = r3.headers.get('x-express-plus-projected-hotRank');
+  const listHeader = r3.headers.get('x-workbench-projected-hotRank');
   assert.ok(listHeader, 'list response carries projected cursor header');
   assert.ok(Number(listHeader) >= 1, `list cursor >= 1, got ${listHeader}`);
 });

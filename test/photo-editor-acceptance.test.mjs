@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity,
   text,
   number,
@@ -53,7 +53,7 @@ function scopedIds(db, entityRecord, prin) {
 }
 
 async function serve(t, db, routes, who) {
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   for (const { path, entity: e } of routes) app.mount(path, e);
   app.listen(0, { principalOf: () => who });
   await app.ready;
@@ -360,7 +360,7 @@ test('HTTP list and read respect inherited canvas grant', async (t) => {
   seed(db);
   setActiveDb(db);
 
-  const app2 = expressPlus({ db });
+  const app2 = workbench({ db });
   app2.mount('/canvases', Canvas);
   app2.mount('/layers', RasterLayer);
   await app2.ddl();
@@ -426,7 +426,7 @@ test('projected.async computes a renderable preview for Canvas', async (t) => {
   setActiveDb(db);
 
   // Create canvas through the framework pipeline so projected.async fires
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/canvases', Canvas);
   await app.ddl();
   app.listen(0, { principalOf: () => alice });

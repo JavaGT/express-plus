@@ -20,7 +20,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import expressPlus, {
+import workbench, {
   entity,
   text,
   ref,
@@ -81,7 +81,7 @@ async function listen(app) {
 }
 
 test('.listen(0) opens a real node:http server with the resolved routing table', async () => {
-  const app = expressPlus().mount('/notes', makeNote());
+  const app = workbench().mount('/notes', makeNote());
   const { origin, close } = await listen(app);
   try {
     // a request to a declared route reaches the server (not a connection refusal)
@@ -95,7 +95,7 @@ test('.listen(0) opens a real node:http server with the resolved routing table',
 test('the default-on route gate denies an anonymous request with 401', async () => {
   // No principal source configured → every request is anonymous → requireUser
   // denies the auto-CRUD list route.
-  const app = expressPlus().mount('/notes', makeNote());
+  const app = workbench().mount('/notes', makeNote());
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/notes`);
@@ -106,7 +106,7 @@ test('the default-on route gate denies an anonymous request with 401', async () 
 });
 
 test('a relaxed (allowAnonymous) verb admits an anonymous request', async () => {
-  const app = expressPlus().mount('/notes', makePublicListNote());
+  const app = workbench().mount('/notes', makePublicListNote());
   const { origin, close } = await listen(app);
   try {
     // list is public; GET /notes is admitted past the gate.
@@ -126,7 +126,7 @@ test('an admitted request reaches dispatch (fail-closed without a db)', async ()
   // 500 — which proves the request crossed the gate into dispatch (a denied
   // request would have stopped at 401, never reaching the db check). The full
   // DB-backed CRUD path is proven end to end in test/http-crud.test.mjs.
-  const app = expressPlus().mount('/notes', makePublicListNote());
+  const app = workbench().mount('/notes', makePublicListNote());
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/notes`);
@@ -137,7 +137,7 @@ test('an admitted request reaches dispatch (fail-closed without a db)', async ()
 });
 
 test('a request to an undeclared path returns 404', async () => {
-  const app = expressPlus().mount('/notes', makePublicListNote());
+  const app = workbench().mount('/notes', makePublicListNote());
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/nonexistent`);
@@ -148,7 +148,7 @@ test('a request to an undeclared path returns 404', async () => {
 });
 
 test('a request with an unsupported method on a known path returns 405', async () => {
-  const app = expressPlus().mount('/notes', makePublicListNote());
+  const app = workbench().mount('/notes', makePublicListNote());
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/notes`, { method: 'PUT' });

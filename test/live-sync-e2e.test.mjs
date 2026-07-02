@@ -11,7 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
 import { randomBytes, createHash } from 'node:crypto';
 
-import expressPlus, { entity, text, ref, grant, read, write, subscribe, scope, generateDDL } from '../src/index.mjs';
+import workbench, { entity, text, ref, grant, read, write, subscribe, scope, generateDDL } from '../src/index.mjs';
 
 function makeNote() {
   return entity('Note', {
@@ -127,7 +127,7 @@ test('update emits a WS event with seq:1', async () => {
   for (const sql of generateDDL(Note)) db.exec(sql);
   db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'hello', '1')").run();
 
-  const app = expressPlus({ db }).mount('/notes', Note);
+  const app = workbench({ db }).mount('/notes', Note);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -167,7 +167,7 @@ test('live event carries the kernel committed seq, not a local counter', async (
   for (const sql of generateDDL(Note)) db.exec(sql);
   db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'hello', '1')").run();
 
-  const app = expressPlus({ db }).mount('/notes', Note);
+  const app = workbench({ db }).mount('/notes', Note);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -215,7 +215,7 @@ test('subscribe reports the kernel currentSeq for the scope', async () => {
   for (const sql of generateDDL(Note)) db.exec(sql);
   db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'hello', '1')").run();
 
-  const app = expressPlus({ db }).mount('/notes', Note);
+  const app = workbench({ db }).mount('/notes', Note);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -247,7 +247,7 @@ test('update and delete emit sequential WS events', async () => {
   for (const sql of generateDDL(Note)) db.exec(sql);
   db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'first', '1')").run();
 
-  const app = expressPlus({ db }).mount('/notes', Note);
+  const app = workbench({ db }).mount('/notes', Note);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();

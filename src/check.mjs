@@ -32,7 +32,7 @@ export class UnawaitedCheckError extends Error {
 // check(fn, { name }) -> a callable check. Calling it runs `fn` (sync or async)
 // and returns a normal promise resolving to a boolean fact. A check is awaited
 // at the use site: `(await is.owner()) ? grant(...) : deny(...)`.
-const CHECK_RESULT = Symbol('express-plus.checkResult');
+const CHECK_RESULT = Symbol('workbench.checkResult');
 
 export function check(fn, { name } = {}) {
   const callable = (...args) => {

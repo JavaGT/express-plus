@@ -1,4 +1,4 @@
-// LiveChannel end-to-end tests against a real express+ server.
+// LiveChannel end-to-end tests against a real workbench server.
 //
 // 6 tests exercising connect, subscribe, event delivery, unsubscribe,
 // multiplex, reconnect, and close cleanup.
@@ -6,9 +6,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import expressPlus, { entity, text, scope, everyone, grant, read, write, subscribe } from '../src/index.mjs';
+import workbench, { entity, text, scope, everyone, grant, read, write, subscribe } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
-import { LiveChannel } from '../public/express-plus-client.mjs';
+import { LiveChannel } from '../public/workbench-client.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -18,12 +18,12 @@ const Doc = entity('Doc', {
   grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
 
-// Boot an express+ app with an in-memory DB, mount Doc, listen on a random
+// Boot an workbench app with an in-memory DB, mount Doc, listen on a random
 // port. Returns { app, origin, port }. Caller must close both.
 async function bootApp() {
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   await app.ddl(); // creates Doc table + framework _Log/_Cursor
   app.listen(0, { principalOf: () => ({ type: 'user', id: 'test' }) });
   await app.ready;

@@ -3,16 +3,16 @@
 // Sensible defaults (security, body, sessions, req.principal hydration, rate
 // limit, cors, logs, views, static, error handling, graceful shutdown, AND
 // the baked-in WS /events subscription stream re-authorized per push) live in
-// express-plus — nothing to mount, nothing to hand-apply.
+// workbench — nothing to mount, nothing to hand-apply.
 //
 // Persisted product domains are entities (`app.mount('/docs', Doc)`); the
 // child Comment entity is mounted as a sub-resource of Doc (grant inherits
 // through the typed FK). Cross-cutting auth is plain routers (`app.use`).
-import expressPlus, { config } from 'express-plus';
+import workbench, { config } from 'workbench';
 import { Doc } from './doc.mjs';
 import { sessionRoutes, userRoutes } from './session.mjs';
 
-const app = expressPlus();
+const app = workbench();
 
 app.use('/sessions', sessionRoutes());    // auth boundary (login opts out, rest authed)
 app.use('/users',    userRoutes());        // user views (authed)

@@ -1,6 +1,6 @@
 // projects/todo/PAIN-POINTS.md
 //
-// Stress-testing the grilled express-plus API against the simplest possible
+// Stress-testing the grilled workbench API against the simplest possible
 // project: a todo app. Persona: The Pragmatist — wants the simple case to stay
 // simple. Central question: did killing the zero-floor (ADR #7) break the
 // easy case?
@@ -23,7 +23,7 @@ smooth for the canonical simplest project.
 import {
   entity, text, boolean, date, ref,
   grant, deny, read, write, subscribe, scope,
-} from 'express-plus';
+} from 'workbench';
 
 export const Todo = entity('Todo', {
   fields: {

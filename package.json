@@ -1,7 +1,7 @@
 {
-  "name": "express-plus",
+  "name": "workbench",
   "version": "0.0.0",
-  "description": "Express, but for collaborative, persisted, realtime data.",
+  "description": "Workbench for collaborative, persisted, realtime data.",
   "type": "module",
   "main": "src/index.mjs",
   "types": "index.d.ts",

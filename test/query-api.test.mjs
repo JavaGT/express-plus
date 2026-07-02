@@ -7,13 +7,13 @@
 // lookup is inherently pre-principal and the handler already passed its gate.
 // It is not a request path, so it is not a second auth path (DECISIONLOG #41).
 //
-// The db handle is ambient: expressPlus({ db }) binds it via setActiveDb so a
+// The db handle is ambient: workbench({ db }) binds it via setActiveDb so a
 // standalone entity (declared before any app) can run queries with no db arg.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import expressPlus, { entity, text, date, scope, grant, read, everyone } from '../src/index.mjs';
+import workbench, { entity, text, date, scope, grant, read, everyone } from '../src/index.mjs';
 import { lowerToSql } from '../src/scope-sql.mjs';
 
 // A trivial public-read entity (the query API is unscoped, so the grant's scope
@@ -64,7 +64,7 @@ test('Entity.<field> is a typed handle whose .is(value) lowers to a value-eq WHE
 
 test('Entity.findOne(predicate) returns the matching row, or null when absent', () => {
   const User = makeUser();
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   const found = User.findOne(User.username.is('alice'));
   assert.equal(found.username, 'alice');
   assert.equal(found.password, 'pw-a');
@@ -73,7 +73,7 @@ test('Entity.findOne(predicate) returns the matching row, or null when absent', 
 
 test('Entity.findAll() returns every row', () => {
   const User = makeUser();
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   const rows = User.findAll();
   assert.equal(rows.length, 2);
   assert.deepEqual(rows.map((r) => r.username).sort(), ['alice', 'bob']);
@@ -81,7 +81,7 @@ test('Entity.findAll() returns every row', () => {
 
 test('Entity.findAll().select(...handles) projects only the named columns', () => {
   const User = makeUser();
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   const rows = User.findAll().select(User.id, User.username);
   assert.equal(rows.length, 2);
   for (const row of rows) {
@@ -92,7 +92,7 @@ test('Entity.findAll().select(...handles) projects only the named columns', () =
 
 test('Entity.getOrFail(id) returns the row; a missing id throws a 404-status error', () => {
   const User = makeUser();
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   const row = User.getOrFail('1');
   assert.equal(row.username, 'alice');
   assert.throws(
@@ -103,7 +103,7 @@ test('Entity.getOrFail(id) returns the row; a missing id throws a 404-status err
 
 test('Entity.create(payload) inserts and returns the new row with its id', () => {
   const User = makeUser();
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   const created = User.create({ username: 'carol', password: 'pw-c' });
   assert.ok(created.id);
   assert.equal(created.username, 'carol');
@@ -114,7 +114,7 @@ test('Entity.create(payload) inserts and returns the new row with its id', () =>
 
 test('Entity.delete(id) removes the row', () => {
   const User = makeUser();
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   const target = User.findOne(User.username.is('bob'));
   User.delete(target.id);
   assert.equal(User.findOne(User.username.is('bob')), null);
@@ -130,14 +130,14 @@ test('the query API runs UNSCOPED — it bypasses the read-scope (trusted server
     // to a column comparison that no seeded row satisfies if it WERE applied.
     grant: () => [scope(({ fields }) => fields.username.is('___never___')).can(() => grant(read))],
   });
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   // unscoped: both seeded rows come back despite the restrictive scope
   assert.equal(Hidden.findAll().length, 2);
 });
 
 test('findAll(predicate) supports date range predicates for timeline queries', async () => {
   const Event = makeEvent();
-  expressPlus({ db: seedEventDb() });
+  workbench({ db: seedEventDb() });
 
   const rows = await Event
     .findAll(

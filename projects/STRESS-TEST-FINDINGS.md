@@ -1,6 +1,6 @@
-# express-plus Findings — the reconciled synthesis
+# workbench Findings — the reconciled synthesis
 
-This is the single findings document for express-plus. It reconciles two bodies
+This is the single findings document for workbench. It reconciles two bodies
 of evidence:
 
 - **The 9-app stress test** (post-grill): nine implementers, each with a
@@ -9,7 +9,7 @@ of evidence:
   document is the lead's synthesis across all nine.
 - **The `scope` workbench mining** (`../SCOPE-FINDINGS.md`): what a real, shipped
   event-sourced collaboration framework proves is *buildable*, and which of its
-  disciplines and debts express-plus inherits or avoids.
+  disciplines and debts workbench inherits or avoids.
 
 Every resolved gap maps to an ADR in `../DECISIONLOG.md` and is specified in
 `../SPEC.md`. **There are 15 ADRs (#1–#15).** Earlier drafts of this document
@@ -228,7 +228,7 @@ unbounded-fixpoint door) and general arithmetic beyond inc/dec. Specified in
 The full mining is in `../SCOPE-FINDINGS.md`. The load-bearing conclusions:
 
 - **The DX ceiling is reachable.** A realtime-collaborative feature page in scope
-  is 30–80 lines, none of it event handling. express-plus, owning both the server
+  is 30–80 lines, none of it event handling. workbench, owning both the server
   routes and the client library, can absorb even the endpoint-URL ceremony scope
   could not (deriving URLs from the declared doc/room name).
 - **The validated shape to build now:** branded Action/Event (non-optional
@@ -240,7 +240,7 @@ The full mining is in `../SCOPE-FINDINGS.md`. The load-bearing conclusions:
   preimage-restore undo plus inverse-event append (no second undo log);
   out-of-band effects as projections over the committed log (ADR #8). All
   specified in `../SPEC.md` §7–§9.
-- **express-plus is already ahead on authorization.** scope's single biggest
+- **workbench is already ahead on authorization.** scope's single biggest
   structural debt is *inline, per-handler ownership checks* (no `withOwnerOf`
   abstraction) — exactly what the `checks` + `scope(predicate).can(fn)` model
   eliminates. This is the strongest evidence the authorization model is worth its

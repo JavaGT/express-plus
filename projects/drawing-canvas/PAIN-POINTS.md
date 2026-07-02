@@ -1,4 +1,4 @@
-# Pain Points: Drawing Canvas on express-plus (post-grill)
+# Pain Points: Drawing Canvas on workbench (post-grill)
 
 Stress-testing the grilled API (DECISIONLOG.md ADRs #1–7) by attempting to
 implement a live collaborative drawing canvas. Each entry identifies a specific
@@ -33,7 +33,7 @@ import {
   entity, text, number, ref, map, presence, log, enum_,
   grant, deny, read, write, subscribe, admin, anyOf, never, scope,
   router, User,
-} from 'express-plus';
+} from 'workbench';
 
 const VIEWER  = [read, subscribe];
 const EDITOR  = [read, write, subscribe];

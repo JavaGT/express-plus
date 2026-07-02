@@ -7,11 +7,11 @@
 // and seed data so the demo works out of the box. The framework owns the auth,
 // CRUD, error handling, and graceful shutdown — nothing to mount here.
 
-import expressPlus, {
+import workbench, {
   config,
   generateDDL,
   User,
-} from 'express-plus';
+} from 'workbench';
 
 import { Todo, TodoList, SharedTodo } from './todo.mjs';
 import { DatabaseSync } from 'node:sqlite';
@@ -55,7 +55,7 @@ if (!existing) {
 
 // --- app ---
 
-const app = expressPlus({ db });
+const app = workbench({ db });
 
 // Force a fixed principal for the demo (no login needed). In production this
 // would come from session cookies via the session principal source.

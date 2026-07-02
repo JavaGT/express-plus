@@ -72,7 +72,7 @@ function eventWithParsedHandle(event) {
   }
 }
 
-export const NOW = Symbol('expressPlus.now');
+export const NOW = Symbol('workbench.now');
 
 // Deep-walk an event's `data`, replacing every NOW token with the commit-time
 // `now` ISO string. Returns a fresh structure (does not mutate the handler's

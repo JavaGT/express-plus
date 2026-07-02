@@ -14,7 +14,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity, text, ref, scope, grant, deny, read, write, subscribe,
 } from '../src/index.mjs';
 import {
@@ -129,7 +129,7 @@ test('a client cannot inject its own identity — only the opaque token is honor
 // --- end-to-end over the real socket ---
 
 async function serve(t, db) {
-  const app = expressPlus({ db }); // no explicit principalOf → session hydration
+  const app = workbench({ db }); // no explicit principalOf → session hydration
   app.mount('/notes', ownedNote());
   app.listen(0);
   await new Promise((resolve) => app.httpServer.once('listening', resolve));

@@ -1,7 +1,7 @@
 // photo.mjs — Google Photos clone: a media entity with blob storage,
 // stored-derived thumbnails, structured EXIF, geo-location, full-text
 // search, and link-share principals. Demonstrates where the grilled
-// express-plus API expresses each concept and where it hits a wall.
+// workbench API expresses each concept and where it hits a wall.
 //
 // IMPORTS: the framework exports we WISH existed are imported with a
 // "MISSING" comment — these are the gaps this stress-test documents.
@@ -16,7 +16,7 @@ import {
   // point,          // DEFERRED: geo-point — predicate seam ships (SPEC §11), rtree engine deferred
   // fulltext,       // DEFERRED: full-text — predicate seam ships (SPEC §11), FTS engine deferred
   list,              // RESOLVED: ordered list field type built-in (SPEC §5.1, ADR #9)
-} from 'express-plus';
+} from 'workbench';
 
 // ==========================================================================
 // Capability sets

@@ -1,4 +1,4 @@
-// express-plus — public entry point.
+// workbench — public entry point.
 //
 // Built phase by phase against the canonical SPEC.md. Each export lands with a
 // failing test first (TDD iron law). Phase 0: the async `is.*` guard.

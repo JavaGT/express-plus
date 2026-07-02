@@ -18,7 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity, text, grant, read, write, subscribe,
   principal, buildEffectsRegistry, validateEffects,
   generateDDL, generateFrameworkDDL, executeFrameworkDDL,
@@ -265,7 +265,7 @@ test('#4 boot: missing admitsEffects on target rejects app.ready', async (t) => 
     effects: { ['Source.created']: { mutate: TargetNoAdmit, with: { name: 'x' } } },
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/src', Source);
   app.mount('/tgt', TargetNoAdmit);
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
@@ -289,7 +289,7 @@ test('#4 boot: valid effects resolve app.ready + fire through the wired kernel',
     effects: { ['Source.created']: { mutate: Target, with: { name: 'wired' } } },
   });
 
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/src', Source);
   app.mount('/tgt', Target);
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });

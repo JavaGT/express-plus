@@ -7,7 +7,7 @@
 // Principals: login mints a `user` principal; link-share redemption mints a
 // `link` principal; scheduled transitions and ticks attribute to a `system`
 // principal. One shape feeds grant, queryScope, and latched-auth.
-import { router, open, User, Session } from 'express-plus';
+import { router, open, User, Session } from 'workbench';
 import { Doc } from './doc.mjs';
 
 export function sessionRoutes() {

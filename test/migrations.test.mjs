@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import expressPlus, { entity, text } from '../src/index.mjs';
+import workbench, { entity, text } from '../src/index.mjs';
 import { runMigrations, appliedVersion, ensureMigrationTable } from '../src/migrations.mjs';
 
 function freshDb() {
@@ -113,7 +113,7 @@ test('migrations: run in version order regardless of declaration order', () => {
 test('migrations: wired through app.ddl() at startup (pre-traffic)', async () => {
   const db = new DatabaseSync(':memory:');
   const Note = entity('Note', { fields: { body: text() }, grant: () => [] });
-  const app = expressPlus({
+  const app = workbench({
     db,
     migrations: [{ version: 1, up: (d) => d.exec('ALTER TABLE Note ADD COLUMN archived INTEGER DEFAULT 0') }],
   });

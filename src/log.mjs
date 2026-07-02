@@ -1,7 +1,7 @@
 // Framework-wide structured logger. Agents and humans can read it.
 //
 // DESIGN:
-//   One singleton logger on the framework, set by expressPlus() at construction.
+//   One singleton logger on the framework, set by workbench() at construction.
 //   Every channel (auth, dispatch, http, live, projected, system) has its own
 //   minimum level; messages below that level are dropped.  Output is configurable
 //   — stderr (default), a file stream, or a callback for custom sinks.

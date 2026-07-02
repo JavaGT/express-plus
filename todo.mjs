@@ -1,6 +1,6 @@
-// todo.mjs — the canonical "simplest real app" in express-plus, end to end.
+// todo.mjs — the canonical "simplest real app" in workbench, end to end.
 //
-// This is a REVIEW EXEMPLAR: it imports from the (not-yet-built) `express-plus`
+// This is a REVIEW EXEMPLAR: it imports from the (not-yet-built) `workbench`
 // package and shows the API a todo app would actually write. Two tiers:
 //
 //   1. Todo (single entity)  — the honest floor: declare entity + declare grant.
@@ -19,10 +19,10 @@
 //   - a denied read REMOVES the row from the result set (no separate visibility
 //     axis); there is no `hide()`.
 
-import expressPlus, {
+import workbench, {
   entity, text, number, boolean, date, ref, map,
   grant, deny, read, write, subscribe, scope, anyOf, inherit,
-} from 'express-plus';
+} from 'workbench';
 
 // ---------------------------------------------------------------------------
 // TIER 1 — the floor. A private, single-user todo. ~20 honest lines.
@@ -131,7 +131,7 @@ export const SharedTodo = entity('Todo', {
 // stream, graceful shutdown) live in the framework — nothing to mount here.
 // ---------------------------------------------------------------------------
 
-expressPlus()
+workbench()
   .mount('/todos', Todo)            // tier 1: private todos
   .mount('/lists', TodoList)        // tier 2: shared lists …
   .mount('/lists/:listId/items', SharedTodo)  // … with items inheriting the list grant

@@ -1,6 +1,6 @@
-# Pain Points: Library System on express-plus (POST-GRILL)
+# Pain Points: Library System on workbench (POST-GRILL)
 
-Stress-testing the GRILLED `express-plus` API (doc.mjs + comment.mjs exemplars, CONTEXT.md + DECISIONLOG.md) against a real library management domain with state machines, scheduled transitions, ordered queues, compound uniqueness, and a staff/patron/public visibility asymmetry.
+Stress-testing the GRILLED `workbench` API (doc.mjs + comment.mjs exemplars, CONTEXT.md + DECISIONLOG.md) against a real library management domain with state machines, scheduled transitions, ordered queues, compound uniqueness, and a staff/patron/public visibility asymmetry.
 
 Rank: **BLOCKER** (cannot express the concern declaratively) > **SHOULD-FIX** (expresses it but with friction) > **Sharp edge** (works, but the API fights you in a non-obvious way).
 
@@ -17,7 +17,7 @@ The Bureaucrat — cares about state machines, scheduled transitions, compound r
 The library has five entities. The exemplar code below is IDEALIZED — it imports handles that do not yet exist in the API surface, and documents each gap inline. Code follows the doc.mjs style: one entity per conceptual cluster, `state()` for machine transitions, `grant` exactly `scope(...).can(...)`, field `.can()` for per-field access, `map` for valued sets, and `effects` for declarative reactions.
 
 ```js
-// library.mjs — Library inventory system expressed in the grilled express-plus API.
+// library.mjs — Library inventory system expressed in the grilled workbench API.
 // Entities: Patron, Item, Checkout, Hold, StaffNote.
 // Stress-targets: staff/patron read-scope asymmetry, withheld field marker,
 // state-machine overdue transition, ordered holds queue, compound uniqueness,
@@ -29,7 +29,7 @@ import {
   // ── aspirational imports (not yet in API surface) ──
   // queue   — ordered mutable collection, FIFO dequeue, emits :enqueued/:dequeued
   // tick    — recurring entity lifecycle hook (Phase 2 step 9)
-} from 'express-plus';
+} from 'workbench';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Capability bundles — typed, imported, never strings

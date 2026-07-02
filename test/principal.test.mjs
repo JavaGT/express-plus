@@ -28,7 +28,7 @@ import {
   read,
   write,
   subscribe,
-} from 'express-plus';
+} from 'workbench';
 import { bindReadScope } from '../src/scope-sql.mjs';
 
 const ownerCan = async ({ is }) =>

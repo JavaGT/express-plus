@@ -1,5 +1,5 @@
 // photo-editor.mjs — a shared collaborative photo editor (raster editing)
-// expressed in the express-plus API.
+// expressed in the workbench API.
 //
 // This is a DESIGN STRESS-TEST, not production code. It declares entities
 // for a Figma-for-photos app using the shipped API surface. Every construct
@@ -24,7 +24,7 @@ import {
   entity, text, number, date, ref, map, boolean, blob, raster, projected, presence,
   grant, deny, read, write, subscribe, admin, anyOf, scope, never,
   inherit, router,
-} from 'express-plus';
+} from 'workbench';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CAPABILITY BUNDLES — typed, imported, never strings.

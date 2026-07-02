@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   entity, text, ref, scope, grant, read, write, subscribe,
 } from '../src/index.mjs';
 
@@ -30,7 +30,7 @@ function ownedNote() {
 
 test('HTTP create/update/remove flow through the durable kernel — every mutation appends to _Log', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   const Note = ownedNote();
   app.mount('/notes', Note);
   await app.ddl(); // framework _Log/_Cursor + Note table
@@ -81,7 +81,7 @@ test('HTTP create denied by mayVerb writes nothing to _Log (txn rolled back is N
   // for the owner, so a non-owner gets 404 (not visible). That 404 must NOT append
   // to _Log — the dispatch never ran.
   const db = new DatabaseSync(':memory:');
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   const Note = ownedNote();
   app.mount('/notes', Note);
   await app.ddl();

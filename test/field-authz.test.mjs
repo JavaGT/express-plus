@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { executeDDL, User, Inbox, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/index.mjs';
+import workbench, { executeDDL, User, Inbox, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/index.mjs';
 import { Doc } from '../doc.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -35,7 +35,7 @@ function setup() {
 
 // Start an app with the given principal and return { app, origin, port }.
 async function startApp(db, principalId) {
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   app.listen(0, { principalOf: () => ({ type: 'user', id: principalId }) });
   await app.ready;
   const { port } = app.httpServer.address();

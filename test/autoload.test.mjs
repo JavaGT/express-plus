@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { entity, text, ref, map, grant, read, write, scope, allowAnonymous, generateDDL } from '../src/index.mjs';
+import workbench, { entity, text, ref, map, grant, read, write, scope, allowAnonymous, generateDDL } from '../src/index.mjs';
 
 function makeDoc() {
   return entity('Doc', {
@@ -20,7 +20,7 @@ function makeDoc() {
     routes: (r) => {
       r.resource();
       // A child router under /:docId/shares — req.doc is auto-loaded.
-      const shares = expressPlus.router();
+      const shares = workbench.router();
       shares.get('/', async (req, res) => {
         res.json({ docId: req.doc.id, title: req.doc.title });
       });
@@ -36,7 +36,7 @@ test('req.doc is auto-loaded for a route under /:docId', async () => {
   for (const sql of generateDDL(Doc)) db.exec(sql);
   db.prepare("INSERT INTO Doc (id, title, owner) VALUES (1, 'Hello', 1)").run();
 
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -56,7 +56,7 @@ test('a missing parent row is 404, not a null-deref 500', async () => {
   const Doc = makeDoc();
   for (const sql of generateDDL(Doc)) db.exec(sql);
 
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -77,7 +77,7 @@ test('a generic router :userId param does NOT auto-load (no entity context)', as
     grant: () => grant(read, write),
     routes: (r) => {
       r.resource();
-      const shares = expressPlus.router();
+      const shares = workbench.router();
       shares.delete('/:userId', async (req, res) => {
         // req.user is NOT auto-loaded (generic router) — only req.doc is.
         assert.equal(req.user, undefined);
@@ -89,7 +89,7 @@ test('a generic router :userId param does NOT auto-load (no entity context)', as
   for (const sql of generateDDL(Doc)) db.exec(sql);
   db.prepare("INSERT INTO Doc (id, title, owner) VALUES (1, 'Hello', 1)").run();
 
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -116,7 +116,7 @@ function makeDocScoped() {
     grant: () => [scope(({ is }) => is.owner()).can(() => grant(read, write))],
     routes: (r) => {
       r.resource();
-      const shares = expressPlus.router();
+      const shares = workbench.router();
       shares.get('/', async (req, res) => {
         // only reachable when auto-load admitted the row for THIS principal.
         res.json({ docId: req.doc.id, title: req.doc.title });
@@ -132,7 +132,7 @@ async function bootScopedDoc() {
   const Doc = makeDocScoped();
   for (const sql of generateDDL(Doc)) db.exec(sql);
   db.prepare("INSERT INTO Doc (id, title, owner) VALUES (1, 'Hello', 'alice')").run();
-  const app = expressPlus({ db }).mount('/docs', Doc);
+  const app = workbench({ db }).mount('/docs', Doc);
   // principalOf from the x-test-user header so alice and bob are distinguishable.
   app.listen(0, {
     principalOf: (req) => {

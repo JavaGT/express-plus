@@ -1,5 +1,5 @@
 // drawing-canvas.mjs — a collaborative drawing canvas (vector editing)
-// expressed in the express-plus shipped API.
+// expressed in the workbench shipped API.
 //
 // PERSONA: "The Realtime Artist" — needs 60Hz ephemeral live strokes,
 // ordered shape layers, polyline CRDT for freedraw, and backpressure.
@@ -16,7 +16,7 @@ import {
   entity, text, number, date, ref, map, boolean, polyline, ephemeral, list,
   grant, deny, read, write, subscribe, admin, anyOf, scope, never,
   inherit, router,
-} from 'express-plus';
+} from 'workbench';
 
 const VIEWER  = [read, subscribe];
 const EDITOR  = [read, write, subscribe];

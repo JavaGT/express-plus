@@ -1,6 +1,6 @@
-# express-plus — Canonical Specification
+# workbench — Canonical Specification
 
-This is the single source of truth for what express-plus is, how it behaves, and
+This is the single source of truth for what workbench is, how it behaves, and
 the order in which it gets built. It absorbs the former `FEATURES.md` (the
 featureset), `CONTEXT.md` (the glossary), and `IMPLEMENTATION-PLAN.md` (the
 roadmap). It is paired with two documents that keep their own job:
@@ -26,21 +26,21 @@ evidence under `projects/<name>/PAIN-POINTS.md`).
 
 ---
 
-## 1. What express-plus is
+## 1. What workbench is
 
-express-plus is to *collaborative, persisted, realtime* apps what Express is to
+workbench is to *collaborative, persisted, realtime* apps what Express is to
 request/response apps: the foundation you reach for so you write domain code, not
 plumbing. You declare your entities, their authorization, and their reactions;
 the framework owns the REST routes, the WebSocket live stream, the event log, the
 reducers, optimistic UI, undo, gap recovery, and cross-tab sync.
 
-The north star — *"Express, but for collaborative, persisted, realtime data"* —
+The north star — *"Workbench for collaborative, persisted, realtime data"* —
 is the same one the shipped `scope` workbench hit in production. scope is the
-working proof; express-plus is the cleaner second cut, built proactively for a
+working proof; workbench is the cleaner second cut, built proactively for a
 known set of stress-test apps rather than incrementally as each app stubs its toe
 (see `SCOPE-FINDINGS.md`).
 
-The package name is always `express-plus`, never `express`. It is a distinct
+The package name is always `workbench`, never `express`. It is a distinct
 framework, not a plugin or a fork.
 
 ---
@@ -557,7 +557,7 @@ read** (compilability ≠ read intent — the ADR #2 leak guard).
 
 ## 12. The client library
 
-`public/express-plus-client.mjs` keeps the page declarative:
+`public/workbench-client.mjs` keeps the page declarative:
 
 - **`LiveChannel`** — subscribes over WebSocket, auto-reconnects, dispatches
   events.
@@ -574,8 +574,8 @@ cannot drift). The principal is built **server-side from the session**; the
 client-supplied id is a transport correlation id only — the client cannot supply
 its own identity.
 
-`package.json` declares `express` + `express-plus`, `type: module`,
-`start: node app.mjs`.
+`package.json` declares `workbench`, `type: module`,
+`main: src/index.mjs`.
 
 ---
 

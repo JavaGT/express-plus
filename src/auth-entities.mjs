@@ -85,7 +85,7 @@ export const Session = entity('Session', {
 // is created with { recipient: delta.member, doc: entity.id, kind: 'invite' }),
 // and a user reads their OWN inbox. Like User/Session it is the framework's
 // concern (every collaborative app needs the same per-user notification shape),
-// imported FROM express-plus, never app-declared.
+// imported FROM workbench, never app-declared.
 //
 //   - recipient — a User ref carrying the `recipient` role, so the entity
 //                 compiler derives is.recipient() and the grant's scope compiles

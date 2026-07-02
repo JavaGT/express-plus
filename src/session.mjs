@@ -9,7 +9,7 @@
 // This is the source of the `principalOf(req)` function the HTTP transport calls
 // per request — the SAME admission path as the bare `() => anonymous` default it
 // replaces, never a second auth path. When an app is constructed with a db
-// (`expressPlus({ db })`), session hydration becomes the default principal source.
+// (`workbench({ db })`), session hydration becomes the default principal source.
 
 import { principal, anonymous } from './principal.mjs';
 import { config } from './config.mjs';

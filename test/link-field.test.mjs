@@ -21,7 +21,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import expressPlus, { entity, text, link, scope, grant, read, everyone } from '../src/index.mjs';
+import workbench, { entity, text, link, scope, grant, read, everyone } from '../src/index.mjs';
 import { lowerToSql, fieldHandle, NonCompilableError } from '../src/scope-sql.mjs';
 
 // --- descriptor shape --------------------------------------------------------
@@ -97,7 +97,7 @@ test('Doc.linkShare.token reached through the entity Proxy lowers to its column'
 
 test('a struct write flattens to per-cell columns; a row read reconstructs the namespace', () => {
   const Doc = makeDoc();
-  expressPlus({ db: seedDb() });
+  workbench({ db: seedDb() });
   const created = Doc.create({ title: 'memo', linkShare: { token: 'share-xyz', tier: 'comment' } });
   // the row reconstructs linkShare as a namespace object, NOT raw __ columns
   assert.equal(created.title, 'memo');

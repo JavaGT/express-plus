@@ -1,26 +1,26 @@
-# SCOPE-FINDINGS — what the scope workbench proves, and what express-plus should build
+# SCOPE-FINDINGS — what the scope workbench proves, and what workbench should build
 
 This report mines `~/Development/scope` — a real, shipped SvelteKit + Prisma +
 SQLite app whose `src/lib/wb/` is an app-agnostic, event-sourced collaboration
 framework (~2638 LOC, zero domain nouns, enforced by a grep-audit gate). Its
-north star is *"Express, but for collaborative, persisted, realtime data"* —
-the same target express-plus designs on. scope is the working proof;
-express-plus is the cleaner second cut.
+north star is *"Workbench for collaborative, persisted, realtime data"* —
+the same target workbench designs on. scope is the working proof;
+workbench is the cleaner second cut.
 
-The brief: **express-plus is a real foundation to build and use, not a paper
+The brief: **workbench is a real foundation to build and use, not a paper
 exercise.** Build the known use cases (the `projects/*` stress-test set) up
 front, structured so the developer cannot easily shoot their own foot. So this
 report separates two things:
 
 - **Bring the SHAPE now.** The validated architecture scope proves under real
-  realtime load — build it deliberately into express-plus.
+  realtime load — build it deliberately into workbench.
 - **Keep the DISCIPLINE, drop the deferral.** scope's design rules are sound
   and worth adopting wholesale — *except* its "land machinery with the first
   real consumer, not before" sequencing rule, which the brief overrides. The
   anti-foot-gun half (deletion test, no second path, fail closed) stays; the
   "defer until a consumer asks" half goes.
 
-> **Adoption note.** The recommendations below are now baked into express-plus's
+> **Adoption note.** The recommendations below are now baked into workbench's
 > canonical docs — the deletion test, no-second-path, persistence-by-engaged-seam,
 > named pipeline variants, and projections-over-committed-log all live in
 > **AGENTS.md**; the out-of-band-effects resolution is in **DECISIONLOG.md**. This
@@ -53,18 +53,18 @@ schema. It concentrates: three definitions become one. Its server half
 varies* per entity (ownership re-checks, cascade deletes) and a generator would
 only relocate the variation into a config DSL. **The pure half concentrates;
 the varying half stays explicit.** That split is the model for every
-express-plus generator.
+workbench generator.
 
 ### 1.2 What the brief overrides — and what survives
 
 scope's red line was *"Land machinery WITH the first real consumer, not
-before."* The express-plus brief overrides this: build the foundation for the
+before."* The workbench brief overrides this: build the foundation for the
 known use cases proactively. scope itself half-relaxed this late (ADR-0003
-"proactive stance": the seven target apps *are* the consumer set). express-plus
+"proactive stance": the seven target apps *are* the consumer set). workbench
 takes that relaxation as baseline, with the bar kept: **"a real app in the set
 needs this shape" — not "build every conceivable knob."** The `projects/*`
 stress-test apps are the consumer set; a feature earns its place by being needed
-by one of them. (Transport is the inverse case: express-plus DOES pick WebSockets
+by one of them. (Transport is the inverse case: workbench DOES pick WebSockets
 over scope's SSE+POST, because apps in the set — space-invaders, drawing-canvas —
 need symmetric low-latency push. A divergence an app needs is proactive; a knob
 no app needs is speculative.)
@@ -91,8 +91,8 @@ the developer cannot wire a second one wrong.
 
 ## 2. The core architecture to build now (the validated shape)
 
-scope's core is reviewer-accepted and runs a real app. Where express-plus already
-has a cleaner design (notably authorization), the express-plus design wins —
+scope's core is reviewer-accepted and runs a real app. Where workbench already
+has a cleaner design (notably authorization), the workbench design wins —
 noted inline.
 
 ### 2.1 Action and Event are distinct, and the type system enforces it
@@ -128,7 +128,7 @@ authorize *outside* the transaction → open the transaction → dedupe by actio
 run handler → assign each event a per-scope monotonic sequence number → append
 to the durable log → commit → fan out to subscribers.
 
-express-plus owns this whole pipeline. The developer declares the action's shape
+workbench owns this whole pipeline. The developer declares the action's shape
 and writes the handler body; the framework owns validate, scope, authorize,
 preimage, optimistic, dispatch, dedupe, sequence, persist, and fan-out.
 
@@ -154,7 +154,7 @@ zero class field.
 
 > **Anti-foot-gun refinement scope flagged for us.** scope chose presence over a
 > class *field* (good), but ships a no-op persistence module named `persistent`
-> whose mere presence flips the gate — a marker that does nothing. express-plus
+> whose mere presence flips the gate — a marker that does nothing. workbench
 > makes the wired seam *do the work itself* (the field-type plugin owns
 > persistence strategy), so there is no inert marker to misread.
 
@@ -167,16 +167,16 @@ Two anti-foot-gun consequences:
   before any I/O, so authorization runs *outside* the transaction. On
   single-writer SQLite, a flood of forbidden requests cannot hold the write lock.
 - **The scope is a typed handle, derived from declared shape**, not a string
-  parsed at runtime — exactly express-plus's "no magic strings."
+  parsed at runtime — exactly workbench's "no magic strings."
 
 To make resolution pure, scope carries the scope key (its `projectId`) on every
-action payload as a wire field. express-plus's typed-FK model already supplies
+action payload as a wire field. workbench's typed-FK model already supplies
 the scope handle from declared shape; keep resolution pure so the same
 out-of-transaction-authorize win holds.
 
-### 2.5 Authorization — express-plus is already ahead; do not regress
+### 2.5 Authorization — workbench is already ahead; do not regress
 
-This is the one place scope is *weaker* than the express-plus design, and the
+This is the one place scope is *weaker* than the workbench design, and the
 gap is instructive.
 
 scope has a clean `withEditorAuth((p) => p.projectId)` factory for the common
@@ -188,7 +188,7 @@ abstraction. The ownership predicate is duplicated across every handler that
 needs it — a drift hazard and a foot-gun (forget the check in one handler and
 that entity is unprotected).
 
-**This is exactly the anti-pattern express-plus's `checks` + `scope(predicate)
+**This is exactly the anti-pattern workbench's `checks` + `scope(predicate)
 .can(fn)` model eliminates.** A `check` is a per-entity named fact (`owner`,
 `collaborator`, `editor`); a grant calls it; the framework compiles the read half
 to SQL and runs the rest per-row. Ownership is declared once as a check and
@@ -199,7 +199,7 @@ scope does contribute one layering insight worth keeping: it runs **three**
 authorization layers — pure `resolveScope` (no I/O), membership `authorize` on
 the resolved scope (reads committed state, outside the transaction), and a
 defense-in-depth re-check *inside* the handler that the entity actually belongs
-to the resolved scope. express-plus's compiled `scope` + runtime `.can` covers
+to the resolved scope. workbench's compiled `scope` + runtime `.can` covers
 the first two; the third (the entity-belongs-to-scope check) is worth having the
 framework enforce structurally rather than leaving to each handler.
 
@@ -231,7 +231,7 @@ truncate.**
 > starting the live stream. If the stream starts first, foreign events during the
 > race resync into an empty snapshot, then the snapshot load overwrites them
 > while the cursor has already advanced — permanent event loss in the gap.
-> express-plus's client library (`LiveList` boot-from-snapshot then apply-deltas)
+> workbench's client library (`LiveList` boot-from-snapshot then apply-deltas)
 > must enforce this ordering structurally, not leave it to the developer.
 
 ### 2.7 Undo is preimage-restore, not a reverse action
@@ -249,8 +249,8 @@ inverse-event append; do not build a second undo log.
 
 ### 2.8 Out-of-band effects are PROJECTIONS over the committed log — this closes an open question
 
-express-plus's `effects` primitive covers in-transaction DB mutations only.
-**scope answers the out-of-band question, and the answer fits express-plus's
+workbench's `effects` primitive covers in-transaction DB mutations only.
+**scope answers the out-of-band question, and the answer fits workbench's
 grain.** scope's full-text-search index and its embeddings index are not in-band
 effects — they are **projections over the committed event log.** After a
 transaction commits, the framework fans the events out to projection consumers,
@@ -259,7 +259,7 @@ action. Adding a new derived read model (or a webhook, or an email) is writing
 another projection consumer and composing it onto the post-commit fan-out. The
 core fan-out API does not change.
 
-The right home for out-of-band effects in express-plus:
+The right home for out-of-band effects in workbench:
 
 - **In-transaction effects** (the existing `effects` primitive) — declarative
   `{ mutate, with }` cross-entity mutations that *must* be atomic with the
@@ -272,13 +272,13 @@ The two are distinct precisely on the atomicity boundary: an effect that must
 roll the origin back is in-transaction; an effect that must *not* (because it
 leaves the process and cannot join the DB transaction) is a projection. This
 dissolves the open question without a new primitive — it reuses the committed
-log express-plus already has. (Recorded in **DECISIONLOG.md**.)
+log workbench already has. (Recorded in **DECISIONLOG.md**.)
 
 ---
 
 ## 3. The DX target — proven reachable
 
-scope proves the express-plus DX ceiling is reachable. A realtime-collaborative
+scope proves the workbench DX ceiling is reachable. A realtime-collaborative
 feature page in scope is **30–80 lines, none of which is event handling.** The
 page author constructs a store with a handful of endpoint URLs and a teardown in
 one reactive effect, and calls `dispatch(type, payload)` per mutation. The
@@ -293,13 +293,13 @@ Three DX details worth importing:
   `{ ok: false, reason, message }` on failure, decoded through *one* shared
   decoder so two call sites cannot drift. (A prior scope bug reported every
   failure as success because two hand-rolled parsers diverged; the single decoder
-  is the fix.) express-plus should have one dispatch-result shape and one decoder,
+  is the fix.) workbench should have one dispatch-result shape and one decoder,
   framework-owned.
 - **The principal is built server-side from the session, never from the client.**
   scope's dispatch route derives the session from the request cookie, builds the
   principal `{ id: session.user.id }` itself, and uses the client-supplied id only
   as a transport correlation id. The client cannot supply its own identity. This
-  is the structural form of express-plus's "two default-on layers": a route gate
+  is the structural form of workbench's "two default-on layers": a route gate
   (session → principal) and a row gate (the per-action grant).
 - **The read resync endpoint authorizes at a lower bar than dispatch.** Reading
   the event stream requires `viewer`; dispatching requires `editor`. Same auth
@@ -307,7 +307,7 @@ Three DX details worth importing:
   the grant model already expresses.
 
 The ceremony scope *could not* fully absorb is endpoint-URL configuration (each
-page passes 3–5 URL strings). express-plus, owning both server routes and the
+page passes 3–5 URL strings). workbench, owning both server routes and the
 client library, can absorb this into the declaration: the URLs are derived from
 the declared doc/room name, not hand-passed — a concentration the deletion test
 endorses, and the brief says build it now.
@@ -337,7 +337,7 @@ The findings above now live in the canonical docs (this is the "absorbed" state)
 ## 5. Debts in scope NOT to carry over
 
 scope's own code flags these as things it would do differently. Avoid them in
-express-plus:
+workbench:
 
 - **An identity wrapper that exists only to coax type inference.** scope wraps
   every action entry in a `pure({...})` identity function purely to make
@@ -353,23 +353,23 @@ express-plus:
   where every other uses a dot. Pick one separator and lint it.
 - **Two monotonic counters on one row labeled `seq`.** scope keeps an event
   sequence and an action sequence on the same cursor row, both called some form
-  of "seq," inviting "which seq?" confusion. Name them distinctly (express-plus
+  of "seq," inviting "which seq?" confusion. Name them distinctly (workbench
   house rule: distinguish similar-but-different concepts).
 - **Inline ownership authorization** (§2.5) — the single biggest structural debt,
-  and the one express-plus's authorization model already fixes. Do not regress
+  and the one workbench's authorization model already fixes. Do not regress
   into per-handler ownership checks.
 
 ---
 
 ## Summary
 
-scope is the working proof that express-plus's design is buildable: the one
+scope is the working proof that workbench's design is buildable: the one
 pipeline, branded action/event, opt-in persistence by engaged seam, pure scope
 resolution, sequence-cursor replay, preimage-restore undo, and projections over
 the committed log all run a real app under real realtime load. Build that shape
 now, proactively, for the `projects/*` use-case set — gated by the deletion test
 and the no-second-path invariant so the foundation is solid and hard to misuse.
-Keep express-plus's authorization model exactly as designed; it is the one place
+Keep workbench's authorization model exactly as designed; it is the one place
 the paper design is already ahead of the shipped one. The single open question
-express-plus carried — out-of-band side effects — is answered by scope's
+workbench carried — out-of-band side effects — is answered by scope's
 projection model and recorded as resolved in DECISIONLOG.md.

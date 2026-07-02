@@ -2,7 +2,7 @@
 //
 // This is the Phase-1 capstone. It declares a real Blog → Post → Comment chain
 // with ONLY built constructs (entity, text, boolean, date, ref, scope,
-// grant/deny/read/write/subscribe, everyone, anyOf, inherit, expressPlus,
+// grant/deny/read/write/subscribe, everyone, anyOf, inherit, workbench,
 // router) and exercises the WHOLE declared stack end-to-end:
 //
 //   entity compile → field strategies → serialize → grant SQL scope →
@@ -29,7 +29,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, {
+import workbench, {
   router,
   entity,
   text,
@@ -219,7 +219,7 @@ test('mounting the spine resolves a routing table with the two default-on auth l
   const comments = router({ mergeParams: true });
   comments.mount('/', Comment);
 
-  const app = expressPlus()
+  const app = workbench()
     .mount('/blogs', Blog)
     .mount('/posts', Post)
     .mount('/posts/:postId/comments', comments)

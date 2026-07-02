@@ -6,7 +6,7 @@
 > derived fields recompute on every read.
 >
 > **Date**: 2026-06-28  
-> **Tested against**: grilled express-plus API (ADR #1–#7, doc.mjs + comment.mjs exemplars)
+> **Tested against**: grilled workbench API (ADR #1–#7, doc.mjs + comment.mjs exemplars)
 
 ---
 
@@ -392,7 +392,7 @@ Without it, the upload pipeline is 100% external to the framework.
 
 | # | Prior Finding | Status | Why |
 |---|---------------|--------|-----|
-| 1 | No blob/binary field type | **STILL-OPEN** | `blob` listed in IMPL-PLAN Phase 2 step 12 but absent from grilled exemplars. No `import { blob } from 'express-plus'` exists. |
+| 1 | No blob/binary field type | **STILL-OPEN** | `blob` listed in IMPL-PLAN Phase 2 step 12 but absent from grilled exemplars. No `import { blob } from 'workbench'` exists. |
 | 2 | No full-text search predicate | **STILL-OPEN** | Listed as "Deferred / plugin territory." No `.match()`/`.search()` predicate exists. |
 | 3 | No background-job or async-pipeline | **NEW-ANGLE** | `effects` solves in-transaction cross-entity mutation (ADR #5). But `storedDerived` — the async compute+persist primitive for thumbnails — is deferred to Phase 3. External side-effects (calling ImageMagick) are explicitly "NOT yet designed." The gap narrowed but didn't close. |
 | 4 | No geo-point field type | **STILL-OPEN** | Listed as "Deferred / plugin territory." No `point` constructor, no `.near()` predicate. |

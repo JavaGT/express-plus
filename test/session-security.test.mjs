@@ -4,7 +4,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import expressPlus, { entity, text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import workbench, { entity, text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
 import { parseCookies, sessionCookie } from '../src/session.mjs';
 
 // M1: Malformed cookie does not throw → anonymous principal, not 500
@@ -31,7 +31,7 @@ test('request with malformed sid cookie → anonymous principal (route 401s)', a
     fields: { body: text() },
     grant: () => [scope().can(() => grant(read, write))],
   });
-  const app = expressPlus({ db });
+  const app = workbench({ db });
   app.mount('/notes', Note);
   await app.ddl();
   

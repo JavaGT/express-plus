@@ -9,12 +9,12 @@
 //   - an owner and a set of collaborators with viewer/editor roles,
 //   - read admission compiled to SQL, capabilities decided per row.
 //
-// REVIEW EXEMPLAR: imports from the (not-yet-built) `express-plus` package.
+// REVIEW EXEMPLAR: imports from the (not-yet-built) `workbench` package.
 
-import expressPlus, {
+import workbench, {
   entity, text, number, date, ref, map,
   grant, deny, read, write, subscribe, admin, scope, anyOf,
-} from 'express-plus';
+} from 'workbench';
 
 // Capability tiers, named once. `subscribe` is a peer of `read` (sustained live
 // push vs one-shot fetch); `admin` is reserved for the owner (manage sharing).
@@ -93,7 +93,7 @@ export const Doc = entity('Doc', {
 // `collaborators` field runs through the field's `.can()`, which 403s a
 // non-owner — one auth engine, no second path.
 function shareRoutes() {
-  const r = expressPlus.router({ mergeParams: true });
+  const r = workbench.router({ mergeParams: true });
 
   r.get('/', async (req, res) => {
     const rows = await req.doc.collaborators.toArray();   // FK population is a DB query
@@ -116,5 +116,5 @@ function shareRoutes() {
 // Only auto-start when run directly (not imported by test suites).
 import { fileURLToPath } from 'node:url';
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  expressPlus().mount('/docs', Doc).listen(3000);
+  workbench().mount('/docs', Doc).listen(3000);
 }

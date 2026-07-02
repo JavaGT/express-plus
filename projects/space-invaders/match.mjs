@@ -1,12 +1,12 @@
 // match.mjs — Space Invaders multiplayer match entity.
 // Expresses an authoritative-server real-time arcade game in the grilled
-// express-plus API. Demonstrates: the state machine (lobby → playing →
+// workbench API. Demonstrates: the state machine (lobby → playing →
 // gameover), map-valued player roster, grant with scope + can (player vs
 // spectator), declarative effects, and aspirational constructs (tick, grid,
 // list, entity TTL, subscriber interest).
 //
 // Where a construct does not yet exist in the API surface, the code imports
-// it from 'express-plus' as an idealized handle and documents the gap.
+// it from 'workbench' as an idealized handle and documents the gap.
 import {
   entity, text, number, date, ref, map, state,
   grant, deny, read, write, subscribe, anyOf, never, scope,
@@ -15,7 +15,7 @@ import {
   // list    — ordered mutable collection, delta-broadcast
   // tick    — recurring entity lifecycle hook
   // Player    — per-connection principal with session
-} from 'express-plus';
+} from 'workbench';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Capability bundles — typed, imported, never strings.

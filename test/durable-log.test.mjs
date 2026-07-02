@@ -1,5 +1,5 @@
 // Framework DDL — the Log and Cursor tables (spec #20, eng-review Tier 4).
-// These are framework-owned, not entity-scoped: every express+ app that engages
+// These are framework-owned, not entity-scoped: every workbench app that engages
 // persistence needs them. They are created alongside entity tables via app.ddl().
 
 import { test } from 'node:test';
@@ -117,7 +117,7 @@ test('executeFrameworkDDL creates Log and Cursor tables', () => {
 test('app.ddl() creates framework tables (Log and Cursor) alongside entity tables', async () => {
   // This tests that the app assembly auto-creates framework tables.
   // Import dynamically to avoid circular issues.
-  const { default: expressPlus } = await import('../src/app.mjs');
+  const { default: workbench } = await import('../src/app.mjs');
   const { entity: entityFn, text, ref, grant, read, write, scope } = await import('../src/index.mjs');
 
   const db = new DatabaseSync(':memory:');
@@ -134,7 +134,7 @@ test('app.ddl() creates framework tables (Log and Cursor) alongside entity table
     ],
   });
 
-  const app = expressPlus({ db }).mount('/notes', Note);
+  const app = workbench({ db }).mount('/notes', Note);
   await app.ddl();
 
   // Verify framework tables exist
