@@ -30,7 +30,7 @@ function makeDoc() {
         await req.doc.collaborators.set('u2', { role: 'viewer' });
         res.json({ added: 'u2' });
       });
-      r.use('/:docId/collab', collab);
+      r.mount('/:docId/collab', collab);
     },
   });
 }

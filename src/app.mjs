@@ -134,7 +134,7 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
   let resolution = null; // the in-flight/resolved finalization promise (idempotent)
 
   // When an ENTITY-bound builder mounts a child under a `:<entityName>Id` path
-  // segment (doc.mjs: `r.use('/:docId/shares', ...)` on Doc's builder), the
+  // segment (doc.mjs: `r.mount('/:docId/shares', ...)` on Doc's builder), the
   // framework auto-loads that entity row by the path param and attaches it to
   // `req.<entityName>` for every descendant route — so a share handler reads
   // `req.doc` with no hand-written load boilerplate. The convention is scoped to
@@ -162,12 +162,6 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
     declarations,
     mount: recordMount,
   };
-
-  // `use` is a second NAME for `mount` — the readability convention the repo-root
-  // exemplars adopt (`app.use('/sessions', router)` for routers,
-  // `app.mount('/docs', Doc)` for entities). Both names record the one declaration
-  // kind; there is a single mount operation, two words for it.
-  surface.use = surface.mount;
 
   // The per-entity builder also exposes `r.resource({gate})`: expand the five CRUD
   // verbs for THIS entity at THIS base, resolved through the per-verb gate map.

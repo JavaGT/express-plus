@@ -21,7 +21,7 @@
 //   - NO DEFAULT GRANT: entity with no grant = LOAD-TIME ERROR.
 
 import {
-  entity, text, number, date, ref, map, boolean, blob, raster, projected, presence,
+  entity, text, number, date, ref, map, boolean, blob, raster, projected, ephemeral,
   grant, deny, read, write, subscribe, admin, anyOf, scope, never,
   inherit, router,
 } from 'workbench';
@@ -81,7 +81,7 @@ export const Canvas = entity('Canvas', {
 
     backgroundColor: text({ default: '#ffffff', max: 9 }),
 
-    presence: presence({ cursor: true }),
+    presence: ephemeral({ cursor: true }),
 
     createdAt: date({ default: () => new Date() }),
     updatedAt: date({ touch: true }),
@@ -117,7 +117,7 @@ export const Canvas = entity('Canvas', {
       res.type('image/png').send(png);
     });
 
-    r.use('/:canvasId/layers', layerRoutes());
+    r.mount('/:canvasId/layers', layerRoutes());
   },
 });
 

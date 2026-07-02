@@ -5,7 +5,7 @@
 
 export { check, resolveDecision, UnawaitedCheckError } from './check.mjs';
 export { assertGuarded } from './guard/static.mjs';
-export { text, boolean, enum_, date, number, json, ref, hash, blob, link, map, list, log, presence, ephemeral, state, projected, raster, polyline } from './field.mjs';
+export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, projected, raster, polyline } from './field.mjs';
 export { createLog, getLog } from './log.mjs';
 export { now } from './deferred.mjs';
 export { resolveStrategy, validateMutation, ValidationError } from './field-strategy.mjs';
@@ -16,7 +16,7 @@ export { entity } from './entity.mjs';
 export { User, Session, Inbox } from './auth-entities.mjs';
 export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope } from './scope-sql.mjs';
 export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectSource } from './principal.mjs';
-export { requireUser, allowAnonymous, open, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
+export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient, durableMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.mjs';
 export { buildKernel } from './kernel.mjs';
 export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes } from './projected-async.mjs';

@@ -24,7 +24,7 @@ function makeDoc() {
       shares.get('/', async (req, res) => {
         res.json({ docId: req.doc.id, title: req.doc.title });
       });
-      r.use('/:docId/shares', shares);
+      r.mount('/:docId/shares', shares);
     },
   });
 }
@@ -83,7 +83,7 @@ test('a generic router :userId param does NOT auto-load (no entity context)', as
         assert.equal(req.user, undefined);
         res.sendStatus(204);
       });
-      r.use('/:docId/shares', shares);
+      r.mount('/:docId/shares', shares);
     },
   });
   for (const sql of generateDDL(Doc)) db.exec(sql);
@@ -121,7 +121,7 @@ function makeDocScoped() {
         // only reachable when auto-load admitted the row for THIS principal.
         res.json({ docId: req.doc.id, title: req.doc.title });
       });
-      r.use('/:docId/shares', shares);
+      r.mount('/:docId/shares', shares);
     },
   });
 }

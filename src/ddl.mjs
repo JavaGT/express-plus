@@ -3,7 +3,7 @@
 // The framework generates NO DDL by default (the app owns its schema). This
 // module provides `generateDDL(entity)` which returns an ordered array of SQL
 // strings: the main entity table first, then each side-table (map membership,
-// log entries, presence). The returned SQL is standalone — it may be executed
+// log entries, ephemeral cells). The returned SQL is standalone — it may be executed
 // against a node:sqlite DatabaseSync handle, or printed and committed to a
 // migration file.
 //
@@ -87,7 +87,7 @@ function logTableDDL(entity, name, descriptor) {
 }
 
 // Generate side-table DDL for ephemeral fields (per-connection cell tracking).
-// `presence` is a retired wrapper over `ephemeral` (one non-persisting kind).
+// `ephemeral` is the one non-persisting kind.
 function ephemeralTableDDL(entity, name) {
   const tableName = `${entity.name}_${name}`;
   const ownerCol = `${entity.name}_id`;

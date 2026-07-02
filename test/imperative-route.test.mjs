@@ -1,7 +1,7 @@
 // Phase 2 — slice A: the imperative router surface over the live HTTP transport
 // (SPEC §3, §4).
 //
-// An imperative route is a hand-written handler chain: `r.post('/', open, fn)`.
+// An imperative route is a hand-written handler chain: `r.post('/', allowAnonymous(), fn)`.
 // It shares the request spine with entity CRUD routes — one match, one principal,
 // one route gate — and forks only at the tail: a route carrying `handlers` runs
 // the chain; a route carrying `entity`/`verb` runs DB-backed CRUD. There is no
@@ -15,12 +15,12 @@
 //   next({status, message}) — a DELIBERATE client error rendered with that status
 //
 // Fail-closed default: an imperative route with no leading gate inherits
-// requireUser(), so anonymous is denied 401. `open` is the explicit opt-out.
+// requireUser(), so anonymous is denied 401. `allowAnonymous()` is the explicit opt-out.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import workbench, { router, open } from '../src/index.mjs';
+import workbench, { router, allowAnonymous } from '../src/index.mjs';
 
 // Start a server on an ephemeral port and return { origin, close }.
 async function listen(app) {
@@ -36,10 +36,10 @@ async function listen(app) {
   };
 }
 
-test('an open imperative GET runs its handler and returns res.json', async () => {
+test('an anonymous imperative GET runs its handler and returns res.json', async () => {
   const r = router();
-  r.get('/ping', open(), (req, res) => res.json({ pong: true }));
-  const app = workbench().use('/api', r);
+  r.get('/ping', allowAnonymous(), (req, res) => res.json({ pong: true }));
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/ping`);
@@ -52,8 +52,8 @@ test('an open imperative GET runs its handler and returns res.json', async () =>
 
 test('res.status(n).json(obj) sets the status code', async () => {
   const r = router();
-  r.post('/things', open(), (req, res) => res.status(201).json({ created: true }));
-  const app = workbench().use('/api', r);
+  r.post('/things', allowAnonymous(), (req, res) => res.status(201).json({ created: true }));
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/things`, { method: 'POST' });
@@ -66,8 +66,8 @@ test('res.status(n).json(obj) sets the status code', async () => {
 
 test('res.sendStatus(204) ends with no body', async () => {
   const r = router();
-  r.delete('/things/:id', open(), (req, res) => res.sendStatus(204));
-  const app = workbench().use('/api', r);
+  r.delete('/things/:id', allowAnonymous(), (req, res) => res.sendStatus(204));
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/things/abc`, { method: 'DELETE' });
@@ -80,10 +80,10 @@ test('res.sendStatus(204) ends with no body', async () => {
 
 test('req.params binds the path parameter; req.query the search string', async () => {
   const r = router();
-  r.get('/things/:id', open(), (req, res) =>
+  r.get('/things/:id', allowAnonymous(), (req, res) =>
     res.json({ id: req.params.id, q: req.query.q ?? null }),
   );
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/things/xyz?q=hi`);
@@ -95,8 +95,8 @@ test('req.params binds the path parameter; req.query the search string', async (
 
 test('req.body is the parsed JSON payload for a POST', async () => {
   const r = router();
-  r.post('/echo', open(), (req, res) => res.json({ echo: req.body }));
-  const app = workbench().use('/api', r);
+  r.post('/echo', allowAnonymous(), (req, res) => res.json({ echo: req.body }));
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/echo`, {
@@ -112,8 +112,8 @@ test('req.body is the parsed JSON payload for a POST', async () => {
 
 test('req.body parses urlencoded form fields for imperative POST', async () => {
   const r = router();
-  r.post('/echo-form', open(), (req, res) => res.json({ echo: req.body }));
-  const app = workbench().use('/api', r);
+  r.post('/echo-form', allowAnonymous(), (req, res) => res.json({ echo: req.body }));
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/echo-form`, {
@@ -131,14 +131,14 @@ test('req.body parses urlencoded form fields for imperative POST', async () => {
 
 test('form fields named __proto__ remain ordinary own fields', async () => {
   const r = router();
-  r.post('/safe-form', open(), (req, res) =>
+  r.post('/safe-form', allowAnonymous(), (req, res) =>
     res.json({
       own: Object.prototype.hasOwnProperty.call(req.body, '__proto__'),
       value: req.body.__proto__,
       polluted: {}.polluted ?? null,
     }),
   );
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/safe-form`, {
@@ -159,7 +159,7 @@ test('form fields named __proto__ remain ordinary own fields', async () => {
 
 test('req.body parses multipart text fields and file parts for imperative POST', async () => {
   const r = router();
-  r.post('/upload', open(), (req, res) => {
+  r.post('/upload', allowAnonymous(), (req, res) => {
     res.json({
       title: req.body.title,
       file: {
@@ -171,7 +171,7 @@ test('req.body parses multipart text fields and file parts for imperative POST',
       },
     });
   });
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   const boundary = 'workbench-test-boundary';
   const body = [
@@ -212,8 +212,8 @@ test('req.body parses multipart text fields and file parts for imperative POST',
 
 test('imperative routes reject unsupported request body content types', async () => {
   const r = router();
-  r.post('/echo-text', open(), (req, res) => res.json({ echo: req.body }));
-  const app = workbench().use('/api', r);
+  r.post('/echo-text', allowAnonymous(), (req, res) => res.json({ echo: req.body }));
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/echo-text`, {
@@ -231,9 +231,9 @@ test('imperative routes reject unsupported request body content types', async ()
 
 test('an imperative route with no leading gate denies anonymous with 401 (fail closed)', async () => {
   const r = router();
-  // no `open` → inherits requireUser(); no principal source → anonymous → 401
+  // no `allowAnonymous()` → inherits requireUser(); no principal source → anonymous → 401
   r.get('/secret', (req, res) => res.json({ secret: true }));
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/secret`);
@@ -247,10 +247,10 @@ test('an imperative route with no leading gate denies anonymous with 401 (fail c
 
 test('next({status, message}) renders a deliberate client error with that status', async () => {
   const r = router();
-  r.post('/login', open(), (req, res, next) =>
+  r.post('/login', allowAnonymous(), (req, res, next) =>
     next({ status: 401, message: 'bad credentials' }),
   );
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/login`, { method: 'POST' });
@@ -264,11 +264,11 @@ test('next({status, message}) renders a deliberate client error with that status
 
 test('a thrown exception in a handler renders an opaque 500 (no leaked message in prod)', async () => {
   const r = router();
-  r.get('/boom', open(), () => {
+  r.get('/boom', allowAnonymous(), () => {
     throw new Error('secret internal detail');
   });
   // env defaults to config.env; force production semantics via a listen option.
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await (async () => {
     const server = app.listen(0, { env: 'production' });
     await new Promise((resolve) => {
@@ -298,8 +298,8 @@ test('chain middleware runs in order and can short-circuit via next(err)', async
   const r = router();
   const reject = (req, res, next) => next({ status: 403, message: 'nope' });
   const never = (req, res) => res.json({ reached: true });
-  r.get('/guarded', open(), reject, never);
-  const app = workbench().use('/api', r);
+  r.get('/guarded', allowAnonymous(), reject, never);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/guarded`);

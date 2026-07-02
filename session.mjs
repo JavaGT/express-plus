@@ -1,21 +1,21 @@
 // session.mjs — the auth boundary. Auth is CROSS-CUTTING, not a persisted
 // product entity, so it's plain Express-style routers (not an `entity`). The
-// route gate (requireAuth) is default-on for every route; `open` opts the
-// login and link-redemption routes out — the two legitimate unauthenticated
+// route gate (requireAuth) is default-on for every route; `allowAnonymous`
+// opts the login and link-redemption routes out — the two legitimate unauthenticated
 // endpoints (they MINT a principal). `User` and `Session` are framework-provided.
 //
 // Principals: login mints a `user` principal; link-share redemption mints a
 // `link` principal; scheduled transitions and ticks attribute to a `system`
 // principal. One shape feeds grant, queryScope, and latched-auth.
-import { router, open, User, Session } from 'workbench';
+import { router, allowAnonymous, User, Session } from 'workbench';
 import { Doc } from './doc.mjs';
 
 export function sessionRoutes() {
   const s = router();
 
   // login: find-or-create user, verify password against the `hash()` field,
-  // mint a session. `open` opts out of the fail-closed auth default.
-  s.post('/', open, async (req, res, next) => {
+  // mint a session. `allowAnonymous` opts out of the fail-closed auth default.
+  s.post('/', allowAnonymous(), async (req, res, next) => {
     const { username, password } = req.body;
     let user = await User.findOne(User.username.is(username));
     if (!user) {
@@ -28,11 +28,11 @@ export function sessionRoutes() {
   });
 
   // link-share redemption: exchange a Doc share token for a `link` principal.
-  // `open` — no user session. This is the MINTING path the uniform-principal
+  // `allowAnonymous` — no user session. This is the MINTING path the uniform-principal
   // story needs: a `link` principal is evaluated by Doc.grant.can for both
   // row visibility and capability tiering (linkShare.tiers). Without this route,
   // the `link` principal is consumed in grant but never created.
-  s.post('/link', open, async (req, res, next) => {
+  s.post('/link', allowAnonymous(), async (req, res, next) => {
     const { token } = req.body;
     const doc = await Doc.findOne(Doc.linkShare.token.is(token));
     if (!doc) return next({ status: 404, message: 'no such share link' });

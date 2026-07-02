@@ -18,7 +18,6 @@ import assert from 'node:assert/strict';
 import {
   requireUser,
   allowAnonymous,
-  open,
   isGate,
   resolveRouteGate,
   routeGateFor,
@@ -51,15 +50,14 @@ test('allowAnonymous() admits everyone including anonymous', () => {
 
 // --- gates are BRANDED so the imperative-router varargs peel is deterministic ---
 //
-// In an imperative route `r.post('/', open, handler)`, the gate and the handler
+// In an imperative route `r.post('/', allowAnonymous(), handler)`, the gate and the handler
 // are both functions. The peeler must tell them apart by the gate's BRAND, never
 // by argument position or arity (that would be a magic convention). isGate() is
 // the brand check; a plain middleware/handler is NOT a gate and must not peel.
 
-test('requireUser() / allowAnonymous() / open() return BRANDED gates', () => {
+test('requireUser() / allowAnonymous() return BRANDED gates', () => {
   assert.equal(isGate(requireUser()), true);
   assert.equal(isGate(allowAnonymous()), true);
-  assert.equal(isGate(open()), true);
 });
 
 test('isGate() rejects a plain handler/middleware (only branded gates peel)', () => {
@@ -69,13 +67,6 @@ test('isGate() rejects a plain handler/middleware (only branded gates peel)', ()
   assert.equal(isGate(null), false);
   assert.equal(isGate(undefined), false);
   assert.equal(isGate('open'), false);
-});
-
-test('open() admits everyone including anonymous (branded admit-anonymous gate)', () => {
-  const gate = open();
-  assert.equal(typeof gate, 'function');
-  assert.equal(gate(anonymous), true);
-  assert.equal(gate(principal({ type: 'user', id: 'u' })), true);
 });
 
 // --- resolveRouteGate normalizes a declared { verb: fn } map, defaulting closed ---

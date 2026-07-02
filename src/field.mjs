@@ -11,7 +11,7 @@
 // a marker), `crdt` (custom merge with per-element deltas), `hash` (one-way
 // salted digest, never queryable — its own kind so scope refuses to compare),
 // `store` (internally-keyed owned collection — map/log), `ordered` (fractional-
-// index keyspace — list), `presence` (live cells), `state` (transition-enforced
+// index keyspace — list), `ephemeral` (live cells), `state` (transition-enforced
 // state machine), `struct` (nested structure). Each is deferred-incremental: the
 // descriptor ships at import; its persistence/merge/diff strategy fires later.
 
@@ -30,7 +30,25 @@ function makeDescriptor(props) {
 // `value` kind — a single stored value with whole-value diff. The default
 // mechanism (the bare kind is the sensible default per the naming rule).
 export function text(options = {}) {
-  return makeDescriptor({ kind: 'value', type: 'text', ...options });
+  const { oneOf, validate, ...rest } = options;
+  if (oneOf !== undefined) {
+    if (!Array.isArray(oneOf) || oneOf.length === 0) {
+      throw new Error('text({ oneOf }) requires a non-empty array of allowed values');
+    }
+    const values = Object.freeze([...oneOf]);
+    const allowed = new Set(values);
+    return makeDescriptor({
+      kind: 'value',
+      type: 'text',
+      oneOf: values,
+      validate: (v) => {
+        if (!allowed.has(v)) return `expected one of [${values.join(', ')}]`;
+        return typeof validate === 'function' ? validate(v) : true;
+      },
+      ...rest,
+    });
+  }
+  return makeDescriptor({ kind: 'value', type: 'text', validate, ...rest });
 }
 // `text.crdt()` — the `crdt` kind instance for collaborative text. One instance
 // of the crdt contract, not a privileged special case (ADR #9).
@@ -55,22 +73,6 @@ export const polyline = {
 
 export function boolean(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'boolean', ...options });
-}
-
-// `enum_(values)` — a value-kind text field restricted to a closed set of
-// allowed string values. The built-in validate rejects any value outside the
-// set (fail-closed). Thin sugar over `text({ validate })`.
-export function enum_(values, options = {}) {
-  if (!Array.isArray(values) || values.length === 0) {
-    throw new Error('enum_(values) requires a non-empty array of allowed values');
-  }
-  const set = new Set(values);
-  return makeDescriptor({
-    kind: 'value',
-    type: 'text',
-    validate: (v) => set.has(v) ? true : `expected one of [${values.join(', ')}]`,
-    ...options,
-  });
 }
 
 export function date(options = {}) {
@@ -193,21 +195,6 @@ export function log(entry = {}) {
   });
 }
 
-// `presence({ cursor, selection })` — the framework's first NON-PERSISTING
-// field: per-connection live state (cursors, selections, typing indicators).
-// It is its own KIND (`presence`), a namespace of named live sub-cells. Its
-// ephemerality is EMERGENT, not a flag (SPEC §7.2): it engages no persistence
-// seam — there is no `presence` strategy entry, so it never serializes, and a
-// presence handle is not whole-value comparable in scope (the fieldHandle
-// non-value gate throws — fail closed). There is no `persisted: false` label;
-// the absence of the seam IS the ephemerality.
-//
-//   - cells — the declared live sub-cells (cursor, selection, …); the shape is
-//             config, frozen so a later layer cannot mutate the declared set.
-//
-// Import-surface scope: this constructor delivers the descriptor the entity
-// compiler accepts. The per-connection broadcast and volatile coalescing are
-// the presence kind's deferred live behavior.
 // `list(of)` — the `ordered` KIND's first instance: a fractional-index
 // keyspace. Each element has a STABLE `id` (identity, never re-keyed) and a
 // fractional `key` (the sort position, mutable). insertAt mints a key BETWEEN
@@ -298,16 +285,6 @@ export function ephemeral(cells = {}) {
     type: 'ephemeral',
     cells: Object.freeze({ ...cells }),
   });
-}
-
-// `presence({ cursor, selection })` — RETIRED to a thin wrapper over `ephemeral`
-// (AGENTS: "a new general mechanism retires the special-case it generalizes, in
-// the same change"). There is ONE non-persisting kind — `ephemeral`; `presence`
-// is the convenience name for the canonical { cursor, selection } presence shape.
-// Do not re-introduce a separate `presence` kind: that would run a parallel path
-// beside `ephemeral`, the exact drift this retirement removed.
-export function presence(cells = {}) {
-  return ephemeral(cells);
 }
 
 // `state({ values, transitions, effects, auto })` — a finite-state-machine

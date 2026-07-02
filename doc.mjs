@@ -9,7 +9,7 @@
 // whose grant INHERITS this entity's — the typed-FK-traversal compilation
 // (abstraction #5).
 import {
-  entity, text, number, date, ref, map, presence, log, state, link,
+  entity, text, number, date, ref, map, ephemeral, log, state, link,
   grant, deny, read, write, subscribe, admin, anyOf, scope,
   router, User, Inbox, now,
 } from 'workbench';
@@ -58,7 +58,7 @@ export const Doc = entity('Doc', {
       .can(async ({ is }) =>
         (await is.owner()) ? grant(...OWNER) : deny('only the owner may manage link sharing')),
 
-    presence: presence({ cursor: true, selection: true }),        // ephemeral, per-connection
+    presence: ephemeral({ cursor: true, selection: true }),       // per-connection
 
     // Chat: owner or any collaborator inherits their row-tier capability; a
     // link holder (admitted by read scope but not a collaborator) gets
@@ -209,9 +209,9 @@ export const Doc = entity('Doc', {
     r.resource();                                                 // CRUD through grant
     r.get('/feed', feed(Doc));                                   // JSON bootstrap for the client
     r.get('/home', home);                                        // HTML file-list page
-    r.use('/:docId/shares', shareRoutes(Doc));                   // sub-resource; :docId auto-loads req.doc
+    r.mount('/:docId/shares', shareRoutes(Doc));                   // sub-resource; :docId auto-loads req.doc
     const { commentRoutes } = await import('./comment.mjs');     // lazy: breaks the doc<->comment cycle
-    r.use('/:docId/comments', commentRoutes());                  // child entity; grant inherits via typed FK
+    r.mount('/:docId/comments', commentRoutes());                  // child entity; grant inherits via typed FK
   },
 });
 

@@ -12,7 +12,6 @@ import workbench, {
   projected,
   raster,
   polyline,
-  enum_,
   ref,
   scope,
   grant,
@@ -791,27 +790,29 @@ test('raster and polyline fields compile into an entity', () => {
   assert.equal(Canvas.fields.stroke.type, 'polyline');
 });
 
-// --- enum_() field constructor ---
+// --- text({ oneOf }) closed text domain ---
 
-test('enum_(values) returns a value/text descriptor with validate', () => {
-  const d = enum_(['rect', 'ellipse', 'freedraw']);
+test('text({ oneOf }) returns a value/text descriptor with validate', () => {
+  const d = text({ oneOf: ['rect', 'ellipse', 'freedraw'] });
   assert.equal(d.kind, 'value');
   assert.equal(d.type, 'text');
+  assert.deepEqual(d.oneOf, ['rect', 'ellipse', 'freedraw']);
+  assert.ok(Object.isFrozen(d.oneOf));
   assert.equal(typeof d.validate, 'function');
   assert.equal(d.validate('rect'), true);
   assert.equal(d.validate('ellipse'), true);
   assert.notEqual(d.validate('triangle'), true);
 });
 
-test('enum_() throws on empty or non-array values', () => {
-  assert.throws(() => enum_(), { message: /requires a non-empty array/ });
-  assert.throws(() => enum_([]), { message: /requires a non-empty array/ });
+test('text({ oneOf }) throws on empty or non-array values', () => {
+  assert.throws(() => text({ oneOf: 'rect' }), { message: /requires a non-empty array/ });
+  assert.throws(() => text({ oneOf: [] }), { message: /requires a non-empty array/ });
 });
 
-test('enum_() validates through the pipeline', () => {
+test('text({ oneOf }) validates through the pipeline', () => {
   const Shape = entity('Shape', {
     fields: {
-      type: enum_(['rect', 'ellipse', 'freedraw', 'text', 'arrow']),
+      type: text({ oneOf: ['rect', 'ellipse', 'freedraw', 'text', 'arrow'] }),
     },
     grant: () => [scope(() => never()).can(() => grant(read))],
   });

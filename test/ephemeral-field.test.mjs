@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { entity, ephemeral, presence, scope, everyone, grant, read, generateDDL } from '../src/index.mjs';
+import { entity, ephemeral, scope, everyone, grant, read, generateDDL } from '../src/index.mjs';
 
 // `ephemeral(cells)` — the general NON-PERSISTING field kind (DECISIONLOG #51).
 // Accepts an author-declared cell shape (richer than boolean toggles — e.g. a
@@ -38,23 +38,6 @@ test('.can(fn) returns a new frozen ephemeral descriptor carrying the access fn'
   assert.ok(Object.isFrozen(field));
 });
 
-test('presence(cells) is a retired wrapper — identical to ephemeral(cells)', () => {
-  // presence RETIRED into ephemeral: ONE non-persisting kind. presence(cells)
-  // must produce the same kind/type/cells as ephemeral(cells) — not run a
-  // parallel kind beside it. (deepEqual chokes on the `can` method, so compare
-  // fields.)
-  const field = presence({ cursor: true, selection: true });
-  assert.equal(field.kind, 'ephemeral');
-  assert.equal(field.type, 'ephemeral');
-  assert.deepEqual(field.cells, { cursor: true, selection: true });
-  assert.ok(Object.isFrozen(field.cells));
-  assert.ok(Object.isFrozen(field));
-  const direct = ephemeral({ cursor: true, selection: true });
-  assert.equal(field.kind, direct.kind);
-  assert.equal(field.type, direct.type);
-  assert.deepEqual(field.cells, direct.cells);
-});
-
 test('ephemeral field compiles into an entity at import', () => {
   const Canvas = entity('CanvasWithEphemeral', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -82,20 +65,6 @@ test('ephemeral field generates side-table DDL (no main-table column)', () => {
   assert.ok(ddl[1].includes('CREATE TABLE IF NOT EXISTS CanvasDDL_cursor'));
   assert.ok(ddl[1].includes('client_id TEXT NOT NULL'));
   assert.ok(ddl[1].includes('CanvasDDL_id TEXT NOT NULL'));
-});
-
-test('presence field still generates side-table DDL (unchanged behavior)', () => {
-  const Room = entity('RoomPresenceDDL', {
-    grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      cursors: presence({ cursor: true, selection: true }),
-    },
-  });
-  const ddl = generateDDL(Room);
-  assert.equal(ddl.length, 2);
-  assert.ok(!ddl[0].includes('cursors'));
-  assert.ok(ddl[1].includes('CREATE TABLE IF NOT EXISTS RoomPresenceDDL_cursors'));
-  assert.ok(ddl[1].includes('client_id TEXT NOT NULL'));
 });
 
 test('ephemeral field accepts a real grant scope(()=>everyone()).can(()=>grant(read))', () => {

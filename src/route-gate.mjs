@@ -19,7 +19,7 @@
 export const ROUTE_VERBS = Object.freeze(['list', 'read', 'create', 'update', 'remove']);
 
 // Every gate carries a non-enumerable BRAND so the imperative-router varargs peel
-// (`r.post(path, open, handler)`) can tell a gate from a middleware/handler
+// (`r.post(path, allowAnonymous(), handler)`) can tell a gate from a middleware/handler
 // deterministically — by the brand, never by argument position or arity (which
 // would be a magic convention, and a handler that happens to take one argument
 // would be mistaken for a gate). A gate stays a callable `(principal) => boolean`;
@@ -49,19 +49,9 @@ export function requireUser() {
 // allowAnonymous() — admit everyone, including the first-class `anonymous`
 // principal. The public-read path (a published blog post, the reddit front page)
 // that replaces the dead `publicRead` flag. The row grant still decides which
-// rows an anonymous principal may actually see. This is the entity-facing name
-// used in a `{ verb: gate }` declaration.
+// rows an anonymous principal may actually see. This is the one explicit opt-out
+// name for both entity verb maps and imperative routes.
 export function allowAnonymous() {
-  return brand(() => true);
-}
-
-// open() — the imperative-router-facing admit-anonymous gate. Behaviorally
-// identical to allowAnonymous() (admit everyone), but it is the name a hand-
-// written route reads naturally: `r.post('/', open, handler)`. Distinct name for
-// the distinct surface (imperative route vs entity verb-map); same admit-all
-// authorization function underneath. An imperative route with no leading gate
-// defaults to requireUser() (fail closed); `open` is the explicit opt-out.
-export function open() {
   return brand(() => true);
 }
 

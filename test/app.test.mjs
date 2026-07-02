@@ -33,7 +33,6 @@ import workbench, {
   scope,
   allowAnonymous,
   requireUser,
-  open,
 } from '../src/index.mjs';
 import { principal, anonymous } from '../src/principal.mjs';
 
@@ -228,13 +227,13 @@ test('r.get(path, handler) builds an imperative route with method, path, handler
   assert.equal(route.gate(user), true);
 });
 
-test('a leading `open` gate peels off into route.gate, leaving only the handler chain', async () => {
+test('a leading allowAnonymous gate peels off into route.gate, leaving only the handler chain', async () => {
   const handler = (req, res) => res.json({});
   const r = router();
-  r.post('/login', open(), handler);
+  r.post('/login', allowAnonymous(), handler);
   const routes = await resolved(r);
   const [route] = routes;
-  assert.equal(route.gate(anonymous), true, 'open admits anonymous');
+  assert.equal(route.gate(anonymous), true, 'allowAnonymous admits anonymous');
   assert.deepEqual(route.handlers, [handler], 'gate is peeled, not left in the chain');
 });
 
@@ -242,10 +241,10 @@ test('leading middleware before the final handler stays in the chain; only brand
   const mw = (req, res, next) => next();
   const handler = (req, res) => res.json({});
   const r = router();
-  r.post('/x', open(), mw, handler);
+  r.post('/x', allowAnonymous(), mw, handler);
   const routes = await resolved(r);
   const [route] = routes;
-  // open peels (branded); the plain middleware does NOT peel and stays in order
+  // allowAnonymous peels (branded); the plain middleware does NOT peel and stays in order
   assert.deepEqual(route.handlers, [mw, handler]);
   assert.equal(route.gate(anonymous), true);
 });
@@ -253,7 +252,7 @@ test('leading middleware before the final handler stays in the chain; only brand
 test('an imperative route with no handlers is rejected (a route must do something)', () => {
   const r = router();
   assert.throws(() => r.get('/nothing'), /handler/i);
-  assert.throws(() => r.get('/nothing', open()), /handler/i);
+  assert.throws(() => r.get('/nothing', allowAnonymous()), /handler/i);
 });
 
 test('the four verbs map to their HTTP methods', async () => {
@@ -268,43 +267,39 @@ test('the four verbs map to their HTTP methods', async () => {
   assert.deepEqual(byPath, { '/a': 'GET', '/b': 'POST', '/c': 'PATCH', '/d': 'DELETE' });
 });
 
-// --- Slice A: app.use(path, router) mounts an imperative router ----------------
+// --- Slice A: app.mount(path, router) mounts an imperative router --------------
 //
-// `use` is a second NAME for the same mount operation as `mount`; the repo-root
-// exemplars deliberately read `app.use('/sessions', router)` for routers and
-// `app.mount('/docs', Doc)` for entities. Both record one declaration kind.
+// `mount` is the single mount operation for both routers and entities.
 // Re-basing carries the imperative `handlers` tail through unchanged.
 
-test('app.use is an alias for mount; both re-base a mounted router under the path', async () => {
+test('app.mount re-bases a mounted router under the path', async () => {
   const app = workbench();
-  assert.equal(typeof app.use, 'function');
+  assert.equal(app.use, undefined);
   const r = router();
   const handler = (req, res) => res.json({});
-  r.post('/', open(), handler);
-  app.use('/sessions', r);
+  r.post('/', allowAnonymous(), handler);
+  app.mount('/sessions', r);
   const routes = await resolved(app);
   assert.equal(routes.length, 1);
   const [route] = routes;
   assert.equal(route.method, 'POST');
   assert.equal(route.path, '/sessions');
-  // the imperative tail survives re-basing intact
   assert.deepEqual(route.handlers, [handler]);
   assert.equal(route.gate(anonymous), true);
 });
 
-test('app.use re-bases a multi-route imperative router and preserves each tail', async () => {
+test('app.mount re-bases a multi-route imperative router and preserves each tail', async () => {
   const app = workbench();
   const h = (req, res) => res.json({});
   const r = router();
   r.get('/', h);
   r.get('/:id', h);
-  app.use('/users', r);
+  app.mount('/users', r);
   const routes = await resolved(app);
   const paths = routes.map((rt) => rt.path).sort();
   assert.deepEqual(paths, ['/users', '/users/:id']);
   for (const route of routes) {
     assert.deepEqual(route.handlers, [h]);
-    // default gate carried through re-basing
     assert.equal(route.gate(anonymous), false);
   }
 });

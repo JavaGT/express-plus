@@ -85,7 +85,7 @@ export const Doc = entity('Doc', {
 
   routes: (r) => {
     r.resource();                                  // CRUD through the grant
-    r.use('/:docId/shares', shareRoutes());        // sub-resource for the roster
+    r.mount('/:docId/shares', shareRoutes());        // sub-resource for the roster
   },
 });
 

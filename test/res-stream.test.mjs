@@ -7,7 +7,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import workbench, { router, open } from '../src/index.mjs';
+import workbench, { router, allowAnonymous } from '../src/index.mjs';
 
 async function listen(app) {
   const server = app.listen(0);
@@ -24,7 +24,7 @@ async function listen(app) {
 
 test('res.stream pumps a bare ReadableStream as text/event-stream with X-Accel-Buffering: no', async () => {
   const r = router();
-  r.get('/events', open(), (req, res) => {
+  r.get('/events', allowAnonymous(), (req, res) => {
     const stream = new ReadableStream({
       start(controller) {
         controller.enqueue(new TextEncoder().encode('data: one\n\n'));
@@ -34,7 +34,7 @@ test('res.stream pumps a bare ReadableStream as text/event-stream with X-Accel-B
     });
     return res.stream(stream);
   });
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/events`);
@@ -50,14 +50,14 @@ test('res.stream pumps a bare ReadableStream as text/event-stream with X-Accel-B
 
 test('res.stream copies a Web Response headers + status and pumps its body', async () => {
   const r = router();
-  r.get('/backup', open(), (req, res) => {
+  r.get('/backup', allowAnonymous(), (req, res) => {
     const web = new Response('hello-bytes', {
       status: 202,
       headers: { 'content-type': 'application/octet-stream' },
     });
     return res.stream(web);
   });
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/backup`);
@@ -71,7 +71,7 @@ test('res.stream copies a Web Response headers + status and pumps its body', asy
 
 test('res.status(n).stream(...) carries the pending status code', async () => {
   const r = router();
-  r.get('/partial', open(), (req, res) => {
+  r.get('/partial', allowAnonymous(), (req, res) => {
     const stream = new ReadableStream({
       start(controller) {
         controller.enqueue(new TextEncoder().encode('chunk'));
@@ -80,7 +80,7 @@ test('res.status(n).stream(...) carries the pending status code', async () => {
     });
     return res.status(206).stream(stream);
   });
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/partial`);
@@ -93,7 +93,7 @@ test('res.status(n).stream(...) carries the pending status code', async () => {
 
 test('res.stream opts out of X-Accel-Buffering with { buffering: false }', async () => {
   const r = router();
-  r.get('/raw', open(), (req, res) => {
+  r.get('/raw', allowAnonymous(), (req, res) => {
     const stream = new ReadableStream({
       start(controller) {
         controller.enqueue(new TextEncoder().encode('ok'));
@@ -102,7 +102,7 @@ test('res.stream opts out of X-Accel-Buffering with { buffering: false }', async
     });
     return res.stream(stream, { buffering: false });
   });
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     const res = await fetch(`${origin}/api/raw`);
@@ -116,7 +116,7 @@ test('res.stream opts out of X-Accel-Buffering with { buffering: false }', async
 test('res.stream tears down the socket on a mid-stream pump error (no JSON junk appended)', async () => {
   let reads = 0;
   const r = router();
-  r.get('/broken', open(), (req, res) => {
+  r.get('/broken', allowAnonymous(), (req, res) => {
     const stream = new ReadableStream({
       pull(controller) {
         reads += 1;
@@ -130,7 +130,7 @@ test('res.stream tears down the socket on a mid-stream pump error (no JSON junk 
     });
     return res.stream(stream);
   });
-  const app = workbench().use('/api', r);
+  const app = workbench().mount('/api', r);
   const { origin, close } = await listen(app);
   try {
     // The stream errors mid-flight. Either the socket is torn down (fetch

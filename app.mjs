@@ -14,8 +14,8 @@ import { sessionRoutes, userRoutes } from './session.mjs';
 
 const app = workbench();
 
-app.use('/sessions', sessionRoutes());    // auth boundary (login opts out, rest authed)
-app.use('/users',    userRoutes());        // user views (authed)
+app.mount('/sessions', sessionRoutes());    // auth boundary (login opts out, rest authed)
+app.mount('/users',    userRoutes());        // user views (authed)
 app.mount('/docs',   Doc);                 // Doc + /docs/:id/feed + /home + /:docId/shares + /:docId/comments
                                             // Comment inherits Doc's grant via the typed FK
 

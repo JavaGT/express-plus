@@ -80,7 +80,7 @@ export type Handler = (
 export type Gate = (principal: Principal) => boolean;
 
 // ---------------------------------------------------------------------------
-// Route builder — the `r` handed to `app.use(path, r)` / entity `routes` thunks.
+// Route builder — the `r` handed to `app.mount(path, r)` / entity `routes` thunks.
 // ---------------------------------------------------------------------------
 
 export interface RouteBuilder {
@@ -88,7 +88,6 @@ export interface RouteBuilder {
   post(path: string, ...rest: Array<Gate | Handler>): this;
   patch(path: string, ...rest: Array<Gate | Handler>): this;
   delete(path: string, ...rest: Array<Gate | Handler>): this;
-  use(path: string, target: unknown): this;
   mount(path: string, target: unknown): this;
 }
 
@@ -102,7 +101,6 @@ export interface ResourceGateConfig {
 
 export function requireUser(): Gate;
 export function allowAnonymous(): Gate;
-export function open(): Gate;
 export function isGate(value: unknown): value is Gate;
 
 // ---------------------------------------------------------------------------
