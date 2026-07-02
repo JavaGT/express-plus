@@ -40,6 +40,7 @@ import { resolveTemplate } from './views.mjs';
 import { readFileSync, existsSync } from 'node:fs';
 import { isSafePath, matchExtension } from './views.mjs';
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
+import { committedEventHeaders, sendJson } from './http-response.mjs';
 
 // Match a concrete request path against a route's path template. Phase-1 routes
 // carry literal segments and `:param` segments (e.g. `/notes/:id`). Returns the
@@ -85,31 +86,6 @@ function matchRoute(routes, method, pathname) {
     if (!best || score > best.score) best = { route, params, score };
   }
   return best ? { route: best.route, params: best.params } : { route: null, params: null, pathMatched };
-}
-
-// Send a JSON response with a status code. One place owns the response shape so
-// every exit (404, 401, 200) is consistent.
-function sendJson(res, status, body, headers = {}) {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'content-length': Buffer.byteLength(payload),
-    ...headers,
-  });
-  res.end(payload);
-}
-
-function committedEventHeaders(result, actionId, scope = null) {
-  const events = Array.isArray(result?.events) ? result.events : [];
-  const relevantEvents = scope ? events.filter((event) => event.scope === scope) : events;
-  const seq = relevantEvents.reduce(
-    (max, event) => Number.isFinite(event.seq) ? Math.max(max, event.seq) : max,
-    -Infinity,
-  );
-  return {
-    'x-workbench-action-id': actionId,
-    ...(Number.isFinite(seq) ? { 'x-workbench-seq': String(seq) } : {}),
-  };
 }
 
 // DB-backed dispatch for one admitted verb. The route gate already admitted the
