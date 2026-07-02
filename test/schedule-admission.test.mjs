@@ -3,12 +3,12 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { entity, schedule, date, scope, everyone, grant, read } from '../src/index.mjs';
 import { generateDDL } from '../src/ddl.mjs';
-import { admitScheduledMutation } from '../src/schedule.mjs';
+import { admitSystemMutation } from '../src/schedule.mjs';
 
 // P6d Spine A step 4b — scheduler admission (Option A, in-txn re-check).
 // A reaper-fired dispatch runs under a SCHEDULER SYSTEM PRINCIPAL. The scheduler
 // principal is NOT a user with a row grant — its authority is the entity's
-// DECLARED schedule. admitScheduledMutation re-checks due/while/payload IN-TXN
+// DECLARED schedule. admitSystemMutation re-checks due/while/payload IN-TXN
 // against the current row (TOCTOU: the row may have changed between discovery
 // and dispatch) and admits ONLY the payload derived from the declared `with`.
 // A scheduler principal may NEVER send an arbitrary payload (else "due" =
@@ -34,113 +34,113 @@ function setupEntity(now) {
   return { db, Blog, publishedAt };
 }
 
-test('admitScheduledMutation admits a matching scheduler dispatch (in-txn due + while + payload)', () => {
+test('admitSystemMutation admits a matching scheduler dispatch (in-txn due + while + payload)', () => {
   const { db, Blog } = setupEntity();
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'draft');
 
   const principal = { type: 'system', attributes: { source: 'BlogAdmit.update.publishedAt' } };
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
     payload: { published: true }, principal, db, now,
   });
   assert.equal(granted, true, 'a due + while-holding row with the exact declared payload is admitted');
 });
 
-test('admitScheduledMutation DENIES a future-due row (not due at dispatch time)', () => {
+test('admitSystemMutation DENIES a future-due row (not due at dispatch time)', () => {
   const { db, Blog } = setupEntity();
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now + 100_000, 'draft');
 
   const principal = { type: 'system', attributes: { source: 'BlogAdmit.update.publishedAt' } };
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
     payload: { published: true }, principal, db, now,
   });
   assert.equal(granted, false, 'TOCTOU: row was due at discovery but future at dispatch → deny');
 });
 
-test('admitScheduledMutation DENIES when while no longer holds (in-txn re-check)', () => {
+test('admitSystemMutation DENIES when while no longer holds (in-txn re-check)', () => {
   const { db, Blog } = setupEntity();
   const now = Date.now();
   // due AND status is 'archived' (NOT 'draft') — while fails.
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'archived');
 
   const principal = { type: 'system', attributes: { source: 'BlogAdmit.update.publishedAt' } };
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
     payload: { published: true }, principal, db, now,
   });
   assert.equal(granted, false, 'while predicate failed at dispatch time → deny (no second auth path; the declared will governs)');
 });
 
-test('admitScheduledMutation DENIES an arbitrary payload (security: scheduler cannot write-anything)', () => {
+test('admitSystemMutation DENIES an arbitrary payload (security: scheduler cannot write-anything)', () => {
   const { db, Blog } = setupEntity();
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'draft');
 
   const principal = { type: 'system', attributes: { source: 'BlogAdmit.update.publishedAt' } };
   // A payload the schedule did NOT declare (owner hijack attempt):
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
     payload: { owner: 'attacker' }, principal, db, now,
   });
   assert.equal(granted, false, 'dispatched payload must equal the declared `with` payload exactly');
 });
 
-test('admitScheduledMutation DENIES a principal whose source is not this entity/verb/field', () => {
+test('admitSystemMutation DENIES a principal whose source is not this entity/verb/field', () => {
   const { db, Blog } = setupEntity();
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'draft');
 
   // A scheduler principal for a DIFFERENT source must not admit this dispatch.
   const principal = { type: 'system', attributes: { source: 'OtherEntity.update.publishedAt' } };
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
     payload: { published: true }, principal, db, now,
   });
   assert.equal(granted, false, 'principal source must bind to the declared schedule (BlogAdmit.update.publishedAt)');
 });
 
-test('admitScheduledMutation DENIES a verb the entity did not declare a schedule for', () => {
+test('admitSystemMutation DENIES a verb the entity did not declare a schedule for', () => {
   const { db, Blog } = setupEntity();
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'draft');
 
   const principal = { type: 'system', attributes: { source: 'BlogAdmit.remove.publishedAt' } };
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'remove', rowId: 'row1',
     payload: {}, principal, db, now,
   });
   assert.equal(granted, false, 'no schedule declared for remove → deny (fail closed)');
 });
 
-test('admitScheduledMutation DENIES a non-system principal (fail closed)', () => {
+test('admitSystemMutation DENIES a non-system principal (fail closed)', () => {
   const { db, Blog } = setupEntity();
   const now = Date.now();
   db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', now - 1000, 'draft');
 
   const principal = { type: 'user', id: 'someone', attributes: {} };
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'row1',
     payload: { published: true }, principal, db, now,
   });
-  assert.equal(granted, false, 'only a bound scheduler system principal goes through admitScheduledMutation');
+  assert.equal(granted, false, 'only a bound scheduler system principal goes through admitSystemMutation');
 });
 
-test('admitScheduledMutation DENIES a missing row (TOCTOU: row deleted between discovery + dispatch)', () => {
+test('admitSystemMutation DENIES a missing row (TOCTOU: row deleted between discovery + dispatch)', () => {
   const { db, Blog } = setupEntity();
   const now = Date.now();
   // No row inserted — pretend it was deleted after discovery.
   const principal = { type: 'system', attributes: { source: 'BlogAdmit.update.publishedAt' } };
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'gone',
     payload: { published: true }, principal, db, now,
   });
   assert.equal(granted, false, 'row vanished between discovery + dispatch → deny');
 });
 
-test('admitScheduledMutation recomputes the `with` function-form payload from the CURRENT row', () => {
+test('admitSystemMutation recomputes the `with` function-form payload from the CURRENT row', () => {
   const db = new DatabaseSync(':memory:');
   const dueAt = date();
   const Todo = entity('TodoAdmit', {
@@ -158,7 +158,7 @@ test('admitScheduledMutation recomputes the `with` function-form payload from th
   db.prepare('INSERT INTO TodoAdmit (id, title, dueAt) VALUES (?, ?, ?)').run('t1', 'buy milk', now - 1000);
 
   const principal = { type: 'system', attributes: { source: 'TodoAdmit.update.dueAt' } };
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Todo, verb: 'update', rowId: 't1',
     payload: { title: 'buy milk [DONE]' }, principal, db, now,
   });
@@ -166,14 +166,14 @@ test('admitScheduledMutation recomputes the `with` function-form payload from th
 
   // Mismatch (the row title changed since discovery → recomputed payload differs):
   db.prepare('UPDATE TodoAdmit SET title = ? WHERE id = ?').run('buy groceries', 't1');
-  const granted2 = admitScheduledMutation({
+  const granted2 = admitSystemMutation({
     entity: Todo, verb: 'update', rowId: 't1',
     payload: { title: 'buy milk [DONE]' }, principal, db, now,
   });
   assert.equal(granted2, false, 'payload recomputed from current row no longer matches the stale dispatched payload → deny');
 });
 
-test('admitScheduledMutation: schedule.after due = row.field + delay <= now', () => {
+test('admitSystemMutation: schedule.after due = row.field + delay <= now', () => {
   const db = new DatabaseSync(':memory:');
   const createdAt = date();
   const Task = entity('TaskAfter', {
@@ -188,7 +188,7 @@ test('admitScheduledMutation: schedule.after due = row.field + delay <= now', ()
   // createdAt 10s ago + 5s delay = 5s before now → DUE
   db.prepare('INSERT INTO TaskAfter (id, createdAt, status) VALUES (?, ?, ?)').run('k1', now - 10_000, 'open');
   const principal = { type: 'system', attributes: { source: 'TaskAfter.update.createdAt' } };
-  const granted = admitScheduledMutation({
+  const granted = admitSystemMutation({
     entity: Task, verb: 'update', rowId: 'k1',
     payload: { status: 'stale' }, principal, db, now,
   });
@@ -196,7 +196,7 @@ test('admitScheduledMutation: schedule.after due = row.field + delay <= now', ()
 
   // createdAt 1s ago + 5s delay = 6s after now → NOT due
   db.prepare('UPDATE TaskAfter SET createdAt = ? WHERE id = ?').run(now - 1000, 'k1');
-  const granted2 = admitScheduledMutation({
+  const granted2 = admitSystemMutation({
     entity: Task, verb: 'update', rowId: 'k1',
     payload: { status: 'stale' }, principal, db, now,
   });
@@ -205,7 +205,7 @@ test('admitScheduledMutation: schedule.after due = row.field + delay <= now', ()
 
 // ============================================================
 // END-TO-END: the wired dispatch spine admits / denies a scheduler principal
-// (Option A — postHandlerAuthorize branches to admitScheduledMutation).
+// (Option A — postHandlerAuthorize branches to admitSystemMutation).
 // ============================================================
 import { createServer } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
@@ -227,9 +227,9 @@ function setupAppServer() {
   });
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.exec('CREATE TABLE _Cursor (scope TEXT PRIMARY KEY, lastSeq INTEGER)');
-  // The real serve.mjs hook (mirrored here): scheduler branch → admitScheduledMutation.
+  // The real serve.mjs hook (mirrored here): scheduler branch → admitSystemMutation.
   // The real serve.mjs hook (mirrored here): scheduler admission runs in the
-  // PRE-projection phase so admitScheduledMutation re-checks due/while/with
+  // PRE-projection phase so admitSystemMutation re-checks due/while/with
   // against the row as it stood at discovery — NOT after this dispatch's own
   // projection has applied the payload. On denial it throws 403 with zero
   // footprint (no _Log row, no projection write).
@@ -240,7 +240,7 @@ function setupAppServer() {
     authorize: () => true,
     preProjectionAuthorize: async ({ entityName, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
-      return admitScheduledMutation({
+      return admitSystemMutation({
         entity: Blog, verb, rowId: event?.data?.id,
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
       });

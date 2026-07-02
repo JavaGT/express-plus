@@ -29,7 +29,7 @@ import { mayVerb, hasOwnCanGrant, mayRow } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
-import { admitScheduledMutation, tickSource, admitTickedMutation } from './schedule.mjs';
+import { admitSystemMutation } from './schedule.mjs';
 import { startTickEngine } from './tick-engine.mjs';
 import { startReaper } from './reaper.mjs';
 import { createLiveServer } from './live.mjs';
@@ -1311,51 +1311,25 @@ function buildKernel(app) {
     effects: effectsRegistry.size > 0 ? effectsRegistry : null,
     authorize: () => true,
     preProjectionAuthorize: async ({ entityName, verb, principal, event, payload, db: hookDb, now }) => {
-      // Tick SOURCE — a dispatch under a tick system principal. The source is
-      // `${entityName}.${verb}` (exactly 2 dotted segments). Distinguish by
-      // comparing principal.attributes.source against the exact tickSource; if
-      // it matches, route to admitTickedMutation. If not, fall through to the
-      // scheduler branch below (which handles 3-segment sources like
-      // `${entityName}.${verb}.${fieldName}`). Non-system and
-      // unrecognized principals pass through unchanged.
-      const src = principal?.attributes?.source;
-      if (principal?.type === 'system' && src) {
-        // tickSource pattern: exactly 2 parts — source has no fieldName suffix.
-        const expected = tickSource(entityName, verb);
-        if (src === expected) {
-          const entity = app.entities?.get(entityName);
-          if (!entity) return false;
-          return admitTickedMutation({
-            entity,
-            verb,
-            rowId: event?.data?.id,
-            payload,
-            principal,
-            db: hookDb ?? app.db,
-            now: now ?? Date.now(),
-          });
-        }
-      }
-      // SCHEDULER SYSTEM PRINCIPAL (Option A, DECISIONLOG #62) — a reaper-fired
-      // dispatch under a scheduler principal is NOT a user with a row grant: its
-      // authority is the entity's DECLARED schedule. This admission runs
-      // PRE-projection, IN-TXN, against the row as it stood when the schedule
-      // was discovered (the `while`/due/`with` re-checks must NOT see this
-      // dispatch's own projected mutation — they check the candidate is still
-      // due). admitScheduledMutation denies fail-closed on any mismatch
-      // (future-due, while-fails, wrong source, arbitrary payload). On denial it
-      // throws 403 with ZERO footprint: nothing appended to _Log, no projection.
+      // SYSTEM PRINCIPAL admission — a dispatch under a system principal carrying
+      // `attributes.source` is a CLOCK-TRIGGERED mutation (a reaper-fired schedule
+      // OR a tick-engine-fired tick). Its authority is the entity's DECLARED
+      // schedule for this verb, never a user row grant. admitSystemMutation
+      // discriminates by the declared trigger kind (tick.hz/every vs
+      // schedule.at/after), binds the source to the derived id, and re-checks
+      // while/due/payload IN-TXN against the current row. On denial it returns
+      // false (fail-closed, zero footprint). Non-system and unrecognized
+      // principals pass through unchanged.
       if (principal?.type !== 'system' || !principal.attributes?.source) return true;
       const entity = app.entities?.get(entityName);
       if (!entity) return false;
-      const hookDbRef = hookDb ?? app.db;
-      return admitScheduledMutation({
+      return admitSystemMutation({
         entity,
         verb,
         rowId: event?.data?.id,
         payload,
         principal,
-        db: hookDbRef,
+        db: hookDb ?? app.db,
         now: now ?? Date.now(),
       });
     },
@@ -1496,7 +1470,7 @@ export function listen(app, port, optionsOrCallback = {}) {
   // dispatch handle. Scans entities for tick triggers (tick.hz / tick.every);
   // only starts if at least one exists (avoids a no-op timer). ONE reconciliation
   // path — the engine dispatches under a system principal through `kernel.dispatch`,
-  // admitted in-txn by `preProjectionAuthorize` → `admitTickedMutation`.
+  // admitted in-txn by `preProjectionAuthorize` → `admitSystemMutation`.
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
   httpServer.listen(port);
 

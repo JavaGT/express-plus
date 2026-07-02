@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import expressPlus, { entity, scope, everyone, grant, read, tick, date } from '../src/index.mjs';
+import expressPlus, { entity, scope, everyone, grant, read, tick, date, schedule } from '../src/index.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
-import { admitTickedMutation, discoverTickedRows } from '../src/schedule.mjs';
+import { admitSystemMutation, discoverTickedRows } from '../src/schedule.mjs';
 import { startTickEngine } from '../src/tick-engine.mjs';
 
 // ============================================================
@@ -14,7 +14,7 @@ import { startTickEngine } from '../src/tick-engine.mjs';
 // The tick engine is a CLOCK TRIGGER, not an authority. Each
 // interval it discovers rows matching `while`, dispatches
 // `update` under a system principal, and the dispatch spine
-// routes through preProjectionAuthorize → admitTickedMutation
+// routes through preProjectionAuthorize → admitSystemMutation
 // (the admission gate). ONE reconciliation path.
 //
 // Each dispatch has try/catch + stderr — one row's deny/throw
@@ -42,20 +42,12 @@ function makeAppWithTick(entityDef, entityName) {
     projections: [entityDef.projection],
     authorize: () => true,
     preProjectionAuthorize: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
-      // Tick branch: exact match on 2-part source → admitTickedMutation
-      const src = p?.attributes?.source;
-      if (p?.type === 'system' && src) {
-        const expected = `${en}.${verb}`;
-        if (src === expected) {
-          const ent = entities.get(en) ?? entityDef;
-          return admitTickedMutation({
-            entity: ent, verb, rowId: event?.data?.id,
-            payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
-          });
-        }
-      }
-      // Non-tick system principal — pass through
-      return true;
+      if (p?.type !== 'system' || !p.attributes?.source) return true;
+      const ent = entities.get(en) ?? entityDef;
+      return admitSystemMutation({
+        entity: ent, verb, rowId: event?.data?.id,
+        payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
+      });
     },
   });
 
@@ -114,9 +106,9 @@ test('discoverTickedRows returns rows matching while, null when none match', () 
 });
 
 // ============================================================
-// unit: admitTickedMutation direct
+// unit: admitSystemMutation direct
 // ============================================================
-test('admitTickedMutation admits an exact-match dispatch', () => {
+test('admitSystemMutation admits an exact-match dispatch', () => {
   const db = new DatabaseSync(':memory:');
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('AdmitDirect', {
@@ -133,14 +125,14 @@ test('admitTickedMutation admits an exact-match dispatch', () => {
   db.prepare('INSERT INTO AdmitDirect (id, status) VALUES (?, ?)').run('x1', 'alive');
 
   const principal = makePrincipal({ type: 'system', attributes: { source: 'AdmitDirect.update' } });
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x1',
     payload: { id: 'x1', status: 'moving' }, principal, db, now: Date.now(),
   });
   assert.equal(granted, true, 'exact source + while-holds + exact with → admitted');
 });
 
-test('admitTickedMutation DENIES wrong payload', () => {
+test('admitSystemMutation DENIES wrong payload', () => {
   const db = new DatabaseSync(':memory:');
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('AdmitWrongPayload', {
@@ -157,14 +149,14 @@ test('admitTickedMutation DENIES wrong payload', () => {
   db.prepare('INSERT INTO AdmitWrongPayload (id, status) VALUES (?, ?)').run('x2', 'alive');
 
   const principal = makePrincipal({ type: 'system', attributes: { source: 'AdmitWrongPayload.update' } });
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x2',
     payload: { id: 'x2', status: 'hijacked' }, principal, db, now: Date.now(),
   });
   assert.equal(granted, false, 'undeclared payload → deny (no write-anything)');
 });
 
-test('admitTickedMutation DENIES row deleted between discover + dispatch', () => {
+test('admitSystemMutation DENIES row deleted between discover + dispatch', () => {
   const db = new DatabaseSync(':memory:');
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('AdmitTOCTOU', {
@@ -181,14 +173,14 @@ test('admitTickedMutation DENIES row deleted between discover + dispatch', () =>
   // No row inserted — row was "deleted" after discovery.
 
   const principal = makePrincipal({ type: 'system', attributes: { source: 'AdmitTOCTOU.update' } });
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'gone',
     payload: { id: 'gone', status: 'moving' }, principal, db, now: Date.now(),
   });
   assert.equal(granted, false, 'TOCTOU: row vanished → deny');
 });
 
-test('admitTickedMutation DENIES non-system principal', () => {
+test('admitSystemMutation DENIES non-system principal', () => {
   const db = new DatabaseSync(':memory:');
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('AdmitNonSystem', {
@@ -204,11 +196,43 @@ test('admitTickedMutation DENIES non-system principal', () => {
   for (const sql of generateDDL(Blog)) db.exec(sql);
 
   const principal = makePrincipal({ type: 'user', id: 'someone' });
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x1',
     payload: { id: 'x1', status: 'moving' }, principal, db, now: Date.now(),
   });
   assert.equal(granted, false, 'non-system principal → fail closed');
+});
+
+test('admitSystemMutation admits and denies the 3-part scheduler source through the same seam', () => {
+  const db = new DatabaseSync(':memory:');
+  const publishedAt = date();
+  const status = { kind: 'value', type: 'text' };
+  const Blog = entity('AdmitSystemSchedule', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    fields: { publishedAt, status },
+    schedule: {
+      update: schedule.at(publishedAt, {
+        with: { status: 'published' },
+      }),
+    },
+  });
+  for (const sql of generateDDL(Blog)) db.exec(sql);
+  const now = Date.now();
+  db.prepare('INSERT INTO AdmitSystemSchedule (id, publishedAt, status) VALUES (?, ?, ?)').run('s1', now - 1000, 'draft');
+
+  const principal = makePrincipal({ type: 'system', attributes: { source: 'AdmitSystemSchedule.update.publishedAt' } });
+  const granted = admitSystemMutation({
+    entity: Blog, verb: 'update', rowId: 's1',
+    payload: { id: 's1', status: 'published' }, principal, db, now,
+  });
+  assert.equal(granted, true, '3-part scheduler source + due row + exact payload → admitted');
+
+  db.prepare('UPDATE AdmitSystemSchedule SET publishedAt = ? WHERE id = ?').run(now + 100_000, 's1');
+  const notDue = admitSystemMutation({
+    entity: Blog, verb: 'update', rowId: 's1',
+    payload: { id: 's1', status: 'published' }, principal, db, now,
+  });
+  assert.equal(notDue, false, '3-part scheduler source still re-checks due through the same seam');
 });
 
 // ============================================================
@@ -242,18 +266,12 @@ test('e2e: tick dispatch updates row through projection', async (t) => {
     projections: [Blog.projection],
     authorize: () => true,
     preProjectionAuthorize: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
-      const src = p?.attributes?.source;
-      if (p?.type === 'system' && src) {
-        const expected = `${en}.${verb}`;
-        if (src === expected) {
-          const ent = entities.get(en) ?? Blog;
-          return admitTickedMutation({
-            entity: ent, verb, rowId: event?.data?.id,
-            payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
-          });
-        }
-      }
-      return true;
+      if (p?.type !== 'system' || !p.attributes?.source) return true;
+      const ent = entities.get(en) ?? Blog;
+      return admitSystemMutation({
+        entity: ent, verb, rowId: event?.data?.id,
+        payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
+      });
     },
   });
 
@@ -335,18 +353,12 @@ test('e2e: while-fails — row not matching while is never mutated', async () =>
     projections: [Blog.projection],
     authorize: () => true,
     preProjectionAuthorize: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
-      const src = p?.attributes?.source;
-      if (p?.type === 'system' && src) {
-        const expected = `${en}.${verb}`;
-        if (src === expected) {
-          const ent = entities.get(en) ?? Blog;
-          return admitTickedMutation({
-            entity: ent, verb, rowId: event?.data?.id,
-            payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
-          });
-        }
-      }
-      return true;
+      if (p?.type !== 'system' || !p.attributes?.source) return true;
+      const ent = entities.get(en) ?? Blog;
+      return admitSystemMutation({
+        entity: ent, verb, rowId: event?.data?.id,
+        payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
+      });
     },
   });
 
@@ -388,18 +400,12 @@ test('e2e: TOCTOU — row deleted between discover and dispatch does not escape'
     projections: [Blog.projection],
     authorize: () => true,
     preProjectionAuthorize: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
-      const src = p?.attributes?.source;
-      if (p?.type === 'system' && src) {
-        const expected = `${en}.${verb}`;
-        if (src === expected) {
-          const ent = entities.get(en) ?? Blog;
-          return admitTickedMutation({
-            entity: ent, verb, rowId: event?.data?.id,
-            payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
-          });
-        }
-      }
-      return true;
+      if (p?.type !== 'system' || !p.attributes?.source) return true;
+      const ent = entities.get(en) ?? Blog;
+      return admitSystemMutation({
+        entity: ent, verb, rowId: event?.data?.id,
+        payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
+      });
     },
   });
 

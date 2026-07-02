@@ -1,5 +1,5 @@
-// P6d Spine A step 4: admitTickedMutation admission gate (isolated).
-// Tests for: admitTickedMutation admits/denies based on principal kind,
+// P6d Spine A step 4: admitSystemMutation admission gate (isolated).
+// Tests for: admitSystemMutation admits/denies based on principal kind,
 // source binding, verb declaration, row existence, while predicate,
 // payload match, tick-kind gating.
 
@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { entity, text, scope, everyone, grant, read, generateDDL, schedule, date, tick } from '../src/index.mjs';
-import { admitTickedMutation, tickSource } from '../src/schedule.mjs';
+import { admitSystemMutation, tickSource } from '../src/schedule.mjs';
 
 // ============================================================
 // SETUP HELPERS
@@ -40,7 +40,7 @@ function seedRow(db, tableName, id, status) {
 // ADMIT: matching row + while-holds + matching payload
 // ============================================================
 
-test('admitTickedMutation ADMITS on present-row + while-holds + matching payload', () => {
+test('admitSystemMutation ADMITS on present-row + while-holds + matching payload', () => {
   const db = makeDb();
   const AdmitTick = makeTickEntity();
   for (const sql of generateDDL(AdmitTick)) db.exec(sql);
@@ -51,7 +51,7 @@ test('admitTickedMutation ADMITS on present-row + while-holds + matching payload
   const source = tickSource('AdmitTick', 'update');
   const principal = { type: 'system', attributes: { source } };
 
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'update',
     rowId: 'row1',
@@ -67,7 +67,7 @@ test('admitTickedMutation ADMITS on present-row + while-holds + matching payload
 // DENY: non-system principal
 // ============================================================
 
-test('admitTickedMutation DENIES a non-system principal (fail closed)', () => {
+test('admitSystemMutation DENIES a non-system principal (fail closed)', () => {
   const db = makeDb();
   const AdmitTick = makeTickEntity();
   for (const sql of generateDDL(AdmitTick)) db.exec(sql);
@@ -75,7 +75,7 @@ test('admitTickedMutation DENIES a non-system principal (fail closed)', () => {
   const now = Date.now();
 
   const principal = { type: 'user', id: 'someone' };
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'update',
     rowId: 'row1',
@@ -91,7 +91,7 @@ test('admitTickedMutation DENIES a non-system principal (fail closed)', () => {
 // DENY: wrong source
 // ============================================================
 
-test('admitTickedMutation DENIES wrong source', () => {
+test('admitSystemMutation DENIES wrong source', () => {
   const db = makeDb();
   const AdmitTick = makeTickEntity();
   for (const sql of generateDDL(AdmitTick)) db.exec(sql);
@@ -99,7 +99,7 @@ test('admitTickedMutation DENIES wrong source', () => {
   const now = Date.now();
 
   const principal = { type: 'system', attributes: { source: 'Other.update' } };
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'update',
     rowId: 'row1',
@@ -115,7 +115,7 @@ test('admitTickedMutation DENIES wrong source', () => {
 // DENY: undeclared verb
 // ============================================================
 
-test('admitTickedMutation DENIES undeclared verb (verb not in entity.schedule)', () => {
+test('admitSystemMutation DENIES undeclared verb (verb not in entity.schedule)', () => {
   const db = makeDb();
   const AdmitTick = makeTickEntity();
   for (const sql of generateDDL(AdmitTick)) db.exec(sql);
@@ -124,7 +124,7 @@ test('admitTickedMutation DENIES undeclared verb (verb not in entity.schedule)',
 
   const source = tickSource('AdmitTick', 'remove'); // 'remove' not declared
   const principal = { type: 'system', attributes: { source } };
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'remove',
     rowId: 'row1',
@@ -140,7 +140,7 @@ test('admitTickedMutation DENIES undeclared verb (verb not in entity.schedule)',
 // DENY: missing row (TOCTOU)
 // ============================================================
 
-test('admitTickedMutation DENIES missing row (TOCTOU)', () => {
+test('admitSystemMutation DENIES missing row (TOCTOU)', () => {
   const db = makeDb();
   const AdmitTick = makeTickEntity();
   for (const sql of generateDDL(AdmitTick)) db.exec(sql);
@@ -149,7 +149,7 @@ test('admitTickedMutation DENIES missing row (TOCTOU)', () => {
 
   const source = tickSource('AdmitTick', 'update');
   const principal = { type: 'system', attributes: { source } };
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'update',
     rowId: 'gone',
@@ -165,7 +165,7 @@ test('admitTickedMutation DENIES missing row (TOCTOU)', () => {
 // DENY: while-fails (row doesn&#39;t satisfy while predicate)
 // ============================================================
 
-test('admitTickedMutation DENY while-fails (row does not satisfy while predicate)', () => {
+test('admitSystemMutation DENY while-fails (row does not satisfy while predicate)', () => {
   const db = makeDb();
   const AdmitTick = makeTickEntity();
   for (const sql of generateDDL(AdmitTick)) db.exec(sql);
@@ -175,7 +175,7 @@ test('admitTickedMutation DENY while-fails (row does not satisfy while predicate
 
   const source = tickSource('AdmitTick', 'update');
   const principal = { type: 'system', attributes: { source } };
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'update',
     rowId: 'row1',
@@ -191,7 +191,7 @@ test('admitTickedMutation DENY while-fails (row does not satisfy while predicate
 // DENY: arbitrary payload (hijack attempt)
 // ============================================================
 
-test('admitTickedMutation DENY arbitrary payload (hijack attempt)', () => {
+test('admitSystemMutation DENY arbitrary payload (hijack attempt)', () => {
   const db = makeDb();
   const AdmitTick = makeTickEntity();
   for (const sql of generateDDL(AdmitTick)) db.exec(sql);
@@ -201,7 +201,7 @@ test('admitTickedMutation DENY arbitrary payload (hijack attempt)', () => {
   const source = tickSource('AdmitTick', 'update');
   const principal = { type: 'system', attributes: { source } };
   // Declared payload is { status: 'stopped' }, but this tries to send { status: 'hijacked' }
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: AdmitTick,
     verb: 'update',
     rowId: 'row1',
@@ -214,10 +214,10 @@ test('admitTickedMutation DENY arbitrary payload (hijack attempt)', () => {
 });
 
 // ============================================================
-// DENY: schedule.at/after trigger routed through tick gate
+// DENY: schedule.at/after trigger with the wrong tick-style source
 // ============================================================
 
-test('admitTickedMutation DENY a schedule.at trigger through this gate', () => {
+test('admitSystemMutation DENIES a schedule.at trigger with a tick-style source', () => {
   const db = makeDb();
   const status = text();
   const createdAt = date();
@@ -238,7 +238,7 @@ test('admitTickedMutation DENY a schedule.at trigger through this gate', () => {
   // Use the tickSource-derived source string — but the trigger is schedule.at, not tick.
   const source = tickSource('AdmitSchedAt', 'update');
   const principal = { type: 'system', attributes: { source } };
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: schedAt,
     verb: 'update',
     rowId: 'row1',
@@ -247,14 +247,14 @@ test('admitTickedMutation DENY a schedule.at trigger through this gate', () => {
     db,
     now,
   });
-  assert.equal(granted, false, 'schedule.at trigger denied through admitTickedMutation gate (only ticks)');
+  assert.equal(granted, false, 'schedule.at requires the 3-part scheduler source, not the 2-part tick source');
 });
 
 // ============================================================
 // CONFIRM: no due-check runs on a tick
 // ============================================================
 
-test('admitTickedMutation: no due-check runs (tick row with no date field still admitted)', () => {
+test('admitSystemMutation: no due-check runs (tick row with no date field still admitted)', () => {
   const db = makeDb();
   const status = text();
   const NoDate = entity('NoDateTick', {
@@ -273,7 +273,7 @@ test('admitTickedMutation: no due-check runs (tick row with no date field still 
 
   const source = tickSource('NoDateTick', 'update');
   const principal = { type: 'system', attributes: { source } };
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: NoDate,
     verb: 'update',
     rowId: 'row1',
@@ -290,7 +290,7 @@ test('admitTickedMutation: no due-check runs (tick row with no date field still 
 // ============================================================
 
 // Fix the schedAfter test to use a unique entity name.
-test('admitTickedMutation DENY a schedule.after trigger through this gate', () => {
+test('admitSystemMutation DENIES a schedule.after trigger with a tick-style source', () => {
   const db = makeDb();
   const status = text();
   const createdAt = date();
@@ -310,7 +310,7 @@ test('admitTickedMutation DENY a schedule.after trigger through this gate', () =
 
   const source = tickSource('AdmitSchedAfter', 'update');
   const principal = { type: 'system', attributes: { source } };
-  const granted = admitTickedMutation({
+  const granted = admitSystemMutation({
     entity: schedAfter,
     verb: 'update',
     rowId: 'row1',
@@ -319,5 +319,5 @@ test('admitTickedMutation DENY a schedule.after trigger through this gate', () =
     db,
     now,
   });
-  assert.equal(granted, false, 'schedule.after trigger denied through admitTickedMutation gate');
+  assert.equal(granted, false, 'schedule.after requires the 3-part scheduler source, not the 2-part tick source');
 });
