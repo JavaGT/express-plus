@@ -38,6 +38,34 @@ function mintToken() {
   return randomBytes(24).toString('hex');
 }
 
+// authorizeFieldOp — the ONE field-op authorization check, shared by every
+// field-handle read and write (11 sites). It is the field-level face of the
+// no-second-auth-path invariant: a single gate, run before the mechanics, that
+// a principal present (the request path) must pass; bypassed when null (the
+// trusted query API). Reads call it with `read`; writes with `write`. Extracted
+// so the guard and the `{ status: 403, message: 'forbidden' }` verdict live in
+// one place rather than 11 (the deletion test: one concept absorbs the copies).
+async function authorizeFieldOp(record, fieldName, capability, row, principal) {
+  if (principal && !(await mayFieldOp(record, fieldName, capability, row, principal))) {
+    throw { status: 403, message: 'forbidden' };
+  }
+}
+
+// requireFieldDispatch — the no-direct-write-path guard, hoisted from four
+// byte-identical inline copies (one per field-handle factory). A store mutation
+// is a committed pipeline ACTION, never a direct side-table write; a handle
+// hydrated without a `dispatch` ref (the trusted query API) throws here rather
+// than falling back to SQL. The message names the field so the failure is
+// self-locating.
+function requireFieldDispatch(entityName, fieldName, dispatch) {
+  if (!dispatch) {
+    throw new Error(
+      `cannot mutate ${entityName}.${fieldName} without a dispatch ref ` +
+        `(hydrate with dispatch inside a handler/route)`,
+    );
+  }
+}
+
 // makeQueryBuilder({ name, predicate, hydrate }) — the awaitable, chainable
 // query behind `findAll(predicate)`. It composes WHERE (the lowered predicate)
 // + ORDER BY + LIMIT + column projection and executes ONE SELECT on await (a
@@ -527,15 +555,6 @@ export function entity(name, declaration = {}) {
         .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
         .get({ owner: oid, member: String(memberId) });
 
-    const requireDispatch = () => {
-      if (!dispatch) {
-        throw new Error(
-          `cannot mutate ${entityName}.${fieldName} without a dispatch ref ` +
-            `(hydrate with dispatch inside a handler/route)`,
-        );
-      }
-    };
-
     return {
       // `.set(memberId, { role })` — a committed pipeline ACTION. A NEW member
       // dispatches `<Entity>.<field>.add` (emits `:added`, fires onAdded via the
@@ -544,9 +563,7 @@ export function entity(name, declaration = {}) {
       // SAME role is a no-op (no dispatch). The side-table is written by the
       // projection applying the emitted event, NOT by the handle.
       set: async (memberId, { role } = {}) => {
-        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
+        await authorizeFieldOp(record, fieldName, write, row, principal);
         const mid = String(memberId);
         const existing = probeRow(memberId);
         const actionType =
@@ -554,7 +571,7 @@ export function entity(name, declaration = {}) {
           : hasRole && existing.role !== (role ?? null) ? `${entityName}.${fieldName}.setRole`
           : null;
         if (actionType === null) return; // same-role repeat share: no-op
-        requireDispatch();
+        requireFieldDispatch(entityName, fieldName, dispatch);
         const result = await dispatch({
           actionId: randomUUID(),
           type: actionType,
@@ -564,12 +581,10 @@ export function entity(name, declaration = {}) {
         if (!result.granted) throw { status: 403, message: 'forbidden' };
       },
       remove: async (memberId) => {
-        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
+        await authorizeFieldOp(record, fieldName, write, row, principal);
         const mid = String(memberId);
         if (!probe(memberId)) return; // idempotent remove: nothing to dispatch
-        requireDispatch();
+        requireFieldDispatch(entityName, fieldName, dispatch);
         const result = await dispatch({
           actionId: randomUUID(),
           type: `${entityName}.${fieldName}.remove`,
@@ -586,9 +601,7 @@ export function entity(name, declaration = {}) {
           .get({ owner: oid, member: mid }) ?? undefined;
       },
       toArray: async () => {
-        if (principal && !(await mayFieldOp(record, fieldName, read, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
+        await authorizeFieldOp(record, fieldName, read, row, principal);
         const db = getActiveDb();
         const selectCols = hasRole ? `${MEMBER_COLUMN} AS member_id, role` : `${MEMBER_COLUMN} AS member_id`;
         const rows = db
@@ -647,25 +660,14 @@ export function entity(name, declaration = {}) {
       return (low + high) / 2;
     };
 
-    const requireDispatch = () => {
-      if (!dispatch) {
-        throw new Error(
-          `cannot mutate ${entityName}.${fieldName} without a dispatch ref ` +
-            `(hydrate with dispatch inside a handler/route)`,
-        );
-      }
-    };
-
     return {
       insertAt: async (index, value) => {
-        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
+        await authorizeFieldOp(record, fieldName, write, row, principal);
         const rows = rowsOrdered();
         const low = index > 0 ? rows[index - 1].key : null;
         const high = index < rows.length ? rows[index].key : null;
         const key = keyBetween(low, high);
-        requireDispatch();
+        requireFieldDispatch(entityName, fieldName, dispatch);
         const result = await dispatch({
           actionId: randomUUID(),
           type: `${entityName}.${fieldName}.insert`,
@@ -676,15 +678,13 @@ export function entity(name, declaration = {}) {
         return result.events?.find((e) => e.type === `${entityName}.${fieldName}.inserted`)?.data?.id;
       },
       move: async (id, index) => {
-        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
+        await authorizeFieldOp(record, fieldName, write, row, principal);
         const sid = String(id);
         const others = rowsOrdered().filter((r) => r.id !== sid);
         const low = index > 0 ? others[index - 1].key : null;
         const high = index < others.length ? others[index].key : null;
         const key = keyBetween(low, high);
-        requireDispatch();
+        requireFieldDispatch(entityName, fieldName, dispatch);
         const result = await dispatch({
           actionId: randomUUID(),
           type: `${entityName}.${fieldName}.move`,
@@ -694,11 +694,9 @@ export function entity(name, declaration = {}) {
         if (!result.granted) throw { status: 403, message: 'forbidden' };
       },
       reorder: async (ids) => {
-        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
+        await authorizeFieldOp(record, fieldName, write, row, principal);
         const entries = ids.map((entryId, i) => ({ id: String(entryId), key: i }));
-        requireDispatch();
+        requireFieldDispatch(entityName, fieldName, dispatch);
         const result = await dispatch({
           actionId: randomUUID(),
           type: `${entityName}.${fieldName}.reorder`,
@@ -708,10 +706,8 @@ export function entity(name, declaration = {}) {
         if (!result.granted) throw { status: 403, message: 'forbidden' };
       },
       remove: async (id) => {
-        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
-        requireDispatch();
+        await authorizeFieldOp(record, fieldName, write, row, principal);
+        requireFieldDispatch(entityName, fieldName, dispatch);
         const result = await dispatch({
           actionId: randomUUID(),
           type: `${entityName}.${fieldName}.remove`,
@@ -731,9 +727,7 @@ export function entity(name, declaration = {}) {
         return r ? JSON.parse(r.item) : undefined;
       },
       toArray: async () => {
-        if (principal && !(await mayFieldOp(record, fieldName, read, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
+        await authorizeFieldOp(record, fieldName, read, row, principal);
         return rowsOrdered().map((r) => JSON.parse(r.item));
       },
     };
@@ -755,15 +749,8 @@ export function entity(name, declaration = {}) {
     const entryDescriptor = fields[fieldName].entry ?? {};
     return {
       append: async (entry) => {
-        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
-        if (!dispatch) {
-          throw new Error(
-            `cannot append to ${entityName}.${fieldName} without a dispatch ref ` +
-              `(hydrate with dispatch inside a handler/route)`,
-          );
-        }
+        await authorizeFieldOp(record, fieldName, write, row, principal);
+        requireFieldDispatch(entityName, fieldName, dispatch);
         const result = await dispatch({
           actionId: randomUUID(),
           type: `${entityName}.${fieldName}.append`,
@@ -775,9 +762,7 @@ export function entity(name, declaration = {}) {
         return appended?.data?.id;
       },
       entries: async () => {
-        if (principal && !(await mayFieldOp(record, fieldName, read, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
+        await authorizeFieldOp(record, fieldName, read, row, principal);
         const rows = getActiveDb()
           .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner ORDER BY rowid`)
           .all({ owner: oid });
@@ -806,21 +791,10 @@ export function entity(name, declaration = {}) {
     const oid = String(row.id);
     const clientId = String(principal?.id ?? 'anonymous');
 
-    const requireDispatch = () => {
-      if (!dispatch) {
-        throw new Error(
-          `cannot mutate ${entityName}.${fieldName} without a dispatch ref ` +
-            `(hydrate with dispatch inside a handler/route)`,
-        );
-      }
-    };
-
     return {
       set: async (cells) => {
-        if (principal && !(await mayFieldOp(record, fieldName, write, row, principal))) {
-          throw { status: 403, message: 'forbidden' };
-        }
-        requireDispatch();
+        await authorizeFieldOp(record, fieldName, write, row, principal);
+        requireFieldDispatch(entityName, fieldName, dispatch);
         const result = await dispatch({
           actionId: randomUUID(),
           type: `${entityName}.${fieldName}.set`,
