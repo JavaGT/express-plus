@@ -295,3 +295,30 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
 - **Base at merge:** main @ da08c82 (post live-fanout merge).
 - **Conflict resolution:** NONE — PR1 touched serve.mjs imports+snapshotRoute; PR2 touched the res facade in runChain; non-overlapping regions, clean merge.
 - **Note:** TS-surface direction set by Opus consult (Option A: hand-written .d.ts, no compiler/migration) over full TS migration (B, singular-system violation) and helpers-only (C, incomplete). `res.raw` typed as node's `ServerResponse` (no custom RawRes alias — relocation rejected). Gates: `node --test` 913/0; `tsc --noEmit` exit 0. Independent reviewer: DONE_WITH_CONCERNS→PASS; stream error-path body-corruption + .d.ts `{now}` seam drift both fixed. PR #2.
+
+## 2026-07-02 — arch/event-handles merged into main
+
+- **Purpose:** type framework event handles so dotted event-name grammar lives behind one interface while `_Log.eventType` remains compatible.
+- **Files touched:** src/event-handle.mjs, src/pipeline.mjs, src/entity.mjs, src/live-fanout.mjs, src/serve.mjs, src/index.mjs, test/event-handle.test.mjs.
+- **Commits:** 98ba437 → merge e6d42df.
+- **Base at merge:** main @ 04e867b.
+- **Conflict resolution:** NONE.
+- **Note:** `event(handle, reduce)` preserves a non-enumerable handle; `event(string, reduce)` remains a narrow generic compatibility adapter. Follow-up reviewer gaps were closed before merge: entity projection event types derive from handles, CRUD handlers emit handles, and blob adoption prefers `ev.handle.entity`. Gate after all Phase 1 merges: `node --test` 929/929/0.
+
+## 2026-07-02 — arch/schedule-admission merged into main
+
+- **Purpose:** centralize tick/schedule admission in `schedule.mjs` and delete caller-side source-shape branching.
+- **Files touched:** src/schedule.mjs, src/serve.mjs, src/tick-engine.mjs, src/index.mjs, test/tick-engine.test.mjs, test/tick-admission.test.mjs, test/schedule-admission.test.mjs, test/reaper.test.mjs.
+- **Commits:** c6c364a rebased to bf7a12f → merge 78932b3.
+- **Base at merge:** main @ e6d42df.
+- **Conflict resolution:** NONE.
+- **Note:** `admitSystemMutation` discriminates by declared trigger kind, not source dot-count. Tick requires `whileSql` and skips due-check; schedule performs due-check and allows missing while. Old `admitTickedMutation`/`admitScheduledMutation` exports were retired; `_effectPrincipal` stayed in `postHandlerAuthorize`. Gate after all Phase 1 merges: `node --test` 929/929/0.
+
+## 2026-07-02 — arch/authz-extract merged into main
+
+- **Purpose:** extract entity load-time authorization assembly into `compileEntityAuthz` without folding the existing authorization leaves or creating a runtime facade.
+- **Files touched:** src/authz.mjs, src/entity.mjs, test/authz.test.mjs.
+- **Commits:** bc40804 rebased to 4d4f464 → merge 071cea6.
+- **Base at merge:** main @ 78932b3.
+- **Conflict resolution:** NONE.
+- **Note:** `compileEntityAuthz` returns the unchanged registry/readScope/scopeAst/clauses assembly; runtime decisions remain in row-grant and the registry two-face engine remains the single auth path. Gate after all Phase 1 merges: `node --test` 929/929/0.
