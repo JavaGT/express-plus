@@ -241,7 +241,7 @@ export function list(of, options = {}) {
 // in-transaction compute), the compute MAY be expensive/async/external (e.g.
 // thumbnail generation, embedding compute, image export). The column stores
 // a JSON-serialized value; the compute function receives the current row
-// (hydrated) and returns a JSON-serializable result.
+// (hydrated) plus the committed db handle and returns a JSON-serializable result.
 //
 // The field is implied readonly — a client may NOT set it; the projection
 // writes it. A read sees the last-written value (may be stale between writes

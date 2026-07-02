@@ -5,7 +5,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { entity, text, ref, hash, link, map, list, log, state, everyone, grant, scope, read, computeDelta } from '../src/index.mjs';
+import { entity, text, ref, hash, link, map, list, log, state, everyone, grant, scope, read, computeDelta, createDeltaProjector, created, updated, removed, native } from '../src/index.mjs';
 
 // --- test entity with one field of each diff-eligible kind plus excluded kinds ---
 
@@ -167,4 +167,73 @@ test('multiple field changes produce a multi-key result', () => {
   assert.equal(result.title.set, 'b');
   assert.deepEqual(result.status, { from: 'draft', to: 'published' });
   assert.ok(result.body.insert, 'crdt body should have an insert op');
+});
+
+test('createDeltaProjector: created seeds shadow and returns undefined', () => {
+  const Doc = makeDoc();
+  const projector = createDeltaProjector();
+  const event = { handle: created('Doc'), data: { id: 'd1', title: 'a' } };
+  assert.equal(projector.project(Doc, 'd1', { id: 'd1', title: 'a' }, event), undefined);
+});
+
+test('createDeltaProjector: updated after created diffs against seeded row', () => {
+  const Doc = makeDoc();
+  const projector = createDeltaProjector();
+  projector.project(Doc, 'd1', { id: 'd1', title: 'a' }, { handle: created('Doc'), data: { id: 'd1', title: 'a' } });
+  const delta = projector.project(Doc, 'd1', { id: 'd1', title: 'b' }, { handle: updated('Doc'), data: { id: 'd1', title: 'b' } });
+  assert.deepEqual(delta, { title: { set: 'b' } });
+});
+
+test('createDeltaProjector: cold updated diffs from empty and seeds', () => {
+  const Doc = makeDoc();
+  const projector = createDeltaProjector();
+  const first = projector.project(Doc, 'd1', { id: 'd1', title: 'a' }, { handle: updated('Doc'), data: { id: 'd1', title: 'a' } });
+  assert.deepEqual(first, { title: { set: 'a' } });
+  const second = projector.project(Doc, 'd1', { id: 'd1', title: 'b' }, { handle: updated('Doc'), data: { id: 'd1', title: 'b' } });
+  assert.deepEqual(second, { title: { set: 'b' } });
+});
+
+test('createDeltaProjector: removed evicts shadow', () => {
+  const Doc = makeDoc();
+  const projector = createDeltaProjector();
+  projector.project(Doc, 'd1', { id: 'd1', title: 'a' }, { handle: created('Doc'), data: { id: 'd1', title: 'a' } });
+  assert.equal(projector.project(Doc, 'd1', undefined, { handle: removed('Doc'), data: { id: 'd1' } }), undefined);
+  const delta = projector.project(Doc, 'd1', { id: 'd1', title: 'b' }, { handle: updated('Doc'), data: { id: 'd1', title: 'b' } });
+  assert.deepEqual(delta, { title: { set: 'b' } });
+});
+
+test('createDeltaProjector: native event returns field delta without shadow mutation', () => {
+  const Doc = makeDoc();
+  const projector = createDeltaProjector();
+  projector.project(Doc, 'd1', { id: 'd1', title: 'a' }, { handle: created('Doc'), data: { id: 'd1', title: 'a' } });
+  const nativeDelta = projector.project(Doc, 'd1', { id: 'd1', title: 'a' }, { handle: native('Doc', 'tags', 'added'), data: { owner: 'd1', member: 'u1' } });
+  assert.deepEqual(nativeDelta, { tags: { owner: 'd1', member: 'u1' } });
+  const updateDelta = projector.project(Doc, 'd1', { id: 'd1', title: 'b' }, { handle: updated('Doc'), data: { id: 'd1', title: 'b' } });
+  assert.deepEqual(updateDelta, { title: { set: 'b' } });
+});
+
+test('createDeltaProjector: clear evicts all shadows', () => {
+  const Doc = makeDoc();
+  const projector = createDeltaProjector();
+  projector.project(Doc, 'd1', { id: 'd1', title: 'a' }, { handle: created('Doc'), data: { id: 'd1', title: 'a' } });
+  projector.clear();
+  const delta = projector.project(Doc, 'd1', { id: 'd1', title: 'b' }, { handle: updated('Doc'), data: { id: 'd1', title: 'b' } });
+  assert.deepEqual(delta, { title: { set: 'b' } });
+});
+
+test('createDeltaProjector: unchanged updated returns {}', () => {
+  const Doc = makeDoc();
+  const projector = createDeltaProjector();
+  projector.project(Doc, 'd1', { id: 'd1', title: 'a' }, { handle: created('Doc'), data: { id: 'd1', title: 'a' } });
+  const delta = projector.project(Doc, 'd1', { id: 'd1', title: 'a' }, { handle: updated('Doc'), data: { id: 'd1', title: 'a' } });
+  assert.deepEqual(delta, {});
+});
+
+test('createDeltaProjector: maxScopes evicts oldest shadow', () => {
+  const Doc = makeDoc();
+  const projector = createDeltaProjector({ maxScopes: 1 });
+  projector.project(Doc, 'd1', { id: 'd1', title: 'a' }, { handle: created('Doc'), data: { id: 'd1', title: 'a' } });
+  projector.project(Doc, 'd2', { id: 'd2', title: 'x' }, { handle: created('Doc'), data: { id: 'd2', title: 'x' } });
+  const delta = projector.project(Doc, 'd1', { id: 'd1', title: 'b' }, { handle: updated('Doc'), data: { id: 'd1', title: 'b' } });
+  assert.deepEqual(delta, { title: { set: 'b' } });
 });

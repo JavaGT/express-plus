@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import expressPlus, {
-  entity, text, ref, blob, scope, grant, read, write, subscribe,
+  entity, text, ref, blob, scope, grant, read, write, subscribe, createBlobLifecycle,
 } from '../src/index.mjs';
 
 function photoNote() {
@@ -130,3 +130,33 @@ test('a create referencing a blob adopts + finalizes it in the dispatch commit',
 // (buildKernel) admits the create path through its own afterProjection seam — a dispatched
 // create always commits there — so that contract is not reachable via HTTP and
 // is not re-tested here.
+
+test('blob lifecycle owns field discovery, adopt, finalize, and reaper columns', async () => {
+  const adopted = [];
+  const finalized = [];
+  const blobs = {
+    adopt: (db, id) => adopted.push([db, id]),
+    finalize: (id) => finalized.push(id),
+  };
+  const entities = new Map([
+    ['Note', photoNote()],
+    ['Plain', { fields: { body: text() } }],
+  ]);
+  const lifecycle = createBlobLifecycle({ blobs, entities });
+
+  assert.deepEqual(lifecycle.blobColumns, [{ table: 'Note', column: 'photo' }]);
+
+  const db = {};
+  const events = [
+    { type: 'Note.created', data: { id: 'n1', photo: 'b1' } },
+    { type: 'Note.updated', data: { id: 'n1', photo: 'b1' } },
+    { type: 'Plain.created', data: { id: 'p1', body: 'ignore' } },
+    { type: 'Other.created', data: { id: 'o1', photo: 'ignore' } },
+  ];
+
+  await lifecycle.blobAdapter.adoptInTxn(db, events);
+  await lifecycle.blobFinalizeConsumer(events);
+
+  assert.deepEqual(adopted, [[db, 'b1']]);
+  assert.deepEqual(finalized, ['b1']);
+});

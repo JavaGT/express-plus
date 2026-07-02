@@ -9,7 +9,7 @@ export { text, boolean, enum_, date, number, json, ref, hash, blob, link, map, l
 export { createLog, getLog } from './log.mjs';
 export { now } from './deferred.mjs';
 export { resolveStrategy, validateMutation, ValidationError } from './field-strategy.mjs';
-export { computeDelta } from './field-delta.mjs';
+export { computeDelta, createDeltaProjector } from './field-delta.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
 export { entity } from './entity.mjs';
@@ -19,6 +19,8 @@ export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectS
 export { requireUser, allowAnonymous, open, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient, durableMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.mjs';
 export { buildKernel } from './kernel.mjs';
+export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes } from './projected-async.mjs';
+export { createBlobLifecycle } from './blob-lifecycle.mjs';
 export { EventKind, created, updated, removed, fieldSet, native, parseEventType, lifecycleVerb } from './event-handle.mjs';
 export { createLiveServer } from './live.mjs';
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';

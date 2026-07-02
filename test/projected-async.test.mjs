@@ -24,6 +24,8 @@ import expressPlus, {
   resolveStrategy,
   validateMutation,
   ValidationError,
+  createProjectedAsyncConsumer,
+  resolveProjectedAsyncTriggerTypes,
 } from '../src/index.mjs';
 import { principal } from '../src/principal.mjs';
 import { setActiveDb } from '../src/db.mjs';
@@ -90,6 +92,43 @@ test('a projected field is readonly — validateMutation rejects client writes',
 
 // --- Slice 2: post-commit compute + write-back ---
 
+test('projected.async consumer owns trigger selection, compute, write-back, and cursor advance', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE PostDirect (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+  db.exec("INSERT INTO PostDirect (id, title, score) VALUES ('p1', 'Direct', 7)");
+  const PostDirect = entity('PostDirect', {
+    fields: {
+      title: text(),
+      score: number(),
+      hotRank: projected.async({
+        from: 'updated',
+        compute: async (row, { db: computeDb }) => {
+          assert.equal(computeDb, db);
+          return row.score * 4;
+        },
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  executeFrameworkDDL(db);
+  const consumer = createProjectedAsyncConsumer({ entities: new Map([[PostDirect.name, PostDirect]]) });
+
+  await consumer([{ type: 'PostDirect.created', scope: 'PostDirect:p1', data: { id: 'p1' } }], { db });
+  let row = db.prepare("SELECT hotRank FROM PostDirect WHERE id = 'p1'").get();
+  assert.equal(row.hotRank, null);
+  assert.deepEqual(resolveProjectedAsyncTriggerTypes(PostDirect.fields.hotRank, 'PostDirect'), ['PostDirect.updated']);
+
+  await consumer([{ type: 'PostDirect.updated', scope: 'PostDirect:p1', data: { id: 'p1', score: 7 } }], { db });
+  row = db.prepare("SELECT hotRank FROM PostDirect WHERE id = 'p1'").get();
+  assert.equal(JSON.parse(row.hotRank), 28);
+  const cursor = db.prepare(
+    "SELECT lastSeq FROM _ProjectedCursor WHERE entity = 'PostDirect' AND field = 'hotRank'",
+  ).get();
+  assert.equal(cursor.lastSeq, 1);
+  db.close();
+});
+
 test('projected.async value is computed and stored after create dispatch', async (t) => {
   const db = new DatabaseSync(':memory:');
   setActiveDb(db);
@@ -125,6 +164,50 @@ test('projected.async value is computed and stored after create dispatch', async
   const row = db.prepare('SELECT hotRank FROM Post WHERE title = :t').get({ t: 'Test' });
   assert.ok(row, 'row exists');
   assert.equal(JSON.parse(row.hotRank), 84, `hotRank should be 84, got ${row.hotRank}`);
+});
+
+test('projected.async compute receives the committed db handle', async (t) => {
+  const appDb = new DatabaseSync(':memory:');
+  const ambientDb = new DatabaseSync(':memory:');
+  setActiveDb(appDb);
+  appDb.exec('CREATE TABLE PostCtx (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+  ambientDb.exec('CREATE TABLE PostCtx (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const PostCtx = entity('PostCtx', {
+    fields: {
+      title: text(),
+      score: number(),
+      hotRank: projected.async({
+        compute: async (row, { db }) => {
+          assert.equal(db, appDb);
+          assert.notEqual(db, ambientDb);
+          const stored = db.prepare('SELECT score FROM PostCtx WHERE id = :id').get({ id: row.id });
+          return stored.score * 2;
+        },
+      }),
+    },
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const app = expressPlus({ db: appDb });
+  app.mount('/postctx', PostCtx);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); appDb.close(); ambientDb.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const res = await fetch(`${origin}/postctx`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Test', score: 21 }),
+  });
+  assert.equal(res.status, 201);
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  const row = appDb.prepare('SELECT hotRank FROM PostCtx WHERE title = :t').get({ t: 'Test' });
+  assert.ok(row, 'row exists');
+  assert.equal(JSON.parse(row.hotRank), 42);
 });
 
 test('projected.async value is recomputed after update', async (t) => {
@@ -742,8 +825,8 @@ test('enum_() validates through the pipeline', () => {
 
 // --- projected.async compute can query related entities ---
 
-// The post-commit consumer runs compute with the active DB set, so
-// findAll / getOrFail on related entities work from inside compute.
+// Existing related-entity compute functions can still use the ambient query API;
+// explicit DB-handle access is covered by the committed-db-handle test above.
 
 test('projected.async compute can findAll related entities', async (t) => {
   const db = new DatabaseSync(':memory:');
