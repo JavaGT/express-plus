@@ -277,3 +277,21 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
 - **Conflict resolution:** NONE
 
 268: Decision: The durable `dispatch` and `dispatchBatch` transaction brace (BEGIN IMMEDIATE → applyEventsToTxn → COMMIT → postCommitConsumers → ROLLBACK-on-403) and the `_Log` dedupe row→event mapping are extracted into shared module-level helpers (`commitEvents`, `rowToEvent`) so the two paths have ONE definition of each. Reason: the duplication was the exact "two pathways drift" seam AGENTS.md forbids — a future change to the transaction brace or the row→event shape would have to be made twice and could diverge. The `payload` argument threaded through `applyEventsToTxn` to the authorize hooks stays per-caller: `dispatch` passes its single action's `payload`, `dispatchBatch` passes the `actions` array. A full "dispatch = 1-element batch" collapse was REJECTED because the tick/schedule re-admission hooks (`admitTickedMutation`, `admitScheduledMutation` in schedule.mjs) destructure `payload` as one action's payload object — routing `dispatch` through a batch core would pass the `actions` array, breaking `const { id, ...payloadFields } = payload`. The brace is extracted but the `payload` value is parameterized: behaviour-preserving. The dead `actionId || \`dispatch-${Date.now()}\`` fallback is dropped (every internal caller supplies `actionId: randomUUID()`), and the empty-actions guard is reconciled to `actions.length === 0` on both paths. Added test: `a post-grant deny rolls back the first action mid-transaction` — the kernel's `authorize` is `() => true`, so a create deny reaches the in-txn `postHandlerAuthorize` → `mayVerb('create')` → 403 inside the open BEGIN→COMMIT; the test pins that the first action's row is undone (count 0) and no `_Log` row survives, proving the 403 is thrown inside the transaction. Gate: `node --test` → 903/903/0.
+
+## 2026-07-02 — architecture-live-fanout merged into main
+
+- **Purpose:** deepen the live architecture from one 607-line `live.mjs` into four focused modules (live-fanout, live-connection, live-admission, cursor).
+- **Files touched:** src/live.mjs, src/pipeline.mjs, src/serve.mjs; created src/cursor.mjs, src/live-admission.mjs, src/live-connection.mjs, src/live-fanout.mjs, test/live-fanout.test.mjs.
+- **Commits:** da08c82..4492405 (branch) → merged a60e5ec.
+- **Base at merge:** main @ da08c82.
+- **Conflict resolution:** NONE.
+- **Note:** `src/live.mjs` 607→88 lines (85% reduction). Public API `createLiveServer(...) -> {emit, count, close}` preserved; one auth path through `mayRow(...,'subscribe',...)`; removed events skip reauth; field-pace/field-delta untouched. Independent reviewer: DONE. PR #1.
+
+## 2026-07-02 — handler-ergonomics merged into main
+
+- **Purpose:** handler ergonomics from the Scope thermo-nuclear review — `res.stream` SSE/streaming helper, hand-written TS type surface (`index.d.ts`), `createJobQueue` public export.
+- **Files touched:** src/serve.mjs, src/index.mjs, package.json; created index.d.ts, test/res-stream.test.mjs.
+- **Commits:** da08c82..7a5ff1a (branch) → merged a60e5ec.
+- **Base at merge:** main @ da08c82 (post live-fanout merge).
+- **Conflict resolution:** NONE — PR1 touched serve.mjs imports+snapshotRoute; PR2 touched the res facade in runChain; non-overlapping regions, clean merge.
+- **Note:** TS-surface direction set by Opus consult (Option A: hand-written .d.ts, no compiler/migration) over full TS migration (B, singular-system violation) and helpers-only (C, incomplete). `res.raw` typed as node's `ServerResponse` (no custom RawRes alias — relocation rejected). Gates: `node --test` 913/0; `tsc --noEmit` exit 0. Independent reviewer: DONE_WITH_CONCERNS→PASS; stream error-path body-corruption + .d.ts `{now}` seam drift both fixed. PR #2.
