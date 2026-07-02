@@ -18,6 +18,7 @@
 import { check, resolveDecision } from './check.mjs';
 import { read, write, subscribe } from './grant.mjs';
 import { getLog } from './log.mjs';
+import { isRuntimeGrantClause } from './scope.mjs';
 
 // Build the `is` proxy the .can body destructures: each entity check, bound to
 // this row + principal, wrapped as an awaitable check so `await is.owner()`
@@ -47,7 +48,7 @@ function makeIs(entityRecord, row, principal) {
 export async function rowCapabilities(entityRecord, row, principal) {
   const clauses = typeof entityRecord.grant === 'function' ? entityRecord.grant() : null;
   const clause = Array.isArray(clauses)
-    ? clauses.find((c) => c && typeof c.can === 'function')
+    ? clauses.find((c) => isRuntimeGrantClause(c))
     : null;
   if (!clause) return { granted: false, capabilities: [] };
 
@@ -94,7 +95,7 @@ function grantClauses(entityRecord) {
 
 export function hasOwnCanGrant(entityRecord) {
   const grant = grantClauses(entityRecord);
-  return Array.isArray(grant) && grant.some((c) => c && typeof c.can === 'function');
+  return Array.isArray(grant) && grant.some((c) => isRuntimeGrantClause(c));
 }
 
 export function inheritedGrant(entityRecord) {

@@ -1,5 +1,6 @@
 import { assertGuarded } from './guard/static.mjs';
 import { buildCheckRegistry } from './registry.mjs';
+import { isRuntimeGrantClause } from './scope.mjs';
 import { compileReadScope, compileInheritScope } from './scope-sql.mjs';
 
 // Normalize the grant declaration into an array of clauses. A grant is either a
@@ -32,7 +33,7 @@ export function compileEntityAuthz(name, { fields, grant, declaredChecks }) {
   if (Array.isArray(clauses)) {
     // Every clause's runtime .can body is statically guarded.
     for (const clause of clauses) {
-      if (clause && typeof clause.can === 'function') {
+      if (isRuntimeGrantClause(clause)) {
         assertGuarded(clause.can, { where: `entity('${name}') grant .can` });
       }
     }
