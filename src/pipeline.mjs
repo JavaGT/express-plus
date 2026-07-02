@@ -11,6 +11,8 @@
 // (AGENTS.md, one reconciliation path).
 
 // Lazy import of effect compiler (avoids circular dependency at module load time).
+import { readSeq } from './cursor.mjs';
+
 // Use createRequire for dynamic import in ES module context.
 import { createRequire } from 'node:module';
 const _require = createRequire(import.meta.url);
@@ -413,12 +415,8 @@ export function createServer({ handlers = {}, authorize, db, projections: projec
 
   // ---- durable path (db engaged) — async, SQLite-backed ----
 
-  // nextSeq reads the persisted Cursor; assigns and upserts the new value.
   function nextSeq(scope) {
-    const row = db.prepare(
-      'SELECT lastSeq FROM _Cursor WHERE scope = ?',
-    ).get(scope);
-    const seq = (row?.lastSeq ?? 0) + 1;
+    const seq = readSeq(db, scope) + 1;
     db.prepare(
       'INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET lastSeq = ?',
     ).run(scope, seq, seq);
