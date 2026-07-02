@@ -36,10 +36,10 @@ import { readSeq } from './cursor.mjs';
 import { getLog } from './log.mjs';
 import { buildKernel } from './kernel.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
-import { resolveTemplate } from './views.mjs';
 import { readFileSync, existsSync } from 'node:fs';
 import { isSafePath, matchExtension } from './views.mjs';
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
+import { runChain } from './http-handler-chain.mjs';
 import { matchRoute } from './http-route-match.mjs';
 import { committedEventHeaders, sendJson } from './http-response.mjs';
 
@@ -413,176 +413,6 @@ async function handleJobRoute(app, req, res) {
   return false;
 }
 
-// The imperative terminal: run a hand-written handler chain over an Express-like
-// (req, res, next). This is the OTHER arm of the single dispatch fork — it never
-// touches the db or the row grant (an imperative route has no entity), so the
-// route gate is its only framework-applied auth, and the principal it sees was
-// already admitted by that gate (no second auth path).
-//
-// The chain is `[...optional middleware, finalHandler]`. Each handler is awaited
-// with (req, res, next). Calling next() with no argument advances to the next
-// handler; calling next(err) — including the deliberate next({ status, message })
-// shape — defers to the single error renderer and stops the chain. A handler that
-// writes the response (res.json / res.sendStatus / res.send) and does not call
-// next() ends the chain by completing the request.
-async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, query, autoLoad, app }, { env }) {
-  // an Express-like request facade over the node request. The raw node request
-  // remains reachable for handlers that need headers; the framework surfaces the
-  // already-parsed body, the matched path params, the parsed query, and the
-  // already-admitted principal.
-  const req = {
-    body,
-    params,
-    query: Object.fromEntries(query),
-    principal,
-    raw: nodeReq,
-    headers: nodeReq.headers,
-    method: nodeReq.method,
-    url: nodeReq.url,
-  };
-
-  // Entity auto-load: a route under an entity's `:<entity>Id` subtree admits the
-  // parent row for THIS principal via the SAME authorizeRead path snapshot and
-  // events-since use (bindReadScope + mayVerb('read')) — never the unscoped
-  // trusted findById, which would bypass read-scope (H1). Out-of-scope = 404 (no
-  // existence leak); in-scope-but-denied = 403; in neither case does the handler
-  // run. An admitted row is hydrated (principal-aware map handles) for the handler.
-  if (autoLoad) {
-    const auth = await authorizeRead(app, autoLoad.entity, params[autoLoad.param], principal);
-    if (auth.status) {
-      renderError(nodeRes, { status: auth.status, message: auth.status === 404 ? 'not found' : 'forbidden' }, { env });
-      return;
-    }
-    // Thread a dispatch ref so a store MUTATION off the hydrated row
-    // (`req.doc.collaborators.set(...)`) RE-ENTERS dispatch as a committed
-    // pipeline action (consult #19, UNIT 2) — the handle dispatches, the
-    // projection applies, one reconciliation path (no direct-SQL fallback). The
-    // ref is the writeQueue-wrapped kernel.dispatch (the same wrapping the CRUD
-    // sites use, so store mutations serialize through the single-writer mutex).
-    // Custom route handlers run OUTSIDE writeQueue, so re-entry acquires a free
-    // lock (no deadlock).
-    const dispatchRef = app?.kernel
-      ? (args) => app.writeQueue.run(() => app.kernel.dispatch(args))
-      : null;
-    req[autoLoad.key] = autoLoad.entity.hydrate(auth.row, principal, dispatchRef);
-  }
-
-  // an Express-like response facade over the node response. `status(n)` records a
-  // pending code and chains; `json`/`send` flush with it (defaulting to 200);
-  // `sendStatus(n)` ends with no body.
-  let pendingStatus = 200;
-  const res = {
-    status(code) {
-      pendingStatus = code;
-      return res;
-    },
-    json(value) {
-      sendJson(nodeRes, pendingStatus, value);
-      return res;
-    },
-    send(value) {
-      const payload = typeof value === 'string' ? value : String(value);
-      if (!nodeRes.headersSent) {
-        nodeRes.writeHead(pendingStatus, {
-          'content-type': 'text/plain; charset=utf-8',
-          'content-length': Buffer.byteLength(payload),
-        });
-      }
-      nodeRes.end(payload);
-      return res;
-    },
-    sendStatus(code) {
-      nodeRes.writeHead(code);
-      nodeRes.end();
-      return res;
-    },
-    render(name, data = {}) {
-      try {
-        const html = resolveTemplate(config.viewsDir ?? resolve(process.cwd(), 'views'), name, data);
-        if (!nodeRes.headersSent) {
-          nodeRes.writeHead(pendingStatus, {
-            'content-type': 'text/html; charset=utf-8',
-            'content-length': Buffer.byteLength(html),
-          });
-        }
-        nodeRes.end(html);
-      } catch (err) {
-        // Template read failure (e.g. file not found) → 500 or 404.
-        const status = err.code === 'ENOENT' ? 404 : 500;
-        renderError(nodeRes, { status, message: err.code === 'ENOENT' ? `template not found: ${name}` : err.message }, { env });
-      }
-      return res;
-    },
-    // Stream a Web Response / ReadableStream to the client — the SSE/streaming
-    // helper. Accepts a fetch-style Response (headers + body stream) or a bare
-    // ReadableStream. Writes status + headers once (copying the Web response's
-    // headers, defaulting content-type to text/event-stream for a bare stream),
-    // then pumps bytes until done. `X-Accel-Buffering: no` is set by default so
-    // nginx doesn't buffer the stream (the SSE footgun) — pass `{ buffering: false }`
-    // to opt out. One place owns the node-internal plumbing so a handler never
-    // casts `res.raw` or hand-rolls a `while (reader.read())` pump.
-    async stream(webResponse, { buffering = true } = {}) {
-      const isResponse = typeof webResponse?.body?.getReader === 'function'
-        || (webResponse && typeof webResponse.body === 'object');
-      const body = webResponse?.body ?? webResponse;
-      const headers = isResponse && webResponse.headers
-        ? Object.fromEntries(webResponse.headers.entries())
-        : {};
-      if (!('content-type' in headers) && !isResponse) {
-        headers['content-type'] = 'text/event-stream; charset=utf-8';
-      }
-      if (buffering) headers['x-accel-buffering'] = 'no';
-      if (!nodeRes.headersSent) {
-        nodeRes.writeHead(isResponse && Number.isFinite(webResponse.status) ? webResponse.status : pendingStatus, headers);
-      }
-      if (!body || typeof body.getReader !== 'function') {
-        nodeRes.end();
-        return res;
-      }
-      const reader = body.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (nodeRes.destroyed) break;
-          nodeRes.write(Buffer.isBuffer(value) ? value : Buffer.from(value));
-        }
-        if (!nodeRes.writableEnded) nodeRes.end();
-      } catch (err) {
-        // Headers are already committed mid-stream, so renderError (which writes
-        // a JSON body) would append trailing junk into the stream. The response
-        // is unrecoverable — tear down the socket instead. Log the pump failure
-        // for server-side observability.
-        getLog().warn('system', 'res.stream pump failed', { err });
-        if (!nodeRes.destroyed) nodeRes.destroy(err);
-      } finally {
-        try { await reader.cancel(); } catch { /* already closed */ }
-      }
-      return res;
-    },
-    raw: nodeRes,
-  };
-
-  // walk the chain. `next` is single-shot per step: it either advances (no arg)
-  // or renders an error and halts. A thrown error inside a handler propagates to
-  // makeRequestHandler's catch, which runs the same renderer.
-  for (const handler of handlers) {
-    let advance = false;
-    let errored = false;
-    const next = (err) => {
-      if (err) {
-        errored = true;
-        renderError(nodeRes, err, { env });
-      } else {
-        advance = true;
-      }
-    };
-    await handler(req, res, next);
-    if (errored) return;
-    if (!advance) return; // the handler completed the response (no next() call)
-  }
-}
-
 // The standard stateless CSRF guard (eng-review §8 Tier-2 ops bundle, #13). A
 // state-MUTATING request (anything but a safe method) carrying a FOREIGN Origin
 // or Referer is rejected; the browser always sends a foreign Origin on a
@@ -810,7 +640,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // second auth path — the chain inherits the already-admitted principal and
       // never re-gates.
       if (route.handlers) {
-        await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
+        await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source, authorizeRead }, { env });
       } else {
         await dispatch(req, res, route, principal, db, params, body, isApp ? source : null);
       }
