@@ -4,9 +4,10 @@ import { config } from './config.mjs';
 import { getLog } from './log.mjs';
 import { renderError } from './middleware.mjs';
 import { sendJson } from './http-response.mjs';
+import { authorizeRead } from './http-row-read.mjs';
 import { resolveTemplate } from './views.mjs';
 
-export async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, query, autoLoad, app, authorizeRead }, { env }) {
+export async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, query, autoLoad, app }, { env }) {
   const req = {
     body,
     params,

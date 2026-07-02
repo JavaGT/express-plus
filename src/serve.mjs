@@ -42,6 +42,7 @@ import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { runChain } from './http-handler-chain.mjs';
 import { matchRoute } from './http-route-match.mjs';
 import { committedEventHeaders, sendJson } from './http-response.mjs';
+import { readScopedRow, authorizeRead } from './http-row-read.mjs';
 
 // DB-backed dispatch for one admitted verb. The route gate already admitted the
 // request; here the SECOND default-on auth layer runs: the row grant's SQL scope
@@ -217,39 +218,6 @@ async function handleResyncRoute(app, req, res, principal) {
   if (seg[0] === 'snapshot') return snapshotRoute(app, entity, id, scopeKey, principal, res);
   const cursor = Number(url.searchParams.get('cursor') ?? 0);
   return eventsSinceRoute(app, entity, scopeKey, principal, res, cursor);
-}
-
-// Load the materialized row through the readScope (fail closed: out-of-scope OR
-// absent → 404) and admit via mayVerb('read'). Shared by snapshot + events-since
-// — both prove the viewer can read THIS scope's current row before serving it.
-// Read the materialized row through the readScope (fail closed: out-of-scope OR
-// absent → null). Synchronous — no await — so /snapshot can read the scope cursor
-// in the SAME statement block and return a (row, seq) pair that actually
-// coexisted: a concurrent dispatch commit must not advance the cursor in the gap
-// between reading the row and reading the cursor (eng-review Tier-1 #2). node:sqlite
-// is single-writer + sync, and there is no yield between these two reads.
-function readScopedRow(app, entity, id, principal) {
-  const bound = bindReadScope(entity.readScope, principal);
-  const where = bound ? bound.sql : '1=1';
-  const scopeParams = bound ? bound.params : {};
-  const row = app.db
-    .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
-    .get({ ...scopeParams, id });
-  return entity.deserializeRow(row);
-}
-
-// Load the materialized row through the readScope (fail closed: out-of-scope OR
-// absent → 404) and admit via mayVerb('read'). Shared by snapshot + events-since
-// — both prove the viewer can read THIS scope's current row before serving it.
-// `preRow` is supplied only by /snapshot, which must read the row + cursor together
-// (see readScopedRow); every other caller reads the row here.
-async function authorizeRead(app, entity, id, principal, preRow = null) {
-  const row = preRow ?? readScopedRow(app, entity, id, principal);
-  if (!row) return { status: 404 };
-  // mayRow owns inherit, scope-only, and own-.can handling; snapshot and
-  // events-since do not re-derive authorization shape.
-  if (!(await mayRow(entity, 'read', row, principal))) return { status: 403 };
-  return { row };
 }
 
 async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
@@ -640,7 +608,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // second auth path — the chain inherits the already-admitted principal and
       // never re-gates.
       if (route.handlers) {
-        await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source, authorizeRead }, { env });
+        await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
       } else {
         await dispatch(req, res, route, principal, db, params, body, isApp ? source : null);
       }
