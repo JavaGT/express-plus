@@ -115,6 +115,37 @@ export async function mayVerb(entityRecord, verb, row, principal) {
   return allowed;
 }
 
+// The one row-authorization decision every transport consumes. This is the
+// `hasOwnCanGrant` skip + `mayVerb` pair that was hand-copied across serve.mjs
+// (5×) and live.mjs (3×); concentrating it here writes the skip ONCE — the skip
+// is the load-bearing landmine (drop it and a scope-only entity flips admit→deny,
+// because mayVerb on a no-`.can` grant returns false).
+//
+//   - No own `.can` grant → return true (admit): the read-scope alone decided
+//     visibility, and this layer has no `.can` body to run (an inherit child's
+//     capabilities follow its parent, resolved upstream).
+//   - Own `.can` grant → run mayVerb inside a try/catch and fail CLOSED on throw
+//     (return false). A thrown `.can` body is a server bug; fail-closed denies
+//     rather than leaking the row. The REST path previously let a throw propagate
+//     to renderError as a 500 — folding the catch here makes every transport
+//     fail-closed uniformly, which is more correct (AGENTS: fail closed).
+//
+// Callers own their transport's deny action (REST sendJson 403, authorizeRead
+// returns {status:403}, live return/continue/this.error, list filter skip, the
+// create hook returns false) — the decision is uniform, the rendering is not.
+//
+// `authz` (optional) overrides the mayVerb engine used — the live server injects
+// its own mayVerb param (apps/tests can customize authorization there), so it
+// passes that through; REST dispatch uses the framework default.
+export async function mayRow(entityRecord, verb, row, principal, authz = mayVerb) {
+  if (!hasOwnCanGrant(entityRecord)) return true;
+  try {
+    return await authz(entityRecord, verb, row, principal);
+  } catch {
+    return false;
+  }
+}
+
 // Field-level capability authority (SPEC §6, AGENTS Authorization § "one auth
 // engine"). A field with `.can(fn)` owns its capability rule — `access({ is },
 // defaults)` → grant(...)/deny(...). A field WITHOUT `.can` strong-inherits the

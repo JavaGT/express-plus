@@ -34,7 +34,7 @@ import { FrameSender, FrameParser, upgradeWebSocket } from './websocket.mjs';
 import { isSameOriginRequest } from './middleware.mjs';
 import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
-import { hasOwnCanGrant } from './row-grant.mjs';
+import { mayRow } from './row-grant.mjs';
 import { PACE_STRATEGIES, validatePaceSelection } from './field-pace.mjs';
 import { computeDelta } from './field-delta.mjs';
 
@@ -112,16 +112,9 @@ export function createLiveServer(httpServer, {
     if (events.length === 0) return;
     if (conn.closed) return;
 
-    // Re-auth (fail-closed): a thrown check or !allowed → drop the buffer silently.
-    if (mayVerb && hasOwnCanGrant(entityRecord)) {
-      let allowed = true;
-      try {
-        allowed = await mayVerb(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous);
-      } catch {
-        allowed = false;
-      }
-      if (!allowed) return;
-    }
+    // Re-auth (fail-closed): mayRow owns the hasOwnCanGrant skip + the
+    // try/catch fail-closed; a thrown check or !allowed → drop the buffer.
+    if (!(await mayRow(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous, mayVerb))) return;
 
     // Coalesce using the ephemeral kind's logic.
     const kind = PACE_STRATEGIES.ephemeral;
@@ -336,15 +329,9 @@ export function createLiveServer(httpServer, {
         return;
       }
       if (!row) { this.error('forbidden'); return; }
-      if (hasOwnCanGrant(entity)) {
-        let allowed = true;
-        try {
-          const hydrated = entity.hydrate ? entity.hydrate(row, principal) : row;
-          allowed = await mayVerb(entity, 'subscribe', hydrated, principal);
-        } catch {
-          allowed = false;
-        }
-        if (!allowed) { this.error('forbidden'); return; }
+      {
+        const hydrated = entity.hydrate ? entity.hydrate(row, principal) : row;
+        if (!(await mayRow(entity, 'subscribe', hydrated, principal, mayVerb))) { this.error('forbidden'); return; }
       }
       addSubscription(msg.entity, idStr, this, fields, pace);
       this.send({
@@ -503,18 +490,12 @@ export function createLiveServer(httpServer, {
         subs.delete(conn);
         continue;
       }
-      if (mayVerb && hasOwnCanGrant(entityRecord) && !removed) {
-        // AWAIT — the bypass bug was calling mayVerb without await, so the
-        // returned Promise was always truthy and the `!allowed` guard never
-        // fired. The SAME mayVerb the REST dispatch uses (verb='subscribe') —
-        // no second auth path.
-        let allowed = true;
-        try {
-          allowed = await mayVerb(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous);
-        } catch {
-          allowed = false;                   // a thrown check fails closed
-        }
-        if (!allowed) continue;
+      if (!removed && !(await mayRow(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous, mayVerb))) {
+        // mayRow owns the hasOwnCanGrant skip + try/catch fail-closed (the
+        // bypass bug was calling mayVerb without await — mayRow awaits). Removed
+        // events skip re-auth intentionally: the remove IS the revocation signal,
+        // forwarded to every current subscriber before the row is gone.
+        continue;
       }
       // Interest filter for ephemeral events: deliver ONLY if the subscriber's
       // SubSpec.fields includes the ephemeral field. Pass-through events

@@ -21,7 +21,7 @@ export { action, event, createServer, createClient, NOW } from './pipeline.mjs';
 export { createLiveServer } from './live.mjs';
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
 export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views.mjs';
-export { mayVerb, mayFieldOp } from './row-grant.mjs';
+export { mayVerb, mayFieldOp, mayRow } from './row-grant.mjs';
 export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL } from './ddl.mjs';
 export { config } from './config.mjs';
 export { parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE } from './session.mjs';

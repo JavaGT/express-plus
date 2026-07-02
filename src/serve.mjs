@@ -25,7 +25,7 @@ import { resolve } from 'node:path';
 import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
 import { ValidationError, resolveStrategy } from './field-strategy.mjs';
-import { mayVerb, hasOwnCanGrant } from './row-grant.mjs';
+import { mayVerb, hasOwnCanGrant, mayRow } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
@@ -330,7 +330,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     if (hasOwnCanGrant(entity)) {
       listed = [];
       for (const row of rows) {
-        if (await mayVerb(entity, 'list', row, principal)) listed.push(row);
+        if (await mayRow(entity, 'list', row, principal)) listed.push(row);
       }
     }
     addProjectedCursors(res, db, entity);
@@ -345,7 +345,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
     // not visible under scope OR absent → 404 (do not distinguish, fail closed).
     if (!row) return void sendJson(res, 404, { error: 'not found' });
     entity.deserializeRow(row);
-    if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'read', row, principal))) {
+    if (!(await mayRow(entity, 'read', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
     addProjectedCursors(res, db, entity);
@@ -382,7 +382,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
       .get({ ...scopeParams, id: params.id });
     if (!row) return void sendJson(res, 404, { error: 'not found' });
     entity.deserializeRow(row);
-    if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'update', row, principal))) {
+    if (!(await mayRow(entity, 'update', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
     let result;
@@ -413,7 +413,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
       .get({ ...scopeParams, id: params.id });
     if (!row) return void sendJson(res, 404, { error: 'not found' });
     entity.deserializeRow(row);
-    if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'remove', row, principal))) {
+    if (!(await mayRow(entity, 'remove', row, principal))) {
       return void sendJson(res, 403, { error: 'forbidden' });
     }
     let result;
@@ -499,7 +499,7 @@ async function authorizeRead(app, entity, id, principal, preRow = null) {
   // one rule across every read path, no second authz logic). MayVerb on a no-`.can`
   // grant denies (no clause to run); an entity AUTHORING a capability set always
   // has a `.can`, so this skip never bypasses a real capability decision.
-  if (hasOwnCanGrant(entity) && !(await mayVerb(entity, 'read', row, principal))) return { status: 403 };
+  if (!(await mayRow(entity, 'read', row, principal))) return { status: 403 };
   return { row };
 }
 
