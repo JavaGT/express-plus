@@ -765,6 +765,53 @@ async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, q
       }
       return res;
     },
+    // Stream a Web Response / ReadableStream to the client — the SSE/streaming
+    // helper. Accepts a fetch-style Response (headers + body stream) or a bare
+    // ReadableStream. Writes status + headers once (copying the Web response's
+    // headers, defaulting content-type to text/event-stream for a bare stream),
+    // then pumps bytes until done. `X-Accel-Buffering: no` is set by default so
+    // nginx doesn't buffer the stream (the SSE footgun) — pass `{ buffering: false }`
+    // to opt out. One place owns the node-internal plumbing so a handler never
+    // casts `res.raw` or hand-rolls a `while (reader.read())` pump.
+    async stream(webResponse, { buffering = true } = {}) {
+      const isResponse = typeof webResponse?.body?.getReader === 'function'
+        || (webResponse && typeof webResponse.body === 'object');
+      const body = webResponse?.body ?? webResponse;
+      const headers = isResponse && webResponse.headers
+        ? Object.fromEntries(webResponse.headers.entries())
+        : {};
+      if (!('content-type' in headers) && !isResponse) {
+        headers['content-type'] = 'text/event-stream; charset=utf-8';
+      }
+      if (buffering) headers['x-accel-buffering'] = 'no';
+      if (!nodeRes.headersSent) {
+        nodeRes.writeHead(isResponse && Number.isFinite(webResponse.status) ? webResponse.status : pendingStatus, headers);
+      }
+      if (!body || typeof body.getReader !== 'function') {
+        nodeRes.end();
+        return res;
+      }
+      const reader = body.getReader();
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (nodeRes.destroyed) break;
+          nodeRes.write(Buffer.isBuffer(value) ? value : Buffer.from(value));
+        }
+        if (!nodeRes.writableEnded) nodeRes.end();
+      } catch (err) {
+        // Headers are already committed mid-stream, so renderError (which writes
+        // a JSON body) would append trailing junk into the stream. The response
+        // is unrecoverable — tear down the socket instead. Log the pump failure
+        // for server-side observability.
+        getLog().warn('system', 'res.stream pump failed', { err });
+        if (!nodeRes.destroyed) nodeRes.destroy(err);
+      } finally {
+        try { await reader.cancel(); } catch { /* already closed */ }
+      }
+      return res;
+    },
     raw: nodeRes,
   };
 

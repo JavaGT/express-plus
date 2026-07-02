@@ -4,8 +4,12 @@
   "description": "Express, but for collaborative, persisted, realtime data.",
   "type": "module",
   "main": "src/index.mjs",
+  "types": "index.d.ts",
   "exports": {
-    ".": "./src/index.mjs"
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./src/index.mjs"
+    }
   },
   "scripts": {
     "test": "node --test"

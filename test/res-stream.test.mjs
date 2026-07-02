@@ -1,0 +1,156 @@
+// res.stream — the SSE/streaming response helper (#4 + #7 from the Scope
+// ergonomics review). A handler streams a Web Response or ReadableStream through
+// res.stream; the framework owns the header write + the reader pump + the
+// X-Accel-Buffering: no default (the nginx SSE footgun). No res.raw casts, no
+// hand-rolled `while (reader.read())` loops in app code.
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import expressPlus, { router, open } from '../src/index.mjs';
+
+async function listen(app) {
+  const server = app.listen(0);
+  await new Promise((resolve) => {
+    if (server.httpServer.listening) resolve();
+    else server.httpServer.once('listening', resolve);
+  });
+  const { port } = server.httpServer.address();
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    close: () => new Promise((r) => server.httpServer.close(r)),
+  };
+}
+
+test('res.stream pumps a bare ReadableStream as text/event-stream with X-Accel-Buffering: no', async () => {
+  const r = router();
+  r.get('/events', open(), (req, res) => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('data: one\n\n'));
+        controller.enqueue(new TextEncoder().encode('data: two\n\n'));
+        controller.close();
+      },
+    });
+    return res.stream(stream);
+  });
+  const app = expressPlus().use('/api', r);
+  const { origin, close } = await listen(app);
+  try {
+    const res = await fetch(`${origin}/api/events`);
+    assert.equal(res.status, 200);
+    assert.equal(res.headers.get('content-type'), 'text/event-stream; charset=utf-8');
+    assert.equal(res.headers.get('x-accel-buffering'), 'no');
+    const text = await res.text();
+    assert.equal(text, 'data: one\n\ndata: two\n\n');
+  } finally {
+    await close();
+  }
+});
+
+test('res.stream copies a Web Response headers + status and pumps its body', async () => {
+  const r = router();
+  r.get('/backup', open(), (req, res) => {
+    const web = new Response('hello-bytes', {
+      status: 202,
+      headers: { 'content-type': 'application/octet-stream' },
+    });
+    return res.stream(web);
+  });
+  const app = expressPlus().use('/api', r);
+  const { origin, close } = await listen(app);
+  try {
+    const res = await fetch(`${origin}/api/backup`);
+    assert.equal(res.status, 202);
+    assert.equal(res.headers.get('content-type'), 'application/octet-stream');
+    assert.equal(await res.text(), 'hello-bytes');
+  } finally {
+    await close();
+  }
+});
+
+test('res.status(n).stream(...) carries the pending status code', async () => {
+  const r = router();
+  r.get('/partial', open(), (req, res) => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('chunk'));
+        controller.close();
+      },
+    });
+    return res.status(206).stream(stream);
+  });
+  const app = expressPlus().use('/api', r);
+  const { origin, close } = await listen(app);
+  try {
+    const res = await fetch(`${origin}/api/partial`);
+    assert.equal(res.status, 206);
+    assert.equal(await res.text(), 'chunk');
+  } finally {
+    await close();
+  }
+});
+
+test('res.stream opts out of X-Accel-Buffering with { buffering: false }', async () => {
+  const r = router();
+  r.get('/raw', open(), (req, res) => {
+    const stream = new ReadableStream({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('ok'));
+        controller.close();
+      },
+    });
+    return res.stream(stream, { buffering: false });
+  });
+  const app = expressPlus().use('/api', r);
+  const { origin, close } = await listen(app);
+  try {
+    const res = await fetch(`${origin}/api/raw`);
+    assert.equal(res.headers.get('x-accel-buffering'), null);
+    assert.equal(await res.text(), 'ok');
+  } finally {
+    await close();
+  }
+});
+
+test('res.stream tears down the socket on a mid-stream pump error (no JSON junk appended)', async () => {
+  let reads = 0;
+  const r = router();
+  r.get('/broken', open(), (req, res) => {
+    const stream = new ReadableStream({
+      pull(controller) {
+        reads += 1;
+        if (reads === 1) {
+          controller.enqueue(new TextEncoder().encode('data: partial\n\n'));
+          return;
+        }
+        // Second pull errors mid-stream, AFTER the first chunk has flushed.
+        controller.error(new Error('upstream blew up'));
+      },
+    });
+    return res.stream(stream);
+  });
+  const app = expressPlus().use('/api', r);
+  const { origin, close } = await listen(app);
+  try {
+    // The stream errors mid-flight. Either the socket is torn down (fetch
+    // rejects — the correct clean recovery) OR a partial body arrives; in
+    // NEITHER case may the body end with a JSON error tail (the body-
+    // corruption bug renderError would introduce after headers are sent).
+    let text = '';
+    try {
+      const res = await fetch(`${origin}/api/broken`);
+      assert.equal(res.status, 200);
+      assert.equal(res.headers.get('content-type'), 'text/event-stream; charset=utf-8');
+      text = await res.text().catch(() => '');
+    } catch {
+      // Socket torn down before fetch could complete — acceptable.
+    }
+    assert.ok(
+      !text.includes('"error"') && !text.includes('internal error'),
+      `stream body should not contain a JSON error tail, got: ${JSON.stringify(text)}`,
+    );
+  } finally {
+    await close();
+  }
+});
