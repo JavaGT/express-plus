@@ -1,4 +1,4 @@
-import { mayVerb, hasOwnCanGrant } from './row-grant.mjs';
+import { mayRow } from './row-grant.mjs';
 import { admitSystemMutation } from './schedule.mjs';
 import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer, durableMutationVariant } from './pipeline.mjs';
@@ -82,7 +82,6 @@ function buildDurableAdmission(app) {
       if (verb !== 'create') return true;
       const entity = app.entities?.get(entityName);
       if (!entity) return false;
-      if (!hasOwnCanGrant(entity)) return true;
       const id = event?.data?.id;
       if (id == null) return false;
       let row = null;
@@ -92,7 +91,7 @@ function buildDurableAdmission(app) {
         row = null;
       }
       if (!row) return false;
-      return mayVerb(entity, verb, row, principal);
+      return mayRow(entity, verb, row, principal);
     },
   };
 }

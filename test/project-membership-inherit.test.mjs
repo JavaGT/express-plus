@@ -223,6 +223,18 @@ test('project members can read child documents through inherited project members
   assert.equal((await response.json()).title, 'Shared document');
 });
 
+test('project members cannot update child documents without inherited parent write capability', async (t) => {
+  const { origin } = await serveProjectDocuments(t, member);
+
+  const response = await fetch(`${origin}/documents/d1`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Member hijack' }),
+  });
+
+  assert.equal(response.status, 403);
+});
+
 test('non-members cannot see child documents inherited from private projects', async (t) => {
   const { origin } = await serveProjectDocuments(t, stranger);
 

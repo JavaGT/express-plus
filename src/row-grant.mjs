@@ -43,8 +43,7 @@ function makeIs(entityRecord, row, principal) {
 // un-awaited check fails closed instead of silently granting.
 //
 // The read-scope already decided this row is VISIBLE; the .can body decides the
-// capabilities held on it. A grant with no scope clause (an inherit child) has no
-// own .can body here — its capabilities follow its parent, resolved upstream.
+// capabilities held on it.
 export async function rowCapabilities(entityRecord, row, principal) {
   const clauses = typeof entityRecord.grant === 'function' ? entityRecord.grant() : null;
   const clause = Array.isArray(clauses)
@@ -87,14 +86,20 @@ const VERB_CAPABILITY = Object.freeze({
 
 // True iff the entity's grant carries its OWN `.can` body (a scope(...).can(fn)
 // clause). Inherit children (grant is an `inherit` directive) and scope-only
-// grants have NO own `.can` — their capability resolves elsewhere (the parent
-// seam for inherit children; the read-scope alone for scope-only). `mayVerb`
-// returns denied for such entities (no clause to run), so callers that gate on
-// mayVerb (the create in-txn hook, the list post-filter) must SKIP them rather
-// than deny — authorize what the row-grant engine can resolve at this layer.
+// grants have NO own `.can`; mayRow owns those cases before falling through to
+// mayVerb for entities with an own runtime capability body.
+function grantClauses(entityRecord) {
+  return typeof entityRecord.grant === 'function' ? entityRecord.grant() : entityRecord.grant;
+}
+
 export function hasOwnCanGrant(entityRecord) {
-  const grant = typeof entityRecord.grant === 'function' ? entityRecord.grant() : null;
+  const grant = grantClauses(entityRecord);
   return Array.isArray(grant) && grant.some((c) => c && typeof c.can === 'function');
+}
+
+export function inheritedGrant(entityRecord) {
+  const grant = grantClauses(entityRecord);
+  return grant && grant.inherit ? grant : null;
 }
 
 // True iff the principal holds the capability `verb` requires on this row. The
@@ -115,20 +120,16 @@ export async function mayVerb(entityRecord, verb, row, principal) {
   return allowed;
 }
 
-// The one row-authorization decision every transport consumes. This is the
-// `hasOwnCanGrant` skip + `mayVerb` pair that was hand-copied across serve.mjs
-// (5×) and live.mjs (3×); concentrating it here writes the skip ONCE — the skip
-// is the load-bearing landmine (drop it and a scope-only entity flips admit→deny,
-// because mayVerb on a no-`.can` grant returns false).
+// The one row-authorization decision every transport consumes.
 //
-//   - No own `.can` grant → return true (admit): the read-scope alone decided
-//     visibility, and this layer has no `.can` body to run (an inherit child's
-//     capabilities follow its parent, resolved upstream).
+//   - Inherit directive → load the parent row through the declared FK and recurse
+//     into the parent's mayRow decision, so inherited visibility and inherited
+//     capabilities stay one concept.
+//   - Scope-only grant → return true (admit): the read-scope alone decided
+//     visibility, and this layer has no `.can` body to run.
 //   - Own `.can` grant → run mayVerb inside a try/catch and fail CLOSED on throw
 //     (return false). A thrown `.can` body is a server bug; fail-closed denies
-//     rather than leaking the row. The REST path previously let a throw propagate
-//     to renderError as a 500 — folding the catch here makes every transport
-//     fail-closed uniformly, which is more correct (AGENTS: fail closed).
+//     rather than leaking the row.
 //
 // Callers own their transport's deny action (REST sendJson 403, authorizeRead
 // returns {status:403}, live return/continue/this.error, list filter skip, the
@@ -137,9 +138,24 @@ export async function mayVerb(entityRecord, verb, row, principal) {
 // `authz` (optional) overrides the mayVerb engine used — the live server injects
 // its own mayVerb param (apps/tests can customize authorization there), so it
 // passes that through; REST dispatch uses the framework default.
+function inheritedParentRow(entityRecord, row, principal) {
+  const inherited = inheritedGrant(entityRecord);
+  if (!inherited) return null;
+  const parent = inherited.inherit;
+  const parentId = row?.[inherited.via];
+  if (parentId == null || !parent || typeof parent.findById !== 'function') return null;
+  return parent.findById(String(parentId), principal);
+}
+
 export async function mayRow(entityRecord, verb, row, principal, authz = mayVerb) {
-  if (!hasOwnCanGrant(entityRecord)) return true;
   try {
+    const inherited = inheritedGrant(entityRecord);
+    if (inherited) {
+      const parentRow = inheritedParentRow(entityRecord, row, principal);
+      if (!parentRow) return false;
+      return await mayRow(inherited.inherit, verb, parentRow, principal, authz);
+    }
+    if (!hasOwnCanGrant(entityRecord)) return true;
     return await authz(entityRecord, verb, row, principal);
   } catch {
     return false;

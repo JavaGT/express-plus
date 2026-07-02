@@ -198,9 +198,8 @@ test('owner may update and remove a public-read row', async (t) => {
   assert.equal(gone, undefined);
 });
 
-// Inherit-child entity for testing the hasOwnCanGrant guard on update/remove.
-// The child inherits the parent's scope; it has no own .can clause, so the
-// new hasOwnCanGrant guard in serve.mjs must skip mayVerb for update/remove.
+// Inherit-child entity for testing update/remove through the parent grant.
+// The child inherits the parent's scope and capabilities through the declared FK.
 function makeDoc() {
   return entity('Doc', {
     fields: {

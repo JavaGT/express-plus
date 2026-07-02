@@ -103,8 +103,8 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     if (events.length === 0) return;
     if (conn.closed) return;
 
-    // Re-auth (fail-closed): mayRow owns the hasOwnCanGrant skip + the
-    // try/catch fail-closed; a thrown check or !allowed drops the buffer.
+    // Re-auth (fail-closed): mayRow owns inherit/scope-only/.can handling; a
+    // thrown check or !allowed drops the buffer.
     if (!(await mayRow(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous, mayVerb))) return;
 
     // Coalesce using the ephemeral kind's logic.
@@ -174,9 +174,9 @@ export function createLiveFanout({ mayVerb = null } = {}) {
         continue;
       }
       if (!removed && !(await mayRow(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous, mayVerb))) {
-        // mayRow owns the hasOwnCanGrant skip + try/catch fail-closed. Removed
-        // events skip re-auth intentionally: the remove IS the revocation signal,
-        // forwarded to every current subscriber before the row is gone.
+        // mayRow owns inherit/scope-only/.can handling. Removed events skip
+        // re-auth intentionally: the remove IS the revocation signal, forwarded
+        // to every current subscriber before the row is gone.
         continue;
       }
       // Interest filter for ephemeral events: deliver ONLY if the subscriber's

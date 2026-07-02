@@ -25,7 +25,7 @@ import { resolve } from 'node:path';
 import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
 import { ValidationError } from './field-strategy.mjs';
-import { mayVerb, hasOwnCanGrant, mayRow } from './row-grant.mjs';
+import { mayVerb, mayRow } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
@@ -308,19 +308,14 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
   if (verb === 'list') {
     const rows = db.prepare(`SELECT * FROM ${table} AS t0 WHERE ${where}`).all(scopeParams)
       .map((row) => entity.deserializeRow(row));
-    // Post-filter through the SAME mayVerb('list') engine `read` uses — the SQL
+    // Post-filter through the SAME mayRow('list') engine `read` uses — the SQL
     // scope decides VISIBILITY, the .can body decides the read CAPABILITY. A
     // grant can admit a row via scope yet deny read in .can; without this list
-    // would leak it (one auth path: list + read agree). Entities with no own
-    // `.can` (scope-only / inherit children resolved at the parent seam) are
-    // NOT filtered — mayVerb denies them (no clause) and would wrongly empty
-    // the list; their scope already decided visibility.
-    let listed = rows;
-    if (hasOwnCanGrant(entity)) {
-      listed = [];
-      for (const row of rows) {
-        if (await mayRow(entity, 'list', row, principal)) listed.push(row);
-      }
+    // would leak it (one auth path: list + read agree). mayRow owns inherit and
+    // scope-only handling so list does not re-derive the skip.
+    const listed = [];
+    for (const row of rows) {
+      if (await mayRow(entity, 'list', row, principal)) listed.push(row);
     }
     addProjectedCursors(res, db, entity);
     sendJson(res, 200, listed);
@@ -482,12 +477,8 @@ function readScopedRow(app, entity, id, principal) {
 async function authorizeRead(app, entity, id, principal, preRow = null) {
   const row = preRow ?? readScopedRow(app, entity, id, principal);
   if (!row) return { status: 404 };
-  // The .can capability body runs only for entities that HAVE one; a scope-only
-  // / bare grant is admitted by its read-scope alone (hasOwnCanGrant gates the
-  // same false-positive deny that the list post-filter and create hook skip —
-  // one rule across every read path, no second authz logic). MayVerb on a no-`.can`
-  // grant denies (no clause to run); an entity AUTHORING a capability set always
-  // has a `.can`, so this skip never bypasses a real capability decision.
+  // mayRow owns inherit, scope-only, and own-.can handling; snapshot and
+  // events-since do not re-derive authorization shape.
   if (!(await mayRow(entity, 'read', row, principal))) return { status: 403 };
   return { row };
 }

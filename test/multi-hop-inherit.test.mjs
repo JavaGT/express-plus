@@ -26,9 +26,8 @@
 //      rows whose Feed ancestor the principal subscribes to — for a subscriber,
 //      a different feed's subscriber, and a stranger/anonymous (fail-closed).
 //   4. the parent (Feed) still admits its subscriber through BOTH layers
-//      (SQL scope AND runtime mayVerb) — the inherit children resolve
-//      capabilities through the parent seam (no own .can), so only the parent's
-//      mayVerb is meaningful here, by design (row-grant.mjs hasOwnCanGrant).
+//      (SQL scope AND runtime mayVerb) — inherit children resolve capabilities
+//      by recursing through the parent seam.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
