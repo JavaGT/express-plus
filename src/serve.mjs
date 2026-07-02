@@ -35,6 +35,7 @@ import { startReaper } from './reaper.mjs';
 import { createLiveServer } from './live.mjs';
 import { executeFrameworkDDL } from './ddl.mjs';
 import { createServer } from './pipeline.mjs';
+import { readSeq } from './cursor.mjs';
 import { buildEffectsRegistry, validateEffects } from './effect-compiler.mjs';
 import { User, Session, Inbox } from './auth-entities.mjs';
 import { getActiveDb, setActiveDb } from './db.mjs';
@@ -509,15 +510,13 @@ async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
   // (eng-review Tier-1 #2): the cursor is captured alongside the row, before the
   // async mayVerb yields. The pair we authorize is the pair we return.
   const row = readScopedRow(app, entity, id, principal);
-  const cursorRow = app.db
-    .prepare('SELECT lastSeq FROM _Cursor WHERE scope = ?')
-    .get(scopeKey);
+  const lastSeq = readSeq(app.db, scopeKey);
   const auth = await authorizeRead(app, entity, id, principal, row);
   if (auth.status) {
     sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
     return true;
   }
-  sendJson(res, 200, { snapshot: auth.row, seq: cursorRow ? cursorRow.lastSeq : 0 });
+  sendJson(res, 200, { snapshot: auth.row, seq: lastSeq });
   return true;
 }
 
