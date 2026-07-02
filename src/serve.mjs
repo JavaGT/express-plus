@@ -40,53 +40,8 @@ import { resolveTemplate } from './views.mjs';
 import { readFileSync, existsSync } from 'node:fs';
 import { isSafePath, matchExtension } from './views.mjs';
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
+import { matchRoute } from './http-route-match.mjs';
 import { committedEventHeaders, sendJson } from './http-response.mjs';
-
-// Match a concrete request path against a route's path template. Phase-1 routes
-// carry literal segments and `:param` segments (e.g. `/notes/:id`). Returns the
-// bound params on a match, or null on no match. A segment count mismatch is a
-// non-match (a longer or shorter path is a different route).
-function matchPath(template, actual) {
-  const t = template.split('/').filter(Boolean);
-  const a = actual.split('/').filter(Boolean);
-  if (t.length !== a.length) return null;
-  const params = {};
-  for (let i = 0; i < t.length; i += 1) {
-    if (t[i].startsWith(':')) {
-      params[t[i].slice(1)] = decodeURIComponent(a[i]);
-    } else if (t[i] !== a[i]) {
-      return null;
-    }
-  }
-  return params;
-}
-
-// Specificity of a path template: the count of LITERAL (non-param) segments.
-// More literals = more specific. A literal route (`/docs/feed`) beats a
-// parametric one (`/docs/:id`) for the same request regardless of declaration
-// order — so a CRUD `/:id` declared by `r.resource()` does not shadow a
-// hand-written `/feed` route the entity mounts after it. Ties (same literal
-// count, e.g. `/a/:x` vs `/:a/b`) fall back to declaration order (first wins).
-function specificity(template) {
-  return template.split('/').filter((s) => s && !s.startsWith(':')).length;
-}
-
-// Find the route whose method AND path template match the request, preferring
-// the MOST SPECIFIC match. Path is matched first so a known path with the wrong
-// method can be told apart (405) from an unknown path (404).
-function matchRoute(routes, method, pathname) {
-  let pathMatched = false;
-  let best = null;
-  for (const route of routes) {
-    const params = matchPath(route.path, pathname);
-    if (params === null) continue;
-    pathMatched = true;
-    if (route.method !== method) continue;
-    const score = specificity(route.path);
-    if (!best || score > best.score) best = { route, params, score };
-  }
-  return best ? { route: best.route, params: best.params } : { route: null, params: null, pathMatched };
-}
 
 // DB-backed dispatch for one admitted verb. The route gate already admitted the
 // request; here the SECOND default-on auth layer runs: the row grant's SQL scope
