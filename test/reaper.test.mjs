@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { entity, scope, everyone, grant, read, tick, date, schedule } from '../src/index.mjs';
 import { generateDDL } from '../src/ddl.mjs';
-import { createServer } from '../src/pipeline.mjs';
+import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
 import { admitSystemMutation, discoverDueSchedules, schedulerSource } from '../src/schedule.mjs';
 import { startReaper } from '../src/reaper.mjs';
@@ -14,9 +14,9 @@ import { startReaper } from '../src/reaper.mjs';
 // The reaper is a CLOCK TRIGGER, not an authority (DECISIONLOG
 // #19, #62). Each interval it discovers due rows via
 // discoverDueSchedules, dispatches `update` under a scheduler
-// system principal, and the dispatch spine routes through
-// preProjectionAuthorize → admitSystemMutation (the admission
-// gate). ONE reconciliation path — no second auth path.
+// system principal, and the dispatch spine routes through the
+// durable variant's beforeProjection admission seam. ONE reconciliation path —
+// no second auth path.
 //
 // Each dispatch has try/catch + stderr — one row's deny/throw
 // NEVER aborts the sweep (mirror tick engine pattern).
@@ -41,9 +41,11 @@ function makeAppWithSchedule(entityDef) {
   const server = createServer({
     handlers: entityDef.crudHandlers,
     db,
-    projections: [entityDef.projection],
     authorize: () => true,
-    preProjectionAuthorize: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
+    pipeline: durableMutationVariant({
+      projectionConsumers: [entityDef.projection],
+      admission: {
+        beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
       const ent = entities.get(en);
       if (!ent) return false;
@@ -52,6 +54,9 @@ function makeAppWithSchedule(entityDef) {
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
       });
     },
+        afterProjection: async () => true,
+      },
+    }),
   });
 
   return { db, entity: entityDef, entities, server };
@@ -300,7 +305,7 @@ test('admitSystemMutation DENIES non-system principal', () => {
 });
 
 // ============================================================
-// e2e: schedule source wired through preProjectionAuthorize
+// e2e: schedule source wired through beforeProjection admission
 // ============================================================
 test('e2e: reaper dispatch updates row through projection (ADMITTED)', async (t) => {
   const publishedAt = date();

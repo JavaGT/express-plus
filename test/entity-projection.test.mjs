@@ -33,7 +33,7 @@ test('entity-projection: create — handler emits event — entity.projection wr
 
   for (const sql of Note.generateDDL()) db.exec(sql);
 
-  const { createServer } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -46,7 +46,9 @@ test('entity-projection: create — handler emits event — entity.projection wr
     },
     authorize: () => true,
     db,
-    projections: [Note.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Note.projection],
+    }),
   });
 
   const result = await server.dispatch({
@@ -86,7 +88,7 @@ test('entity-projection: create — round-trip: row == reducer fold', async () =
 
   for (const sql of Note.generateDDL()) db.exec(sql);
 
-  const { createServer } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -99,7 +101,9 @@ test('entity-projection: create — round-trip: row == reducer fold', async () =
     },
     authorize: () => true,
     db,
-    projections: [Note.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Note.projection],
+    }),
   });
 
   const result = await server.dispatch({
@@ -143,7 +147,7 @@ test('entity-projection: update — projection updates row', async () => {
 
   const row = Note.create({ body: 'original' });
 
-  const { createServer } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -153,7 +157,9 @@ test('entity-projection: update — projection updates row', async () => {
     },
     authorize: () => true,
     db,
-    projections: [Note.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Note.projection],
+    }),
   });
 
   const result = await server.dispatch({
@@ -202,7 +208,7 @@ test('entity-projection: update — struct (link) cells persist to the row', asy
   const row = Doc.create({ title: 'memo', linkShare: { token: 'tok-1', tier: 'view' } });
   assert.equal(row.linkShare.tier, 'view');
 
-  const { createServer } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -212,7 +218,9 @@ test('entity-projection: update — struct (link) cells persist to the row', asy
     },
     authorize: () => true,
     db,
-    projections: [Doc.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Doc.projection],
+    }),
   });
 
   const result = await server.dispatch({
@@ -251,7 +259,7 @@ test('entity-projection: remove — projection deletes row', async () => {
 
   const row = Note.create({ body: 'delete me' });
 
-  const { createServer } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -261,7 +269,9 @@ test('entity-projection: remove — projection deletes row', async () => {
     },
     authorize: () => true,
     db,
-    projections: [Note.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Note.projection],
+    }),
   });
 
   const result = await server.dispatch({
@@ -292,7 +302,7 @@ test('entity-projection: projection failure rolls back the whole txn', async () 
 
   for (const sql of Note.generateDDL()) db.exec(sql);
 
-  const { createServer } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -302,10 +312,12 @@ test('entity-projection: projection failure rolls back the whole txn', async () 
     },
     authorize: () => true,
     db,
-    projections: [{
-      eventTypes: ['Note.created'],
-      apply: () => { throw new Error('projection failure'); },
-    }],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [{
+        eventTypes: ['Note.created'],
+        apply: () => { throw new Error('projection failure'); },
+      }],
+    }),
   });
 
   await assert.rejects(

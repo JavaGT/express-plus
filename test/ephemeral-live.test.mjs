@@ -13,7 +13,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   entity, text, ephemeral, scope, everyone, grant, read, write, subscribe, generateDDL,
-  createServer, executeFrameworkDDL, principal as makePrincipal,
+  createServer, durableMutationVariant, executeFrameworkDDL, principal as makePrincipal,
 } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -38,9 +38,11 @@ async function makeServer(db) {
   return createServer({
     db,
     handlers: Canvas.crudHandlers,
-    projections: [Canvas.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Canvas.projection],
+      admission: { beforeProjection: () => true, afterProjection: async () => true },
+    }),
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
   });
 }
 

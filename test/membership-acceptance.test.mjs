@@ -42,7 +42,7 @@ import {
   deny,
   anyOf,
   never,
-  createServer,
+  createServer, durableMutationVariant,
   executeFrameworkDDL,
 } from '../src/index.mjs';
 import { principal } from '../src/principal.mjs';
@@ -92,9 +92,11 @@ async function seedWithServer() {
   const server = await createServer({
     db,
     handlers: TodoList.crudHandlers,
-    projections: [TodoList.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [TodoList.projection],
+      admission: { beforeProjection: () => true, afterProjection: async () => true },
+    }),
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
   });
   return { db, TodoList, server };
 }

@@ -24,29 +24,17 @@ import { resolve } from 'node:path';
 
 import { anonymous } from './principal.mjs';
 import { bindReadScope } from './scope-sql.mjs';
-import { ValidationError, resolveStrategy } from './field-strategy.mjs';
+import { ValidationError } from './field-strategy.mjs';
 import { mayVerb, hasOwnCanGrant, mayRow } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
-import { admitSystemMutation } from './schedule.mjs';
 import { startTickEngine } from './tick-engine.mjs';
 import { startReaper } from './reaper.mjs';
 import { createLiveServer } from './live.mjs';
-import { executeFrameworkDDL } from './ddl.mjs';
-import { createServer } from './pipeline.mjs';
 import { readSeq } from './cursor.mjs';
-import { buildEffectsRegistry, validateEffects } from './effect-compiler.mjs';
-import { User, Session, Inbox } from './auth-entities.mjs';
-import { getActiveDb, setActiveDb } from './db.mjs';
 import { getLog } from './log.mjs';
-
-// Framework auth entities are always-available effect targets (an app's effect
-// may target Inbox without mounting it — auth entities are never request-facing
-// routes). They must be present in the validation set so the admission handshake
-// can resolve them + their `admitsEffects`.
-const FRAMEWORK_ENTITIES = [User, Session, Inbox];
-import { createWriteQueue } from './write-queue.mjs';
+import { buildKernel } from './kernel.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
 import { resolveTemplate } from './views.mjs';
 import { readFileSync, existsSync } from 'node:fs';
@@ -1088,294 +1076,6 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
 // Graceful shutdown (SPEC §3) is framework-owned: SIGTERM/SIGINT close the live
 // server, and an unhandledRejection/uncaughtException is trapped. The app mounts
 // none of this — `app.shutdown()` is the close the traps call (and tests use).
-// Build the durable mutation kernel over the app's mounted entities. Every
-// entity's auto-generated crudHandlers (the handler map, keyed `${name}.create`
-// etc.) merge into one registry; every entity's projection merges into one
-// consumer list. The route gate (requireUser) already admitted the request —
-// the first default-on auth layer; the kernel's `authorize` is therefore
-// passthrough, and the second layer (bindReadScope + mayVerb) still runs in
-// `dispatch`'s pre-mutation read. There is no second auth path here.
-function buildKernel(app) {
-  const handlers = {};
-  const projections = [];
-  const entities = new Map();
-  for (const route of app.routes) {
-    const entity = route.entity;
-    if (entity && !entities.has(entity.name)) {
-      entities.set(entity.name, entity);
-      Object.assign(handlers, entity.crudHandlers);
-      projections.push(entity.projection);
-    }
-  }
-  // An entity-by-name registry for the framework-owned snapshot/resync endpoints —
-  // `/snapshot/:entity/:id` resolves the entity at request time from the path
-  // param, not from the mount (the snapshot is a framework default, not a
-  // per-entity route). One registry, derived from the resolved table.
-  app.entities = entities;
-  if (app.db && typeof app.db.exec === 'function') executeFrameworkDDL(app.db);
-
-  // Effects (gap #4 wiring): build the registry from every mounted entity and
-  // run the GLOBAL validation pass — detectCrossEntityCycles +
-  // verifyAdmissionHandshake — so effect safety is load-time-enforced at boot
-  // (fail-closed: a cycle or a missing admitsEffects rejects app.ready). No-op
-  // for an app with no effects (zero blast radius). The registry is passed to
-  // createServer so effects fire in-txn on committed CRUD events through the
-  // real app path, not only via the direct createServer test harness.
-  const effectsRegistry = buildEffectsRegistry([...entities.values()]);
-  if (effectsRegistry.size > 0) {
-    // Include framework auth entities so effects targeting them (e.g. Doc → Inbox)
-    // resolve in the admission handshake even though they aren't mounted routes.
-    const forValidation = [...entities.values()];
-    for (const fe of FRAMEWORK_ENTITIES) {
-      if (fe && !entities.has(fe.name)) forValidation.push(fe);
-    }
-    validateEffects(forValidation);
-  }
-
-  // Auto-wire the blob adopter from declared blob fields (spec #2). Every entity
-  // field marked `blob: true` holds a blob id; a dispatch committing an event
-  // that carries one adopts that blob IN the dispatch transaction (a rolled-back
-  // dispatch leaves it pending) and finalizes the file post-commit. `resolve`
-  // derives the blob ids from the event data by entity name — the event type's
-  // prefix — so the kernel owns no blob-field knowledge. One wiring, derived
-  // from the same field declarations the read/write paths use: no parallel
-  // registration. `app.blobColumns` exposes the same scan for the reaper's
-  // refcount sweep (reap needs the (table, column) pairs that hold blob ids).
-  let blobAdopter;
-  if (app.blobs) {
-    const blobFields = new Map(); // entityName -> [fieldName]
-    const blobColumns = [];
-    for (const [name, ent] of entities) {
-      const fields = [];
-      for (const [fname, descriptor] of Object.entries(ent.fields ?? {})) {
-        if (descriptor && descriptor.blob === true) fields.push(fname);
-      }
-      if (fields.length > 0) {
-        blobFields.set(name, fields);
-        for (const fName of fields) blobColumns.push({ table: name, column: fName });
-      }
-    }
-    app.blobColumns = blobColumns;
-    if (blobFields.size > 0) {
-      blobAdopter = {
-        resolve(ev) {
-          const entityName = ev.handle?.brand === 'event-handle' ? ev.handle.entity : (() => { const dot = ev.type.indexOf('.'); return dot >= 0 ? ev.type.slice(0, dot) : ''; })();
-          const fields = blobFields.get(entityName) ?? [];
-          const ids = [];
-          for (const fName of fields) {
-            const value = ev.data?.[fName];
-            if (value) ids.push(value);
-          }
-          return ids;
-        },
-        adopt: (txnDb, ids) => {
-          for (const id of ids) app.blobs.adopt(txnDb, id);
-        },
-        finalize: (id) => app.blobs.finalize(id),
-      };
-    }
-  }
-
-  // Post-commit consumers of the committed log (eng-review §D3). Both retirings
-  // of special-case wiring live here: blob file finalize (the post-commit FS
-  // rename, formerly an inline kernel call) and live WS fan-out (formerly three
-  // imperative `live.emit` call sites in dispatch). The kernel fans committed
-  // events to every registered consumer after COMMIT; a consumer error never
-  // rolls back the origin. live re-reads the materialized row post-commit — for
-  // a 'removed' event the row is gone, and `live.emit` skips re-authorization
-  // (the remove event IS the revocation signal, forwarded to current subs).
-  const postCommitConsumers = [];
-  if (blobAdopter) {
-    postCommitConsumers.push(async (events) => {
-      const ids = new Set();
-      for (const ev of events) {
-        for (const id of blobAdopter.resolve(ev)) ids.add(id);
-      }
-      for (const id of ids) {
-        try { blobAdopter.finalize(id); } catch { /* reaper reconciles */ }
-      }
-    });
-  }
-  if (app.live) {
-    postCommitConsumers.push(async (events, { db }) => {
-      for (const ev of events) {
-        const colon = ev.scope.indexOf(':');
-        if (colon < 0) continue;
-        const entityName = ev.scope.slice(0, colon);
-        const id = ev.scope.slice(colon + 1);
-        // The compiled entity RECORD — mayVerb needs it to run the grant's
-        // `.can` body. Unknown entity → undefined → emit fails closed (no
-        // delivery without a grant to authorize it).
-        const entity = app.entities?.get(entityName);
-        let row;
-        try {
-          row = db.prepare(`SELECT * FROM ${entityName} WHERE id = ?`).get(id);
-        } catch {
-          row = undefined;
-        }
-        app.live.emit(entity, id, row, ev);
-      }
-    });
-  }
-  // projected.async: post-commit projection over the committed log (ADR #12).
-  // The consumer resolves entities at *runtime* from app.entities (set by
-  // buildKernel during app.ready) so it always sees the fully-built registry.
-  //
-  // NOTE: The computed value is written via UPDATE, not appended to _Log —
-  // the event-sourcing invariant "the log is the source of truth" holds for
-  // authored fields but NOT for projected.async fields. A disaster-recovery
-  // rebuild from _Log alone would miss these columns; they must be recomputed
-  // by re-running every projected.async compute function. The _ProjectedCursor
-  // tracks progress as a staleness indicator, not a replay checkpoint.
-  //
-  // Resolve from triggers to full event types (e.g. 'created' → 'Post.created').
-  function resolveTriggerTypes(desc, entityName) {
-    if (!desc.from) return [`${entityName}.created`, `${entityName}.updated`];
-    if (typeof desc.from === 'string') {
-      const from = desc.from;
-      return from.includes('.') ? [from] : [`${entityName}.${from}`];
-    }
-    return desc.from.map((f) => f.includes('.') ? f : `${entityName}.${f}`);
-  }
-
-  postCommitConsumers.push(async (events, { db }) => {
-    for (const ev of events) {
-      const colon = ev.scope?.indexOf(':');
-      if (colon < 0) continue;
-      const entityName = ev.scope.slice(0, colon);
-      const rowId = ev.scope.slice(colon + 1);
-      const entityRecord = app.entities?.get(entityName);
-      if (!entityRecord || !entityRecord.projectedAsyncFields?.length) continue;
-      const projFields = entityRecord.projectedAsyncFields;
-      const eventType = ev.type;
-      const triggered = [];
-      for (const [fieldName, desc] of projFields) {
-        const triggerTypes = resolveTriggerTypes(desc, entityName);
-        if (triggerTypes.includes(eventType)) {
-          triggered.push({ fieldName, compute: desc.compute });
-        }
-      }
-      if (triggered.length === 0) continue;
-      const row = db.prepare(`SELECT * FROM ${entityName} WHERE id = :id`).get({ id: rowId });
-      if (!row) continue;
-      const filteredRow = {};
-      if (row.id !== undefined) filteredRow.id = row.id;
-      for (const [k, v] of Object.entries(row)) {
-        if (Object.prototype.hasOwnProperty.call(entityRecord.fields, k)) {
-          const desc = entityRecord.fields[k];
-          if (desc?.kind === 'value' || desc?.kind === 'projected') {
-            try { filteredRow[k] = resolveStrategy(desc.kind).deserialize?.(v, desc) ?? v; } catch { filteredRow[k] = v; }
-          } else {
-            filteredRow[k] = v;
-          }
-        }
-      }
-      for (const { fieldName, compute } of triggered) {
-        const prevDb = getActiveDb();
-        setActiveDb(db);
-        try {
-          const result = await compute(filteredRow);
-          const serialized = resolveStrategy('projected').serialize(result);
-          db.prepare(`UPDATE ${entityName} SET ${fieldName} = :val WHERE id = :id`).run({
-            val: serialized, id: rowId,
-          });
-          // Per-field monotonic cursor: tracks compute completions (staleness indicator).
-          const cursorKey = `${entityName}.${fieldName}`;
-          const cursorRow = db.prepare(
-            'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
-          ).get({ e: entityName, f: fieldName });
-          const next = (cursorRow?.lastSeq ?? 0) + 1;
-          db.prepare(
-            'INSERT OR REPLACE INTO _ProjectedCursor (entity, field, lastSeq) VALUES (:e, :f, :s)',
-          ).run({ e: entityName, f: fieldName, s: next });
-        } catch {
-          // compute failure leaves the projected column unchanged; cursor NOT advanced
-        } finally {
-          setActiveDb(prevDb);
-        }
-      }
-    }
-  });
-
-  // The single-writer mutex over node:sqlite (D9, eng-review spec #6). A durable
-  // dispatch holds BEGIN→…→COMMIT open across an async `postHandlerAuthorize`
-  // (the in-txn create row-grant), so two in-flight mutations on the one
-  // connection would race a second BEGIN → "cannot start a transaction within a
-  // transaction" → 500. The writeQueue serializes the whole dispatch txn; a
-  // bounded wait or depth rejects with 503 (fail closed, do not pile unbounded).
-  app.writeQueue = createWriteQueue();
-
-  return createServer({
-    handlers,
-    projections,
-    effects: effectsRegistry.size > 0 ? effectsRegistry : null,
-    authorize: () => true,
-    preProjectionAuthorize: async ({ entityName, verb, principal, event, payload, db: hookDb, now }) => {
-      // SYSTEM PRINCIPAL admission — a dispatch under a system principal carrying
-      // `attributes.source` is a CLOCK-TRIGGERED mutation (a reaper-fired schedule
-      // OR a tick-engine-fired tick). Its authority is the entity's DECLARED
-      // schedule for this verb, never a user row grant. admitSystemMutation
-      // discriminates by the declared trigger kind (tick.hz/every vs
-      // schedule.at/after), binds the source to the derived id, and re-checks
-      // while/due/payload IN-TXN against the current row. On denial it returns
-      // false (fail-closed, zero footprint). Non-system and unrecognized
-      // principals pass through unchanged.
-      if (principal?.type !== 'system' || !principal.attributes?.source) return true;
-      const entity = app.entities?.get(entityName);
-      if (!entity) return false;
-      return admitSystemMutation({
-        entity,
-        verb,
-        rowId: event?.data?.id,
-        payload,
-        principal,
-        db: hookDb ?? app.db,
-        now: now ?? Date.now(),
-      });
-    },
-    postHandlerAuthorize: async ({ entityName, verb, principal, event, payload, db: hookDb, now }) => {
-      // EFFECT-ORIGINATED events (carrying `_effectPrincipal`) are authorized by
-      // the TARGET's `admitsEffects` admission gate — already evaluated in-txn by
-      // the effect compiler (executeEffect) before the event was minted, and a
-      // deny there already rolled back the origin. The row-grant mayVerb below is
-      // the USER-mutation gate (route-admitted principal Against a row); re-running
-      // it for an effect principal would force every effect target to also admit
-      // system principals in its row grant — a redundant, verbose second gate. So
-      // effect events are admitted here (admitsEffects is THE effect gate, ADR #6).
-      if (event?._effectPrincipal) return true;
-      // CREATE has no pre-existing row, so dispatch's pre-check (serve.mjs)
-      // can't authorize it — this in-txn hook is the authoritative create
-      // row-grant (spec #5). update/remove are pre-authorized in dispatch
-      // against the pre-mutation row; owner is a readonly invariant, so the
-      // pre-check stands and is NOT re-run here — one check per verb, no
-      // second auth path. The SAME mayVerb engine REST + live use.
-      if (verb !== 'create') return true;
-      const entity = app.entities?.get(entityName);
-      if (!entity) return false;                  // unknown entity → fail closed
-      // Inherit children (grant is an `inherit` directive, no own `.can`
-      // clause) resolve their capability through the parent's read-scope join
-      // at the parent seam — mayVerb at the child returns denied (no clause to
-      // run), so the hook must NOT deny them. Authorize entities that own a
-      // `.can` body; inherit children are admitted (their create authz is the
-      // inherited-scope concern, not this hook).
-      if (!hasOwnCanGrant(entity)) return true;
-      const id = event?.data?.id;
-      if (id == null) return false;
-      let row = null;
-      try {
-        row = entity.findById(String(id), principal);   // in-txn projected row, hydrated
-      } catch {
-        row = null;
-      }
-      if (!row) return false;
-      return mayVerb(entity, verb, row, principal);
-    },
-    db: app.db,
-    blobAdopter,
-    postCommitConsumers,
-  });
-}
-
 export function listen(app, port, optionsOrCallback = {}) {
   const isCallback = typeof optionsOrCallback === 'function';
   const options = isCallback ? {} : optionsOrCallback;
@@ -1470,7 +1170,7 @@ export function listen(app, port, optionsOrCallback = {}) {
   // dispatch handle. Scans entities for tick triggers (tick.hz / tick.every);
   // only starts if at least one exists (avoids a no-op timer). ONE reconciliation
   // path — the engine dispatches under a system principal through `kernel.dispatch`,
-  // admitted in-txn by `preProjectionAuthorize` → `admitSystemMutation`.
+  // admitted in-txn by the durable variant's `admission.beforeProjection` seam.
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
   httpServer.listen(port);
 
@@ -1496,7 +1196,7 @@ export function listen(app, port, optionsOrCallback = {}) {
     // app.batch(actions, { principal }) — a server-side composed mutation
     // (SPEC §11, ADR #13). N actions run as ONE transaction = ONE composed
     // commit (one actionId, one `now`), all-or-nothing. This reuses the SAME
-    // kernel path (authorize→handler→applyEventsToTxn) wrapped once in the
+    // kernel path (authorize→handler→durable variant) wrapped once in the
     // writeQueue — not a second pipeline. Exposed for server code that needs
     // an atomic multi-entity write outside the per-route HTTP handlers.
     app.batch = (actions, { principal } = {}) =>

@@ -103,7 +103,7 @@ test('a state handle cannot be compared in scope (fail closed)', () => {
 
 import { resolveStrategy, ValidationError } from '../src/field-strategy.mjs';
 import { generateDDL } from '../src/ddl.mjs';
-import { executeFrameworkDDL, createServer } from '../src/index.mjs';
+import { executeFrameworkDDL, createServer, durableMutationVariant } from '../src/index.mjs';
 
 function setupDoc() {
   const Doc = entity('DocState', {
@@ -158,7 +158,9 @@ test('create with valid state value persists the row', async (t) => {
   const server = createServer({
     db,
     handlers: Doc.crudHandlers,
-    projections: [Doc.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Doc.projection],
+    }),
     authorize: () => true,
   });
   t.after(() => db.close());
@@ -185,7 +187,9 @@ test('create with invalid state value throws ValidationError', async (t) => {
   const server = createServer({
     db,
     handlers: Doc.crudHandlers,
-    projections: [Doc.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Doc.projection],
+    }),
     authorize: () => true,
   });
   t.after(() => db.close());
@@ -214,7 +218,9 @@ test('update legal transition (draft -> shared) persists', async (t) => {
   const server = createServer({
     db,
     handlers: Doc.crudHandlers,
-    projections: [Doc.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Doc.projection],
+    }),
     authorize: () => true,
   });
   t.after(() => db.close());
@@ -250,7 +256,9 @@ test('update illegal transition (draft -> archived) throws 400 with zero footpri
   const server = createServer({
     db,
     handlers: Doc.crudHandlers,
-    projections: [Doc.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Doc.projection],
+    }),
     authorize: () => true,
   });
   t.after(() => db.close());
@@ -300,7 +308,9 @@ test('update state to current value is a no-op (skips transition check)', async 
   const server = createServer({
     db,
     handlers: Doc.crudHandlers,
-    projections: [Doc.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Doc.projection],
+    }),
     authorize: () => true,
   });
   t.after(() => db.close());
@@ -335,7 +345,9 @@ test('update nonexistent row with state change throws 400 (no current state)', a
   const server = createServer({
     db,
     handlers: Doc.crudHandlers,
-    projections: [Doc.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Doc.projection],
+    }),
     authorize: () => true,
   });
   t.after(() => db.close());

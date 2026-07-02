@@ -157,15 +157,15 @@ test('empty batch is a no-op granted with no events', async (t) => {
 });
 
 // The deny in `a denied sub-action rolls back…` could come from either the
-// first-layer `authorize` OR the in-txn create row-grant (`postHandlerAuthorize`).
+// first-layer `authorize` OR the durable variant's in-txn afterProjection seam.
 // The kernel's `authorize` is `() => true` (serve.mjs), so a create deny reaches
-// the IN-TXAN post-grant — this test pins that: it confirms the ROLLBACK happens
+// the in-txn post-grant — this test pins that: it confirms the ROLLBACK happens
 // mid-transaction (the first action's row is undone), proving the 403 came from
 // inside the open BEGIN→COMMIT, not a pre-txn gate. A pre-txn authorize deny
 // would leave the first action un-attempted; an in-txn deny leaves it rolled back.
 test('a post-grant deny rolls back the first action mid-transaction (in-txn ROLLBACK)', async (t) => {
   // PostGrantDeny grants only read → create passes `authorize: () => true` and
-  // runs the handler, but the in-txn `postHandlerAuthorize` → mayVerb('create')
+  // runs the handler, but the in-txn afterProjection admission → mayVerb('create')
   // denies → 403 thrown inside the open transaction → ROLLBACK.
   const postGrantDeny = entity('PostGrantDeny', {
     fields: { body: text() },

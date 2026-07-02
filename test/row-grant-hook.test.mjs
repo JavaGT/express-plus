@@ -35,7 +35,7 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
   // Seed a row owned by u1 (trusted insert, bypasses readonly check)
   const row = Note.insert({ body: 'original', owner: 'u1' });
 
-  const { createServer } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
   const server = createServer({
     handlers: {
@@ -45,16 +45,21 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
     },
     authorize: () => true,
     db,
-    projections: [Note.projection],
-    // The in-txn row-grant hook: runs after projections, inside the txn.
-    // If it returns false (deny), the txn rolls back.
-    postHandlerAuthorize: async ({ entityName, verb, principal, eventType, event }) => {
-      // Read the materialized row that the projection just wrote
-      const currentRow = db.prepare(`SELECT * FROM ${entityName} WHERE id = ?`).get(event.data.id);
-      if (!currentRow) return true; // no row to check
-      // Use the SAME mayVerb as the REST dispatch — no second auth path
-      return mayVerb(Note, 'update', currentRow, principal);
-    },
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Note.projection],
+      admission: {
+        beforeProjection: async () => true,
+        // The in-txn row-grant hook: runs after projections, inside the txn.
+        // If it returns false (deny), the txn rolls back.
+        afterProjection: async ({ entityName, principal, event }) => {
+          // Read the materialized row that the projection just wrote
+          const currentRow = db.prepare(`SELECT * FROM ${entityName} WHERE id = ?`).get(event.data.id);
+          if (!currentRow) return true; // no row to check
+          // Use the SAME mayVerb as the REST dispatch — no second auth path
+          return mayVerb(Note, 'update', currentRow, principal);
+        },
+      },
+    }),
   });
 
   // u1 is the owner — update should succeed
@@ -104,7 +109,7 @@ test('in-txn row-grant hook: create — runs on the newly projected row', async 
 
   for (const sql of Note.generateDDL()) db.exec(sql);
 
-  const { createServer } = await import('../src/pipeline.mjs');
+  const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
   // A restrictive hook: only u1 may create (simulating an entity-level create gate)
   const server = createServer({
@@ -115,11 +120,16 @@ test('in-txn row-grant hook: create — runs on the newly projected row', async 
     },
     authorize: () => true,
     db,
-    projections: [Note.projection],
-    postHandlerAuthorize: async ({ principal }) => {
-      // Only u1 may create (simulated rule)
-      return principal.id === 'u1';
-    },
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Note.projection],
+      admission: {
+        beforeProjection: async () => true,
+        afterProjection: async ({ principal }) => {
+          // Only u1 may create (simulated rule)
+          return principal.id === 'u1';
+        },
+      },
+    }),
   });
 
   // u1 creates — succeeds
@@ -131,7 +141,7 @@ test('in-txn row-grant hook: create — runs on the newly projected row', async 
   });
   assert.equal(r1.granted, true);
 
-  // u2 tries to create — postHandlerAuthorize denies
+  // u2 tries to create — afterProjection admission denies
   const r2 = await server.dispatch({
     actionId: 'c2',
     type: 'Note.create',

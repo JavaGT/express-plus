@@ -17,7 +17,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { entity, text, ref, map, hash, grant, read, generateDDL, createServer, executeFrameworkDDL } from '../src/index.mjs';
+import { entity, text, ref, map, hash, grant, read, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/index.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 // A User with a hash password — the security reason toArray must hydrate.
@@ -49,9 +49,11 @@ async function setup() {
   const server = await createServer({
     db,
     handlers: Doc.crudHandlers,
-    projections: [Doc.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Doc.projection],
+      admission: { beforeProjection: () => true, afterProjection: async () => true },
+    }),
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
   });
   return { db, server };
 }
@@ -109,9 +111,11 @@ test('.toArray() with no registered target returns [null, role] pairs (graceful 
   const server = await createServer({
     db,
     handlers: Phantom.crudHandlers,
-    projections: [Phantom.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Phantom.projection],
+      admission: { beforeProjection: () => true, afterProjection: async () => true },
+    }),
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
   });
   const row = Phantom.hydrate({ id: '1' }, null, server.dispatch);
   await row.members.set('m1');

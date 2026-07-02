@@ -1,8 +1,8 @@
 // C3: `create` mutations must run the row-grant, not just the route gate.
 //
 // Before this fix `buildKernel` wired `createServer({ authorize: () => true })`
-// and NEVER passed `postHandlerAuthorize` — the in-txn post-projection hook
-// (spec #5) that is the INTENDED create-authorizer (create has no pre-existing
+// and NEVER passed the in-txn post-projection admission seam (spec #5) that is
+// the INTENDED create-authorizer (create has no pre-existing
 // row to pre-check, unlike update/remove). So `result.granted` could only be
 // true and a create never 403'd — the route gate alone admitted the principal,
 // the row grant never ran. Latent for the exemplars because their `.can` grants

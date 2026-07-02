@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import expressPlus, { entity, scope, everyone, grant, read, tick, date, schedule } from '../src/index.mjs';
 import { generateDDL } from '../src/ddl.mjs';
-import { createServer } from '../src/pipeline.mjs';
+import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
 import { admitSystemMutation, discoverTickedRows } from '../src/schedule.mjs';
 import { startTickEngine } from '../src/tick-engine.mjs';
@@ -14,8 +14,8 @@ import { startTickEngine } from '../src/tick-engine.mjs';
 // The tick engine is a CLOCK TRIGGER, not an authority. Each
 // interval it discovers rows matching `while`, dispatches
 // `update` under a system principal, and the dispatch spine
-// routes through preProjectionAuthorize → admitSystemMutation
-// (the admission gate). ONE reconciliation path.
+// routes through the durable variant's beforeProjection admission seam.
+// ONE reconciliation path.
 //
 // Each dispatch has try/catch + stderr — one row's deny/throw
 // NEVER aborts the sweep (mirror reaper pattern).
@@ -39,9 +39,11 @@ function makeAppWithTick(entityDef, entityName) {
   const server = createServer({
     handlers: entityDef.crudHandlers,
     db,
-    projections: [entityDef.projection],
     authorize: () => true,
-    preProjectionAuthorize: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
+    pipeline: durableMutationVariant({
+      projectionConsumers: [entityDef.projection],
+      admission: {
+        beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
       const ent = entities.get(en) ?? entityDef;
       return admitSystemMutation({
@@ -49,6 +51,9 @@ function makeAppWithTick(entityDef, entityName) {
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
       });
     },
+        afterProjection: async () => true,
+      },
+    }),
   });
 
   return { db, entity: entityDef, entities, server, entityName };
@@ -236,7 +241,7 @@ test('admitSystemMutation admits and denies the 3-part scheduler source through 
 });
 
 // ============================================================
-// e2e: tick source wired through preProjectionAuthorize
+// e2e: tick source wired through beforeProjection admission
 // ============================================================
 test('e2e: tick dispatch updates row through projection', async (t) => {
   const statusDesc = { kind: 'value', type: 'text' };
@@ -259,13 +264,15 @@ test('e2e: tick dispatch updates row through projection', async (t) => {
   const entities = new Map();
   entities.set(Blog.name, Blog);
 
-  // Mirror serve.mjs preProjectionAuthorize wiring: tick branch + pass-through
+  // Mirror production beforeProjection admission: tick branch + pass-through
   const server = createServer({
     handlers: Blog.crudHandlers,
     db,
-    projections: [Blog.projection],
     authorize: () => true,
-    preProjectionAuthorize: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Blog.projection],
+      admission: {
+        beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
       const ent = entities.get(en) ?? Blog;
       return admitSystemMutation({
@@ -273,6 +280,9 @@ test('e2e: tick dispatch updates row through projection', async (t) => {
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
       });
     },
+        afterProjection: async () => true,
+      },
+    }),
   });
 
   const engine = startTickEngine({ db, entities, dispatch: server.dispatch });
@@ -350,9 +360,11 @@ test('e2e: while-fails — row not matching while is never mutated', async () =>
   const server = createServer({
     handlers: Blog.crudHandlers,
     db,
-    projections: [Blog.projection],
     authorize: () => true,
-    preProjectionAuthorize: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Blog.projection],
+      admission: {
+        beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
       const ent = entities.get(en) ?? Blog;
       return admitSystemMutation({
@@ -360,6 +372,9 @@ test('e2e: while-fails — row not matching while is never mutated', async () =>
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
       });
     },
+        afterProjection: async () => true,
+      },
+    }),
   });
 
   const engine = startTickEngine({ db, entities, dispatch: server.dispatch });
@@ -397,9 +412,11 @@ test('e2e: TOCTOU — row deleted between discover and dispatch does not escape'
   const server = createServer({
     handlers: Blog.crudHandlers,
     db,
-    projections: [Blog.projection],
     authorize: () => true,
-    preProjectionAuthorize: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Blog.projection],
+      admission: {
+        beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
       const ent = entities.get(en) ?? Blog;
       return admitSystemMutation({
@@ -407,6 +424,9 @@ test('e2e: TOCTOU — row deleted between discover and dispatch does not escape'
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
       });
     },
+        afterProjection: async () => true,
+      },
+    }),
   });
 
   const engine = startTickEngine({ db, entities, dispatch: server.dispatch });
@@ -461,7 +481,7 @@ test('e2e: engine dispatch error continues sweep (stderr, no throw)', async (t) 
   const entities = new Map();
   entities.set(Blog.name, Blog);
 
-  // A dispatch that throws — simulates preProjectionAuthorize rejecting a row.
+  // A dispatch that throws — simulates beforeProjection admission rejecting a row.
   // Uses the REAL compiled Blog (whose `while` discovers the seeded row) so the
   // engine actually reaches dispatch each interval; the throw exercises the
   // per-row try/catch (one row's failure must NOT abort the sweep).

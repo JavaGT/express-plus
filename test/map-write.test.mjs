@@ -15,7 +15,7 @@ import {
   scope,
   grant,
   read,
-  createServer,
+  createServer, durableMutationVariant,
   executeFrameworkDDL,
 } from '../src/index.mjs';
 import { ValidationError } from '../src/field-strategy.mjs';
@@ -51,9 +51,11 @@ async function setup() {
   const server = await createServer({
     db,
     handlers: TodoList.crudHandlers,
-    projections: [TodoList.projection],
+    pipeline: durableMutationVariant({
+      projectionConsumers: [TodoList.projection],
+      admission: { beforeProjection: () => true, afterProjection: async () => true },
+    }),
     authorize: async () => true,
-    postHandlerAuthorize: async () => true,
   });
   return { db, server };
 }
