@@ -46,6 +46,19 @@ function makeIs(entityRecord, row, principal) {
 // The read-scope already decided this row is VISIBLE; the .can body decides the
 // capabilities held on it.
 export async function rowCapabilities(entityRecord, row, principal) {
+  // An inherit-child has no own `.can` body — its grant is an `inherit` directive,
+  // not a runtime clause. The capability half must resolve the parent the same way
+  // `mayRow` resolves the parent (D1): load the parent row via the `via` FK and run
+  // the PARENT's `.can`. Otherwise a no-`.can` field's `defaults` is {granted:false}
+  // and every inherit-child field without an explicit `.can` is silently unreadable
+  // — the §6 "strong-inherit is half-built" trap. `mayRow` already recurses; this
+  // is the field-defaults half of the same move (one capability-resolution path).
+  const inherited = inheritedGrant(entityRecord);
+  if (inherited) {
+    const parentRow = inheritedParentRow(entityRecord, row, principal);
+    if (!parentRow) return { granted: false, capabilities: [] };
+    return await rowCapabilities(inherited.inherit, parentRow, principal);
+  }
   const clauses = typeof entityRecord.grant === 'function' ? entityRecord.grant() : null;
   const clause = Array.isArray(clauses)
     ? clauses.find((c) => isRuntimeGrantClause(c))

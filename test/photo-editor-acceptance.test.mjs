@@ -330,6 +330,29 @@ test('removing a collaborator revokes SQL scope AND field read', async () => {
   db.close();
 });
 
+// ---- ACCEPTANCE 7b: a field WITHOUT .can strong-inherits the resolved row grant
+// (review §6 "field .can strong-inherit is half-built" — after D1 the inherit-child
+// row grant resolves the parent's .can, so a no-.can field inherits that, not a
+// silent {granted:false}. `name` and `opacity` have no .can on RasterLayer.)
+
+test('inherit-child field without explicit .can strong-inherits the resolved row grant', async () => {
+  const { RasterLayer } = declareCanvasLayer();
+  const db = new DatabaseSync(':memory:');
+  seed(db);
+  setActiveDb(db);
+
+  const { mayFieldOp } = await import('../src/row-grant.mjs');
+  const l1 = RasterLayer.getOrFail('l1'); // canvas c-shared
+
+  // owner (alice) and editor (bob) get read+write on Canvas; viewer (carol) gets read.
+  assert.equal(await mayFieldOp(RasterLayer, 'name', read, l1, alice), true, 'owner reads no-.can field');
+  assert.equal(await mayFieldOp(RasterLayer, 'name', read, l1, bob), true, 'editor reads no-.can field');
+  assert.equal(await mayFieldOp(RasterLayer, 'name', read, l1, carol), true, 'viewer reads no-.can field');
+  assert.equal(await mayFieldOp(RasterLayer, 'name', read, l1, stranger), false, 'non-scoped stranger cannot read');
+
+  db.close();
+});
+
 // ---- ACCEPTANCE 8: HTTP list/read through inherited grant ----
 
 test('HTTP list and read respect inherited canvas grant', async (t) => {

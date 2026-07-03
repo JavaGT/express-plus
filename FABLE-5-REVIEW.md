@@ -671,3 +671,36 @@ resolved in a followup branch, full suite **959 pass / 0 fail**:
 
 Verification: `node --check` on all touched files, `git diff --check` clean,
 full `npm test` → **959/0**.
+
+## Second-pass followup — §6 field `.can` strong-inherit
+
+The first followup pass re-audited FABLE-5-REVIEW.md against the merged code.
+Everything in the progress log had landed; one genuinely unaddressed review item
+remained: §6 "field `.can` strong-inherit is half-built" (ADR #263). #263 had
+*documented* the trap as accepted (inherit-children must declare field `.can`
+explicitly or the field is silently unreadable), but the silent trap itself was
+never fixed.
+
+**Root cause:** `src/row-grant.mjs` `rowCapabilities` (the field-defaults source)
+did not handle the inherit-child case. An inherit-child's grant is an `inherit`
+directive with no runtime clause, so `rowCapabilities` returned
+`{granted:false, capabilities:[]}` — that false became `fieldCapabilities`'
+`defaults`, silently denying every no-`.can` child field. D1 had fixed `mayRow`
+to recurse into the parent, but the field-defaults half of the same move was
+missing — the exact §6 hole.
+
+**Repro (RED→GREEN):** RasterLayer is an inherit-child (`inherit(Canvas, {via:'canvas'})`)
+whose `name`/`opacity`/`blendMode`/`imageData`/`createdAt` fields have no `.can`.
+Before the fix, the owner could not read her own no-`.can` child field; after,
+owner and viewer read, stranger is denied. Added as ACCEPTANCE 7b in
+`test/photo-editor-acceptance.test.mjs`.
+
+**Fix:** `rowCapabilities` now recurses into the parent for inherit-children
+(mirroring `mayRow`'s D1 move): if `inheritedGrant`, load the parent row via the
+`via` FK and `return await rowCapabilities(inherited.inherit, parentRow, principal)`;
+no parent row → `{granted:false, capabilities:[]}` (fail closed). One resolution
+path, no second engine. ADR #263 annotated as superseded on this point.
+
+**Verification:** `node --check src/row-grant.mjs`; focused photo-editor
+acceptance 12/0; inherit/authz cluster 26/0 (38/0 with photo-editor); full
+`npm test` → **960 pass / 0 fail** (was 959, +1); `git diff --check` clean.
