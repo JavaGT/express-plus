@@ -13,6 +13,7 @@
 // Lazy import of effect compiler (avoids circular dependency at module load time).
 import { readSeq } from './cursor.mjs';
 import { lifecycleVerb, parseEventType } from './event-handle.mjs';
+import { isPlainObject } from './field-strategy.mjs';
 
 // Use createRequire for dynamic import in ES module context.
 import { createRequire } from 'node:module';
@@ -80,12 +81,6 @@ export const NOW = Symbol('workbench.now');
 // arrays — a Date, Buffer, or class instance passes through untouched (a Date's
 // ISO form comes from its toJSON at serialization; flattening it to {} would
 // lose the value).
-function isPlainObject(v) {
-  if (!v || typeof v !== 'object') return false;
-  const proto = Object.getPrototypeOf(v);
-  return proto === Object.prototype || proto === null;
-}
-
 function resolveNowTokens(value, now) {
   if (value === NOW) return now;
   if (Array.isArray(value)) return value.map((v) => resolveNowTokens(v, now));

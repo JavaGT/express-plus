@@ -291,7 +291,6 @@ export function router(options = {}) {
 // chain.
 export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts, log: logOpts } = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
-  // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
     const val = process.env[v];
     if (!val) {

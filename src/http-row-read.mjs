@@ -11,9 +11,11 @@ export function readScopedRow(app, entity, id, principal) {
   return entity.deserializeRow(row);
 }
 
-export async function authorizeRead(app, entity, id, principal, preRow = null) {
+// Scoped row load + capability check for one verb. Absent-or-invisible → 404
+// (do not distinguish, fail closed); visible but denied by .can → 403.
+export async function authorizeRow(app, entity, verb, id, principal, preRow = null) {
   const row = preRow ?? readScopedRow(app, entity, id, principal);
   if (!row) return { status: 404 };
-  if (!(await mayRow(entity, 'read', row, principal))) return { status: 403 };
+  if (!(await mayRow(entity, verb, row, principal))) return { status: 403 };
   return { row };
 }

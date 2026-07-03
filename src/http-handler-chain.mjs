@@ -4,7 +4,7 @@ import { config } from './config.mjs';
 import { getLog } from './log.mjs';
 import { renderError } from './middleware.mjs';
 import { sendJson } from './http-response.mjs';
-import { authorizeRead } from './http-row-read.mjs';
+import { authorizeRow } from './http-row-read.mjs';
 import { resolveTemplate } from './views.mjs';
 
 export async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, query, autoLoad, app }, { env }) {
@@ -20,7 +20,7 @@ export async function runChain(handlers, nodeReq, nodeRes, { principal, params, 
   };
 
   if (autoLoad) {
-    const auth = await authorizeRead(app, autoLoad.entity, params[autoLoad.param], principal);
+    const auth = await authorizeRow(app, autoLoad.entity, 'read', params[autoLoad.param], principal);
     if (auth.status) {
       renderError(nodeRes, { status: auth.status, message: auth.status === 404 ? 'not found' : 'forbidden' }, { env });
       return;

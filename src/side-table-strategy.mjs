@@ -22,6 +22,17 @@ function requireFieldDispatch(entityName, fieldName, dispatch) {
   }
 }
 
+// The shared tail of every side-table write: require a dispatch ref, dispatch
+// the field action, fail closed on deny. Callers authorize BEFORE their
+// payload prep so an unauthorized principal gets 403 even when the write would
+// be a no-op. Returns the dispatch result for handles that read emitted events.
+async function dispatchFieldMutation({ entityName, fieldName, dispatch, type, payload, principal }) {
+  requireFieldDispatch(entityName, fieldName, dispatch);
+  const result = await dispatch({ actionId: randomUUID(), type, payload, principal });
+  if (!result.granted) throw { status: 403, message: 'forbidden' };
+  return result;
+}
+
 function mapHandle({ record, entityName, fieldName, descriptor, row, principal, dispatch }) {
   const table = membershipTable(entityName, fieldName);
   const ownerCol = membershipOwnerCol(entityName);
@@ -52,27 +63,21 @@ function mapHandle({ record, entityName, fieldName, descriptor, row, principal, 
         : hasRole && existing.role !== (role ?? null) ? `${entityName}.${fieldName}.setRole`
         : null;
       if (actionType === null) return;
-      requireFieldDispatch(entityName, fieldName, dispatch);
-      const result = await dispatch({
-        actionId: randomUUID(),
+      await dispatchFieldMutation({
+        entityName, fieldName, dispatch, principal,
         type: actionType,
         payload: { owner: oid, member: mid, role },
-        principal,
       });
-      if (!result.granted) throw { status: 403, message: 'forbidden' };
     },
     remove: async (memberId) => {
       await authorizeFieldOp(record, fieldName, write, row, principal);
       const mid = String(memberId);
       if (!probe(memberId)) return;
-      requireFieldDispatch(entityName, fieldName, dispatch);
-      const result = await dispatch({
-        actionId: randomUUID(),
+      await dispatchFieldMutation({
+        entityName, fieldName, dispatch, principal,
         type: `${entityName}.${fieldName}.remove`,
         payload: { owner: oid, member: mid },
-        principal,
       });
-      if (!result.granted) throw { status: 403, message: 'forbidden' };
     },
     has: (memberId) => probe(memberId) !== undefined,
     get: (memberId) => {
@@ -220,14 +225,11 @@ function orderedHandle({ record, entityName, fieldName, row, principal, dispatch
       const low = index > 0 ? rows[index - 1].key : null;
       const high = index < rows.length ? rows[index].key : null;
       const key = keyBetween(low, high);
-      requireFieldDispatch(entityName, fieldName, dispatch);
-      const result = await dispatch({
-        actionId: randomUUID(),
+      const result = await dispatchFieldMutation({
+        entityName, fieldName, dispatch, principal,
         type: `${entityName}.${fieldName}.insert`,
         payload: { owner: oid, key, value },
-        principal,
       });
-      if (!result.granted) throw { status: 403, message: 'forbidden' };
       return result.events?.find((e) => e.type === `${entityName}.${fieldName}.inserted`)?.data?.id;
     },
     move: async (id, index) => {
@@ -237,37 +239,28 @@ function orderedHandle({ record, entityName, fieldName, row, principal, dispatch
       const low = index > 0 ? others[index - 1].key : null;
       const high = index < others.length ? others[index].key : null;
       const key = keyBetween(low, high);
-      requireFieldDispatch(entityName, fieldName, dispatch);
-      const result = await dispatch({
-        actionId: randomUUID(),
+      await dispatchFieldMutation({
+        entityName, fieldName, dispatch, principal,
         type: `${entityName}.${fieldName}.move`,
         payload: { owner: oid, id: sid, key },
-        principal,
       });
-      if (!result.granted) throw { status: 403, message: 'forbidden' };
     },
     reorder: async (ids) => {
       await authorizeFieldOp(record, fieldName, write, row, principal);
       const entries = ids.map((entryId, i) => ({ id: String(entryId), key: i }));
-      requireFieldDispatch(entityName, fieldName, dispatch);
-      const result = await dispatch({
-        actionId: randomUUID(),
+      await dispatchFieldMutation({
+        entityName, fieldName, dispatch, principal,
         type: `${entityName}.${fieldName}.reorder`,
         payload: { owner: oid, entries },
-        principal,
       });
-      if (!result.granted) throw { status: 403, message: 'forbidden' };
     },
     remove: async (id) => {
       await authorizeFieldOp(record, fieldName, write, row, principal);
-      requireFieldDispatch(entityName, fieldName, dispatch);
-      const result = await dispatch({
-        actionId: randomUUID(),
+      await dispatchFieldMutation({
+        entityName, fieldName, dispatch, principal,
         type: `${entityName}.${fieldName}.remove`,
         payload: { owner: oid, id: String(id) },
-        principal,
       });
-      if (!result.granted) throw { status: 403, message: 'forbidden' };
     },
     has: (id) =>
       getActiveDb()
@@ -402,14 +395,11 @@ function logHandle({ record, entityName, fieldName, descriptor, row, principal, 
   return {
     append: async (entry) => {
       await authorizeFieldOp(record, fieldName, write, row, principal);
-      requireFieldDispatch(entityName, fieldName, dispatch);
-      const result = await dispatch({
-        actionId: randomUUID(),
+      const result = await dispatchFieldMutation({
+        entityName, fieldName, dispatch, principal,
         type: `${entityName}.${fieldName}.append`,
         payload: { owner: oid, ...(entry ?? {}) },
-        principal,
       });
-      if (!result.granted) throw { status: 403, message: 'forbidden' };
       const appended = result.events?.find((e) => e.type === `${entityName}.${fieldName}.appended`);
       return appended?.data?.id;
     },
@@ -499,14 +489,11 @@ function ephemeralHandle({ record, entityName, fieldName, row, principal, dispat
   return {
     set: async (cells) => {
       await authorizeFieldOp(record, fieldName, write, row, principal);
-      requireFieldDispatch(entityName, fieldName, dispatch);
-      const result = await dispatch({
-        actionId: randomUUID(),
+      await dispatchFieldMutation({
+        entityName, fieldName, dispatch, principal,
         type: `${entityName}.${fieldName}.set`,
         payload: { owner: oid, client: clientId, cells: cells ?? {} },
-        principal,
       });
-      if (!result.granted) throw { status: 403, message: 'forbidden' };
     },
     get: () => {
       const r = getActiveDb()

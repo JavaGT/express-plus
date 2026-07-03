@@ -145,7 +145,7 @@ export async function mayVerb(entityRecord, verb, row, principal) {
 //     (return false). A thrown `.can` body is a server bug; fail-closed denies
 //     rather than leaking the row.
 //
-// Callers own their transport's deny action (REST sendJson 403, authorizeRead
+// Callers own their transport's deny action (REST sendJson 403, authorizeRow
 // returns {status:403}, live return/continue/this.error, list filter skip, the
 // create hook returns false) — the decision is uniform, the rendering is not.
 //

@@ -10,7 +10,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { principalFrom } from './principal.mjs';
-import { discoverDueSchedules, schedulerSource } from './schedule.mjs';
+import { discoverDueSchedules, schedulerSource, triggerList } from './schedule.mjs';
 import { getLog } from './log.mjs';
 
 const SCAN_INTERVAL_MS = 1000;
@@ -48,8 +48,7 @@ export function startReaper({ db, entities, dispatch, now = Date.now }) {
   for (const entity of entityList) {
     if (!entity || !entity.schedule) continue;
     for (const triggerOrTriggers of Object.values(entity.schedule)) {
-      const triggers = triggerOrTriggers == null ? [] : Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
-      for (const trigger of triggers) {
+      for (const trigger of triggerList(triggerOrTriggers)) {
         if (!trigger) continue;
         if (trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after') {
           hasDeadlineTrigger = true;
@@ -71,9 +70,7 @@ export function startReaper({ db, entities, dispatch, now = Date.now }) {
       try {
         const entity = entityMap.get(entityName);
         if (!entity) continue;
-        const triggers = entity.schedule?.[verb] ?? [];
-        const arr = Array.isArray(triggers) ? triggers : [triggers];
-        const trigger = arr.find((t) => (t.sourceName ?? t.fieldName) === sourceName);
+        const trigger = triggerList(entity.schedule?.[verb]).find((t) => (t.sourceName ?? t.fieldName) === sourceName);
         if (!trigger?.fieldName) continue;
         const source = schedulerSource(entityName, verb, sourceName ?? trigger.fieldName);
         const principal = principalFrom(source);

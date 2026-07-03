@@ -35,7 +35,7 @@ import { created, updated, removed } from '../event-handle.mjs';
 import { generateDDL } from '../ddl.mjs';
 import { resolveRouteGate } from '../route-gate.mjs';
 import { effectEntries, validateEffectDeclaration } from '../effect-compiler.mjs';
-import { schedule as scheduleConstructors } from '../schedule.mjs';
+import { schedule as scheduleConstructors, triggerList } from '../schedule.mjs';
 import { collectSideTableStrategies } from '../side-table-strategy.mjs';
 import { registerEntityHandle } from './handles.mjs';
 import { createEntityHydrator } from './hydrate.mjs';
@@ -67,11 +67,6 @@ function assertSqlIdentifier(kind, value) {
         `digits, or underscores). Rename it (fail closed).`,
     );
   }
-}
-
-function scheduleTriggersFor(triggerOrTriggers) {
-  if (triggerOrTriggers == null) return [];
-  return Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
 }
 
 function autoStateScheduleTrigger(entityName, fieldName, descriptor, fields) {
@@ -353,7 +348,7 @@ export function entity(name, declaration = {}) {
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind !== 'state' || descriptor.auto == null) continue;
     const trigger = autoStateScheduleTrigger(name, fieldName, descriptor, fields);
-    declaredSchedule.update = [...scheduleTriggersFor(declaredSchedule.update), trigger];
+    declaredSchedule.update = [...triggerList(declaredSchedule.update), trigger];
   }
 
   let validatedSchedule = null;
@@ -367,7 +362,7 @@ export function entity(name, declaration = {}) {
       if (!['create', 'update', 'remove'].includes(verbName)) {
         throw new Error(`schedule verb '${verbName}' must be one of create | update | remove (entity '${name}')`);
       }
-      const triggers = scheduleTriggersFor(triggerOrTriggers);
+      const triggers = triggerList(triggerOrTriggers);
       if (triggers.length === 0) {
         throw new Error(`schedule.${verbName}: expected at least one schedule trigger`);
       }

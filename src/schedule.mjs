@@ -55,14 +55,15 @@ export const schedule = Object.freeze({
   },
 });
 
-// discoverDueSchedules — PURE discovery function for P6d step 4a.
-// Returns an array of { entity, verb, rowId, payload } for all due schedule triggers.
-// Does NOT dispatch, write, or mutate — only reads.
-function triggerList(triggerOrTriggers) {
+// A verb's schedule slot accepts one trigger or an array; normalize to an array.
+export function triggerList(triggerOrTriggers) {
   if (triggerOrTriggers == null) return [];
   return Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
 }
 
+// discoverDueSchedules — PURE discovery function for P6d step 4a.
+// Returns an array of { entity, verb, rowId, payload } for all due schedule triggers.
+// Does NOT dispatch, write, or mutate — only reads.
 export function discoverDueSchedules(db, entities, now) {
   const results = [];
   for (const record of entities) {
@@ -167,8 +168,7 @@ export function discoverTickedRows(db, entities, now) {
   for (const entity of entities) {
     if (!entity || !entity.schedule) continue;
     for (const [verb, triggerOrTriggers] of Object.entries(entity.schedule)) {
-      const triggers = triggerOrTriggers == null ? [] : Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
-      for (const trigger of triggers) {
+      for (const trigger of triggerList(triggerOrTriggers)) {
         if (trigger.kind !== 'tick.hz' && trigger.kind !== 'tick.every') continue;
 
         // Defensive: skip rows without a compiled while predicate (the empty-while
@@ -213,9 +213,7 @@ export function admitSystemMutation({ entity, verb, rowId, payload, principal, d
   const source = principal.attributes?.source;
   if (typeof source !== 'string' || source === '') return false;
 
-  const verbTriggers = entity?.schedule?.[verb];
-  const triggers = verbTriggers == null ? [] : Array.isArray(verbTriggers) ? verbTriggers : [verbTriggers];
-  const trigger = triggers.find((t) => {
+  const trigger = triggerList(entity?.schedule?.[verb]).find((t) => {
     if (t.kind === 'tick.hz' || t.kind === 'tick.every') return source === tickSource(entity.name, verb);
     const sourceName = t.sourceName ?? t.fieldName;
     return sourceName != null && source === schedulerSource(entity.name, verb, sourceName);

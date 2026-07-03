@@ -85,25 +85,13 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
       const runtimeSelf = {};
       if (entityName) {
         for (const [fName, desc] of Object.entries(fields)) {
-          // For map fields, expose `.has(memberId)` and `.get(memberId)` that
-          // query the membership table. `.get` returns the raw side-table row
-          // (or undefined) so checks can inspect a member's role.
+          // For map fields, expose the membership handle. db is captured
+          // eagerly per run (fail at handle-build time if no active db).
           if (desc?.kind === 'store' && desc.type === 'map') {
             const table = membershipTable(entityName, fName);
             const ownerCol = membershipOwnerCol(entityName);
             const db = getActiveDb();
-            runtimeSelf[fName] = {
-              has: (memberId) => {
-                return db.prepare(
-                  `SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
-                ).get({ owner: row.id, member: memberId }) !== undefined;
-              },
-              get: (memberId) => {
-                return db.prepare(
-                  `SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
-                ).get({ owner: row.id, member: memberId }) ?? undefined;
-              },
-            };
+            runtimeSelf[fName] = membershipHandle(table, ownerCol, () => row.id, () => db);
           }
           // For struct fields (the `link` kind), expose each sub-cell as a value
           // handle with a runtime `.is(v)` — the run-time mirror of the harvest
@@ -199,6 +187,29 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
   return Object.freeze(registry);
 }
 
+// Runtime `.has(memberId)` / `.get(memberId)` over a membership side-table.
+// `.get` returns the raw side-table row (or undefined) so checks can inspect a
+// member's role. `ownerId` may be null (unset FK) — fail closed. `dbOf` defers
+// the handle's db resolution to the caller's capture policy.
+function membershipHandle(table, ownerCol, ownerIdOf, dbOf) {
+  return {
+    has: (memberId) => {
+      const ownerId = ownerIdOf();
+      if (ownerId == null) return false;
+      return dbOf().prepare(
+        `SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
+      ).get({ owner: ownerId, member: memberId }) !== undefined;
+    },
+    get: (memberId) => {
+      const ownerId = ownerIdOf();
+      if (ownerId == null) return undefined;
+      return dbOf().prepare(
+        `SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
+      ).get({ owner: ownerId, member: memberId }) ?? undefined;
+    },
+  };
+}
+
 function makeRuntimeRefHandle({ fieldName, descriptor, row }) {
   const targetName = typeof descriptor.target === 'string'
     ? descriptor.target
@@ -213,22 +224,7 @@ function makeRuntimeRefHandle({ fieldName, descriptor, row }) {
     if (targetDescriptor?.kind === 'store' && targetDescriptor.type === 'map') {
       const table = membershipTable(target.name ?? targetName, targetFieldName);
       const ownerCol = membershipOwnerCol(target.name ?? targetName);
-      const mh = {
-        has: (memberId) => {
-          if (refId == null) return false;
-          const db = getActiveDb();
-          return db.prepare(
-            `SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
-          ).get({ owner: refId, member: memberId }) !== undefined;
-        },
-        get: (memberId) => {
-          if (refId == null) return undefined;
-          const db = getActiveDb();
-          return db.prepare(
-            `SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
-          ).get({ owner: refId, member: memberId }) ?? undefined;
-        },
-      };
+      const mh = membershipHandle(table, ownerCol, () => refId, getActiveDb);
       mapEntries.push([targetFieldName, mh]);
       mapHandles[targetFieldName] = mh;
     }

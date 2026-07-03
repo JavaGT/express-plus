@@ -13,7 +13,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { principalFrom } from './principal.mjs';
-import { tickSource, discoverTickedRows } from './schedule.mjs';
+import { tickSource, discoverTickedRows, triggerList } from './schedule.mjs';
 import { getLog } from './log.mjs';
 
 /**
@@ -116,8 +116,7 @@ function computeTickInterval(entities) {
   for (const entity of entities) {
     if (!entity || !entity.schedule) continue;
     for (const triggerOrTriggers of Object.values(entity.schedule)) {
-      const triggers = triggerOrTriggers == null ? [] : Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
-      for (const trigger of triggers) {
+      for (const trigger of triggerList(triggerOrTriggers)) {
         if (!trigger) continue;
         const iv = computeIntervalFromTrigger(trigger);
         if (Number.isFinite(iv) && iv < min) min = iv;
