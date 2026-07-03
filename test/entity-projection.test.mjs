@@ -20,10 +20,9 @@ test('entity-projection: create — handler emits event — entity.projection wr
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : grant(read)),
@@ -75,10 +74,9 @@ test('entity-projection: create — round-trip: row == reducer fold', async () =
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : grant(read)),
@@ -132,10 +130,9 @@ test('entity-projection: update — projection updates row', async () => {
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : grant(read)),
@@ -191,11 +188,10 @@ test('entity-projection: update — struct (link) cells persist to the row', asy
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Doc = entity('Doc', {
-    fields: {
-      title: text(),
-      linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view' }),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        title: text(),
+    linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view' }),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : grant(read)),
@@ -244,10 +240,9 @@ test('entity-projection: remove — projection deletes row', async () => {
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : grant(read)),
@@ -295,7 +290,8 @@ test('entity-projection: projection failure rolls back the whole txn', async () 
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
-    fields: { body: text() },
+        body: text(),
+
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
 

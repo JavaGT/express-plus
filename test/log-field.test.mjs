@@ -58,9 +58,8 @@ test('.can(fn) returns a new frozen descriptor carrying the access function', ()
 test('a log field compiles into an entity at import without throwing', () => {
   const Doc = entity('DocWithLog', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      chat: log({ sender: ref('User'), body: text() }),
-    },
+        chat: log({ sender: ref('User'), body: text() }),
+
   });
   assert.equal(Doc.name, 'DocWithLog');
 });
@@ -68,9 +67,8 @@ test('a log field compiles into an entity at import without throwing', () => {
 test('a log field is not whole-value comparable in scope (fail closed)', () => {
   const Doc = entity('DocWithLog2', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      chat: log({ sender: ref('User'), body: text() }),
-    },
+        chat: log({ sender: ref('User'), body: text() }),
+
   });
   assert.throws(() => Doc.chat.is('x'), /store field and cannot be compared/);
 });
@@ -85,7 +83,8 @@ test('a log field is not whole-value comparable in scope (fail closed)', () => {
 // map's fireMapEffects), so this is purely additive — no dual-path risk.
 
 const DocLogB = entity('DocLogB', {
-  fields: { chat: log({ sender: text(), body: text() }) },
+    chat: log({ sender: text(), body: text() }),
+
   grant: () => grant(read),
 });
 

@@ -20,33 +20,31 @@ const EDITOR = [read, write, subscribe];
 const OWNER  = [read, write, subscribe, admin];
 
 export const Doc = entity('Doc', {
-  fields: {
     title: text({ validate: (v) => v.length <= 200 || 'title too long' }),
 
-    // The collaborative body. `text.crdt()` is a CRDT field: it owns its own
-    // live sync and emits change/delta events through the baked-in WS stream —
-    // the app writes no socket code.
-    body: text.crdt(),
+  // The collaborative body. `text.crdt()` is a CRDT field: it owns its own
+  // live sync and emits change/delta events through the baked-in WS stream —
+  // the app writes no socket code.
+  body: text.crdt(),
 
-    // A pure computed field: recomputed from `body` on read, never stored,
-    // never hand-maintained.
-    wordCount: computed({
-      compute: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0,
-    }),
+  // A pure computed field: recomputed from `body` on read, never stored,
+  // never hand-maintained.
+  wordCount: computed({
+    compute: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0,
+  }),
 
-    owner: ref('User', { role: 'owner', readonly: true }),  // auto-derives checks.owner
+  owner: ref('User', { role: 'owner', readonly: true }),  // auto-derives checks.owner
 
-    // Sharing: a valued set keyed by User (unique by construction), each member
-    // carrying a role. The field owns its capability rule — only the owner may
-    // change who can see or edit the document.
-    collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} })
-      .can(async ({ is }) =>
-        (await is.owner()) ? grant(...OWNER)
-                           : deny('only the owner may manage sharing')),
+  // Sharing: a valued set keyed by User (unique by construction), each member
+  // carrying a role. The field owns its capability rule — only the owner may
+  // change who can see or edit the document.
+  collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} })
+    .can(async ({ is }) =>
+      (await is.owner()) ? grant(...OWNER)
+                         : deny('only the owner may manage sharing')),
 
-    createdAt: date({ default: () => new Date() }),
-    updatedAt: date({ touch: true }),   // auto-bumps on any mutation
-  },
+  createdAt: date({ default: () => new Date() }),
+  updatedAt: date({ touch: true }),   // auto-bumps on any mutation
 
   // Plain functions — facts about a row. They grant nothing until a grant calls
   // them. `owner` and `collaborator` are compilable (FK equality, set

@@ -13,10 +13,9 @@ import { principal } from '../src/principal.mjs';
 // An owner-scoped Note: only the owner may write/remove.
 function ownedNote() {
   return entity('BatchNote', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(() => everyone()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
@@ -27,10 +26,9 @@ function ownedNote() {
 
 function ownedCounter() {
   return entity('BatchCounter', {
-    fields: {
-      n: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        n: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(() => everyone()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
@@ -76,7 +74,8 @@ test('a denied sub-action rolls back the ENTIRE batch (all-or-nothing)', async (
   // The BatchDeny grant only grants read — its post-grant denies writes.
   // A batch that creates a BatchNote then a BatchDeny must roll back BOTH.
   const alwaysDeny = entity('BatchDeny', {
-    fields: { body: text() },
+        body: text(),
+
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
   const db = new DatabaseSync(':memory:');
@@ -169,7 +168,8 @@ test('a post-grant deny rolls back the first action mid-transaction (in-txn ROLL
   // runs the handler, but the in-txn afterProjection admission → mayVerb('create')
   // denies → 403 thrown inside the open transaction → ROLLBACK.
   const postGrantDeny = entity('PostGrantDeny', {
-    fields: { body: text() },
+        body: text(),
+
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
   const db = new DatabaseSync(':memory:');

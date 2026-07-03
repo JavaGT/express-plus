@@ -28,13 +28,11 @@ import workbench, { entity, text, number, boolean, date, ref, map, grant, deny, 
 // ---------------------------------------------------------------------------
 
 export const Todo = entity('Todo', {
-  fields: {
     title:     text({ validate: (v) => (v?.length > 0) || 'title required' }),
-    completed: boolean({ default: false }),
-    dueDate:   date({ optional: true }),
-    owner:     ref('User', { role: 'owner', readonly: true }),  // auto-derives checks.owner
-    createdAt: date({ default: () => new Date() }),
-  },
+  completed: boolean({ default: false }),
+  dueDate:   date({ optional: true }),
+  owner:     ref('User', { role: 'owner', readonly: true }),  // auto-derives checks.owner
+  createdAt: date({ default: () => new Date() }),
 
   // `scope` is read admission (compiled to SQL: WHERE owner = principal.id).
   // `.can` decides write/subscribe per row. The owner gets everything; any
@@ -55,18 +53,16 @@ export const Todo = entity('Todo', {
 // ---------------------------------------------------------------------------
 
 export const TodoList = entity('TodoList', {
-  fields: {
     title: text({ validate: (v) => (v?.length > 0) || 'title required' }),
-    owner: ref('User', { role: 'owner', readonly: true }),
-    // A valued set keyed by User: membership is unique by construction (a user
-    // can't appear twice), and each member carries a role. The field owns its
-    // own capability rule — only the owner may manage the roster.
-    collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} })
-      .can(async ({ is }) =>
-        (await is.owner()) ? grant(read, write, subscribe)
-                           : deny('only the owner manages collaborators')),
-    createdAt: date({ default: () => new Date() }),
-  },
+  owner: ref('User', { role: 'owner', readonly: true }),
+  // A valued set keyed by User: membership is unique by construction (a user
+  // can't appear twice), and each member carries a role. The field owns its
+  // own capability rule — only the owner may manage the roster.
+  collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} })
+    .can(async ({ is }) =>
+      (await is.owner()) ? grant(read, write, subscribe)
+                         : deny('only the owner manages collaborators')),
+  createdAt: date({ default: () => new Date() }),
 
   checks: {
     // `owner` is auto-derived from role:'owner' above; written explicitly here
@@ -101,15 +97,13 @@ export const TodoList = entity('TodoList', {
 const inheritList = inherit(TodoList, { via: 'list' });
 
 export const SharedTodo = entity('Todo', {
-  fields: {
     title:     text({ validate: (v) => (v?.length > 0) || 'title required' }),
-    completed: boolean({ default: false }),
-    dueDate:   date({ optional: true }),
-    list:      ref('TodoList', { required: true }),  // typed FK → parent list; grant inherits through it
-    parent:    ref('Todo', { optional: true }),       // self-referential subtask tree
-    position:  number({ default: 0 }),                // sibling order (a ref alone carries no order)
-    createdAt: date({ default: () => new Date() }),
-  },
+  completed: boolean({ default: false }),
+  dueDate:   date({ optional: true }),
+  list:      ref('TodoList', { required: true }),  // typed FK → parent list; grant inherits through it
+  parent:    ref('Todo', { optional: true }),       // self-referential subtask tree
+  position:  number({ default: 0 }),                // sibling order (a ref alone carries no order)
+  createdAt: date({ default: () => new Date() }),
 
   // `editor` reads the member's role off the list's collaborators payload — a
   // runtime fact, so it may only be consulted from `.can` (here, inherited).

@@ -22,10 +22,9 @@ import { principal, anonymous } from '../src/principal.mjs';
 // An owned Note: the owner may read+write+subscribe; everyone else read-only.
 function makeNote() {
   return entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
@@ -71,7 +70,8 @@ test('mayVerb maps a CRUD verb to the capability it requires and checks the gran
 
 test('a deny() decision confers no capabilities (fail closed)', async () => {
   const Locked = entity('Locked', {
-    fields: { body: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+        body: text(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : deny('not the owner'),

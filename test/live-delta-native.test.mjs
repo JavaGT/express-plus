@@ -21,16 +21,16 @@ import { setActiveDb } from '../src/db.mjs';
 // --- test entity ---
 
 const User = entity('User', {
-  fields: { name: text() },
+    name: text(),
+
   grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
 
 const Doc = entity('Doc', {
-  fields: {
     title: text(),
-    collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
-    items: list(text()),
-  },
+  collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
+  items: list(text()),
+
   grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
 

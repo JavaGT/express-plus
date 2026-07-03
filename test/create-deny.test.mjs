@@ -26,7 +26,8 @@ import workbench, { entity, generateDDL } from '../src/internal.mjs';
 // the creator) is granted read/write/subscribe.
 function makeWidget() {
   return entity('Widget', {
-    fields: { label: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+        label: text(), owner: ref('User', { role: 'owner', readonly: true }),
+
     checks: { banned: ({ principal }) => principal.id === 'banned' },
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>

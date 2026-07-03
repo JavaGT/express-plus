@@ -25,7 +25,8 @@ import workbench, { entity, generateDDL } from '../src/internal.mjs';
 // shape no exemplar has — it isolates the list-only leak.
 function makeSecret() {
   return entity('Secret', {
-    fields: { label: text() },
+        label: text(),
+
     checks: { vip: ({ principal }) => principal.id === 'vip' },
     grant: () => [
       scope(everyone).can(async ({ is }) =>

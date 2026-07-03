@@ -1,8 +1,10 @@
 // Phase 1 — the entity() constructor and its load-time validation.
 //
-// entity(name, { fields, grant, checks?, routes? }) compiles a declared entity
-// into a frozen, validated entity record. The constructor is where fail-closed
-// load-time guards live (SPEC §6.1, §13; ADRs #7, #16):
+// entity(name, { <fields>, grant, checks?, routes?, gate?, ... }) compiles a
+// declared entity into a frozen, validated entity record. Fields are declared
+// as the non-reserved keys of the declaration (no `fields:` wrapper); the
+// reserved slots are grant/checks/routes/create/effects/admitsEffects/schedule/
+// gate/on. The constructor is where fail-closed load-time guards live (SPEC §6.1, §13; ADRs #7, #16):
 //
 //  - An entity with NO grant is a LOAD-TIME ERROR (ADR #7) — there is no
 //    zero-to-one default grant. The smoothest path must still be explicit.
@@ -30,7 +32,8 @@ const ownerGrant = () => [
 
 test('entity() returns a frozen record carrying its name and fields', () => {
   const Note = entity('Note', {
-    fields: { body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }) },
+        body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: ownerGrant,
   });
   assert.equal(Note.name, 'Note');
@@ -41,7 +44,7 @@ test('entity() returns a frozen record carrying its name and fields', () => {
 
 test('an entity with no grant is a load-time error (ADR #7, fail-closed)', () => {
   assert.throws(
-    () => entity('Ungranted', { fields: { body: text() } }),
+    () => entity('Ungranted', { body: text() }),
     /grant/i,
     'an entity declared without a grant must throw at load time',
   );
@@ -49,7 +52,8 @@ test('an entity with no grant is a load-time error (ADR #7, fail-closed)', () =>
 
 test('a ref field with role derives a check is.<role>() (the one thing the FK derives)', () => {
   const Note = entity('Note', {
-    fields: { body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }) },
+        body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: ownerGrant,
   });
   assert.equal(typeof Note.checks.owner, 'function');
@@ -67,17 +71,15 @@ test('owner() expands to the owner ref-role field descriptor', () => {
 
 test('owner.only() compiles like the explicit owner-only grant', async () => {
   const Manual = entity('ManualOwnerOnly', {
-    fields: { body: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+        body: text(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(
         async ({ is }) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not the owner'),
       ),
     ],
   });
-  const Sugared = entity('SugaredOwnerOnly', {
-    fields: { body: text(), owner: owner() },
-    grant: owner.only,
-  });
+  const Sugared = entity('SugaredOwnerOnly', { body: text(), owner: owner(), grant: owner.only, });
 
   assert.equal(Sugared.readScope.sql, Manual.readScope.sql.replaceAll('ManualOwnerOnly', 'SugaredOwnerOnly'));
   assert.deepEqual(Sugared.readScope.params, Manual.readScope.params);
@@ -98,7 +100,8 @@ test('owner.only() compiles like the explicit owner-only grant', async () => {
 
 test('the derived role check tests principal identity against the ref column', () => {
   const Note = entity('Note', {
-    fields: { body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }) },
+        body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: ownerGrant,
   });
   const row = { owner: 'user-1' };
@@ -116,7 +119,8 @@ test('redeclaring a ref-role-derived check name in checks is a load-time error (
   // at load; a developer who wants different behavior uses a different name.
   assert.throws(
     () => entity('Comment', {
-      fields: { body: text(), author: ref('User', { role: 'author' }) },
+            body: text(), author: ref('User', { role: 'author' }),
+
       grant: () => [
         scope(({ is }) => is.author()).can(
           async ({ is }) => (await is.author()) ? grant(read, write, subscribe) : deny('not the author'),
@@ -136,7 +140,8 @@ test('a ref-role check resolves through ONE registry in both modes (scope SQL + 
   //    requires the harvest face to lower successfully);
   //  - the runtime face is a boolean identity check against the ref column.
   const Comment = entity('Comment', {
-    fields: { body: text(), author: ref('User', { role: 'author' }) },
+        body: text(), author: ref('User', { role: 'author' }),
+
     grant: () => [
       scope(({ is }) => is.author()).can(
         async ({ is }) => (await is.author()) ? grant(read, write, subscribe) : deny('not the author'),
@@ -161,7 +166,8 @@ test('a grant with two scope clauses is a load-time error (one read-scope per gr
   // inferred from "more than one clause in the array".
   assert.throws(
     () => entity('TwoScopes', {
-      fields: { body: text(), owner: ref('User', { role: 'owner' }), editor: ref('User', { role: 'editor' }) },
+            body: text(), owner: ref('User', { role: 'owner' }), editor: ref('User', { role: 'editor' }),
+
       grant: () => [
         scope(({ is }) => is.owner()).can(
           async ({ is }) => (await is.owner()) ? grant(read, write, subscribe) : deny('no'),
@@ -179,8 +185,9 @@ test('a grant with two scope clauses is a load-time error (one read-scope per gr
 test('a .can body with an unawaited is.* call is rejected at load (ADR #16 static guard)', () => {
   assert.throws(
     () => entity('Leaky', {
-      fields: { body: text(), owner: ref('User', { role: 'owner' }) },
-      // forgotten await: is.owner() is a pending promise, always truthy
+            body: text(), owner: ref('User', { role: 'owner' }),
+
+      // forgotten await: is.owner() is a pending promise, always truthy,
       grant: () => [scope(({ is }) => is.owner()).can(({ is }) => is.owner() ? grant(write) : deny('no'))],
     }),
     /await/i,
@@ -191,12 +198,12 @@ test('a .can body with an unawaited is.* call is rejected at load (ADR #16 stati
 test('an entity name that is not a valid SQL identifier is a load-time error (fail-closed)', () => {
   // The entity name is interpolated verbatim into `FROM ${name}` / CREATE TABLE.
   assert.throws(
-    () => entity('Drop; DROP TABLE Note;--', { fields: { body: text() }, grant: ownerGrant }),
+    () => entity('Drop; DROP TABLE Note;--', { body: text(), grant: ownerGrant }),
     /valid SQL identifier/i,
     'a non-identifier entity name must throw at load time',
   );
   assert.throws(
-    () => entity('123bad', { fields: { body: text() }, grant: ownerGrant }),
+    () => entity('123bad', { body: text(), grant: ownerGrant }),
     /valid SQL identifier/i,
     'a name starting with a digit must throw',
   );
@@ -205,7 +212,7 @@ test('an entity name that is not a valid SQL identifier is a load-time error (fa
 test('a field name that is not a valid SQL identifier is a load-time error (fail-closed)', () => {
   // A field name becomes a column, interpolated into SQL.
   assert.throws(
-    () => entity('Note', { fields: { 'bad-col': text() }, grant: ownerGrant }),
+    () => entity('Note', { 'bad-col': text(), grant: ownerGrant }),
     /valid SQL identifier/i,
     'a non-identifier field name must throw at load time',
   );
@@ -213,10 +220,27 @@ test('a field name that is not a valid SQL identifier is a load-time error (fail
 
 test('a valid identifier entity/field name compiles (the guard does not reject legal names)', () => {
   const Note = entity('Note_2', {
-    fields: { body_text: text(), _internal: text(), owner: ref('User', { role: 'owner' }) },
+        body_text: text(), _internal: text(), owner: ref('User', { role: 'owner' }),
+
     grant: ownerGrant,
   });
   assert.equal(Note.name, 'Note_2');
   assert.ok(Note.fields.body_text);
   assert.ok(Note.fields._internal);
+});
+
+test('a `fields:` wrapper is a load-time error (fields-less declaration only)', () => {
+  assert.throws(
+    () => entity('Note', { fields: { body: text() }, grant: ownerGrant }),
+    /fields\s*wrapper|fields-less/i,
+    'a `fields:` wrapper must be rejected now that fields are declared as top-level keys',
+  );
+});
+
+test('a reserved declaration slot used as a field name is a load-time error', () => {
+  assert.throws(
+    () => entity('Note', { schedule: text(), grant: ownerGrant }),
+    /reserved/i,
+    'a reserved slot name must not be treated as a field',
+  );
 });

@@ -36,68 +36,66 @@ const collaborators = map(ref('User'), {
 const updatedAt = date({ touch: true });
 
 export const Doc = entity('Doc', {
-  fields: {
     title:      text({ validate: (v) => v.length <= 200 || 'title too long' }),
-    body:       text.crdt(),                                       // CRDT; emits :changed + :delta
-    wordCount:  computed({ compute: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0 }),
+  body:       text.crdt(),                                       // CRDT; emits :changed + :delta
+  wordCount:  computed({ compute: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0 }),
 
-    owner: ref('User', { role: 'owner', readonly: true }),       // auto-derives checks.owner
-    // Valued set: membership keyed by User, each member carries a role.
-    // Uniqueness-by-construction (a User can't appear twice as a key) — the
-    // `map` plugin dissolves the separate-join-entity + compound-unique pattern.
-    // `.can(...)` is fluent field access (Note 2): the field owns its own
-    // capability rule; a field with no `.can` strong-inherits the row grant.
-    collaborators,
+  owner: ref('User', { role: 'owner', readonly: true }),       // auto-derives checks.owner
+  // Valued set: membership keyed by User, each member carries a role.
+  // Uniqueness-by-construction (a User can't appear twice as a key) — the
+  // `map` plugin dissolves the separate-join-entity + compound-unique pattern.
+  // `.can(...)` is fluent field access (Note 2): the field owns its own
+  // capability rule; a field with no `.can` strong-inherits the row grant.
+  collaborators,
 
-    // Share-by-link: a non-user principal. The `link` field mints a token,
-    // declares the allowed tiers, and carries the CURRENT tier granted by this
-    // link. `tiers` = allowed values (domain config); `tier` = the current
-    // single value grant.can reads to pick the capability set.
-    linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view', token: 'autogen' })
-      .can(async ({ is }) =>
-        (await is.owner()) ? grant(...OWNER) : deny('only the owner may manage link sharing')),
+  // Share-by-link: a non-user principal. The `link` field mints a token,
+  // declares the allowed tiers, and carries the CURRENT tier granted by this
+  // link. `tiers` = allowed values (domain config); `tier` = the current
+  // single value grant.can reads to pick the capability set.
+  linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view', token: 'autogen' })
+    .can(async ({ is }) =>
+      (await is.owner()) ? grant(...OWNER) : deny('only the owner may manage link sharing')),
 
-    presence: ephemeral({ cursor: true, selection: true }),       // per-connection
+  presence: ephemeral({ cursor: true, selection: true }),       // per-connection
 
-    // Chat: owner or any collaborator inherits their row-tier capability; a
-    // link holder (admitted by read scope but not a collaborator) gets
-    // viewer-read of the log. `.can(fn, defaults)` receives the row grant as
-    // `defaults` — return it to inherit the row decision. A field read-denial
-    // would return a typed `withheld` marker; here non-collaborators still get
-    // VIEWER read, so no field is withheld.
-    chat: log({ sender: ref('User'), body: text() })              // append-only; emits :appended:<id>
-      .can(async ({ is }, defaults) =>
-        ((await is.collaborator()) || (await is.owner())) ? defaults : grant(...VIEWER)),
+  // Chat: owner or any collaborator inherits their row-tier capability; a
+  // link holder (admitted by read scope but not a collaborator) gets
+  // viewer-read of the log. `.can(fn, defaults)` receives the row grant as
+  // `defaults` — return it to inherit the row decision. A field read-denial
+  // would return a typed `withheld` marker; here non-collaborators still get
+  // VIEWER read, so no field is withheld.
+  chat: log({ sender: ref('User'), body: text() })              // append-only; emits :appended:<id>
+    .can(async ({ is }, defaults) =>
+      ((await is.collaborator()) || (await is.owner())) ? defaults : grant(...VIEWER)),
 
-    // State machine: declared transitions + declarative effects + a scheduled
-    // auto-transition. Effects are MUTATIONS the engine compiles (Design C),
-    // not callbacks. `auto` is a timer feeding the pipeline (Design D).
-    status: state({
-      values: ['draft', 'shared', 'archived'],
-      transitions: {
-        draft:    ['shared'],
-        shared:   ['archived', 'draft'],
-        archived: ['draft'],
-      },
-      effects: {
-        // Same { mutate, with } primitive as entity effects — target defaults to
-        // self here, so this is a self-write (the engine sees the row exists →
-        // set). Keyed by a typed transition handle, not a magic string.
-        [state.transition('shared', 'archived')]: { with: { archivedAt: now } },
-      },
-      auto: {
-        // A doc idle in `shared` for 90 days auto-archives. Scheduled mutation
-        // runs through the pipeline as a system principal — no cron, no leak.
-        // `from` is the explicit anchor field: the timer fires `from + after`.
-        when: 'shared', after: '90d', to: 'archived', from: updatedAt,
-      },
-    }).can(async ({ is }) =>
-      (await is.owner()) ? grant(...OWNER) : deny('only the owner may change status')),
+  // State machine: declared transitions + declarative effects + a scheduled
+  // auto-transition. Effects are MUTATIONS the engine compiles (Design C),
+  // not callbacks. `auto` is a timer feeding the pipeline (Design D).
+  status: state({
+    values: ['draft', 'shared', 'archived'],
+    transitions: {
+      draft:    ['shared'],
+      shared:   ['archived', 'draft'],
+      archived: ['draft'],
+    },
+    effects: {
+      // Same { mutate, with } primitive as entity effects — target defaults to
+      // self here, so this is a self-write (the engine sees the row exists →
+      // set). Keyed by a typed transition handle, not a magic string.
+      [state.transition('shared', 'archived')]: { with: { archivedAt: now } },
+    },
+    auto: {
+      // A doc idle in `shared` for 90 days auto-archives. Scheduled mutation
+      // runs through the pipeline as a system principal — no cron, no leak.
+      // `from` is the explicit anchor field: the timer fires `from + after`.
+      when: 'shared', after: '90d', to: 'archived', from: updatedAt,
+    },
+  }).can(async ({ is }) =>
+    (await is.owner()) ? grant(...OWNER) : deny('only the owner may change status')),
 
-    createdAt: date({ default: () => new Date() }),
-    updatedAt,                                                    // auto-bumps on any mutation
-    archivedAt: date({ optional: true }),
-  },
+  createdAt: date({ default: () => new Date() }),
+  updatedAt,                                                    // auto-bumps on any mutation
+  archivedAt: date({ optional: true }),
 
   // `checks` is the SINGLE SOURCE OF TRUTH for auth facts. A check is a plain
   // function — just a fact about a row. It grants nothing until a grant CALLS

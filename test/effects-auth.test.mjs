@@ -36,13 +36,15 @@ test('#2 effect target event is authorized under the effect principal, not the u
   const db = setupDb();
 
   const Target = entity('Target', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
   });
   for (const sql of generateDDL(Target)) db.exec(sql);
 
   const Source = entity('Source', {
-    fields: { title: text() },
+        title: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [Source.created, { mutate: Target, with: { name: 'from-effect' } },],
@@ -93,13 +95,15 @@ test('#2 target row-grant deny of effect principal rolls back origin (in-txn ato
   const db = setupDb();
 
   const Target = entity('Target', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
   });
   for (const sql of generateDDL(Target)) db.exec(sql);
 
   const Source = entity('Source', {
-    fields: { title: text() },
+        title: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [Source.created, { mutate: Target, with: { name: 'x' } },],
@@ -142,14 +146,16 @@ test('#3 admitsEffects deny rolls back origin', async () => {
   const db = setupDb();
 
   const Target = entity('Target', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: () => false, // deny every effect principal
   });
   for (const sql of generateDDL(Target)) db.exec(sql);
 
   const Source = entity('Source', {
-    fields: { title: text() },
+        title: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [Source.created, { mutate: Target, with: { name: 'x' } },],
@@ -185,14 +191,16 @@ test('#3 admitsEffects admit applies the effect', async () => {
   const db = setupDb();
 
   const Target = entity('Target', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect }) => effect === 'Source',
   });
   for (const sql of generateDDL(Target)) db.exec(sql);
 
   const Source = entity('Source', {
-    fields: { title: text() },
+        title: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [Source.created, { mutate: Target, with: { name: 'made' } },],
@@ -253,12 +261,14 @@ test('#4 boot: missing admitsEffects on target rejects app.ready', async (t) => 
   const db = new DatabaseSync(':memory:');
 
   const TargetNoAdmit = entity('TargetNoAdmit', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     // no admitsEffects
   });
   const Source = entity('Source', {
-    fields: { title: text() },
+        title: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [[Source.created, { mutate: TargetNoAdmit, with: { name: 'x' } }]],
   });
@@ -277,12 +287,14 @@ test('#4 boot: valid effects resolve app.ready + fire through the wired kernel',
   const db = new DatabaseSync(':memory:');
 
   const Target = entity('Target', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: () => true,
   });
   const Source = entity('Source', {
-    fields: { title: text() },
+        title: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [[Source.created, { mutate: Target, with: { name: 'wired' } }]],
   });

@@ -19,10 +19,9 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : grant(read)),
@@ -96,10 +95,9 @@ test('in-txn row-grant hook: create — runs on the newly projected row', async 
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : grant(read)),

@@ -74,12 +74,11 @@ test('crdt strategy validates structurally and its merge is a per-element diff',
 
 function makeArticle() {
   return entity('Article', {
-    fields: {
-      title: text({ validate: (s) => s.length <= 10 || 'title too long' }),
-      published: boolean({ default: false }),
-      owner: ref('User', { role: 'owner', readonly: true }),
-      blog: ref('Blog', { required: true }),
-    },
+        title: text({ validate: (s) => s.length <= 10 || 'title too long' }),
+    published: boolean({ default: false }),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    blog: ref('Blog', { required: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read)),
@@ -120,7 +119,8 @@ test('validateMutation throws on a structural type mismatch (boolean given a str
 
 test('validateMutation accepts JSON values and rejects non-JSON payloads', () => {
   const Document = entity('Document', {
-    fields: { meta: json() },
+        meta: json(),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 

@@ -129,7 +129,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
   // remove event forwards to every current subscriber (it IS the revocation
   // signal). `committedEvent` is the kernel's event — its `seq` is the per-scope
   // monotonic seq from `_Cursor`, and `data` is the mutation payload.
-  async function emit(entityRecord, id, row, committedEvent) {
+  async function emit(entityRecord, id, row, committedEvent, { hydrated = false } = {}) {
     const name = entityRecord?.name;
     if (!name) return;                       // unknown entity -> can't authorize -> fail closed
     let committed = committedEvent;
@@ -152,7 +152,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     // the raw row when hydration is unavailable (unchanged behavior for simple
     // entities whose .can body reads only `is.*`).
     let authzRow = row;
-    if (!removed && entityRecord.findById) {
+    if (!removed && !hydrated && entityRecord.findById) {
       try { authzRow = entityRecord.findById(String(id), null) ?? row; } catch { authzRow = row; }
     }
 

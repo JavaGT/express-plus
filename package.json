@@ -12,6 +12,9 @@
     },
     "./internal": {
       "default": "./src/internal.mjs"
+    },
+    "./client": {
+      "default": "./public/workbench-client.mjs"
     }
   },
   "scripts": {

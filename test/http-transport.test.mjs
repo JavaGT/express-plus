@@ -28,10 +28,9 @@ import { principal, anonymous } from '../src/principal.mjs';
 // An owned entity, routes omitted → auto-CRUD, every verb default-on.
 function makeNote() {
   return entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
@@ -43,16 +42,16 @@ function makeNote() {
 // An entity whose list verb is public (route gate relaxed for `list` only).
 function makePublicListNote() {
   return entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
       ),
     ],
-    routes: (r) => r.resource({ gate: { list: allowAnonymous() } }),
+    routes: (r) => r.resource(),
+    gate: { list: allowAnonymous() },
   });
 }
 

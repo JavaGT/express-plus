@@ -23,16 +23,16 @@ import { setActiveDb } from '../src/db.mjs';
 
 // A User with a hash password — the security reason toArray must hydrate.
 const User = entity('User', {
-  fields: { username: text(), password: hash() },
+    username: text(), password: hash(),
+
   grant: () => grant(read),
 });
 
 const Doc = entity('Doc', {
-  fields: {
     title: text(),
-    owner: ref('User', { role: 'owner', readonly: true }),
-    collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
-  },
+  owner: ref('User', { role: 'owner', readonly: true }),
+  collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
+
   grant: () => grant(read),
 });
 
@@ -101,7 +101,8 @@ test('.toArray() with no registered target returns [null, role] pairs (graceful 
   // A map whose of-target is an entity that was never registered (e.g. a ref to
   // a name with no compiled entity). toArray degrades rather than throwing.
   const Phantom = entity('Phantom', {
-    fields: { tag: text(), members: map(ref('Nonexistent')) },
+        tag: text(), members: map(ref('Nonexistent')),
+
     grant: () => grant(read),
   });
   const db = new DatabaseSync(':memory:');

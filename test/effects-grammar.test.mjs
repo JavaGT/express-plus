@@ -24,13 +24,15 @@ test('CRUD-trigger effect: Note.created → creates one Counter row', async () =
   const db = setupDb();
 
   const Counter = entity('Counter', {
-    fields: { value: text() },
+        value: text(),
+
     grant: () => grant(read, write, subscribe),
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
   const Note = entity('Note', {
-    fields: { title: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+        title: text(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => grant(read, write, subscribe),
     effects: (Note) => [
       [Note.created, {
@@ -74,13 +76,15 @@ test('effect with set operator: with: { title: "x" }', async () => {
   const db = setupDb();
 
   const Target = entity('Target', {
-    fields: { title: text() },
+        title: text(),
+
     grant: () => grant(read, write, subscribe),
   });
   for (const sql of generateDDL(Target)) db.exec(sql);
 
   const Source = entity('Source', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [Source.created, {
@@ -123,14 +127,16 @@ test('effect when guard: prevents effect when predicate returns false', () => {
   const db = setupDb();
 
   const Counter = entity('Counter', {
-    fields: { value: text() },
+        value: text(),
+
     grant: () => grant(read, write, subscribe),
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
   // when guard that only allows effect when title is 'trigger'
   const Note = entity('Note', {
-    fields: { title: text() },
+        title: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Note) => [
       [Note.created, {
@@ -154,11 +160,12 @@ test('effect when guard: prevents effect when predicate returns false', () => {
 test('non-compilable when predicate (references I/O) throws at entity() compile', () => {
   assert.throws(() => {
     entity('BadEntity', {
-      fields: { name: text() },
+            name: text(),
+
       grant: () => grant(read, write, subscribe),
       effects: (BadEntity) => [
         [BadEntity.created, {
-          mutate: entity('Target', { fields: { x: text() }, grant: () => grant(read, write, subscribe) }),
+          mutate: entity('Target', { x: text(), grant: () => grant(read, write, subscribe) }),
           with: { x: 'y' },
           when: ({ delta }) => {
             // Forbidden: references external I/O (fetch)
@@ -192,7 +199,8 @@ test('missing admitsEffects on target entity throws at compile', () => {
   const db = setupDb();
 
   const TargetNoAdmit = entity('TargetNoAdmit', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     // No admitsEffects declaration
   });
@@ -200,7 +208,8 @@ test('missing admitsEffects on target entity throws at compile', () => {
   // Source entity targets TargetNoAdmit but target has no admitsEffects
   // This should be caught by verifyAdmissionHandshake (called after all entities defined)
   const Source = entity('Source', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [Source.created, {
@@ -225,13 +234,15 @@ test('target grant denial rolls back origin (in-txn atomic)', () => {
   const db = setupDb();
 
   const RestrictedTarget = entity('RestrictedTarget', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read), // No write capability
   });
   for (const sql of generateDDL(RestrictedTarget)) db.exec(sql);
 
   const Source = entity('Source', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [Source.created, {
@@ -298,7 +309,8 @@ test('self inc: emits :updated with read-modify-write (seed=5, inc(2) → 7)', a
 
   // Use Counter.created as trigger (fires once, not recursive like :updated → :updated)
   const Counter = entity('Counter', {
-    fields: { count: number() },
+        count: number(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
     effects: (Counter) => [
@@ -339,7 +351,8 @@ test('self dec: emits :updated with read-modify-write (seed=10, dec(3) → 7)', 
   const db = setupDb();
 
   const Counter = entity('Counter', {
-    fields: { count: number() },
+        count: number(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
     effects: (Counter) => [
@@ -380,14 +393,16 @@ test('inc-on-create (non-self): degenerate literal (0+4=4), emits :created', asy
   const db = setupDb();
 
   const Target = entity('Target', {
-    fields: { count: number() },
+        count: number(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
   });
   for (const sql of generateDDL(Target)) db.exec(sql);
 
   const Source = entity('Source', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [Source.created, {
@@ -430,7 +445,8 @@ test('depth cap: self-recursion bounded (Counter.updated → Counter.updated)', 
   // Effect: every Counter.updated triggers another Counter.updated via self
   // This would recurse forever without the depth cap
   const Counter = entity('Counter', {
-    fields: { count: number(), phase: text() },
+        count: number(), phase: text(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
     effects: (Counter) => [
@@ -496,7 +512,8 @@ test('db threaded through effects executor: RMW read uses in-txn db handle', asy
   const db = setupDb();
 
   const Counter = entity('Counter', {
-    fields: { count: number() },
+        count: number(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
     effects: (Counter) => [
@@ -546,11 +563,10 @@ test('many fan-out: creates N target rows (one per collection member at trigger 
 
   // Define Inbox FIRST (target entity) to avoid temporal dead zone
   const Inbox = entity('Inbox', {
-    fields: {
-      recipient: ref('User', { readonly: true }),
-      post: ref('User', { readonly: true }),
-      kind: text(),
-    },
+        recipient: ref('User', { readonly: true }),
+    post: ref('User', { readonly: true }),
+    kind: text(),
+
     grant: () => grant(read, write, subscribe),
   });
   for (const sql of generateDDL(Inbox)) db.exec(sql);
@@ -558,10 +574,9 @@ test('many fan-out: creates N target rows (one per collection member at trigger 
   // User has a map of members (collaborators)
   // Effect on the native collaborators added event: fan-out to ALL current members
   const User = entity('User', {
-    fields: {
-      name: text(),
-      collaborators: collaboratorsField,
-    },
+        name: text(),
+    collaborators: collaboratorsField,
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
     effects: (User) => [
@@ -652,21 +667,19 @@ test('many fan-out: create-only (no dedup, two origins each add member → separ
 
   // Define Inbox FIRST (target entity) to avoid temporal dead zone
   const Inbox = entity('Inbox', {
-    fields: {
-      recipient: ref('User', { readonly: true }),
-      post: ref('User', { readonly: true }),
-      kind: text(),
-    },
+        recipient: ref('User', { readonly: true }),
+    post: ref('User', { readonly: true }),
+    kind: text(),
+
     grant: () => grant(read, write, subscribe),
   });
   for (const sql of generateDDL(Inbox)) db.exec(sql);
 
   // User has a map of members (collaborators)
   const User = entity('User', {
-    fields: {
-      name: text(),
-      collaborators: collaboratorsField,
-    },
+        name: text(),
+    collaborators: collaboratorsField,
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
     effects: (User) => [
@@ -741,7 +754,8 @@ test('many fan-out: create-only (no dedup, two origins each add member → separ
 
 test('many() operator creates correct sentinel object', () => {
   const Target = entity('Target', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
   });
 
@@ -777,14 +791,16 @@ test('Fan-IN: anyOf(Source.created, Source.updated) fires on EITHER event', asyn
   const db = setupDb();
 
   const Target = entity('Target', {
-    fields: { count: number() },
+        count: number(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
   });
   for (const sql of generateDDL(Target)) db.exec(sql);
 
   const Source = entity('Source', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [effect.anyOf(Source.created, Source.updated), {
@@ -836,14 +852,16 @@ test('Admission coverage: anyOf effect targeting non-admitting entity throws at 
 
   // Target without admitsEffects
   const TargetNoAdmit = entity('TargetNoAdmit', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     // No admitsEffects
   });
   for (const sql of generateDDL(TargetNoAdmit)) db.exec(sql);
 
   const Source = entity('Source', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [effect.anyOf(Source.created, Source.updated), {
@@ -867,7 +885,8 @@ test('Dedupe: anyOf(X.created, X.created) registers effect ONCE', async () => {
   const db = setupDb();
 
   const Target = entity('Target', {
-    fields: { count: number() },
+        count: number(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
   });
@@ -875,7 +894,8 @@ test('Dedupe: anyOf(X.created, X.created) registers effect ONCE', async () => {
 
   // Use a variable handle twice to test dedupe
   const Source = entity('Source', {
-    fields: { name: text() },
+        name: text(),
+
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
       [effect.anyOf(Source.created, Source.created), {
@@ -920,7 +940,8 @@ test('Self-recursion depth cap: anyOf effect with self-mutate bounded by maxDept
   const db = setupDb();
 
   const Counter = entity('Counter', {
-    fields: { count: number(), phase: text() },
+        count: number(), phase: text(),
+
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect, principal }) => true,
     effects: (Counter) => [

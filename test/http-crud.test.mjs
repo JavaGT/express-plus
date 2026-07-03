@@ -23,10 +23,9 @@ import workbench, {
 // the owner may read+write+subscribe.
 function ownedNote() {
   return entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
@@ -39,10 +38,9 @@ function ownedNote() {
 // the owner may write/remove (the .can capability axis, distinct from visibility).
 function publicPost() {
   return entity('Post', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(() => everyone()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
@@ -201,10 +199,9 @@ test('owner may update and remove a public-read row', async (t) => {
 // The child inherits the parent's scope and capabilities through the declared FK.
 function makeDoc() {
   return entity('Doc', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : deny('not owner'),
@@ -215,10 +212,9 @@ function makeDoc() {
 
 function makeDocComment(doc) {
   return entity('DocComment', {
-    fields: {
-      doc: ref('Doc', { required: true }),
-      body: text(),
-    },
+        doc: ref('Doc', { required: true }),
+    body: text(),
+
     grant: inherit(doc, { via: 'doc' }),
   });
 }

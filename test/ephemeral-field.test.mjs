@@ -42,9 +42,8 @@ test('.can(fn) returns a new frozen ephemeral descriptor carrying the access fn'
 test('ephemeral field compiles into an entity at import', () => {
   const Canvas = entity('CanvasWithEphemeral', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      drawing: ephemeral({ stroke: 'object', x: 'number', y: 'number' }),
-    },
+        drawing: ephemeral({ stroke: 'object', x: 'number', y: 'number' }),
+
   });
   assert.ok(Canvas);
 });
@@ -52,9 +51,8 @@ test('ephemeral field compiles into an entity at import', () => {
 test('ephemeral field generates side-table DDL (no main-table column)', () => {
   const Canvas = entity('CanvasDDL', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      cursor: ephemeral({ x: 'number', y: 'number' }),
-    },
+        cursor: ephemeral({ x: 'number', y: 'number' }),
+
   });
   const ddl = generateDDL(Canvas);
   // Should have main table + one side-table
@@ -71,9 +69,8 @@ test('ephemeral field generates side-table DDL (no main-table column)', () => {
 test('ephemeral field accepts a real grant scope(()=>everyone()).can(()=>grant(read))', () => {
   const Canvas = entity('CanvasWithGrant', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      stroke: ephemeral({ x: 'number', y: 'number' }).can(async () => true),
-    },
+        stroke: ephemeral({ x: 'number', y: 'number' }).can(async () => true),
+
   });
   assert.ok(Canvas);
   assert.ok(Canvas.fields.stroke.access);
@@ -82,9 +79,8 @@ test('ephemeral field accepts a real grant scope(()=>everyone()).can(()=>grant(r
 test('ephemeral handle cannot be compared in scope (fail closed)', () => {
   const Canvas = entity('CanvasScopeGuard', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      cursor: ephemeral({ x: 'number' }),
-    },
+        cursor: ephemeral({ x: 'number' }),
+
   });
   assert.throws(
     () => Canvas.cursor.is('x'),

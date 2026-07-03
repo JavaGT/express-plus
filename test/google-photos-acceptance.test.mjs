@@ -50,15 +50,14 @@ async function serve(t, db, routes, who) {
 
 function declareAlbumPhoto() {
   const Album = entity('Album', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-      collaborators: map(ref('User'), {
-        role: ['viewer', 'editor', 'coOwner'],
-        default: {},
-      }),
-      updatedAt: date({ touch: true }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    collaborators: map(ref('User'), {
+      role: ['viewer', 'editor', 'coOwner'],
+      default: {},
+    }),
+    updatedAt: date({ touch: true }),
+
     checks: {
       collaborator: ({ Album, principal }) =>
         Album.collaborators.has(principal.id),
@@ -80,12 +79,11 @@ function declareAlbumPhoto() {
   });
 
   const Photo = entity('Photo', {
-    fields: {
-      title: text(),
-      album: ref('Album'),
-      capturedAt: date({ optional: true }),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        title: text(),
+    album: ref('Album'),
+    capturedAt: date({ optional: true }),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     checks: {
       albumMember: ({ Photo, principal }) =>
         Photo.album.collaborators.has(principal.id),
@@ -287,20 +285,18 @@ test('async declared checks use await to read target scalar fields', async () =>
   });
 
   const Album2 = entity('Album2', {
-    fields: {
-      owner: ref('User', { role: 'owner' }),
-      title: text(),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
-    },
+        owner: ref('User', { role: 'owner' }),
+    title: text(),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+
     grant: () => [scope(() => never()).can(() => grant(read))],
   });
 
   const Photo2 = entity('Photo2', {
-    fields: {
-      title: text(),
-      album: ref('Album2'),
-      owner: ref('User', { role: 'owner' }),
-    },
+        title: text(),
+    album: ref('Album2'),
+    owner: ref('User', { role: 'owner' }),
+
     checks: {
       albumOwner: async ({ entity, principal }) => {
         const a = await entity.album;

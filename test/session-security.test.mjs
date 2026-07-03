@@ -29,13 +29,14 @@ test('parseCookies: multiple cookies with one malformed pair', () => {
 test('request with malformed sid cookie → anonymous principal (route 401s)', async (t) => {
   const db = new DatabaseSync(':memory:');
   const Note = entity('Note', {
-    fields: { body: text() },
+        body: text(),
+
     grant: () => [scope().can(() => grant(read, write))],
   });
   const app = workbench({ db });
   app.mount('/notes', Note);
   await app.ddl();
-  
+
   // Default route gate is requireUser() — anonymous is denied
   app.listen(0);
   await app.ready;

@@ -24,144 +24,142 @@ const OWNER   = [read, write, subscribe, admin];
 // Photo entity — the core media item
 // ==========================================================================
 export const Photo = entity('Photo', {
-  fields: {
     // ===================================================================
-    // RESOLVED: blob field type is a built-in (SPEC §5.1, ADR #9)
-    //
-    // Binary storage is the primitive of a photo app — the original image
-    // file IS the entity's reason for existing. No framework construct for:
-    //   - streaming/multipart upload through the mutation pipeline
-    //   - byte-level access control (the URL is gated; the bytes are not)
-    //   - deduplication or replication of binary storage
-    //   - content-type validation at the field level
-    //
-    // Real API (the field-type plugin contract provides):
-    //   original: blob({ accept: ['image/*','video/*'], maxSize: '50MB' })
-    //     .can(async ({ is }, defaults) =>
-    //       (await is.owner() || await is.albumEditor()) ? defaults
-    //         : deny('only owner may download original')),
-    //
-    // The `store` argument is the field-type persistence strategy — the
-    // plugin owns it, the app does not hand-wire S3 keys.
-    // ===================================================================
-    blobUrl: text({ readonly: true }),
+  // RESOLVED: blob field type is a built-in (SPEC §5.1, ADR #9)
+  //
+  // Binary storage is the primitive of a photo app — the original image
+  // file IS the entity's reason for existing. No framework construct for:
+  //   - streaming/multipart upload through the mutation pipeline
+  //   - byte-level access control (the URL is gated; the bytes are not)
+  //   - deduplication or replication of binary storage
+  //   - content-type validation at the field level
+  //
+  // Real API (the field-type plugin contract provides):
+  //   original: blob({ accept: ['image/*','video/*'], maxSize: '50MB' })
+  //     .can(async ({ is }, defaults) =>
+  //       (await is.owner() || await is.albumEditor()) ? defaults
+  //         : deny('only owner may download original')),
+  //
+  // The `store` argument is the field-type persistence strategy — the
+  // plugin owns it, the app does not hand-wire S3 keys.
+  // ===================================================================
+  blobUrl: text({ readonly: true }),
 
-    // ===================================================================
-    // RESOLVED: stored computed fields have two modes (SPEC §5.3, ADR #12)
-    //
-    // Thumbnails must be computed ASYNCHRONOUSLY (resize is external I/O),
-    // ONCE on upload (not recomputed on every read), and PERSISTED + INDEXED
-    // (so queries can use them). The grilled API has:
-    //
-    // The grilled `computed()` (synchronous read-time pull) and in-transaction
-    // `{ mutate, with }` effects (cannot shell out to ImageMagick/sharp) were
-    // the wrong primitives for async compute. The designed API provides:
-    //
-    //   - `computed({ compute })` — synchronous, recompute-on-read.
-    //   - `projected.async` — post-commit projection over the committed log,
-    //     with a sequence watermark and explicit staleness (SPEC §9.3, ADR #8).
-    //     This IS the core upload workflow for a photo app.
-    //
-    // Real API (the designed projected.async primitive, SPEC §5.3):
-    //   thumbnailSm: projected.async({
-    //     from: 'original',
-    //     compute: (blob) => sharp(blob).resize(400, 400, { fit: 'cover' }).toBuffer(),
-    //   }),
-    //   thumbnailLg: projected.async({
-    //     from: 'original',
-    //     compute: (blob) => sharp(blob).resize(1600, 1600, { fit: 'inside' }).toBuffer(),
-    //   }),
-    //
-    // The projection principal (a bounded post-commit consumer, ADR #8)
-    // is admitted by the target's own grant and runs on its own schedule.
-    // No external job queue, no polling — the committed log is the source.
-    // ===================================================================
-    thumbnailSmUrl: text({ optional: true }),
-    thumbnailLgUrl: text({ optional: true }),
-    isProcessed: boolean({ default: false }),
-    processingError: text({ optional: true }),
+  // ===================================================================
+  // RESOLVED: stored computed fields have two modes (SPEC §5.3, ADR #12)
+  //
+  // Thumbnails must be computed ASYNCHRONOUSLY (resize is external I/O),
+  // ONCE on upload (not recomputed on every read), and PERSISTED + INDEXED
+  // (so queries can use them). The grilled API has:
+  //
+  // The grilled `computed()` (synchronous read-time pull) and in-transaction
+  // `{ mutate, with }` effects (cannot shell out to ImageMagick/sharp) were
+  // the wrong primitives for async compute. The designed API provides:
+  //
+  //   - `computed({ compute })` — synchronous, recompute-on-read.
+  //   - `projected.async` — post-commit projection over the committed log,
+  //     with a sequence watermark and explicit staleness (SPEC §9.3, ADR #8).
+  //     This IS the core upload workflow for a photo app.
+  //
+  // Real API (the designed projected.async primitive, SPEC §5.3):
+  //   thumbnailSm: projected.async({
+  //     from: 'original',
+  //     compute: (blob) => sharp(blob).resize(400, 400, { fit: 'cover' }).toBuffer(),
+  //   }),
+  //   thumbnailLg: projected.async({
+  //     from: 'original',
+  //     compute: (blob) => sharp(blob).resize(1600, 1600, { fit: 'inside' }).toBuffer(),
+  //   }),
+  //
+  // The projection principal (a bounded post-commit consumer, ADR #8)
+  // is admitted by the target's own grant and runs on its own schedule.
+  // No external job queue, no polling — the committed log is the source.
+  // ===================================================================
+  thumbnailSmUrl: text({ optional: true }),
+  thumbnailLgUrl: text({ optional: true }),
+  isProcessed: boolean({ default: false }),
+  processingError: text({ optional: true }),
 
-    // ===================================================================
-    // RESOLVED: json(shape) is a built-in field type (SPEC §5.1, ADR #9)
-    //
-    // EXIF data is naturally structured: { iso, aperture, focalLength,
-    // cameraModel, gpsLat, gpsLng, ... }. `json(shape)` provides:
-    //   - a single typed sub-object, not 20+ flat fields
-    //   - typed-handle access to individual keys
-    //   - path-queryable via opt-in index (the json field is value-kind,
-    //     with an index capability that compiles typed sub-key predicates)
-    //
-    // Real API:
-    //   exif: json({
-    //     iso: number(), aperture: number(), shutterSpeed: text(),
-    //     focalLength: number(), cameraModel: text(), make: text(),
-    //     lens: text(), flash: boolean(), orientation: number(),
-    //     gpsLatitude: number(), gpsLongitude: number(),
-    //     gpsAltitude: number(), dateTaken: date(),
-    //   }),
-    //
-    // The flattened fields below are the workaround — still shown for
-    // contrast, but the framework now provides the real primitive.
-    // ===================================================================
-    exifIso:           number({ optional: true }),
-    exifAperture:      number({ optional: true }),
-    exifShutterSpeed:  text({ optional: true }),
-    exifFocalLength:   number({ optional: true }),
-    exifCameraModel:   text({ optional: true }),
-    exifMake:          text({ optional: true }),
-    exifLens:          text({ optional: true }),
-    exifFlash:         boolean({ optional: true }),
-    exifOrientation:   number({ optional: true }),
-    // GPS — DEFERRED: geo-point field + rtree engine deferred (SPEC §11);
-    gpsLatitude:       number({ optional: true }),
-    gpsLongitude:      number({ optional: true }),
-    gpsAltitude:       number({ optional: true }),
-    dateTaken:         date({ optional: true }),
+  // ===================================================================
+  // RESOLVED: json(shape) is a built-in field type (SPEC §5.1, ADR #9)
+  //
+  // EXIF data is naturally structured: { iso, aperture, focalLength,
+  // cameraModel, gpsLat, gpsLng, ... }. `json(shape)` provides:
+  //   - a single typed sub-object, not 20+ flat fields
+  //   - typed-handle access to individual keys
+  //   - path-queryable via opt-in index (the json field is value-kind,
+  //     with an index capability that compiles typed sub-key predicates)
+  //
+  // Real API:
+  //   exif: json({
+  //     iso: number(), aperture: number(), shutterSpeed: text(),
+  //     focalLength: number(), cameraModel: text(), make: text(),
+  //     lens: text(), flash: boolean(), orientation: number(),
+  //     gpsLatitude: number(), gpsLongitude: number(),
+  //     gpsAltitude: number(), dateTaken: date(),
+  //   }),
+  //
+  // The flattened fields below are the workaround — still shown for
+  // contrast, but the framework now provides the real primitive.
+  // ===================================================================
+  exifIso:           number({ optional: true }),
+  exifAperture:      number({ optional: true }),
+  exifShutterSpeed:  text({ optional: true }),
+  exifFocalLength:   number({ optional: true }),
+  exifCameraModel:   text({ optional: true }),
+  exifMake:          text({ optional: true }),
+  exifLens:          text({ optional: true }),
+  exifFlash:         boolean({ optional: true }),
+  exifOrientation:   number({ optional: true }),
+  // GPS — DEFERRED: geo-point field + rtree engine deferred (SPEC §11);
+  gpsLatitude:       number({ optional: true }),
+  gpsLongitude:      number({ optional: true }),
+  gpsAltitude:       number({ optional: true }),
+  dateTaken:         date({ optional: true }),
 
-    // ===================================================================
-    // Core metadata — works fine with existing field types
-    // ===================================================================
-    caption:     text({ validate: (v) => v.length <= 5000 || 'caption too long' }),
-    description: text(),
-    filename:    text({ readonly: true }),
-    mimeType:    text({ readonly: true }),
-    fileSize:    number({ readonly: true }),
+  // ===================================================================
+  // Core metadata — works fine with existing field types
+  // ===================================================================
+  caption:     text({ validate: (v) => v.length <= 5000 || 'caption too long' }),
+  description: text(),
+  filename:    text({ readonly: true }),
+  mimeType:    text({ readonly: true }),
+  fileSize:    number({ readonly: true }),
 
-    // ===================================================================
-    // Tags — RESOLVED: `list` field type built-in (SPEC §5.1, ADR #9)
-    //
-    // Real API:
-    //   tags: list(text()),
-    //
-    // The comma-separated string below is the old workaround; `list` replaces it.
-    // ===================================================================
-    tags: text({ optional: true }),
+  // ===================================================================
+  // Tags — RESOLVED: `list` field type built-in (SPEC §5.1, ADR #9)
+  //
+  // Real API:
+  //   tags: list(text()),
+  //
+  // The comma-separated string below is the old workaround; `list` replaces it.
+  // ===================================================================
+  tags: text({ optional: true }),
 
-    // ===================================================================
-    // Ownership & relations — expressible with existing ref + link fields
-    // ===================================================================
-    owner: ref('User', { role: 'owner', readonly: true }),
-    album: ref('Album', { optional: true }),
+  // ===================================================================
+  // Ownership & relations — expressible with existing ref + link fields
+  // ===================================================================
+  owner: ref('User', { role: 'owner', readonly: true }),
+  album: ref('Album', { optional: true }),
 
-    // Link-share for direct photo links — the `link` field type handles
-    // single-tier-per-link well. For per-member tiers (share with
-    // multiple non-users at different tiers), see Album.linkShare
-    // discussion in PAIN-POINTS.md.
-    linkShare: link({ tiers: ['view', 'download'], tier: 'view', token: 'autogen' })
-      .can(async ({ is }) =>
-        (await is.owner()) ? grant(...OWNER) : deny('only owner may manage link sharing')),
+  // Link-share for direct photo links — the `link` field type handles
+  // single-tier-per-link well. For per-member tiers (share with
+  // multiple non-users at different tiers), see Album.linkShare
+  // discussion in PAIN-POINTS.md.
+  linkShare: link({ tiers: ['view', 'download'], tier: 'view', token: 'autogen' })
+    .can(async ({ is }) =>
+      (await is.owner()) ? grant(...OWNER) : deny('only owner may manage link sharing')),
 
-    // ===================================================================
-    // Dates — fully expressible
-    // ===================================================================
-    capturedAt: date({ optional: true }),
-    uploadedAt: date({ default: () => new Date() }),
-    updatedAt:  date({ touch: true }),
-  },
+  // ===================================================================
+  // Dates — fully expressible
+  // ===================================================================
+  capturedAt: date({ optional: true }),
+  uploadedAt: date({ default: () => new Date() }),
+  updatedAt:  date({ touch: true }),
 
   // ==========================================================================
   // Checks
-  // ==========================================================================
+  // ==========================================================================,
   checks: {
     // Auto-derived from `owner: ref('User', { role: 'owner' })`:
     //   owner: ({ Photo, principal }) => Photo.owner.is(principal.id)
@@ -208,7 +206,7 @@ export const Photo = entity('Photo', {
   //
   // scope = who can READ (compiled to SQL WHERE)
   // .can  = every other capability (runtime, per-row)
-  // ==========================================================================
+  // ==========================================================================,
   grant: () => [
     scope(({ is }) => anyOf(is.owner(), is.albumMember(), is.linkHolder()))
       .can(async ({ is, entity }) => {
@@ -247,7 +245,7 @@ export const Photo = entity('Photo', {
 
   // ==========================================================================
   // Routes
-  // ==========================================================================
+  // ==========================================================================,
   routes: (r, Photo) => {
     r.resource();  // CRUD through grant
 

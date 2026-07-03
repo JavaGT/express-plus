@@ -8,14 +8,14 @@ import workbench, { entity, generateDDL } from '../src/internal.mjs';
 
 function makeNote() {
   return entity('Note', {
-    fields: {
-      body: text(),
-      wordCount: computed({ compute: (d) => d.body ? d.body.length : 0 }),
-      updatedAt: date({ touch: true }),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    wordCount: computed({ compute: (d) => d.body ? d.body.length : 0 }),
+    updatedAt: date({ touch: true }),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [scope(({ is }) => is.owner()).can(async ({ is }) => (await is.owner()) ? grant(read, write) : grant(read))],
-    routes: (r) => r.resource({ gate: { list: allowAnonymous() } }),
+    gate: { list: allowAnonymous() },
+    routes: (r) => r.resource(),
   });
 }
 

@@ -47,10 +47,9 @@ import { principal, anonymous } from '../src/principal.mjs';
 // the proven map.has path (the build-flag fix from the council verdict).
 function makeFeed() {
   return entity('Feed', {
-    fields: {
-      title: text(),
-      subscribers: map(ref('User'), { default: {} }),
-    },
+        title: text(),
+    subscribers: map(ref('User'), { default: {} }),
+
     checks: {
       subscriber: ({ Feed, principal: p }) => Feed.subscribers.has(p.id),
     },
@@ -68,15 +67,18 @@ function makeFeed() {
 function makeChain() {
   const Feed = makeFeed();
   const Episode = entity('Episode', {
-    fields: { feed: ref('Feed', { required: true }), title: text() },
+        feed: ref('Feed', { required: true }), title: text(),
+
     grant: inherit(Feed, { via: 'feed' }),
   });
   const AudioAsset = entity('AudioAsset', {
-    fields: { episode: ref('Episode', { required: true }), contentHash: text() },
+        episode: ref('Episode', { required: true }), contentHash: text(),
+
     grant: inherit(Episode, { via: 'episode' }),
   });
   const WordTimings = entity('WordTimings', {
-    fields: { audioAsset: ref('AudioAsset', { required: true }) },
+        audioAsset: ref('AudioAsset', { required: true }),
+
     grant: inherit(AudioAsset, { via: 'audioAsset' }),
   });
   return { Feed, Episode, AudioAsset, WordTimings };

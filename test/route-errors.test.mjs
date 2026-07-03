@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import workbench, { entity } from '../src/internal.mjs';
 
 test('mount after resolveRoutes throws', async () => {
-  const E = entity('E', { fields: { x: text() }, grant: () => grant(read) });
+  const E = entity('E', { x: text(), grant: () => grant(read) });
   const app = workbench().mount('/e', E);
   await app.resolveRoutes();
   assert.throws(
@@ -16,7 +16,7 @@ test('mount after resolveRoutes throws', async () => {
 });
 
 test('mount after listen throws', async () => {
-  const E = entity('E', { fields: { x: text() }, grant: () => grant(read) });
+  const E = entity('E', { x: text(), grant: () => grant(read) });
   const app = workbench().mount('/e', E);
   app.listen(0);
   await app.ready;
@@ -29,7 +29,8 @@ test('mount after listen throws', async () => {
 
 test('broken routes thunk throws at resolveRoutes', async () => {
   const E = entity('E', {
-    fields: { x: text() },
+        x: text(),
+
     grant: () => grant(read),
     routes: () => { throw new Error('broken'); },
   });
@@ -41,7 +42,7 @@ test('broken routes thunk throws at resolveRoutes', async () => {
 });
 
 test('double resolveRoutes is idempotent', async () => {
-  const E = entity('E', { fields: { x: text() }, grant: () => grant(read) });
+  const E = entity('E', { x: text(), grant: () => grant(read) });
   const app = workbench().mount('/e', E);
   const r1 = await app.resolveRoutes();
   const r2 = await app.resolveRoutes();

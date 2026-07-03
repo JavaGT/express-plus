@@ -16,7 +16,7 @@
 import workbench, { entity, text, ref, grant, deny, read, write, subscribe, scope } from 'workbench';
 
 export const Note = entity('Note', {
-  fields: { body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }) },
+  body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }),
   grant: () => [
     scope(({ is }) => is.owner())
       .can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe) : deny('not the owner')),

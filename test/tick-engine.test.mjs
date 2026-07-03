@@ -88,7 +88,8 @@ test('discoverTickedRows returns rows matching while, null when none match', () 
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('TestDisc', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status },
+        status,
+
     schedule: {
       update: tick.hz(100, {
         while: ({ fields }) => fields.status.is('alive'),
@@ -119,7 +120,8 @@ test('admitSystemMutation admits an exact-match dispatch', () => {
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('AdmitDirect', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status },
+        status,
+
     schedule: {
       update: tick.hz(100, {
         while: ({ fields }) => fields.status.is('alive'),
@@ -143,7 +145,8 @@ test('admitSystemMutation DENIES wrong payload', () => {
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('AdmitWrongPayload', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status },
+        status,
+
     schedule: {
       update: tick.hz(100, {
         while: ({ fields }) => fields.status.is('alive'),
@@ -167,7 +170,8 @@ test('admitSystemMutation DENIES row deleted between discover + dispatch', () =>
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('AdmitTOCTOU', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status },
+        status,
+
     schedule: {
       update: tick.hz(100, {
         while: ({ fields }) => fields.status.is('alive'),
@@ -191,7 +195,8 @@ test('admitSystemMutation DENIES non-system principal', () => {
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('AdmitNonSystem', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status },
+        status,
+
     schedule: {
       update: tick.hz(100, {
         while: ({ fields }) => fields.status.is('alive'),
@@ -215,7 +220,8 @@ test('admitSystemMutation admits and denies the 3-part scheduler source through 
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('AdmitSystemSchedule', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt, status },
+        publishedAt, status,
+
     schedule: {
       update: schedule.at(publishedAt, {
         with: { status: 'published' },
@@ -248,7 +254,8 @@ test('e2e: tick dispatch updates row through projection', async (t) => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogTick', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: statusDesc },
+        status: statusDesc,
+
     schedule: {
       update: tick.hz(20, {
         while: ({ fields }) => fields.status.is('alive'),
@@ -300,7 +307,8 @@ test('listen tick dispatch waits behind the app write queue', async (t) => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogTickQueue', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: statusDesc },
+        status: statusDesc,
+
     schedule: {
       update: tick.hz(20, {
         while: ({ fields }) => fields.status.is('alive'),
@@ -341,7 +349,8 @@ test('e2e: while-fails — row not matching while is never mutated', async () =>
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogWhileFail', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: statusDesc },
+        status: statusDesc,
+
     schedule: {
       update: tick.hz(20, {
         while: ({ fields }) => fields.status.is('alive'),
@@ -393,7 +402,8 @@ test('e2e: TOCTOU — row deleted between discover and dispatch does not escape'
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogTOCTOU', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: statusDesc },
+        status: statusDesc,
+
     schedule: {
       update: tick.hz(20, {
         while: ({ fields }) => fields.status.is('alive'),
@@ -447,7 +457,8 @@ test('e2e: engine with no tick triggers returns no-op', () => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogNoTick', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: statusDesc },
+        status: statusDesc,
+
     schedule: {
       // No tick triggers — only a regular field, no schedule at all.
     },
@@ -466,7 +477,8 @@ test('e2e: engine dispatch error continues sweep (stderr, no throw)', async (t) 
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogSweepContinue', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: statusDesc },
+        status: statusDesc,
+
     schedule: {
       update: tick.hz(20, {
         while: ({ fields }) => fields.status.is('alive'),

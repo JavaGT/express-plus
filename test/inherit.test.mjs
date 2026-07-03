@@ -31,7 +31,8 @@ const norm = (s) => s.replace(/\s+/g, ' ').trim();
 // The canonical parent: a Doc readable only by its owner.
 function makeDoc() {
   return entity('Doc', {
-    fields: { title: text(), owner: ref('User', { role: 'owner' }) },
+        title: text(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ is }) => is.owner()).can(ownerCan)],
   });
 }
@@ -39,7 +40,8 @@ function makeDoc() {
 test('inherit(Parent, { via }) compiles the child read-scope to a correlated EXISTS through the FK', () => {
   const Doc = makeDoc();
   const Comment = entity('Comment', {
-    fields: { doc: ref('Doc', { required: true }), body: text() },
+        doc: ref('Doc', { required: true }), body: text(),
+
     grant: inherit(Doc, { via: 'doc' }),
   });
   const s = norm(Comment.readScope.sql);
@@ -56,7 +58,8 @@ test('inherit(Parent, { via }) compiles the child read-scope to a correlated EXI
 test('the inherited child scope keeps exactly one principalId placeholder for bindReadScope', () => {
   const Doc = makeDoc();
   const Comment = entity('Comment', {
-    fields: { doc: ref('Doc', { required: true }), body: text() },
+        doc: ref('Doc', { required: true }), body: text(),
+
     grant: inherit(Doc, { via: 'doc' }),
   });
   const keys = Object.keys(Comment.readScope.params).filter((k) => k.endsWith('_principalId'));
@@ -68,7 +71,8 @@ test('the inherited child scope keeps exactly one principalId placeholder for bi
 test('the inherited scope executes against node:sqlite and selects exactly the child rows whose parent the principal owns', () => {
   const Doc = makeDoc();
   const Comment = entity('Comment', {
-    fields: { doc: ref('Doc', { required: true }), body: text() },
+        doc: ref('Doc', { required: true }), body: text(),
+
     grant: inherit(Doc, { via: 'doc' }),
   });
 
@@ -98,7 +102,8 @@ test('the inherited scope executes against node:sqlite and selects exactly the c
 test('the parent entity is unchanged by being inherited (its own scope still binds to t0)', () => {
   const Doc = makeDoc();
   entity('Comment', {
-    fields: { doc: ref('Doc', { required: true }), body: text() },
+        doc: ref('Doc', { required: true }), body: text(),
+
     grant: inherit(Doc, { via: 'doc' }),
   });
   // Doc's own read-scope is still its own, aliased to its own base table.

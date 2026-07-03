@@ -16,22 +16,20 @@ import { Doc } from './doc.mjs';
 const inheritDoc = inherit(Doc, { via: 'doc' });
 
 export const Comment = entity('Comment', {
-  fields: {
     doc: ref('Doc', { required: true }),        // typed FK → parent; grant inherits through this
-    author: ref('User', { role: 'author', readonly: true }),  // auto-populates req.principal.id
-    body: text({ validate: (v) => v.length <= 5000 || 'comment too long' })
-      // Fluent field access (Note 2): the author gets write on their own row;
-      // everyone else admitted by the inherited Doc-scope gets read/subscribe
-      // only — NOT the Doc editor-tier, so a Doc editor can't edit someone
-      // else's comment. Every is.* is awaited. Non-author read is granted (not
-      // withheld) so the body is visible to all Doc-readers.
-      .can(async ({ is }) =>
-        (await is.author()) ? grant(read, write, subscribe) : grant(read, subscribe)),
-    resolved: boolean({ default: false })
-      .can(async ({ is }) =>
-        (await is.author()) ? grant(read, write, subscribe) : grant(read, subscribe)),
-    createdAt: date({ default: () => new Date() }),
-  },
+  author: ref('User', { role: 'author', readonly: true }),  // auto-populates req.principal.id
+  body: text({ validate: (v) => v.length <= 5000 || 'comment too long' })
+    // Fluent field access (Note 2): the author gets write on their own row;
+    // everyone else admitted by the inherited Doc-scope gets read/subscribe
+    // only — NOT the Doc editor-tier, so a Doc editor can't edit someone
+    // else's comment. Every is.* is awaited. Non-author read is granted (not
+    // withheld) so the body is visible to all Doc-readers.
+    .can(async ({ is }) =>
+      (await is.author()) ? grant(read, write, subscribe) : grant(read, subscribe)),
+  resolved: boolean({ default: false })
+    .can(async ({ is }) =>
+      (await is.author()) ? grant(read, write, subscribe) : grant(read, subscribe)),
+  createdAt: date({ default: () => new Date() }),
 
   // Grant inheritance: Comment follows the parent Doc grant through the typed FK
   // (joins Comment→Doc in the WHERE), inheriting row read-scope + base

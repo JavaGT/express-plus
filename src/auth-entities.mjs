@@ -34,10 +34,9 @@ const notRequestReadable = (which) =>
       `code (the unscoped query API), never request-dispatched`));
 
 export const User = entity('User', {
-  fields: {
     username: text(),
-    password: hash(),
-  },
+  password: hash(),
+
   grant: () => [notRequestReadable('User')],
 });
 
@@ -71,11 +70,10 @@ export const Session = entity('Session', {
   // The stored cells are framework-owned and readonly: an app never writes them
   // by hand; the create policy mints them. Declaring them keeps the table schema
   // typed and inspectable (Session.token.is(...) is a first-class handle).
-  fields: {
     token: text({ readonly: true }),
-    principalType: text({ readonly: true }),
-    principalId: text({ readonly: true }),
-  },
+  principalType: text({ readonly: true }),
+  principalId: text({ readonly: true }),
+
   grant: () => [notRequestReadable('Session')],
   create: mintSession,
 });
@@ -100,11 +98,10 @@ export const Session = entity('Session', {
 // and a sustained WS push of new notifications). It needs no is.* call — the row
 // is already the principal's own — so it is trivially guard-clean.
 export const Inbox = entity('Inbox', {
-  fields: {
     recipient: ref('User', { role: 'recipient' }),
-    doc: ref('Doc'),
-    kind: text(),
-  },
+  doc: ref('Doc'),
+  kind: text(),
+
   grant: () => [scope(({ is }) => is.recipient()).can(() => grant(read, subscribe))],
   // Inbox EXISTS to receive projected notifications from other entities' effects
   // (e.g. Doc's collaboratorAdded → Inbox invite row). It admits effect

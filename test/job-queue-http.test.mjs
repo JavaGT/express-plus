@@ -19,7 +19,7 @@ function makeApp() {
     db,
     jobs: { sharedSecret: SECRET, leaseMs: 60_000, heartbeatGraceMs: 60_000, reapIntervalMs: 1_000_000 },
   });
-  app.mount('/notes', entity('Note', { fields: { body: text() }, grant: () => [grant(read)] }));
+  app.mount('/notes', entity('Note', { body: text(), grant: () => [grant(read)] }));
   return { db, app };
 }
 
@@ -36,7 +36,7 @@ function bearer(workerId, token) {
 test('jobs routes absent when substrate not engaged (falls through to 404)', async (t) => {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db }); // no `jobs` config
-  app.mount('/notes', entity('Note', { fields: { body: text() }, grant: () => [grant(read)] }));
+  app.mount('/notes', entity('Note', { body: text(), grant: () => [grant(read)] }));
   const base = await ready(app);
   t.after(() => { app.httpServer.close(); db.close(); });
   const res = await fetch(`${base}/jobs/claim`, { method: 'POST' });

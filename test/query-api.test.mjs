@@ -20,10 +20,7 @@ import { lowerToSql } from '../src/scope-sql.mjs';
 // A trivial public-read entity (the query API is unscoped, so the grant's scope
 // does not constrain it — see the unscoped test below).
 function makeUser() {
-  return entity('User', {
-    fields: { username: text(), password: text() },
-    grant: () => [scope(() => everyone()).can(() => grant(read))],
-  });
+  return entity('User', { username: text(), password: text(), grant: () => [scope(() => everyone()).can(() => grant(read))], });
 }
 
 // A real on-disk-shaped in-memory DB seeded with a User table.
@@ -36,10 +33,7 @@ function seedDb() {
 }
 
 function makeEvent() {
-  return entity('Event', {
-    fields: { title: text(), startsAt: date() },
-    grant: () => [scope(() => everyone()).can(() => grant(read))],
-  });
+  return entity('Event', { title: text(), startsAt: date(), grant: () => [scope(() => everyone()).can(() => grant(read))], });
 }
 
 function seedEventDb() {
@@ -126,7 +120,8 @@ test('the query API runs UNSCOPED — it bypasses the read-scope (trusted server
   // principal. The query API must still return rows, proving it does not thread
   // bindReadScope — it is the privileged server-side primitive, not a request.
   const Hidden = entity('User', {
-    fields: { username: text(), password: text() },
+        username: text(), password: text(),
+
     // owner-scoped with no owner field would be empty; use a scope that compiles
     // to a column comparison that no seeded row satisfies if it WERE applied.
     grant: () => [scope(({ fields }) => fields.username.is('___never___')).can(() => grant(read))],

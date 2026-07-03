@@ -105,7 +105,8 @@ test('entity with tick.hz schedule compiles → kind, whileSql populated, no fie
   const status = text();
   const Enemy = entity('Enemy', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status },
+        status,
+
     schedule: {
       update: tick.hz(30, {
         while: ({ fields }) => fields.status.is('moving'),
@@ -132,7 +133,8 @@ test('entity with tick.every schedule compiles', () => {
   const status = text();
   const Enemy = entity('EnemyEvery', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status },
+        status,
+
     schedule: {
       update: tick.every('1m', {
         while: ({ fields }) => fields.status.is('idle'),
@@ -159,7 +161,8 @@ test('entity with tick.hz no while throws at compile (empty while forbidden)', (
   assert.throws(
     () => entity('EnemyNoWhile', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { status },
+            status,
+
       schedule: {
         update: tick.hz(30), // no while → foot-gun
       },
@@ -173,7 +176,8 @@ test('entity with tick.every no while throws at compile', () => {
   assert.throws(
     () => entity('EnemyEveryNoWhile', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { status },
+            status,
+
       schedule: {
         update: tick.every('1m'),
       },
@@ -191,7 +195,8 @@ test('tick.hz with when: rejected at entity compile', () => {
   assert.throws(
     () => entity('EnemyWhenTick', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { status },
+            status,
+
       schedule: {
         update: tick.hz(30, { when: true }),
       },

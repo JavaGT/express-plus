@@ -22,10 +22,9 @@ import workbench, {
 // --- test entity ---
 
 const Canvas = entity('Canvas', {
-  fields: {
     title: text(),
-    activeStroke: ephemeral({ points: true, color: true }),
-  },
+  activeStroke: ephemeral({ points: true, color: true }),
+
   grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
 

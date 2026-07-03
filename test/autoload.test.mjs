@@ -12,11 +12,10 @@ import workbench, { entity, generateDDL } from '../src/internal.mjs';
 
 function makeDoc() {
   return entity('Doc', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
+
     grant: () => grant(read, write),
     routes: (r) => {
       r.resource();
@@ -74,7 +73,8 @@ test('a generic router :userId param does NOT auto-load (no entity context)', as
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   const Doc = entity('Doc', {
-    fields: { title: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+        title: text(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => grant(read, write),
     routes: (r) => {
       r.resource();
@@ -109,11 +109,10 @@ test('a generic router :userId param does NOT auto-load (no entity context)', as
 // in-scope-but-denied = 403, and the handler never runs for an admitted row.
 function makeDocScoped() {
   return entity('Doc', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
+
     grant: () => [scope(({ is }) => is.owner()).can(() => grant(read, write))],
     routes: (r) => {
       r.resource();

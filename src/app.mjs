@@ -5,8 +5,11 @@
 // app synchronously, so the fluent `app.mount(...).mount(...).listen()` chain is
 // preserved. The concrete routing table is RESOLVED later by `resolveRoutes()`:
 // it invokes each entity's `routes:(r, Entity)=>...` thunk with a route builder
-// `r`, whose `r.resource({gate})` declares the five CRUD verbs and runs the
-// per-verb gate map through resolveRouteGate (Todo B). Resolution is ASYNC — an
+// `r`, whose `r.resource()` declares the five CRUD verbs. The per-verb route
+// gate is owned by the entity declaration (`gate: { list: allowAnonymous() }`)
+// and resolved once at compile time through resolveRouteGate; `r.resource()`
+// takes no gate arg — there is no per-mount override (AGENTS: one authorization
+// story, not two places). Resolution is ASYNC — an
 // entity's `routes` thunk may be `async` and dynamic-import a child module at
 // wiring time (the parent/child lazy mount that breaks an import cycle without a
 // second route-building path). The result is an INSPECTABLE routing table: a list
@@ -23,7 +26,7 @@
 // `app.ready`. The server never serves a partial table — resolution completes
 // before the request handler is created.
 
-import { resolveRouteGate, requireUser, isGate } from './route-gate.mjs';
+import { requireUser, isGate } from './route-gate.mjs';
 import { listen as serveListen } from './serve.mjs';
 import { setActiveDb } from './db.mjs';
 import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
@@ -163,14 +166,15 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
     mount: recordMount,
   };
 
-  // The per-entity builder also exposes `r.resource({gate})`: expand the five CRUD
-  // verbs for THIS entity at THIS base, resolved through the per-verb gate map.
+  // The per-entity builder also exposes `r.resource()`: expand the five CRUD
+  // verbs for THIS entity at THIS base. The per-verb route gate comes from the
+  // entity's compiled `gate` (declared next to `grant`); there is no gate arg.
   if (entity) {
-    surface.resource = (options = {}) => {
+    surface.resource = () => {
       if (resolution) {
         throw new Error('cannot declare routes after resolution');
       }
-      declarations.push({ kind: 'resource', options });
+      declarations.push({ kind: 'resource' });
       return surface;
     };
   }
@@ -202,7 +206,7 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
         if (decl.kind === 'imperative') {
           routes.push(rebaseRoute(decl.route, base));
         } else if (decl.kind === 'resource') {
-          for (const route of resolveResource(entity, joinPath(base, ''), decl.options)) {
+          for (const route of resolveResource(entity, joinPath(base, ''))) {
             routes.push(route);
           }
         } else if (decl.kind === 'mount') {
@@ -236,10 +240,14 @@ async function resolveMount(path, target) {
   return buildEntityRoutes(target, path);
 }
 
-// Expand the five CRUD verbs for `entity` at `base`, resolving the per-verb gate
-// map (unlisted verbs default to requireUser() via resolveRouteGate).
-function resolveResource(entity, base, options = {}) {
-  const resolvedGate = resolveRouteGate(options.gate ?? {});
+// Expand the five CRUD verbs for `entity` at `base`. The per-verb route gate is
+// owned by the entity declaration (resolved once at compile time through
+// resolveRouteGate, unlisted verbs default to requireUser()). There is no
+// per-mount gate override — the route gate and the row grant are one
+// authorization story on the entity, not two places (AGENTS: prefer a singular
+// system). A path needing bespoke admission is a bespoke imperative route.
+function resolveResource(entity, base) {
+  const resolvedGate = entity.gate;
   return RESOURCE_VERBS.map(({ verb, method, suffix }) =>
     Object.freeze({
       method,

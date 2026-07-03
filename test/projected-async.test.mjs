@@ -46,11 +46,10 @@ test('projected value serializes to JSON and back', () => {
 
 test('an entity with a projected.async field compiles and generates DDL', () => {
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({ compute: async (row) => row?.score * 2 }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({ compute: async (row) => row?.score * 2 }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
   assert.equal(Post.name, 'Post');
@@ -78,17 +77,16 @@ test('projected.async consumer owns trigger selection, compute, write-back, and 
   db.exec('CREATE TABLE PostDirect (id TEXT, title TEXT, score REAL, hotRank TEXT)');
   db.exec("INSERT INTO PostDirect (id, title, score) VALUES ('p1', 'Direct', 7)");
   const PostDirect = entity('PostDirect', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        from: 'updated',
-        compute: async (row, { db: computeDb }) => {
-          assert.equal(computeDb, db);
-          return row.score * 4;
-        },
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      from: 'updated',
+      compute: async (row, { db: computeDb }) => {
+        assert.equal(computeDb, db);
+        return row.score * 4;
+      },
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
   const { executeFrameworkDDL } = await import('../src/ddl.mjs');
@@ -116,13 +114,12 @@ test('projected.async value is computed and stored after create dispatch', async
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        compute: async (row) => (row.score ?? 0) * 2,
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      compute: async (row) => (row.score ?? 0) * 2,
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -155,18 +152,17 @@ test('projected.async compute receives the committed db handle', async (t) => {
   ambientDb.exec('CREATE TABLE PostCtx (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const PostCtx = entity('PostCtx', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        compute: async (row, { db }) => {
-          assert.equal(db, appDb);
-          assert.notEqual(db, ambientDb);
-          const stored = db.prepare('SELECT score FROM PostCtx WHERE id = :id').get({ id: row.id });
-          return stored.score * 2;
-        },
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      compute: async (row, { db }) => {
+        assert.equal(db, appDb);
+        assert.notEqual(db, ambientDb);
+        const stored = db.prepare('SELECT score FROM PostCtx WHERE id = :id').get({ id: row.id });
+        return stored.score * 2;
+      },
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -197,13 +193,12 @@ test('projected.async value is recomputed after update', async (t) => {
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        compute: async (row) => (row.score ?? 0) * 3,
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      compute: async (row) => (row.score ?? 0) * 3,
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -248,16 +243,15 @@ test('projected.async compute failure leaves the column unchanged', async (t) =>
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        compute: async (row) => {
-          if (row.score < 0) throw new Error('negative');
-          return row.score * 10;
-        },
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      compute: async (row) => {
+        if (row.score < 0) throw new Error('negative');
+        return row.score * 10;
+      },
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -305,13 +299,12 @@ test('projected.async field is rejected in client create payload (readonly)', as
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        compute: async (row) => row.score,
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      compute: async (row) => row.score,
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -347,13 +340,12 @@ test('computed.stored value is stored immediately in the create response', async
   db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Blog = entity('Blog', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: computed.stored({
-        compute: (row) => (row.score ?? 0) * 2,
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: computed.stored({
+      compute: (row) => (row.score ?? 0) * 2,
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -385,13 +377,12 @@ test('computed.stored value is recomputed on update', async (t) => {
   db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Blog = entity('Blog', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: computed.stored({
-        compute: (row) => (row.score ?? 0) * 3,
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: computed.stored({
+      compute: (row) => (row.score ?? 0) * 3,
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -428,16 +419,15 @@ test('computed.stored compute failure rolls back the mutation', async (t) => {
   db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Blog = entity('Blog', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: computed.stored({
-        compute: (row) => {
-          if (row.score < 0) throw new Error('negative score');
-          return row.score * 10;
-        },
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: computed.stored({
+      compute: (row) => {
+        if (row.score < 0) throw new Error('negative score');
+        return row.score * 10;
+      },
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -478,14 +468,13 @@ test('projected.async with from:created only recomputes on create, not update', 
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        from: 'created',
-        compute: async (row) => (row.score ?? 0) * 2,
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      from: 'created',
+      compute: async (row) => (row.score ?? 0) * 2,
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -525,14 +514,13 @@ test('projected.async with from:updated only recomputes on update', async (t) =>
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        from: 'Post.updated',
-        compute: async (row) => (row.score ?? 0) * 3,
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      from: 'Post.updated',
+      compute: async (row) => (row.score ?? 0) * 3,
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -573,13 +561,12 @@ test('projected.async without from recomputes on both create and update (default
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        compute: async (row) => (row.score ?? 0) * 5,
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      compute: async (row) => (row.score ?? 0) * 5,
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -623,16 +610,15 @@ test('compute counter advances with each successful compute, survives across eve
 
   let computeCount = 0;
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        compute: async (row) => {
-          computeCount++;
-          return (row.score ?? 0) * 2;
-        },
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      compute: async (row) => {
+        computeCount++;
+        return (row.score ?? 0) * 2;
+      },
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -696,14 +682,13 @@ test('compute counter advances with each successful compute, survives across eve
   // Compute failure does NOT advance cursor
   computeCount = 0;
   const PostWithFailure = entity('PostWithFail', {
-    fields: {
-      title: text(),
-      score: number(),
-      hotRank: projected.async({
-        compute: async () => { computeCount++; throw new Error('fail'); },
-        from: 'created',
-      }),
-    },
+        title: text(),
+    score: number(),
+    hotRank: projected.async({
+      compute: async () => { computeCount++; throw new Error('fail'); },
+      from: 'created',
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
   const app2 = workbench({ db });
@@ -758,10 +743,9 @@ test('raster.crdt and polyline.crdt validate structurally', () => {
 
 test('raster and polyline fields compile into an entity', () => {
   const Canvas = entity('Canvas', {
-    fields: {
-      imageData: raster.crdt({ mergeStrategy: 'blend' }),
-      stroke: polyline.crdt(),
-    },
+        imageData: raster.crdt({ mergeStrategy: 'blend' }),
+    stroke: polyline.crdt(),
+
     grant: () => [scope(() => never()).can(() => grant(read))],
   });
   assert.equal(Canvas.fields.imageData.kind, 'crdt');
@@ -792,9 +776,8 @@ test('text({ oneOf }) throws on empty or non-array values', () => {
 
 test('text({ oneOf }) validates through the pipeline', () => {
   const Shape = entity('Shape', {
-    fields: {
-      type: text({ oneOf: ['rect', 'ellipse', 'freedraw', 'text', 'arrow'] }),
-    },
+        type: text({ oneOf: ['rect', 'ellipse', 'freedraw', 'text', 'arrow'] }),
+
     grant: () => [scope(() => never()).can(() => grant(read))],
   });
 
@@ -815,25 +798,23 @@ test('projected.async compute can findAll related entities', async (t) => {
   setActiveDb(db);
 
   const TComment = entity('TComment_FindAll', {
-    fields: {
-      post: ref('TPost_FindAll'),
-      body: text(),
-    },
+        post: ref('TPost_FindAll'),
+    body: text(),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
   const TPost = entity('TPost_FindAll', {
-    fields: {
-      title: text(),
-      score: number({ default: 0 }),
-      commentRank: projected.async({
-        from: ['created', 'updated'],
-        compute: async (post) => {
-          const cmts = await TComment.findAll(TComment.post.is(post.id));
-          return cmts.length + (post.score ?? 0);
-        },
-      }),
-    },
+        title: text(),
+    score: number({ default: 0 }),
+    commentRank: projected.async({
+      from: ['created', 'updated'],
+      compute: async (post) => {
+        const cmts = await TComment.findAll(TComment.post.is(post.id));
+        return cmts.length + (post.score ?? 0);
+      },
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
@@ -898,13 +879,12 @@ test('read response includes projected cursor headers for staleness detection', 
   setActiveDb(db);
 
   const Post = entity('Post_Stale', {
-    fields: {
-      title: text(),
-      hotRank: projected.async({
-        from: ['created', 'updated'],
-        compute: (row) => (row.title?.length ?? 0),
-      }),
-    },
+        title: text(),
+    hotRank: projected.async({
+      from: ['created', 'updated'],
+      compute: (row) => (row.title?.length ?? 0),
+    }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 

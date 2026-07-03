@@ -113,7 +113,7 @@ test('migrations: run in version order regardless of declaration order', () => {
 
 test('migrations: wired through app.ready at startup (pre-traffic)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const Note = entity('Note', { fields: { body: text() }, grant: () => [] });
+  const Note = entity('Note', { body: text(), grant: () => [] });
   const app = workbench({
     db,
     migrations: [{ version: 1, up: (d) => d.exec('ALTER TABLE Note ADD COLUMN archived INTEGER DEFAULT 0') }],
@@ -129,7 +129,7 @@ test('migrations: wired through app.ready at startup (pre-traffic)', async (t) =
 
 test('migrations: app.ddl compatibility path and app.ready share one schema preparation', async (t) => {
   const db = new DatabaseSync(':memory:');
-  const Note = entity('Note', { fields: { body: text() }, grant: () => [] });
+  const Note = entity('Note', { body: text(), grant: () => [] });
   let calls = 0;
   const app = workbench({
     db,

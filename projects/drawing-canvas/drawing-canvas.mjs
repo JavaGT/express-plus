@@ -23,36 +23,34 @@ const OWNER   = [read, write, subscribe, admin];
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export const Canvas = entity('Canvas', {
-  fields: {
     name: text({
-      validate: v => v.length <= 200 || 'name too long',
-    }),
+    validate: v => v.length <= 200 || 'name too long',
+  }),
 
-    owner: ref('User', { role: 'owner', readonly: true }),
+  owner: ref('User', { role: 'owner', readonly: true }),
 
-    collaborators: map(ref('User'), {
-      role: ['viewer', 'collaborator'],
-      default: {},
-    }).can(async ({ is }) =>
-      (await is.owner())
-        ? grant(...OWNER)
-        : deny('only the owner may manage collaborators')),
+  collaborators: map(ref('User'), {
+    role: ['viewer', 'collaborator'],
+    default: {},
+  }).can(async ({ is }) =>
+    (await is.owner())
+      ? grant(...OWNER)
+      : deny('only the owner may manage collaborators')),
 
-    // Shipped: ordered list of text labels for shape layers (z-order).
-    // Each shape stores its layer index via fractional-index keyspace.
-    // The `list()` field type (kind: ordered) owns insertAt / move / reorder.
-    shapeOrder: list(text()),
+  // Shipped: ordered list of text labels for shape layers (z-order).
+  // Each shape stores its layer index via fractional-index keyspace.
+  // The `list()` field type (kind: ordered) owns insertAt / move / reorder.
+  shapeOrder: list(text()),
 
-    // Shipped: ephemeral(cells) — per-connection non-persisting field.
-    // Exposes .set({ activeStroke, cursor }) for 60Hz live broadcasts.
-    // The pace contract (field-pace.mjs) coalesces at 15fps with latest-wins.
-    liveStroke: ephemeral({
-      activeStroke: polyline.crdt(),
-    }),
+  // Shipped: ephemeral(cells) — per-connection non-persisting field.
+  // Exposes .set({ activeStroke, cursor }) for 60Hz live broadcasts.
+  // The pace contract (field-pace.mjs) coalesces at 15fps with latest-wins.
+  liveStroke: ephemeral({
+    activeStroke: polyline.crdt(),
+  }),
 
-    createdAt: date({ default: () => new Date() }),
-    updatedAt: date({ touch: true }),
-  },
+  createdAt: date({ default: () => new Date() }),
+  updatedAt: date({ touch: true }),
 
   checks: {
     owner:        ({ Canvas: c, principal: p }) => c.owner.is(p.id),
@@ -83,48 +81,46 @@ export const Canvas = entity('Canvas', {
 const inheritCanvas = inherit(Canvas, { via: 'canvas' });
 
 export const Shape = entity('Shape', {
-  fields: {
     canvas: ref('Canvas', { required: true }),
 
-    creator: ref('User', { role: 'creator', readonly: true }),
+  creator: ref('User', { role: 'creator', readonly: true }),
 
-    name: text({ default: 'Shape' }),
+  name: text({ default: 'Shape' }),
 
-    type: text({
-      default: 'rect',
-      validate: v =>
-        ['rect', 'ellipse', 'freedraw', 'text', 'arrow'].includes(v)
-          || 'invalid shape type',
+  type: text({
+    default: 'rect',
+    validate: v =>
+      ['rect', 'ellipse', 'freedraw', 'text', 'arrow'].includes(v)
+        || 'invalid shape type',
+  }),
+
+  // Bounding box (rect/ellipse/arrow)
+  x:       number({ default: 0 }),
+  y:       number({ default: 0 }),
+  width:   number({ default: 100 }),
+  height:  number({ default: 100 }),
+
+  // Shipped: polyline.crdt() for freedraw vector data.
+  // Whole-value replace for MVP; per-segment CRDT merge DEFERRED per SPEC.
+  points: polyline.crdt(),
+
+  // Shipped: field-level visibility gating with is.*() registry checks.
+  // Editors/owners see all shapes; collaborators see visible ones.
+  visible: boolean({ default: true })
+    .can(async ({ is, entity }) => {
+      if (await is.editor()) return grant(read, subscribe);
+      if (await is.owner()) return grant(read, subscribe);
+      if (await is.collaborator() && entity.visible) return grant(read, subscribe);
+      return grant(subscribe);
     }),
 
-    // Bounding box (rect/ellipse/arrow)
-    x:       number({ default: 0 }),
-    y:       number({ default: 0 }),
-    width:   number({ default: 100 }),
-    height:  number({ default: 100 }),
+  fillColor:   text({ default: '#ffffff', max: 9 }),
+  strokeColor: text({ default: '#000000', max: 9 }),
+  strokeWidth: number({ default: 2, min: 0, max: 100 }),
+  opacity:     number({ default: 100, min: 0, max: 100 }),
 
-    // Shipped: polyline.crdt() for freedraw vector data.
-    // Whole-value replace for MVP; per-segment CRDT merge DEFERRED per SPEC.
-    points: polyline.crdt(),
-
-    // Shipped: field-level visibility gating with is.*() registry checks.
-    // Editors/owners see all shapes; collaborators see visible ones.
-    visible: boolean({ default: true })
-      .can(async ({ is, entity }) => {
-        if (await is.editor()) return grant(read, subscribe);
-        if (await is.owner()) return grant(read, subscribe);
-        if (await is.collaborator() && entity.visible) return grant(read, subscribe);
-        return grant(subscribe);
-      }),
-
-    fillColor:   text({ default: '#ffffff', max: 9 }),
-    strokeColor: text({ default: '#000000', max: 9 }),
-    strokeWidth: number({ default: 2, min: 0, max: 100 }),
-    opacity:     number({ default: 100, min: 0, max: 100 }),
-
-    createdAt: date({ default: () => new Date() }),
-    updatedAt: date({ touch: true }),
-  },
+  createdAt: date({ default: () => new Date() }),
+  updatedAt: date({ touch: true }),
 
   grant: inheritCanvas,
 

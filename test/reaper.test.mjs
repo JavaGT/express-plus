@@ -90,7 +90,8 @@ test('startReaper returns no-op {stop()} when no schedule triggers', () => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('NoSched', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: statusDesc },
+        status: statusDesc,
+
     schedule: {
       // No schedule triggers at all
     },
@@ -113,7 +114,8 @@ test('startReaper returns no-op {stop()} for tick-only entities', () => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('TickOnly', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: statusDesc },
+        status: statusDesc,
+
     schedule: {
       update: tick.hz(100, {
         while: ({ fields }) => fields.status.is('alive'),
@@ -139,7 +141,8 @@ test('discoverDueSchedules returns due schedule.at rows, excludes future-due', (
   const publishedAt = date();
   const Blog = entity('DiscDue', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: { kind: 'value', type: 'text' }, publishedAt },
+        status: { kind: 'value', type: 'text' }, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),
@@ -172,7 +175,8 @@ test('startReaper calls dispatch with correct scheduler principal and payload', 
   const publishedAt = date();
   const Blog = entity('ReapDispatch', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: { kind: 'value', type: 'text' }, publishedAt },
+        status: { kind: 'value', type: 'text' }, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),
@@ -215,7 +219,8 @@ test('admitSystemMutation admits an exact-match scheduler dispatch', () => {
   const publishedAt = date();
   const Blog = entity('AdmitSched', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: { kind: 'value', type: 'text' }, publishedAt },
+        status: { kind: 'value', type: 'text' }, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),
@@ -239,7 +244,8 @@ test('admitSystemMutation DENIES wrong payload', () => {
   const publishedAt = date();
   const Blog = entity('AdmitWrongPayload', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: { kind: 'value', type: 'text' }, publishedAt },
+        status: { kind: 'value', type: 'text' }, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),
@@ -263,7 +269,8 @@ test('admitSystemMutation DENIES row deleted between discover + dispatch', () =>
   const publishedAt = date();
   const Blog = entity('AdmitTOCTOU', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: { kind: 'value', type: 'text' }, publishedAt },
+        status: { kind: 'value', type: 'text' }, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),
@@ -287,7 +294,8 @@ test('admitSystemMutation DENIES non-system principal', () => {
   const publishedAt = date();
   const Blog = entity('AdmitNonSystem', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: { kind: 'value', type: 'text' }, publishedAt },
+        status: { kind: 'value', type: 'text' }, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),
@@ -312,7 +320,8 @@ test('e2e: reaper dispatch updates row through projection (ADMITTED)', async (t)
   const publishedAt = date();
   const Blog = entity('BlogSched', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: { kind: 'value', type: 'text' }, publishedAt },
+        status: { kind: 'value', type: 'text' }, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),
@@ -341,7 +350,8 @@ test('e2e: while-fails — row with mismatched status stays unchanged (DENIED)',
   const publishedAt = date();
   const Blog = entity('BlogSchedDeny', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: { kind: 'value', type: 'text' }, publishedAt },
+        status: { kind: 'value', type: 'text' }, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),
@@ -369,7 +379,8 @@ test('e2e: entity with NO schedule triggers returns no-op reaper', () => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogNoSchedule', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: statusDesc },
+        status: statusDesc
+
     // No schedule at all
   });
   const db = seededDb();
@@ -386,7 +397,8 @@ test('e2e: reaper dispatch error continues sweep (stderr, no throw)', async (t) 
   const publishedAt = date();
   const Blog = entity('BlogSweepCont', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: { kind: 'value', type: 'text' }, publishedAt },
+        status: { kind: 'value', type: 'text' }, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),
@@ -427,7 +439,8 @@ test('reaper survives discovery-phase throw (bad table)', async (t) => {
   const publishedAt = date();
   const Blog = entity('BadTable', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status: { kind: 'value', type: 'text' }, publishedAt },
+        status: { kind: 'value', type: 'text' }, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),

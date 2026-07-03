@@ -11,10 +11,9 @@ import {
 
 test('entity auto-generates verbs.create/.update/.remove action types', () => {
   const Note = entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : grant(read)),
@@ -32,10 +31,9 @@ test('entity auto-generates verbs.create/.update/.remove action types', () => {
 
 test('entity auto-generates verbs.created/.updated/.removed event types with reducers', () => {
   const Note = entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : grant(read)),
@@ -78,7 +76,8 @@ test('entity auto-generates verbs.created/.updated/.removed event types with red
 
 test('the verbs namespace contains no redundant keys', () => {
   const Note = entity('Note', {
-    fields: { body: text() },
+        body: text(),
+
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
 
@@ -88,11 +87,13 @@ test('the verbs namespace contains no redundant keys', () => {
 
 test('auto-gen types are distinct per entity', () => {
   const Note = entity('Note', {
-    fields: { body: text() },
+        body: text(),
+
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
   const Post = entity('Post', {
-    fields: { title: text() },
+        title: text(),
+
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
 

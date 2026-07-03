@@ -30,58 +30,55 @@ const VIEWER  = [read, subscribe];
 const EDITOR  = [read, write, subscribe];
 const OWNER   = [read, write, subscribe, admin];
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Canvas — the top-level collaborative photo editing document.
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export const Canvas = entity('Canvas', {
-  fields: {
     title: text({
-      validate: v => v.length <= 200 || 'title too long',
-    }),
+    validate: v => v.length <= 200 || 'title too long',
+  }),
 
-    width:  number({ default: 1920, min: 1, max: 8192 }),
-    height: number({ default: 1080, min: 1, max: 8192 }),
+  width:  number({ default: 1920, min: 1, max: 8192 }),
+  height: number({ default: 1080, min: 1, max: 8192 }),
 
-    owner: ref('User', { role: 'owner', readonly: true }),
+  owner: ref('User', { role: 'owner', readonly: true }),
 
-    collaborators: map(ref('User'), {
-      role: ['viewer', 'editor'],
-      default: {},
-    }).can(async ({ is }) =>
-      (await is.owner())
-        ? grant(...OWNER)
-        : deny('only the owner may manage collaborators')),
+  collaborators: map(ref('User'), {
+    role: ['viewer', 'editor'],
+    default: {},
+  }).can(async ({ is }) =>
+    (await is.owner())
+      ? grant(...OWNER)
+      : deny('only the owner may manage collaborators')),
 
-    // Shipped: projected.async (post-commit stored computed field).
-    // Recomputes whenever the canvas or its layers change.
-    export: projected.async({
-      from: ['created', 'updated'],
-      compute: async (canvas) => {
-        const layers = await RasterLayer.findAll(
-          RasterLayer.canvas.is(canvas.id),
-        );
-        layers.sort((a, b) => a.order - b.order);
-        return compositeToPng(layers, canvas.width, canvas.height);
-      },
-    }),
+  // Shipped: projected.async (post-commit stored computed field).
+  // Recomputes whenever the canvas or its layers change.
+  export: projected.async({
+    from: ['created', 'updated'],
+    compute: async (canvas) => {
+      const layers = await RasterLayer.findAll(
+        RasterLayer.canvas.is(canvas.id),
+      );
+      layers.sort((a, b) => a.order - b.order);
+      return compositeToPng(layers, canvas.width, canvas.height);
+    },
+  }),
 
-    // DEFERRED: list(ref('RasterLayer')) for z-ordered layers.
-    // The `list()` field type (fractional-index keyspace) ships with
-    // insertAt/move/reorder. RasterLayer entities are standalone until
-    // the list-of-entities variant is implemented.
-    //
-    // Shipped API (standalone entity workaround):
-    //   RasterLayer entities with a `canvas` FK + `order: number()`.
+  // DEFERRED: list(ref('RasterLayer')) for z-ordered layers.
+  // The `list()` field type (fractional-index keyspace) ships with
+  // insertAt/move/reorder. RasterLayer entities are standalone until
+  // the list-of-entities variant is implemented.
+  //
+  // Shipped API (standalone entity workaround):
+  //   RasterLayer entities with a `canvas` FK + `order: number()`.
 
-    backgroundColor: text({ default: '#ffffff', max: 9 }),
+  backgroundColor: text({ default: '#ffffff', max: 9 }),
 
-    presence: ephemeral({ cursor: true }),
+  presence: ephemeral({ cursor: true }),
 
-    createdAt: date({ default: () => new Date() }),
-    updatedAt: date({ touch: true }),
-  },
+  createdAt: date({ default: () => new Date() }),
+  updatedAt: date({ touch: true }),
 
   checks: {
     collaborator: ({ Canvas: c, principal: p }) => c.collaborators.has(p.id),
@@ -126,51 +123,49 @@ export const Canvas = entity('Canvas', {
 const inheritCanvas = inherit(Canvas, { via: 'canvas' });
 
 export const RasterLayer = entity('RasterLayer', {
-  fields: {
     canvas: ref('Canvas', { required: true }),
 
-    name: text({
-      default: 'New Layer',
-      validate: v => v.length <= 100 || 'name too long',
+  name: text({
+    default: 'New Layer',
+    validate: v => v.length <= 100 || 'name too long',
+  }),
+
+  // Shipped: raster.crdt({ mergeStrategy: 'blend' }).
+  // Pixel buffer CRDT — whole-value replace for MVP; per-region
+  // Porter-Duff compositing merge is DEFERRED per SPEC.
+  imageData: raster.crdt({
+    mergeStrategy: 'blend',
+    compaction: true,
+  }),
+
+  // Shipped: boolean field with .can() using is.editor()/is.owner()
+  // and entity.visible (reading the field's own value). Inherit
+  // children must grant explicitly — defaults carries { granted: false }.
+  visible: boolean({ default: true })
+    .can(async ({ is, entity }) => {
+      if (await is.editor()) return grant(read, subscribe);
+      if (await is.owner()) return grant(read, subscribe);
+      if (await is.collaborator() && entity.visible) return grant(read, subscribe);
+      return grant(subscribe);
     }),
 
-    // Shipped: raster.crdt({ mergeStrategy: 'blend' }).
-    // Pixel buffer CRDT — whole-value replace for MVP; per-region
-    // Porter-Duff compositing merge is DEFERRED per SPEC.
-    imageData: raster.crdt({
-      mergeStrategy: 'blend',
-      compaction: true,
-    }),
+  // DEFERRED: list-of-entities — layers belong to Canvas as an ordered
+  // collection (z-order). Until then, the standalone entity uses a
+  // manual `order` number.
+  order: number({ default: 0 }),
 
-    // Shipped: boolean field with .can() using is.editor()/is.owner()
-    // and entity.visible (reading the field's own value). Inherit
-    // children must grant explicitly — defaults carries { granted: false }.
-    visible: boolean({ default: true })
-      .can(async ({ is, entity }) => {
-        if (await is.editor()) return grant(read, subscribe);
-        if (await is.owner()) return grant(read, subscribe);
-        if (await is.collaborator() && entity.visible) return grant(read, subscribe);
-        return grant(subscribe);
-      }),
+  opacity: number({ default: 100, min: 0, max: 100 }),
 
-    // DEFERRED: list-of-entities — layers belong to Canvas as an ordered
-    // collection (z-order). Until then, the standalone entity uses a
-    // manual `order` number.
-    order: number({ default: 0 }),
+  blendMode: text({
+    default: 'normal',
+    validate: v =>
+      ['normal','multiply','screen','overlay','darken','lighten',
+       'color-dodge','color-burn','hard-light','soft-light','difference',
+       'exclusion','hue','saturation','color','luminosity'].includes(v)
+        || 'invalid blend mode',
+  }),
 
-    opacity: number({ default: 100, min: 0, max: 100 }),
-
-    blendMode: text({
-      default: 'normal',
-      validate: v =>
-        ['normal','multiply','screen','overlay','darken','lighten',
-         'color-dodge','color-burn','hard-light','soft-light','difference',
-         'exclusion','hue','saturation','color','luminosity'].includes(v)
-          || 'invalid blend mode',
-    }),
-
-    createdAt: date({ default: () => new Date() }),
-  },
+  createdAt: date({ default: () => new Date() }),
 
   grant: inheritCanvas,
 
@@ -194,7 +189,6 @@ export const RasterLayer = entity('RasterLayer', {
   },
 });
 
-
 // ═══════════════════════════════════════════════════════════════════════════════
 // Layer sub-routes — mounted under /canvases/:canvasId/layers
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -211,7 +205,6 @@ function layerRoutes() {
 
   return r;
 }
-
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Stub compositor — would use sharp/canvas in a real implementation.

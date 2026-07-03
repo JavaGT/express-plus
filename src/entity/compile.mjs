@@ -1,4 +1,9 @@
-// entity(name, { fields, grant, checks?, routes? }) — the entity compiler.
+// entity(name, { <fields>, grant, checks?, routes?, ... }) — the entity compiler.
+//
+// The declaration is fields-less: every top-level key that is not a reserved
+// framework slot IS a field descriptor. Reserved slots are grant, checks, routes,
+// create, effects, admitsEffects, schedule, gate, on. (The old `fields:` wrapper
+// is retired — one way to declare a field, not two.)
 //
 // Compiles a declared entity into a frozen, validated record. This is where the
 // fail-closed load-time guards live (SPEC §6.1, §13; ADRs #7, #16):
@@ -28,6 +33,7 @@ import { action, event } from '../pipeline.mjs';
 import * as eventHandle from '../event-handle.mjs';
 import { created, updated, removed } from '../event-handle.mjs';
 import { generateDDL } from '../ddl.mjs';
+import { resolveRouteGate } from '../route-gate.mjs';
 import { effectEntries, validateEffectDeclaration } from '../effect-compiler.mjs';
 import { schedule as scheduleConstructors } from '../schedule.mjs';
 import { collectSideTableStrategies } from '../side-table-strategy.mjs';
@@ -213,11 +219,49 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
   });
 }
 
+// Reserved top-level declaration slots. Every other key on the declaration is a
+// field descriptor. A field name that collides with a reserved slot is a
+// load-time error: the developer would have written a field whose name the
+// compiler owns, which silently drops the field (fail closed).
+const RESERVED_DECLARATION_SLOTS = new Set([
+  'fields', 'grant', 'checks', 'routes', 'create', 'effects', 'admitsEffects',
+  'schedule', 'gate', 'on',
+]);
+
+function looksLikeFieldDescriptor(value) {
+  return value !== null && typeof value === 'object' && typeof value.kind === 'string';
+}
+
 export function entity(name, declaration = {}) {
-  const { fields = {}, grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {} } = declaration;
+  if (Object.hasOwn(declaration, 'fields')) {
+    throw new Error(
+      `entity('${name}') uses the retired fields wrapper. Declare fields directly on ` +
+        `the entity object; 'fields' is a reserved declaration slot.`,
+    );
+  }
+  for (const key of RESERVED_DECLARATION_SLOTS) {
+    if (Object.hasOwn(declaration, key) && looksLikeFieldDescriptor(declaration[key])) {
+      throw new Error(
+        `entity('${name}') field '${key}' collides with a reserved declaration slot. ` +
+          `Rename the field.`,
+      );
+    }
+  }
+
+  const { grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, gate: declaredGate = {} } = declaration;
 
   // The entity name becomes a table name interpolated into SQL — validate first.
   assertSqlIdentifier('entity', name);
+
+  // Fields-less declaration: every non-reserved top-level key is a field
+  // descriptor. A reserved-slot name used as a field is a load-time error (the
+  // developer intended a field, the compiler owns the slot — fail closed rather
+  // than silently drop the field).
+  const fields = {};
+  for (const [key, value] of Object.entries(declaration)) {
+    if (RESERVED_DECLARATION_SLOTS.has(key)) continue;
+    fields[key] = value;
+  }
 
   // Fail closed: an entity with no grant cannot be mounted (ADR #7).
   if (grant === undefined || grant === null) {
@@ -347,6 +391,14 @@ export function entity(name, declaration = {}) {
   const storedComputedFields = Object.entries(fields)
     .filter(([, d]) => d.kind === 'computed' && d.mode === 'stored');
 
+  // The route gate is the FIRST default-on auth layer (SPEC §6.2, ADR #20). It
+  // lives ON the entity declaration next to `grant` — one authorization story —
+  // and is resolved once at compile time through the same resolveRouteGate the
+  // router used to run: unknown verbs / non-function gates fail closed, and
+  // every unlisted verb defaults to requireUser() (the default-on gate). The row
+  // grant stays a separate layer and is untouched here.
+  const gate = resolveRouteGate(declaredGate);
+
   const record = {
     name,
     fields: Object.freeze({ ...fields }),
@@ -365,6 +417,7 @@ export function entity(name, declaration = {}) {
       return Object.freeze(checksObj);
     },
     routes,
+    gate,
     readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
     scopeAst,
     effects: validatedEffects,
@@ -383,7 +436,6 @@ export function entity(name, declaration = {}) {
   });
 
   installEntityQueries(record, { name, hydrate, deserializeStoredCells });
-
 
   // insert(cells) — the trusted low-level write core: serialize each declared
   // field's value to its stored cell, INSERT, and return the hydrated new row.

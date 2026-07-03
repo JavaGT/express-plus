@@ -11,67 +11,65 @@ const CO_OWNER   = [read, write, subscribe, admin];
 const OWNER      = [read, write, subscribe, admin];
 
 export const Album = entity('Album', {
-  fields: {
     title:       text({ validate: (v) => v.length <= 200 || 'title too long' }),
-    description: text(),
-    coverPhoto:  ref('Photo', { optional: true }),
+  description: text(),
+  coverPhoto:  ref('Photo', { optional: true }),
 
-    // Owner — auto-derives checks.owner from `role: 'owner'`
-    owner: ref('User', { role: 'owner', readonly: true }),
+  // Owner — auto-derives checks.owner from `role: 'owner'`
+  owner: ref('User', { role: 'owner', readonly: true }),
 
-    // ===================================================================
-    // Per-album collaborator roles — EXPRESSIBLE with the `map` plugin
-    //
-    // The grilled `map` plugin (doc.mjs L36-40) supports:
-    //   - keyed-by-User membership (uniqueness-by-construction)
-    //   - per-member payload (here: role = 'viewer'|'contributor'|'coOwner')
-    //   - fluent `.can()` for field-level access control
-    //
-    // This dissolves the pre-grill problem of modeling tiered sharing
-    // with three separate `set(ref('User'))` fields (prior finding #8).
-    // The `map` plugin is a RESOLVED prior finding.
-    // ===================================================================
-    collaborators: map(ref('User'), {
-      role: ['viewer', 'contributor', 'coOwner'],
-      default: {},
-    }).can(async ({ is }) =>
-      (await is.owner()) ? grant(...OWNER) : deny('only owner may manage collaborators')),
+  // ===================================================================
+  // Per-album collaborator roles — EXPRESSIBLE with the `map` plugin
+  //
+  // The grilled `map` plugin (doc.mjs L36-40) supports:
+  //   - keyed-by-User membership (uniqueness-by-construction)
+  //   - per-member payload (here: role = 'viewer'|'contributor'|'coOwner')
+  //   - fluent `.can()` for field-level access control
+  //
+  // This dissolves the pre-grill problem of modeling tiered sharing
+  // with three separate `set(ref('User'))` fields (prior finding #8).
+  // The `map` plugin is a RESOLVED prior finding.
+  // ===================================================================
+  collaborators: map(ref('User'), {
+    role: ['viewer', 'contributor', 'coOwner'],
+    default: {},
+  }).can(async ({ is }) =>
+    (await is.owner()) ? grant(...OWNER) : deny('only owner may manage collaborators')),
 
-    // ===================================================================
-    // Link-share for non-users — MOSTLY EXPRESSIBLE
-    //
-    // The `link` field type (doc.mjs L46-48) supports:
-    //   - non-user principal (type: 'link') with a token
-    //   - single tier per link (e.g. 'view')
-    //   - grant reads the tier to pick capabilities
-    //
-    // This RESOLVES prior finding #5 (no link-sharing primitive).
-    //
-    // SHARP EDGE: the `link` field has ONE tier per link. Google Photos
-    // models link shares as per-member: share with alice@gmail.com as
-    // "viewer", bob@gmail.com as "contributor". To express per-member
-    // link tiers, you'd need:
-    //   linkMembers: map(linkIdentity, { role: ['view','comment','edit'] })
-    // ...but `map` only accepts `ref('User')`, not link principals.
-    //
-    // WORKAROUND: create one link per tier (one view-only link, one
-    // edit link). Crude but functional — each member gets a different
-    // link URL at the tier they need.
-    //
-    // IDEALIZED (hits the wall — map with link principals):
-    //   linkMembers: map(linkIdentity, {
-    //     role: ['view', 'comment', 'edit'],
-    //     default: {},
-    //   }).can(async ({ is }) => (await is.owner()) ? grant(...OWNER)
-    //                            : deny('only owner may manage link shares')),
-    // ===================================================================
-    linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view', token: 'autogen' })
-      .can(async ({ is }) =>
-        (await is.owner()) ? grant(...OWNER) : deny('only owner may manage link sharing')),
+  // ===================================================================
+  // Link-share for non-users — MOSTLY EXPRESSIBLE
+  //
+  // The `link` field type (doc.mjs L46-48) supports:
+  //   - non-user principal (type: 'link') with a token
+  //   - single tier per link (e.g. 'view')
+  //   - grant reads the tier to pick capabilities
+  //
+  // This RESOLVES prior finding #5 (no link-sharing primitive).
+  //
+  // SHARP EDGE: the `link` field has ONE tier per link. Google Photos
+  // models link shares as per-member: share with alice@gmail.com as
+  // "viewer", bob@gmail.com as "contributor". To express per-member
+  // link tiers, you'd need:
+  //   linkMembers: map(linkIdentity, { role: ['view','comment','edit'] })
+  // ...but `map` only accepts `ref('User')`, not link principals.
+  //
+  // WORKAROUND: create one link per tier (one view-only link, one
+  // edit link). Crude but functional — each member gets a different
+  // link URL at the tier they need.
+  //
+  // IDEALIZED (hits the wall — map with link principals):
+  //   linkMembers: map(linkIdentity, {
+  //     role: ['view', 'comment', 'edit'],
+  //     default: {},
+  //   }).can(async ({ is }) => (await is.owner()) ? grant(...OWNER)
+  //                            : deny('only owner may manage link shares')),
+  // ===================================================================
+  linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view', token: 'autogen' })
+    .can(async ({ is }) =>
+      (await is.owner()) ? grant(...OWNER) : deny('only owner may manage link sharing')),
 
-    createdAt: date({ default: () => new Date() }),
-    updatedAt: date({ touch: true }),
-  },
+  createdAt: date({ default: () => new Date() }),
+  updatedAt: date({ touch: true }),
 
   checks: {
     // Auto-derived from `owner: ref('User', { role: 'owner' })`
@@ -122,7 +120,7 @@ export const Album = entity('Album', {
   //
   // When a collaborator is added, notify them via Inbox.
   // Same pattern as doc.mjs L185-188.
-  // ===================================================================
+  // ===================================================================,
   effects: (Album) => [
     [Album.collaborators.added, {
       mutate: Inbox,

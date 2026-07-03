@@ -124,10 +124,8 @@ test('app.ddl() creates framework tables (Log and Cursor) alongside entity table
   setActiveDb(db);
 
   const Note = entityFn('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+    body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write) : grant(read)),

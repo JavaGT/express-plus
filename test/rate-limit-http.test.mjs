@@ -15,7 +15,8 @@ import workbench, {
 
 function ownedNote() {
   return entity('Note', {
-    fields: { body: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+        body: text(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read)),

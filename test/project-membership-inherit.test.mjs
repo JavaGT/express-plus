@@ -22,11 +22,10 @@ const stranger = principal({ type: 'user', id: 'stranger-1' });
 
 function projectEntities() {
   const Project = entity('Project', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-      members: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    members: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+
     checks: {
       member: ({ Project, principal: p }) => Project.members.has(p.id),
     },
@@ -40,10 +39,9 @@ function projectEntities() {
   });
 
   const ProjectDocument = entity('ProjectDocument', {
-    fields: {
-      project: ref('Project', { required: true }),
-      title: text(),
-    },
+        project: ref('Project', { required: true }),
+    title: text(),
+
     grant: inherit(Project, { via: 'project' }),
   });
 

@@ -19,65 +19,63 @@ const SPECTATOR = [read, subscribe];
 // Match entity — the authoritative game session.
 // ────────────────────────────────────────────────────────────────────────────
 export const Match = entity('Match', {
-  fields: {
     // ── persisted fields ────────────────────────────────────────────────────
-    phase: state({
-      values: ['lobby', 'playing', 'gameover'],
-      transitions: {
-        lobby:    ['playing'],
-        playing:  ['gameover'],
-        gameover: [],                      // terminal — no transitions out
-      },
-      effects: {
-        // When the game ends by tick detection, record the timestamp. No
-        // `mutate` target → the engine writes self (the row exists → set), the
-        // same { with }-only self-write shape doc.mjs uses for archivedAt.
-        [state.transition('playing', 'gameover')]: { with: { endedAt: now } },
-      },
-      // NOTE: no `auto` here — the authoritative tick (not a one-shot timer)
-      // drives the phase transition when all invaders are dead or all players
-      // have lost. `state.auto` is a field-level single-fire timer; we need a
-      // recurring tick construct for the game loop.
-    }).can(async ({ is }) =>
-      // Only the tick/system principal may advance phases. Players read.
-      (await is.owner()) ? grant(PLAYER) : grant(read)),
+  phase: state({
+    values: ['lobby', 'playing', 'gameover'],
+    transitions: {
+      lobby:    ['playing'],
+      playing:  ['gameover'],
+      gameover: [],                      // terminal — no transitions out
+    },
+    effects: {
+      // When the game ends by tick detection, record the timestamp. No
+      // `mutate` target → the engine writes self (the row exists → set), the
+      // same { with }-only self-write shape doc.mjs uses for archivedAt.
+      [state.transition('playing', 'gameover')]: { with: { endedAt: now } },
+    },
+    // NOTE: no `auto` here — the authoritative tick (not a one-shot timer)
+    // drives the phase transition when all invaders are dead or all players
+    // have lost. `state.auto` is a field-level single-fire timer; we need a
+    // recurring tick construct for the game loop.
+  }).can(async ({ is }) =>
+    // Only the tick/system principal may advance phases. Players read.
+    (await is.owner()) ? grant(PLAYER) : grant(read)),
 
-    score:        number({ default: 0 }),
-    maxPlayers:   number({ default: 4, validate: (v) => v <= 8 || 'max 8 players' }),
-    createdAt:    date({ default: () => new Date() }),
-    endedAt:      date({ optional: true }),
+  score:        number({ default: 0 }),
+  maxPlayers:   number({ default: 4, validate: (v) => v <= 8 || 'max 8 players' }),
+  createdAt:    date({ default: () => new Date() }),
+  endedAt:      date({ optional: true }),
 
-    // ── player roster — typed map with per-player ship state ────────────────
-    // Players join/leave; each carries their ship x-position and lives.
-    players: map(ref('User'), {
-      x:      number({ default: 0 }),       // ship x-position
-      lives:  number({ default: 3 }),
-      score:  number({ default: 0 }),
-    }).can(async ({ is }) =>
-      // RESOLVED: server-authority is the field-plugin operator/authority
-      // model (SPEC §5.1/§9.2, ADR #13). The `players` map exports operators
-      // that bound which principals may write which sub-fields — the tick
-      // principal (a bounded scheduler, SPEC §10, ADR #10) writes ship
-      // positions; players join/leave the roster. No special `authority`
-      // flag — the field plugin owns the contract.
-      (await is.player()) ? grant(read, write) : grant(read)),
+  // ── player roster — typed map with per-player ship state ────────────────
+  // Players join/leave; each carries their ship x-position and lives.
+  players: map(ref('User'), {
+    x:      number({ default: 0 }),       // ship x-position
+    lives:  number({ default: 3 }),
+    score:  number({ default: 0 }),
+  }).can(async ({ is }) =>
+    // RESOLVED: server-authority is the field-plugin operator/authority
+    // model (SPEC §5.1/§9.2, ADR #13). The `players` map exports operators
+    // that bound which principals may write which sub-fields — the tick
+    // principal (a bounded scheduler, SPEC §10, ADR #10) writes ship
+    // positions; players join/leave the roster. No special `authority`
+    // flag — the field plugin owns the contract.
+    (await is.player()) ? grant(read, write) : grant(read)),
 
-    // ── shared ephemeral game state (aspirational field types) ─────────────
-    // GAP: grid() does not exist in the field-type catalog.
-    // GAP: list() does not exist in the field-type catalog.
-    // GAP: no field persistence strategy `ephemeral` is shown in the API.
-    //
-    // Ideal form:
-    //   invaders:    grid({ cols: 11, rows: 5 }),        // delta-broadcast, ephemeral
-    //   projectiles: list({ max: 50, item: { x: number, y: number, dy: 1|-1, owner: ref('User') } }),
-    //
-    // Current workaround: serialize to text (full-value broadcast, writes to
-    // DB every frame — catastrophic at 30 Hz).
-    invaders:     text({ default: '[]' }),   // JSON grid — NOT ephemeral, NOT delta
-    projectiles:  text({ default: '[]' }),   // JSON list — same problems
-  },
+  // ── shared ephemeral game state (aspirational field types) ─────────────
+  // GAP: grid() does not exist in the field-type catalog.
+  // GAP: list() does not exist in the field-type catalog.
+  // GAP: no field persistence strategy `ephemeral` is shown in the API.
+  //
+  // Ideal form:
+  //   invaders:    grid({ cols: 11, rows: 5 }),        // delta-broadcast, ephemeral
+  //   projectiles: list({ max: 50, item: { x: number, y: number, dy: 1|-1, owner: ref('User') } }),
+  //
+  // Current workaround: serialize to text (full-value broadcast, writes to
+  // DB every frame — catastrophic at 30 Hz).
+  invaders:     text({ default: '[]' }),   // JSON grid — NOT ephemeral, NOT delta
+  projectiles:  text({ default: '[]' }),   // JSON list — same problems
 
-  // ── checks — plain functions, facts about a row ───────────────────────────
+  // ── checks — plain functions, facts about a row ───────────────────────────,
   checks: {
     // Auto-derived from `players` map: checks.player = ({ Match, principal }) =>
     //   Match.players.has(principal.id)
@@ -96,8 +94,8 @@ export const Match = entity('Match', {
     // `publicRead` entity flag is DEAD; `everyone()` is the real mechanism,
     // NULL-safe and symmetric to `never()` = SQL FALSE.
     //
-    // anonymous access is gated at the route level (SPEC §6.2):
-    //   r.resource({ gate: { list: allowAnonymous(), create: requireUser() } })
+    // anonymous access is gated on the entity (SPEC §6.2):
+    //   gate: { list: allowAnonymous(), create: requireUser() }
     // The row grant runs on every verb regardless — two layers, no gap.
     scope(({ is }) => anyOf(is.player(), everyone()))
       .can(async ({ is }) => {
@@ -154,7 +152,7 @@ export const Match = entity('Match', {
   // Ideal form:
   //   ttl: '5m',      // auto-delete 5 min after creation
   // OR for truly ephemeral (no DB row):
-  //   persist: false,  // entire entity in-memory only
+  //   persist: false,  // entire entity in-memory only,
 
   routes: (r, Match) => {
     r.resource();                                // CRUD through grant

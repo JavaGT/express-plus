@@ -58,7 +58,8 @@ test('an anonymous principal with a non-null id is a construction-time error', (
 
 test('bindReadScope fills the principalId placeholder with the principal id', () => {
   const Note = entity('Note', {
-    fields: { body: text(), owner: ref('User', { role: 'owner' }) },
+        body: text(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ is }) => is.owner()).can(ownerCan)],
   });
   const bound = bindReadScope(Note.readScope, principal({ type: 'user', id: 'user-1' }));
@@ -73,7 +74,8 @@ test('bindReadScope fills the principalId placeholder with the principal id', ()
 
 test('an anonymous principal binds the owner placeholder to null (matches no owned rows)', () => {
   const Note = entity('Note', {
-    fields: { body: text(), owner: ref('User', { role: 'owner' }) },
+        body: text(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ is }) => is.owner()).can(ownerCan)],
   });
   const bound = bindReadScope(Note.readScope, anonymous);
@@ -82,7 +84,8 @@ test('an anonymous principal binds the owner placeholder to null (matches no own
 
 test('the bound read-scope executes against node:sqlite and selects exactly the principal rows', () => {
   const Note = entity('Note', {
-    fields: { body: text(), owner: ref('User', { role: 'owner' }) },
+        body: text(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ is }) => is.owner()).can(ownerCan)],
   });
   const db = new DatabaseSync(':memory:');

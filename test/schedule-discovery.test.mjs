@@ -111,7 +111,8 @@ test('entity with schedule.create: valid CRUD verb', () => {
   const publishedAt = date();
   const Blog = entity('ScheduleCreateTest', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       create: schedule.at(publishedAt),
     },
@@ -124,7 +125,8 @@ test('entity with schedule.update: valid CRUD verb', () => {
   const publishedAt = date();
   const Blog = entity('ScheduleUpdateTest', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt),
     },
@@ -136,7 +138,8 @@ test('entity with schedule.remove: valid CRUD verb', () => {
   const publishedAt = date();
   const Blog = entity('ScheduleRemoveTest', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       remove: schedule.at(publishedAt),
     },
@@ -149,7 +152,8 @@ test('entity with non-CRUD verb (publish) throws at load (fail-closed)', () => {
   assert.throws(
     () => entity('BadVerbEntity', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { publishedAt },
+            publishedAt,
+
       schedule: {
         publish: schedule.at(publishedAt),
       },
@@ -163,7 +167,8 @@ test('entity with non-CRUD verb (archive) throws at load', () => {
   assert.throws(
     () => entity('BadVerbEntity2', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { publishedAt },
+            publishedAt,
+
       schedule: {
         archive: schedule.at(publishedAt),
       },
@@ -180,7 +185,8 @@ test('schedule field identity-resolves to fieldName on validated entry', () => {
   const publishedAt = date();
   const Blog = entity('FieldNameResolveTest', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt),
     },
@@ -194,7 +200,8 @@ test('schedule with non-declared field throws at load', () => {
   assert.throws(
     () => entity('BadFieldEntity', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { title: text() },
+            title: text(),
+
       schedule: {
         update: schedule.at(fakeField),
       },
@@ -208,7 +215,8 @@ test('schedule field must be date/number (value kind, comparable)', () => {
   assert.throws(
     () => entity('BadFieldTypeEntity', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { title: txt },
+            title: txt,
+
       schedule: {
         update: schedule.at(txt),
       },
@@ -226,7 +234,8 @@ test('discoverDueSchedules: schedule.at finds past-due rows', () => {
   const publishedAt = date();
   const Blog = entity('BlogAtDiscovery', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, { with: { published: true } }),
     },
@@ -253,7 +262,8 @@ test('discoverDueSchedules: schedule.at excludes future rows', () => {
   const publishedAt = date();
   const Blog = entity('BlogAtFuture', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt),
     },
@@ -279,7 +289,8 @@ test('discoverDueSchedules: schedule.after finds rows where field + delay <= now
 
   const Todo = entity('TodoAfterDiscovery', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { createdAt },
+        createdAt,
+
     schedule: {
       update: schedule.after(createdAt, delay, { with: { reminded: true } }),
     },
@@ -319,7 +330,8 @@ test('discoverDueSchedules: with function receives full row', () => {
 
   const Doc = entity('DocFnPayload', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { createdAt, title, owner: text() },
+        createdAt, title, owner: text(),
+
     schedule: {
       update: schedule.at(createdAt, { with: payloadFn }),
     },
@@ -352,7 +364,8 @@ test('discoverDueSchedules: with omitted → payload: {}', () => {
 
   const Blog = entity('BlogNoWith', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt),
     },
@@ -380,7 +393,8 @@ test('discoverDueSchedules: while predicate narrows results', () => {
 
   const Blog = entity('BlogWhileNarrow', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status, publishedAt },
+        status, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('scheduled'),
@@ -411,7 +425,8 @@ test('discoverDueSchedules: multiple due rows all returned', () => {
 
   const Blog = entity('BlogMultiple', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, { with: { processed: true } }),
     },
@@ -437,7 +452,8 @@ test('discoverDueSchedules: entity with no schedule skipped', () => {
   const db = setupDb();
   const Blog = entity('BlogNoScheduleEntity', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { title: text() },
+        title: text()
+
   });
   for (const sql of generateDDL(Blog)) db.exec(sql);
 
@@ -463,7 +479,8 @@ test('discoverDueSchedules: clock injection - now BEFORE row time → empty', ()
 
   const Blog = entity('BlogClockEarly', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt),
     },
@@ -495,7 +512,8 @@ test('discoverDueSchedules: multiple entities with schedules', () => {
   const blogPublishedAt = date();
   const Blog = entity('BlogMultiEntity', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt: blogPublishedAt },
+        publishedAt: blogPublishedAt,
+
     schedule: {
       update: schedule.at(blogPublishedAt, { with: { source: 'blog' } }),
     },
@@ -505,7 +523,8 @@ test('discoverDueSchedules: multiple entities with schedules', () => {
   const todoDueAt = date();
   const Todo = entity('TodoMultiEntity', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { dueAt: todoDueAt },
+        dueAt: todoDueAt,
+
     schedule: {
       update: schedule.at(todoDueAt, { with: { source: 'todo' } }),
     },
@@ -531,7 +550,8 @@ test('discoverDueSchedules: with: null treated as omitted → {}', () => {
 
   const Blog = entity('BlogNullWith', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, { with: null }),
     },
@@ -562,7 +582,8 @@ test('with function receives row with id field', () => {
 
   const Blog = entity('BlogFnRowId', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, { with: payloadFn }),
     },

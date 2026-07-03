@@ -73,10 +73,9 @@ test('linkShare.token.is(undefined) is the deliberate FALSE (fail-closed, never 
 
 function makeDoc() {
   return entity('Doc', {
-    fields: {
-      title: text(),
-      linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view', token: 'autogen' }),
-    },
+        title: text(),
+    linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view', token: 'autogen' }),
+
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
 }

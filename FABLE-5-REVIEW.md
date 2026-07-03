@@ -628,3 +628,46 @@ suite.
   - Verification: `node --check` on all touched src/test/exemplar files, full `.mjs`
     syntax sweep, `git diff --check` clean, full `npm test` → **957 pass / 0 fail**.
 
+
+## Followup — remaining review-section feedback (post-merge)
+
+After the D1–D6 + effects/time decisions merged to main, six items from the
+analysis sections (not the settled decisions) remained unaddressed. All six
+resolved in a followup branch, full suite **959 pass / 0 fail**:
+
+1. **§7 gap 1 — live-fanout re-hydrates the authz row per subscriber batch.**
+   `src/kernel.mjs` `buildLiveFanoutConsumer` now latches the hydrated authz
+   row per (scope, commit) for the batch; `src/live-fanout.mjs` `emit` skips
+   the redundant `findById` when the caller already passes a hydrated row
+   (5th arg `{ hydrated }`). Direct test callers (raw row, no 5th arg) are
+   unaffected — the contract is preserved.
+2. **§7 gap 2 — `removed` events skip re-authorization.** Documented as a
+   deliberate decision: the remove IS the revocation signal; re-authing a
+   vanished row is meaningless and fail-closed would drop the remove from
+   clients that need to see it. ADR #274.
+3. **§3/§6 — `gate:` lived on `.listen()`/routes, not the entity.** Retired
+   `r.resource({ gate })`. The route gate is now declared on the entity next
+   to `grant` and compiled once at load through the existing `resolveRouteGate`
+   (one auth story, one resolution engine). `r.resource()` takes no gate arg;
+   no per-mount override (the hypothetical same-entity-two-paths case uses a
+   bespoke imperative route). Imperative-route gates are a separate concern,
+   untouched. SPEC §261-268 updated.
+4. **§5 — `workbench/client` subpath.** Added `./client` package export →
+   `public/workbench-client.mjs` (`createLiveStore`, `LiveChannel`, `LiveList`).
+5. **§3 — fields:-less declaration.** Dropped the `fields:` wrapper: non-reserved
+   keys ARE the fields. Reserved slots: `grant`, `checks`, `routes`, `create`,
+   `effects`, `admitsEffects`, `schedule`, `gate`, `on` (and `fields` itself is
+   retired). A reserved slot whose value looks like a field descriptor is a
+   load-time error (fail closed). Migrated all exemplars, framework entities,
+   projects, and ~75 test files; mock/fake compiled-record `{ fields: {...} }`
+   objects left intact (they are not entity declarations). Guard tests added
+   (`fields:` wrapper throws; reserved-slot field collision throws).
+6. **§8 — `computed.stored({ async? })` flag.** Rejected as a deliberate
+   decision (ADR #275): an `async` boolean would be an orthogonal flag selecting
+   a different pipeline variant inside one constructor — the half-applying
+   lattice AGENTS.md forbids ("pipeline variants are named wholes"). `computed()`
+   (pull/read-time), `computed.stored()` (in-transaction), and `projected.async`
+   (post-commit) stay three named wholes.
+
+Verification: `node --check` on all touched files, `git diff --check` clean,
+full `npm test` → **959/0**.

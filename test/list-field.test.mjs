@@ -24,7 +24,8 @@ import {
   entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
 
 const Items = entity('Items', {
-  fields: { parts: list(text()) },
+    parts: list(text()),
+
   grant: () => [],
 });
 

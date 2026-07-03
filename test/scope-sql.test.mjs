@@ -27,7 +27,8 @@ const sql = (entityRecord) => entityRecord.readScope.sql.replace(/\s+/g, ' ').tr
 
 test('is.owner() on a direct User ref lowers to a typed-FK equality', () => {
   const Note = entity('Note', {
-    fields: { body: text(), owner: ref('User', { role: 'owner' }) },
+        body: text(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ is }) => is.owner()).can(ownerCan)],
   });
   assert.match(sql(Note), /owner = :p\d+_principalId/);
@@ -35,11 +36,13 @@ test('is.owner() on a direct User ref lowers to a typed-FK equality', () => {
 
 test('everyone() lowers to SQL TRUE, never() lowers to SQL FALSE', () => {
   const Public = entity('Public', {
-    fields: { body: text(), owner: ref('User', { role: 'owner' }) },
+        body: text(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(() => everyone()).can(ownerCan)],
   });
   const Closed = entity('Closed', {
-    fields: { body: text(), owner: ref('User', { role: 'owner' }) },
+        body: text(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(() => never()).can(ownerCan)],
   });
   assert.equal(sql(Public), '1 = 1');
@@ -48,11 +51,13 @@ test('everyone() lowers to SQL TRUE, never() lowers to SQL FALSE', () => {
 
 test('.is(undefined) lowers to FALSE, distinct from .isNull() which is IS NULL', () => {
   const A = entity('A', {
-    fields: { archivedAt: date(), owner: ref('User', { role: 'owner' }) },
+        archivedAt: date(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ fields }) => fields.archivedAt.is(undefined)).can(ownerCan)],
   });
   const B = entity('B', {
-    fields: { archivedAt: date(), owner: ref('User', { role: 'owner' }) },
+        archivedAt: date(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ fields }) => fields.archivedAt.isNull()).can(ownerCan)],
   });
   assert.equal(sql(A), '1 = 0');
@@ -61,7 +66,8 @@ test('.is(undefined) lowers to FALSE, distinct from .isNull() which is IS NULL',
 
 test('field.in([...]) lowers to a parameterized IN with one param per value in order', () => {
   const Post = entity('Post', {
-    fields: { status: text(), owner: ref('User', { role: 'owner' }) },
+        status: text(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ fields }) => fields.status.in(['draft', 'shared'])).can(ownerCan)],
   });
   assert.match(sql(Post), /status IN \(:p\d+_0, :p\d+_1\)/);
@@ -71,7 +77,8 @@ test('field.gte/lte lower to serialized value comparisons', () => {
   const from = new Date('2026-01-01T00:00:00.000Z');
   const to = new Date('2026-01-31T23:59:59.999Z');
   const Photo = entity('Photo', {
-    fields: { title: text(), capturedAt: date(), owner: ref('User', { role: 'owner' }) },
+        title: text(), capturedAt: date(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [
       scope(({ fields }) => fields.capturedAt.gte(from).and(fields.capturedAt.lte(to))).can(ownerCan),
     ],
@@ -87,11 +94,13 @@ test('field.gte/lte lower to serialized value comparisons', () => {
 
 test('field.gte/lte(undefined) lower to FALSE, never an undefined SQL param', () => {
   const From = entity('From', {
-    fields: { capturedAt: date(), owner: ref('User', { role: 'owner' }) },
+        capturedAt: date(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ fields }) => fields.capturedAt.gte(undefined)).can(ownerCan)],
   });
   const To = entity('To', {
-    fields: { capturedAt: date(), owner: ref('User', { role: 'owner' }) },
+        capturedAt: date(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ fields }) => fields.capturedAt.lte(undefined)).can(ownerCan)],
   });
 
@@ -103,7 +112,8 @@ test('field.gte/lte(undefined) lower to FALSE, never an undefined SQL param', ()
 
 test('a.and(b) and a.not() compose', () => {
   const Post = entity('Post', {
-    fields: { status: text(), owner: ref('User', { role: 'owner' }) },
+        status: text(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [
       scope(({ is, fields }) => is.owner().and(fields.status.in(['published']))).can(ownerCan),
     ],
@@ -116,11 +126,10 @@ test('a.and(b) and a.not() compose', () => {
 
 test('anyOf(a,b,c) lowers via De Morgan into NOT(AND(NOT...)) using only and+not', () => {
   const Post = entity('Post', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner' }),
-      editor: ref('User', { role: 'editor' }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner' }),
+    editor: ref('User', { role: 'editor' }),
+
     grant: () => [scope(({ is }) => anyOf(is.owner(), is.editor())).can(ownerCan)],
   });
   const s = sql(Post);
@@ -134,7 +143,8 @@ test('anyOf(a,b,c) lowers via De Morgan into NOT(AND(NOT...)) using only and+not
 test('a scope predicate that returns a non-AST value is a load-time error', () => {
   assert.throws(
     () => entity('Bad', {
-      fields: { body: text(), owner: ref('User', { role: 'owner' }) },
+            body: text(), owner: ref('User', { role: 'owner' }),
+
       grant: () => [scope(() => true).can(ownerCan)],
     }),
     NonCompilableError,
@@ -144,7 +154,8 @@ test('a scope predicate that returns a non-AST value is a load-time error', () =
 test('an undeclared role in scope is a load-time error', () => {
   assert.throws(
     () => entity('Bad', {
-      fields: { body: text(), owner: ref('User', { role: 'owner' }) },
+            body: text(), owner: ref('User', { role: 'owner' }),
+
       grant: () => [scope(({ is }) => is.nonexistent()).can(ownerCan)],
     }),
     NonCompilableError,
@@ -154,7 +165,8 @@ test('an undeclared role in scope is a load-time error', () => {
 test('a value op on a non-compilable field kind (crdt) is a load-time error', () => {
   assert.throws(
     () => entity('Bad', {
-      fields: { body: text.crdt(), owner: ref('User', { role: 'owner' }) },
+            body: text.crdt(), owner: ref('User', { role: 'owner' }),
+
       grant: () => [scope(({ fields }) => fields.body.is('x')).can(ownerCan)],
     }),
     NonCompilableError,
@@ -164,7 +176,8 @@ test('a value op on a non-compilable field kind (crdt) is a load-time error', ()
 test('range ops on a non-compilable field kind (crdt) are load-time errors', () => {
   assert.throws(
     () => entity('Bad', {
-      fields: { body: text.crdt(), owner: ref('User', { role: 'owner' }) },
+            body: text.crdt(), owner: ref('User', { role: 'owner' }),
+
       grant: () => [scope(({ fields }) => fields.body.gte('x')).can(ownerCan)],
     }),
     NonCompilableError,
@@ -173,7 +186,8 @@ test('range ops on a non-compilable field kind (crdt) are load-time errors', () 
 
 test('the lowered SQL + params execute against node:sqlite and select exactly the principal rows', () => {
   const Note = entity('Note', {
-    fields: { body: text(), owner: ref('User', { role: 'owner' }) },
+        body: text(), owner: ref('User', { role: 'owner' }),
+
     grant: () => [scope(({ is }) => is.owner()).can(ownerCan)],
   });
   const db = new DatabaseSync(':memory:');
@@ -197,11 +211,10 @@ test('a boolean value literal (published.is(true)) binds to node:sqlite as 1 (no
   // (via the value strategy's serialize) so the param is bindable. Anonymous
   // reads only published posts; the author reads all of theirs.
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      published: boolean({ default: false }),
-      author: ref('User', { role: 'author', readonly: true }),
-    },
+        title: text(),
+    published: boolean({ default: false }),
+    author: ref('User', { role: 'author', readonly: true }),
+
     grant: () => [
       scope(({ is, fields }) => anyOf(fields.published.is(true), is.author()))
         .can(async ({ is }) => (await is.author()) ? grant(read, write, subscribe) : grant(read)),

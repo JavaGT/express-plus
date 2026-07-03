@@ -8,9 +8,10 @@
 // A gate is an AUTHORIZATION FUNCTION `(principal) => boolean`, never a magic
 // word (AGENTS: authorization is always functions). The DEFAULT gate for every
 // verb is `requireUser()` — the default-on route gate. Per-verb opt-out names the
-// capability that GRANTS route access (allowlist, not denylist):
+// capability that GRANTS route access (allowlist, not denylist), declared on the
+// entity next to `grant`:
 //
-//   r.resource({ gate: { list: allowAnonymous(), create: requireUser() } })
+//   entity('Post', { title: text(), grant: ()=>[...], gate: { list: allowAnonymous() } })
 //
 // relaxes only `list` to admit anonymous; the row grant still runs on every verb.
 

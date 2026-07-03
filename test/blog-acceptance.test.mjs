@@ -44,11 +44,10 @@ function bind(entityRecord, prin) {
 // Blog: public metadata. Anyone may read; the owner may write.
 function makeBlog() {
   return entity('Blog', {
-    fields: {
-      name: text(),
-      slug: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        name: text(),
+    slug: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(() => everyone()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
@@ -61,14 +60,13 @@ function makeBlog() {
 // everyone else who can see it gets read only.
 function makePost() {
   return entity('Post', {
-    fields: {
-      title: text(),
-      body: text(),
-      published: boolean({ default: false }),
-      createdAt: date({ default: () => new Date() }),
-      blog: ref('Blog', { required: true }),
-      author: ref('User', { role: 'author', readonly: true }),
-    },
+        title: text(),
+    body: text(),
+    published: boolean({ default: false }),
+    createdAt: date({ default: () => new Date() }),
+    blog: ref('Blog', { required: true }),
+    author: ref('User', { role: 'author', readonly: true }),
+
     grant: () => [
       scope(({ is, fields }) => anyOf(fields.published.is(true), is.author()))
         .can(async ({ is }) =>
@@ -76,7 +74,8 @@ function makePost() {
         ),
     ],
     // the public blog index lists published posts; mutations stay default-on.
-    routes: (r) => r.resource({ gate: { list: allowAnonymous() } }),
+    gate: { list: allowAnonymous() },
+    routes: (r) => r.resource(),
   });
 }
 
@@ -85,12 +84,11 @@ function makePost() {
 // post is visible. No read-scope of its own.
 function makeComment(Post) {
   return entity('Comment', {
-    fields: {
-      post: ref('Post', { required: true }),
-      body: text({ validate: (v) => v.length <= 5000 || 'comment too long' }),
-      author: ref('User', { role: 'author', readonly: true }),
-      createdAt: date({ default: () => new Date() }),
-    },
+        post: ref('Post', { required: true }),
+    body: text({ validate: (v) => v.length <= 5000 || 'comment too long' }),
+    author: ref('User', { role: 'author', readonly: true }),
+    createdAt: date({ default: () => new Date() }),
+
     grant: inherit(Post, { via: 'post' }),
     routes: (r) => r.resource(),
   });

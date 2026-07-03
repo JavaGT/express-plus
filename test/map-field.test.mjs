@@ -41,7 +41,8 @@ test('map exposes .can returning a new frozen descriptor carrying access', () =>
 test('a map field compiles into an entity at import (does not throw at load)', () => {
   assert.doesNotThrow(() => {
     entity('Doc', {
-      fields: { collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }) },
+            collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+
       grant: () => [scope(() => never()).can(() => grant(read))],
     });
   });
@@ -62,7 +63,8 @@ test('native map event handles are frozen stable computed keys', () => {
 
 test('a map field is not whole-value comparable in scope (fail closed)', () => {
   const Doc = entity('Doc', {
-    fields: { collaborators: map(ref('User'), { role: ['viewer'] }) },
+        collaborators: map(ref('User'), { role: ['viewer'] }),
+
     grant: () => [scope(() => never()).can(() => grant(read))],
   });
   assert.throws(() => Doc.collaborators.is('x'), /store field and cannot be compared/);

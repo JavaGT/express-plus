@@ -20,12 +20,11 @@ import { setActiveDb } from '../src/db.mjs';
 // --- test entity ---
 
 const Canvas = entity('Canvas', {
-  fields: {
     title: text(),
-    status: state({ values: ['draft', 'published'] }),
-    body: text.crdt(),
-    share: link(),  // struct (dormant-but-correct — .updated doesn't persist struct)
-  },
+  status: state({ values: ['draft', 'published'] }),
+  body: text.crdt(),
+  share: link(),  // struct (dormant-but-correct — .updated doesn't persist struct),
+
   grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
 

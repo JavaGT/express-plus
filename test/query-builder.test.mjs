@@ -15,12 +15,11 @@ import { entity, generateDDL } from '../src/internal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 const Note = entity('Note', {
-  fields: {
     body: text(),
-    stars: number(),
-    updatedAt: date(),
-    owner: ref('User', { role: 'owner', readonly: true }),
-  },
+  stars: number(),
+  updatedAt: date(),
+  owner: ref('User', { role: 'owner', readonly: true }),
+
   grant: () => grant(read),
 });
 

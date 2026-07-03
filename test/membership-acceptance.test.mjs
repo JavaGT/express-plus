@@ -39,11 +39,10 @@ import { principal } from '../src/principal.mjs';
 // check, and the dual-capability grant whose scope is anyOf(owner, collaborator).
 function buildTodoListEntity() {
   return entity('TodoList', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+
     checks: {
       collaborator: ({ TodoList, principal: p }) => TodoList.collaborators.has(p.id),
     },
@@ -176,18 +175,16 @@ test('a photo can inherit album membership through a typed FK in BOTH layers', a
   db.exec('CREATE TABLE Photo (id TEXT PRIMARY KEY, title TEXT, album TEXT)');
 
   entity('Album', {
-    fields: {
-      title: text(),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
-    },
+        title: text(),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+
     grant: () => [scope(() => never()).can(() => grant(read))],
   });
 
   const Photo = entity('Photo', {
-    fields: {
-      title: text(),
-      album: ref('Album'),
-    },
+        title: text(),
+    album: ref('Album'),
+
     checks: {
       albumMember: ({ Photo, principal: p }) => Photo.album.collaborators.has(p.id),
       albumEditor: ({ Photo, principal: p }) =>
@@ -257,19 +254,17 @@ test('runtime ref traversal resolves target scalar fields through await', async 
   db.exec(`CREATE TABLE RasterLayer (id TEXT, canvas TEXT, name TEXT)`);
 
   const Canvas = entity('Canvas', {
-    fields: {
-      owner: ref('User', { role: 'owner' }),
-      title: text(),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
-    },
+        owner: ref('User', { role: 'owner' }),
+    title: text(),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+
     grant: () => [scope(() => never()).can(() => grant(read))],
   });
 
   const RasterLayer = entity('RasterLayer', {
-    fields: {
-      canvas: ref('Canvas'),
-      name: text(),
-    },
+        canvas: ref('Canvas'),
+    name: text(),
+
     checks: {
       layerOwner: async ({ entity, principal }) => {
         const c = await entity.canvas;

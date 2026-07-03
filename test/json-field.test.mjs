@@ -8,9 +8,8 @@ import { principal } from '../src/principal.mjs';
 
 function documentEntity() {
   return entity('JsonDocument', {
-    fields: {
-      meta: json({ tags: 'string[]', nested: 'object' }),
-    },
+        meta: json({ tags: 'string[]', nested: 'object' }),
+
     grant: () => [
       scope(({ fields }) => fields.meta.is({ visible: true, rank: 1 }))
         .can(() => grant(read, write, subscribe)),

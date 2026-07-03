@@ -35,7 +35,8 @@ import { setActiveDb } from '../src/db.mjs';
 // then a CAPABILITY denial, not a scope denial, which is what H2 must catch.
 function makeNote() {
   return entity('Note', {
-    fields: { body: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+        body: text(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(everyone()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read)),

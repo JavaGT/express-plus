@@ -30,12 +30,11 @@ const COMMENT = [read, subscribe];
 // mechanism without coupling to doc.mjs's full schema.
 function makeDoc() {
   return entity('Doc', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner' }),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
-      linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view', token: 'autogen' }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner' }),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+    linkShare: link({ tiers: ['view', 'comment', 'edit'], tier: 'view', token: 'autogen' }),
+
     checks: {
       collaborator: ({ Doc, principal }) => Doc.collaborators.has(principal.id),
       linkHolder: ({ Doc, principal }) => Doc.linkShare.token.is(principal.attributes?.token),

@@ -258,12 +258,20 @@ The principal-type union is **closed**: `user | link | system | anonymous`.
   does not write app middleware (that would relocate the inline-ownership debt
   scope warned against).
 
-**Per-verb route-gate opt-out** relaxes *only* the route gate for named verbs:
+**Per-verb route-gate opt-out** relaxes *only* the route gate for named verbs. It
+is declared on the entity, next to `grant` — one authorization story, not two
+places:
 
 ```js
-r.resource({ gate: { list: allowAnonymous(), create: requireUser() } })
+entity('Post', {
+  fields: { ... },
+  grant: () => [scope(...).can(...)],
+  gate: { list: allowAnonymous(), create: requireUser() },
+})
 ```
 
+`r.resource()` expands the five CRUD verbs using the entity's compiled gate
+(unlisted verbs default to `requireUser()`); there is no per-mount gate override.
 The row grant still runs on every verb regardless. The two default-on layers stay
 intact; there is no second auth path.
 

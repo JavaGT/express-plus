@@ -15,7 +15,6 @@ test('number is a value-kind descriptor typed number', () => {
   assert.ok(Object.isFrozen(d));
 });
 
-
 test('computed() returns a pull computed descriptor', () => {
   const compute = (row) => (row.body ? row.body.length : 0);
   const d = computed({ compute });
@@ -28,7 +27,8 @@ test('computed() returns a pull computed descriptor', () => {
 
 test('a number field compiles into an entity and exposes a value query handle', () => {
   const Metric = entity('Metric', {
-    fields: { score: number() },
+        score: number(),
+
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
   // value-kind handle: .is lowers to an equality on the column

@@ -63,7 +63,8 @@ test('entity with schedule slot: builds and record.schedule is frozen', () => {
   const publishedAt = date();
   const Blog = entity('BlogWithSchedule', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt),
     },
@@ -80,7 +81,8 @@ test('entity with schedule.after: builds correctly', () => {
   const createdAt = date();
   const Todo = entity('TodoWithSchedule', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { createdAt },
+        createdAt,
+
     schedule: {
       update: schedule.after(createdAt, '7d'),
     },
@@ -96,7 +98,8 @@ test('entity rejects malformed schedule: bogus kind', () => {
   assert.throws(
     () => entity('BadEntity1', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { f },
+            f,
+
       schedule: {
         update: { kind: 'bogus' },
       },
@@ -110,7 +113,8 @@ test('entity rejects malformed schedule: empty verb name', () => {
   assert.throws(
     () => entity('BadEntity2', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { f },
+            f,
+
       schedule: {
         '': schedule.at(f),
       },
@@ -130,7 +134,8 @@ test('schedule.at rejects bare-string field (import-surface guard)', () => {
 test('entity WITHOUT schedule slot: builds + record.schedule is null', () => {
   const NoSchedule = entity('NoScheduleEntity', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { name: date() },
+        name: date()
+
   });
   assert.ok(NoSchedule);
   assert.equal(NoSchedule.schedule, null);
@@ -140,7 +145,8 @@ test('schedule trigger field identity: same object identity rides through', () =
   const publishedAt = date();
   const Blog = entity('BlogIdentityTest', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt),
     },
@@ -224,7 +230,8 @@ test('entity with schedule.at + while: compiles to whileSql, whileParams, whileA
   const publishedAt = date();
   const Blog = entity('BlogWhileAt', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status, publishedAt },
+        status, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, { while: ({ fields }) => fields.status.is('queued') }),
     },
@@ -243,7 +250,8 @@ test('entity with schedule.after + while: compiles to whileSql, whileParams, whi
   const createdAt = date();
   const Todo = entity('TodoWhileAfter', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status, createdAt },
+        status, createdAt,
+
     schedule: {
       update: schedule.after(createdAt, '1h', { while: ({ fields }) => fields.status.is('pending') }),
     },
@@ -261,7 +269,8 @@ test('entity with no while on schedule trigger: whileSql is undefined', () => {
   const publishedAt = date();
   const Blog = entity('BlogNoWhile', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt },
+        publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt),
     },
@@ -277,7 +286,8 @@ test('non-compilable while: load-time error (NonCompilableError propagates)', ()
   assert.throws(
     () => entity('BadWhileEntity', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { publishedAt },
+            publishedAt,
+
       schedule: {
         update: schedule.at(publishedAt, { while: ({ fields }) => fields.nonexistent.eq(1) }),
       },
@@ -292,7 +302,8 @@ test("'when' rejection: trigger with when throws not-yet-supported error", () =>
   assert.throws(
     () => entity('BadWhenEntity', {
       grant: scope(() => everyone()).can(() => grant(read)),
-      fields: { publishedAt },
+            publishedAt,
+
       schedule: {
         update: handBuiltTrigger,
       },
@@ -306,7 +317,8 @@ test('while referencing a value-kind comparable field compiles', () => {
   const publishedAt = date();
   const Doc = entity('DocWhileValue', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status, publishedAt },
+        status, publishedAt,
+
     schedule: {
       update: schedule.at(publishedAt, { while: ({ fields }) => fields.status.is('draft') }),
     },

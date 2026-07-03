@@ -125,10 +125,9 @@ async function boot(t, mounts) {
 
 function readableArticle() {
   return entity('D5Article', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(() => everyone()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read)),
@@ -138,10 +137,9 @@ function readableArticle() {
 
 function bannedWidget() {
   return entity('D5Widget', {
-    fields: {
-      label: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        label: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     checks: {
       banned: ({ principal }) => principal.id === banned.id,
     },
@@ -154,11 +152,10 @@ function bannedWidget() {
 
 function inheritedProjectEntities() {
   const Project = entity('D5Project', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-      members: map(ref('User'), { role: ['viewer'], default: {} }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    members: map(ref('User'), { role: ['viewer'], default: {} }),
+
     checks: {
       member: ({ D5Project, principal }) => D5Project.members.has(principal.id),
     },
@@ -171,10 +168,9 @@ function inheritedProjectEntities() {
     ],
   });
   const Child = entity('D5ProjectChild', {
-    fields: {
-      project: ref('D5Project', { required: true }),
-      title: text(),
-    },
+        project: ref('D5Project', { required: true }),
+    title: text(),
+
     grant: inherit(Project, { via: 'project' }),
   });
   return { Project, Child };
@@ -182,7 +178,8 @@ function inheritedProjectEntities() {
 
 function scopeOnlyRecord() {
   return entity('D5ScopeOnlyRecord', {
-    fields: { title: text() },
+        title: text(),
+
     grant: () => [scope(() => everyone())],
   });
 }

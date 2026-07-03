@@ -28,16 +28,16 @@ import workbench, {
 // path and the headers on a 500).
 function makePublicListNote() {
   return entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
       ),
     ],
-    routes: (r) => r.resource({ gate: { list: allowAnonymous(), create: allowAnonymous() } }),
+    routes: (r) => r.resource(),
+    gate: { list: allowAnonymous(), create: allowAnonymous() },
   });
 }
 
@@ -75,7 +75,8 @@ test('security headers are present on every response, including a 404', async (t
 test('security headers are present on a 401 from the route gate', async (t) => {
   // a default-on entity (no public verbs) → anonymous list is denied 401.
   const Note = entity('Note', {
-    fields: { body: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+        body: text(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
   });
   const app = workbench().mount('/notes', Note);

@@ -20,18 +20,18 @@ import {
 import { setActiveDb } from '../src/db.mjs';
 
 const Inbox = entity('Inbox', {
-  fields: { recipient: text(), doc: text(), kind: text() },
+    recipient: text(), doc: text(), kind: text(),
+
   grant: () => grant(read, write, subscribe),
 });
 
 const collaborators = map(ref('User'), { role: ['viewer', 'editor'] });
 
 const Doc = entity('Doc', {
-  fields: {
     title: text(),
-    owner: ref('User', { role: 'owner', readonly: true }),
-    collaborators,
-  },
+  owner: ref('User', { role: 'owner', readonly: true }),
+  collaborators,
+
   grant: () => grant(read, write, subscribe),
   effects: (Doc) => [
     [Doc.collaborators.added, {

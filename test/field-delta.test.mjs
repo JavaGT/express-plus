@@ -12,15 +12,14 @@ import { entity, computeDelta, createDeltaProjector, created, updated, removed, 
 
 function makeDoc() {
   return entity('Doc', {
-    fields: {
-      title: text(),
-      status: state({ values: ['draft', 'published', 'archived'] }),
-      body: text.crdt(),
-      share: link(),
-      password: hash(),
-      tags: map(ref('Tag')),
-      items: list(text()),
-    },
+        title: text(),
+    status: state({ values: ['draft', 'published', 'archived'] }),
+    body: text.crdt(),
+    share: link(),
+    password: hash(),
+    tags: map(ref('Tag')),
+    items: list(text()),
+
     grant: () => [scope(everyone()).can(() => grant(read))],
   });
 }
@@ -57,10 +56,9 @@ test('crdt field: changed body produces an insert delta (NOT a {set})', () => {
 
 test('raster/polyline crdt stubs produce replace deltas and dev diagnostics', () => {
   const Drawing = entity('Drawing', {
-    fields: {
-      pixels: raster.crdt(),
-      stroke: polyline.crdt(),
-    },
+        pixels: raster.crdt(),
+    stroke: polyline.crdt(),
+
     grant: () => [scope(everyone()).can(() => grant(read))],
   });
   const diagnostics = [];

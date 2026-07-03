@@ -22,7 +22,8 @@ function setupEntity(now) {
   const publishedAt = date();
   const Blog = entity('BlogAdmit', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt, status: { kind: 'value', type: 'text' } },
+        publishedAt, status: { kind: 'value', type: 'text' },
+
     schedule: {
       // Due when publishedAt <= now; the dispatched payload is FIXED by `with`.
       update: schedule.at(publishedAt, {
@@ -146,7 +147,8 @@ test('admitSystemMutation recomputes the `with` function-form payload from the C
   const dueAt = date();
   const Todo = entity('TodoAdmit', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { title: { kind: 'value', type: 'text' }, dueAt },
+        title: { kind: 'value', type: 'text' }, dueAt,
+
     schedule: {
       update: schedule.at(dueAt, {
         // payload derived from the row at DISPATCH time, not discovery time.
@@ -179,7 +181,8 @@ test('admitSystemMutation: schedule.after due = row.field + delay <= now', () =>
   const createdAt = date();
   const Task = entity('TaskAfter', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { createdAt, status: { kind: 'value', type: 'text' } },
+        createdAt, status: { kind: 'value', type: 'text' },
+
     schedule: {
       update: schedule.after(createdAt, 5000, { with: { status: 'stale' } }),
     },
@@ -218,7 +221,8 @@ function setupAppServer() {
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('BlogE2E', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { publishedAt, status },
+        publishedAt, status,
+
     schedule: {
       update: schedule.at(publishedAt, {
         while: ({ fields }) => fields.status.is('draft'),

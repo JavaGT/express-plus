@@ -35,10 +35,9 @@ async function resolved(surface) {
 // A minimal owned entity (the note.mjs floor). `routes` omitted → auto-CRUD.
 function makeNote() {
   return entity('Note', {
-    fields: {
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
@@ -47,21 +46,21 @@ function makeNote() {
   });
 }
 
-// An entity that declares an explicit per-verb gate via r.resource({gate}).
+// An entity that declares an explicit per-verb gate on the entity, next to grant.
 function makePost() {
   return entity('Post', {
-    fields: {
-      title: text(),
-      published: boolean({ default: false }),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        title: text(),
+    published: boolean({ default: false }),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(async ({ is }) =>
         (await is.owner()) ? grant(read, write, subscribe) : grant(read),
       ),
     ],
     // list is public (a published blog index); everything else is default-on.
-    routes: (r) => r.resource({ gate: { list: allowAnonymous() } }),
+    gate: { list: allowAnonymous() },
+    routes: (r) => r.resource(),
   });
 }
 
@@ -122,9 +121,9 @@ test('each route entry carries the entity it was mounted for', async () => {
   }
 });
 
-// --- r.resource({gate}) wires the per-verb gate into the table ---
+// --- the entity gate wires the per-verb gate into the table ---
 
-test('r.resource({gate}) relaxes only the named verb; other verbs stay default-on', async () => {
+test('entity gate relaxes only the named verb; other verbs stay default-on', async () => {
   const app = workbench().mount('/posts', makePost());
   const routes = await resolved(app);
   const byVerb = Object.fromEntries(routes.map((r) => [r.verb, r]));
@@ -297,7 +296,8 @@ test('app.mount re-bases a multi-route imperative router and preserves each tail
 test('mount does NOT invoke an entity routes thunk eagerly; it runs at resolution', async () => {
   let invoked = false;
   const E = entity('Lazy', {
-    fields: { body: text() },
+        body: text(),
+
     grant: () => grant(read),
     routes: (r) => {
       invoked = true;
@@ -313,7 +313,8 @@ test('mount does NOT invoke an entity routes thunk eagerly; it runs at resolutio
 test('an async routes thunk is awaited at resolution', async () => {
   let resolved = false;
   const E = entity('Async', {
-    fields: { body: text() },
+        body: text(),
+
     grant: () => grant(read),
     routes: async (r) => {
       await Promise.resolve();

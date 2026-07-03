@@ -9,10 +9,9 @@ import workbench, { entity } from '../src/internal.mjs';
 
 function ownedNote() {
   return entity('Note', {
-    fields: { 
-      body: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [scope(({ is }) => is.owner()).can(async ({ is }) =>
       (await is.owner()) ? grant(read, write) : grant(read))],
   });
@@ -87,7 +86,7 @@ test('CSP: opt-in via listen sets Content-Security-Policy header', async (t) => 
   const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
-  app.listen(0, { 
+  app.listen(0, {
     principalOf: () => ({ id: 'u1' }),
     csp: "default-src 'self'"
   });
@@ -122,7 +121,7 @@ test('HSTS: opt-in via listen sets Strict-Transport-Security header', async (t) 
   const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
-  app.listen(0, { 
+  app.listen(0, {
     principalOf: () => ({ id: 'u1' }),
     hsts: true
   });
@@ -157,7 +156,7 @@ test('CORS: configured origin in allowlist sets ACAO header', async (t) => {
   const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
-  app.listen(0, { 
+  app.listen(0, {
     principalOf: () => ({ id: 'u1' }),
     cors: { origins: ['https://app.example.com'] }
   });
@@ -180,7 +179,7 @@ test('CORS: origin NOT in allowlist → no ACAO header', async (t) => {
   const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
-  app.listen(0, { 
+  app.listen(0, {
     principalOf: () => ({ id: 'u1' }),
     cors: { origins: ['https://app.example.com'] }
   });
@@ -201,7 +200,7 @@ test('CORS: OPTIONS preflight returns 204 with ACAO/ACAM/ACAH', async (t) => {
   const app = workbench({ db });
   app.mount('/notes', ownedNote());
   await app.ddl();
-  app.listen(0, { 
+  app.listen(0, {
     principalOf: () => ({ id: 'u1' }),
     cors: { origins: ['https://app.example.com'] }
   });
@@ -212,7 +211,7 @@ test('CORS: OPTIONS preflight returns 204 with ACAO/ACAM/ACAH', async (t) => {
 
   const r = await fetch(`${base}/notes`, {
     method: 'OPTIONS',
-    headers: { 
+    headers: {
       origin: 'https://app.example.com',
       'access-control-request-method': 'POST'
     }
@@ -256,7 +255,7 @@ test('onShutdown: registered hooks run on shutdown', async (t) => {
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
   await app.ready;
-  
+
   let hookRan = false;
   app.onShutdown('test-hook', () => {
     hookRan = true;
@@ -274,7 +273,7 @@ test('onShutdown: hooks run in registration order', async (t) => {
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
   await app.ready;
-  
+
   const order = [];
   app.onShutdown('first', () => { order.push(1); });
   app.onShutdown('second', () => { order.push(2); });
@@ -292,7 +291,7 @@ test('onShutdown: hook exceeding timeout is force-abandoned', async (t) => {
   await app.ddl();
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
   await app.ready;
-  
+
   let slowRan = false;
   let slowCompleted = false;
   app.onShutdown('slow', async () => {
@@ -305,7 +304,7 @@ test('onShutdown: hook exceeding timeout is force-abandoned', async (t) => {
   const start = Date.now();
   await app.shutdown();
   const elapsed = Date.now() - start;
-  
+
   // Hook started but didn't complete
   assert.equal(slowRan, true);
   assert.equal(slowCompleted, false);

@@ -33,10 +33,9 @@ const norm = (sql) => sql.replace(/\s+/g, ' ').trim();
 
 test('owner check harvests to a typed-FK equality AST (same SQL as before)', () => {
   const TodoList = entity('TodoList', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner' }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner' }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(() => grant(read)),
     ],
@@ -190,10 +189,9 @@ test('runtime-only check in scope throws at entity load', () => {
   assert.throws(
     () => {
       entity('Doc', {
-        fields: {
-          owner: ref('User', { role: 'owner' }),
-          members: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
-        },
+                owner: ref('User', { role: 'owner' }),
+        members: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+
         grant: () => [
           // is.editor() has NO harvest face — it's a runtime-only check.
           scope(({ is }) => is.editor()).can(() => grant(read)),
@@ -216,10 +214,9 @@ test('unknown check name in scope throws at entity load', () => {
   assert.throws(
     () => {
       entity('Bad', {
-        fields: {
-          body: text(),
-          owner: ref('User', { role: 'owner' }),
-        },
+                body: text(),
+        owner: ref('User', { role: 'owner' }),
+
         grant: () => [
           scope(({ is }) => is.nope()).can(() => grant(read)),
         ],
@@ -275,19 +272,17 @@ test('ref handle thenable resolves to target scalar fields and map handles', asy
   });
 
   const Canvas = entity('Canvas', {
-    fields: {
-      owner: ref('User', { role: 'owner' }),
-      title: text(),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
-    },
+        owner: ref('User', { role: 'owner' }),
+    title: text(),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+
     grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
   });
 
   const RasterLayer = entity('RasterLayer', {
-    fields: {
-      canvas: ref('Canvas'),
-      name: text(),
-    },
+        canvas: ref('Canvas'),
+    name: text(),
+
     checks: {
       layerOwner: async ({ entity, principal }) => {
         const canvas = await entity.canvas;
@@ -337,14 +332,14 @@ test('entity key is available alongside entity-name key in check context', () =>
   });
 
   entity('Target', {
-    fields: { label: text() },
+        label: text(),
+
     grant: () => [scope(() => never()).can(() => grant(read))],
   });
 
   const Doc = entity('Doc', {
-    fields: {
-      target: ref('Target'),
-    },
+        target: ref('Target'),
+
     checks: {
       labelIsHello: ({ entity }) => entity.target.id === 't1',
     },
@@ -370,10 +365,9 @@ test('declared check that returns a non-AST value in scope throws at entity load
   assert.throws(
     () => {
       entity('Leaky', {
-        fields: {
-          body: text(),
-          owner: ref('User', { role: 'owner' }),
-        },
+                body: text(),
+        owner: ref('User', { role: 'owner' }),
+
         // A runtime-shaped body: returns a raw boolean, not an AST node.
         checks: {
           secret: ({ principal: p }) => p.id === 'admin',

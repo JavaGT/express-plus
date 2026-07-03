@@ -68,9 +68,9 @@ test('.can(fn) returns a new frozen state descriptor carrying the access fn', ()
 test('a state field compiles into an entity at import', () => {
   const updatedAt = date({ touch: true });
   const Doc = entity('DocWithState', {
-    grant: scope(() => everyone()).can(() => grant(read)), fields: {
-      status: state({
-        values: ['draft', 'shared', 'archived'], transitions: { draft: ['shared'], shared: ['archived', 'draft'], archived: ['draft'] }, effects: { [state.transition('shared', 'archived')]: { with: { archivedAt: date() } } }, auto: { when: 'shared', after: '90d', to: 'archived', from: updatedAt }, }), updatedAt, } });
+    grant: scope(() => everyone()).can(() => grant(read)),     grant: scope(() => everyone()).can(() => grant(read)), status: state({
+    grant: scope(() => everyone()).can(() => grant(read)),   values: ['draft', 'shared', 'archived'], transitions: { draft: ['shared'], shared: ['archived', 'draft'], archived: ['draft'] }, effects: { [state.transition('shared', 'archived')]: { with: { archivedAt: date() } } }, auto: { when: 'shared', after: '90d', to: 'archived', from: updatedAt }, }), updatedAt,
+    grant: scope(() => everyone()).can(() => grant(read)),  });
   assert.ok(Doc);
 });
 
@@ -78,14 +78,13 @@ test('state.auto lowers to a schedule.after update trigger', () => {
   const updatedAt = date({ touch: true });
   const Doc = entity('DocStateAutoSchedule', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      status: state({
-        values: ['draft', 'shared', 'archived'],
-        transitions: { draft: ['shared'], shared: ['archived', 'draft'] },
-        auto: { when: 'shared', after: '90d', to: 'archived', from: updatedAt },
-      }),
-      updatedAt,
-    },
+        status: state({
+      values: ['draft', 'shared', 'archived'],
+      transitions: { draft: ['shared'], shared: ['archived', 'draft'] },
+      auto: { when: 'shared', after: '90d', to: 'archived', from: updatedAt },
+    }),
+    updatedAt,
+
   });
   assert.equal(Doc.schedule.update.kind, 'schedule.after');
   assert.equal(Doc.schedule.update.fieldName, 'updatedAt');
@@ -100,15 +99,14 @@ test('state.auto coexists with an explicit update schedule', () => {
   const updatedAt = date({ touch: true });
   const Doc = entity('DocStateAutoAndSchedule', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      status: state({
-        values: ['draft', 'shared', 'archived'],
-        transitions: { draft: ['shared'], shared: ['archived', 'draft'] },
-        auto: { when: 'shared', after: '90d', to: 'archived', from: updatedAt },
-      }),
-      dueAt,
-      updatedAt,
-    },
+        status: state({
+      values: ['draft', 'shared', 'archived'],
+      transitions: { draft: ['shared'], shared: ['archived', 'draft'] },
+      auto: { when: 'shared', after: '90d', to: 'archived', from: updatedAt },
+    }),
+    dueAt,
+    updatedAt,
+
     schedule: { update: schedule.at(dueAt, { with: { status: 'shared' } }) },
   });
   assert.ok(Array.isArray(Doc.schedule.update));
@@ -118,8 +116,8 @@ test('state.auto coexists with an explicit update schedule', () => {
 
 test('a state handle cannot be compared in scope (fail closed)', () => {
   const Doc = entity('DocStateScopeGuard', {
-    grant: scope(() => everyone()).can(() => grant(read)), fields: {
-      status: state({ values: ['draft', 'shared'] }), }, });
+    grant: scope(() => everyone()).can(() => grant(read)),     grant: scope(() => everyone()).can(() => grant(read)), status: state({ values: ['draft', 'shared'] }),
+    grant: scope(() => everyone()).can(() => grant(read)),  });
   assert.throws(
     () => Doc.status.is('draft'), /state field and cannot be compared/, );
 });
@@ -133,13 +131,12 @@ import { executeFrameworkDDL, createServer, durableMutationVariant } from '../sr
 function setupDoc() {
   const Doc = entity('DocState', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: {
-      title: text(),
-      status: state({
-        values: ['draft', 'shared', 'archived'],
-        transitions: { draft: ['shared'], shared: ['archived', 'draft'] },
-      }),
-    },
+        title: text(),
+    status: state({
+      values: ['draft', 'shared', 'archived'],
+      transitions: { draft: ['shared'], shared: ['archived', 'draft'] },
+    }),
+
   });
   return Doc;
 }

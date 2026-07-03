@@ -23,7 +23,8 @@ function makeTickEntity() {
   const status = text();
   return entity('AdmitTick', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status },
+        status,
+
     schedule: {
       update: tick.hz(60, {
         while: ({ fields }) => fields.status.is('moving'),
@@ -224,7 +225,8 @@ test('admitSystemMutation DENIES a schedule.at trigger with a tick-style source'
   const createdAt = date();
   const schedAt = entity('AdmitSchedAt', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status, createdAt },
+        status, createdAt,
+
     schedule: {
       update: schedule.at(createdAt, {
         while: ({ fields }) => fields.status.is('draft'),
@@ -260,7 +262,8 @@ test('admitSystemMutation: no due-check runs (tick row with no date field still 
   const status = text();
   const NoDate = entity('NoDateTick', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status },
+        status,
+
     schedule: {
       update: tick.every('5m', {
         while: ({ fields }) => fields.status.is('ready'),
@@ -297,7 +300,8 @@ test('admitSystemMutation DENIES a schedule.after trigger with a tick-style sour
   const createdAt = date();
   const schedAfter = entity('AdmitSchedAfter', {
     grant: scope(() => everyone()).can(() => grant(read)),
-    fields: { status, createdAt },
+        status, createdAt,
+
     schedule: {
       update: schedule.after(createdAt, 30000, {
         while: ({ fields }) => fields.status.is('idle'),

@@ -26,11 +26,10 @@ test('an app opts into the pipeline: action → event → reducer fold', async (
 
   // A product entity with a published flag.
   const Post = entity('Post', {
-    fields: {
-      title: text(),
-      published: text({ default: 'false' }),
-      owner: ref('User', { role: 'owner', readonly: true }),
-    },
+        title: text(),
+    published: text({ default: 'false' }),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [scope(({ is }) => is.owner()).can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe) : grant(read))],
   });
   for (const sql of generateDDL(Post)) db.exec(sql);
@@ -107,7 +106,8 @@ test('pipeline and direct CRUD coexist — one does not subsume the other', asyn
   setActiveDb(db);
 
   const Note = entity('Note', {
-    fields: { body: text(), owner: ref('User', { role: 'owner', readonly: true }) },
+        body: text(), owner: ref('User', { role: 'owner', readonly: true }),
+
     grant: () => [scope(({ is }) => is.owner()).can(async ({ is }) => (await is.owner()) ? grant(read, write) : grant(read))],
   });
   for (const sql of generateDDL(Note)) db.exec(sql);

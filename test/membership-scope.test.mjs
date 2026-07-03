@@ -23,11 +23,10 @@ const norm = (sql) => sql.replace(/\s+/g, ' ').trim();
 
 test('a map field membership check compiles to a correlated EXISTS over the side-table', () => {
   const TodoList = entity('TodoList', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner' }),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner' }),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+
     checks: {
       // entity-name-keyed self handle: `TodoList` is the entity itself; `.has`
       // tests membership of `principal.id` in the collaborators side-table.
@@ -52,10 +51,9 @@ test('a map field membership check compiles to a correlated EXISTS over the side
 
 test('the membership scope keeps the principalId placeholder for bindReadScope', () => {
   const TodoList = entity('TodoList', {
-    fields: {
-      owner: ref('User', { role: 'owner' }),
-      collaborators: map(ref('User'), { role: ['viewer'], default: {} }),
-    },
+        owner: ref('User', { role: 'owner' }),
+    collaborators: map(ref('User'), { role: ['viewer'], default: {} }),
+
     checks: {
       collaborator: ({ TodoList, principal }) => TodoList.collaborators.has(principal.id),
     },
@@ -75,10 +73,9 @@ test('the membership scope keeps the principalId placeholder for bindReadScope',
 
 test('a map field is still NOT whole-value comparable in scope (.is throws, .has does not)', () => {
   const Doc = entity('Doc', {
-    fields: {
-      owner: ref('User', { role: 'owner' }),
-      collaborators: map(ref('User'), { role: ['viewer'] }),
-    },
+        owner: ref('User', { role: 'owner' }),
+    collaborators: map(ref('User'), { role: ['viewer'] }),
+
     grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
   });
   // whole-value ops remain fail-closed ...
@@ -91,18 +88,16 @@ test('a map field is still NOT whole-value comparable in scope (.is throws, .has
 
 test('a typed FK can traverse to a target map membership in scope', () => {
   entity('Album', {
-    fields: {
-      title: text(),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
-    },
+        title: text(),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+
     grant: () => [scope(() => never()).can(() => grant(read))],
   });
 
   const Photo = entity('Photo', {
-    fields: {
-      title: text(),
-      album: ref('Album'),
-    },
+        title: text(),
+    album: ref('Album'),
+
     checks: {
       albumMember: ({ Photo, principal }) => Photo.album.collaborators.has(principal.id),
     },
@@ -120,18 +115,16 @@ test('a typed FK can traverse to a target map membership in scope', () => {
 
 test('ref-role fields stay raw identity handles and do not traverse target maps', () => {
   entity('TeamUser', {
-    fields: {
-      name: text(),
-      groups: map(ref('User'), { role: ['member'], default: {} }),
-    },
+        name: text(),
+    groups: map(ref('User'), { role: ['member'], default: {} }),
+
     grant: () => [scope(() => never()).can(() => grant(read))],
   });
 
   const Doc = entity('RoleRefDoc', {
-    fields: {
-      title: text(),
-      owner: ref('TeamUser', { role: 'owner' }),
-    },
+        title: text(),
+    owner: ref('TeamUser', { role: 'owner' }),
+
     grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
   });
 

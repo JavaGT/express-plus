@@ -15,7 +15,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // A public Doc entity — everyone can read, write, and subscribe.
 const Doc = entity('Doc', {
-  fields: { title: text(), cursor: ephemeral({ x: true, y: true }) },
+    title: text(), cursor: ephemeral({ x: true, y: true }),
+
   grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
 

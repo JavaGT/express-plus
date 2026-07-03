@@ -68,23 +68,22 @@ function json(url, opts = {}) {
 
 function declareCanvasLayer() {
   const Canvas = entity('Canvas', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-      collaborators: map(ref('User'), {
-        role: ['viewer', 'editor'],
-        default: {},
-      }),
-      width: number({ default: 1920 }),
-      height: number({ default: 1080 }),
-      preview: projected.async({
-        compute: async (canvas) => {
-          return { rendered: true, title: canvas.title };
-        },
-      }),
-      createdAt: date({ default: () => new Date() }),
-      updatedAt: date({ touch: true }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    collaborators: map(ref('User'), {
+      role: ['viewer', 'editor'],
+      default: {},
+    }),
+    width: number({ default: 1920 }),
+    height: number({ default: 1080 }),
+    preview: projected.async({
+      compute: async (canvas) => {
+        return { rendered: true, title: canvas.title };
+      },
+    }),
+    createdAt: date({ default: () => new Date() }),
+    updatedAt: date({ touch: true }),
+
     checks: {
       collaborator: ({ Canvas: c, principal: p }) =>
         c.collaborators.has(p.id),
@@ -105,21 +104,20 @@ function declareCanvasLayer() {
   });
 
   const RasterLayer = entity('RasterLayer', {
-    fields: {
-      canvas: ref('Canvas'),
-      name: text({ default: 'New Layer' }),
-      imageData: raster.crdt({ mergeStrategy: 'blend' }),
-      visible: boolean({ default: true })
-        .can(async ({ is, entity }) => {
-          if (await is.editor()) return grant(read, subscribe);
-          if (await is.owner()) return grant(read, subscribe);
-          if (await is.collaborator() && entity.visible) return grant(read, subscribe);
-          return grant(subscribe);
-        }),
-      opacity: number({ default: 100 }),
-      blendMode: text({ default: 'normal' }),
-      createdAt: date({ default: () => new Date() }),
-    },
+        canvas: ref('Canvas'),
+    name: text({ default: 'New Layer' }),
+    imageData: raster.crdt({ mergeStrategy: 'blend' }),
+    visible: boolean({ default: true })
+      .can(async ({ is, entity }) => {
+        if (await is.editor()) return grant(read, subscribe);
+        if (await is.owner()) return grant(read, subscribe);
+        if (await is.collaborator() && entity.visible) return grant(read, subscribe);
+        return grant(subscribe);
+      }),
+    opacity: number({ default: 100 }),
+    blendMode: text({ default: 'normal' }),
+    createdAt: date({ default: () => new Date() }),
+
     checks: {
       editor: async ({ entity, principal: p }) => {
         const canvas = await entity.canvas;

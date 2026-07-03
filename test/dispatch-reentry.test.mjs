@@ -12,11 +12,10 @@ import workbench, { entity, generateDDL } from '../src/internal.mjs';
 
 function makeDoc() {
   return entity('Doc', {
-    fields: {
-      title: text(),
-      owner: ref('User', { role: 'owner', readonly: true }),
-      collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
-    },
+        title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
+
     grant: () => [
       scope(({ is }) => is.owner()).can(() => grant(read, write)),
     ],

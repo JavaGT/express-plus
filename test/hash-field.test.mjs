@@ -16,7 +16,8 @@ import { fieldHandle } from '../src/scope-sql.mjs';
 
 function makeUser() {
   return entity('User', {
-    fields: { username: text(), password: hash() },
+        username: text(), password: hash(),
+
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
 }
