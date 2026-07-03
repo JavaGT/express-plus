@@ -35,9 +35,9 @@ import { createLiveServer } from './live.mjs';
 import { readSeq } from './cursor.mjs';
 import { getLog } from './log.mjs';
 import { buildKernel } from './kernel.mjs';
+import { reconcileProjectedRecovery } from './projected-async.mjs';
+import { reconcileDurableEffects } from './durable-effects.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
-import { readFileSync, existsSync } from 'node:fs';
-import { isSafePath, matchExtension } from './views.mjs';
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { runChain } from './http-handler-chain.mjs';
 import { matchRoute } from './http-route-match.mjs';
@@ -191,6 +191,60 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
 }
 
 // Framework-owned snapshot + resync endpoints (spec #1, D6/D7). NOT mounted
+// `makeHandlerRes(nodeRes, onEnd)` wraps a node response in the Express-style
+// facade the `app.use(prefix, fn)` intercept hands to a mounted handler: a
+// chainable `status`/`json`/`send`/`sendStatus`, passthrough `writeHead`/`end`/
+// `setHeader`, a `headersSent` getter, and `raw` for callers that pipe a
+// `Response.body` (the consumer's `sendWebResponse`). `onEnd` flips the
+// intercept's handled flag so a handler that ended the response short-circuits
+// the dispatch and one that did not write falls through to the next handler.
+function makeHandlerRes(nodeRes, onEnd) {
+  let pendingStatus = 200;
+  const res = {
+    status(code) {
+      pendingStatus = code;
+      return res;
+    },
+    json(value) {
+      sendJson(nodeRes, pendingStatus, value);
+      onEnd();
+      return res;
+    },
+    send(value) {
+      const payload = String(value);
+      nodeRes.writeHead(pendingStatus, {
+        'content-type': 'text/plain; charset=utf-8',
+        'content-length': Buffer.byteLength(payload),
+      });
+      nodeRes.end(payload);
+      onEnd();
+      return res;
+    },
+    sendStatus(code) {
+      nodeRes.writeHead(code);
+      nodeRes.end();
+      onEnd();
+      return res;
+    },
+    get headersSent() {
+      return nodeRes.headersSent;
+    },
+    writeHead(...args) {
+      return nodeRes.writeHead(...args);
+    },
+    end(...args) {
+      const r = nodeRes.end(...args);
+      onEnd();
+      return r;
+    },
+    setHeader(...args) {
+      return nodeRes.setHeader(...args);
+    },
+    raw: nodeRes,
+  };
+  return res;
+}
+
 // routes — resolved at request time from `/snapshot/:entity/:id` and
 // `/events-since/:entity/:id`. The entity table IS the snapshot (scope's proven
 // shape); the committed `_Log` is the RESYNC source. Authorization runs the SAME
@@ -540,31 +594,40 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
         const handled = await handleJobRoute(source, req, res);
         if (handled) return;
       }
-      if (isApp && source._static && req.method === 'GET') {
-        const { prefix, dir } = source._static;
-        if (url.pathname.startsWith(prefix)) {
-          const filePath = url.pathname.slice(prefix.length) || '/index.html';
-          if (!isSafePath(dir, filePath)) {
-            sendJson(res, 404, { error: 'not found' });
-            return;
-          }
-          const fullPath = resolve(dir, filePath);
-          if (!existsSync(fullPath)) {
-            sendJson(res, 404, { error: 'not found' });
-            return;
-          }
+      // App-declared prefix-intercept handlers — `app.use(prefix, fn)` (and its
+      // `app.static` sugar). Each fn is a catch-all under its prefix; the first
+      // matching prefix wins, in declaration order. The fn receives an
+      // Express-style { req, res } with `req.params.path` holding the prefix
+      // tail (so a manual sub-router can split it). A fn that does NOT write
+      // falls through to the next handler (and then to matchRoute); a fn that
+      // throws is rendered as an error. Runs AFTER framework defaults (/blobs,
+      // /jobs, /snapshot, /events-since) and BEFORE matchRoute — one interceptor
+      // mechanism, no special-cases.
+      if (isApp && source._handlers?.length) {
+        for (const { prefix, fn } of source._handlers) {
+          if (!url.pathname.startsWith(prefix)) continue;
+          const rest = url.pathname.slice(prefix.length) || '/';
+          const ctxReq = {
+            body: undefined,
+            params: { path: rest.replace(/^\//, '') },
+            query: Object.fromEntries(url.searchParams),
+            principal: principalOf(req),
+            raw: req,
+            headers: req.headers,
+            method: req.method,
+            url: req.url,
+          };
+          let handled = false;
+          const ctxRes = makeHandlerRes(res, () => {
+            handled = true;
+          });
           try {
-            const content = readFileSync(fullPath);
-            const mime = matchExtension(filePath);
-            res.writeHead(200, {
-              'content-type': mime,
-              'content-length': Buffer.byteLength(content),
-            });
-            res.end(content);
-          } catch {
-            sendJson(res, 500, { error: 'internal error' });
+            await fn(ctxReq, ctxRes, () => {});
+          } catch (err) {
+            renderError(res, err, { env });
+            return;
           }
-          return;
+          if (handled || res.writableEnded) return;
         }
       }
 
@@ -773,6 +836,32 @@ export function listen(app, port, optionsOrCallback = {}) {
     // some entity declares a schedule.at / schedule.after deadline trigger.
     const reaper = startReaper({ db: app.db, entities: app.entities, dispatch: dispatchThroughWriteQueue });
     app.onShutdown('reaper', () => { reaper.stop(); }, { timeoutMs: 1000 });
+    // Projected.async boot catch-up. If the process died between committing an
+    // event and the post-commit consumer applying its projection, the projected
+    // field is stale and nothing reconciles it. One sweep at startup, under the
+    // writeQueue mutex (same critical section dispatch uses), recomputes lagging
+    // scopes from current row state and cleans cursors for removed rows. Run
+    // after buildKernel (app.entities is set) and before serving traffic.
+    try {
+      await app.writeQueue.run(() => reconcileProjectedRecovery(app.db, app.entities));
+    } catch (err) {
+      log.warn('system', 'projected recovery sweep failed', { err });
+    }
+    // Durable-effects boot catch-up. Same crash gap as projected recovery: a
+    // committed _Log row whose post-commit enqueue was lost (process died
+    // between COMMIT and the durable consumer) would never be retried. One
+    // sweep at startup, under the same writeQueue mutex, re-enqueues missed
+    // jobs and advances the per-scope consumer cursor. No-op when no durable
+    // effects are declared or the job-queue substrate is not engaged.
+    if (app.jobs && app.durableEffectsRegistry) {
+      try {
+        await app.writeQueue.run(() =>
+          reconcileDurableEffects(app.db, { durableEffectsRegistry: app.durableEffectsRegistry, jobs: app.jobs }),
+        );
+      } catch (err) {
+        log.warn('system', 'durable effects recovery sweep failed', { err });
+      }
+    }
     if (!httpServer.listening) {
       await new Promise((resolve) => httpServer.once('listening', resolve));
     }

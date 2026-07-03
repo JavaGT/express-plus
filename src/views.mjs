@@ -20,7 +20,7 @@
 //
 // `matchExtension(filename)` returns a content-type for static file serving.
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, existsSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
 
 // HTML-context escaping (OWASP): the five characters that can break out of text
@@ -81,4 +81,56 @@ export function matchExtension(filename) {
 export function isSafePath(root, requested) {
   const resolved = resolve(root, requested);
   return resolved.startsWith(resolve(root) + sep) || resolved === resolve(root);
+}
+
+// `stripPrefix` recovers the path tail under a URL prefix. The `?query` is
+// dropped (the caller already has it as `url.searchParams`); a missing prefix is
+// a pass-through so the factory is usable bare.
+export function stripPrefix(url, prefix) {
+  if (!prefix) return url;
+  const q = url.indexOf('?');
+  const path = q === -1 ? url : url.slice(0, q);
+  return path.startsWith(prefix) ? path.slice(prefix.length) : path;
+}
+
+// `serveStatic(dir, options)` is a catch-all request handler factory for the
+// `app.use(prefix, fn)` seam: GET a file under `dir` at the prefix-stripped tail,
+// fall through to `next()` on a missing/unsafe file so a downstream handler (a
+// SPA fallback) may serve it, and 404 only when there is no `next`. Path
+// traversal is rejected via `isSafePath` (fail closed). `options.prefix` is the
+// URL prefix already trimmed of trailing slashes; the tail is taken from
+// `req.params.path` when the intercept has already stripped it, else from the
+// raw URL.
+export function serveStatic(dir, options = {}) {
+  return (req, res, next) => {
+    const rel = req.params?.path ?? stripPrefix(req.url, options.prefix);
+    const relPath = String(rel).replace(/^\/+/, '');
+    if (!relPath || !isSafePath(dir, relPath)) return next ? next() : sendStatic(res, 404, { error: 'not found' });
+    const fullPath = resolve(dir, relPath);
+    if (!existsSync(fullPath)) return next ? next() : sendStatic(res, 404, { error: 'not found' });
+    try {
+      const content = readFileSync(fullPath);
+      const mime = matchExtension(relPath);
+      if (!res.headersSent) {
+        res.writeHead(200, {
+          'content-type': mime,
+          'content-length': Buffer.byteLength(content),
+        });
+      }
+      res.end(content);
+    } catch {
+      return sendStatic(res, 500, { error: 'internal error' });
+    }
+  };
+}
+
+// JSON response helper for static-file error paths (matches `sendJson`'s shape so
+// a 404 from the file layer reads the same as a 404 from the router).
+export function sendStatic(res, status, body) {
+  const payload = JSON.stringify(body);
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(payload),
+  });
+  res.end(payload);
 }

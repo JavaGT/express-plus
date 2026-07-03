@@ -34,6 +34,7 @@ import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { createLog, setAmbientLog, getLog } from './log.mjs';
+import { serveStatic } from './views.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 
@@ -155,8 +156,29 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
     if (resolution) {
       throw new Error('cannot mount after routes are resolved — assemble the app before listen()');
     }
+    // `app.use(prefix, fn)` — a FUNCTION target is a catch-all request handler
+    // under the prefix (the Express idiom for mounting a raw router/handler). It
+    // is a distinct declaration kind: it does not contribute routes to the
+    // matchRoute table (the matcher needs exact segment count and has no
+    // wildcard), it intercepts by URL prefix BEFORE matchRoute. This is the
+    // permanent home for third-party routers that own their own dynamic
+    // sub-paths (e.g. better-auth's `/api/auth/[...all]`) and generalizes the
+    // former `app.static` special-case — one prefix-intercept mechanism,
+    // declared by apps, not baked into serve.mjs.
+    if (typeof target === 'function') {
+      declarations.push({ kind: 'handler', prefix: normalizePrefix(path), fn: target });
+      return surface;
+    }
     declarations.push({ kind: 'mount', path, target, autoLoad: makeAutoLoad(path) });
     return surface;
+  }
+
+  // Trim trailing slashes so the prefix-intercept matches with startsWith: the
+  // bare prefix ('/api/auth') and any path under it. The bare root '/' collapses
+  // to '/' so it matches everything, and `pathname.slice('/'.length)` still
+  // yields the tail.
+  function normalizePrefix(prefix) {
+    return prefix.replace(/\/+$/, '') || '/';
   }
 
   const surface = {
@@ -164,6 +186,7 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
     routes,
     declarations,
     mount: recordMount,
+    use: recordMount,
   };
 
   // The per-entity builder also exposes `r.resource()`: expand the five CRUD
@@ -209,6 +232,11 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
           for (const route of resolveResource(entity, joinPath(base, ''))) {
             routes.push(route);
           }
+        } else if (decl.kind === 'handler') {
+          // A function-target `use` does not add to the matchRoute table — it
+          // intercepts by prefix before the table is consulted. Collected in
+          // declaration order so the first matching prefix wins.
+          (surface._handlers ??= []).push({ prefix: decl.prefix, fn: decl.fn });
         } else if (decl.kind === 'mount') {
           for (const route of await resolveMount(decl.path, decl.target)) {
             const rebased = rebaseRoute(route, base);
@@ -401,13 +429,12 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
     app.port = port;
     return serveListen(app, port, optionsOrCallback);
   };
-  // Static file serving. `prefix` is the URL prefix (e.g. '/static');
-  // `dir` is the filesystem directory. The handler checks the URL prefix and
-  // serves matching files; it runs in the HTTP dispatch path BEFORE route
-  // matching, so it intercepts any request under the prefix.
-  app.static = (prefix, dir) => {
-    app._static = { prefix: prefix.replace(/\/$/, ''), dir };
-    return app;
-  };
+  // Static file serving — a thin alias over the general `app.use` prefix-intercept
+  // seam: `app.static('/public', dir)` is exactly
+  // `app.use('/public', serveStatic(dir))`. Retained as a readability convenience
+  // (the file-serve factory lives in views.mjs); the framework has ONE interceptor
+  // mechanism, not two. A missing file falls through to the next declared
+  // handler (e.g. a SPA fallback) rather than short-circuiting the request.
+  app.static = (prefix, dir) => app.use(prefix, serveStatic(dir, { prefix: prefix.replace(/\/+$/, '') }));
   return app;
 }
