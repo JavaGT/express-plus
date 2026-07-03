@@ -94,11 +94,14 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
   // client can detect staleness by comparing with its last-known cursor value.
   function addProjectedCursors(res, db, entity) {
     if (!entity.projectedAsyncFields || entity.projectedAsyncFields.length === 0) return;
+    const cursors = new Map(
+      db.prepare('SELECT field, lastSeq FROM _ProjectedCursor WHERE entity = :e')
+        .all({ e: entity.name })
+        .map((r) => [r.field, r.lastSeq]),
+    );
     for (const [fieldName] of entity.projectedAsyncFields) {
-      const row = db.prepare(
-        'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
-      ).get({ e: entity.name, f: fieldName });
-      if (row) res.setHeader(`x-workbench-projected-${fieldName}`, String(row.lastSeq));
+      const lastSeq = cursors.get(fieldName);
+      if (lastSeq !== undefined) res.setHeader(`x-workbench-projected-${fieldName}`, String(lastSeq));
     }
   }
 
