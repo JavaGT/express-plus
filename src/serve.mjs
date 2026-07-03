@@ -240,6 +240,26 @@ function makeHandlerRes(nodeRes, onEnd) {
     setHeader(...args) {
       return nodeRes.setHeader(...args);
     },
+    async stream(webResponse, options = {}) {
+      const source = webResponse instanceof ReadableStream
+        ? new Response(webResponse)
+        : webResponse;
+      nodeRes.writeHead(source.status, Object.fromEntries(source.headers));
+      if (options.buffering === false) {
+        nodeRes.setHeader('X-Accel-Buffering', 'no');
+      }
+      if (source.body) {
+        const reader = source.body.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          nodeRes.write(value);
+        }
+      }
+      nodeRes.end();
+      onEnd();
+      return res;
+    },
     raw: nodeRes,
   };
   return res;

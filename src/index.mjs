@@ -9,6 +9,7 @@ export { everyone, never, anyOf, inherit } from './scope-sql.mjs';
 export { principal, anonymous } from './principal.mjs';
 export { requireUser, allowAnonymous } from './route-gate.mjs';
 export { router } from './app.mjs';
+export { matchRoute } from './http-route-match.mjs';
 export { serveStatic } from './views.mjs';
 export { inc, dec, self, many, effect } from './effect-compiler.mjs';
 export { schedule, tick } from './schedule.mjs';

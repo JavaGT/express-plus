@@ -11,13 +11,13 @@
 
 /// <reference types="node" />
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage, ServerResponse } from "node:http";
 
 // ---------------------------------------------------------------------------
 // Principal — the closed union (user | link | system | anonymous).
 // ---------------------------------------------------------------------------
 
-export type PrincipalType = 'user' | 'link' | 'system' | 'anonymous';
+export type PrincipalType = "user" | "link" | "system" | "anonymous";
 
 export interface Principal {
   readonly type: PrincipalType;
@@ -42,7 +42,7 @@ export interface HandlerReq {
   principal: Principal;
   /** The raw node IncomingMessage (headers, streaming reads). */
   raw: IncomingMessage;
-  headers: IncomingMessage['headers'];
+  headers: IncomingMessage["headers"];
   method: string;
   url: string;
   /** Entity auto-load: `req.<entityName>` for a route under an entity's `:<entity>Id` subtree. */
@@ -92,7 +92,9 @@ export interface RouteBuilder {
 }
 
 export interface ResourceGateConfig {
-  gate?: Partial<Record<'list' | 'read' | 'create' | 'update' | 'remove', Gate>>;
+  gate?: Partial<
+    Record<"list" | "read" | "create" | "update" | "remove", Gate>
+  >;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +104,29 @@ export interface ResourceGateConfig {
 export function requireUser(): Gate;
 export function allowAnonymous(): Gate;
 export function isGate(value: unknown): value is Gate;
+
+// ---------------------------------------------------------------------------
+// Route matching — a pure helper for apps that want their own sub-routing
+// inside a `use()` handler. Takes an array of {method, path, handler} records
+// and returns the highest-specificity match (or null).
+// ---------------------------------------------------------------------------
+
+export interface RouteRecord {
+  method: string;
+  path: string;
+  handler: Handler;
+}
+
+export interface RouteMatch {
+  route: RouteRecord;
+  params: Record<string, string>;
+}
+
+export function matchRoute(
+  routes: RouteRecord[],
+  method: string,
+  pathname: string,
+): RouteMatch | null;
 
 // ---------------------------------------------------------------------------
 // Job queue — the substrate for app-authored worker routes. The framework owns
@@ -115,7 +140,7 @@ export interface Job {
   id: string;
   kind: string;
   payload: unknown;
-  status: 'queued' | 'claimed' | 'running' | 'completed' | 'failed';
+  status: "queued" | "claimed" | "running" | "completed" | "failed";
   enqueuedAt: number;
   workerId: string | null;
   claimedAt: number | null;
@@ -133,22 +158,31 @@ export interface JobQueueOptions {
 
 export interface JobQueue {
   /** Shared secret → per-worker bearer token (constant-time). null on mismatch. */
-  registerWorker(presentedSecret: string): { workerId: string; token: string } | null;
+  registerWorker(
+    presentedSecret: string,
+  ): { workerId: string; token: string } | null;
   /** Bearer `<workerId>.<token>` → workerId, or null (unknown/revoked/bad token). */
   authenticate(bearer: string): string | null;
   enqueue(job: { kind: string; payload?: unknown; id?: string }): Job;
   /** Claim the oldest queued job for a worker (atomic). null if none queued. */
   claim(workerId: string): Job | null;
   /** Extend the lease; flips claimed→running. Non-owner/terminal → false. `now` is a testing seam. */
-  heartbeat(jobId: string, workerId: string, options?: { now?: () => number }): boolean;
+  heartbeat(
+    jobId: string,
+    workerId: string,
+    options?: { now?: () => number },
+  ): boolean;
   /** Submit a result. Idempotent by job id. Non-owner/not-found → { accepted: false }. */
   submitResult(
     jobId: string,
     workerId: string,
-    result: { status: 'completed' | 'failed'; output?: unknown },
+    result: { status: "completed" | "failed"; output?: unknown },
   ): { accepted: boolean; noop?: boolean };
   /** Reaper sweep: reassign expired leases + revoke stale workers. `now` is a testing seam. */
-  reap(options?: { now?: () => number }): { reassigned: number; revoked: number };
+  reap(options?: { now?: () => number }): {
+    reassigned: number;
+    revoked: number;
+  };
   startReaper(): void;
   stop(): void;
 }
