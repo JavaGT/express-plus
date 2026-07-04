@@ -32,7 +32,7 @@ import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
 import { startTickEngine } from './tick-engine.mjs';
 import { startReaper } from './reaper.mjs';
 import { createLiveServer } from './live.mjs';
-import { readSeq } from './cursor.mjs';
+import { readSeq, readSince, minSeqForScope, retentionPrune } from './committed-log.mjs';
 import { getLog } from './log.mjs';
 import { buildKernel } from './kernel.mjs';
 import { reconcileProjectedRecovery } from './projected-async.mjs';
@@ -278,10 +278,7 @@ async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
     sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
     return true;
   }
-  const oldest = app.db
-    .prepare('SELECT MIN(seq) AS min FROM _Log WHERE scope = ?')
-    .get(scopeKey);
-  const minSeq = oldest ? oldest.min : null;
+  const minSeq = minSeqForScope(app.db, scopeKey);
   // The client wants events > cursor; the first wanted is cursor+1. If that is
   // older than the oldest RETAINED event, the gap can never be filled → HARD-FAIL.
   // Never a silent truncate (SPEC §3.6 — the single non-negotiable property).
@@ -289,14 +286,12 @@ async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
     sendJson(res, 200, { resync: 'stale', reason: 'cursor-behind-retention' });
     return true;
   }
-  const rows = app.db
-    .prepare('SELECT * FROM _Log WHERE scope = ? AND seq > ? ORDER BY seq')
-    .all(scopeKey, cursor);
+  const rows = readSince(app.db, scopeKey, cursor);
   const events = rows.map((r) => ({
     type: r.eventType,
     scope: r.scope,
     seq: r.seq,
-    data: r.eventData ? JSON.parse(r.eventData) : null,
+    data: r.data ?? null,
     actionId: r.actionId,
     committedAt: r.committedAt,
   }));
@@ -751,7 +746,7 @@ export function listen(app, port, optionsOrCallback = {}) {
   if (logRetentionDays > 0) {
     app.sweepLog = () => app.writeQueue.run(() => {
       const cutoff = new Date(Date.now() - logRetentionDays * 86_400_000).toISOString();
-      app.db.prepare('DELETE FROM _Log WHERE committedAt < :cutoff').run({ cutoff });
+      retentionPrune(app.db, cutoff);
       app.db.prepare('DELETE FROM _ProjectedCursor WHERE lastSeq = 0').run();
     });
     app.clock.add({ name: 'log-reaper', intervalMs: options.logRetentionIntervalMs ?? BLOB_REAP_INTERVAL_MS,
