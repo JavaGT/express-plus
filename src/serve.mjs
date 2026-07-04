@@ -19,174 +19,26 @@
 // second auth path.
 
 import { createServer as createHttpServer } from 'node:http';
-import { randomUUID } from 'node:crypto';
-import { resolve } from 'node:path';
 
 import { anonymous } from './principal.mjs';
-import { ValidationError } from './field-strategy.mjs';
 import { mayVerb, mayRow } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
-import { startTickEngine } from './tick-engine.mjs';
-import { startReaper } from './reaper.mjs';
 import { createLiveServer } from './live.mjs';
-import { readSeq, readSince, minSeqForScope, retentionPrune } from './committed-log.mjs';
+import { retentionPrune } from './committed-log.mjs';
 import { getLog } from './log.mjs';
-import { buildKernel } from './kernel.mjs';
-import { reconcileProjectedRecovery } from './projected-async.mjs';
-import { reconcileDurableEffects } from './durable-effects.mjs';
+import { buildKernel, buildAndStart } from './kernel.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
-import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
+import { BodyError, readRequestBody } from './http-body.mjs';
 import { runChain } from './http-handler-chain.mjs';
 import { matchRoute } from './http-route-match.mjs';
 import { committedEventHeaders, sendJson } from './http-response.mjs';
-import { readScopedRow, authorizeRow } from './http-row-read.mjs';
+import { authorizeRow } from './http-row-read.mjs';
 import { createResponseFacade } from './http-response-factory.mjs';
-
-// One kernel mutation through the write queue, translating the failure modes
-// shared by create/update/remove: queue starvation → 503, validation → 400
-// (remove opts out — its {id} payload has nothing to validate, so a
-// ValidationError there is a real bug and propagates), grant deny → 403.
-// Responds and returns null on failure; returns the granted result otherwise.
-async function runKernelMutation(app, kernel, res, action, { validation400 = true } = {}) {
-  let result;
-  try {
-    result = await app.writeQueue.run(() => kernel.dispatch(action));
-  } catch (err) {
-    if (err?.status === 503) {
-      sendJson(res, 503, { error: 'service busy' });
-      return null;
-    }
-    if (validation400 && err instanceof ValidationError) {
-      sendJson(res, 400, { error: err.message });
-      return null;
-    }
-    throw err;
-  }
-  if (!result.granted) {
-    sendJson(res, 403, { error: 'forbidden' });
-    return null;
-  }
-  return result;
-}
-
-// DB-backed dispatch for one admitted verb. The route gate already admitted the
-// request; here the SECOND default-on auth layer runs: the row grant's SQL scope
-// (which rows are visible) and its .can capability (what may be done). Both must
-// pass. A missing db is fail-closed (500): an entity CRUD route cannot serve
-// without persistence.
-async function dispatch(req, res, route, principal, db, params, body, app = null) {
-  if (!db) {
-    sendJson(res, 500, { error: 'no database configured for entity dispatch' });
-    return;
-  }
-  const actionId = randomUUID();
-  const { entity, verb } = route;
-  const table = entity.name;
-  const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
-
-  // Staleness indicators for projected.async fields. Each projected field has a
-  // monotonic counter in _ProjectedCursor tracking how many times the compute has
-  // run successfully. The read/list response includes a header per field so the
-  // client can detect staleness by comparing with its last-known cursor value.
-  function addProjectedCursors(res, db, entity) {
-    if (!entity.projectedAsyncFields || entity.projectedAsyncFields.length === 0) return;
-    const cursors = new Map(
-      db.prepare('SELECT field, lastSeq FROM _ProjectedCursor WHERE entity = :e')
-        .all({ e: entity.name })
-        .map((r) => [r.field, r.lastSeq]),
-    );
-    for (const [fieldName] of entity.projectedAsyncFields) {
-      const lastSeq = cursors.get(fieldName);
-      if (lastSeq !== undefined) res.setHeader(`x-workbench-projected-${fieldName}`, String(lastSeq));
-    }
-  }
-
-  if (verb === 'list') {
-    const rows = db.prepare(`SELECT * FROM ${table} AS t0 WHERE ${where}`).all(scopeParams)
-      .map((row) => entity.deserializeRow(row));
-    // Post-filter through the SAME mayRow('list') engine `read` uses — the SQL
-    // scope decides VISIBILITY, the .can body decides the read CAPABILITY. A
-    // grant can admit a row via scope yet deny read in .can; without this list
-    // would leak it (one auth path: list + read agree). mayRow owns inherit and
-    // scope-only handling so list does not re-derive the skip.
-    const listed = [];
-    for (const row of rows) {
-      if (await mayRow(entity, 'list', row, principal)) listed.push(row);
-    }
-    addProjectedCursors(res, db, entity);
-    sendJson(res, 200, listed);
-    return;
-  }
-
-  if (verb === 'read') {
-    // Scoped load + capability check: absent-or-invisible → 404, denied → 403.
-    const auth = await authorizeRow({ db }, entity, 'read', params.id, principal);
-    if (auth.status) {
-      return void sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
-    }
-    addProjectedCursors(res, db, entity);
-    sendJson(res, 200, auth.row);
-    return;
-  }
-
-  if (verb === 'create') {
-    const kernel = app?.kernel;
-    if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
-    const result = await runKernelMutation(app, kernel, res, { actionId, type: `${table}.create`, payload: body, principal });
-    if (!result) return;
-    const id = result.events[0].data.id;
-    const created = db
-      .prepare(`SELECT * FROM ${table} AS t0 WHERE t0.id = :id`)
-      .get({ id });
-    entity.deserializeRow(created);
-    sendJson(res, 201, created, committedEventHeaders(result, actionId, `${table}:${id}`));
-    return;
-  }
-
-  if (verb === 'update') {
-    const kernel = app?.kernel;
-    if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
-    const auth = await authorizeRow({ db }, entity, 'update', params.id, principal);
-    if (auth.status) {
-      return void sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
-    }
-    const result = await runKernelMutation(app, kernel, res, {
-      actionId,
-      type: `${table}.update`,
-      payload: { ...body, id: params.id },
-      principal,
-    });
-    if (!result) return;
-    const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
-    entity.deserializeRow(updated);
-    sendJson(res, 200, updated, committedEventHeaders(result, actionId, `${table}:${params.id}`));
-    return;
-  }
-
-  if (verb === 'remove') {
-    const kernel = app?.kernel;
-    if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
-    const auth = await authorizeRow({ db }, entity, 'remove', params.id, principal);
-    if (auth.status) {
-      return void sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
-    }
-    const result = await runKernelMutation(app, kernel, res, {
-      actionId,
-      type: `${table}.remove`,
-      payload: { id: params.id },
-      principal,
-    }, { validation400: false });
-    if (!result) return;
-    res.writeHead(204, committedEventHeaders(result, actionId, `${table}:${params.id}`));
-    res.end();
-    return;
-  }
-
-  // an unknown verb is fail-closed (the routing table only mints the five).
-  sendJson(res, 500, { error: `unknown verb '${verb}'` });
-}
+import { dispatchCrud } from './http-crud-dispatch.mjs';
+import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute } from './http-framework-routes.mjs';
+import { installGracefulShutdown } from './lifecycle.mjs';
 
 // Framework-owned snapshot + resync endpoints (spec #1, D6/D7). NOT mounted
 // `makeHandlerRes(nodeRes, onEnd)` wraps a node response in the Express-style
@@ -224,88 +76,8 @@ function makeHandlerRes(nodeRes, onEnd) {
   return res;
 }
 
-// routes — resolved at request time from `/snapshot/:entity/:id` and
-// `/events-since/:entity/:id`. The entity table IS the snapshot (scope's proven
-// shape); the committed `_Log` is the RESYNC source. Authorization runs the SAME
-// mayVerb('read') engine as REST `read` (the viewer bar), after the same
-// readScope row filter — one auth engine, no second path (SPEC §7, §7.1).
-//
-// Returns true when the request was handled (the caller short-circuits); false
-// when the path is not a framework resync route (fall through to matchRoute).
-async function handleResyncRoute(app, req, res, principal) {
-  const url = new URL(req.url, 'http://localhost');
-  const seg = url.pathname.split('/').filter(Boolean);
-  if (seg.length !== 3 || (seg[0] !== 'snapshot' && seg[0] !== 'events-since')) return false;
-  if (!app || !app.entities || !app.db) return false;
-  const [, entityName, id] = seg;
-  const entity = app.entities.get(entityName);
-  if (!entity) { sendJson(res, 404, { error: 'not found' }); return true; }
-  // route gate (requireUser) — fail closed for anonymous, same as a mounted route.
-  if (!principal || principal.id == null) {
-    sendJson(res, 401, { error: 'unauthorized' });
-    return true;
-  }
-  const scopeKey = `${entityName}:${id}`;
-  if (seg[0] === 'snapshot') return snapshotRoute(app, entity, id, scopeKey, principal, res);
-  const cursor = Number(url.searchParams.get('cursor') ?? 0);
-  return eventsSinceRoute(app, entity, scopeKey, principal, res, cursor);
-}
-
-async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
-  // Read the row + the scope cursor in ONE synchronous block — no await between
-  // them — then authorize. A concurrent dispatch commit cannot split the pair
-  // (eng-review Tier-1 #2): the cursor is captured alongside the row, before the
-  // async mayVerb yields. The pair we authorize is the pair we return.
-  const row = readScopedRow(app, entity, id, principal);
-  const lastSeq = readSeq(app.db, scopeKey);
-  const auth = await authorizeRow(app, entity, 'read', id, principal, row);
-  if (auth.status) {
-    sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
-    return true;
-  }
-  sendJson(res, 200, { snapshot: auth.row, seq: lastSeq });
-  return true;
-}
-
-async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
-  // events-since authorizes against the CURRENT row (fail closed: a deleted or
-  // out-of-scope row yields 404). The log is replayed for an admitted viewer.
-  const auth = await authorizeRow(app, entity, 'read', scopeKey.slice(scopeKey.indexOf(':') + 1), principal);
-  if (auth.status) {
-    sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
-    return true;
-  }
-  const minSeq = minSeqForScope(app.db, scopeKey);
-  // The client wants events > cursor; the first wanted is cursor+1. If that is
-  // older than the oldest RETAINED event, the gap can never be filled → HARD-FAIL.
-  // Never a silent truncate (SPEC §3.6 — the single non-negotiable property).
-  if (minSeq !== null && cursor + 1 < minSeq) {
-    sendJson(res, 200, { resync: 'stale', reason: 'cursor-behind-retention' });
-    return true;
-  }
-  const rows = readSince(app.db, scopeKey, cursor);
-  const events = rows.map((r) => ({
-    type: r.eventType,
-    scope: r.scope,
-    seq: r.seq,
-    data: r.data ?? null,
-    actionId: r.actionId,
-    committedAt: r.committedAt,
-  }));
-  sendJson(res, 200, { events });
-  return true;
-}
-
-// Framework-owned blob upload endpoint (spec #2, eng-review Walk 1b). NOT a
-// mounted route: `POST /blobs` streams the request body to the BlobStore as a
-// PENDING blob (`.pending` file + row), returning { id, md5, sha256, size, mime }.
-// The blob is ADOPTED later by the dispatch that references it (an entity field
-// marked `blob: true` carrying the blob id) — adopted IN that dispatch's
-// transaction, finalized post-commit. A rolled-back dispatch leaves it pending
-// for the reaper. Route-gate fail-closed: anonymous → 401 (same admission as a
-// mounted route — no second auth path). Returns true when handled; false to fall
-// through to matchRoute.
-const BLOB_LIMIT = 50_000_000; // ~50mb upload cap (SPEC §3 size-guard default).
+// Framework-owned routes — handleResyncRoute, handleBlobUploadRoute, handleJobRoute
+// — live in http-framework-routes.mjs and are imported above.
 // Blob reaper cadence + stale threshold (eng-review spec #10, consult #17). A
 // pending upload whose adopt dispatch never came (client crash / abandonment) is
 // orphaned; once it is older than the TTL the reaper sweeps the .pending file +
@@ -314,98 +86,6 @@ const BLOB_LIMIT = 50_000_000; // ~50mb upload cap (SPEC §3 size-guard default)
 // TTL window (6×/hour) so orphans don't linger far past the threshold.
 const BLOB_REAP_INTERVAL_MS = 10 * 60_000; // sweep every 10 minutes.
 const BLOB_REAP_TTL_MS = 60 * 60_000;       // a pending blob is stale after 1 hour.
-
-async function handleBlobUploadRoute(app, req, res, principal) {
-  const url = new URL(req.url, 'http://localhost');
-  if (url.pathname !== '/blobs' || req.method !== 'POST') return false;
-  if (!app || !app.blobs) return false;
-  // route gate (requireUser) — fail closed for anonymous, same as a mounted route.
-  if (!principal || principal.id == null) {
-    sendJson(res, 401, { error: 'unauthorized' });
-    return true;
-  }
-  let bytes;
-  try {
-    bytes = await readRawBody(req, BLOB_LIMIT);
-  } catch (err) {
-    if (err instanceof BodyError) {
-      sendJson(res, err.status, { error: err.message });
-      return true;
-    }
-    throw err;
-  }
-  const mime = (req.headers['content-type'] ?? 'application/octet-stream').split(';')[0].trim();
-  const meta = app.blobs.upload({ bytes, mime });
-  sendJson(res, 201, meta);
-  return true;
-}
-
-// Framework-owned job-queue endpoints (spec #5, Walk 2). NOT mounted routes: the
-// worker / job API is a framework default, intercepted before route matching (like
-// /blobs, /health, /snapshot). Auth is its OWN path — a per-worker bearer token,
-// constant-time compared + revocable (cso: never the shared secret, which is used
-// only at /workers/register). These routes are anonymous w.r.t. the route gate — a
-// worker is not a logged-in principal; the bearer IS the credential. Workers are
-// non-browser clients (no Origin/Referer) so they pass the foreign-only CSRF guard.
-// Returns true when handled; false to fall through to matchRoute.
-async function handleJobRoute(app, req, res) {
-  const url = new URL(req.url, 'http://localhost');
-  if (req.method !== 'POST' || !app?.jobs) return false;
-  const jobs = app.jobs;
-
-  // Bearer extraction: `Authorization: Bearer <workerId>.<token>`.
-  const bearer = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim() || null;
-
-  if (url.pathname === '/workers/register') {
-    let body;
-    try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
-      if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
-      throw err;
-    }
-    const w = jobs.registerWorker(body.secret);
-    if (!w) { sendJson(res, 401, { error: 'invalid shared secret' }); return true; }
-    sendJson(res, 200, w);
-    return true;
-  }
-
-  if (url.pathname === '/jobs/claim') {
-    const workerId = jobs.authenticate(bearer);
-    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
-    const job = jobs.claim(workerId);
-    if (!job) { res.writeHead(204); res.end(); return true; } // no queued work
-    sendJson(res, 200, job);
-    return true;
-  }
-
-  const hb = url.pathname.match(/^\/jobs\/([^/]+)\/heartbeat$/);
-  if (hb) {
-    const workerId = jobs.authenticate(bearer);
-    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
-    const ok = jobs.heartbeat(hb[1], workerId);
-    if (!ok) { sendJson(res, 403, { error: 'not the owning worker or job not running' }); return true; }
-    sendJson(res, 200, { ok: true });
-    return true;
-  }
-
-  const rs = url.pathname.match(/^\/jobs\/([^/]+)\/result$/);
-  if (rs) {
-    const workerId = jobs.authenticate(bearer);
-    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
-    let body;
-    try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
-      if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
-      throw err;
-    }
-    let result;
-    try { result = jobs.submitResult(rs[1], workerId, body); }
-    catch (err) { sendJson(res, 400, { error: err.message }); return true; }
-    if (!result.accepted) { sendJson(res, 403, { error: 'not the owning worker or job not in progress' }); return true; }
-    sendJson(res, 200, result);
-    return true;
-  }
-
-  return false;
-}
 
 // The standard stateless CSRF guard (eng-review §8 Tier-2 ops bundle, #13). A
 // state-MUTATING request (anything but a safe method) carrying a FOREIGN Origin
@@ -642,7 +322,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       if (route.handlers) {
         await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
       } else {
-        await dispatch(req, res, route, principal, db, params, body, isApp ? source : null);
+        await dispatchCrud({ entity: route.entity, verb: route.verb, db, principal, params, body, app: isApp ? source : null, res, sendJson, committedEventHeaders, authorizeRow, mayRow });
       }
     } catch (err) {
       // the single error renderer (SPEC §3): an unexpected exception becomes an
@@ -779,156 +459,9 @@ export function listen(app, port, optionsOrCallback = {}) {
     await app.resolveRoutes();
     if (app.db && typeof app.db.exec === 'function') await app.prepareSchema();
     app.kernel = buildKernel(app);
-    const dispatchThroughWriteQueue = (args) => app.writeQueue.run(() => app.kernel.dispatch(args));
-    // app.batch(actions, { principal }) — a server-side composed mutation
-    // (SPEC §11, ADR #13). N actions run as ONE transaction = ONE composed
-    // commit (one actionId, one `now`), all-or-nothing. This reuses the SAME
-    // kernel path (authorize→handler→durable variant) wrapped once in the
-    // writeQueue — not a second pipeline. Exposed for server code that needs
-    // an atomic multi-entity write outside the per-route HTTP handlers.
-    app.batch = (actions, { principal } = {}) =>
-      app.writeQueue.run(() => app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal }));
-    // Start the tick engine now that `app.kernel.dispatch` exists. Only starts
-    // if some entity declares a tick trigger (tick.hz / tick.every); otherwise
-    // startTickEngine returns a no-op and no timer is created. Scheduled on
-    // the shared clock.
-    startTickEngine({
-      db: app.db,
-      entities: app.entities,
-      dispatch: dispatchThroughWriteQueue,
-      clock: app.clock,
-    });
-    // Start the schedule reaper now that app.kernel.dispatch exists. Only
-    // starts if some entity declares a schedule.at / schedule.after deadline
-    // trigger. Scheduled on the shared clock.
-    startReaper({ db: app.db, entities: app.entities, dispatch: dispatchThroughWriteQueue, clock: app.clock });
-    // Projected.async boot catch-up. If the process died between committing an
-    // event and the post-commit consumer applying its projection, the projected
-    // field is stale and nothing reconciles it. One sweep at startup, under the
-    // writeQueue mutex (same critical section dispatch uses), recomputes lagging
-    // scopes from current row state and cleans cursors for removed rows. Run
-    // after buildKernel (app.entities is set) and before serving traffic.
-    try {
-      await app.writeQueue.run(() => reconcileProjectedRecovery(app.db, app.entities));
-    } catch (err) {
-      log.warn('system', 'projected recovery sweep failed', { err });
-    }
-    // Durable-effects boot catch-up. Same crash gap as projected recovery: a
-    // committed _Log row whose post-commit enqueue was lost (process died
-    // between COMMIT and the durable consumer) would never be retried. One
-    // sweep at startup, under the same writeQueue mutex, re-enqueues missed
-    // jobs and advances the per-scope consumer cursor. No-op when no durable
-    // effects are declared or the job-queue substrate is not engaged.
-    if (app.jobs && app.durableEffectsRegistry) {
-      try {
-        await app.writeQueue.run(() =>
-          reconcileDurableEffects(app.db, { durableEffectsRegistry: app.durableEffectsRegistry, jobs: app.jobs }),
-        );
-      } catch (err) {
-        log.warn('system', 'durable effects recovery sweep failed', { err });
-      }
-    }
-    // Start the unified clock — a single setTimeout loop that wakes only at the
-    // nearest deadline. All framework reapers (schedule, tick, job-queue lease,
-    // blob, log-retention, job-worker polls) register as watchers above; this
-    // activates real timer scheduling. Called AFTER the sweeps finish so catch-up
-    // doesn't race the first interval fire.
-    app.clock._schedule();
-    if (!httpServer.listening) {
-      await new Promise((resolve) => httpServer.once('listening', resolve));
-    }
-    log.info('system', `server listening on port ${app.httpServer.address()?.port ?? port}`);
+    await buildAndStart(app);
     return app;
   })();
 
   return app;
-}
-
-// The set of live apps to close on a shutdown signal, and whether the
-// process-level traps are installed. These traps belong to the PROCESS, not an
-// app — installing them per app would accumulate listeners (a leak, and a
-// MaxListeners warning). They are installed ONCE; the signal handler closes
-// every registered app.
-const liveApps = new Set();
-let processTrapsInstalled = false;
-
-function installProcessTraps() {
-  if (processTrapsInstalled) return;
-  processTrapsInstalled = true;
-
-  const onSignal = () => {
-    Promise.all([...liveApps].map((a) => a.shutdown())).then(() => process.exit(0));
-  };
-  process.once('SIGTERM', onSignal);
-  process.once('SIGINT', onSignal);
-  process.on('unhandledRejection', (reason) => {
-    const log = getLog();
-    log.error('system', 'unhandledRejection', { reason });
-    process.stderr.write(`unhandledRejection: ${reason}\n`);
-  });
-  process.on('uncaughtException', (err) => {
-    const log = getLog();
-    log.error('system', 'uncaughtException', { err });
-    process.stderr.write(`uncaughtException: ${err?.stack ?? err}\n`);
-  });
-}
-
-// The graceful-shutdown seam. `app.shutdown()` closes the live server (resolving
-// once it has stopped accepting connections) and unregisters the app. SIGTERM/
-// SIGINT close every registered app; an unhandledRejection/uncaughtException is
-// trapped so a stray rejection cannot crash the process silently. The framework
-// owns these — an app that mounted its own would be a leak.
-// 
-// onShutdown registry (eng-review #16): apps register named hooks with deadlines.
-// Hooks run in registration order on shutdown; each bounded by its timeoutMs.
-// A hook exceeding its deadline is force-abandoned (resolve with timeout error, log,
-// continue to next).
-function installGracefulShutdown(app) {
-  if (!app._shutdownHooks) {
-    app._shutdownHooks = [];
-  }
-  if (!app.onShutdown) {
-    app.onShutdown = (name, fn, { timeoutMs = 5000 } = {}) => {
-      app._shutdownHooks.push({ name, fn, timeoutMs });
-    };
-  }
-  if (!app.shutdown) {
-    app.shutdown = () =>
-      new Promise((resolve) => {
-        // Run registered hooks first, each bounded by its deadline
-        const runHooks = async () => {
-          for (const hook of app._shutdownHooks) {
-            const timer = new Promise((_, reject) => {
-              const t = setTimeout(() => {
-                clearTimeout(t);
-                reject(new Error(`onShutdown hook '${hook.name}' exceeded ${hook.timeoutMs}ms deadline`));
-              }, hook.timeoutMs);
-            });
-            try {
-              await Promise.race([hook.fn(), timer]);
-            } catch (err) {
-              getLog().warn('system', `onShutdown hook '${hook.name}' failed`, { err, hook: hook.name });
-              process.stderr.write(`onShutdown hook '${hook.name}' failed: ${err.message}\n`);
-              // Continue to next hook (force-abandon on timeout)
-            }
-          }
-        };
-        // Close http server and live server, then resolve
-        const closeServer = () => new Promise((resolveClose) => {
-          if (app.httpServer && app.httpServer.listening) {
-            app.httpServer.close(() => {
-              liveApps.delete(app);
-              resolveClose();
-            });
-          } else {
-            liveApps.delete(app);
-            resolveClose();
-          }
-        });
-        // Run hooks then close
-        runHooks().then(closeServer).then(resolve);
-      });
-  }
-  liveApps.add(app);
-  installProcessTraps();
 }

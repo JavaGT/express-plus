@@ -20,3 +20,12 @@ export function committedEventHeaders(result, actionId, scope = null) {
     ...(Number.isFinite(seq) ? { 'x-workbench-seq': String(seq) } : {}),
   };
 }
+
+export function projectedCursorHeaders(cursors) {
+  if (!cursors || cursors.length === 0) return {};
+  const headers = {};
+  for (const { field, lastSeq } of cursors) {
+    headers[`x-workbench-projected-${field}`] = String(lastSeq);
+  }
+  return headers;
+}

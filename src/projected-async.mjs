@@ -104,6 +104,18 @@ export function createProjectedAsyncConsumer({ entities }) {
 // current regardless of how many events were missed. Scopes whose row was
 // removed have their recovery cursor cleaned up. Idempotent: a scope already at
 // head is untouched, so running twice changes nothing.
+export function readProjectedCursors(db, entity) {
+  if (!entity.projectedAsyncFields || entity.projectedAsyncFields.length === 0) return [];
+  const cursors = new Map(
+    db.prepare('SELECT field, lastSeq FROM _ProjectedCursor WHERE entity = :e')
+      .all({ e: entity.name })
+      .map(r => [r.field, r.lastSeq])
+  );
+  return entity.projectedAsyncFields
+    .filter(([fieldName]) => cursors.has(fieldName))
+    .map(([fieldName]) => ({ field: fieldName, lastSeq: cursors.get(fieldName) }));
+}
+
 export async function reconcileProjectedRecovery(db, entities) {
   const CONSUMER = 'projected.async';
   // Only entities that declare projected.async fields have anything to recover.
