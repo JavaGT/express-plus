@@ -16,17 +16,7 @@ import { appendEvents, eventsFor, rowToEvent } from './committed-log.mjs';
 import { lifecycleVerb, parseEventType } from './event-handle.mjs';
 import { txn } from './driver.mjs';
 import { isPlainObject } from './field-strategy.mjs';
-
-// Use createRequire for dynamic import in ES module context.
 import { createRequire } from 'node:module';
-const _require = createRequire(import.meta.url);
-let _effectModule = null;
-function _getEffectModule() {
-  if (!_effectModule) {
-    _effectModule = _require('./effect-compiler.mjs');
-  }
-  return _effectModule;
-}
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -111,11 +101,12 @@ function requireAdmission(granted) {
   if (!granted) throw Object.assign(new Error('forbidden'), { status: 403 });
 }
 
-function effectEventsFor(registry) {
+function effectEventsFor(registry, executeEffectsForEvent) {
   if (!registry) return null;
   return (event, { now, actionId, depth, maxEffectDepth, db }) => {
-    const { executeEffectsForEvent } = _getEffectModule();
-    return executeEffectsForEvent(event, registry, { now, actionId, depth, maxDepth: maxEffectDepth, db });
+    const impl = executeEffectsForEvent ??
+      createRequire(import.meta.url)('./effect-compiler.mjs').executeEffectsForEvent;
+    return impl(event, registry, { now, actionId, depth, maxDepth: maxEffectDepth, db });
   };
 }
 
@@ -124,9 +115,10 @@ export function durableMutationVariant({
   admission = noAdmission(),
   blobAdapter = noBlobAdapter(),
   effectsRegistry = null,
+  executeEffectsForEvent = null,
   postCommitConsumers = [],
 } = {}) {
-  const effectsExecutor = effectEventsFor(effectsRegistry);
+  const effectsExecutor = effectEventsFor(effectsRegistry, executeEffectsForEvent);
   const variant = {
     name: 'durable.mutation',
     async applyInTxn(db, events, {

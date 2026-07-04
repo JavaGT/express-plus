@@ -18,7 +18,7 @@
 // so their read-scope grants nothing — `never()`/`deny`. The auth layer reaches
 // them only through the UNSCOPED, trusted query API, never a request path.
 
-import { entity } from './entity.mjs';
+import { entity } from './entity/compile.mjs';
 import { text, hash, ref, date } from './field.mjs';
 import { scope } from './scope.mjs';
 import { never } from './scope-sql.mjs';

@@ -8,7 +8,7 @@ export { resolveStrategy, validateMutation, ValidationError, lawsOf } from './fi
 export { computeDelta, createDeltaProjector } from './field-delta.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
-export { entity } from './entity.mjs';
+export { entity } from './entity/compile.mjs';
 export { User, Session, Inbox } from './auth-entities.mjs';
 export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope } from './scope-sql.mjs';
 export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectSource } from './principal.mjs';

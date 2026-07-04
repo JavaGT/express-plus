@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mayRow } from './row-grant.mjs';
 import { admitSystemMutation } from './schedule.mjs';
 import { createServer, durableMutationVariant } from './pipeline.mjs';
-import { buildEffectsRegistry, validateEffects } from './effect-compiler.mjs';
+import { buildEffectsRegistry, validateEffects, executeEffectsForEvent } from './effect-compiler.mjs';
 import { User, Session, Inbox } from './auth-entities.mjs';
 import { createWriteQueue } from './write-queue.mjs';
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
@@ -155,6 +155,7 @@ export function buildKernel(app) {
       admission: buildDurableAdmission(app),
       blobAdapter,
       effectsRegistry: effectsRegistry.size > 0 ? effectsRegistry : null,
+      executeEffectsForEvent,
       postCommitConsumers,
     }),
   });
