@@ -23,7 +23,6 @@ import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 
 import { anonymous } from './principal.mjs';
-import { bindReadScope } from './scope-sql.mjs';
 import { ValidationError } from './field-strategy.mjs';
 import { mayVerb, mayRow } from './row-grant.mjs';
 import { config } from './config.mjs';
@@ -85,9 +84,7 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
   const actionId = randomUUID();
   const { entity, verb } = route;
   const table = entity.name;
-  const bound = bindReadScope(entity.readScope, principal);
-  const where = bound ? bound.sql : '1=1';
-  const scopeParams = bound ? bound.params : {};
+  const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
 
   // Staleness indicators for projected.async fields. Each projected field has a
   // monotonic counter in _ProjectedCursor tracking how many times the compute has

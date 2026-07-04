@@ -22,7 +22,7 @@
 //    `is.*` calls are correctly un-awaited (SPEC §6.1).
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import { compileReadScope, fieldHandle } from '../scope-sql.mjs';
+import { compileReadScope, fieldHandle, bindReadScope } from '../scope-sql.mjs';
 import { getActiveDb } from '../db.mjs';
 import { compileEntityAuthz } from '../authz.mjs';
 import { getLog } from '../log.mjs';
@@ -190,6 +190,19 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
   }
 
   const sourceName = trigger.sourceName ?? fieldName;
+
+  // matches(db, row) — run the while predicate against one row after discovery.
+  // The whileSql is still compiled (used in discovery queries), but callers that
+  // need to verify a single row use this instead of recomposing the SQL inline.
+  const matches = (db, row) => {
+    if (!whileSql) return true;
+    const params = { ...(whileParams ?? {}), __rowId: row.id };
+    const result = db.prepare(
+      `SELECT 1 FROM ${name} AS t0 WHERE t0.id = :__rowId AND (${whileSql})`
+    ).get(params);
+    return !!result;
+  };
+
   if (isDeadline) {
     return Object.freeze({
       kind: trigger.kind,
@@ -201,6 +214,7 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
       whileAst,
       with: withValue,
       sourceName,
+      matches,
     });
   }
   return Object.freeze({
@@ -212,6 +226,7 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
     whileAst,
     with: withValue,
     sourceName: trigger.sourceName ?? null,
+    matches,
   });
 }
 
@@ -415,6 +430,11 @@ export function entity(name, declaration = {}) {
     gate,
     readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
     scopeAst,
+    scopeFilter(principal) {
+      if (!readScope) return { sql: '1=1', params: {} };
+      const bound = bindReadScope(readScope, principal);
+      return bound ? { sql: bound.sql, params: bound.params } : { sql: '1=1', params: {} };
+    },
     effects: validatedEffects,
     admitsEffects,
     schedule: validatedSchedule,
