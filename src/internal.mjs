@@ -25,7 +25,7 @@ export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
 export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views.mjs';
 export { mayVerb, mayFieldOp, mayRow } from './row-grant.mjs';
 export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL } from './ddl.mjs';
-export { config } from './config.mjs';
+export { config, resolveConfig } from './config.mjs';
 export { parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE } from './session.mjs';
 export { default, router } from './app.mjs';
 export { inc, dec, self, many, effect, validateEffectDeclaration, createEffectContext, checkEffectDepth, executeEffectsForEvent, buildEffectsRegistry, buildEffectsGraph, validateEffects, verifyAdmissionHandshake, detectCrossEntityCycles, compileEntityEffects } from './effect-compiler.mjs';
