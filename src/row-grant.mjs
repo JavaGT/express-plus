@@ -59,7 +59,14 @@ export async function rowCapabilities(entityRecord, row, principal) {
     if (!parentRow) return { granted: false, capabilities: [] };
     return await rowCapabilities(inherited.inherit, parentRow, principal);
   }
-  const clauses = typeof entityRecord.grant === 'function' ? entityRecord.grant() : null;
+  // Resolve through the SAME `grantClauses` the sibling resolvers use
+  // (hasOwnCanGrant / inheritedGrant). A grant may be a function (a thunk
+  // returning the clause array) OR a bare clause array — `owner.only()` returns
+  // the array directly, and the compile half (resolveGrantClauses) already
+  // accepts that shape. Resolving it here too is one reconciliation path: the
+  // handwritten thunk and the `owner.only()` expansion run the identical code.
+  // Inherit directives were handled and returned above.
+  const clauses = grantClauses(entityRecord);
   const clause = Array.isArray(clauses)
     ? clauses.find((c) => isRuntimeGrantClause(c))
     : null;

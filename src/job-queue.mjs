@@ -36,6 +36,13 @@ function sha256hex(s) {
   return createHash('sha256').update(s).digest('hex');
 }
 
+// Quote a string as a SQL string literal (escape embedded quotes). Used for the
+// optional kind filter in claim(), where a bound parameter cannot ride inside
+// the sub-select's WHERE without restructuring the statement.
+function sqlLit(s) {
+  return `'${String(s).replace(/'/g, "''")}'`;
+}
+
 // Constant-time comparison of two hex digest strings. Hashes are fixed-width, but
 // we guard length regardless so a mismatched-length input never reaches
 // timingSafeEqual (which throws on unequal lengths).
@@ -52,7 +59,11 @@ export function createJobQueue({
   leaseMs = 30_000,
   heartbeatGraceMs = 90_000,
   reapIntervalMs = 15_000,
+  maxAttempts = 5,
+  backoffMs = 5_000,
+  pollIntervalMs = 1_000,
   now = () => Date.now(),
+  clock,
 } = {}) {
   if (!db) throw new Error('createJobQueue: db is required');
   if (sharedSecret == null || sharedSecret === '') {
@@ -61,6 +72,7 @@ export function createJobQueue({
   // Store only the hash — the plaintext never persists past construction.
   const secretHash = sha256hex(sharedSecret);
   let timer = null;
+  let reaperWatcher = null;
 
   function parseJob(row) {
     if (!row) return null;
@@ -111,17 +123,21 @@ export function createJobQueue({
     return parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
   }
 
-  // Claim the oldest queued job for a worker. Atomic single-statement
+  // Claim the oldest available queued job for a worker. Atomic single-statement
   // UPDATE…RETURNING: a racing claim sees status='claimed' and gets zero rows.
-  // Returns the claimed job (status 'claimed', leaseUntil set) or null.
-  function claim(workerId) {
+  // `availableAt` is the backoff gate: a retried job is not claimable until now.
+  // `{ kind }` restricts the claim to one kind (an in-process worker runs one
+  // kind's handler). Returns the claimed job (status 'claimed', leaseUntil set)
+  // or null.
+  function claim(workerId, { kind } = {}) {
     const t = now();
+    const kindClause = kind ? `AND kind = ${sqlLit(kind)} ` : '';
     const row = db.prepare(
       `UPDATE _Job
          SET status = ?, workerId = ?, claimedAt = ?, leaseUntil = ?
-       WHERE id = (SELECT id FROM _Job WHERE status = ? ORDER BY enqueuedAt LIMIT 1)
+       WHERE id = (SELECT id FROM _Job WHERE status = ? AND (availableAt IS NULL OR availableAt <= ?) ${kindClause}ORDER BY enqueuedAt LIMIT 1)
        RETURNING *`,
-    ).get(STATES.CLAIMED, workerId, t, t + leaseMs, STATES.QUEUED);
+    ).get(STATES.CLAIMED, workerId, t, t + leaseMs, STATES.QUEUED, t);
     return parseJob(row) ?? null;
   }
 
@@ -150,11 +166,17 @@ export function createJobQueue({
   // job is a no-op ack ({accepted:true, noop:true}) — the first terminal result
   // wins, the stored output is NOT overwritten (no double-apply of the derived
   // write). Non-owner / not-found → {accepted:false}.
+  //
+  // Failure policy (substrate-owned, singular): a `failed` result is NOT
+  // terminal while attempts < maxAttempts — the job is re-queued with backoff
+  // (availableAt = now + backoffMs) and the ack carries {retried, attempts}. At
+  // maxAttempts it becomes a terminal dead-letter ({deadLettered, attempts}).
+  // A completed result is always terminal.
   function submitResult(jobId, workerId, { status, output = null } = {}) {
     if (status !== STATES.COMPLETED && status !== STATES.FAILED) {
       throw new Error('submitResult: status must be completed or failed');
     }
-    const current = db.prepare('SELECT status, payload, workerId FROM _Job WHERE id = ?').get(jobId);
+    const current = db.prepare('SELECT status, payload, workerId, attempts FROM _Job WHERE id = ?').get(jobId);
     if (!current) return { accepted: false };
     if (TERMINAL.has(current.status)) {
       // Idempotent retry: only the OWNING worker gets the no-op ack. A non-owner
@@ -162,11 +184,28 @@ export function createJobQueue({
       // confirmation that the job is terminal.
       return current.workerId === workerId ? { accepted: true, noop: true } : { accepted: false };
     }
+    if (status === STATES.COMPLETED) {
+      const res = db.prepare(
+        `UPDATE _Job SET status = ?, payload = ?
+         WHERE id = ? AND workerId = ? AND status IN (?, ?)`,
+      ).run(status, output != null ? JSON.stringify(output) : null, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
+      return res.changes > 0 ? { accepted: true, noop: false } : { accepted: false };
+    }
+    // FAILED: retry while under maxAttempts, else terminal dead-letter.
+    const ownerGuard = 'AND workerId = ? AND status IN (?, ?)';
+    const attempts = Number(current.attempts ?? 0) + 1;
+    if (attempts < maxAttempts) {
+      const res = db.prepare(
+        `UPDATE _Job SET status = ?, workerId = NULL, claimedAt = NULL, leaseUntil = NULL, attempts = ?, availableAt = ?
+         WHERE id = ? ${ownerGuard}`,
+      ).run(STATES.QUEUED, attempts, now() + backoffMs, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
+      return res.changes > 0 ? { accepted: true, retried: true, attempts } : { accepted: false };
+    }
     const res = db.prepare(
-      `UPDATE _Job SET status = ?, payload = ?
-       WHERE id = ? AND workerId = ? AND status IN (?, ?)`,
-    ).run(status, output != null ? JSON.stringify(output) : null, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
-    return res.changes > 0 ? { accepted: true, noop: false } : { accepted: false };
+      `UPDATE _Job SET status = ?, payload = ?, attempts = ?
+       WHERE id = ? ${ownerGuard}`,
+    ).run(status, output != null ? JSON.stringify(output) : null, attempts, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
+    return res.changes > 0 ? { accepted: true, deadLettered: true, attempts } : { accepted: false };
   }
 
   // Reaper sweep. (1) Reassign jobs whose lease expired (claimed/running → queued,
@@ -177,7 +216,7 @@ export function createJobQueue({
   function reap({ now: nowFn = now } = {}) {
     const t = (typeof nowFn === 'function' ? nowFn : now)();
     const reassigned = db.prepare(
-      `UPDATE _Job SET status = ?, workerId = NULL, claimedAt = NULL, leaseUntil = NULL
+      `UPDATE _Job SET status = ?, workerId = NULL, claimedAt = NULL, leaseUntil = NULL, availableAt = NULL
        WHERE status IN (?, ?) AND leaseUntil < ?`,
     ).run(STATES.QUEUED, STATES.CLAIMED, STATES.RUNNING, t).changes;
     const revoked = db.prepare(
@@ -188,9 +227,15 @@ export function createJobQueue({
   }
 
   // Periodic reaper, owned by the framework (the listen() layer registers the
-  // stop() with onShutdown). No-op if already started.
+  // stop() with onShutdown). No-op if already started. When a `clock` is provided
+  // to the constructor, the reaper schedules via the shared clock (single timer,
+  // nearest-deadline) instead of starting its own setInterval.
   function startReaper() {
     if (timer) return;
+    if (clock) {
+      reaperWatcher = clock.add({ name: 'job-queue-reaper', intervalMs: reapIntervalMs, fn: reap });
+      return;
+    }
     timer = setInterval(() => {
       try { reap(); } catch (err) { getLog().warn('system', 'job-queue reap failed', { err }); }
     }, reapIntervalMs);
@@ -198,8 +243,64 @@ export function createJobQueue({
   }
 
   function stop() {
+    if (reaperWatcher) { reaperWatcher.remove(); reaperWatcher = null; }
     if (timer) { clearInterval(timer); timer = null; }
   }
 
-  return { registerWorker, authenticate, enqueue, claim, heartbeat, submitResult, reap, startReaper, stop };
+  // In-process worker: run jobs of `kind` by claiming+executing+submitting
+  // them in this process — the INTERNAL shortcut to the HTTP /jobs routes'
+  // EXTERNAL worker. One process may both enqueue (post-commit consumer) AND
+  // run jobs without standing up a separate worker + bearer auth. The internal
+  // worker is a privileged path: a synthetic workerId, no _Worker row, no bearer
+  // (the same trust boundary as enqueue()).
+  //
+  // `once()` runs one claim→fn→submit cycle and returns the result (or null when
+  // nothing claimable) — awaitable for deterministic tests. The poll loop calls
+  // once() on `pollIntervalMs`. `stop()` halts the loop. The fn's thrown error →
+  // failed result → substrate retry/dead-letter policy; its return value →
+  // completed result.
+  function work(kind, fn, { pollIntervalMs: intervalMs = pollIntervalMs } = {}) {
+    if (!kind) throw new Error('work: kind is required');
+    if (typeof fn !== 'function') throw new Error('work: fn must be a function');
+    const workerId = `in-process:${kind}:${randomUUID()}`;
+    let pollTimer = null;
+    let pollWatcher = null;
+    let stopped = false;
+
+    async function once() {
+      const job = claim(workerId, { kind });
+      if (!job) return null;
+      heartbeat(job.id, workerId);
+      let result;
+      try {
+        const output = await fn(job);
+        result = submitResult(job.id, workerId, { status: STATES.COMPLETED, output: output ?? null });
+      } catch (err) {
+        result = submitResult(job.id, workerId, { status: STATES.FAILED, output: { error: err.message } });
+        getLog().warn('system', 'job worker fn failed', { err, kind, jobId: job.id });
+      }
+      return { job, result };
+    }
+
+    function start() {
+      if (pollTimer || pollWatcher || stopped) return;
+      if (!Number.isFinite(intervalMs)) return;
+      if (clock) {
+        pollWatcher = clock.add({ name: `job-worker-${kind}`, intervalMs, fn: () => void once() });
+        return;
+      }
+      pollTimer = setInterval(() => { void once().catch((err) => getLog().warn('system', 'job worker poll failed', { err, kind })); }, intervalMs);
+      if (typeof pollTimer.unref === 'function') pollTimer.unref();
+    }
+    function stop() {
+      stopped = true;
+      if (pollWatcher) { pollWatcher.remove(); pollWatcher = null; }
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
+
+    start();
+    return { once, stop, workerId };
+  }
+
+  return { registerWorker, authenticate, enqueue, claim, heartbeat, submitResult, reap, startReaper, stop, work };
 }

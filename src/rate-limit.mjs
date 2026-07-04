@@ -26,16 +26,11 @@ export function createRateLimiter({ ip: { windowMs: ipWindowMs, max: ipMax }, se
       buckets.set(key, bucket);
     }
     
-    if (bucket.count >= max) {
-      const nextWindowStart = (currentWindow + 1) * windowMs;
-      const retryAfterMs = nextWindowStart - now();
-      return { allowed: false, retryAfterMs, limit: max };
-    }
-    
-    bucket.count++;
+    const allowed = bucket.count < max;
+    if (allowed) bucket.count++;
     const nextWindowStart = (currentWindow + 1) * windowMs;
     const retryAfterMs = nextWindowStart - now();
-    return { allowed: true, retryAfterMs, limit: max };
+    return { allowed, retryAfterMs, limit: max };
   }
   
   function check({ ip, sessionId }) {

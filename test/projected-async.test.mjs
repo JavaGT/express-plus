@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, resolveStrategy, validateMutation, ValidationError, createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes } from '../src/internal.mjs';
+  entity, resolveStrategy, validateMutation, ValidationError, createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
@@ -291,6 +291,64 @@ test('projected.async compute failure leaves the column unchanged', async (t) =>
 
   row = db.prepare('SELECT hotRank FROM Post WHERE id = :id').get({ id: created.id });
   assert.equal(JSON.parse(row.hotRank), 50, 'failed compute did not overwrite');
+});
+
+test('projected.async compute failure is logged on the projected channel', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Post = entity('Post', {
+    title: text(),
+    score: number(),
+    hotRank: projected.async({
+      compute: async (row) => {
+        if (row.score < 0) throw new Error('negative');
+        return row.score * 10;
+      },
+    }),
+
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  const lines = [];
+  const app = workbench({ db, log: { output: (level, channel, msg, ctx) => lines.push({ level, channel, msg, ctx }) } });
+  app.mount('/posts', Post);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const r1 = await fetch(`${origin}/posts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Good', score: 5 }),
+  });
+  const created = await r1.json();
+  for (let i = 0; i < 20; i++) {
+    const row = db.prepare('SELECT hotRank FROM Post WHERE id = :id').get({ id: created.id });
+    if (row?.hotRank != null) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+
+  await fetch(`${origin}/posts/${created.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ score: -1 }),
+  });
+
+  let failure;
+  for (let i = 0; i < 20; i++) {
+    failure = lines.find((l) => l.channel === 'projected' && l.msg === 'compute failed');
+    if (failure) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  assert.ok(failure, 'compute failure was logged');
+  assert.equal(failure.level, 'warn');
+  assert.equal(failure.ctx.entity, 'Post');
+  assert.equal(failure.ctx.field, 'hotRank');
+  assert.equal(failure.ctx.scope, `Post:${created.id}`);
+  assert.equal(failure.ctx.err.message, 'negative');
 });
 
 test('projected.async field is rejected in client create payload (readonly)', async (t) => {
@@ -920,4 +978,173 @@ test('read response includes projected cursor headers for staleness detection', 
   const listHeader = r3.headers.get('x-workbench-projected-hotRank');
   assert.ok(listHeader, 'list response carries projected cursor header');
   assert.ok(Number(listHeader) >= 1, `list cursor >= 1, got ${listHeader}`);
+});
+
+// --- projected.async boot recovery (reconcileProjectedRecovery) ---
+
+// Simulate a crash: events are committed to _Log but the post-commit consumer
+// never applied the projection (the recovery cursor is absent). The boot sweep
+// must recompute the field from current row state and advance the cursor to the
+// scope's log head — closing the crash gap the design identifies.
+test('reconcileProjectedRecovery recomputes lagging scopes and advances to head', async () => {
+  const db = new DatabaseSync(':memory:');
+  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Post = entity('Post', {
+    title: text(),
+    score: number(),
+    hotRank: projected.async({ compute: async (row) => (row.score ?? 0) * 2 }),
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  const entities = new Map([[Post.name, Post]]);
+
+  // Commit a row + a log event WITHOUT running the consumer (simulating a crash
+  // between COMMIT and the post-commit consumer). The row exists in current
+  // state; the projection was never applied (hotRank stays null).
+  db.prepare("INSERT INTO Post (id, title, score, hotRank) VALUES ('p1','t',7,NULL)").run();
+  db.prepare("INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES ('Post:p1',1,'Post.created',:d,'a1','2026-01-01T00:00:00Z')").run({ d: '{}' });
+  db.prepare("INSERT INTO _Cursor (scope, lastSeq) VALUES ('Post:p1', 1)").run();
+
+  // Before reconcile: no recovery cursor, field stale.
+  let recovery = db.prepare("SELECT lastSeq FROM _ConsumerCursor WHERE consumer='projected.async' AND scope='Post:p1'").get();
+  assert.equal(recovery, undefined, 'no recovery cursor before sweep');
+  let row = db.prepare("SELECT hotRank FROM Post WHERE id='p1'").get();
+  assert.equal(row.hotRank, null, 'field stale before sweep');
+
+  const result = await reconcileProjectedRecovery(db, entities);
+  assert.equal(result.recomputed, 1, 'one scope recomputed');
+  assert.equal(result.cleaned, 0, 'nothing cleaned');
+
+  // After reconcile: field computed from current row state, cursor at head (1).
+  row = db.prepare("SELECT hotRank FROM Post WHERE id='p1'").get();
+  assert.equal(JSON.parse(row.hotRank), 14, 'field recomputed from row state');
+  recovery = db.prepare("SELECT lastSeq FROM _ConsumerCursor WHERE consumer='projected.async' AND scope='Post:p1'").get();
+  assert.equal(recovery.lastSeq, 1, 'cursor advanced to log head');
+
+  // Idempotent: a second sweep finds the scope current and changes nothing.
+  const result2 = await reconcileProjectedRecovery(db, entities);
+  assert.equal(result2.recomputed, 0, 'second sweep: scope already current');
+  assert.equal(result2.cleaned, 0, 'second sweep: nothing cleaned');
+  row = db.prepare("SELECT hotRank FROM Post WHERE id='p1'").get();
+  assert.equal(JSON.parse(row.hotRank), 14, 'value unchanged by idempotent sweep');
+  db.close();
+});
+
+test('reconcileProjectedRecovery cleans up recovery cursors for removed rows', async () => {
+  const db = new DatabaseSync(':memory:');
+  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Post = entity('Post', {
+    title: text(),
+    score: number(),
+    hotRank: projected.async({ compute: async (row) => (row.score ?? 0) * 2 }),
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  const entities = new Map([[Post.name, Post]]);
+
+  // A scope has events in _Log and a recovery cursor, but the row was removed.
+  db.prepare("INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES ('Post:gone',1,'Post.created',:d,'a1','2026-01-01T00:00:00Z')").run({ d: '{}' });
+  db.prepare("INSERT INTO _Cursor (scope, lastSeq) VALUES ('Post:gone', 1)").run();
+  db.prepare("INSERT INTO _ConsumerCursor (consumer, scope, lastSeq) VALUES ('projected.async','Post:gone',0)").run();
+
+  const result = await reconcileProjectedRecovery(db, entities);
+  assert.equal(result.recomputed, 0, 'nothing recomputed (row gone)');
+  assert.equal(result.cleaned, 1, 'phantom cursor cleaned');
+
+  const recovery = db.prepare("SELECT lastSeq FROM _ConsumerCursor WHERE consumer='projected.async' AND scope='Post:gone'").get();
+  assert.equal(recovery, undefined, 'recovery cursor for removed row deleted');
+  db.close();
+});
+
+test('reconcileProjectedRecovery leaves current scopes untouched', async () => {
+  const db = new DatabaseSync(':memory:');
+  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Post = entity('Post', {
+    title: text(),
+    score: number(),
+    hotRank: projected.async({ compute: async (row) => (row.score ?? 0) * 2 }),
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  const entities = new Map([[Post.name, Post]]);
+
+  // Scope is fully caught up: recovery cursor at head.
+  db.prepare("INSERT INTO Post (id, title, score, hotRank) VALUES ('p1','t',7,'14')").run();
+  db.prepare("INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES ('Post:p1',1,'Post.created',:d,'a1','2026-01-01T00:00:00Z')").run({ d: '{}' });
+  db.prepare("INSERT INTO _Cursor (scope, lastSeq) VALUES ('Post:p1', 1)").run();
+  db.prepare("INSERT INTO _ConsumerCursor (consumer, scope, lastSeq) VALUES ('projected.async','Post:p1',1)").run();
+
+  let computeCount = 0;
+  const entitiesTracked = new Map([[Post.name, {
+    ...Post,
+    projectedAsyncFields: Post.projectedAsyncFields.map(([n, d]) => [n, { ...d, compute: async (row) => { computeCount++; return d.compute(row); } }]),
+  }]]);
+
+  const result = await reconcileProjectedRecovery(db, entitiesTracked);
+  assert.equal(result.recomputed, 0, 'current scope not recomputed');
+  assert.equal(result.cleaned, 0, 'nothing cleaned');
+  assert.equal(computeCount, 0, 'compute NOT invoked on a current scope');
+  db.close();
+});
+
+// Integration: the sweep runs during app.ready, so a freshly-started app back-
+// fills any projected fields left stale by a prior crash before serving traffic.
+test('app.ready runs the projected recovery sweep (backfill before serving)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  setActiveDb(db);
+  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
+
+  const Post = entity('Post', {
+    title: text(),
+    score: number(),
+    hotRank: projected.async({ compute: async (row) => (row.score ?? 0) * 2 }),
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  // Pre-seed the DB as if a prior process crashed: committed row + log event,
+  // but the projection never applied (hotRank NULL, no recovery cursor).
+  db.prepare("INSERT INTO Post (id, title, score, hotRank) VALUES ('p1','t',21,NULL)").run();
+  db.prepare("INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES ('Post:p1',1,'Post.created',:d,'a1','2026-01-01T00:00:00Z')").run({ d: '{}' });
+  db.prepare("INSERT INTO _Cursor (scope, lastSeq) VALUES ('Post:p1', 1)").run();
+
+  const app = workbench({ db });
+  app.mount('/posts', Post);
+  app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+
+  // app.ready ran the sweep under the mutex; the stale field is backfilled.
+  const row = db.prepare("SELECT hotRank FROM Post WHERE id='p1'").get();
+  assert.equal(JSON.parse(row.hotRank), 42, 'stale field backfilled on startup');
+  const recovery = db.prepare("SELECT lastSeq FROM _ConsumerCursor WHERE consumer='projected.async' AND scope='Post:p1'").get();
+  assert.equal(recovery.lastSeq, 1, 'recovery cursor at head after startup sweep');
+});
+
+test('reconcileProjectedRecovery skips scopes for entities with no projected.async fields', async () => {
+  const db = new DatabaseSync(':memory:');
+  const { executeFrameworkDDL } = await import('../src/ddl.mjs');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Plain (id TEXT, title TEXT)');
+
+  const Plain = entity('Plain', {
+    title: text(),
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  const entities = new Map([[Plain.name, Plain]]);
+
+  db.prepare("INSERT INTO Plain (id, title) VALUES ('x','hi')").run();
+  db.prepare("INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES ('Plain:x',1,'Plain.created',:d,'a1','2026-01-01T00:00:00Z')").run({ d: '{}' });
+
+  const result = await reconcileProjectedRecovery(db, entities);
+  assert.equal(result.recomputed, 0, 'non-projected entity not touched');
+  assert.equal(result.cleaned, 0, 'non-projected entity: nothing cleaned');
+  db.close();
 });

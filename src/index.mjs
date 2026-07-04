@@ -12,5 +12,5 @@ export { router } from './app.mjs';
 export { matchRoute } from './http-route-match.mjs';
 export { serveStatic } from './views.mjs';
 export { inc, dec, self, many, effect } from './effect-compiler.mjs';
-export { schedule, tick } from './schedule.mjs';
+export { schedule, tick, simulate } from './schedule.mjs';
 export { default } from './app.mjs';

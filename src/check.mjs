@@ -49,23 +49,11 @@ export function check(fn, { name } = {}) {
 
 // True when a value is a check's own result that escaped without `await` (the
 // body returned `is.owner()` or `is.a() || is.b()` directly as the decision).
-function isEscapedCheck(value) {
-  return (
-    value !== null &&
-    typeof value === 'object' &&
-    Object.prototype.hasOwnProperty.call(value, CHECK_RESULT)
-  );
-}
+const isEscapedCheck = (v) => v !== null && typeof v === 'object' && CHECK_RESULT in v;
 
 // A value is "thenable" if it has a callable `.then` (a promise or a check
 // result that escaped without `await`).
-function isThenable(value) {
-  return (
-    value !== null &&
-    (typeof value === 'object' || typeof value === 'function') &&
-    typeof value.then === 'function'
-  );
-}
+const isThenable = (v) => typeof v?.then === 'function';
 
 // Layer (1): RUNTIME BACKSTOP. The grant engine wraps every `.can`/`scope` body
 // with this. It awaits the body once, then inspects the resolved decision: if

@@ -13,7 +13,7 @@ import { config } from 'workbench/internal';
 import { Doc } from './doc.mjs';
 import { sessionRoutes, userRoutes } from './session.mjs';
 
-const app = workbench();
+const app = workbench({ db: 'gdoc.db' });
 
 app.mount('/sessions', sessionRoutes());    // auth boundary (login opts out, rest authed)
 app.mount('/users',    userRoutes());        // user views (authed)

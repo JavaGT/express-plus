@@ -131,7 +131,9 @@ export function generateFrameworkDDL() {
   enqueuedAt INTEGER NOT NULL,
   workerId TEXT,
   claimedAt INTEGER,
-  leaseUntil INTEGER
+  leaseUntil INTEGER,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  availableAt INTEGER
 );`,
     'CREATE INDEX IF NOT EXISTS idx__job_claim ON _Job (status, enqueuedAt);',
     `CREATE TABLE IF NOT EXISTS _ProjectedCursor (
@@ -139,6 +141,18 @@ export function generateFrameworkDDL() {
   field TEXT NOT NULL,
   lastSeq INTEGER NOT NULL DEFAULT 0,
   PRIMARY KEY (entity, field)
+);`,
+    // Per-scope cursor for post-commit consumers over _Log. Tracks the real
+    // per-scope log seq last successfully consumed by a named consumer, so a
+    // boot-time sweep can detect scopes that fell behind (process died between
+    // COMMIT and a post-commit consumer) and catch them up. _ProjectedCursor is
+    // separate: it is a staleness version counter (self-incrementing count) for
+    // response headers, not a recovery cursor.
+    `CREATE TABLE IF NOT EXISTS _ConsumerCursor (
+  consumer TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  lastSeq INTEGER NOT NULL,
+  PRIMARY KEY (consumer, scope)
 );`,
     `CREATE TABLE IF NOT EXISTS _Worker (
   id TEXT PRIMARY KEY,
@@ -153,5 +167,20 @@ export function generateFrameworkDDL() {
 export function executeFrameworkDDL(db) {
   for (const sql of generateFrameworkDDL()) {
     db.exec(sql);
+  }
+  // Additive column migrations for persistent dbs where CREATE TABLE IF NOT
+  // EXISTS would not add columns added after the table's first creation. Each
+  // guard checks PRAGMA table_info so it is a no-op on a fresh db and a safe
+  // one-time ALTER on an older one.
+  ensureJobColumns(db);
+}
+
+function ensureJobColumns(db) {
+  const cols = new Set(db.prepare('PRAGMA table_info(_Job)').all().map((r) => r.name));
+  if (!cols.has('attempts')) {
+    db.exec('ALTER TABLE _Job ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!cols.has('availableAt')) {
+    db.exec('ALTER TABLE _Job ADD COLUMN availableAt INTEGER');
   }
 }

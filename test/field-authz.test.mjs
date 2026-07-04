@@ -19,7 +19,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, { executeDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
-import { Doc } from '../doc.mjs';
+import { Doc } from '../projects/doc.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 // ---- helpers ---------------------------------------------------------------

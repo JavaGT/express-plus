@@ -26,7 +26,7 @@ import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import workbench, { entity, generateDDL, executeDDL } from '../src/internal.mjs';
-import { Doc } from '../doc.mjs';
+import { Doc } from '../projects/doc.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 // A Note anyone may READ but only the owner may SUBSCRIBE to. Widening the

@@ -19,5 +19,8 @@
   },
   "scripts": {
     "test": "node --test"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "^6.2.5"
   }
 }

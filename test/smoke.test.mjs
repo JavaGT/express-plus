@@ -14,8 +14,8 @@ import workbench, {
 
 // Re-create the doc.mjs Doc entity inline (avoids the exemplar import cycle
 // that's now lazily resolved — this test is the real-usage smoke).
-import { Doc } from '../doc.mjs';
-import { Comment } from '../comment.mjs';
+import { Doc } from '../projects/doc.mjs';
+import { Comment } from '../projects/comment.mjs';
 
 test('doc entity resolves and DDL generates without error', () => {
   // importing doc.mjs is the acid test — it resolves Comment via lazy import.

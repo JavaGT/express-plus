@@ -7,7 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, { generateDDL } from '../src/internal.mjs';
 
 // --- Note demo ---
-import { Note } from '../note.mjs';
+import { Note } from '../projects/note.mjs';
 
 test('note.mjs imports, generates DDL, and note CRUD works', async () => {
   const db = new DatabaseSync(':memory:');
@@ -39,7 +39,7 @@ test('note.mjs imports, generates DDL, and note CRUD works', async () => {
 });
 
 // --- GDOC demo ---
-import { Doc as GDoc } from '../gdoc.mjs';
+import { Doc as GDoc } from '../projects/gdoc.mjs';
 
 test('gdoc.mjs imports, generates DDL, and gdoc CRUD works', async () => {
   const db = new DatabaseSync(':memory:');
@@ -85,8 +85,8 @@ test('gdoc.mjs imports, generates DDL, and gdoc CRUD works', async () => {
 });
 
 // --- Doc/comments demo (parent-child FK inheritance) ---
-import { Doc } from '../doc.mjs';
-import { Comment } from '../comment.mjs';
+import { Doc } from '../projects/doc.mjs';
+import { Comment } from '../projects/comment.mjs';
 
 test('doc.mjs + comment.mjs: parent-child FK inheritance works', async () => {
   const db = new DatabaseSync(':memory:');

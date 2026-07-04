@@ -25,5 +25,5 @@ export const Note = entity('Note', {
 
 import { fileURLToPath } from 'node:url';
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  workbench().mount('/notes', Note).listen(3000);
+  workbench({ db: 'note.db' }).mount('/notes', Note).listen(3000);
 }

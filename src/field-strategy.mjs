@@ -134,6 +134,7 @@ const STRATEGIES = Object.freeze({
   // `value` — a single stored value with whole-value diff. apply replaces;
   // diff is a whole-value set, null when unchanged.
   value: Object.freeze({
+    laws: Object.freeze({ invertible: true, coalescible: true, idempotent: false, commutativeMerge: false }),
     validate(value, descriptor) {
       switch (descriptor.type) {
         case 'text':
@@ -205,6 +206,7 @@ const STRATEGIES = Object.freeze({
   // reads as a change — passwords are write-only, never diffed for equality of
   // plaintext. verify is exposed on the hydrated row, not here.
   hash: Object.freeze({
+    laws: Object.freeze({ invertible: false, coalescible: false, idempotent: false, commutativeMerge: false }),
     validate(value) {
       if (!isTextValue(value)) return 'expected a password string';
       return true;
@@ -231,6 +233,7 @@ const STRATEGIES = Object.freeze({
   // toolkit lands. Single-writer dispatch stores `next` (apply = replace); the
   // delta is the broadcast artifact. The concurrent-merge toolkit is deferred.
   crdt: Object.freeze({
+    laws: Object.freeze({ invertible: true, coalescible: true, idempotent: false, commutativeMerge: true }),
     validate(value, descriptor) {
       if (descriptor?.type === 'raster') {
         if (value === null || value === undefined) return true;
@@ -261,6 +264,7 @@ const STRATEGIES = Object.freeze({
   // delta: {added, removed, changed}. A role change is `changed`, NOT `added` —
   // only a NEW member fires native added (idempotent re-share, DECISIONLOG #57).
   store: Object.freeze({
+    laws: Object.freeze({ invertible: true, coalescible: true, idempotent: true, commutativeMerge: false }),
     validate(value) {
       if (value === null || typeof value !== 'object') return 'expected a store value';
       return true;
@@ -291,6 +295,7 @@ const STRATEGIES = Object.freeze({
   // (field-delta.mjs) structurally enforces that ordered never reaches this
   // strategy's (absent) `.diff` (DECISIONLOG #74 — VESTIGIAL: deleted orderedListDiff).
   ordered: Object.freeze({
+    laws: Object.freeze({ invertible: true, coalescible: false, idempotent: false, commutativeMerge: false }),
     validate(value) {
       if (!Array.isArray(value)) return 'expected an ordered list';
       return true;
@@ -304,6 +309,7 @@ const STRATEGIES = Object.freeze({
   // reaches this persistence strategy; `computed.stored()` stores a JSON cell
   // written by the projection.
   computed: Object.freeze({
+    laws: Object.freeze({ invertible: false, coalescible: true, idempotent: false, commutativeMerge: false }),
     validate() {
       return true; // the compute result is trusted, not client-provided
     },
@@ -327,6 +333,7 @@ const STRATEGIES = Object.freeze({
 
   // `projected` — a stored computed field updated by a post-commit projection.
   projected: Object.freeze({
+    laws: Object.freeze({ invertible: false, coalescible: true, idempotent: false, commutativeMerge: false }),
     validate() {
       return true;
     },
@@ -355,6 +362,7 @@ const STRATEGIES = Object.freeze({
   // Phase 1 write path flattens a struct payload into per-cell columns via
   // flattenStruct; serialize/apply of the WHOLE struct replace it.
   struct: Object.freeze({
+    laws: Object.freeze({ invertible: true, coalescible: true, idempotent: false, commutativeMerge: false }),
     validate(value, descriptor) {
       if (value === null || value === undefined) return true;
       if (typeof value !== 'object') return 'expected a structured value';
@@ -383,6 +391,7 @@ const STRATEGIES = Object.freeze({
   // The transition guard (reject illegal moves at update time) lives in the CRUD
   // handler — this strategy validates shape only.
   state: Object.freeze({
+    laws: Object.freeze({ invertible: true, coalescible: true, idempotent: true, commutativeMerge: false }),
     validate(value, descriptor) {
       if (!descriptor.values.includes(value)) {
         return `expected one of [${descriptor.values.join(', ')}]`;
@@ -441,6 +450,14 @@ export function resolveStrategy(kind) {
     );
   }
   return strategy;
+}
+
+// lawsOf(kind) → the field kind's declared algebraic laws. Used by undo (checks
+// invertible before dispatching an inverse), log compaction (coalescible gates
+// coalescing), and future derivation consumers. Laws are frozen, per-kind, and
+// never per-instance — the kind owns its algebra, not individual descriptors.
+export function lawsOf(kind) {
+  return resolveStrategy(kind).laws;
 }
 
 // Serialize a single value to the stored cell its descriptor's kind dictates.

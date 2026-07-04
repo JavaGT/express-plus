@@ -261,7 +261,7 @@ test('the four verbs map to their HTTP methods', async () => {
 
 test('app.mount re-bases a mounted router under the path', async () => {
   const app = workbench();
-  assert.equal(app.use, undefined);
+  assert.equal(typeof app.use, 'function');
   const r = router();
   const handler = (req, res) => res.json({});
   r.post('/', allowAnonymous(), handler);

@@ -444,10 +444,7 @@ export function lowerToSql(ast, ctx = {}) {
   const state = ctx.state ?? { n: 0 };
   const params = ctx.params ?? {};
   const col = (field) => `${alias}.${field}`;
-  const freshParam = (logical) => {
-    const key = `p${state.n += 1}_${logical}`;
-    return key;
-  };
+  const freshParam = (logical) => `p${state.n += 1}_${logical}`;
 
   const lower = (node) => {
     switch (node.node) {

@@ -2,7 +2,7 @@ import { scope, everyone, grant, read, tick, date, schedule } from '../src/index
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { entity } from '../src/internal.mjs';
+import { entity, Session } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
@@ -373,6 +373,80 @@ test('e2e: while-fails — row with mismatched status stays unchanged (DENIED)',
   await new Promise((resolve) => setTimeout(resolve, 2500));
   const row = db.prepare('SELECT status FROM BlogSchedDeny WHERE id = ?').get('b2');
   assert.equal(row.status, 'archived', 'while-failed row stays unmutated');
+});
+
+// ============================================================
+// Session expiry: schedule.after(createdAt, delay) → remove
+// ============================================================
+test('Session: discoverDueSchedules finds expired sessions', () => {
+  const db = new DatabaseSync(':memory:');
+  // Session requires a workbench() context for standalone create.
+  db.exec('CREATE TABLE Session (id TEXT PRIMARY KEY, token TEXT, principalType TEXT, principalId TEXT, createdAt TEXT)');
+  const now = Date.now();
+  // Past session (createdAt 8 days ago — beyond a 7-day window)
+  db.prepare(
+    'INSERT INTO Session (id, token, principalType, principalId, createdAt) VALUES (?, ?, ?, ?, ?)',
+  ).run('s1', 'tok1', 'user', 'alice', now - 8 * 86_400_000);
+  // Fresh session (createdAt now — not expired)
+  db.prepare(
+    'INSERT INTO Session (id, token, principalType, principalId, createdAt) VALUES (?, ?, ?, ?, ?)',
+  ).run('s2', 'tok2', 'user', 'bob', now);
+
+  // Session has schedule.remove: schedule.after(createdAt, 7 days)
+  const results = discoverDueSchedules(db, [Session], now);
+  // Only the past session should be discovered.
+  const sessionResults = results.filter((r) => r.entity === 'Session');
+  assert.equal(sessionResults.length, 1, 'only the expired session is discovered');
+  assert.equal(sessionResults[0].rowId, 's1');
+  assert.equal(sessionResults[0].verb, 'remove');
+});
+
+test('e2e: expired session is deleted by the reaper', async (t) => {
+  const db = seededDb();
+  for (const sql of generateDDL(Session)) db.exec(sql);
+  const now = Date.now();
+  db.prepare(
+    'INSERT INTO Session (id, token, principalType, principalId, createdAt) VALUES (?, ?, ?, ?, ?)',
+  ).run('s1', 'tok-expired', 'user', 'alice', now - 8 * 86_400_000);
+  db.prepare(
+    'INSERT INTO Session (id, token, principalType, principalId, createdAt) VALUES (?, ?, ?, ?, ?)',
+  ).run('s2', 'tok-fresh', 'user', 'bob', now);
+
+  const entities = new Map();
+  entities.set(Session.name, Session);
+
+  const server = createServer({
+    handlers: Session.crudHandlers,
+    db,
+    authorize: () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [Session.projection],
+      admission: {
+        beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now: hookNow }) => {
+          if (p?.type !== 'system' || !p.attributes?.source) return true;
+          const ent = entities.get(en);
+          if (!ent) return false;
+          return admitSystemMutation({
+            entity: ent, verb, rowId: event?.data?.id,
+            payload, principal: p, db: hookDb ?? db, now: hookNow ?? now,
+          });
+        },
+        afterProjection: async () => true,
+      },
+    }),
+  });
+
+  const reaper = startReaper({ db, entities, dispatch: server.dispatch });
+  t.after(() => reaper.stop());
+
+  // The reaper fired → expired session deleted, fresh session untouched.
+  await poll(() => {
+    const row = db.prepare('SELECT id FROM Session WHERE id = ?').get('s1');
+    assert.equal(row, undefined, 'expired session deleted');
+  }, { timeoutMs: 4000 });
+
+  const fresh = db.prepare('SELECT id FROM Session WHERE id = ?').get('s2');
+  assert.ok(fresh, 'fresh session is untouched');
 });
 
 test('e2e: entity with NO schedule triggers returns no-op reaper', () => {

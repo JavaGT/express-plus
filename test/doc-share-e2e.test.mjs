@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, { generateDDL, executeDDL } from '../src/internal.mjs';
-import { Doc } from '../doc.mjs';
+import { Doc } from '../projects/doc.mjs';
 
 function setup() {
   const db = new DatabaseSync(':memory:');

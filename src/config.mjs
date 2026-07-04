@@ -18,4 +18,5 @@ export const config = Object.freeze({
   port: readPort(process.env.PORT),
   env: process.env.NODE_ENV ?? 'development',
   viewsDir: process.env.VIEWS_DIR ?? null, // null → framework default (cwd/views)
+  sessionDurationMs: 7 * 86_400_000, // 7 days — used by Session's schedule.after expiry
 });

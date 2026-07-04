@@ -122,7 +122,7 @@ export const SharedTodo = entity('Todo', {
 // stream, graceful shutdown) live in the framework — nothing to mount here.
 // ---------------------------------------------------------------------------
 
-workbench()
+workbench({ db: 'todo.db' })
   .mount('/todos', Todo)            // tier 1: private todos
   .mount('/lists', TodoList)        // tier 2: shared lists …
   .mount('/lists/:listId/items', SharedTodo)  // … with items inheriting the list grant

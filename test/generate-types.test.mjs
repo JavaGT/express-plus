@@ -1,0 +1,103 @@
+import { text, boolean, ref, map, scope, grant, read, write, entity, computed, generateTypes, link, everyone } from '../src/internal.mjs';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+test('generateTypes: flat entity emits row interface and entity handle', () => {
+  const Doc = entity('Doc', {
+    body: text(),
+    published: boolean(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    grant: () => [scope(({ is }) => is.owner()).can(() => grant(read, write))],
+  });
+
+  const types = generateTypes([Doc]);
+
+  assert.ok(types.includes('export interface DocRow'));
+  assert.ok(types.includes('id: string'));
+  assert.ok(types.includes('body: string'));
+  assert.ok(types.includes('published: boolean'));
+  assert.ok(types.includes('owner: string'));
+  assert.ok(types.includes('export const Doc'));
+
+  assert.ok(types.includes('owner(): Promise<boolean>'));
+  assert.ok(types.includes('create(payload:'));
+  assert.ok(types.includes('created:'));
+  assert.ok(types.includes('update:'));
+  assert.ok(types.includes('updated:'));
+  assert.ok(types.includes('remove:'));
+  assert.ok(types.includes('removed:'));
+});
+
+test('generateTypes: map field emits MapFieldHandle', () => {
+  const Doc = entity('Doc', {
+    body: text(),
+    owner: ref('User', { role: 'owner' }),
+    collaborators: map(ref('User'), { role: ['editor', 'viewer'] }),
+    grant: () => [scope(({ is }) => is.owner()).can(() => grant(read, write))],
+  });
+
+  const types = generateTypes([Doc]);
+
+  assert.ok(types.includes('MapFieldHandle'));
+  assert.ok(types.includes('collaborators:'));
+  assert.ok(types.includes('has(value: string)'), 'MapFieldHandle has()');
+});
+
+test('generateTypes: link field emits struct sub-cell handles', () => {
+  const Doc = entity('Doc', {
+    body: text(),
+    owner: ref('User', { role: 'owner' }),
+    linkShare: link({ tier: text(), token: text() }, { tiers: ['view'], tokenIntent: 'autogen' }),
+    grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
+  });
+
+  const types = generateTypes([Doc]);
+
+  assert.ok(types.includes('linkShare:'), 'should type the link field');
+  assert.ok(types.includes('token:'), 'should include sub-cell token');
+  assert.ok(types.includes('tier:'), 'should include sub-cell tier');
+});
+
+test('generateTypes: computed field (pull) excluded from row', () => {
+  const Note = entity('Note', {
+    body: text(),
+    owner: ref('User', { role: 'owner' }),
+    preview: computed({ compute: ({ entity }) => entity.body?.slice(0, 10) }),
+    grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
+  });
+
+  const types = generateTypes([Note]);
+
+  assert.ok(types.includes('export interface NoteRow'));
+  assert.ok(types.includes('preview:'), 'pull-computed should appear on handle');
+});
+
+test('generateTypes: stored computed field included in row', () => {
+  const Note = entity('Note', {
+    body: text(),
+    owner: ref('User', { role: 'owner' }),
+    wordCount: computed.stored({ compute: ({ entity }) => entity.body?.split(' ').length }),
+    grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
+  });
+
+  const types = generateTypes([Note]);
+  assert.ok(types.includes('wordCount: string'), 'stored-computed should be in row');
+});
+
+test('generateTypes: checks emit per-check methods', () => {
+  const Doc = entity('Doc', {
+    body: text(),
+    editor: ref('User', { role: 'editor' }),
+    owner: ref('User', { role: 'owner' }),
+    checks: {
+      isPublished: ({ entity }) => entity.body?.length > 0,
+    },
+    grant: () => [scope(({ is }) => is.owner()).can(() => grant(read))],
+  });
+
+  const types = generateTypes([Doc]);
+
+  assert.ok(types.includes('owner(): Promise<boolean>'));
+  assert.ok(types.includes('editor(): Promise<boolean>'));
+  assert.ok(types.includes('isPublished(): Promise<boolean>'));
+});

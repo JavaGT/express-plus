@@ -5,6 +5,7 @@ import { buildEffectsRegistry, validateEffects } from './effect-compiler.mjs';
 import { User, Session, Inbox } from './auth-entities.mjs';
 import { createWriteQueue } from './write-queue.mjs';
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
+import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
@@ -108,9 +109,17 @@ function buildDurableAdmission(app) {
 
 export function buildKernel(app) {
   const { handlers, projections, entities } = collectAppEntities(app);
+  for (const fe of FRAMEWORK_ENTITIES) {
+    if (fe && !entities.has(fe.name)) {
+      entities.set(fe.name, fe);
+      Object.assign(handlers, fe.crudHandlers);
+      projections.push(fe.projection);
+    }
+  }
   app.entities = entities;
 
   const effectsRegistry = buildEffects(entities);
+  const durableEffectsRegistry = buildDurableEffectsRegistry([...entities.values()]);
   const { blobAdapter, blobFinalizeConsumer, blobColumns } = createBlobLifecycle({
     blobs: app.blobs,
     entities,
@@ -120,7 +129,9 @@ export function buildKernel(app) {
     blobFinalizeConsumer,
     buildLiveFanoutConsumer(app),
     createProjectedAsyncConsumer({ entities }),
+    createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }),
   ].filter(Boolean);
+  app.durableEffectsRegistry = durableEffectsRegistry;
 
   app.writeQueue = createWriteQueue();
 

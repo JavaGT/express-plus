@@ -33,10 +33,12 @@ import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
 import { createJobQueue } from './job-queue.mjs';
+import { createClock } from './clock.mjs';
 import { createLog, setAmbientLog, getLog } from './log.mjs';
 import { serveStatic } from './views.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 
 // The HTTP methods an imperative router verb maps to. `r.get/post/patch/delete`
 // build a hand-written route (a handler chain) rather than entity CRUD.
@@ -325,6 +327,18 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
       throw new Error(`missing required env: ${v}`);
     }
   }
+  // A `db` string is a path (or ':memory:') the framework opens itself, so an app
+  // never imports DatabaseSync just to hand the framework an instance it could
+  // have opened from the same string. One construction path: the PRAGMA bootstrap
+  // and `app.prepareSchema()` below own the driver — an app passing a bare string
+  // gets the same schema/PRAGMA treatment as one passing a pre-built handle.
+  if (typeof db === 'string') {
+    const dir = path.dirname(db);
+    if (dir && dir !== '.' && db !== ':memory:') {
+      mkdirSync(dir, { recursive: true });
+    }
+    db = new DatabaseSync(db);
+  }
   const app = makeMountable();
   // Set up the framework-wide structured logger BEFORE any module imports log.
   // The ambient logger is used by every layer — auth, dispatch, HTTP, live.
@@ -376,8 +390,13 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
   // envGate). Reached by the framework-owned /workers + /jobs HTTP routes AND by
   // post-commit consumers that call `app.jobs.enqueue(...)`. No `jobs` config →
   // no queue, no routes, no reaper (zero blast radius).
+  // The shared clock is the single timer for all framework reapers (schedule,
+  // tick, job-queue lease, blob, log-retention, job-worker polls). Created once
+  // at app construction so the job queue and later serve.mjs share it.
+  const clock = createClock();
+  app.clock = clock;
   if (db && jobOpts) {
-    app.jobs = createJobQueue({ db, ...jobOpts });
+    app.jobs = createJobQueue({ db, clock, ...jobOpts });
   }
   app.port = undefined;
   app.httpServer = undefined;

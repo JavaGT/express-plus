@@ -18,10 +18,10 @@ import { createJobQueue } from '../src/job-queue.mjs';
 
 const SECRET = 's3cret-shared-deployment-key';
 
-function freshQueue({ leaseMs = 1000, heartbeatGraceMs = 3000, now } = {}) {
+function freshQueue({ leaseMs = 1000, heartbeatGraceMs = 3000, now, ...rest } = {}) {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  const queue = createJobQueue({ db, sharedSecret: SECRET, leaseMs, heartbeatGraceMs, now });
+  const queue = createJobQueue({ db, sharedSecret: SECRET, leaseMs, heartbeatGraceMs, now, ...rest });
   return { db, queue };
 }
 
@@ -134,17 +134,35 @@ test('result: idempotent by job id — a retried result for a completed job is a
   db.close();
 });
 
-test('result: failed is terminal; non-owner result rejected', () => {
-  const { db, queue } = freshQueue();
+test('result: failed is retried while under maxAttempts; non-owner result rejected', () => {
+  let t = 1000;
+  const now = () => t;
+  const { db, queue } = freshQueue({ maxAttempts: 5, backoffMs: 1000, now });
   const w1 = queue.registerWorker(SECRET);
   const w2 = queue.registerWorker(SECRET);
   queue.enqueue({ kind: 'k', payload: {} });
   const job = queue.claim(w1.workerId);
   assert.equal(queue.submitResult(job.id, w2.workerId, { status: 'completed', output: {} }).accepted, false, 'non-owner rejected');
   const r = queue.submitResult(job.id, w1.workerId, { status: 'failed', output: { error: 'boom' } });
-  assert.deepEqual(r, { accepted: true, noop: false }, 'owner failed result accepted');
-  const row = db.prepare('SELECT status FROM _Job WHERE id=?').get(job.id);
-  assert.equal(row.status, 'failed', 'marked failed (terminal)');
+  assert.deepEqual(r, { accepted: true, retried: true, attempts: 1 }, 'owner failed result retried (not terminal under maxAttempts)');
+  const row = db.prepare('SELECT status, attempts, availableAt FROM _Job WHERE id=?').get(job.id);
+  assert.equal(row.status, 'queued', 're-queued for retry');
+  assert.equal(row.attempts, 1);
+  assert.ok(row.availableAt != null, 'backoff scheduled');
+  // a failed result at maxAttempts becomes a terminal dead-letter
+  let attempts = 1;
+  let guard = 0;
+  while (attempts < 5 && guard < 20) {
+    guard++;
+    t += 1000; // advance past backoff
+    const c = queue.claim(w1.workerId);
+    if (!c) break;
+    const rr = queue.submitResult(job.id, w1.workerId, { status: 'failed', output: { error: 'boom' } });
+    attempts = rr.attempts;
+  }
+  const final = db.prepare('SELECT status, attempts FROM _Job WHERE id=?').get(job.id);
+  assert.equal(final.status, 'failed', 'dead-lettered at maxAttempts (terminal)');
+  assert.equal(final.attempts, 5);
   db.close();
 });
 

@@ -7,11 +7,17 @@
 // Each dispatch try/catch mirrors the tick engine's per-iteration pattern: a
 // single row's deny/throw logs to stderr and CONTINUES the sweep — never aborts
 // it. setInterval MUST unref() so the test process exits without leak.
+//
+// When a `clock` is provided, the reaper registers as a watcher on the shared
+// clock (one timer, nearest-deadline scheduling) instead of starting its own
+// setInterval. Callers that provide a clock MUST call clock._schedule() to start
+// real timers.
 
 import { randomUUID } from 'node:crypto';
 import { principalFrom } from './principal.mjs';
 import { discoverDueSchedules, schedulerSource, triggerList } from './schedule.mjs';
 import { getLog } from './log.mjs';
+import { createClockRunner } from './clock-runner.mjs';
 
 const SCAN_INTERVAL_MS = 1000;
 
@@ -22,20 +28,20 @@ const SCAN_INTERVAL_MS = 1000;
  * every 1000ms. If NO schedule triggers exist across any entity, returns a
  * no-op `{stop(){}}` — the engine does NOT start a timer for an empty config.
  *
+ * When `opts.clock` is provided, schedules via the shared clock (single
+ * setTimeout, nearest-deadline). Otherwise starts its own setInterval.
+ *
  * @param {object} opts
  * @param {object} opts.db — DatabaseSync handle for discovery queries.
  * @param {Map<string, object>} opts.entities — Entity map (entity name →
  *   entity descriptor; entity.schedule holds deadline triggers with
  *   {kind, fieldName, whileSql, with}).
- * @param {function} opts.dispatch — Pipeline dispatch function:
- *   `({type, principal, payload, actionId?})`. Called per discovered row as
- *   `{type: "${entityName}.${verb}", principal, payload: {id: rowId, ...with}}`.
+ * @param {function} opts.dispatch — Pipeline dispatch function.
  * @param {function} [opts.now=Date.now] — Time source for discovery.
+ * @param {object} [opts.clock] — Shared clock from createClock().
  * @returns {{stop(): void}} Engine handle. `.stop()` is idempotent.
  */
-export function startReaper({ db, entities, dispatch, now = Date.now }) {
-  let timer = null;
-
+export function startReaper({ db, entities, dispatch, now = Date.now, clock }) {
   // Normalize entities to an array — discoverDueSchedules iterates with for…of,
   // which over a Map yields [key, value] tuples, not entity objects.
   const entityList = entities instanceof Map ? [...entities.values()] : entities;
@@ -81,23 +87,5 @@ export function startReaper({ db, entities, dispatch, now = Date.now }) {
     }
   }
 
-  if (!timer) {
-    timer = setInterval(() => {
-      try {
-        scan();
-      } catch (err) {
-        getLog().warn('system', 'reaper scan failed', { err });
-      }
-    }, SCAN_INTERVAL_MS);
-    if (typeof timer.unref === 'function') timer.unref();
-  }
-
-  return {
-    stop() {
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
-    },
-  };
+  return createClockRunner({ clock, intervalMs: SCAN_INTERVAL_MS, fn: scan, name: 'schedule-reaper' });
 }

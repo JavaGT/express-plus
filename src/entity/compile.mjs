@@ -220,7 +220,7 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
 // compiler owns, which silently drops the field (fail closed).
 const RESERVED_DECLARATION_SLOTS = new Set([
   'fields', 'grant', 'checks', 'routes', 'create', 'effects', 'admitsEffects',
-  'schedule', 'gate', 'on',
+  'schedule', 'simulation', 'gate', 'on',
 ]);
 
 function looksLikeFieldDescriptor(value) {
@@ -243,7 +243,7 @@ export function entity(name, declaration = {}) {
     }
   }
 
-  const { grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, gate: declaredGate = {} } = declaration;
+  const { grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {} } = declaration;
 
   // The entity name becomes a table name interpolated into SQL — validate first.
   assertSqlIdentifier('entity', name);
@@ -341,6 +341,7 @@ export function entity(name, declaration = {}) {
   const entries = effectEntries(declaredEffectsArray, { sourceEntityName: name });
   const validatedEffects = entries.length > 0 ? Object.freeze([...entries]) : null;
   for (const [triggerHandle, effect] of entries) {
+    if (effect && typeof effect === 'object' && typeof effect.durable === 'string') continue;
     validateEffectDeclaration(effect, { triggerHandle, sourceEntityName: name });
   }
 
@@ -418,6 +419,7 @@ export function entity(name, declaration = {}) {
     effects: validatedEffects,
     admitsEffects,
     schedule: validatedSchedule,
+    simulation,
     projectedAsyncFields: Object.freeze(projectedAsyncFields),
     storedComputedFields: Object.freeze(storedComputedFields),
   };

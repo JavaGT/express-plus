@@ -4,7 +4,7 @@ export { text, boolean, date, number, json, ref, hash, blob, link, map, list, lo
 export { owner } from './owner.mjs';
 export { createLog, getLog } from './log.mjs';
 export { now } from './deferred.mjs';
-export { resolveStrategy, validateMutation, ValidationError } from './field-strategy.mjs';
+export { resolveStrategy, validateMutation, ValidationError, lawsOf } from './field-strategy.mjs';
 export { computeDelta, createDeltaProjector } from './field-delta.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
@@ -15,7 +15,9 @@ export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectS
 export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient, durableMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.mjs';
 export { buildKernel } from './kernel.mjs';
-export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes } from './projected-async.mjs';
+export { createClock } from './clock.mjs';
+export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from './projected-async.mjs';
+export { buildDurableEffectsRegistry, createDurableEffectsConsumer, reconcileDurableEffects } from './durable-effects.mjs';
 export { createBlobLifecycle } from './blob-lifecycle.mjs';
 export { EventKind, created, updated, removed, fieldSet, native, parseEventType, lifecycleVerb } from './event-handle.mjs';
 export { createLiveServer } from './live.mjs';
@@ -31,3 +33,8 @@ export { schedule, tick, tickSource, discoverTickedRows, admitSystemMutation, di
 export { startTickEngine } from './tick-engine.mjs';
 export { startReaper } from './reaper.mjs';
 export { createJobQueue } from './job-queue.mjs';
+export { explain } from './explain.mjs';
+export { compileEntityAuthz } from './authz.mjs';
+export { canUndoField, undoableFieldKinds } from './field-laws.mjs';
+export { startSimulation } from './simulate.mjs';
+export { generateTypes } from './generate-types.mjs';

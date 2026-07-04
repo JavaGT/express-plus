@@ -3,9 +3,9 @@ import { resolve } from 'node:path';
 import { config } from './config.mjs';
 import { getLog } from './log.mjs';
 import { renderError } from './middleware.mjs';
-import { sendJson } from './http-response.mjs';
 import { authorizeRow } from './http-row-read.mjs';
 import { resolveTemplate } from './views.mjs';
+import { createResponseFacade } from './http-response-factory.mjs';
 
 export async function runChain(handlers, nodeReq, nodeRes, { principal, params, body, query, autoLoad, app }, { env }) {
   const req = {
@@ -31,84 +31,65 @@ export async function runChain(handlers, nodeReq, nodeRes, { principal, params, 
     req[autoLoad.key] = autoLoad.entity.hydrate(auth.row, principal, dispatchRef);
   }
 
-  let pendingStatus = 200;
-  const res = {
-    status(code) {
-      pendingStatus = code;
-      return res;
-    },
-    json(value) {
-      sendJson(nodeRes, pendingStatus, value);
-      return res;
-    },
-    send(value) {
-      const payload = typeof value === 'string' ? value : String(value);
+  const res = createResponseFacade(nodeRes, {});
+
+  // chain-specific: template rendering via the views engine.
+  res.render = function (name, data = {}) {
+    try {
+      const html = resolveTemplate(config.viewsDir ?? resolve(process.cwd(), 'views'), name, data);
       if (!nodeRes.headersSent) {
-        nodeRes.writeHead(pendingStatus, {
-          'content-type': 'text/plain; charset=utf-8',
-          'content-length': Buffer.byteLength(payload),
+        nodeRes.writeHead(this._pendingStatus, {
+          'content-type': 'text/html; charset=utf-8',
+          'content-length': Buffer.byteLength(html),
         });
       }
-      nodeRes.end(payload);
-      return res;
-    },
-    sendStatus(code) {
-      nodeRes.writeHead(code);
+      nodeRes.end(html);
+    } catch (err) {
+      const status = err.code === 'ENOENT' ? 404 : 500;
+      renderError(nodeRes, { status, message: err.code === 'ENOENT' ? `template not found: ${name}` : err.message }, { env });
+    }
+    return this;
+  };
+
+  // chain-specific: streaming with SSE defaults, buffering toggle, destroyed
+  // guard, and cancellation on error.
+  res.stream = async function (webResponse, { buffering = true } = {}) {
+    const isResponse = typeof webResponse?.body?.getReader === 'function'
+      || (webResponse && typeof webResponse.body === 'object');
+    const body = webResponse?.body ?? webResponse;
+    const headers = isResponse && webResponse.headers
+      ? Object.fromEntries(webResponse.headers.entries())
+      : {};
+    if (!('content-type' in headers) && !isResponse) {
+      headers['content-type'] = 'text/event-stream; charset=utf-8';
+    }
+    if (buffering) headers['x-accel-buffering'] = 'no';
+    if (!nodeRes.headersSent) {
+      nodeRes.writeHead(
+        isResponse && Number.isFinite(webResponse.status) ? webResponse.status : this._pendingStatus,
+        headers,
+      );
+    }
+    if (!body || typeof body.getReader !== 'function') {
       nodeRes.end();
-      return res;
-    },
-    render(name, data = {}) {
-      try {
-        const html = resolveTemplate(config.viewsDir ?? resolve(process.cwd(), 'views'), name, data);
-        if (!nodeRes.headersSent) {
-          nodeRes.writeHead(pendingStatus, {
-            'content-type': 'text/html; charset=utf-8',
-            'content-length': Buffer.byteLength(html),
-          });
-        }
-        nodeRes.end(html);
-      } catch (err) {
-        const status = err.code === 'ENOENT' ? 404 : 500;
-        renderError(nodeRes, { status, message: err.code === 'ENOENT' ? `template not found: ${name}` : err.message }, { env });
+      return this;
+    }
+    const reader = body.getReader();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (nodeRes.destroyed) break;
+        nodeRes.write(Buffer.isBuffer(value) ? value : Buffer.from(value));
       }
-      return res;
-    },
-    async stream(webResponse, { buffering = true } = {}) {
-      const isResponse = typeof webResponse?.body?.getReader === 'function'
-        || (webResponse && typeof webResponse.body === 'object');
-      const body = webResponse?.body ?? webResponse;
-      const headers = isResponse && webResponse.headers
-        ? Object.fromEntries(webResponse.headers.entries())
-        : {};
-      if (!('content-type' in headers) && !isResponse) {
-        headers['content-type'] = 'text/event-stream; charset=utf-8';
-      }
-      if (buffering) headers['x-accel-buffering'] = 'no';
-      if (!nodeRes.headersSent) {
-        nodeRes.writeHead(isResponse && Number.isFinite(webResponse.status) ? webResponse.status : pendingStatus, headers);
-      }
-      if (!body || typeof body.getReader !== 'function') {
-        nodeRes.end();
-        return res;
-      }
-      const reader = body.getReader();
-      try {
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (nodeRes.destroyed) break;
-          nodeRes.write(Buffer.isBuffer(value) ? value : Buffer.from(value));
-        }
-        if (!nodeRes.writableEnded) nodeRes.end();
-      } catch (err) {
-        getLog().warn('system', 'res.stream pump failed', { err });
-        if (!nodeRes.destroyed) nodeRes.destroy(err);
-      } finally {
-        try { await reader.cancel(); } catch {}
-      }
-      return res;
-    },
-    raw: nodeRes,
+      if (!nodeRes.writableEnded) nodeRes.end();
+    } catch (err) {
+      getLog().warn('system', 'res.stream pump failed', { err });
+      if (!nodeRes.destroyed) nodeRes.destroy(err);
+    } finally {
+      try { await reader.cancel(); } catch {}
+    }
+    return this;
   };
 
   for (const handler of handlers) {

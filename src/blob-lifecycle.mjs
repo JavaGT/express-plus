@@ -1,3 +1,5 @@
+import { parseEventType } from './event-handle.mjs';
+
 export function createBlobLifecycle({ blobs, entities }) {
   if (!blobs) return { blobAdapter: undefined, blobFinalizeConsumer: null, blobColumns: [] };
 
@@ -19,7 +21,7 @@ export function createBlobLifecycle({ blobs, entities }) {
   const resolveBlobIds = (event) => {
     const entityName = event.handle?.brand === 'event-handle'
       ? event.handle.entity
-      : (() => { const dot = event.type.indexOf('.'); return dot >= 0 ? event.type.slice(0, dot) : ''; })();
+      : (() => { try { return parseEventType(event.type).entity; } catch { return ''; } })();
     const fields = blobFields.get(entityName) ?? [];
     const ids = [];
     for (const fieldName of fields) {

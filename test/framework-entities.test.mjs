@@ -33,7 +33,7 @@ function seed() {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   db.exec(
-    'CREATE TABLE Session (id TEXT PRIMARY KEY, token TEXT, principalType TEXT, principalId TEXT)',
+    'CREATE TABLE Session (id TEXT PRIMARY KEY, token TEXT, principalType TEXT, principalId TEXT, createdAt TEXT)',
   );
   return db;
 }

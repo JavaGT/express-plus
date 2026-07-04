@@ -19,10 +19,12 @@
 // them only through the UNSCOPED, trusted query API, never a request path.
 
 import { entity } from './entity.mjs';
-import { text, hash, ref } from './field.mjs';
+import { text, hash, ref, date } from './field.mjs';
 import { scope } from './scope.mjs';
 import { never } from './scope-sql.mjs';
 import { grant, deny, read, subscribe } from './grant.mjs';
+import { schedule } from './schedule.mjs';
+import { config } from './config.mjs';
 
 // A framework auth entity is never request-readable: its rows are reached only
 // by trusted server code (login lookup, principal hydration), never dispatched
@@ -40,8 +42,10 @@ export const User = entity('User', {
   grant: () => [notRequestReadable('User')],
 });
 
+const SessionCreatedAt = date();
+
 // The two session intents are a CLOSED set, each a named whole mapped to the one
-// canonical stored row { token, principalType, principalId }:
+// canonical stored row { token, principalType, principalId, createdAt }:
 //   - { userId }            -> a user session   (principalType 'user', principalId = userId)
 //   - { kind: 'link', token } -> a link session (principalType 'link', principalId = the share token)
 // The minted `token` is a fresh, unguessable SESSION token (distinct from a
@@ -50,14 +54,15 @@ export const User = entity('User', {
 // it composes the entity's trusted `insert` core (one write path).
 function mintSession(payload, { insert, mintToken }) {
   const token = mintToken();
+  const now = Date.now();
   if (payload && typeof payload.userId !== 'undefined') {
-    return insert({ token, principalType: 'user', principalId: String(payload.userId) });
+    return insert({ token, principalType: 'user', principalId: String(payload.userId), createdAt: now });
   }
   if (payload && payload.kind === 'link' && typeof payload.token !== 'undefined') {
     // The link principal carries WHICH share granted it: the incoming share
     // token (the grant identity), not the doc id. A fresh session token is minted
     // for the cookie; the share token becomes the principal id.
-    return insert({ token, principalType: 'link', principalId: String(payload.token) });
+    return insert({ token, principalType: 'link', principalId: String(payload.token), createdAt: now });
   }
   throw new Error(
     `Session.create accepts a closed set of session intents: { userId } for a ` +
@@ -73,9 +78,13 @@ export const Session = entity('Session', {
     token: text({ readonly: true }),
   principalType: text({ readonly: true }),
   principalId: text({ readonly: true }),
+  createdAt: SessionCreatedAt,
 
   grant: () => [notRequestReadable('Session')],
   create: mintSession,
+  schedule: {
+    remove: schedule.after(SessionCreatedAt, config.sessionDurationMs),
+  },
 });
 
 // Inbox — the framework's per-user notification store. An app projects rows into

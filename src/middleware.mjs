@@ -19,11 +19,7 @@ const SECURITY_HEADERS = Object.freeze({
 
 // Apply the security headers to a response before its head is written. Idempotent
 // and unconditional — every exit path runs through here.
-export function applySecurityHeaders(res) {
-  for (const [name, value] of Object.entries(SECURITY_HEADERS)) {
-    res.setHeader(name, value);
-  }
-}
+export const applySecurityHeaders = (res) => Object.entries(SECURITY_HEADERS).forEach(([name, value]) => res.setHeader(name, value));
 
 // Same-origin verification — the ONE implementation used by both transports:
 // the REST CSRF guard (serve.mjs) and the WebSocket upgrade handshake (live.mjs).

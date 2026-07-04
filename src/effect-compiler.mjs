@@ -68,6 +68,10 @@ function isTriggerHandle(handle) {
   return isEventHandle(handle) || isStateTransitionHandle(handle) || typeof handle === 'symbol';
 }
 
+function isDurableEffectDeclaration(effect) {
+  return effect && typeof effect === 'object' && typeof effect.durable === 'string';
+}
+
 export function effectEntries(effects, { sourceEntityName } = {}) {
   if (effects === null || effects === undefined) return [];
   if (!Array.isArray(effects)) {
@@ -239,6 +243,7 @@ export function compileEntityEffects(entityRecord, allEntities) {
   const effectGraphEntry = new Set(); // target entities for cycle detection
 
   for (const [triggerHandle, effect] of effectEntries(effects, { sourceEntityName: name })) {
+    if (isDurableEffectDeclaration(effect)) continue;
     const validation = validateEffectDeclaration(effect, {
       triggerHandle,
       sourceEntityName: name,
@@ -490,6 +495,7 @@ export function buildEffectsRegistry(entities) {
     if (!effects) continue;
 
     for (const [key, effect] of effectEntries(effects, { sourceEntityName: name })) {
+      if (isDurableEffectDeclaration(effect)) continue;
       const isSymbol = typeof key === 'symbol';
       if (!isTriggerHandle(key)) {
         throw new Error(
@@ -649,6 +655,7 @@ export function buildEffectsGraph(entities) {
     if (!effects) continue;
     const targets = new Set();
     for (const [, effect] of effectEntries(effects, { sourceEntityName: name })) {
+      if (isDurableEffectDeclaration(effect)) continue;
       const tgt = effect && effect.mutate;
       if (tgt) {
         // self: skip (no edge), many: use .target.name, plain use .name
@@ -678,11 +685,7 @@ export function validateEffects(entities) {
 
 // ---- Helpers ----
 
-function stringifyTrigger(handle) {
-  if (typeof handle === 'string') return handle;
-  if (typeof handle === 'symbol') return handle.toString();
-  if (handle && typeof handle.toString === 'function') {
-    return handle.toString();
-  }
-  return String(handle);
-}
+const stringifyTrigger = (h) =>
+  typeof h === 'string' ? h
+  : typeof h === 'symbol' ? h.toString()
+  : h?.toString?.() ?? String(h);

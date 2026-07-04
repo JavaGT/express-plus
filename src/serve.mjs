@@ -43,6 +43,7 @@ import { runChain } from './http-handler-chain.mjs';
 import { matchRoute } from './http-route-match.mjs';
 import { committedEventHeaders, sendJson } from './http-response.mjs';
 import { readScopedRow, authorizeRow } from './http-row-read.mjs';
+import { createResponseFacade } from './http-response-factory.mjs';
 
 // One kernel mutation through the write queue, translating the failure modes
 // shared by create/update/remove: queue starvation → 503, validation → 400
@@ -192,76 +193,37 @@ async function dispatch(req, res, route, principal, db, params, body, app = null
 
 // Framework-owned snapshot + resync endpoints (spec #1, D6/D7). NOT mounted
 // `makeHandlerRes(nodeRes, onEnd)` wraps a node response in the Express-style
-// facade the `app.use(prefix, fn)` intercept hands to a mounted handler: a
-// chainable `status`/`json`/`send`/`sendStatus`, passthrough `writeHead`/`end`/
-// `setHeader`, a `headersSent` getter, and `raw` for callers that pipe a
-// `Response.body` (the consumer's `sendWebResponse`). `onEnd` flips the
-// intercept's handled flag so a handler that ended the response short-circuits
-// the dispatch and one that did not write falls through to the next handler.
+// facade the `app.use(prefix, fn)` intercept hands to a mounted handler (shared
+// methods from http-response-factory.mjs + a serve-specific `.stream()`).
+// `onEnd` flips the intercept's handled flag so a handler that ended the
+// response short-circuits the dispatch and one that did not write falls through
+// to the next handler.
 function makeHandlerRes(nodeRes, onEnd) {
-  let pendingStatus = 200;
-  const res = {
-    status(code) {
-      pendingStatus = code;
-      return res;
-    },
-    json(value) {
-      sendJson(nodeRes, pendingStatus, value);
-      onEnd();
-      return res;
-    },
-    send(value) {
-      const payload = String(value);
-      nodeRes.writeHead(pendingStatus, {
-        'content-type': 'text/plain; charset=utf-8',
-        'content-length': Buffer.byteLength(payload),
-      });
-      nodeRes.end(payload);
-      onEnd();
-      return res;
-    },
-    sendStatus(code) {
-      nodeRes.writeHead(code);
-      nodeRes.end();
-      onEnd();
-      return res;
-    },
-    get headersSent() {
-      return nodeRes.headersSent;
-    },
-    writeHead(...args) {
-      return nodeRes.writeHead(...args);
-    },
-    end(...args) {
-      const r = nodeRes.end(...args);
-      onEnd();
-      return r;
-    },
-    setHeader(...args) {
-      return nodeRes.setHeader(...args);
-    },
-    async stream(webResponse, options = {}) {
-      const source = webResponse instanceof ReadableStream
-        ? new Response(webResponse)
-        : webResponse;
-      nodeRes.writeHead(source.status, Object.fromEntries(source.headers));
-      if (options.buffering === false) {
-        nodeRes.setHeader('X-Accel-Buffering', 'no');
+  const res = createResponseFacade(nodeRes, { onEnd });
+
+  // serve-specific: stream pipes a Web Response (or a bare ReadableStream) to
+  // the Node response and calls onEnd() so the intercept short-circuits.
+  res.stream = async function (webResponse, options = {}) {
+    const source = webResponse instanceof ReadableStream
+      ? new Response(webResponse)
+      : webResponse;
+    nodeRes.writeHead(source.status, Object.fromEntries(source.headers));
+    if (options.buffering === false) {
+      nodeRes.setHeader('X-Accel-Buffering', 'no');
+    }
+    if (source.body) {
+      const reader = source.body.getReader();
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        nodeRes.write(value);
       }
-      if (source.body) {
-        const reader = source.body.getReader();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          nodeRes.write(value);
-        }
-      }
-      nodeRes.end();
-      onEnd();
-      return res;
-    },
-    raw: nodeRes,
+    }
+    nodeRes.end();
+    onEnd();
+    return this;
   };
+
   return res;
 }
 
@@ -467,10 +429,7 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 // Returns true when the mutation is allowed, false when it is foreign (→ 403).
 // Safe methods carry no state change; the same-origin verdict (shared with the
 // WS upgrade handshake, middleware.mjs) gates every other method.
-function csrfGuard(req) {
-  if (SAFE_METHODS.has(req.method)) return true;
-  return isSameOriginRequest(req);
-}
+const csrfGuard = (req) => SAFE_METHODS.has(req.method) || isSameOriginRequest(req);
 
 // Build the node:http request handler that serves a routing table. `principalOf`
 // derives the request's principal; it defaults to a function returning anonymous
@@ -749,14 +708,16 @@ export function listen(app, port, optionsOrCallback = {}) {
   const httpServer = createHttpServer(resolved);
   app.httpServer = httpServer;
   installGracefulShutdown(app);
-  // The job-queue reaper runs as a framework-owned periodic sweep (spec #5):
-  // re-assigns lease-expired jobs + revokes stale-heartbeat workers. Started
-  // after installGracefulShutdown so its stop() can be registered with the
-  // onShutdown registry (the timer is cleared on graceful exit). Only when the
-  // app engaged the job-queue substrate.
+  // Register the shared clock shutdown handler once (one timer, not five).
+  // All framework reapers (schedule, tick, job-queue lease, blob, log-retention,
+  // job-worker polls) register as watchers on `app.clock`. The clock is stopped
+  // once on graceful exit.
+  app.onShutdown('clock', () => app.clock?.stop(), { timeoutMs: 1000 });
+  // The job-queue reaper — re-assigns lease-expired jobs + revokes stale-
+  // heartbeat workers. Scheduled on the shared clock. Only when the app engaged
+  // the job-queue substrate.
   if (app.jobs) {
     app.jobs.startReaper();
-    app.onShutdown('job-queue-reaper', () => app.jobs.stop(), { timeoutMs: 1000 });
   }
   // The blob reaper (eng-review spec #10, consult #17). `app.blobs` is built
   // whenever a db is engaged (not opt-in), and POST /blobs is always live, so an
@@ -769,19 +730,15 @@ export function listen(app, port, optionsOrCallback = {}) {
   // critical section against dispatch via writeQueue.run. app.blobColumns is set
   // in buildKernel (app.ready); the sweep reads it lazily so it is always current
   // even for apps whose blob fields register after listen() (buildKernel runs in
-  // app.ready, which tests await).
+  // app.ready, which tests await). Scheduled on the shared clock.
   const blobReapIntervalMs = options.blobReapIntervalMs ?? BLOB_REAP_INTERVAL_MS;
   const blobReapTtlMs = options.blobReapTtlMs ?? BLOB_REAP_TTL_MS;
   if (app.blobs) {
     app.sweepBlobs = () => app.writeQueue.run(() =>
       app.blobs.reap({ ttl: blobReapTtlMs, blobColumns: app.blobColumns ?? [] })
     );
-    let blobTimer;
-    blobTimer = setInterval(() => {
-      app.sweepBlobs().catch((err) => log.warn('system', 'blob reap failed', { err }));
-    }, blobReapIntervalMs);
-    if (typeof blobTimer.unref === 'function') blobTimer.unref();
-    app.onShutdown('blob-reaper', () => { if (blobTimer) clearInterval(blobTimer); }, { timeoutMs: 1000 });
+    app.clock.add({ name: 'blob-reaper', intervalMs: blobReapIntervalMs,
+      fn: () => { app.sweepBlobs().catch((err) => log.warn('system', 'blob reap failed', { err })); } });
   }
   // _Log retention reaper (eng-review #42). The event log grows forever; when a
   // logRetentionDays option is set, the reaper prunes entries older than the
@@ -789,6 +746,7 @@ export function listen(app, port, optionsOrCallback = {}) {
   // under the writeQueue mutex so concurrent dispatches don't race. The log is
   // eviction-safe: events-since delivers a gap → recover bundle (SPEC §D6); a
   // pruned entry that arrived after the subscriber's cursor is a legitimate gap.
+  // Scheduled on the shared clock.
   const logRetentionDays = options.logRetentionDays;
   if (logRetentionDays > 0) {
     app.sweepLog = () => app.writeQueue.run(() => {
@@ -796,12 +754,8 @@ export function listen(app, port, optionsOrCallback = {}) {
       app.db.prepare('DELETE FROM _Log WHERE committedAt < :cutoff').run({ cutoff });
       app.db.prepare('DELETE FROM _ProjectedCursor WHERE lastSeq = 0').run();
     });
-    let logTimer;
-    logTimer = setInterval(() => {
-      app.sweepLog().catch((err) => log.warn('system', 'log retention sweep failed', { err }));
-    }, options.logRetentionIntervalMs ?? BLOB_REAP_INTERVAL_MS);
-    if (typeof logTimer.unref === 'function') logTimer.unref();
-    app.onShutdown('log-reaper', () => { if (logTimer) clearInterval(logTimer); }, { timeoutMs: 1000 });
+    app.clock.add({ name: 'log-reaper', intervalMs: options.logRetentionIntervalMs ?? BLOB_REAP_INTERVAL_MS,
+      fn: () => { app.sweepLog().catch((err) => log.warn('system', 'log retention sweep failed', { err })); } });
   }
   // Start the tick engine if any entity declares a tick trigger. DEFERRED into
   // `app.ready` below — `app.kernel` (and thus `dispatch`) is not built until
@@ -844,18 +798,18 @@ export function listen(app, port, optionsOrCallback = {}) {
       app.writeQueue.run(() => app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal }));
     // Start the tick engine now that `app.kernel.dispatch` exists. Only starts
     // if some entity declares a tick trigger (tick.hz / tick.every); otherwise
-    // startTickEngine returns a no-op and no timer is created.
-    const tickEngine = startTickEngine({
+    // startTickEngine returns a no-op and no timer is created. Scheduled on
+    // the shared clock.
+    startTickEngine({
       db: app.db,
       entities: app.entities,
       dispatch: dispatchThroughWriteQueue,
+      clock: app.clock,
     });
-    app.onShutdown('tick-engine', () => { tickEngine.stop(); }, { timeoutMs: 1000 });
-    // Start the schedule reaper now that app.kernel.dispatch exists. Mirrors
-    // the tick engine pattern; uses a fixed 1s poll interval. Only starts if
-    // some entity declares a schedule.at / schedule.after deadline trigger.
-    const reaper = startReaper({ db: app.db, entities: app.entities, dispatch: dispatchThroughWriteQueue });
-    app.onShutdown('reaper', () => { reaper.stop(); }, { timeoutMs: 1000 });
+    // Start the schedule reaper now that app.kernel.dispatch exists. Only
+    // starts if some entity declares a schedule.at / schedule.after deadline
+    // trigger. Scheduled on the shared clock.
+    startReaper({ db: app.db, entities: app.entities, dispatch: dispatchThroughWriteQueue, clock: app.clock });
     // Projected.async boot catch-up. If the process died between committing an
     // event and the post-commit consumer applying its projection, the projected
     // field is stale and nothing reconciles it. One sweep at startup, under the
@@ -882,6 +836,12 @@ export function listen(app, port, optionsOrCallback = {}) {
         log.warn('system', 'durable effects recovery sweep failed', { err });
       }
     }
+    // Start the unified clock — a single setTimeout loop that wakes only at the
+    // nearest deadline. All framework reapers (schedule, tick, job-queue lease,
+    // blob, log-retention, job-worker polls) register as watchers above; this
+    // activates real timer scheduling. Called AFTER the sweeps finish so catch-up
+    // doesn't race the first interval fire.
+    app.clock._schedule();
     if (!httpServer.listening) {
       await new Promise((resolve) => httpServer.once('listening', resolve));
     }

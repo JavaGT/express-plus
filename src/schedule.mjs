@@ -29,6 +29,15 @@ function validateWith(withValue, context) {
   throw new Error(`schedule ${context}: 'with' must be an object or a function ({row}) => obj`);
 }
 
+function resolvePayload(trigger, db, entityName, rowId) {
+  if (trigger.with === undefined || trigger.with === null) return {};
+  if (typeof trigger.with === 'function') {
+    const fullRow = db.prepare(`SELECT * FROM ${entityName} WHERE id = :id`).get({ id: rowId });
+    return trigger.with({ row: fullRow });
+  }
+  return { ...trigger.with };
+}
+
 export const schedule = Object.freeze({
   at(field, options = {}) {
     if (!field || typeof field !== 'object') throw new Error('schedule.at: field must be a field descriptor');
@@ -96,18 +105,7 @@ export function discoverDueSchedules(db, entities, now) {
 
         const rows = db.prepare(sql).all(params);
         for (const row of rows) {
-          // Resolve payload from 'with'
-          let payload = {};
-          if (trigger.with !== undefined && trigger.with !== null) {
-            if (typeof trigger.with === 'function') {
-              // Re-fetch the full row for the function
-              const fullRow = db.prepare(`SELECT * FROM ${record.name} WHERE id = :id`).get({ id: row.id });
-              payload = trigger.with({ row: fullRow });
-            } else {
-              // Object literal: shallow copy per row
-              payload = { ...trigger.with };
-            }
-          }
+          const payload = resolvePayload(trigger, db, record.name, row.id);
           results.push({ entity: record.name, verb, rowId: row.id, payload, sourceName: trigger.sourceName ?? fieldName });
         }
       }
@@ -152,6 +150,23 @@ export const tick = Object.freeze({
   },
 });
 
+// simulate — simulation declaration. A simulation runs an `hz`-rate loop
+// holding ephemeral working state in memory (never per-tick DB writes).
+// `step({state, dt, row})` → {state, events} returns the next working state
+// plus optional events to persist. Events are dispatched through the normal
+// pipeline (in-transaction), so checkpoint writes are framework-owned.
+// `when` is an optional lifecycle guard — the simulation only runs while it
+// returns true per scope.
+export function simulate({ hz, step, when } = {}) {
+  if (typeof hz !== 'number' || !Number.isFinite(hz) || hz <= 0) {
+    throw new Error('simulate: hz must be a finite positive number');
+  }
+  if (typeof step !== 'function') {
+    throw new Error('simulate: step must be a function ({state, dt, row}) => ({state, events})');
+  }
+  return Object.freeze({ kind: 'simulate', hz, step, when: when ?? undefined });
+}
+
 // tickSource — derives the identity for a tick principal, mirroring the
 // schedulerSource pattern (entity + verb). No fieldName — a tick has no
 // field; derived id, never magic string.
@@ -181,18 +196,7 @@ export function discoverTickedRows(db, entities, now) {
         const rows = db.prepare(sql).all(params);
 
         for (const row of rows) {
-          // Resolve payload from `with` (IDENTICAL to discoverDueSchedules)
-          let payload = {};
-          if (trigger.with !== undefined && trigger.with !== null) {
-            if (typeof trigger.with === 'function') {
-              // Re-fetch the full row for the function
-              const fullRow = db.prepare(`SELECT * FROM ${entity.name} WHERE id = :id`).get({ id: row.id });
-              payload = trigger.with({ row: fullRow });
-            } else {
-              // Object literal: shallow copy per row
-              payload = { ...trigger.with };
-            }
-          }
+          const payload = resolvePayload(trigger, db, entity.name, row.id);
           results.push({ entity: entity.name, verb, rowId: row.id, payload });
         }
       }
