@@ -98,6 +98,11 @@ rather than ad-hoc additions to a closed catalog.
 
 ### BLOCKER #2 — No blob/bytes binary field type
 
+> **SETTLED (blob field shipped):** `blob` is now exported from `workbench`
+> (`src/field.mjs`) and used by the photo-editor exemplar (`original: blob(...)`
+> in `photo-editor.mjs`). The field-type gap is closed; the *raster CRDT* gap
+> (BLOCKER #1) remains open. The historical text below is kept for context.
+
 **Failing code:**
 ```js
 imageData: text({ max: 50000000 })
@@ -288,7 +293,7 @@ This sharp edge is a consequence of SHOULD-FIX #1 (no `array` field).
 
 | # | Prior finding (pre-grill) | Status | Why |
 |---|--------------------------|--------|-----|
-| 1 | No blob/bytes field | **STILL-OPEN** | Planned in Phase 2 item 12; not in grilled API surface. BLOCKER #2 above. |
+| 1 | No blob/bytes field | **SETTLED** | `blob` now exported from `workbench` (`src/field.mjs`); photo-editor.mjs uses `original: blob(...)`. The field type shipped. (Historical: was STILL-OPEN / Phase 2 item 12.) |
 | 2 | No raster CRDT merge | **STILL-OPEN** | No design; blocked on undefined custom CRDT plugin contract. BLOCKER #1 above. |
 | 3 | No ordered collection | **STILL-OPEN (NEW-ANGLE)** | Planned in Phase 2 item 12; `map` (valued set) is unordered. The grilled API adds `map` but NOT `array`. SHOULD-FIX #1 above. |
 | 4 | No undo/redo primitive | **STILL-OPEN** | Deferred per IMPL PLAN P6. The grilled design reserves the `inverse` slot in the operator contract but doesn't expose it. Not raised as a new pain point here — the same gap, unchanged. |
@@ -303,7 +308,7 @@ This sharp edge is a consequence of SHOULD-FIX #1 (no `array` field).
 | # | Pain point | Severity | Tests |
 |---|-----------|----------|-------|
 | 1 | No raster CRDT + no custom CRDT plugin contract | **BLOCKER** | Field-type catalog, plugin extension point |
-| 2 | No blob/bytes binary field | **BLOCKER** | Phase 2 item 12 (planned, not surfaced) |
+| 2 | No blob/bytes binary field | **SETTLED** | `blob` shipped (`src/field.mjs`); photo-editor.mjs uses it. (Historical: Phase 2 item 12, planned-not-surfaced.) |
 | 3 | No ordered array collection (z-order) | SHOULD-FIX | `map` solves valued sets but not ordered lists |
 | 4 | Effects can't drive a render pipeline | SHOULD-FIX | ADR #6 (effects are DB-only, `with` can't compute) |
 | 5 | Field `.can()` reading its own value | Sharp edge | ADR #3 (row materialized before field eval) |

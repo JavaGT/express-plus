@@ -37,7 +37,7 @@ import { committedEventHeaders, sendJson } from './http-response.mjs';
 import { authorizeRow } from './http-row-read.mjs';
 import { createResponseFacade } from './http-response-factory.mjs';
 import { dispatchCrud } from './http-crud-dispatch.mjs';
-import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute } from './http-framework-routes.mjs';
+import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute, handleClientSdkRoute } from './http-framework-routes.mjs';
 import { installGracefulShutdown } from './lifecycle.mjs';
 
 // Framework-owned snapshot + resync endpoints (spec #1, D6/D7). NOT mounted
@@ -222,6 +222,13 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // `app.static('/public', dir)`; every GET request under the prefix is served
       // from the filesystem with a content-type derived from the file extension.
       // Missing files → 404; path-traversal attempts → 404 (fail closed).
+      // Framework-owned browser SDK: `GET /workbench.mjs` serves the client
+      // side of the /events live protocol. Intercepts BEFORE matchRoute like
+      // other framework defaults.
+      if (isApp && req.method === 'GET') {
+        const handled = await handleClientSdkRoute(source, req, res);
+        if (handled) return;
+      }
       // Framework-owned default endpoints — snapshot + resync (spec #1, D6/D7).
       // Like the /events WS transport, these are framework defaults (not mounted
       // routes): `/snapshot/:entity/:id` and `/events-since/:entity/:id` resolve
@@ -347,6 +354,12 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
 // server, and an unhandledRejection/uncaughtException is trapped. The app mounts
 // none of this — `app.shutdown()` is the close the traps call (and tests use).
 export function listen(app, port, optionsOrCallback = {}) {
+  // Portless `app.listen()` — `port` was already optional to `app.listen`, but
+  // here it is the value actually bound. An absent port falls back to
+  // `app.config.port` (the env-or-option value resolved at construction) and
+  // finally the process-wide singleton. One listen path, three sources, most-
+  // specific-wins.
+  port = port ?? app.config?.port ?? config.port;
   const isCallback = typeof optionsOrCallback === 'function';
   const options = isCallback ? {} : optionsOrCallback;
   const onListening = isCallback ? optionsOrCallback : options.onListening;
@@ -369,11 +382,14 @@ export function listen(app, port, optionsOrCallback = {}) {
   // already accepting connections. A resolution failure rejects `app.ready`; the
   // handler surfaces it as a 500 and the request is never dispatched — fail closed.
   // CSP / HSTS / CORS / requestLog are opt-in policy headers (piece 4, 5).
+  // `env` follows the app's config when set (per-app env), else the explicit
+  // option, else the singleton default inside makeRequestHandler.
   const resolved = makeRequestHandler(
     // Read the table through a thunk: it is empty until resolution completes, and
     // the handler below gates every request on `app.ready` before reading it.
     app,
-    { ...options, principalOf, db: app.db, rateLimiter: options.rateLimit ? createRateLimiter(options.rateLimit) : null,
+    { ...options, principalOf, db: app.db, env: options.env ?? app.config?.env ?? config.env,
+      rateLimiter: options.rateLimit ? createRateLimiter(options.rateLimit) : null,
       csp: options.csp, hsts: options.hsts, cors: options.cors, requestLog: options.requestLog },
   );
 

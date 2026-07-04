@@ -9,7 +9,6 @@
 // child Comment entity is mounted as a sub-resource of Doc (grant inherits
 // through the typed FK). Cross-cutting auth is plain routers (`app.use`).
 import workbench from 'workbench';
-import { config } from 'workbench/internal';
 import { Doc } from './doc.mjs';
 import { sessionRoutes, userRoutes } from './session.mjs';
 
@@ -20,5 +19,5 @@ app.mount('/users',    userRoutes());        // user views (authed)
 app.mount('/docs',   Doc);                 // Doc + /docs/:id/feed + /home + /:docId/shares + /:docId/comments
                                             // Comment inherits Doc's grant via the typed FK
 
-app.listen(config.port, () =>
-  console.log(`gdocs-clone on http://localhost:${config.port} [${config.env}]`));
+app.listen(() =>
+  console.log(`gdocs-clone on http://localhost:${app.config.port} [${app.config.env}]`));

@@ -88,7 +88,7 @@ const norm = (s) => s.replace(/\s+/g, ' ').trim();
 
 function seed() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Feed (id TEXT PRIMARY KEY, title TEXT)');
   db.exec('CREATE TABLE Feed_subscribers (Feed_id TEXT, member_id TEXT)');
   db.exec('CREATE TABLE Episode (id TEXT PRIMARY KEY, feed TEXT, title TEXT)');

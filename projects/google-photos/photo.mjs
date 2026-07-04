@@ -5,13 +5,7 @@
 //
 // IMPORTS: the framework exports we WISH existed are imported with a
 // "MISSING" comment — these are the gaps this stress-test documents.
-import { entity, text, number, date, ref, link, map, boolean, grant, deny, read, write, subscribe, admin, anyOf, never, scope, router, User } from 'workbench';
-import {
-  blob,
-  projected,
-  json,
-  list,
-} from 'workbench/internal';
+import { entity, text, number, date, ref, link, map, boolean, grant, deny, read, write, subscribe, admin, anyOf, never, scope, router, User, blob, projected, json, list } from 'workbench';
 
 // ==========================================================================
 // Capability sets
@@ -161,9 +155,9 @@ export const Photo = entity('Photo', {
   // Checks
   // ==========================================================================,
   checks: {
-    // Auto-derived from `owner: ref('User', { role: 'owner' })`:
-    //   owner: ({ Photo, principal }) => Photo.owner.is(principal.id)
-    owner:       ({ Photo, principal }) => Photo.owner.is(principal.id),
+    // `owner` is auto-derived from `owner: ref('User', { role: 'owner' })`
+    // above (DECISIONLOG #54) and is NOT redeclared here — redeclaring a
+    // ref-role-derived check name is a load-time error.
 
     // Cross-entity typed-FK traversal: asks "is principal a member of
     // this photo's album?" The authorization compiler must traverse

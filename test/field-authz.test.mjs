@@ -156,7 +156,7 @@ test('Owner can manage collaborators (regression guard)', async () => {
 
 test('Trusted query API (no principal) bypasses field authz (mechanics)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   executeDDL(User, db);
   executeDDL(Doc, db);

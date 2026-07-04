@@ -213,7 +213,7 @@ test('SQL scope returns only layers whose canvas the principal can access', () =
   const { RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   assert.deepEqual(scopedIds(db, RasterLayer, alice).sort(), ['l1', 'l2']);
   assert.deepEqual(scopedIds(db, RasterLayer, bob).sort(), ['l1', 'l2', 'l3']);
@@ -229,7 +229,7 @@ test('runtime mayVerb grants correct capabilities per canvas role on the parent'
   const { Canvas } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const c = Canvas.getOrFail('c-shared');
 
@@ -250,7 +250,7 @@ test('visible field .can admits editors/owners for hidden layers via mayFieldOp'
   const { RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const l2 = RasterLayer.getOrFail('l2');
   assert.equal(l2.visible, false, 'l2 is hidden');
@@ -275,7 +275,7 @@ test('visible field .can passes for visible layers to all scoped members', async
   const { RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const l1 = RasterLayer.getOrFail('l1');
   assert.equal(l1.visible, true, 'l1 is visible');
@@ -295,7 +295,7 @@ test('null canvas FK fails closed for all principals', async () => {
   const { RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const l4 = RasterLayer.getOrFail('l4');
   assert.equal(await mayVerb(RasterLayer, 'read', l4, alice), false);
@@ -314,7 +314,7 @@ test('removing a collaborator revokes SQL scope AND field read', async () => {
   const { RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const { mayFieldOp } = await import('../src/row-grant.mjs');
   const l1 = RasterLayer.getOrFail('l1');
@@ -339,7 +339,7 @@ test('inherit-child field without explicit .can strong-inherits the resolved row
   const { RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const { mayFieldOp } = await import('../src/row-grant.mjs');
   const l1 = RasterLayer.getOrFail('l1'); // canvas c-shared
@@ -359,7 +359,7 @@ test('HTTP list and read respect inherited canvas grant', async (t) => {
   const { Canvas, RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const app2 = workbench({ db });
   app2.mount('/canvases', Canvas);
@@ -393,7 +393,7 @@ test('RasterLayer checks traverse canvas FK through thenable ref handle', async 
   const { RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const l1 = RasterLayer.getOrFail('l1');
 
@@ -424,7 +424,7 @@ test('RasterLayer checks traverse canvas FK through thenable ref handle', async 
 test('projected.async computes a renderable preview for Canvas', async (t) => {
   const { Canvas } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   // Create canvas through the framework pipeline so projected.async fires
   const app = workbench({ db });

@@ -90,7 +90,7 @@ const DocLogB = entity('DocLogB', {
 
 function setupLog() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(DocLogB)) db.exec(sql);
   return db;

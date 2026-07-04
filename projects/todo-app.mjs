@@ -9,7 +9,6 @@
 // app.ready), error handling, and graceful shutdown — nothing to mount here.
 
 import workbench, { User } from 'workbench';
-import { config } from 'workbench/internal';
 
 import { Todo, TodoList, SharedTodo } from './todo.mjs';
 
@@ -28,10 +27,10 @@ app.mount('/todos', Todo)
    .mount('/lists', TodoList)
    .mount('/lists/:listId/items', SharedTodo);
 
-app.listen(config.port, {
+app.listen({
   principalOf: () => demoUser,
   onListening: () => {
-    console.log(`todo-demo → http://localhost:${config.port}`);
+    console.log(`todo-demo → http://localhost:${app.config.port}`);
     console.log(`  GET  /todos                      — list your todos`);
     console.log(`  POST /todos                      — create a todo`);
     console.log(`  GET  /todos/:id                  — read one todo`);

@@ -172,7 +172,7 @@ test('DDL includes a TEXT column for state fields', () => {
 
 test('create with valid state value persists the row', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
@@ -201,7 +201,7 @@ test('create with valid state value persists the row', async (t) => {
 
 test('create with invalid state value throws ValidationError', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
@@ -232,7 +232,7 @@ test('create with invalid state value throws ValidationError', async (t) => {
 
 test('update legal transition (draft -> shared) persists', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
@@ -270,7 +270,7 @@ test('update legal transition (draft -> shared) persists', async (t) => {
 
 test('update illegal transition (draft -> archived) throws 400 with zero footprint', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
@@ -322,7 +322,7 @@ test('update illegal transition (draft -> archived) throws 400 with zero footpri
 
 test('update state to current value is a no-op (skips transition check)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
@@ -359,7 +359,7 @@ test('update state to current value is a no-op (skips transition check)', async 
 
 test('update nonexistent row with state change throws 400 (no current state)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);

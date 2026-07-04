@@ -58,7 +58,7 @@ function buildTodoListEntity() {
 
 function seed() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE TodoList (id TEXT PRIMARY KEY, title TEXT, owner TEXT)');
   db.exec(
     'CREATE TABLE TodoList_collaborators (TodoList_id TEXT, member_id TEXT, role TEXT)',
@@ -68,7 +68,7 @@ function seed() {
 
 async function seedWithServer() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE TodoList (id TEXT PRIMARY KEY, title TEXT, owner TEXT)');
   db.exec(
@@ -169,7 +169,7 @@ test('a non-member is denied by BOTH layers (the two agree)', async () => {
 
 test('a photo can inherit album membership through a typed FK in BOTH layers', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Album (id TEXT PRIMARY KEY, title TEXT)');
   db.exec('CREATE TABLE Album_collaborators (Album_id TEXT, member_id TEXT, role TEXT)');
   db.exec('CREATE TABLE Photo (id TEXT PRIMARY KEY, title TEXT, album TEXT)');
@@ -247,7 +247,7 @@ function scopedPhotoIds(db, Photo, who) {
 
 test('runtime ref traversal resolves target scalar fields through await', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   db.exec(`CREATE TABLE Canvas (id TEXT, owner TEXT, title TEXT)`);
   db.exec(`CREATE TABLE Canvas_collaborators (Canvas_id TEXT, member_id TEXT, role TEXT)`);

@@ -31,7 +31,7 @@ const Items = entity('Items', {
 
 async function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(Items)) db.exec(sql);
   db.prepare("INSERT INTO Items (id) VALUES ('r1')").run();

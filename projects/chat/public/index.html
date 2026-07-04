@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>workbench chat</title>
+  <style>
+    :root { color-scheme: light dark; --bg: #fafafa; --panel: #fff; --line: #e3e3e3; --accent: #2563eb; }
+    * { box-sizing: border-box; }
+    body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: var(--bg); color: #111; }
+    header { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 12px; align-items: center; background: var(--panel); }
+    header h1 { font-size: 16px; margin: 0; }
+    header #who { margin-left: auto; color: #555; }
+    main { display: grid; grid-template-columns: 220px 1fr; height: calc(100vh - 47px); }
+    #chats { border-right: 1px solid var(--line); background: var(--panel); overflow-y: auto; padding: 8px; }
+    #chats .chat { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; }
+    #chats .chat.active { background: #eef2ff; }
+    #chats .chat small { color: #777; }
+    #newchat { display: flex; gap: 4px; margin: 8px 0; }
+    #newchat input { flex: 1; padding: 6px; border: 1px solid var(--line); border-radius: 6px; }
+    button { border: 1px solid var(--line); background: var(--panel); padding: 6px 10px; border-radius: 6px; cursor: pointer; }
+    button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+    #chatview { display: flex; flex-direction: column; }
+    #messages { flex: 1; overflow-y: auto; padding: 12px 16px; }
+    .msg { margin: 4px 0; }
+    .msg .meta { color: #777; font-size: 12px; margin-right: 6px; }
+    .msg.mine .meta { color: var(--accent); }
+    #send { display: flex; gap: 8px; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--panel); }
+    #send input { flex: 1; padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
+    #login { max-width: 280px; margin: 40px auto; padding: 24px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+    #login h2 { margin-top: 0; }
+    #login label { display: block; margin: 10px 0 4px; }
+    #login input { width: 100%; padding: 8px; border: 1px solid var(--line); border-radius: 6px; }
+    #login button { width: 100%; margin-top: 14px; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <header class="hidden" id="appbar">
+    <h1>workbench chat</h1>
+    <span id="who"></span>
+    <button id="logout">log out</button>
+  </header>
+
+  <section id="login">
+    <h2>Sign in</h2>
+    <p style="color:#777;margin-top:0">Any username + password creates the account.</p>
+    <label>username <input id="username" autofocus /></label>
+    <label>password <input id="password" type="password" /></label>
+    <button class="primary" id="signin">sign in / sign up</button>
+    <p id="err" style="color:#b91c1c;margin-top:10px"></p>
+  </section>
+
+  <main class="hidden" id="main">
+    <aside id="chats">
+      <div id="newchat">
+        <input id="title" placeholder="new chat title" />
+        <button class="primary" id="create">+</button>
+      </div>
+      <div id="chatlist"></div>
+    </aside>
+    <section id="chatview">
+      <div id="messages"><p style="color:#999">select or create a chat</p></div>
+      <form id="send" class="hidden">
+        <input id="body" placeholder="type a message" autocomplete="off" />
+        <button class="primary" type="submit">send</button>
+      </form>
+    </section>
+  </main>
+
+  <script type="module">
+    import { createAuthClient, createLiveStore } from '/workbench.mjs';
+
+    const auth = createAuthClient({ baseUrl: '' });
+    const me = { id: null, username: null };
+
+    // The chat list is a live store: subscribe(id) per chat row syncs over the
+    // framework's /events WebSocket. Here we keep one row live at a time; the
+    // full list of chats is fetched plainly (the SDK has no live-collection
+    // primitive — see the SDK-gap note at the bottom of this file).
+    const chats = createLiveStore({ baseUrl: '', name: 'Chat', path: '/chats' });
+
+    let currentChatId = null;
+    let pollTimer = null;
+    let seenMessageIds = new Set();
+
+    const $ = (id) => document.getElementById(id);
+
+    // --- auth ---
+    $('signin').onclick = async () => {
+      $('err').textContent = '';
+      const u = $('username').value.trim();
+      const p = $('password').value;
+      if (!u || !p) { $('err').textContent = 'enter a username and password'; return; }
+      try {
+        const { user } = await auth.login(u, p);
+        me.id = user.id; me.username = user.username;
+        enterApp();
+      } catch (e) { $('err').textContent = e.message; }
+    };
+    $('logout').onclick = async () => { await auth.logout(); location.reload(); };
+
+    function enterApp() {
+      $('login').classList.add('hidden');
+      $('appbar').classList.remove('hidden');
+      $('main').classList.remove('hidden');
+      $('who').textContent = '@' + me.username;
+      loadChats();
+    }
+
+    // --- chat list ---
+    async function loadChats() {
+      const res = await fetch('/chats', { credentials: 'include' });
+      const rows = await res.json();
+      renderChatList(rows, currentChatId);
+      if (currentChatId) await openChat(currentChatId);
+    }
+
+    function renderChatList(rows, activeId) {
+      const list = $('chatlist');
+      list.innerHTML = '';
+      if (!rows.length) {
+        list.innerHTML = '<p style="color:#999">no chats yet</p>';
+        return;
+      }
+      for (const c of rows) {
+        const el = document.createElement('div');
+        el.className = 'chat' + (c.id === activeId ? ' active' : '');
+        el.innerHTML = `${escapeHtml(c.title)}<br><small>owner @${escapeHtml(c.owner)}</small>`;
+        el.onclick = () => openChat(c.id);
+        list.appendChild(el);
+      }
+    }
+
+    $('create').onclick = async () => {
+      const title = $('title').value.trim();
+      if (!title) return;
+      const res = await chats.create({ title });   // owner auto-set from the session
+      $('title').value = '';
+      await loadChats();
+      if (res.ok) openChat(res.id);
+    };
+
+    // --- one chat open ---
+    async function openChat(chatId) {
+      currentChatId = chatId;
+      // refresh the active highlight
+      for (const el of $('chatlist').children) {
+        if (el.classList.contains('chat')) el.classList.toggle('active', el.onclick && false);
+      }
+      $('send').classList.remove('hidden');
+      seenMessageIds = new Set();
+      await renderMessages();
+      startPolling();
+    }
+
+    // SDK gap: there is no live-collection / live-query primitive — a store
+    // subscribes to ONE (entity, id) ROW. The Message rows for a chat are a
+    // separate entity whose ids are unknown ahead of time, so they cannot be
+    // subscribed to as a set. The simplest in-page fallback that still gives a
+    // live two-tab feel is plain fetch + short poll of the message list. The
+    // Chat ROW itself (title, members) IS subscribed live via the store.
+    async function renderMessages() {
+      const res = await fetch(`/chats/${currentChatId}/messages`, { credentials: 'include' });
+      if (!res.ok) { $('messages').innerHTML = '<p style="color:#b91c1c">cannot read this chat</p>'; return; }
+      const rows = await res.json();
+      const box = $('messages');
+      box.innerHTML = '';
+      let appended = false;
+      for (const m of rows) {
+        if (!seenMessageIds.has(m.id)) { appended = true; seenMessageIds.add(m.id); }
+        const div = document.createElement('div');
+        div.className = 'msg' + (m.author === me.id ? ' mine' : '');
+        const when = new Date(m.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        div.innerHTML = `<span class="meta">@${escapeHtml(m.author)} ${when}</span>${escapeHtml(m.body)}`;
+        box.appendChild(div);
+      }
+      if (appended) box.scrollTop = box.scrollHeight;
+    }
+
+    function startPolling() {
+      clearInterval(pollTimer);
+      pollTimer = setInterval(renderMessages, 1500);
+    }
+
+    $('send').onsubmit = async (e) => {
+      e.preventDefault();
+      const body = $('body').value.trim();
+      if (!body || !currentChatId) return;
+      $('body').value = '';
+      // POST to the sub-entity; the chat FK must travel in the body (path
+      // params are not merged into the create payload).
+      await fetch(`/chats/${currentChatId}/messages`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ chat: currentChatId, body }),
+      });
+      await renderMessages();
+    };
+
+    function escapeHtml(s) {
+      return String(s ?? '').replace(/[&<>"']/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+      ));
+    }
+  </script>
+</body>
+</html>

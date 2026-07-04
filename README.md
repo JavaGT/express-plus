@@ -16,15 +16,16 @@ each app stubs its toe.
 
 The framework is implemented and under active development. Zero dependencies —
 Node 26 only (`node:http`, `node:crypto`, `node:sqlite`, `node:fs`). Tests run on
-`node --test`; the suite is green (lead-verified raw). The binding exemplars at
-the repo root (`doc.mjs`, `gdoc.mjs`, `note.mjs`, `comment.mjs`, `todo.mjs`,
-`session.mjs`) are the source of truth for naming and usage direction.
+`node --test`; the suite is green (lead-verified raw). The binding exemplars
+(`doc.mjs`, `gdoc.mjs`, `note.mjs`, `comment.mjs`, `todo.mjs`, `session.mjs`)
+live under `projects/` and are the source of truth for naming and usage
+direction.
 
 ## Quick start
 
 ```sh
-node --test                 # run the full suite
-node doc.mjs                # run a binding exemplar
+node --test                          # run the full suite
+node projects/chat/server.mjs        # run the chat sample (open localhost:3000 in two tabs)
 ```
 
 ## Documents

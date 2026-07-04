@@ -2,7 +2,7 @@
 // with per-member collaborator roles and link-share for non-users.
 // Exercises the `map` plugin for valued-set membership and the `link`
 // field type for non-user principals.
-import { entity, text, date, ref, map, link, grant, deny, read, write, subscribe, admin, anyOf, never, scope, router, User } from 'workbench';
+import { entity, text, date, ref, map, link, grant, deny, read, write, subscribe, admin, anyOf, never, scope, router, User, Inbox } from 'workbench';
 import { Photo } from './photo.mjs';
 
 const VIEWER     = [read, subscribe];
@@ -72,8 +72,9 @@ export const Album = entity('Album', {
   updatedAt: date({ touch: true }),
 
   checks: {
-    // Auto-derived from `owner: ref('User', { role: 'owner' })`
-    owner:        ({ Album, principal }) => Album.owner.is(principal.id),
+    // `owner` is auto-derived from `owner: ref('User', { role: 'owner' })`
+    // above (DECISIONLOG #54) and is NOT redeclared here — redeclaring a
+    // ref-role-derived check name is a load-time error.
 
     // Membership check — compilable (a set membership SQL check)
     collaborator: ({ Album, principal }) => Album.collaborators.has(principal.id),

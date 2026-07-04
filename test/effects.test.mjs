@@ -46,7 +46,7 @@ const Doc = entity('Doc', {
 
 function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(Inbox)) db.exec(sql);
   for (const sql of generateDDL(Doc)) db.exec(sql);

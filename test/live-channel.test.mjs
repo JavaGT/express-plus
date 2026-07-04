@@ -24,7 +24,7 @@ const Doc = entity('Doc', {
 // port. Returns { app, origin, port }. Caller must close both.
 async function bootApp() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   const app = workbench({ db }).mount('/docs', Doc);
   await app.ddl(); // creates Doc table + framework _Log/_Cursor
   app.listen(0, { principalOf: () => ({ type: 'user', id: 'test' }) });

@@ -7,14 +7,20 @@
 // Principals: login mints a `user` principal; link-share redemption mints a
 // `link` principal; scheduled transitions and ticks attribute to a `system`
 // principal. One shape feeds grant, queryScope, and latched-auth.
-import { router, allowAnonymous, User, Session } from 'workbench';
+import { router, allowAnonymous, User, Session, sessionCookie } from 'workbench';
 import { Doc } from './doc.mjs';
 
-export function sessionRoutes() {
+export function sessionRoutes({ secure = process.env.NODE_ENV === 'production' } = {}) {
   const s = router();
 
   // login: find-or-create user, verify password against the `hash()` field,
   // mint a session. `allowAnonymous` opts out of the fail-closed auth default.
+  // The token travels in the fail-closed `sid` cookie (HttpOnly, SameSite=Lax,
+  // Path=/, Secure in production) so sessionPrincipalOf — which reads ONLY the
+  // cookie — hydrates a user principal on the NEXT request. The body still
+  // echoes the token for non-browser clients, but the cookie is what makes a
+  // browser session stick (the 0→1 bug this fixes: a body-only login leaves the
+  // client anonymous forever).
   s.post('/', allowAnonymous(), async (req, res, next) => {
     const { username, password } = req.body;
     let user = await User.findOne(User.username.is(username));
@@ -24,6 +30,7 @@ export function sessionRoutes() {
       return next({ status: 401, message: 'bad credentials' });
     }
     const session = await Session.create({ userId: user.id });  // createdAt auto-set; no hand-pass
+    res.setHeader('set-cookie', sessionCookie(session.token, { secure }));
     res.status(201).json({ token: session.token, user: { id: user.id, username: user.username } });
   });
 
@@ -31,7 +38,9 @@ export function sessionRoutes() {
   // `allowAnonymous` — no user session. This is the MINTING path the uniform-principal
   // story needs: a `link` principal is evaluated by Doc.grant.can for both
   // row visibility and capability tiering (linkShare.tiers). Without this route,
-  // the `link` principal is consumed in grant but never created.
+  // the `link` principal is consumed in grant but never created. The cookie is
+  // set with the same fail-closed attributes as login so the link principal
+  // hydrates on subsequent requests the same way a user principal does.
   s.post('/link', allowAnonymous(), async (req, res, next) => {
     const { token } = req.body;
     const doc = await Doc.findOne(Doc.linkShare.token.is(token));
@@ -39,13 +48,15 @@ export function sessionRoutes() {
     // Mint a link-scoped session; on subsequent requests the framework hydrates
     // req.principal = { type: 'link', attributes: { token } } from it.
     const session = await Session.create({ kind: 'link', token });
+    res.setHeader('set-cookie', sessionCookie(session.token, { secure }));
     res.status(200).json({ token: session.token, tier: doc.linkShare.tier });
   });
 
-  // logout: inherits requireAuth. Session.delete runs through the pipeline; a
-  // framework-provided Session entity's grant scopes deletion to the owner.
+  // logout: inherits requireAuth. Read the sid cookie, delete that session, and
+  // clear the cookie (same attributes + Max-Age=0) so the browser drops it.
   s.delete('/:id', async (req, res) => {
     await Session.delete(req.params.id);
+    res.setHeader('set-cookie', `${sessionCookie('', { secure })}; Max-Age=0`);
     res.sendStatus(204);
   });
 

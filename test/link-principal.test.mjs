@@ -60,7 +60,7 @@ function makeDoc() {
 
 function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   const Doc = makeDoc();
   executeDDL(Doc, db);
   // Seed a doc owned by alice, shared by link token 'share-xyz' at tier comment.

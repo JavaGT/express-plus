@@ -301,6 +301,14 @@ export const Comment = entity('Comment', {
 
 ### BLOCKER #1: `state.auto` is duration-relative only — no point-in-time / field-driven trigger for scheduled publish
 
+> **SETTLED (background jobs shipped):** A durable job-queue primitive has
+> landed — `createJobQueue` is exported from `workbench/internal`
+> (`src/job-queue.mjs`). Scheduled publish can now be driven by an in-framework
+> background job (enqueue at `publishedAt`, transition on fire) instead of an
+> external timer. The narrower ask — a *declarative* point-in-time `auto`
+> trigger inside `state` (`at: Post.publishedAt`) — remains the open part of
+> this blocker. Historical text kept below.
+
 Tests: DECISIONLOG.md ADR #4 (scheduled mutation = timer feeding pipeline);
 IMPLEMENTATION-PLAN abstraction #4 (state.auto + entity tick are same
 mechanism); doc.mjs L78-82 (the only auto exemplar: relative `after: '90d'`).

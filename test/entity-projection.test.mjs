@@ -16,7 +16,7 @@ import { setActiveDb } from '../src/db.mjs';
 
 test('entity-projection: create — handler emits event — entity.projection writes row', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -70,7 +70,7 @@ test('entity-projection: create — handler emits event — entity.projection wr
 
 test('entity-projection: create — round-trip: row == reducer fold', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -126,7 +126,7 @@ test('entity-projection: create — round-trip: row == reducer fold', async () =
 
 test('entity-projection: update — projection updates row', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -184,7 +184,7 @@ test('entity-projection: update — projection updates row', async () => {
 // disagreed. This asserts the update path flattens struct cells like create.
 test('entity-projection: update — struct (link) cells persist to the row', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Doc = entity('Doc', {
@@ -236,7 +236,7 @@ test('entity-projection: update — struct (link) cells persist to the row', asy
 
 test('entity-projection: remove — projection deletes row', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -286,7 +286,7 @@ test('entity-projection: remove — projection deletes row', async () => {
 
 test('entity-projection: projection failure rolls back the whole txn', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {

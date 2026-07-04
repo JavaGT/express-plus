@@ -1118,3 +1118,50 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
 
   return store;
 }
+
+// ---------------------------------------------------------------------------
+// createAuthClient — login/logout against the framework's `/auth` battery.
+// ---------------------------------------------------------------------------
+//
+// Thin fetch wrappers over `/auth/login` and `/auth/logout` with
+// `credentials: 'include'` so the browser sends and stores the fail-closed
+// `sid` cookie the server sets on login. The token lives in the cookie, never
+// client JS (HttpOnly), so the client never holds a credential it can leak.
+// Independent of the live-store machinery — a page may auth before subscribing.
+// `login` returns the parsed JSON body (`{ user: { id, username } }`); both
+// throw on a non-2xx response with the server's error message.
+
+export function createAuthClient({ baseUrl, fetchImpl } = {}) {
+  const fetchFn = fetchImpl ?? globalThis.fetch;
+
+  async function login(username, password) {
+    const res = await fetchFn(`${baseUrl}/auth/login`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      let message = `http ${res.status}`;
+      try { const body = await res.json(); if (body?.error) message = body.error; } catch { /* keep status */ }
+      throw new Error(message);
+    }
+    return res.json();
+  }
+
+  async function logout() {
+    const res = await fetchFn(`${baseUrl}/auth/logout`, {
+      method: 'POST',
+      credentials: 'include',
+    });
+    if (!res.ok && res.status !== 204) {
+      let message = `http ${res.status}`;
+      try { const body = await res.json(); if (body?.error) message = body.error; } catch { /* keep status */ }
+      throw new Error(message);
+    }
+    // logout responds 204 with no body; return a plain ok marker for callers.
+    return { ok: true };
+  }
+
+  return { login, logout };
+}

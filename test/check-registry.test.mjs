@@ -77,7 +77,7 @@ test('owner check run face tests principal identity against the FK column', () =
 
 test('declared check with membership runs against the real DB', () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   // Create the membership side-table that the runtime face will query.
   db.exec(`
@@ -136,7 +136,7 @@ test('declared check with membership runs against the real DB', () => {
 
 test('map-role names have a run face only; harvest is undefined', () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS Doc_collaborators (
@@ -237,7 +237,7 @@ test('unknown check name in scope throws at entity load', () => {
 
 test('ref handle thenable resolves to target scalar fields and map handles', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS Canvas (
@@ -319,7 +319,7 @@ test('ref handle thenable resolves to target scalar fields and map handles', asy
 
 test('entity key is available alongside entity-name key in check context', () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   db.exec(`CREATE TABLE IF NOT EXISTS Target (id TEXT PRIMARY KEY, label TEXT)`);
   db.exec(`CREATE TABLE IF NOT EXISTS Doc (id TEXT PRIMARY KEY, target TEXT)`);

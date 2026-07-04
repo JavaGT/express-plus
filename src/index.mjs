@@ -11,6 +11,13 @@ export { requireUser, allowAnonymous } from './route-gate.mjs';
 export { router } from './app.mjs';
 export { matchRoute } from './http-route-match.mjs';
 export { serveStatic } from './views.mjs';
+// Session cookie helpers — promoted to the public surface so an app hand-rolling
+// its auth boundary (like projects/session.mjs) can set/clear the fail-closed
+// `sid` cookie without reaching into `workbench/internal`. sessionPrincipalOf is
+// the request→principal source listen() wires by default when a db is engaged;
+// exporting it lets a test or bespoke transport use the same path (no second
+// auth path). The internal.mjs re-export is retained.
+export { sessionCookie, sessionPrincipalOf, sessionTokenOf, parseCookies, SESSION_COOKIE } from './session.mjs';
 export { inc, dec, self, many, effect } from './effect-compiler.mjs';
 export { schedule, tick, simulate } from './schedule.mjs';
 export { default } from './app.mjs';

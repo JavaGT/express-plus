@@ -1,8 +1,12 @@
+import { upsert } from './driver.mjs';
+
 export function upsertConsumerCursor(db, { consumer, scope, lastSeq }) {
-  db.prepare(
-    `INSERT INTO _ConsumerCursor (consumer, scope, lastSeq) VALUES (:consumer, :scope, :lastSeq)
-     ON CONFLICT(consumer, scope) DO UPDATE SET lastSeq = excluded.lastSeq`,
-  ).run({ consumer, scope, lastSeq });
+  upsert(db, {
+    table: '_ConsumerCursor',
+    keyColumns: ['consumer', 'scope'],
+    columns: ['lastSeq'],
+    values: { consumer, scope, lastSeq },
+  });
 }
 
 export function consumerCursorMap(db, consumer) {

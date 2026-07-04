@@ -36,7 +36,7 @@ export async function runChain(handlers, nodeReq, nodeRes, { principal, params, 
   // chain-specific: template rendering via the views engine.
   res.render = function (name, data = {}) {
     try {
-      const html = resolveTemplate(config.viewsDir ?? resolve(process.cwd(), 'views'), name, data);
+      const html = resolveTemplate(app?.config?.viewsDir ?? config.viewsDir ?? resolve(process.cwd(), 'views'), name, data);
       if (!nodeRes.headersSent) {
         nodeRes.writeHead(this._pendingStatus, {
           'content-type': 'text/html; charset=utf-8',

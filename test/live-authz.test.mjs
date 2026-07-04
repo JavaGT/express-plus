@@ -235,7 +235,7 @@ test('H2: a REVOKED subscriber is denied at fan-out (the await guard)', async ()
   // per-event re-authorization must now deny him. If the `await` were removed,
   // bob would receive the event despite the revocation.
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeDDL(User, db);
   executeDDL(Doc, db);
   executeDDL(Inbox, db);

@@ -25,7 +25,7 @@ const Note = entity('Note', {
 
 function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   for (const sql of generateDDL(Note)) db.exec(sql);
   // Three notes owned by u1 with different updatedAt, one by u2.
   db.prepare("INSERT INTO Note (id, body, stars, updatedAt, owner) VALUES (1, 'a', 1, 100, 'u1')").run();

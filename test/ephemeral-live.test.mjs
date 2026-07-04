@@ -25,7 +25,7 @@ const Canvas = entity('Canvas', {
 
 function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(Canvas)) db.exec(sql);
   db.prepare('INSERT INTO Canvas (id, title) VALUES (?, ?)').run('c1', 'Drawing 1');

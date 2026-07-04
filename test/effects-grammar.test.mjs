@@ -14,7 +14,7 @@ import { setActiveDb } from '../src/db.mjs';
 // Helper to set up a fresh in-memory db with framework tables
 function setupDb() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   return db;
 }

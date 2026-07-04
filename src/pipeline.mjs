@@ -14,6 +14,7 @@
 import { readSeq } from './committed-log.mjs';
 import { appendEvents, eventsFor, rowToEvent } from './committed-log.mjs';
 import { lifecycleVerb, parseEventType } from './event-handle.mjs';
+import { txn } from './driver.mjs';
 import { isPlainObject } from './field-strategy.mjs';
 
 // Use createRequire for dynamic import in ES module context.
@@ -269,22 +270,20 @@ export function durableMutationVariant({
 // the `payload` value stays per-caller. Throws non-403 errors after rolling back;
 // returns `{events}` on success or `{granted:false, events:[]}` on a 403 in-txn.
 async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline }) {
-  db.exec('BEGIN IMMEDIATE');
   try {
-    const committed = await pipeline.applyInTxn(db, events, {
+    // The in-transaction work (applyInTxn) is wrapped by the driver's txn
+    // helper: BEGIN IMMEDIATE / await fn() / COMMIT, ROLLBACK on throw. The
+    // callback brackets ONLY applyInTxn — afterCommit is post-commit fan-out
+    // (out-of-band effects that cannot join the DB txn) and runs AFTER commit,
+    // naturally outside the txn (seam-review §2.1).
+    const committed = await txn(db, () => pipeline.applyInTxn(db, events, {
       now, actionId, nextSeq, principal, payload,
-    });
-    db.exec('COMMIT');
-    // Post-commit fan-out (eng-review §D3). Consumers run AFTER commit — an
-    // out-of-band effect (live WS fan-out, blob file finalize, job enqueue,
-    // webhook) cannot join the DB txn, so the named variant owns it here:
-    // independently durable and retried on its own, never rolling back origin.
+    }));
     await pipeline.afterCommit(committed, { db, actionId });
     return { granted: true, events: committed };
   } catch (err) {
-    try { db.exec('ROLLBACK'); } catch { /* ignore */ }
     // A 403 from the in-txn admission seam is a deliberate denial (spec #5) —
-    // return denied gracefully rather than throwing.
+    // return denied gracefully rather than throwing. txn already rolled back.
     if (err.status === 403) {
       return { granted: false, events: [] };
     }

@@ -249,6 +249,15 @@ and auto-sorts `.children()` by position.
 
 ### SHARP EDGE #3 — Due-date reminders: `state.auto` uses relative durations, not absolute field values — no "fire at 3pm Tuesday"
 
+> **SETTLED (background jobs shipped):** A durable job-queue primitive has
+> landed — `createJobQueue` is exported from `workbench/internal`
+> (`src/job-queue.mjs`). Out-of-band background work (the "polling cron in
+> framework clothing" workaround (a) below) now has a first-class primitive
+> instead of an external scheduler. The narrower ask — a *declarative*
+> per-row absolute-time trigger inside `state.auto` (`at: Todo.dueDate`) — is
+> distinct and remains the open part of this sharp edge. Historical text kept
+> below.
+
 **ADR/design tested**: Scheduled mutation (IMPLEMENTATION-PLAN.md §4); `state.auto`
 (doc.mjs lines 79-81).
 
@@ -390,6 +399,16 @@ ALWAYS includes the owner + invitees uniformly.
 ---
 
 ## Gaps — features the todo app needs that the grilled API has no answer for
+
+> **SETTLED primitives (shipped after this doc was written):**
+> - **`blob` field** — exported from `workbench` (`src/field.mjs`). A todo
+>   attachment (`attachment: blob(...)`) is now expressible; the binary-field
+>   gap recorded in sibling docs (photo-editor, google-photos) is closed.
+> - **Background jobs** — `createJobQueue` exported from `workbench/internal`
+>   (`src/job-queue.mjs`); durable out-of-band work no longer needs an external
+>   cron. See the SETTLED note on SHARP EDGE #3.
+> The gaps below remain open as written; these two primitives are no longer
+> missing from the framework.
 
 ### GAP #1 — No `children` virtual field from reverse FK
 

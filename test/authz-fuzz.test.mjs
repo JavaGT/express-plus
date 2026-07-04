@@ -8,7 +8,7 @@ let db;
 test.beforeEach(() => {
   db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 });
 
 test.afterEach(() => {

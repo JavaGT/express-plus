@@ -14,9 +14,23 @@ function readPort(raw) {
   return Number.isInteger(n) && n >= 0 ? n : 3000;
 }
 
-export const config = Object.freeze({
-  port: readPort(process.env.PORT),
-  env: process.env.NODE_ENV ?? 'development',
-  viewsDir: process.env.VIEWS_DIR ?? null, // null → framework default (cwd/views)
-  sessionDurationMs: 7 * 86_400_000, // 7 days — used by Session's schedule.after expiry
-});
+// resolveConfig — the per-app config surface (SPEC §3). An app passes
+// `{ port, env, viewsDir, session: { durationMs } }` to `workbench()` and every
+// option overrides its env fallback; an option left absent behaves exactly like
+// the process-wide singleton below (env-sourced defaults). The frozen shape is
+// the same four keys every consumer reads, so `app.config` and the singleton
+// are interchangeable to readers — only the values differ per app.
+export function resolveConfig(options = {}) {
+  return Object.freeze({
+    port: readPort(options.port ?? process.env.PORT),
+    env: options.env ?? process.env.NODE_ENV ?? 'development',
+    viewsDir: options.viewsDir ?? process.env.VIEWS_DIR ?? null, // null → framework default (cwd/views)
+    sessionDurationMs: options.session?.durationMs ?? 7 * 86_400_000, // 7 days — Session schedule.after expiry
+  });
+}
+
+// The process-wide singleton: env-sourced defaults for the consumers that have
+// no app in reach (module-level helpers in session/middleware/field-delta) and
+// the fallback `listen()`/`makeRequestHandler` read when an app omits an option.
+// Identical to `resolveConfig()` with no args — one mechanism, not two.
+export const config = resolveConfig();

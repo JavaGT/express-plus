@@ -30,6 +30,12 @@ GPS coordinates).
 
 ### BLOCKER #1 — No `blob` field type for binary storage
 
+> **SETTLED (blob field shipped):** `blob` is now exported from `workbench`
+> (`src/field.mjs`) — `import { blob } from 'workbench'` resolves and the field
+> constructor is available. The field-type omission this blocker recorded is
+> closed. (The `storedDerived` async-thumbnail gap in BLOCKER #2 is separate and
+> remains open.) Historical text kept below for context.
+
 **What fails**: Binary storage is the *primitive* of a photo app — the original
 image file IS the entity's reason for existing. The grilled field-type catalog
 has `text`, `number`, `date`, `ref`, `map`, `presence`, `log`, `state`, `link`,
@@ -84,6 +90,10 @@ thumbnailSm: storedDerived({
 }),
 
 // WORKAROUND — external job queue entirely outside the framework:
+//   **SETTLED (job queue shipped):** `createJobQueue` is now exported from
+//   `workbench/internal` (`src/job-queue.mjs`) — durable background work no
+//   longer needs an external pg-boss/bull. The narrower `storedDerived`
+//   (eager async compute+persist) primitive below remains open.
 thumbnailSmUrl: text({ optional: true }),
 isProcessed: boolean({ default: false }),
 ```
@@ -392,9 +402,9 @@ Without it, the upload pipeline is 100% external to the framework.
 
 | # | Prior Finding | Status | Why |
 |---|---------------|--------|-----|
-| 1 | No blob/binary field type | **STILL-OPEN** | `blob` listed in IMPL-PLAN Phase 2 step 12 but absent from grilled exemplars. No `import { blob } from 'workbench'` exists. |
+| 1 | No blob/binary field type | **SETTLED** | `blob` now exported from `workbench` (`src/field.mjs`); `import { blob } from 'workbench'` resolves. The field type shipped. (Historical: was STILL-OPEN / Phase 2 step 12.) |
 | 2 | No full-text search predicate | **STILL-OPEN** | Listed as "Deferred / plugin territory." No `.match()`/`.search()` predicate exists. |
-| 3 | No background-job or async-pipeline | **NEW-ANGLE** | `effects` solves in-transaction cross-entity mutation (ADR #5). But `storedDerived` — the async compute+persist primitive for thumbnails — is deferred to Phase 3. External side-effects (calling ImageMagick) are explicitly "NOT yet designed." The gap narrowed but didn't close. |
+| 3 | No background-job or async-pipeline | **PARTIALLY-SETTLED** | `effects` solves in-transaction cross-entity mutation (ADR #5). A background job queue has since shipped (`createJobQueue` from `workbench/internal`, `src/job-queue.mjs`) — durable out-of-band work now has a primitive. The broader `storedDerived` (async compute+persist, eager-on-write) design for thumbnails remains deferred to Phase 3. The external-job-queue gap narrowed further but the eager async-pipeline didn't close. |
 | 4 | No geo-point field type | **STILL-OPEN** | Listed as "Deferred / plugin territory." No `point` constructor, no `.near()` predicate. |
 | 5 | No link-sharing primitive | **RESOLVED** | The `link` field type + link principal in doc.mjs fully addresses the basic case. Per-member link tiers is a new gap (SHOULD-FIX #2) but the primitive EXISTS. |
 | 6 | No date-range or comparison predicates | **STILL-OPEN** | Planned (Phase 3 step 13 — `.gte`/`.lte`/`.lt`) but not yet in exemplars. Has a roadmap commitment. |
@@ -407,7 +417,7 @@ Without it, the upload pipeline is 100% external to the framework.
 
 ## Summary
 
-- **4 BLOCKERS** (blob, storedDerived, geo, full-text) — the core storage, processing, and query primitives of a photo app require constructs the framework doesn't have.
+- **4 BLOCKERS** (~~blob~~ [SETTLED — `blob` shipped, `src/field.mjs`], storedDerived, geo, full-text) — the core storage, processing, and query primitives of a photo app require constructs the framework doesn't have.
 - **4 SHOULD-FIX** (json field, per-member link tiers, comparison predicates, array field) — each forces a workaround that loses typed-handle queryability or creates schema debt.
 - **4 SHARP EDGES** (cross-entity check resolution, nullable FK queries, compound `.and()`, external computation via effects) — ambiguous contracts or planned-but-not-shown features.
 - **4 of 10 prior findings RESOLVED** by the grilled ADRs (link sharing, boolean, valued-set tiers, half of the async-pipeline gap).

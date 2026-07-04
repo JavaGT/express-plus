@@ -26,7 +26,7 @@ import { setActiveDb } from '../src/db.mjs';
 
 function setupDb() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   return db;
 }

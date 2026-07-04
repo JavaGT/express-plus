@@ -15,7 +15,7 @@ import { setActiveDb } from '../src/db.mjs';
 
 test('in-txn row-grant hook: deny after projections roll back the txn', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -91,7 +91,7 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
 
 test('in-txn row-grant hook: create — runs on the newly projected row', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {

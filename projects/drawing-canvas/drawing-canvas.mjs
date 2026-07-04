@@ -53,7 +53,9 @@ export const Canvas = entity('Canvas', {
   updatedAt: date({ touch: true }),
 
   checks: {
-    owner:        ({ Canvas: c, principal: p }) => c.owner.is(p.id),
+    // `owner` is auto-derived from `owner: ref('User', { role: 'owner' })`
+    // above (DECISIONLOG #54) and is NOT redeclared here — redeclaring a
+    // ref-role-derived check name is a load-time error.
     collaborator: ({ Canvas: c, principal: p }) => c.collaborators.has(p.id),
   },
 

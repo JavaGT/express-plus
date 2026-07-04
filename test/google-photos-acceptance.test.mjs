@@ -176,7 +176,7 @@ test('SQL scope returns only photos whose album the principal can access (or own
   const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   // Alice owns a-shared → sees p1 (in a-shared).
   assert.deepEqual(scopedIds(db, Photo, alice), ['p1']);
@@ -196,7 +196,7 @@ test('runtime mayVerb grants the correct capabilities per album role', async () 
   const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const p1 = Photo.getOrFail('p1');
 
@@ -217,7 +217,7 @@ test('null and dangling album FKs fail closed for non-owning principals', async 
   const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   // Orphan (album=null, owner=dave) — not visible to any test principal
   const p3 = Photo.getOrFail('p3');
@@ -246,7 +246,7 @@ test('removing a collaborator revokes SQL scope AND runtime .can', async () => {
   const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const p1 = Photo.getOrFail('p1');
   // Carol is a viewer on a-shared → sees p1
@@ -268,7 +268,7 @@ test('removing a collaborator revokes SQL scope AND runtime .can', async () => {
 
 test('async declared checks use await to read target scalar fields', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   db.exec('CREATE TABLE Album2 (id TEXT, owner TEXT, title TEXT)');
   db.exec('CREATE TABLE Album2_collaborators (Album2_id TEXT, member_id TEXT, role TEXT)');

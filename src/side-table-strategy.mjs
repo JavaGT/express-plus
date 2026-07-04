@@ -6,6 +6,7 @@ import { mayFieldOp } from './row-grant.mjs';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
 import { getActiveDb, getActiveEntity } from './db.mjs';
 import * as eventHandles from './event-handle.mjs';
+import { upsert } from './driver.mjs';
 
 async function authorizeFieldOp(record, fieldName, capability, row, principal) {
   if (principal && !(await mayFieldOp(record, fieldName, capability, row, principal))) {
@@ -536,12 +537,16 @@ function ephemeralProjectionApply({ entityName, fieldEntries, handle, event, db 
     if (handle.field !== ephField || handle.kind !== eventHandles.EventKind.fieldSet) continue;
     const sideTable = membershipTable(entityName, ephField);
     const ownerCol = membershipOwnerCol(entityName);
-    db.prepare(`INSERT OR REPLACE INTO ${sideTable} (${ownerCol}, client_id, cells) VALUES (:owner, :client, :cells)`)
-      .run({
-        owner: String(event.data?.owner),
-        client: String(event.data?.client),
+    upsert(db, {
+      table: sideTable,
+      keyColumns: [ownerCol, 'client_id'],
+      columns: ['cells'],
+      values: {
+        [ownerCol]: String(event.data?.owner),
+        client_id: String(event.data?.client),
         cells: JSON.stringify(event.data?.cells ?? {}),
-      });
+      },
+    });
     return true;
   }
   return false;

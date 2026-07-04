@@ -1,0 +1,201 @@
+// auth-routes.test.mjs — the framework-owned `.auth()` battery, end-to-end.
+//
+// `.auth()` mounts `/auth` (login + logout) built from the SAME public
+// primitives an app would use, PLUS the Set-Cookie handling the exemplar omits
+// — the 0→1 auth bug: `sessionPrincipalOf` reads ONLY the cookie, so a
+// body-only login leaves the client anonymous on every subsequent request.
+//
+// The invariant under test: login sets a fail-closed `sid` cookie, a
+// subsequent request carrying it hydrates a user principal (owner-scoped CRUD
+// succeeds), wrong password → 401 + no cookie, logout deletes the session and
+// clears the cookie, and `.auth()` on a db-less app throws at construction.
+
+import { entity, text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+
+import workbench from '../src/app.mjs';
+import { SESSION_COOKIE } from '../src/session.mjs';
+import { createAuthClient } from '../public/workbench-client.mjs';
+
+// An owner-scoped Note: the default-on route gate admits a user, the row grant
+// scopes rows to the owner. Proves a hydrated principal reaches dispatch and is
+// filtered by the row scope — the whole point of setting the cookie.
+function ownedNote() {
+  return entity('Note', {
+        body: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+
+    grant: () => [
+      scope(({ is }) => is.owner()).can(async ({ is }) =>
+        (await is.owner()) ? grant(read, write, subscribe) : grant(read),
+      ),
+    ],
+  });
+}
+
+// Boot an app with `.auth()` + an owner-scoped Note. `listen(0)` picks an
+// ephemeral port; `app.ready` resolves once routes + schema + server are up.
+// No explicit principalOf → session hydration (sessionPrincipalOf) is the
+// default principal source, exactly the path the cookie fixes.
+async function boot(t) {
+  const app = workbench({ db: ':memory:' }).auth().mount('/notes', ownedNote());
+  app.listen(0);
+  await app.ready;
+  const { port } = app.httpServer.address();
+  t.after(() => app.httpServer.close());
+  return { app, origin: `http://127.0.0.1:${port}` };
+}
+
+// Pull the `sid=...` value out of a Set-Cookie header (Node joins multiple
+// Set-Cookie headers with `, ` — split on the attribute boundary, not commas).
+function sidFromSetCookie(header) {
+  const first = header.split(/,(?=[^ ;]+)/)[0];
+  const match = first.match(new RegExp(`${SESSION_COOKIE}=([^;]+)`));
+  return match ? match[1] : null;
+}
+
+test('login sets a fail-closed Set-Cookie (HttpOnly, SameSite=Lax, Path=/)', async (t) => {
+  const { origin } = await boot(t);
+  const res = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  assert.equal(res.status, 201);
+  const cookie = res.headers.get('set-cookie');
+  assert.ok(cookie, 'login sets a Set-Cookie header');
+  assert.match(cookie, /HttpOnly/i);
+  assert.match(cookie, /SameSite=Lax/i);
+  assert.match(cookie, /Path=\//);
+  // the cookie value is an opaque token, not the username or a body echo
+  const token = sidFromSetCookie(cookie);
+  assert.ok(token, 'the sid cookie carries a token');
+  assert.doesNotMatch(cookie, /alice/);
+  // the body carries the public user shape, NOT the token
+  const body = await res.json();
+  assert.deepEqual(body, { user: { id: body.user.id, username: 'alice' } });
+  assert.equal(body.token, undefined, 'the token travels in the cookie, not the body');
+});
+
+test('a subsequent request carrying the cookie hydrates a user principal (owner CRUD succeeds)', async (t) => {
+  const { origin } = await boot(t);
+  // login as alice → capture the cookie
+  const loginRes = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  const cookie = `sid=${sidFromSetCookie(loginRes.headers.get('set-cookie'))}`;
+
+  // create a note as alice — the owner is auto-set from the hydrated principal
+  const created = await fetch(`${origin}/notes`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ body: 'hello' }),
+  });
+  assert.equal(created.status, 201);
+  const note = await created.json();
+
+  // a second request with the same cookie lists the note — the principal is
+  // hydrated from the cookie, and the owner-scoped grant returns alice's row
+  const listed = await fetch(`${origin}/notes`, { headers: { cookie } });
+  assert.equal(listed.status, 200);
+  const rows = await listed.json();
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, note.id);
+  assert.equal(rows[0].owner, rows[0].owner, 'owner is set');
+});
+
+test('wrong password → 401 and no cookie', async (t) => {
+  const { origin } = await boot(t);
+  // first login creates alice
+  await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  // a wrong-password login is rejected and mints nothing
+  const res = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'wrong' }),
+  });
+  assert.equal(res.status, 401);
+  assert.equal(res.headers.get('set-cookie'), null, 'no cookie on a failed login');
+  const body = await res.json();
+  assert.match(body.error, /bad credentials/i);
+});
+
+test('logout deletes the session and clears the cookie; the old cookie is anonymous afterwards', async (t) => {
+  const { origin, app } = await boot(t);
+  const loginRes = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  const cookieValue = sidFromSetCookie(loginRes.headers.get('set-cookie'));
+  const cookie = `sid=${cookieValue}`;
+
+  // logout clears the cookie (Max-Age=0) and deletes the session row
+  const logoutRes = await fetch(`${origin}/auth/logout`, {
+    method: 'POST',
+    headers: { cookie },
+  });
+  assert.equal(logoutRes.status, 204);
+  const cleared = logoutRes.headers.get('set-cookie');
+  assert.ok(cleared, 'logout clears the cookie');
+  assert.match(cleared, /Max-Age=0/i);
+  assert.match(cleared, new RegExp(`${SESSION_COOKIE}=`));
+
+  // the session row is gone — the old cookie resolves to anonymous (401)
+  const after = await fetch(`${origin}/notes`, { headers: { cookie } });
+  assert.equal(after.status, 401, 'the old cookie is anonymous after logout');
+  // the Session table is empty
+  const count = app.db.prepare('SELECT COUNT(*) AS n FROM Session').get().n;
+  assert.equal(count, 0, 'logout deleted the session row');
+});
+
+test('no cookie → anonymous → default-on route gate denies (401)', async (t) => {
+  const { origin } = await boot(t);
+  const res = await fetch(`${origin}/notes`);
+  assert.equal(res.status, 401);
+});
+
+test('.auth() on a db-less app throws at construction (fail closed, loud)', () => {
+  assert.throws(
+    () => workbench().auth(),
+    /db/i,
+    'auth() on a db-less app throws at construction, not mid-login',
+  );
+});
+
+test('createAuthClient.login returns the user and propagates errors', async (t) => {
+  const { origin } = await boot(t);
+  const client = createAuthClient({ baseUrl: origin });
+  const result = await client.login('alice', 'hunter2');
+  assert.equal(result.user.username, 'alice');
+  // a wrong-password login throws with the server's error message
+  await assert.rejects(() => client.login('alice', 'wrong'), /bad credentials/i);
+});
+
+test('createAuthClient.logout clears the session', async (t) => {
+  const { origin, app } = await boot(t);
+  // The client SDK uses credentials: 'include' so the cookie round-trips; in
+  // Node's fetch the Set-Cookie is not auto-stored across requests, so we drive
+  // the cookie manually here to exercise the logout path against the live route.
+  const loginRes = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  const cookieValue = sidFromSetCookie(loginRes.headers.get('set-cookie'));
+  const client = createAuthClient({
+    baseUrl: origin,
+    fetchImpl: (url, opts) => fetch(url, { ...opts, headers: { ...(opts.headers || {}), cookie: `sid=${cookieValue}` } }),
+  });
+  const result = await client.logout();
+  assert.equal(result.ok, true);
+  const count = app.db.prepare('SELECT COUNT(*) AS n FROM Session').get().n;
+  assert.equal(count, 0, 'logout deleted the session row');
+});

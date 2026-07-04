@@ -117,9 +117,14 @@ export function buildKernel(app) {
   const { handlers, projections, entities } = collectAppEntities(app);
   for (const fe of FRAMEWORK_ENTITIES) {
     if (fe && !entities.has(fe.name)) {
-      entities.set(fe.name, fe);
-      Object.assign(handlers, fe.crudHandlers);
-      projections.push(fe.projection);
+      // A per-app Session copy (app._sessionEntity) carries this app's session-
+      // duration schedule trigger; prefer it over the framework singleton when
+      // the app installed one. Same shape (shallow spread, overridden delay),
+      // so the reaper / admission / projection read the right expiry.
+      const entity = fe === Session && app._sessionEntity ? app._sessionEntity : fe;
+      entities.set(entity.name, entity);
+      Object.assign(handlers, entity.crudHandlers);
+      projections.push(entity.projection);
     }
   }
   app.entities = entities;

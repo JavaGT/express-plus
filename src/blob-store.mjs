@@ -1,13 +1,22 @@
 // blob-store.mjs — durable blob storage with pending/adopted lifecycle.
 //
-// Upload writes atomically to <id>.pending with computed hashes, then records
+// Upload writes atomically to a pending slot with computed hashes, then records
 // a 'pending' row. Caller adopts in their txn (status → 'adopted'), then
-// finalizes out-of-band (rename .pending → final). Reaper reconciles crashes
+// finalizes out-of-band (promote pending → final). Reaper reconciles crashes
 // and sweeps orphans/danglers.
+//
+// This module fuses METADATA (the BlobStore table) + LIFECYCLE (the
+// pending→adopt→finalize state machine, the reaper's reconcile/sweep). The BYTE
+// storage — where the bytes physically live — is delegated to an injected
+// byte store (`bytes`), defaulting to fsBlobs({ root }) (seam-review §2.2).
+// Only the byte half is swappable; lifecycle + metadata are framework
+// invariants. `workbench({ blobs: { root } })` constructs fsBlobs internally
+// (back-compat); `workbench({ blobs: byteStore })` accepts any conforming
+// byte-store object (the deployment reality for a photos app is S3-compatible
+// storage — a future `s3Blobs({...})` implements the same interface).
 
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdirSync, writeFileSync, renameSync, unlinkSync, openSync, readSync, closeSync, existsSync, statSync } from 'node:fs';
-import path from 'node:path';
+import { fsBlobs } from './fs-blobs.mjs';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
@@ -17,134 +26,92 @@ function safeId(id) {
   }
 }
 
-export function createBlobStore({ root, db }) {
-  mkdirSync(root, { recursive: true });
-  
-  function pathFor(id, { pending } = {}) {
-    return path.join(root, id + (pending ? '.pending' : ''));
-  }
-  
-  function upload({ bytes, mime, id } = {}) {
+export function createBlobStore({ root, db, bytes }) {
+  // The byte store owns where bytes live (node:fs by default; S3 later). It is
+  // the ONLY seam for byte storage — every read/write/remove/finalize goes
+  // through it. `root` is accepted for back-compat (`blobs: { root }`): when no
+  // byte store is injected, fsBlobs({ root }) is the default. `bytes` may also
+  // be passed directly as `root`'s replacement once a caller hands a store in.
+  const store = bytes ?? fsBlobs({ root });
+  const { writePending, finalizePending, readRange, remove, exists, pathFor } = store;
+
+  function upload({ bytes: uploadBytes, mime, id } = {}) {
     id = id ?? randomUUID();
     safeId(id);
-    
-    if (typeof bytes === 'string') {
-      bytes = Buffer.from(bytes);
+
+    if (typeof uploadBytes === 'string') {
+      uploadBytes = Buffer.from(uploadBytes);
     }
-    
+
     const md5Hash = createHash('md5');
     const sha256Hash = createHash('sha256');
-    md5Hash.update(bytes);
-    sha256Hash.update(bytes);
+    md5Hash.update(uploadBytes);
+    sha256Hash.update(uploadBytes);
     const md5 = md5Hash.digest('hex');
     const sha256 = sha256Hash.digest('hex');
-    
-    const pendingPath = pathFor(id, { pending: true });
-    writeFileSync(pendingPath, bytes);
-    
+
+    writePending(id, uploadBytes);
+
     const now = new Date().toISOString();
     const mimeValue = mime ?? null;
     db.prepare(
       'INSERT INTO BlobStore (id, status, md5, sha256, size, mime, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)',
-    ).run(id, 'pending', md5, sha256, bytes.length, mimeValue, now);
-    
-    return { id, md5, sha256, size: bytes.length, mime: mimeValue };
+    ).run(id, 'pending', md5, sha256, uploadBytes.length, mimeValue, now);
+
+    return { id, md5, sha256, size: uploadBytes.length, mime: mimeValue };
   }
-  
+
+  // adopt runs the metadata UPDATE in the CALLER'S transaction. It touches NO
+  // bytes — the in-txn part of the lifecycle is metadata-only, so it can live
+  // inside a BEGIN IMMEDIATE…COMMIT bracket with no await (an async byte store
+  // would break that; adopt deliberately does not delegate).
   function adopt(dbOrTxn, id) {
     safeId(id);
     const stmt = dbOrTxn.prepare('UPDATE BlobStore SET status = ? WHERE id = ? AND status = ?');
     const { changes } = stmt.run('adopted', id, 'pending');
     return { adopted: changes };
   }
-  
+
+  // finalize promotes the pending slot to the final slot via the byte store,
+  // post-commit. Idempotent (the byte store swallows a missing pending slot) so
+  // the post-commit finalize consumer and the reaper's reconcile step can both
+  // call it without racing each other.
   function finalize(id) {
     safeId(id);
-    const pendingPath = pathFor(id, { pending: true });
-    const finalPath = pathFor(id);
-    try {
-      renameSync(pendingPath, finalPath);
-    } catch (err) {
-      if (err.code !== 'ENOENT') throw err;
-    }
-    return finalPath;
+    return finalizePending(id);
   }
-  
-  function readRange(id, [start, end] = []) {
+
+  function readRangeBytes(id, range) {
     safeId(id);
-    let filePath = pathFor(id);
-    if (!existsSync(filePath)) {
-      const pendingPath = pathFor(id, { pending: true });
-      if (existsSync(pendingPath)) {
-        filePath = pendingPath;
-      }
-    }
-
-    const fileStat = statSync(filePath);
-    const fileSize = fileStat.size;
-
-    start = start ?? 0;
-    // Reject bogus bounds cleanly rather than handing a negative position to
-    // readSync (which reads from the current offset instead of throwing) or a
-    // negative / non-finite length to Buffer.alloc. The upper bound still clamps
-    // to the file size, so `null`/`undefined` end (and open-ended → EOF via
-    // Infinity) mean "to the end".
-    if (!Number.isFinite(start) || start < 0 || !Number.isInteger(start)) {
-      throw new Error('invalid blob range: start');
-    }
-    end = end == null ? fileSize : Math.min(end, fileSize);
-    if (!Number.isFinite(end) || end < 0 || !Number.isInteger(end)) {
-      throw new Error('invalid blob range: end');
-    }
-    if (end < start) {
-      throw new Error('invalid blob range: end < start');
-    }
-
-    const length = end - start;
-    if (length === 0) return Buffer.alloc(0);
-    const buffer = Buffer.alloc(length);
-    const fd = openSync(filePath, 'r');
-    try {
-      readSync(fd, buffer, 0, length, start);
-    } finally {
-      // sync fds are raw OS descriptors Node will NOT GC — close deterministically.
-      closeSync(fd);
-    }
-    return buffer;
+    return readRange(id, range);
   }
-  
+
   function reap({ ttl, blobColumns }) {
     const now = Date.now();
     let reconciled = 0;
     let orphans = 0;
     let danglers = 0;
-    
-    // 1. Reconcile: adopted blobs with .pending files → finalize
+
+    // 1. Reconcile: adopted blobs with a pending slot → finalize
     const adoptedRows = db.prepare('SELECT id FROM BlobStore WHERE status = ?').all('adopted');
     for (const row of adoptedRows) {
-      const pendingPath = pathFor(row.id, { pending: true });
-      if (existsSync(pendingPath)) {
+      if (exists(row.id, { pending: true })) {
         finalize(row.id);
         reconciled++;
       }
     }
-    
+
     // 2. Orphan sweep: stale pending blobs
     const staleDate = new Date(now - ttl).toISOString();
     const pendingRows = db.prepare(
       'SELECT id, createdAt FROM BlobStore WHERE status = ? AND createdAt < ?',
     ).all('pending', staleDate);
     for (const row of pendingRows) {
-      const pendingPath = pathFor(row.id, { pending: true });
-      try {
-        unlinkSync(pendingPath);
-      } catch (err) {
-        if (err.code !== 'ENOENT') throw err;
-      }
+      remove(row.id, { pending: true });
       db.prepare('DELETE FROM BlobStore WHERE id = ? AND status = ?').run(row.id, 'pending');
       orphans++;
     }
-    
+
     // 3. Refcount sweep: adopted blobs with no references
     const adoptedForRefcount = db.prepare('SELECT id FROM BlobStore WHERE status = ?').all('adopted');
     for (const row of adoptedForRefcount) {
@@ -157,32 +124,27 @@ export function createBlobStore({ root, db }) {
         }
       }
       if (!referenced) {
-        const finalPath = pathFor(row.id);
-        try {
-          unlinkSync(finalPath);
-        } catch (err) {
-          if (err.code !== 'ENOENT') throw err;
-        }
+        remove(row.id, { pending: false });
         db.prepare('DELETE FROM BlobStore WHERE id = ?').run(row.id);
         danglers++;
       }
     }
-    
+
     return { orphans, danglers, reconciled };
   }
-  
+
   function stat(id) {
     safeId(id);
     const row = db.prepare('SELECT id, status, md5, sha256, size, mime, createdAt FROM BlobStore WHERE id = ?').get(id);
     return row;
   }
-  
+
   return {
     safeId,
     upload,
     adopt,
     finalize,
-    readRange,
+    readRange: readRangeBytes,
     reap,
     stat,
     pathFor,

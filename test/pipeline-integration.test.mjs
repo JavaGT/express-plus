@@ -22,7 +22,7 @@ import { setActiveDb } from '../src/db.mjs';
 
 test('an app opts into the pipeline: action → event → reducer fold', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   // A product entity with a published flag.
   const Post = entity('Post', {
@@ -103,7 +103,7 @@ test('pipeline and direct CRUD coexist — one does not subsume the other', asyn
   // The live-sync sequence numbers bridge both: every mutation, whichever
   // path it took, produces a sequenced live event.
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const Note = entity('Note', {
         body: text(), owner: ref('User', { role: 'owner', readonly: true }),

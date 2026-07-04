@@ -121,7 +121,7 @@ test('app.ddl() creates framework tables (Log and Cursor) alongside entity table
   const { entity: entityFn, text, ref, grant, read, write, scope } = await import('../src/index.mjs');
 
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
 
   const Note = entityFn('Note', {
     body: text(),

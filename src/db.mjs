@@ -12,8 +12,39 @@
 
 let activeDb;
 
-export function setActiveDb(db) {
+// Rebinding the ambient db is a real hazard: a second workbench({db}) in the
+// same process rebinds the active db for ALL entities, so the prior app's
+// entity queries now silently hit the new db. Make it LOUD — emit a warning
+// when the active db changes to a different handle. This does NOT throw: tests
+// legitimately rebind (a fresh :memory: per test), and per-test teardown can
+// pass `{ replace: true }` (or call resetActiveDb) to reset without the warning.
+// The framework's own workbench({db}) call (src/app.mjs) deliberately stays
+// bare so a genuinely conflicting second app warns — that is the case worth
+// catching, not routine test reset.
+//
+// The warning fires ONCE per process. Sequential multi-app construction is a
+// legitimate pattern (the framework's own suite builds hundreds of apps); the
+// hazard being flagged is a process-level property — "this process rebound the
+// ambient at least once, entity queries may not hit the db you think" — and one
+// loud line carries that. Repeating it per construction is noise that trains
+// readers to ignore it.
+let warnedRebind = false;
+export function setActiveDb(db, { replace = false } = {}) {
+  if (!replace && !warnedRebind && activeDb && activeDb !== db) {
+    warnedRebind = true;
+    process.emitWarning(
+      "workbench ambient db rebound — a second workbench({db}) in the same " +
+        "process rebinds the active db for ALL entities; the prior app's entity " +
+        "queries now hit this db. Pass { replace: true } to silence (e.g. per-test reset).",
+      { code: 'WB_AMBIENT_REBIND', type: 'WorkbenchWarning' },
+    );
+  }
   activeDb = db;
+}
+
+// Clear the ambient binding without warning — the test-cleanup escape hatch.
+export function resetActiveDb() {
+  activeDb = undefined;
 }
 
 export function getActiveDb() {

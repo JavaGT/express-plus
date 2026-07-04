@@ -111,5 +111,5 @@ function shareRoutes() {
 // Only auto-start when run directly (not imported by test suites).
 import { fileURLToPath } from 'node:url';
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  workbench({ db: 'gdoc.db' }).mount('/docs', Doc).listen(3000);
+  workbench({ db: 'gdoc.db' }).mount('/docs', Doc).listen();
 }

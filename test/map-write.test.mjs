@@ -26,7 +26,7 @@ const TodoList = entity('TodoList', {
 
 async function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
+  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   // Manual DDL: role column is nullable (matches old test, allows .set without role)
   db.exec(`CREATE TABLE IF NOT EXISTS TodoList (

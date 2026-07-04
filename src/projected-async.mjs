@@ -1,6 +1,7 @@
 import { resolveStrategy } from './field-strategy.mjs';
 import { getLog } from './log.mjs';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
+import { upsert } from './driver.mjs';
 
 export function resolveProjectedAsyncTriggerTypes(desc, entityName) {
   if (!desc.from) return [`${entityName}.created`, `${entityName}.updated`];
@@ -49,9 +50,12 @@ async function recomputeFields(entityRecord, entityName, rowId, db, fields, { sc
         'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
       ).get({ e: entityName, f: fieldName });
       const next = (cursorRow?.lastSeq ?? 0) + 1;
-      db.prepare(
-        'INSERT OR REPLACE INTO _ProjectedCursor (entity, field, lastSeq) VALUES (:e, :f, :s)',
-      ).run({ e: entityName, f: fieldName, s: next });
+      upsert(db, {
+        table: '_ProjectedCursor',
+        keyColumns: ['entity', 'field'],
+        columns: ['lastSeq'],
+        values: { entity: entityName, field: fieldName, lastSeq: next },
+      });
     } catch (err) {
       allSucceeded = false;
       getLog().warn('projected', 'compute failed', { entity: entityName, field: fieldName, scope, err });

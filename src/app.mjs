@@ -29,6 +29,7 @@
 import { requireUser, isGate } from './route-gate.mjs';
 import { listen as serveListen } from './serve.mjs';
 import { setActiveDb } from './db.mjs';
+import { wrapDriver } from './driver.mjs';
 import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
@@ -36,6 +37,9 @@ import { createJobQueue } from './job-queue.mjs';
 import { createClock } from './clock.mjs';
 import { createLog, setAmbientLog, getLog } from './log.mjs';
 import { serveStatic } from './views.mjs';
+import { authRoutes } from './auth-routes.mjs';
+import { User, Session } from './auth-entities.mjs';
+import { config, resolveConfig } from './config.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
@@ -319,7 +323,7 @@ export function router(options = {}) {
 // (chainable). The server is exposed on `app.httpServer`. `options.principalOf`
 // overrides the request→principal source (default: anonymous, fail-closed). Both
 // chain.
-export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts, log: logOpts } = {}) {
+export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts, log: logOpts, port, env, session, viewsDir } = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
     const val = process.env[v];
@@ -339,7 +343,21 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
     }
     db = new DatabaseSync(db);
   }
+  // Wrap the raw handle with the driver contract helpers (txn/begin/commit/
+  // rollback/upsert) and run the PRAGMA bootstrap. A conforming custom driver
+  // (already providing txn+upsert) is passed through untouched — it owns its
+  // own bootstrap. The driver IS the raw handle with helpers attached, so
+  // `app.db.prepare` keeps working — entity code and tests reach it everywhere.
+  // One construction path: a bare-string app gets the same treatment as a
+  // pre-built handle. (seam-review §2.1, priority #7.)
+  if (db) db = wrapDriver(db);
   const app = makeMountable();
+  // Per-app config — options override env fallbacks (SPEC §3). `app.config` is
+  // the one place a mounted route / transport reads this app's port, env,
+  // viewsDir, and session duration instead of the process-wide singleton. An
+  // option left absent behaves exactly like the singleton (env-sourced
+  // defaults), so an app that sets nothing still runs.
+  app.config = resolveConfig({ port, env, session, viewsDir });
   // Set up the framework-wide structured logger BEFORE any module imports log.
   // The ambient logger is used by every layer — auth, dispatch, HTTP, live.
   // Callers pass `workbench({ log: { level: 'debug', channels: {...} } })`.
@@ -357,32 +375,28 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
   // independently of any app) reaches this same handle with no db argument.
   // One shared db — the singular-system rule — not a second persistence path.
   if (db) setActiveDb(db);
-  // Production SQLite PRAGMAs (eng-review #42, #46). WAL mode permits
-  // concurrent reads during writes (the live /events subscriber reads _Log
-  // while dispatches commit), foreign_keys=ON enforces referential integrity
-  // (FKs on map side-tables and ref columns), synchronous=NORMAL balances
-  // safety with speed in WAL mode, and busy_timeout avoids immediate
-  // SQLITE_BUSY on contended writes. :memory: databases silently ignore WAL
-  // (no journal) and test behaviour is unaffected. Wrapped in try/catch for
-  // tests that pass a stub/mock db (which lacks .exec).
-  if (db && typeof db.exec === 'function') {
-    try {
-      db.exec('PRAGMA journal_mode = WAL');
-      db.exec('PRAGMA foreign_keys = ON');
-      db.exec('PRAGMA synchronous = NORMAL');
-      db.exec('PRAGMA busy_timeout = 5000');
-    } catch { /* mock/stub db — no-op */ }
-  }
   // The blob store is an app-level resource, constructed when a db is engaged
   // (blobs are adopted by dispatch commits — no db, no durable kernel, no
   // blobs). The root defaults to a `.blobs` dir under cwd, durable across
   // restarts (an adopted blob's final file must survive a reboot); `blobs:
   // { root }` overrides. One store, reached by the /blobs upload route AND the
   // kernel's blob adopter — not a second persistence path.
+  //
+  // SEAM (seam-review §2.2): `blobs` may be either an options bag (`{ root }`,
+  // back-compat — the framework builds fsBlobs({root}) internally) OR a
+  // conforming byte-store object (e.g. `fsBlobs({root})` or a future
+  // `s3Blobs({...})`). Detection is by SHAPE, not type: a byte store exposes
+  // `writePending` (the signature method of the byte-store interface); an
+  // options bag does not. The framework OWNS metadata + lifecycle; only the
+  // byte half swaps.
   if (db) {
-    const root = blobOpts?.root ?? path.join(process.cwd(), '.blobs');
-    mkdirSync(root, { recursive: true });
-    app.blobs = createBlobStore({ root, db });
+    if (blobOpts && typeof blobOpts.writePending === 'function') {
+      app.blobs = createBlobStore({ db, bytes: blobOpts });
+    } else {
+      const root = blobOpts?.root ?? path.join(process.cwd(), '.blobs');
+      mkdirSync(root, { recursive: true });
+      app.blobs = createBlobStore({ root, db });
+    }
   }
   // The job-queue substrate (spec #5) — a separate seam, opt-in. Built at
   // construction when a db + `jobs` config are engaged (the shared secret is
@@ -433,6 +447,22 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
             }
           }
         }
+        // When `.auth()` is engaged, the framework auth entities (User, Session)
+        // back the /auth routes' login/logout but are NOT mounted as entity
+        // routes — `app.auth()` mounts an imperative router, not the entities.
+        // Their tables would therefore never be created by the mount loop above,
+        // yet login writes a User row and mints a Session. Create them here so the
+        // battery works out of the box — fail-closed loud otherwise (a missing
+        // table would surface as a 500 mid-login). buildKernel already registers
+        // these in app.entities for the live/reaper seams; this is the DDL half.
+        if (app._authEngaged) {
+          for (const fe of [User, Session]) {
+            if (!seen.has(fe.name)) {
+              seen.add(fe.name);
+              executeDDL(fe, app.db);
+            }
+          }
+        }
         // Migrations run last, pre-traffic, after every entity table exists. Each
         // is its own transaction (DDL + meta-version bump atomic). Runs only when
         // declared — an app with no migrations is untouched (no _Migration table).
@@ -445,8 +475,13 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
   app.ddl = () => app.prepareSchema();
 
   app.listen = (port, optionsOrCallback) => {
-    app.port = port;
-    return serveListen(app, port, optionsOrCallback);
+    // Portless `app.listen()` binds `app.config.port` — the env-or-option value
+    // resolved at construction — so an exemplar writes `workbench({ port:
+    // 3000 }).listen()` with no redundant argument. An explicit port still wins
+    // (the legacy `listen(3000, ...)` shape), preserving one listen path.
+    const p = port ?? app.config.port;
+    app.port = p;
+    return serveListen(app, p, optionsOrCallback);
   };
   // Static file serving — a thin alias over the general `app.use` prefix-intercept
   // seam: `app.static('/public', dir)` is exactly
@@ -455,5 +490,45 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
   // mechanism, not two. A missing file falls through to the next declared
   // handler (e.g. a SPA fallback) rather than short-circuiting the request.
   app.static = (prefix, dir) => app.use(prefix, serveStatic(dir, { prefix: prefix.replace(/\/+$/, '') }));
+  // `.auth()` mounts the framework-owned auth battery at `/auth` — login +
+  // logout routes that set/clear the fail-closed `sid` cookie (the Set-Cookie
+  // the exemplar omits, which is the whole 0→1 auth bug). Built from the SAME
+  // public primitives an app would use to hand-roll its own boundary; an app
+  // needing bespoke login mounts its own router instead. Returns the app
+  // (chainable). Fail closed: an app with no db cannot serve auth — the routes
+  // write User rows and mint Sessions, and sessionPrincipalOf has nothing to
+  // look a token up in. Throw at construction (loud), not mid-login (a 500).
+  app.auth = function auth() {
+    if (!app.db) {
+      throw new Error('app.auth() requires a db — login writes a User row and mints a Session, and the session principal source has nothing to look a token up in without one (fail closed).');
+    }
+    app._authEngaged = true;
+    // `secure` follows THIS app's env, not the process-wide singleton — an app
+    // that opts into production cookie behavior does so through `workbench({
+    // env: 'production' })`, the one config surface.
+    app.mount('/auth', authRoutes({ secure: app.config.env === 'production' }));
+    // Per-app session duration: when the app's duration differs from the
+    // singleton default, install a shallow copy of Session whose schedule.remove
+    // trigger carries the app's delay. The compiled trigger (compile.mjs) is a
+    // frozen object stamped with fieldName/whileSql/whileParams/whileAst/
+    // sourceName/matches/delay — spreading it and overriding `delay` preserves
+    // every stamped prop, so no re-compile is needed. buildKernel prefers this
+    // copy over the framework Session, and the reaper / admitSystemMutation read
+    // the delay off the entity in `app.entities` at runtime. Shallow spread is
+    // safe: Session is a frozen Proxy whose field-handle/lifecycle-handle
+    // resolution was used at declaration time, not runtime; the record's own
+    // props (crudHandlers/projection/hydrate/findById/grant/registry/schedule)
+    // are what downstream seams read.
+    if (app.config.sessionDurationMs !== config.sessionDurationMs) {
+      app._sessionEntity = {
+        ...Session,
+        schedule: Object.freeze({
+          ...Session.schedule,
+          remove: Object.freeze({ ...Session.schedule.remove, delay: app.config.sessionDurationMs }),
+        }),
+      };
+    }
+    return app;
+  };
   return app;
 }

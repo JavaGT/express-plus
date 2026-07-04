@@ -1,10 +1,16 @@
-// Framework-owned HTTP routes — snapshot, events-since, blob upload, job queue.
+// Framework-owned HTTP routes — snapshot, events-since, blob upload, job queue,
+// and the browser SDK endpoint.
 //
 // These are NOT mounted routes: they are framework defaults intercepted before
 // route matching in the request handler, like /health. Auth runs through the
 // SAME engine as REST (mayVerb / mayRow / readScope), not a second path.
 //
-// Exports: handleResyncRoute, handleBlobUploadRoute, handleJobRoute.
+// Exports: handleResyncRoute, handleBlobUploadRoute, handleJobRoute,
+// handleClientSdkRoute.
+
+import { readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { sendJson } from './http-response.mjs';
 import { readScopedRow, authorizeRow } from './http-row-read.mjs';
@@ -184,4 +190,31 @@ export async function handleJobRoute(app, req, res) {
   }
 
   return false;
+}
+
+// Framework-owned browser SDK endpoint: `GET /workbench.mjs` serves the client
+// side of the /events live protocol. Resolved relative to THIS file via
+// import.meta.url, never process.cwd(). Only engaged when a db is present (the
+// live kernel is running); a db-less app has no live protocol and falls through.
+// Returns true when handled; false to fall through.
+const CLIENT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-client.mjs';
+
+export function handleClientSdkRoute(app, req, res) {
+  if (req.method !== 'GET') return false;
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname !== '/workbench.mjs') return false;
+  if (!app || !app.db) return false;
+  let body;
+  try {
+    body = readFileSync(CLIENT_SDK_PATH);
+  } catch {
+    sendJson(res, 404, { error: 'not found' });
+    return true;
+  }
+  res.writeHead(200, {
+    'content-type': 'text/javascript; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+  });
+  res.end(body);
+  return true;
 }

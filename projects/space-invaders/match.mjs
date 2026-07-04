@@ -7,7 +7,7 @@
 //
 // Where a construct does not yet exist in the API surface, the code imports
 // it from 'workbench' as an idealized handle and documents the gap.
-import { entity, text, number, date, ref, map, state, grant, deny, read, write, subscribe, anyOf, never, scope } from 'workbench';
+import { entity, text, number, date, ref, map, state, grant, deny, read, write, subscribe, anyOf, never, scope, now, everyone, self } from 'workbench';
 
 // ────────────────────────────────────────────────────────────────────────────
 // Capability bundles — typed, imported, never strings.
