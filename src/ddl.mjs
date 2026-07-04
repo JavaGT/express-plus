@@ -20,6 +20,7 @@
 //   ephemeral   → {Entity}_{field} ({Entity}_id, client_id)
 import { structCellColumn } from './field-strategy.mjs';
 import { sideTableDDL } from './side-table-strategy.mjs';
+import { frameworkLogDDL } from './committed-log.mjs';
 
 // Map a field's kind+type to its SQLite column type.
 function sqlType(descriptor) {
@@ -104,20 +105,8 @@ export function generateFrameworkDDL() {
   createdAt TEXT NOT NULL
 );`,
     'CREATE INDEX IF NOT EXISTS idx_blob_status ON BlobStore(status);',
-    `CREATE TABLE IF NOT EXISTS _Log (
-  scope TEXT NOT NULL,
-  seq INTEGER NOT NULL,
-  eventType TEXT NOT NULL,
-  eventData TEXT NOT NULL,
-  actionId TEXT NOT NULL,
-  committedAt TEXT NOT NULL,
-  PRIMARY KEY (scope, seq)
-);`,
-    'CREATE INDEX IF NOT EXISTS idx__Log_actionId ON _Log (actionId);',
-    `CREATE TABLE IF NOT EXISTS _Cursor (
-  scope TEXT NOT NULL PRIMARY KEY,
-  lastSeq INTEGER NOT NULL
-);`,
+    // _Log, _Cursor, and their index are owned by committed-log.mjs.
+    ...frameworkLogDDL(),
     // Job-queue substrate (spec #5). A job is a unit of work with its own
     // lifecycle (queued/claimed/running/completed/failed), NOT a derived read
     // model — separate seam from the projection registry. Timestamps are ms-epoch

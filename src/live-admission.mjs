@@ -7,7 +7,6 @@
 // Exported for use by live-connection.mjs only.
 
 import { anonymous } from './principal.mjs';
-import { bindReadScope } from './scope-sql.mjs';
 import { mayRow } from './row-grant.mjs';
 import { validatePaceSelection } from './field-pace.mjs';
 
@@ -70,9 +69,7 @@ export async function authorizeSubscription(msg, conn, {
   }
 
   const principal = conn.principal ?? anonymous;
-  const bound = bindReadScope(entity.readScope, principal);
-  const where = bound ? bound.sql : '1=1';
-  const scopeParams = bound ? bound.params : {};
+  const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
   let row;
   try {
     row = db

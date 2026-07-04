@@ -22,7 +22,7 @@
 //    `is.*` calls are correctly un-awaited (SPEC §6.1).
 
 import { randomBytes, randomUUID } from 'node:crypto';
-import { compileReadScope, fieldHandle } from '../scope-sql.mjs';
+import { compileReadScope, fieldHandle, bindReadScope } from '../scope-sql.mjs';
 import { getActiveDb } from '../db.mjs';
 import { compileEntityAuthz } from '../authz.mjs';
 import { getLog } from '../log.mjs';
@@ -40,6 +40,7 @@ import { collectSideTableStrategies } from '../side-table-strategy.mjs';
 import { registerEntityHandle } from './handles.mjs';
 import { createEntityHydrator } from './hydrate.mjs';
 import { createEntityProjection } from './projection.mjs';
+import { createCrudHandlers } from './crud.mjs';
 import { installEntityQueries } from './query.mjs';
 
 // mintToken — a cryptographically random opaque session token. Handed to a
@@ -189,6 +190,19 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
   }
 
   const sourceName = trigger.sourceName ?? fieldName;
+
+  // matches(db, row) — run the while predicate against one row after discovery.
+  // The whileSql is still compiled (used in discovery queries), but callers that
+  // need to verify a single row use this instead of recomposing the SQL inline.
+  const matches = (db, row) => {
+    if (!whileSql) return true;
+    const params = { ...(whileParams ?? {}), __rowId: row.id };
+    const result = db.prepare(
+      `SELECT 1 FROM ${name} AS t0 WHERE t0.id = :__rowId AND (${whileSql})`
+    ).get(params);
+    return !!result;
+  };
+
   if (isDeadline) {
     return Object.freeze({
       kind: trigger.kind,
@@ -200,6 +214,7 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
       whileAst,
       with: withValue,
       sourceName,
+      matches,
     });
   }
   return Object.freeze({
@@ -211,6 +226,7 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
     whileAst,
     with: withValue,
     sourceName: trigger.sourceName ?? null,
+    matches,
   });
 }
 
@@ -312,21 +328,19 @@ export function entity(name, declaration = {}) {
     declaredChecks,
   });
 
-  const selfHandle = new Proxy({
-    name,
-    fields,
-    created: created(name),
-    updated: updated(name),
-    removed: removed(name),
-  }, {
-    get(target, key, receiver) {
-      if (key in target || typeof key !== 'string') {
-        return Reflect.get(target, key, receiver);
-      }
+  // Self-handle for effects thunk resolution. The effects thunk receives a
+  // handle that resolves field names to their typed handles — a minimal proxy
+  // distinct from registerEntityHandle (which also sets runtime active-entity
+  // state). Kept minimal so the two handles can't drift (same resolving logic,
+  // different lifecycle purpose).
+  const selfHandle = new Proxy(Object.create(null), {
+    get(_target, key) {
       if (key === 'id') return { fieldName: 'id' };
-      if (Object.prototype.hasOwnProperty.call(fields, key)) {
-        return fieldHandle(key, fields[key], name);
-      }
+      if (key === 'name') return name;
+      if (key === 'created') return created(name);
+      if (key === 'updated') return updated(name);
+      if (key === 'removed') return removed(name);
+      if (Object.prototype.hasOwnProperty.call(fields, key)) return fieldHandle(key, fields[key], name);
       return undefined;
     },
   });
@@ -416,6 +430,11 @@ export function entity(name, declaration = {}) {
     gate,
     readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
     scopeAst,
+    scopeFilter(principal) {
+      if (!readScope) return { sql: '1=1', params: {} };
+      const bound = bindReadScope(readScope, principal);
+      return bound ? { sql: bound.sql, params: bound.params } : { sql: '1=1', params: {} };
+    },
     effects: validatedEffects,
     admitsEffects,
     schedule: validatedSchedule,
@@ -511,80 +530,7 @@ export function entity(name, declaration = {}) {
 
   record.generateDDL = () => generateDDL(record);
 
-  const ownerField = ownerFieldOf(record);
-  record.crudHandlers = Object.freeze({
-    [`${name}.create`]: ({ payload, principal }) => {
-      validateMutation(record, payload);
-      const id = randomUUID();
-      const data = { ...payload, id };
-      if (ownerField) data[ownerField] = principal?.id;
-      return [{ handle: record.verbs.created.handle, type: record.verbs.created.type, scope: `${name}:${id}`, data }];
-    },
-    [`${name}.update`]: ({ payload, principal: _p }) => {
-      const { id, ...rest } = payload;
-      if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
-      validateMutation(record, rest);
-      // Transition guard: for every state field in the payload, pre-read the
-      // current row and verify the move is in the declared transition graph.
-      // Runs after structural validation so invalid targets report as domain
-      // errors before transition errors (clearer diagnostic order).
-      for (const [fieldName, descriptor] of Object.entries(fields)) {
-        if (descriptor.kind !== 'state') continue;
-        if (!(fieldName in rest)) continue;
-        let current;
-        try {
-          current = record.findById(id);
-        } catch (e) {
-          throw Object.assign(
-            new ValidationError(
-              `Illegal transition check requires a durable database ` +
-              `(in-memory kernel cannot verify state transitions for ${name}.${fieldName})`,
-            ),
-            { status: 400 },
-          );
-        }
-        if (!current || current[fieldName] == null) {
-          throw Object.assign(
-            new ValidationError(
-              `${name}.${fieldName}: illegal transition (no current state) -> ${rest[fieldName]}`,
-            ),
-            { status: 400 },
-          );
-        }
-        const currentValue = current[fieldName];
-        if (currentValue === rest[fieldName]) continue; // no-op, skip check
-        const legalTargets = descriptor.transitions[currentValue];
-        if (!legalTargets || !legalTargets.includes(rest[fieldName])) {
-          throw Object.assign(
-            new ValidationError(
-              `${name}.${fieldName}: illegal transition ${currentValue} -> ${rest[fieldName]}`,
-            ),
-            { status: 400 },
-          );
-        }
-      }
-      const data = { ...rest, id };
-      for (const [fieldName, descriptor] of Object.entries(fields)) {
-        if (descriptor.touch) data[fieldName] = new Date();
-      }
-      return [{ handle: record.verbs.updated.handle, type: record.verbs.updated.type, scope: `${name}:${id}`, data }];
-    },
-    [`${name}.remove`]: ({ payload, principal: _p }) => {
-      if (!payload.id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
-      return [{ handle: record.verbs.removed.handle, type: record.verbs.removed.type, scope: `${name}:${payload.id}`, data: { id: payload.id } }];
-    },
-    ...Object.assign({}, ...sideTableStrategyEntries.map(({ strategy, fields: strategyFields }) =>
-      strategy.mutateHandlers(name, strategyFields))),
-  });
-
-  function ownerFieldOf(entity) {
-    for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
-      if (descriptor.type === 'ref' && descriptor.role && descriptor.readonly) {
-        return fieldName;
-      }
-    }
-    return null;
-  }
+  record.crudHandlers = createCrudHandlers({ record, sideTableStrategyEntries });
 
   return registerEntityHandle({ record, fields, name });
 }

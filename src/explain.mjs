@@ -1,6 +1,5 @@
 import { rowCapabilities, mayVerb, inheritedGrant, hasOwnCanGrant, fieldCapabilities } from './row-grant.mjs';
 import { isRuntimeGrantClause } from './scope.mjs';
-import { bindReadScope } from './scope-sql.mjs';
 
 function grantClauses(entityRecord) {
   const grant = entityRecord.grant;
@@ -64,13 +63,14 @@ export async function explain({ entity, row, principal, verb, field }) {
       verbAdmitted: false,
       verbRequired: null,
     };
-    scopeInfo = entity.readScope ? bindReadScope(entity.readScope, principal) : null;
+    const scoped = entity.scopeFilter(principal);
+    scopeInfo = scoped.sql !== '1=1' ? scoped : null;
   } else if (Array.isArray(clauses)) {
     const hasCan = clauses.some((c) => isRuntimeGrantClause(c));
     const scoped = clauses.find((c) => c && typeof c.predicate === 'function');
     if (scoped) {
-      const bound = entity.readScope ? bindReadScope(entity.readScope, principal) : null;
-      scopeInfo = bound;
+      const filtered = entity.scopeFilter(principal);
+      scopeInfo = filtered.sql !== '1=1' ? filtered : null;
     } else {
       scopeInfo = null;
     }

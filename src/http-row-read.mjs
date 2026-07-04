@@ -1,10 +1,7 @@
-import { bindReadScope } from './scope-sql.mjs';
 import { mayRow } from './row-grant.mjs';
 
 export function readScopedRow(app, entity, id, principal) {
-  const bound = bindReadScope(entity.readScope, principal);
-  const where = bound ? bound.sql : '1=1';
-  const scopeParams = bound ? bound.params : {};
+  const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
   const row = app.db
     .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
     .get({ ...scopeParams, id });

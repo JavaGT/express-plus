@@ -11,7 +11,8 @@
 // (AGENTS.md, one reconciliation path).
 
 // Lazy import of effect compiler (avoids circular dependency at module load time).
-import { readSeq } from './cursor.mjs';
+import { readSeq } from './committed-log.mjs';
+import { appendEvents, eventsFor, rowToEvent } from './committed-log.mjs';
 import { lifecycleVerb, parseEventType } from './event-handle.mjs';
 import { isPlainObject } from './field-strategy.mjs';
 
@@ -161,17 +162,17 @@ export function durableMutationVariant({
 
       // Append events to _Log with per-scope sequence numbers. NOW tokens in the
       // event data are resolved to the commit-time ISO here (ADR #24) — before
-      // serialization, so the token never reaches _Log.
+      // serialization, so the token never reaches _Log. The actual INSERT is
+      // centralized in committed-log.mjs — one canonical write surface.
       for (const e of events) {
         const withHandle = eventWithParsedHandle(e);
         const scope = withHandle.scope;
         const seq = nextSeq(scope);
         const data = resolveNowTokens(withHandle.data ?? {}, now);
-        db.prepare(
-          'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
-        ).run(scope, seq, withHandle.type, JSON.stringify(data), actionId, now);
-        finalizedEvents.push(eventWithHandle({ ...withHandle, data, seq, actionId, committedAt: now }, withHandle.handle));
+        const ev = { ...withHandle, data, seq, actionId, committedAt: now };
+        finalizedEvents.push(eventWithHandle(ev, withHandle.handle));
       }
+      appendEvents(db, finalizedEvents);
 
       // Projection consumers — materialize entity rows from events.
       for (const consumer of projectionConsumers) {
@@ -257,28 +258,6 @@ export function durableMutationVariant({
 //
 // `authorize` is REQUIRED and fails closed: there is no default. A default
 // `() => true` would admit every action (fail OPEN), the opposite of the route
-// rowToEvent — rebuild an event object from a durable `_Log` row. Used by the
-// dedupe path: a re-sent actionId returns its previously-committed events
-// without re-running the handler. Shared by `dispatch` and `dispatchBatch` so
-// the row→event shape has ONE definition (a second copy would be the exact seam
-// where the two paths drift — AGENTS.md → singular system).
-function rowToEvent(row) {
-  let handle;
-  try {
-    handle = parseEventType(row.eventType);
-  } catch {
-    handle = undefined;
-  }
-  const event = {
-    type: row.eventType,
-    scope: row.scope,
-    seq: row.seq,
-    actionId: row.actionId,
-    committedAt: row.committedAt,
-    data: JSON.parse(row.eventData),
-  };
-  return handle ? eventWithHandle(event, handle) : Object.freeze(event);
-}
 
 // commitEvents — the durable transaction brace shared by `dispatch` and
 // `dispatchBatch`: BEGIN IMMEDIATE → durable variant applyInTxn → COMMIT →
@@ -422,11 +401,9 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
     // Dedupe by actionId: a re-sent action returns its committed events without
     // re-running the handler (SPEC §7).
-    const existing = db.prepare(
-      'SELECT * FROM _Log WHERE actionId = ? ORDER BY scope, seq',
-    ).all(actionId);
+    const existing = eventsFor(db, actionId);
     if (existing.length > 0) {
-      return { granted: true, deduped: true, events: existing.map(rowToEvent) };
+      return { granted: true, deduped: true, events: existing.map((r) => rowToEvent(r, parseEventType)) };
     }
 
     const handler = handlers[type];
@@ -471,11 +448,9 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     }
 
     // Dedupe the whole batch by its single actionId.
-    const existing = db.prepare(
-      'SELECT * FROM _Log WHERE actionId = ? ORDER BY scope, seq',
-    ).all(actionId);
+    const existing = eventsFor(db, actionId);
     if (existing.length > 0) {
-      return { granted: true, deduped: true, events: existing.map(rowToEvent) };
+      return { granted: true, deduped: true, events: existing.map((r) => rowToEvent(r, parseEventType)) };
     }
 
     // Run every handler, concatenating their emitted events. Handlers are pure

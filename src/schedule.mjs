@@ -97,14 +97,9 @@ export function discoverDueSchedules(db, entities, now) {
           continue;
         }
 
-        // Add while clause if present (scope SQL already uses t0. prefix)
-        if (trigger.whileSql) {
-          sql += ` AND (${trigger.whileSql})`;
-          Object.assign(params, trigger.whileParams);
-        }
-
         const rows = db.prepare(sql).all(params);
         for (const row of rows) {
+          if (!trigger.matches(db, row)) continue;
           const payload = resolvePayload(trigger, db, record.name, row.id);
           results.push({ entity: record.name, verb, rowId: row.id, payload, sourceName: trigger.sourceName ?? fieldName });
         }
@@ -186,16 +181,11 @@ export function discoverTickedRows(db, entities, now) {
       for (const trigger of triggerList(triggerOrTriggers)) {
         if (trigger.kind !== 'tick.hz' && trigger.kind !== 'tick.every') continue;
 
-        // Defensive: skip rows without a compiled while predicate (the empty-while
-        // guard at entity-load-time guarantees this, but guard here too).
-        if (!trigger.whileSql) continue;
-
-        // Build: SELECT id FROM <name> AS t0 WHERE <whileSql>
-        const sql = `SELECT id FROM ${entity.name} AS t0 WHERE ${trigger.whileSql}`;
-        const params = { ...(trigger.whileParams ?? {}) };
-        const rows = db.prepare(sql).all(params);
+        const sql = `SELECT id FROM ${entity.name} AS t0`;
+        const rows = db.prepare(sql).all();
 
         for (const row of rows) {
+          if (!trigger.matches(db, row)) continue;
           const payload = resolvePayload(trigger, db, entity.name, row.id);
           results.push({ entity: entity.name, verb, rowId: row.id, payload });
         }
