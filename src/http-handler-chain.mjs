@@ -3,7 +3,7 @@ import { resolve } from 'node:path';
 import { config } from './config.mjs';
 import { getLog } from './log.mjs';
 import { renderError } from './middleware.mjs';
-import { authorizeRow } from './http-row-read.mjs';
+import { authorizeRow } from './http-crud-dispatch.mjs';
 import { resolveTemplate } from './views.mjs';
 import { createResponseFacade } from './http-response-factory.mjs';
 

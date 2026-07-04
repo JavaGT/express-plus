@@ -13,7 +13,7 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { sendJson } from './http-response.mjs';
-import { readScopedRow, authorizeRow } from './http-row-read.mjs';
+import { readScopedRow, authorizeRow } from './http-crud-dispatch.mjs';
 import { readSeq, readSince, minSeqForScope } from './committed-log.mjs';
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 

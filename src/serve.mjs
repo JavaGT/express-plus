@@ -34,7 +34,6 @@ import { BodyError, readRequestBody } from './http-body.mjs';
 import { runChain } from './http-handler-chain.mjs';
 import { matchRoute } from './http-route-match.mjs';
 import { committedEventHeaders, sendJson } from './http-response.mjs';
-import { authorizeRow } from './http-row-read.mjs';
 import { createResponseFacade } from './http-response-factory.mjs';
 import { dispatchCrud } from './http-crud-dispatch.mjs';
 import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute, handleClientSdkRoute } from './http-framework-routes.mjs';
@@ -329,7 +328,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       if (route.handlers) {
         await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
       } else {
-        await dispatchCrud({ entity: route.entity, verb: route.verb, db, principal, params, body, app: isApp ? source : null, res, sendJson, committedEventHeaders, authorizeRow, mayRow });
+        await dispatchCrud({ entity: route.entity, verb: route.verb, db, principal, params, body, app: isApp ? source : null, res, sendJson, committedEventHeaders, mayRow });
       }
     } catch (err) {
       // the single error renderer (SPEC §3): an unexpected exception becomes an

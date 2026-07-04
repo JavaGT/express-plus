@@ -9,6 +9,7 @@ import { randomUUID } from 'node:crypto';
 import { ValidationError } from './field-strategy.mjs';
 import { readProjectedCursors } from './projected-async.mjs';
 import { projectedCursorHeaders } from './http-response.mjs';
+import { mayRow } from './row-grant.mjs';
 
 // One kernel mutation through the write queue, translating the failure modes
 // shared by create/update/remove: queue starvation → 503, validation → 400
@@ -37,9 +38,24 @@ async function runKernelMutation(app, kernel, res, sendJson, action, { validatio
   return result;
 }
 
+export function readScopedRow(app, entity, id, principal) {
+  const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
+  const row = app.db
+    .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
+    .get({ ...scopeParams, id });
+  return entity.deserializeRow(row);
+}
+
+export async function authorizeRow(app, entity, verb, id, principal, preRow = null) {
+  const row = preRow ?? readScopedRow(app, entity, id, principal);
+  if (!row) return { status: 404 };
+  if (!(await mayRow(entity, verb, row, principal))) return { status: 403 };
+  return { row };
+}
+
 // DB-backed dispatch for one admitted verb.
 export async function dispatchCrud({ entity, verb, db, principal, params, body, app, res,
-  sendJson, committedEventHeaders, authorizeRow, mayRow }) {
+  sendJson, committedEventHeaders, mayRow }) {
   if (!db) {
     sendJson(res, 500, { error: 'no database configured for entity dispatch' });
     return;
@@ -67,7 +83,7 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
 
   if (verb === 'read') {
     // Scoped load + capability check: absent-or-invisible → 404, denied → 403.
-    const auth = await authorizeRow({ db }, entity, 'read', params.id, principal);
+    const auth = await authorizeRow(app, entity, 'read', params.id, principal);
     if (auth.status) {
       return void sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
     }
@@ -93,7 +109,7 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
   if (verb === 'update') {
     const kernel = app?.kernel;
     if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
-    const auth = await authorizeRow({ db }, entity, 'update', params.id, principal);
+    const auth = await authorizeRow(app, entity, 'update', params.id, principal);
     if (auth.status) {
       return void sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
     }
@@ -113,7 +129,7 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
   if (verb === 'remove') {
     const kernel = app?.kernel;
     if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
-    const auth = await authorizeRow({ db }, entity, 'remove', params.id, principal);
+    const auth = await authorizeRow(app, entity, 'remove', params.id, principal);
     if (auth.status) {
       return void sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
     }
