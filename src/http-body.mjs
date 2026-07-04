@@ -97,15 +97,15 @@ function parseMultipartBody(buffer, boundary) {
   if (!boundary) throw new BodyError('multipart body is missing a boundary', 400);
   const body = {};
   const delimiter = `--${boundary}`;
-  const raw = buffer.toString('binary');
+  const raw = buffer.toString('latin1');
   for (const section of raw.split(delimiter).slice(1)) {
     if (section.startsWith('--')) break;
     const trimmed = section.startsWith('\r\n') ? section.slice(2) : section;
     const splitAt = trimmed.indexOf('\r\n\r\n');
     if (splitAt === -1) continue;
     const headers = parseMultipartHeaders(trimmed.slice(0, splitAt));
-    let content = Buffer.from(trimmed.slice(splitAt + 4), 'binary');
-    if (content.subarray(-2).toString('binary') === '\r\n') content = content.subarray(0, -2);
+    let content = Buffer.from(trimmed.slice(splitAt + 4), 'latin1');
+    if (content.subarray(-2).toString('latin1') === '\r\n') content = content.subarray(0, -2);
     const disposition = parseContentDisposition(headers['content-disposition'] ?? '');
     if (!disposition.name) continue;
     if (Object.prototype.hasOwnProperty.call(disposition, 'filename')) {
