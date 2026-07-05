@@ -6,6 +6,7 @@
 // One response abstraction — no two paths building the same wrapper twice.
 
 import { sendJson } from './http-response.mjs';
+import { canWriteResponse } from './http-response.mjs';
 
 /**
  * Creates an Express-style response facade wrapping a Node.js ServerResponse.
@@ -20,32 +21,40 @@ import { sendJson } from './http-response.mjs';
  */
 export function createResponseFacade(nodeRes, { onEnd } = {}) {
   let pendingStatus = 200;
+  let facadeEnded = false;
+
+  function markEnded() {
+    if (facadeEnded) return;
+    facadeEnded = true;
+    if (onEnd) onEnd();
+  }
+
   const res = {
     status(code) {
       pendingStatus = code;
       return res;
     },
     json(value) {
-      sendJson(nodeRes, pendingStatus, value);
-      if (onEnd) onEnd();
+      const wrote = sendJson(nodeRes, pendingStatus, value, {}, { operation: 'res.json' });
+      if (wrote) markEnded();
       return res;
     },
     send(value) {
+      if (!canWriteResponse(nodeRes, 'res.send')) return res;
       const payload = typeof value === 'string' ? value : String(value);
-      if (!nodeRes.headersSent) {
-        nodeRes.writeHead(pendingStatus, {
-          'content-type': 'text/plain; charset=utf-8',
-          'content-length': Buffer.byteLength(payload),
-        });
-      }
+      nodeRes.writeHead(pendingStatus, {
+        'content-type': 'text/plain; charset=utf-8',
+        'content-length': Buffer.byteLength(payload),
+      });
       nodeRes.end(payload);
-      if (onEnd) onEnd();
+      markEnded();
       return res;
     },
     sendStatus(code) {
+      if (!canWriteResponse(nodeRes, 'res.sendStatus')) return res;
       nodeRes.writeHead(code);
       nodeRes.end();
-      if (onEnd) onEnd();
+      markEnded();
       return res;
     },
     get headersSent() {
@@ -55,9 +64,9 @@ export function createResponseFacade(nodeRes, { onEnd } = {}) {
       return nodeRes.writeHead(...args);
     },
     end(...args) {
-      const r = nodeRes.end(...args);
-      if (onEnd) onEnd();
-      return r;
+      nodeRes.end(...args);
+      markEnded();
+      return res;
     },
     setHeader(...args) {
       return nodeRes.setHeader(...args);

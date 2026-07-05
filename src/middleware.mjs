@@ -4,6 +4,7 @@
 // needs no per-app knowledge.
 
 import { config } from './config.mjs';
+import { canWriteResponse, warnLateResponse } from './http-response.mjs';
 
 // Security headers set on EVERY response — including 401/404/500. These are the
 // safe-without-per-app-knowledge defaults: stop MIME sniffing, deny framing
@@ -69,6 +70,7 @@ export function isSameOriginRequest(req) {
 // `env` is server-owned (a listen option, defaulting to config.env) — never
 // client-controlled.
 export function renderError(res, err, { env = config.env } = {}) {
+  if (!canWriteResponse(res, 'renderError', err)) return;
   const deliberate = typeof err?.status === 'number';
   const status = deliberate ? err.status : 500;
   const body = deliberate
@@ -77,11 +79,9 @@ export function renderError(res, err, { env = config.env } = {}) {
       ? { error: 'internal error' }
       : { error: 'internal error', message: String(err?.message ?? err), stack: err?.stack };
   const payload = JSON.stringify(body);
-  if (!res.headersSent) {
-    res.writeHead(status, {
-      'content-type': 'application/json; charset=utf-8',
-      'content-length': Buffer.byteLength(payload),
-    });
-  }
+  res.writeHead(status, {
+    'content-type': 'application/json; charset=utf-8',
+    'content-length': Buffer.byteLength(payload),
+  });
   res.end(payload);
 }

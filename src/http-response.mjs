@@ -1,4 +1,39 @@
-export function sendJson(res, status, body, headers = {}) {
+const DOUBLE_RESPONSE_WARNING_CODE = 'WB_DOUBLE_RESPONSE';
+
+export function responseHasStarted(res) {
+  return Boolean(res.headersSent || res.writableEnded || res.destroyed);
+}
+
+export function warnLateResponse(res, operation, cause) {
+  const req = res.req;
+  const method = req?.method ?? 'UNKNOWN';
+  const url = req?.url ?? 'UNKNOWN_URL';
+  const state = [
+    `headersSent=${Boolean(res.headersSent)}`,
+    `writableEnded=${Boolean(res.writableEnded)}`,
+    `destroyed=${Boolean(res.destroyed)}`,
+  ].join(', ');
+  const causeMessage =
+    cause instanceof Error ? `${cause.name}: ${cause.message}`
+    : cause ? String(cause)
+    : undefined;
+  process.emitWarning(
+    new Error(
+      `Attempted to write response after it had already started in ${operation} ` +
+      `for ${method} ${url} (${state})${causeMessage ? ` — cause: ${causeMessage}` : ''}`,
+    ),
+    { code: DOUBLE_RESPONSE_WARNING_CODE, type: 'DoubleResponseWarning' },
+  );
+}
+
+export function canWriteResponse(res, operation, cause) {
+  if (!responseHasStarted(res)) return true;
+  warnLateResponse(res, operation, cause);
+  return false;
+}
+
+export function sendJson(res, status, body, headers = {}, options = {}) {
+  if (!canWriteResponse(res, options.operation ?? 'sendJson', options.cause)) return false;
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',
@@ -6,6 +41,7 @@ export function sendJson(res, status, body, headers = {}) {
     ...headers,
   });
   res.end(payload);
+  return true;
 }
 
 export function committedEventHeaders(result, actionId, scope = null) {

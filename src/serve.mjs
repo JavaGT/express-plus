@@ -33,7 +33,7 @@ import { createRateLimiter } from './rate-limit.mjs';
 import { BodyError, readRequestBody } from './http-body.mjs';
 import { runChain } from './http-handler-chain.mjs';
 import { matchRoute } from './http-route-match.mjs';
-import { committedEventHeaders, sendJson } from './http-response.mjs';
+import { committedEventHeaders, responseHasStarted, warnLateResponse, sendJson } from './http-response.mjs';
 import { createResponseFacade } from './http-response-factory.mjs';
 import { dispatchCrud } from './http-crud-dispatch.mjs';
 import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute, handleClientSdkRoute } from './http-framework-routes.mjs';
@@ -226,7 +226,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // other framework defaults.
       if (isApp && req.method === 'GET') {
         const handled = await handleClientSdkRoute(source, req, res);
-        if (handled) return;
+        if (handled || responseHasStarted(res)) return;
       }
       // Framework-owned default endpoints — snapshot + resync (spec #1, D6/D7).
       // Like the /events WS transport, these are framework defaults (not mounted
@@ -235,21 +235,21 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // mayVerb ('read') as REST `read` — one auth engine, no second path.
       if (isApp && req.method === 'GET') {
         const handled = await handleResyncRoute(source, req, res, principalOf(req));
-        if (handled) return;
+        if (handled || responseHasStarted(res)) return;
       }
       // Framework-owned blob upload (spec #2): `POST /blobs` is a framework
       // default, not a mounted route — intercepted before route matching, like
       // the snapshot/resync endpoints and the /events WS transport.
       if (isApp && req.method === 'POST') {
         const handled = await handleBlobUploadRoute(source, req, res, principalOf(req));
-        if (handled) return;
+        if (handled || responseHasStarted(res)) return;
       }
       // Framework-owned job-queue endpoints (spec #5): /workers/register,
       // /jobs/claim, /jobs/:id/heartbeat, /jobs/:id/result. Bearer-auth'd (not
       // route-gate auth) — intercepted before matchRoute, like /blobs.
       if (isApp && req.method === 'POST' && source.jobs) {
         const handled = await handleJobRoute(source, req, res);
-        if (handled) return;
+        if (handled || responseHasStarted(res)) return;
       }
       // App-declared prefix-intercept handlers — `app.use(prefix, fn)` (and its
       // `app.static` sugar). Each fn is a catch-all under its prefix; the first
@@ -284,7 +284,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
             renderError(res, err, { env });
             return;
           }
-          if (handled || res.writableEnded) return;
+          if (handled || responseHasStarted(res)) return;
         }
       }
 
@@ -331,9 +331,13 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
         await dispatchCrud({ entity: route.entity, verb: route.verb, db, principal, params, body, app: isApp ? source : null, res, sendJson, committedEventHeaders, mayRow });
       }
     } catch (err) {
-      // the single error renderer (SPEC §3): an unexpected exception becomes an
-      // opaque prod-safe 500 (or a dev 500 with a stack). `env` is server-owned,
-      // never client-controlled.
+      if (responseHasStarted(res)) {
+        warnLateResponse(res, 'makeRequestHandler.catch', err);
+        if (!res.writableEnded && !res.destroyed) {
+          try { res.end(); } catch { /* stream already gone */ }
+        }
+        return;
+      }
       renderError(res, err, { env });
     }
   };
