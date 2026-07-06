@@ -13,6 +13,12 @@
 
 import { principal, anonymous } from './principal.mjs';
 import { config } from './config.mjs';
+import { ApiKey } from './auth-entities.mjs';
+import { createHash } from 'node:crypto';
+
+function sha256hex(s) {
+  return createHash('sha256').update(s).digest('hex');
+}
 
 // The session cookie name. The cookie value is an opaque token; it never carries
 // identity, only a key into the Session table.
@@ -90,6 +96,40 @@ export function sessionPrincipalOf(db) {
       // token match the session was minted to grant).
       const attributes = row.type === 'link' ? { token: row.id } : {};
       return principal({ type: row.type, id: row.id, attributes });
+    } catch {
+      return anonymous;
+    }
+  };
+}
+
+// Build an apiKey principal resolver from a Bearer token. Reads the
+// `Authorization: Bearer <token>` header, hashes the token, looks up the ApiKey
+// row by tokenHash, checks expiration, and returns an apiKey principal.
+// Any failure — no header, no matching row, expired — yields `anonymous`
+// (fail closed). The resolution runs through the SAME authorization engine as
+// session principals — no second auth path.
+export function apiKeyPrincipalOf(db) {
+  return (req) => {
+    const auth = (req.headers?.authorization ?? '').trim();
+    if (!auth) return anonymous;
+    const match = auth.match(/^Bearer\s+(.+)$/i);
+    if (!match) return anonymous;
+    const token = match[1];
+    if (!token) return anonymous;
+    try {
+      const tokenHash = sha256hex(token);
+      const row = ApiKey.findOne(ApiKey.tokenHash.is(tokenHash));
+      if (!row) return anonymous;
+      // Expiration: an expired key is anonymous.
+      if (row.expiresAt != null && row.expiresAt <= Date.now()) return anonymous;
+      return principal({
+        type: 'apiKey',
+        id: row.id,
+        attributes: {
+          entityName: row.entityName ?? undefined,
+          role: row.role ?? undefined,
+        },
+      });
     } catch {
       return anonymous;
     }

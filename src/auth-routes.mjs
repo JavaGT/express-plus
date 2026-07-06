@@ -26,7 +26,7 @@
 
 import { router } from './app.mjs';
 import { allowAnonymous, requireUser } from './route-gate.mjs';
-import { User, Session, Credential, Invitation } from './auth-entities.mjs';
+import { User, Session, Credential, Invitation, ApiKey } from './auth-entities.mjs';
 import { createInvitation, acceptInvitation, rejectInvitation, listInvitationsForUser } from './invitation.mjs';
 import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.mjs';
 import { config } from './config.mjs';
@@ -309,6 +309,79 @@ export function authRoutes({ secure = config.env === 'production' } = {}) {
         createdAt: inv.createdAt,
       })));
     } catch (err) {
+      return next({ status: err.status ?? 500, message: err.message });
+    }
+  });
+
+  // ---- API Key routes -------------------------------------------------------
+
+  // POST /auth/api-key/create — mint a new API key. The plain token is returned
+  // ONCE in the response body and never stored. Only the SHA-256 hash is stored.
+  // requireUser: only an authenticated user may create keys.
+  s.post('/api-key/create', requireUser(), (req, res, next) => {
+    const { name, entityName, role, expiresAt } = req.body ?? {};
+    if (!name) {
+      return next({ status: 400, message: 'name is required' });
+    }
+    try {
+      const result = ApiKey.create({
+        name,
+        entityName: entityName ?? null,
+        role: role ?? null,
+        expiresAt: expiresAt ?? null,
+        createdBy: req.principal.id,
+      });
+      res.status(201).json({
+        id: result.id,
+        prefix: result.prefix,
+        name: result.name,
+        token: result.plainToken,
+      });
+    } catch (err) {
+      return next({ status: err.status ?? 500, message: err.message });
+    }
+  });
+
+  // GET /auth/api-key — list the current user's API keys (prefix + name only,
+  // no hashes, no plain tokens).
+  // requireUser: an anonymous caller cannot list keys.
+  s.get('/api-key', requireUser(), (req, res, next) => {
+    try {
+      const userId = req.principal.id;
+      const keys = ApiKey.findAll(ApiKey.createdBy.is(userId))
+        .sort(ApiKey.createdAt, 'desc')
+        .then((rows) => {
+          res.json(rows.map((k) => ({
+            id: k.id,
+            prefix: k.prefix,
+            name: k.name,
+            entityName: k.entityName,
+            role: k.role,
+            expiresAt: k.expiresAt,
+            createdAt: k.createdAt,
+          })));
+        }, (err) => next({ status: 500, message: err.message }));
+    } catch (err) {
+      return next({ status: err.status ?? 500, message: err.message });
+    }
+  });
+
+  // DELETE /auth/api-key/:id — revoke (delete) an API key. Only the key's
+  // creator may revoke it.
+  // requireUser: an anonymous caller cannot revoke keys.
+  s.delete('/api-key/:id', requireUser(), (req, res, next) => {
+    const { id } = req.params;
+    try {
+      const key = ApiKey.getOrFail(id);
+      if (String(key.createdBy) !== String(req.principal.id)) {
+        return next({ status: 403, message: 'not your key' });
+      }
+      ApiKey.delete(id);
+      res.sendStatus(204);
+    } catch (err) {
+      if (err.message?.includes('not found')) {
+        return next({ status: 404, message: 'key not found' });
+      }
       return next({ status: err.status ?? 500, message: err.message });
     }
   });

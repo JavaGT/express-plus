@@ -18,6 +18,7 @@
 // so their read-scope grants nothing — `never()`/`deny`. The auth layer reaches
 // them only through the UNSCOPED, trusted query API, never a request path.
 
+import { randomBytes, createHash } from 'node:crypto';
 import { entity } from './entity/compile.mjs';
 import { text, hash, ref, date, number } from './field.mjs';
 import { scope } from './scope.mjs';
@@ -25,6 +26,10 @@ import { never } from './scope-sql.mjs';
 import { grant, deny, read, subscribe } from './grant.mjs';
 import { schedule } from './schedule.mjs';
 import { config } from './config.mjs';
+
+function sha256hex(s) {
+  return createHash('sha256').update(s).digest('hex');
+}
 
 // A framework auth entity is never request-readable: its rows are reached only
 // by trusted server code (login lookup, principal hydration), never dispatched
@@ -164,7 +169,6 @@ export const Inbox = entity('Inbox', {
 //   - expiresAt    — epoch ms expiration (null = never)
 //   - createdBy    — the User who created this invitation
 //   - createdAt    — timestamp
-import { randomBytes } from 'node:crypto';
 
 function mintInvitation(payload, { insert }) {
   const token = payload.token || randomBytes(32).toString('base64url');
@@ -210,4 +214,56 @@ export const Credential = entity('Credential', {
          createdAt: date(),
 
   grant: () => [notRequestReadable('Credential')],
+});
+
+// ApiKey — a project-scoped bearer-token principal. An ApiKey mints a random
+// 32-byte token (base64url), stores only its SHA-256 hash, and exposes the plain
+// token ONCE at creation time. The prefix (first 8 chars of the plain token) is
+// stored for display. The key resolves to an apiKey principal through the SAME
+// authorization engine as user principals — no second auth path.
+//
+// Like User/Session/Credential/Invitation, ApiKey is not request-readable: it is
+// reached only by trusted server code (the Bearer resolution in session.mjs and
+// the creation/revocation routes in auth-routes.mjs).
+//
+// Fields:
+//   - tokenHash  — SHA-256 hex digest of the plain token (never stored in plaintext)
+//   - prefix     — first 8 base64url chars of the plain token (for display)
+//   - name       — a human-readable label for the key
+//   - entityName — optional scope: which entity this key is scoped to
+//   - role       — optional capabilities role the key confers
+//   - createdBy  — the User who created this key
+//   - expiresAt  — optional epoch ms expiration
+//   - createdAt  — timestamp of creation
+function mintApiKey(payload, { insert }) {
+  const plainToken = randomBytes(32).toString('base64url');
+  const tokenHash = sha256hex(plainToken);
+  const prefix = plainToken.slice(0, 8);
+  const now = new Date();
+  const row = insert({
+    tokenHash,
+    prefix,
+    name: payload.name,
+    entityName: payload.entityName ?? null,
+    role: payload.role ?? null,
+    createdBy: payload.createdBy,
+    expiresAt: payload.expiresAt ?? null,
+    createdAt: now,
+  });
+  // The plain token is returned ONCE alongside the row and never stored.
+  return { ...row, plainToken };
+}
+
+export const ApiKey = entity('ApiKey', {
+      tokenHash: text(),
+         prefix: text(),
+           name: text(),
+     entityName: text(),
+           role: text(),
+      createdBy: ref('User'),
+      expiresAt: number(),
+      createdAt: date(),
+
+  grant: () => [notRequestReadable('ApiKey')],
+  create: mintApiKey,
 });

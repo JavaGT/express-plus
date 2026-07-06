@@ -1,13 +1,17 @@
 // The principal model — a closed union with `anonymous` first-class
 // (SPEC §6.2; ADRs #11, #20).
 //
-// The principal-type union is CLOSED: user | link | system | anonymous. A
+// The principal-type union is CLOSED: user | link | system | anonymous | apiKey. A
 // principal of any other shape is a construction-time error — fail-closed, the
 // same discipline as a non-compilable scope or a grant-less entity. There is no
-// fifth type and no app-defined type: domain identities (Patron, Reader,
-// Player) are sub-account entities owned by `User` via a typed FK (ADR #20),
-// resolved through the compiled scope JOIN, never minted as a new principal
-// kind.
+// app-defined type: domain identities (Patron, Reader, Player) are sub-account
+// entities owned by `User` via a typed FK (ADR #20), resolved through the compiled
+// scope JOIN, never minted as a new principal kind.
+//
+// `apiKey` is a project-scoped bearer-token principal. It carries the ApiKey row
+// id (not the plain token), an optional entityName (scope), and an optional role
+// (capabilities). It participates in the SAME authorization engine as user
+// principals — no second auth path.
 //
 // `anonymous` is the one principal a request can carry with NO identity:
 // `{ type: 'anonymous', id: null }`. It is admitted only by identity-free
@@ -24,7 +28,7 @@ export class UnknownPrincipalTypeError extends Error {
   }
 }
 
-const PRINCIPAL_TYPES = Object.freeze(['user', 'link', 'system', 'anonymous']);
+const PRINCIPAL_TYPES = Object.freeze(['user', 'link', 'system', 'anonymous', 'apiKey']);
 
 // Build a frozen principal from a declared shape. `attributes` defaults to an
 // empty frozen object (a link principal carries `{ token }`; a user typically
