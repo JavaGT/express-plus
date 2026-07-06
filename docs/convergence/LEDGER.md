@@ -8,9 +8,9 @@ to the logs.
 
 | Packet | Doc | Stage | Branch(es) | Last full gate | Notes |
 |---|---|---|---|---|---|
-| W1 auth parity | `W1-auth-parity.md` | slices | `convergence/W1-two-plane` (slice 1), `convergence/W1-passkeys` (slice 2) | 1252/1252/0 | Slice 1: membership() two-plane pattern. Slice 2: passkey (WebAuthn) auth — Credential entity, challenge/verify on node:crypto, 5 /auth/passkey routes, 22 tests. |
-| W2 persistence ownership | `W2-persistence-ownership.md` | census | — | — | 49 Prisma models — 2 GAPs (FTS + vector) |
-| W3 job queue parity | `W3-job-queue-parity.md` | census | — | — | 3 BUILD (progress, cancel, scoping) |
+| W1 auth parity | `W1-auth-parity.md` | slices | `convergence/W1-two-plane` (slice 1), `convergence/W1-passkeys` (slice 2), `convergence/W1-invitations` (slice 3) | 1323/1323/0 | S1: membership() two-plane. S2: passkey WebAuthn. S3: generic invitation flow (link + direct). |
+| W2 persistence ownership | `W2-persistence-ownership.md` | slices | `convergence/W2-fts` (slice 1) | 1302/1302/0 (merged) | Slice 1: FTS — text({ indexed: 'fts' }), FTS5 CREATE VIRTUAL TABLE, .matches(query) scope predicate, automatic lifecycle sync via projection. |
+| W3 job queue parity | `W3-job-queue-parity.md` | slices | `convergence/W3-job-queue` (slice 1) | 1273/1273/0 (merged) | Slice 1: progress (+stage), cancellation (cancelled status), scoping (scope column + scoped claim). 3 BUILD items closed. |
 | W4 UI kit | `W4-ui-kit.md` | census | — | — | 25 primitives — owner checkpoint required before build-out |
 | W5 client engine parity | `W5-client-engine-parity.md` | slices | `convergence/W5-scope-subscription` (slices 1+2) | 1216/1216/0 | Slice 1: subscribeScope() + normalizeSubscribeMsg. Slice 2: scope-keyed fan-out (per-entity Map retired), scope-level snapshot/events-since routes, generic subscribed ack. Council c01 adopted B′. |
 | S scope migration | `S-scope-migration.md` | gated | — | — | S0 memo: INCOMPATIBLE — per-project vs per-entity seq. Owner direction (2026-07-06): run W5 scope-wide-subscription design council first (with S0 memo as binding input), come back with joint recommendation on cursor granularity + subscription breadth + what changes on each side. S0 ruling deferred. |
@@ -41,3 +41,6 @@ Append one line per merge to main:
 2026-07-07 · W5 · convergence/W5-scope-subscription (slice 2) · 5ca1fcb..9cad72e · node --test 1216/1216/0 · DECISIONLOG #83
 2026-07-07 · W1 · convergence/W1-two-plane (slice 1) · 3abc225..acb030e · node --test 1230/1230/0 · DECISIONLOG #84
 2026-07-07 · W1 · convergence/W1-passkeys (slice 2) · 695b928..ecfce1b · node --test 1252/1252/0 · DECISIONLOG #85
+2026-07-07 · W3 · convergence/W3-job-queue (slice 1) · 7f56605..999d48a · node --test 1273/1273/0 · DECISIONLOG #86
+2026-07-07 · W2 · convergence/W2-fts (slice 1) · 999d48a..75f4d94 · node --test 1302/1302/0 · DECISIONLOG #87
+2026-07-07 · W1 · convergence/W1-invitations (slice 3) · 75f4d94..ca77e19 · node --test 1323/1323/0 · DECISIONLOG #88

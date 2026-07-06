@@ -421,3 +421,24 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
 - **Reason:** Passkeys are the WebAuthn-based passwordless login alternative Scope configured but never UI-mounted. The ceremony split: credential storage + challenge issue/verify as framework concern; UI as app concern. The authenticate route mints a Session + Set-Cookie the same way `/auth/login` does — one session path, no second auth path.
 - **Files:** `src/passkey.mjs` (567 lines, new), `src/auth-entities.mjs` (+Credential entity), `src/auth-routes.mjs` (+5 routes), `src/app.mjs` (+Credential in prepareSchema), `src/kernel.mjs` (+Credential), `src/internal.mjs` (+export), `test/passkey.test.mjs` (22 tests).
 - **Gate:** `node --test` 1252/1252/0 on main.
+
+## 2026-07-07 — W3 slice 1: job progress, cancellation, scoping
+
+- **Decision:** Add progress tracking (`progress` INT, `stage` TEXT columns + `POST /jobs/:id/progress` route with worker ownership guard), cancellation (`cancelled` status in STATES/TERMINAL + `cancelJob()` + `POST /jobs/:id/cancel`), and per-project job scoping (`scope` TEXT column + `idx__job_scope_status` index + scoped `claim()` + `?scope=` query param on `/jobs/claim`). All three are additive — no breaking changes to existing enqueue/claim/heartbeat/result API.
+- **Reason:** The census found 3 BUILD items. Progress tracking lets workers report completion percentage; Scope's worker polls `/api/jobs/:id/progress`. Cancellation lets users abort queued/running jobs; Scope uses polling to detect cancelled status. Scoping isolates jobs per project; Scope uses `projectId` FK on its Job model. All three are minimum-viable additions — no new tables, no worker-side changes.
+- **Files:** `src/job-queue.mjs` (+47 lines), `src/ddl.mjs` (+15 lines), `src/http-framework-routes.mjs` (+30 lines), `test/job-queue-progress.test.mjs` (21 tests).
+- **Gate:** `node --test` 1273/1273/0 on main.
+
+## 2026-07-07 — W2 slice 1: FTS (full-text search)
+
+- **Decision:** Add `text({ indexed: 'fts' })` field type that creates an FTS5 virtual table, a `.matches(query)` scope predicate that compiles to `EXISTS (SELECT 1 FROM {table}_fts WHERE {table}_fts MATCH :q)`, and automatic lifecycle sync via the projection consumer. The FTS table follows the `<entity>_<field>_fts` naming convention with `<entity>_id UNINDEXED` column. FTS5 table alias limitation in node:sqlite: MATCH uses the full table name.
+- **Reason:** Scope uses 3 raw SQL FTS5 virtual tables (segments/artefacts/codes) with manual lifecycle sync in `fts-sync.ts`. Workbench makes this a framework concern: declare the field as FTS-indexed, get DDL + query predicate + lifecycle sync for free. The `fts-strategy.mjs` side-table strategy follows the same pattern as map/log/ordered/ephemeral side tables — registered in SIDE_TABLE_STRATEGIES, picked up automatically by `generateDDL()`.
+- **Files:** `src/fts-strategy.mjs` (90 lines, new), `src/field.mjs` (+8 lines), `src/ddl.mjs` (+3 lines), `src/scope-sql.mjs` (+57 lines), `src/side-table-strategy.mjs` (+4 lines), `src/authz.mjs` (+1 line), `src/membership.mjs` (+1 line), `src/entity/compile.mjs` (+5 lines), `test/fts.test.mjs` (29 tests).
+- **Gate:** `node --test` 1302/1302/0 on main.
+
+## 2026-07-07 — W1 slice 3: generic invitation flow
+
+- **Decision:** Add `Invitation` entity with dual mode: direct user-to-user (targetUser filled) and token-based share link (targetUser null, maxUses optional). Create/accept/reject/list routes under `/auth/invitation`. On accept, inserts a row into the target entity's `{Entity}_members` side-table via `acceptInvitation()` helper. Token auto-generated from 32 random bytes (base64url). Expired invites and maxUses-exceeded link invites reject with 400.
+- **Reason:** Scope has two separate invite models (`ProjectInvitation` user-to-user, `Invite` token-based link) with two separate Prisma tables and handlers. Workbench unifies them into a single entity with an optional `targetUser` discriminator — one table, one flow, two modes. Accept grants membership via direct SQL INSERT into the members map side-table (same structure `membership()` reads from), keeping the two-plane auth pipeline unchanged.
+- **Files:** `src/invitation.mjs` (152 lines, new), `src/auth-entities.mjs` (+59 lines), `src/auth-routes.mjs` (+90 lines), `src/app.mjs` (+4 lines), `src/kernel.mjs` (+4 lines), `src/internal.mjs` (+2 lines), `src/index.mjs` (+3 lines), `test/invitation.test.mjs` (21 tests).
+- **Gate:** `node --test` 1323/1323/0 on main.
