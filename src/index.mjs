@@ -1,4 +1,4 @@
-export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline } from './field.mjs';
+export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';
 export { owner } from './owner.mjs';
 export { now } from './deferred.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';

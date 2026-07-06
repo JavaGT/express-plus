@@ -101,6 +101,18 @@ export function json(shape = null, options = {}) {
 // compiler refuses to compare it (a hash handle's .is throws — fail closed). A
 // hydrated row exposes `row.<field>.verify(plaintext)`; the stored cell is the
 // salted digest, never the plaintext.
+// `vector(dimensions)` — a fixed-length array of numbers stored as JSON TEXT.
+// The field validates dimensions at write time (e.g. vector(1024) rejects a
+// vector of length 1536). Cosine similarity search is brute-force (pure JS,
+// zero runtime dependencies) — loads all rows, computes similarity, returns
+// top-K. Same pattern as Scope's `Json` Prisma type.
+export function vector(dimensions, options = {}) {
+  if (typeof dimensions !== 'number' || dimensions <= 0 || !Number.isInteger(dimensions)) {
+    throw new Error('vector(dimensions) requires a positive integer dimension count');
+  }
+  return makeDescriptor({ kind: 'value', type: 'vector', dimensions, ...options });
+}
+
 export function hash(options = {}) {
   return makeDescriptor({ kind: 'hash', type: 'hash', ...options });
 }

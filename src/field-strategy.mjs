@@ -154,6 +154,21 @@ const STRATEGIES = Object.freeze({
         case 'json':
           if (!isJsonValue(value)) return 'expected a JSON value';
           return true;
+        case 'vector': {
+          // Accept a JSON string (from stored cell) or a number[] (from client).
+          let vec = value;
+          if (typeof value === 'string') {
+            try { vec = JSON.parse(value); } catch { return 'expected a JSON-encoded vector array'; }
+          }
+          if (!Array.isArray(vec)) return 'expected a vector array';
+          if (!vec.every((v) => typeof v === 'number' && Number.isFinite(v))) {
+            return 'expected a vector of finite numbers';
+          }
+          if (vec.length !== descriptor.dimensions) {
+            return `expected vector of length ${descriptor.dimensions}, got ${vec.length}`;
+          }
+          return true;
+        }
         default:
           return true;
       }
@@ -182,6 +197,8 @@ const STRATEGIES = Object.freeze({
           return String(value);
         case 'json':
           return JSON.stringify(value);
+        case 'vector':
+          return JSON.stringify(value);
         default:
           return value;
       }
@@ -192,6 +209,9 @@ const STRATEGIES = Object.freeze({
         case 'boolean':
           return value ? true : false;
         case 'json':
+          if (typeof value !== 'string') return value;
+          return JSON.parse(value);
+        case 'vector':
           if (typeof value !== 'string') return value;
           return JSON.parse(value);
         default:
