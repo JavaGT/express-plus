@@ -1,5 +1,19 @@
 import { getActiveDb } from '../db.mjs';
-import { lowerToSql } from '../scope-sql.mjs';
+import { lowerToSql, cosineSimilarity } from '../scope-sql.mjs';
+
+function applyNearest(rows, nearest, hydrate) {
+  const { field, query, k } = nearest;
+  const scored = rows.map((row) => {
+    let vec = row[field];
+    if (typeof vec === 'string') {
+      try { vec = JSON.parse(vec); } catch { vec = null; }
+    }
+    const similarity = cosineSimilarity(query, vec);
+    return { row, similarity };
+  });
+  scored.sort((a, b) => b.similarity - a.similarity);
+  return scored.slice(0, k).map(({ row }) => row);
+}
 
 export function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null }) {
   const where = lowerToSql(predicate);
@@ -29,7 +43,10 @@ export function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null
           sql += ` LIMIT :limit`;
           params.limit = limit;
         }
-        const rows = getActiveDb().prepare(sql).all(params).map(hydrate);
+        let rows = getActiveDb().prepare(sql).all(params).map(hydrate);
+        if (where.nearest) {
+          rows = applyNearest(rows, where.nearest, hydrate);
+        }
         resolve(rows);
       } catch (err) {
         reject(err);
@@ -76,5 +93,30 @@ export function installEntityQueries(record, { name, hydrate, deserializeStoredC
       throw err;
     }
     return row;
+  };
+
+  // nearest(fieldName, queryVec, k) — top-K nearest-neighbour search by cosine
+  // similarity. Loads all rows, computes similarity in pure JS, returns top-K.
+  record.nearest = (fieldName, queryVec, k) => {
+    if (typeof fieldName !== 'string') {
+      throw new Error(`nearest() requires a field name (string), got ${typeof fieldName}`);
+    }
+    if (!Array.isArray(queryVec)) {
+      throw new Error(`nearest() requires a query vector (number[]), got ${typeof queryVec}`);
+    }
+    if (typeof k !== 'number' || k < 1) {
+      throw new Error(`nearest() requires a positive integer k, got ${k}`);
+    }
+    const rows = getActiveDb().prepare(`SELECT * FROM ${name} AS t0`).all().map(deserializeStoredCells);
+    const scored = rows.map((row) => {
+      let vec = row[fieldName];
+      if (typeof vec === 'string') {
+        try { vec = JSON.parse(vec); } catch { vec = null; }
+      }
+      return { row, similarity: cosineSimilarity(queryVec, vec) };
+    });
+    scored.sort((a, b) => b.similarity - a.similarity);
+    const topK = scored.slice(0, k);
+    return topK.map(({ row }) => hydrate(row));
   };
 }

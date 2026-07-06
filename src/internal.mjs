@@ -1,6 +1,6 @@
 export { check, resolveDecision, UnawaitedCheckError } from './check.mjs';
 export { assertGuarded } from './guard/static.mjs';
-export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline } from './field.mjs';
+export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';
 export { owner } from './owner.mjs';
 export { createLog, getLog } from './log.mjs';
 export { now } from './deferred.mjs';
@@ -10,7 +10,7 @@ export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
 export { entity } from './entity/compile.mjs';
 export { User, Session, Inbox, Credential, Invitation, ApiKey } from './auth-entities.mjs';
-export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope } from './scope-sql.mjs';
+export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope, cosineSimilarity, nearest } from './scope-sql.mjs';
 export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectSource } from './principal.mjs';
 export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient, durableMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.mjs';
