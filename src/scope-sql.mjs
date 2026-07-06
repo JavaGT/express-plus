@@ -328,6 +328,37 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
       ? FALSE
       : makeNode({ node: 'lte', field: name, value: serializeField(descriptor, value) }),
   };
+  // FTS-indexed text fields expose a .matches(query) predicate that compiles to
+  // a correlated EXISTS over the FTS5 virtual table. Requires entityName to
+  // construct the table name (available on the entity handle, and — after
+  // entityName threading — in the fields proxy too).
+  if (descriptor.indexed === 'fts') {
+    if (entityName) {
+      handle.matches = (query) => {
+        if (typeof query !== 'string' || query.length === 0) {
+          throw new NonCompilableError(
+            `field '${String(name)}'.matches(query) requires a non-empty search string`,
+          );
+        }
+        return makeNode({ node: 'match', entity: entityName, field: name, value: query });
+      };
+    } else {
+      handle.matches = () => {
+        throw new NonCompilableError(
+          `field '${String(name)}'.matches(query) requires an entity name to construct the FTS table. ` +
+            `Use the entity handle (e.g. Doc.${String(name)}.matches(...)) rather than the fields proxy.`,
+        );
+      };
+    }
+  } else {
+    // Non-fts fields: .matches() is not supported. Throw a clear error.
+    handle.matches = () => {
+      throw new NonCompilableError(
+        `field '${String(name)}' is not FTS-indexed. ` +
+          `Declare it with text({ indexed: 'fts' }) to enable full-text search.`,
+      );
+    };
+  }
   if (descriptor.type !== 'ref' || descriptor.role || typeof resolveEntity !== 'function') {
     return handle;
   }
@@ -390,7 +421,7 @@ function relationMapHandle({ refFieldName, targetEntityName, targetFieldName }) 
 // non-compilable field kind (crdt/ordered/store) are load-time errors. The
 // proxy delegates to fieldHandle so there is one handle definition; it adds
 // the scope-context `where` to the undeclared/non-value error messages.
-function makeFieldsProxy(fields, where) {
+function makeFieldsProxy(fields, where, entityName) {
   return new Proxy({}, {
     get(_t, name) {
       const descriptor = fields[name];
@@ -409,7 +440,7 @@ function makeFieldsProxy(fields, where) {
         };
         return { is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
       }
-      return fieldHandle(name, descriptor);
+      return fieldHandle(name, descriptor, entityName);
     },
   });
 }
@@ -419,9 +450,9 @@ function makeFieldsProxy(fields, where) {
 // The `registry` is the unified check registry (built by buildCheckRegistry) — it
 // provides both harvest AND run faces, and the scope compiler consults its harvest
 // faces exclusively.
-export function harvest(predicate, { fields, where, registry }) {
+export function harvest(predicate, { fields, where, registry, entityName }) {
   const is = makeIsProxy(registry, where);
-  const fieldsProxy = makeFieldsProxy(fields, where);
+  const fieldsProxy = makeFieldsProxy(fields, where, entityName);
   let ast;
   try {
     ast = predicate({ is, fields: fieldsProxy });
@@ -515,6 +546,20 @@ export function lowerToSql(ast, ctx = {}) {
         params[key] = node.value;
         return `EXISTS (SELECT 1 FROM ${node.table} AS ${mAlias} WHERE ${mAlias}.${node.ownerCol} = ${ownerExpr} AND ${mAlias}.${MEMBER_COLUMN} = :${key})`;
       }
+      // A full-text-search MATCH predicate: the row is admitted iff the FTS5
+      // virtual table has an entry for this row that matches the query. The
+      // FTS table naming convention is {entity}_{field}_fts, with an
+      // {entity}_id UNINDEXED column to correlate back to the main table.
+      // MATCH must reference the full table name (FTS5 does not support table
+      // aliases in the MATCH operator in node:sqlite's bundled SQLite).
+      case 'match': {
+        const ftsTable = `${node.entity}_${node.field}_fts`;
+        const entityIdCol = `${node.entity}_id`;
+        const mAlias = `j${state.n += 1}`;
+        const key = freshParam('ftsQuery');
+        params[key] = node.value;
+        return `EXISTS (SELECT 1 FROM ${ftsTable} AS ${mAlias} WHERE ${ftsTable} MATCH :${key} AND ${mAlias}.${entityIdCol} = ${alias}.id)`;
+      }
       default:
         throw new NonCompilableError(`cannot lower AST node '${node.node}'`, { where: ctx.where });
     }
@@ -535,8 +580,8 @@ function lower2(ast, ctx) {
 // returning the harvested AST so a child entity can re-lower it under a join
 // alias (the inherit path). The AST is the durable artifact; the SQL is one
 // rendering of it.
-export function compileReadScope(predicate, { fields, where, registry }) {
-  const ast = harvest(predicate, { fields, where, registry });
+export function compileReadScope(predicate, { fields, where, registry, entityName }) {
+  const ast = harvest(predicate, { fields, where, registry, entityName });
   return { ...lowerToSql(ast, { where }), ast };
 }
 

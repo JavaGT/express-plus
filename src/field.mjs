@@ -30,7 +30,10 @@ function makeDescriptor(props) {
 // `value` kind — a single stored value with whole-value diff. The default
 // mechanism (the bare kind is the sensible default per the naming rule).
 export function text(options = {}) {
-  const { oneOf, validate, ...rest } = options;
+  const { oneOf, validate, indexed, ...rest } = options;
+  if (indexed !== undefined && indexed !== 'fts') {
+    throw new Error(`text({ indexed }) only supports 'fts', got ${JSON.stringify(indexed)}`);
+  }
   if (oneOf !== undefined) {
     if (!Array.isArray(oneOf) || oneOf.length === 0) {
       throw new Error('text({ oneOf }) requires a non-empty array of allowed values');
@@ -45,10 +48,11 @@ export function text(options = {}) {
         if (!allowed.has(v)) return `expected one of [${values.join(', ')}]`;
         return typeof validate === 'function' ? validate(v) : true;
       },
+      ...(indexed ? { indexed } : {}),
       ...rest,
     });
   }
-  return makeDescriptor({ kind: 'value', type: 'text', validate, ...rest });
+  return makeDescriptor({ kind: 'value', type: 'text', validate, ...(indexed ? { indexed } : {}), ...rest });
 }
 // `text.crdt()` — the `crdt` kind instance for collaborative text. One instance
 // of the crdt contract, not a privileged special case (ADR #9).

@@ -80,6 +80,9 @@ export function generateDDL(entity) {
     } else if (descriptor.kind === 'ordered') {
       const orderedDDL = sideTableDDL(entity, name, descriptor);
       if (orderedDDL) statements.push(orderedDDL);
+    } else if (descriptor.indexed === 'fts') {
+      const ftsDDL = sideTableDDL(entity, name, descriptor);
+      if (ftsDDL) statements.push(ftsDDL);
     }
   }
 
