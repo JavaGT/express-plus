@@ -8,7 +8,7 @@ to the logs.
 
 | Packet | Doc | Stage | Branch(es) | Last full gate | Notes |
 |---|---|---|---|---|---|
-| W1 auth parity | `W1-auth-parity.md` | slices | `convergence/W1-two-plane` (slice 1) | 1230/1230/0 | Slice 1: membership(Entity, { member: { can: [read, subscribe] } }) concentrates two-plane pattern from 15 lines of boilerplate to 1 declaration line. Uses existing primitives only. |
+| W1 auth parity | `W1-auth-parity.md` | slices | `convergence/W1-two-plane` (slice 1), `convergence/W1-passkeys` (slice 2) | 1252/1252/0 | Slice 1: membership() two-plane pattern. Slice 2: passkey (WebAuthn) auth — Credential entity, challenge/verify on node:crypto, 5 /auth/passkey routes, 22 tests. |
 | W2 persistence ownership | `W2-persistence-ownership.md` | census | — | — | 49 Prisma models — 2 GAPs (FTS + vector) |
 | W3 job queue parity | `W3-job-queue-parity.md` | census | — | — | 3 BUILD (progress, cancel, scoping) |
 | W4 UI kit | `W4-ui-kit.md` | census | — | — | 25 primitives — owner checkpoint required before build-out |
@@ -40,3 +40,4 @@ Append one line per merge to main:
 2026-07-06 · W5 · convergence/W5-scope-subscription (slice 1) · c87407f..c6dc078 · node --test 1206/1206/0 · DECISIONLOG #82
 2026-07-07 · W5 · convergence/W5-scope-subscription (slice 2) · 5ca1fcb..9cad72e · node --test 1216/1216/0 · DECISIONLOG #83
 2026-07-07 · W1 · convergence/W1-two-plane (slice 1) · 3abc225..acb030e · node --test 1230/1230/0 · DECISIONLOG #84
+2026-07-07 · W1 · convergence/W1-passkeys (slice 2) · 695b928..ecfce1b · node --test 1252/1252/0 · DECISIONLOG #85
