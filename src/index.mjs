@@ -4,7 +4,7 @@ export { now } from './deferred.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
 export { entity } from './entity/compile.mjs';
-export { User, Session, Inbox, Credential, Invitation } from './auth-entities.mjs';
+export { User, Session, Inbox, Credential, Invitation, ApiKey } from './auth-entities.mjs';
 export { everyone, never, anyOf, inherit } from './scope-sql.mjs';
 export { principal, anonymous } from './principal.mjs';
 export { requireUser, allowAnonymous } from './route-gate.mjs';
@@ -17,7 +17,7 @@ export { serveStatic } from './views.mjs';
 // the request→principal source listen() wires by default when a db is engaged;
 // exporting it lets a test or bespoke transport use the same path (no second
 // auth path). The internal.mjs re-export is retained.
-export { sessionCookie, sessionPrincipalOf, sessionTokenOf, parseCookies, SESSION_COOKIE } from './session.mjs';
+export { sessionCookie, sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf, parseCookies, SESSION_COOKIE } from './session.mjs';
 export { inc, dec, self, many, effect } from './effect-compiler.mjs';
 export { schedule, tick, simulate } from './schedule.mjs';
 export { membership } from './membership.mjs';

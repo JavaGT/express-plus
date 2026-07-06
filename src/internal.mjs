@@ -9,7 +9,7 @@ export { computeDelta, createDeltaProjector } from './field-delta.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
 export { entity } from './entity/compile.mjs';
-export { User, Session, Inbox, Credential, Invitation } from './auth-entities.mjs';
+export { User, Session, Inbox, Credential, Invitation, ApiKey } from './auth-entities.mjs';
 export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope } from './scope-sql.mjs';
 export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectSource } from './principal.mjs';
 export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
@@ -26,7 +26,7 @@ export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views
 export { mayVerb, mayFieldOp, mayRow } from './row-grant.mjs';
 export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL } from './ddl.mjs';
 export { config, resolveConfig } from './config.mjs';
-export { parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE } from './session.mjs';
+export { parseCookies, sessionCookie, sessionPrincipalOf, apiKeyPrincipalOf, SESSION_COOKIE } from './session.mjs';
 export { default, router } from './app.mjs';
 export { inc, dec, self, many, effect, validateEffectDeclaration, createEffectContext, checkEffectDepth, executeEffectsForEvent, buildEffectsRegistry, buildEffectsGraph, validateEffects, verifyAdmissionHandshake, detectCrossEntityCycles, compileEntityEffects } from './effect-compiler.mjs';
 export { schedule, tick, tickSource, discoverTickedRows, admitSystemMutation, discoverDueSchedules } from './schedule.mjs';

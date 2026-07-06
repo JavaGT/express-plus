@@ -24,7 +24,7 @@ import { anonymous } from './principal.mjs';
 import { mayVerb, mayRow } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
-import { sessionPrincipalOf, sessionTokenOf } from './session.mjs';
+import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './session.mjs';
 import { createLiveServer } from './live.mjs';
 import { retentionPrune } from './committed-log.mjs';
 import { getLog } from './log.mjs';
@@ -373,8 +373,23 @@ export function listen(app, port, optionsOrCallback = {}) {
   // An explicit `principalOf` option overrides (tests inject a fixed principal).
   // With no db there is nothing to look a session up in, so the source stays the
   // fail-closed `() => anonymous` default in makeRequestHandler.
-  const principalOf =
-    options.principalOf ?? (app.db ? sessionPrincipalOf(app.db) : undefined);
+  //
+  // When the session resolver returns anonymous (no cookie / invalid session),
+  // the API key resolver is tried next: it reads `Authorization: Bearer <token>`,
+  // hashes the token, looks up the ApiKey row, and returns an apiKey principal.
+  // This is the SAME authorization engine as session principals — no second auth
+  // path. The session takes priority: a request with BOTH a valid cookie and a
+  // Bearer header resolves to the user principal.
+  const sessionResolver = app.db ? sessionPrincipalOf(app.db) : null;
+  const apiKeyResolver = app.db ? apiKeyPrincipalOf(app.db) : null;
+  const defaultPrincipalOf = sessionResolver
+    ? (req) => {
+        const p = sessionResolver(req);
+        if (p.type !== 'anonymous') return p;
+        return apiKeyResolver ? apiKeyResolver(req) : p;
+      }
+    : undefined;
+  const principalOf = options.principalOf ?? defaultPrincipalOf;
 
   // Two-phase boot. The routing table resolves asynchronously (an entity's
   // `routes` thunk may be async — e.g. a parent lazily dynamic-imports a child at

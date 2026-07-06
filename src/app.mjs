@@ -38,7 +38,7 @@ import { createClock } from './clock.mjs';
 import { createLog, setAmbientLog, getLog } from './log.mjs';
 import { serveStatic } from './views.mjs';
 import { authRoutes } from './auth-routes.mjs';
-import { User, Session, Credential, Invitation } from './auth-entities.mjs';
+import { User, Session, Credential, Invitation, ApiKey } from './auth-entities.mjs';
 import { config, resolveConfig } from './config.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -456,7 +456,7 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
         // table would surface as a 500 mid-login). buildKernel already registers
         // these in app.entities for the live/reaper seams; this is the DDL half.
         if (app._authEngaged) {
-          for (const fe of [User, Session, Credential, Invitation]) {
+          for (const fe of [User, Session, Credential, Invitation, ApiKey]) {
             if (!seen.has(fe.name)) {
               seen.add(fe.name);
               executeDDL(fe, app.db);
