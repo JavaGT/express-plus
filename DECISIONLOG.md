@@ -385,3 +385,10 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
   6. **Revoked principals are refused, including on retry** (user confirmation of Fork C / authorize-before-dedupe). Note: Scope's kernel already authorizes before dedupe too — the two kernels agree; no behaviour change on either side.
 - **Interface contract to watch:** Scope's R8 materialiser is being designed to workbench's SPEC §7.1 bootstrap contract — `{ snapshot, cursors }` read in one transaction (see Scope `docs/refactor-v2-decisions/r8-materialiser-design.md`). The seq/cursor numbering agreed when Scope adopts the live spine (station A) becomes a load-bearing wire contract.
 - **Genericity check stands:** the `projects/*` stress-test apps remain the standing proof that Scope-driven features land generic; their needs co-steer the roadmap.
+
+## 2026-07-06 — W5 scope subscription normalization (slice 1 of station-A bridge)
+
+- **Decision:** Introduce `subscribeScope(scope, interest?)` as the forward-looking subscribe surface, with old `{entity, id}` normalised to `{scope: "Entity:id", interest: {entity, id}}` at the decode boundary. No server fan-out change — scope-keyed fan-out deferred to slice 2. Council c01 (Opus 4.8 + GPT 5.5, cross-evaluated) adopted Option B′: unified stream-scope primitive where per-entity is the degenerate scope.
+- **Reason:** The S0 wire memo found Scope uses per-project seq while workbench uses per-entity seq — structurally incompatible. The council recommended the stream-scope model as single subscription primitive covering both per-entity and room/project shapes. The owner directed: run W5 design first (with S0 as binding input), joint recommendation on cursor granularity + subscription breadth before ruling on S0. This slice delivers the wire-surface normalisation only.
+- **Files:** `src/live-admission.mjs` (+`normalizeSubscribeMsg`), `src/live-connection.mjs` (scope-aware acks), `public/workbench-client.mjs` (+`subscribeScope`, `unsubscribeScope`, unified `:` key format), `test/subscribe-scope.test.mjs` (13 new tests).
+- **Gate:** `node --test` 1206/1206/0 on main.

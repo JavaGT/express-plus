@@ -12,8 +12,8 @@ to the logs.
 | W2 persistence ownership | `W2-persistence-ownership.md` | census | — | — | 49 Prisma models — 2 GAPs (FTS + vector) |
 | W3 job queue parity | `W3-job-queue-parity.md` | census | — | — | 3 BUILD (progress, cancel, scoping) |
 | W4 UI kit | `W4-ui-kit.md` | census | — | — | 25 primitives — owner checkpoint required before build-out |
-| W5 client engine parity | `W5-client-engine-parity.md` | census | — | — | 32 capabilities — 18 build, top gap: scope-wide subscription |
-| S scope migration | `S-scope-migration.md` | gated + blocked-on-owner | — | — | S0 memo: INCOMPATIBLE — per-project vs per-entity seq. Owner escalation filed 2026-07-06. |
+| W5 client engine parity | `W5-client-engine-parity.md` | slices | `convergence/W5-scope-subscription` (slice 1 of 2) | 1206/1206/0 | Slice 1 shipped: subscribeScope() client API, normalizeSubscribeMsg, scope-keyed acks. Council c01 adopted B′ (unified stream-scope primitive). Slice 2 (server scope-keyed fan-out) pending. |
+| S scope migration | `S-scope-migration.md` | gated | — | — | S0 memo: INCOMPATIBLE — per-project vs per-entity seq. Owner direction (2026-07-06): run W5 scope-wide-subscription design council first (with S0 memo as binding input), come back with joint recommendation on cursor granularity + subscription breadth + what changes on each side. S0 ruling deferred. |
 
 Stage vocabulary: `not started` → `census` → `design` → `slices` → `done`
 (or `gated` / `blocked-on-owner`).
@@ -25,14 +25,16 @@ One row per council question. Working files live under `.council/<qid>/`
 
 | qid | Date | Question (one line) | Converged after cross-eval? | GLM tie-break used? | Outcome adopted |
 |---|---|---|---|---|---|
+| c01 | 2026-07-06 | Scope-wide subscription granularity: per-entity vs coarser scope, cursor model, wire changes | Yes — Opus 4.8 + GPT 5.5 converged on B′. No material disagreement. | No | Option B′ adopted. `subscribe(scope, interest?)` as single primitive — scope is ordered stream key. Per-entity is the degenerate scope. Stream-scope separated from row-identity. Old `{entity,id}` is decode shim, not second path. Rejected A/C/D. SINGULAR ordering. |
 
 ## Owner escalations
 
 | Date | Question | Owner ruling | Where recorded |
 |---|---|---|---|
-| 2026-07-06 | S0 wire memo: Scope uses per-project seq numbering, workbench uses per-entity seq. Structurally incompatible — Scope's event numbering must adopt workbench's per-entity model before station A. See census/S0-wire-memo.md for the 5 changes needed in Scope's dispatch pipeline, event log, cursor table, snapshot shape, and bootstrap ordering. | — pending — | `census/S0-wire-memo.md` |
+| 2026-07-06 | S0 wire memo: Scope uses per-project seq numbering, workbench uses per-entity seq. Structurally incompatible. See census/S0-wire-memo.md. | Owner ruled (2026-07-06): run W5 scope-wide-subscription design first (with S0 memo as binding input), joint recommendation on cursor granularity + subscription breadth + what changes on each side. S0 ruling deferred. | `census/S0-wire-memo.md`, council c01 |
 
 ## Merged slices
 
 Append one line per merge to main:
 `YYYY-MM-DD · <packet> · <branch> · <commit range> · node --test <N>/<N>/0 · DECISIONLOG #<n>`
+2026-07-06 · W5 · convergence/W5-scope-subscription (slice 1) · c87407f..c6dc078 · node --test 1206/1206/0 · DECISIONLOG #82
