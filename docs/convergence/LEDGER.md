@@ -8,12 +8,12 @@ to the logs.
 
 | Packet | Doc | Stage | Branch(es) | Last full gate | Notes |
 |---|---|---|---|---|---|
-| W1 auth parity | `W1-auth-parity.md` | not started | — | — | |
-| W2 persistence ownership | `W2-persistence-ownership.md` | not started | — | — | |
-| W3 job queue parity | `W3-job-queue-parity.md` | not started | — | — | |
-| W4 UI kit | `W4-ui-kit.md` | not started | — | — | owner checkpoint required before build-out |
-| W5 client engine parity | `W5-client-engine-parity.md` | not started | — | — | |
-| S scope migration | `S-scope-migration.md` | gated | — | — | S0 wire memo may run pre-gate |
+| W1 auth parity | `W1-auth-parity.md` | census | — | — | 25 features — 8 exists, 4 thin-wrap, 10 build, 3 defer-candidate |
+| W2 persistence ownership | `W2-persistence-ownership.md` | census | — | — | 49 Prisma models — 2 GAPs (FTS + vector) |
+| W3 job queue parity | `W3-job-queue-parity.md` | census | — | — | 3 BUILD (progress, cancel, scoping) |
+| W4 UI kit | `W4-ui-kit.md` | census | — | — | 25 primitives — owner checkpoint required before build-out |
+| W5 client engine parity | `W5-client-engine-parity.md` | census | — | — | 32 capabilities — 18 build, top gap: scope-wide subscription |
+| S scope migration | `S-scope-migration.md` | gated + blocked-on-owner | — | — | S0 memo: INCOMPATIBLE — per-project vs per-entity seq. Owner escalation filed 2026-07-06. |
 
 Stage vocabulary: `not started` → `census` → `design` → `slices` → `done`
 (or `gated` / `blocked-on-owner`).
@@ -30,6 +30,7 @@ One row per council question. Working files live under `.council/<qid>/`
 
 | Date | Question | Owner ruling | Where recorded |
 |---|---|---|---|
+| 2026-07-06 | S0 wire memo: Scope uses per-project seq numbering, workbench uses per-entity seq. Structurally incompatible — Scope's event numbering must adopt workbench's per-entity model before station A. See census/S0-wire-memo.md for the 5 changes needed in Scope's dispatch pipeline, event log, cursor table, snapshot shape, and bootstrap ordering. | — pending — | `census/S0-wire-memo.md` |
 
 ## Merged slices
 

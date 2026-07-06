@@ -54,9 +54,7 @@ generation, censuses, and mechanical work; `general-prog` (DeepSeek V4 Pro)
 for slices with cross-module invariants. Never launch a subagent from the
 shell — no `opencode run`, no CLI of any kind, no exceptions — and never
 instruct a subagent to spawn its own helpers that way either. If a task needs
-splitting, it comes back to you and you spawn the parts yourself. (The single
-sanctioned shell use of opencode is your own consultation council, §5, which
-dispatches no work.)
+splitting, it comes back to you and you spawn the parts yourself.
 
 Every brief is **self-contained** — subagents share none of your context:
 
@@ -124,58 +122,34 @@ semantics — where a wrong premise could get ratified by agreement. Do **not**
 use it for sequencing choices (`AGENTS.md`: pick the safest small order and
 start) or for anything in §1 (settled) or §6 (owner's).
 
-Members: Opus 4.8 and GPT-5.5, with GLM 5.2 as tie-breaker. They are
+**Members:** all four council subagents — `council-glm-5.2`,
+`council-kimi-k2.7-code`, `council-mimo-v2.5-pro`, and `council-qwen-3.7-max` —
+dispatched via your built-in Task tool. Each is individually weaker than
+Opus/GPT, so the full set cross-examines to surface blind spots. They are
 **consultants**: text in, text out. Never ask them to run tools, write files,
-or implement. This is the only sanctioned shell use of opencode, it is yours
-alone, and it dispatches no work.
+or implement.
 
 Protocol, per question `<qid>`:
 
-Each member gets its own isolated opencode data dir under `.council/`. That
-makes `-c` (continue last session) unambiguous — the dir holds exactly one
-session — and avoids the known hang where `opencode run` deadlocks on the
-shared `opencode.db` when other sessions hold it. Seed a member dir once per
-question:
+1. Write a self-contained brief (inline, not a file): context, the question,
+   the options you see, binding constraints (quote the relevant §1 ruling /
+   AGENTS value), and the relevant code excerpts. Council sessions know nothing
+   you don't put in the brief.
+2. Dispatch all four in parallel via the Task tool with the same brief. Collect
+   their answers.
+3. Cross-evaluate **in the same sessions**: dispatch each member again (resume
+   by `task_id`) with a follow-up containing the other three members' full
+   answers plus: "Three other experts answered the same brief as follows.
+   Identify what each gets right and wrong, then state your final position —
+   revise yours if warranted." Collect the four final positions.
+4. Operate on the four **final positions**. Unanimous or clear majority →
+   adopt. Split 2–2 or fragmented → you decide based on the reasoning quality,
+   not the vote count. Log the reasoning in `LEDGER.md`.
+5. You still own the decision: before acting, verify every load-bearing factual
+   claim in the adopted answer against the code. Log one row in `LEDGER.md` →
+   Council log.
 
-```
-seed() { mkdir -p "$1/opencode"; cp ~/.local/share/opencode/auth.json ~/.local/share/opencode/account.json "$1/opencode/"; }
-```
-
-1. Write a self-contained brief to `.council/<qid>/brief.md`: context, the
-   question, the options you see, binding constraints (quote the relevant §1
-   ruling / AGENTS value), and the relevant code excerpts. Council sessions
-   know nothing you don't put in the brief.
-2. Ask both, saving answers:
-   ```
-   seed "$PWD/.council/<qid>-opus"; seed "$PWD/.council/<qid>-gpt"
-   XDG_DATA_HOME="$PWD/.council/<qid>-opus" opencode run -m opencode/claude-opus-4-8 "$(cat .council/<qid>/brief.md)" > .council/<qid>/opus-1.md
-   XDG_DATA_HOME="$PWD/.council/<qid>-gpt"  opencode run -m opencode/gpt-5.5         "$(cat .council/<qid>/brief.md)" > .council/<qid>/gpt-1.md
-   ```
-3. Cross-evaluate **in the same sessions**: build a follow-up containing the
-   other model's full answer plus: "Another expert answered the same brief as
-   follows. Identify what it gets right and wrong, then state your final
-   position — revise yours if warranted."
-   ```
-   XDG_DATA_HOME="$PWD/.council/<qid>-opus" opencode run -c "$(cat .council/<qid>/xeval-opus.md)" > .council/<qid>/opus-2.md
-   XDG_DATA_HOME="$PWD/.council/<qid>-gpt"  opencode run -c "$(cat .council/<qid>/xeval-gpt.md)"  > .council/<qid>/gpt-2.md
-   ```
-4. Operate on the two **final positions**. Converged → adopt.
-5. Still materially split → tie-break: write `.council/<qid>/tiebreak.md` =
-   the original brief + both final positions + "Choose which of the two to go
-   with and say why. Do not invent a third option." Then:
-   ```
-   seed "$PWD/.council/<qid>-glm"
-   XDG_DATA_HOME="$PWD/.council/<qid>-glm" opencode run -m opencode/glm-5.2 "$(cat .council/<qid>/tiebreak.md)" > .council/<qid>/glm.md
-   ```
-   Adopt GLM's pick.
-6. You still own the decision: before acting, verify every load-bearing
-   factual claim in the adopted answer against the code. Log one row in
-   `LEDGER.md` → Council log.
-
-Failure modes: provider/billing errors arrive on stderr and don't mean your
-prompt is wrong; a run silent for ~90s is hung — kill and relaunch. `.council/`
-is scratch space, never committed (it is gitignored); the LEDGER row is the
-durable record.
+The LEDGER row is the durable record.
 
 ## 6. Owner escalations (bypass the council, pause only the affected packet)
 
