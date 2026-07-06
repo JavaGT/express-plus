@@ -1,7 +1,9 @@
-// Live fan-out core — subscription registry, delivery-time re-authorization,
-// pace buffers, and event delivery. The WebSocket transport and subscribe-time
-// admission stay in live.mjs; this module owns what happens after a subscription
-// has been admitted and after a committed event is ready to fan out.
+// Live fan-out core — scope-keyed subscription registry, delivery-time
+// re-authorization, pace buffers, and event delivery.
+//
+// W5 slice 2: registry is keyed by scope string (e.g. "Entity:id" for
+// per-entity, "project:p1" for coarse). The old entity→id→conn map
+// is retired — per-entity is a degenerate scope, not a separate path.
 
 import { anonymous } from './principal.mjs';
 import { mayRow } from './row-grant.mjs';
@@ -10,18 +12,8 @@ import { createDeltaProjector } from './field-delta.mjs';
 import { EventKind, parseEventType } from './event-handle.mjs';
 
 export function createLiveFanout({ mayVerb = null } = {}) {
-  // Subscription registry: Map<entity, Map<id, Map<conn, SubSpec>>>
-  // SubSpec = { fields: object|null, latch: true, pace: object|null }
-  const byEntity = new Map();
-
-  // Per-connection subscription keys (`${entity}:${id}`) mirror byEntity so a
-  // disconnect can purge in O(subs) without scanning every entity.
-  const connSubs = new Map();
-
-  // Coalescing buffers for paced subscribers: Map<bufferKey, {conn, scope, field, events:Array, timer:Timeout|null}>
-  // key = `${conn.id}|${scope}|${field}` — scope = `${entity}:${id}`, field = ephemeral field name.
-  // SEPARATE from SubSpec (DECISIONLOG #69 F2: folding a draining timer into the registry value
-  // re-creates a two-lifetime smell).
+  const byScope = new Map();   // Map<scope, Map<conn, SubSpec>>
+  const connSubs = new Map();  // Map<conn, Set<scope>>
   const paceBuffers = new Map();
 
   const deltaProjector = createDeltaProjector();
@@ -30,55 +22,79 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     return connSubs.get(conn)?.size ?? 0;
   }
 
-  function hasSubscription(conn, entity, id) {
-    return connSubs.get(conn)?.has(`${entity}:${id}`) ?? false;
+  // hasSubscription(conn, scopeOrEntity, id?) — two-arg form checks by scope
+  // string; three-arg form derives scope from `${entity}:${id}` for backward
+  // compatibility with callers that don't yet have a scope string.
+  function hasSubscription(conn, scopeOrEntity, id) {
+    if (arguments.length >= 3) {
+      return connSubs.get(conn)?.has(`${scopeOrEntity}:${id}`) ?? false;
+    }
+    return connSubs.get(conn)?.has(scopeOrEntity) ?? false;
   }
 
-  function addSubscription(entity, id, conn, fields = null, pace = null) {
-    if (!byEntity.has(entity)) byEntity.set(entity, new Map());
-    const byId = byEntity.get(entity);
-    if (!byId.has(id)) byId.set(id, new Map());
-    byId.get(id).set(conn, { fields, latch: true, pace });
+  function addSubscription(a, b, c, d, e) {
+    if (arguments.length >= 3 && typeof a === 'string' && (!a.includes(':') || (typeof b === 'string' && typeof c === 'object' && c !== null && c.id !== undefined))) {
+      // Legacy: addSubscription(entity, id, conn, fields?, pace?)
+      // Heuristic: first arg is entity (no ':'), OR there are >=4 args with
+      // the third being a conn (object with .id) — use legacy path.
+      // But actually, conn is always an object so this is unreliable. Use:
+      // first arg has no ':' → legacy. First arg has ':' → scope-keyed.
+    }
+    if (typeof a === 'string' && a.includes(':')) {
+      return addSubscriptionScope(a, b, c, d, e);
+    }
+    return addSubscriptionLegacy(a, b, c, d, e);
+  }
+
+  function addSubscriptionScope(scope, conn, fields = null, pace = null, interest = {}) {
+    if (!byScope.has(scope)) byScope.set(scope, new Map());
+    byScope.get(scope).set(conn, { fields, latch: true, pace, interest });
     let mine = connSubs.get(conn);
     if (!mine) { mine = new Set(); connSubs.set(conn, mine); }
-    mine.add(`${entity}:${id}`);
+    mine.add(scope);
   }
 
-  function removeSubscription(entity, id, conn) {
-    const byId = byEntity.get(entity);
-    if (byId) {
-      const subs = byId.get(id);
-      if (subs) {
-        subs.delete(conn);
-        if (subs.size === 0) byId.delete(id);
-        if (byId.size === 0) byEntity.delete(entity);
-      }
+  function addSubscriptionLegacy(entity, id, conn, fields = null, pace = null) {
+    const scope = `${entity}:${id}`;
+    addSubscriptionScope(scope, conn, fields, pace, { entity, id });
+  }
+
+  function removeSubscription(a, b, c) {
+    if (typeof a === 'string' && a.includes(':')) {
+      return removeSubscriptionScope(a, b);
+    }
+    return removeSubscriptionLegacy(a, b, c);
+  }
+
+  function removeSubscriptionScope(scope, conn) {
+    const subs = byScope.get(scope);
+    if (subs) {
+      subs.delete(conn);
+      if (subs.size === 0) byScope.delete(scope);
     }
     const mine = connSubs.get(conn);
     if (mine) {
-      mine.delete(`${entity}:${id}`);
+      mine.delete(scope);
       if (mine.size === 0) connSubs.delete(conn);
     }
+  }
+
+  function removeSubscriptionLegacy(entity, id, conn) {
+    removeSubscriptionScope(`${entity}:${id}`, conn);
   }
 
   function removeAll(conn) {
     const mine = connSubs.get(conn);
     if (!mine) return;
-    for (const key of mine) {
-      const sep = key.indexOf(':');
-      const entity = key.slice(0, sep);
-      const id = key.slice(sep + 1);
-      const byId = byEntity.get(entity);
-      if (!byId) continue;
-      const subs = byId.get(id);
-      if (!subs) continue;
-      subs.delete(conn);
-      if (subs.size === 0) byId.delete(id);
-      if (byId.size === 0) byEntity.delete(entity);
+    for (const scope of mine) {
+      const subs = byScope.get(scope);
+      if (subs) {
+        subs.delete(conn);
+        if (subs.size === 0) byScope.delete(scope);
+      }
     }
     connSubs.delete(conn);
 
-    // Purge all pacing buffers for this connection (conn.id is part of buffer key).
     for (const [bufKey, entry] of paceBuffers) {
       if (entry.conn === conn) {
         if (entry.timer !== null) { clearTimeout(entry.timer); entry.timer = null; }
@@ -87,14 +103,10 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     }
   }
 
-  // Flush one paced buffer: re-auth, coalesce, send ONE envelope, then clear.
-  // Called from setTimeout. Async with internal error handling (never rejects the
-  // timer callback's returned promise).
   async function flushPacedBuffer(key) {
     const entry = paceBuffers.get(key);
     if (!entry) return;
     const { conn, scope, events, entityRecord, authzRow } = entry;
-    // Clear FIRST — re-entrant safety.
     if (entry.timer !== null) {
       clearTimeout(entry.timer);
       entry.timer = null;
@@ -103,35 +115,26 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     if (events.length === 0) return;
     if (conn.closed) return;
 
-    // Re-auth (fail-closed): mayRow owns inherit/scope-only/.can handling; a
-    // thrown check or !allowed drops the buffer.
     if (!(await mayRow(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous, mayVerb))) return;
 
-    // Coalesce using the ephemeral kind's logic.
     const kind = PACE_STRATEGIES.ephemeral;
     const coalescer = entry.by ? kind.coalescers[entry.by] : null;
     const coalesced = coalescer ? events.reduce(coalescer) : events[events.length - 1];
     const span = kind.reduceSpan(events);
-    const [entityName, idStr] = scope.split(':');
+    const colon = scope.indexOf(':');
+    const entityName = colon > 0 ? scope.slice(0, colon) : scope;
+    const idStr = colon > 0 ? scope.slice(colon + 1) : scope;
     conn.send({
       type: 'event', entity: entityName, id: idStr,
       seq: span.seq, seqSpan: span.seqSpan, event: coalesced,
     });
   }
 
-  // Fan-out: forward a committed kernel event to every authorized subscriber of
-  // (entity, id). `entity` is the compiled entity RECORD — mayVerb needs it to
-  // run the grant's `.can` body. For 'created'/'updated', the row is re-read +
-  // HYDRATED here (a raw SELECT row lacks the assembled struct namespace that
-  // `.can` bodies read, e.g. `entity.linkShare.tier`); hydration via findById
-  // also re-reads the post-commit materialized state. For 'removed', the row is
-  // gone (the consumer passes `undefined`) — re-authorization is SKIPPED and the
-  // remove event forwards to every current subscriber (it IS the revocation
-  // signal). `committedEvent` is the kernel's event — its `seq` is the per-scope
-  // monotonic seq from `_Cursor`, and `data` is the mutation payload.
+  // Fan-out: forward a committed kernel event to authorized subscribers
+  // of the event's scope. One registry, one fan-out path.
   async function emit(entityRecord, id, row, committedEvent, { hydrated = false } = {}) {
     const name = entityRecord?.name;
-    if (!name) return;                       // unknown entity -> can't authorize -> fail closed
+    if (!name) return;
     let committed = committedEvent;
     if (committed.handle?.brand !== 'event-handle') {
       try {
@@ -142,21 +145,15 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     }
     const handle = committed.handle;
     if (handle.entity !== name) return;
-    const byId = byEntity.get(name);
-    if (!byId) return;
-    const subs = byId.get(String(id));
-    if (!subs) return;
 
-    const removed = row === undefined;       // removed -> row gone post-commit
-    // Hydrate so .can bodies reading entity.<struct>.* resolve. Falls back to
-    // the raw row when hydration is unavailable (unchanged behavior for simple
-    // entities whose .can body reads only `is.*`).
+    const eventScope = committedEvent.scope ?? `${name}:${String(id)}`;
+    const removed = row === undefined;
+
     let authzRow = row;
     if (!removed && !hydrated && entityRecord.findById) {
       try { authzRow = entityRecord.findById(String(id), null) ?? row; } catch { authzRow = row; }
     }
 
-    // Determine if this is an ephemeral field event that requires opt-in.
     let ephemeralField = null;
     if (!removed && handle.kind === EventKind.fieldSet) {
       const fd = entityRecord.fields?.[handle.field];
@@ -165,39 +162,29 @@ export function createLiveFanout({ mayVerb = null } = {}) {
       }
     }
 
-    const scope = `${name}:${String(id)}`;
     const delta = deltaProjector.project(entityRecord, id, authzRow, committed);
 
-    for (const [conn, subSpec] of subs) {
+    const scopeSubs = byScope.get(eventScope);
+    if (!scopeSubs) return;
+
+    for (const [conn, subSpec] of scopeSubs) {
       if (conn.closed) {
-        subs.delete(conn);
+        scopeSubs.delete(conn);
         continue;
       }
       if (!removed && !(await mayRow(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous, mayVerb))) {
-        // mayRow owns inherit/scope-only/.can handling. Removed events skip
-        // re-auth intentionally: the remove IS the revocation signal, forwarded
-        // to every current subscriber before the row is gone.
         continue;
       }
-      // Interest filter for ephemeral events: deliver ONLY if the subscriber's
-      // SubSpec.fields includes the ephemeral field. Pass-through events
-      // (created/updated/removed/collection) and removed events are delivered
-      // to ALL subscribers.
       if (ephemeralField !== null) {
-        const interest = subSpec?.fields;
-        if (!interest || interest[ephemeralField] !== true) continue;
+        const fields = subSpec?.fields;
+        if (!fields || fields[ephemeralField] !== true) continue;
       }
 
-      // Determine effective pace for this subscriber + field.
-      // Only ephemeral field events may be paced; pass-through/removed events
-      // and subscribers without pace always use window=0.
       let pace = { window: 0, by: null };
       if (ephemeralField !== null && subSpec?.pace !== null && subSpec?.pace !== undefined) {
         pace = subSpec.pace;
       }
 
-      // ONE paced emit path: window=0 = pass-through (flush-on-receive, inline);
-      // window>0 = enqueue + timer (coalesced on flush).
       if (pace.window === 0) {
         const envelope = {
           type: 'event', entity: name, id, seq: committed.seq,
@@ -207,13 +194,12 @@ export function createLiveFanout({ mayVerb = null } = {}) {
         if (delta !== undefined) envelope.delta = delta;
         conn.send(envelope);
       } else {
-        // Paced: enqueue into per-(conn, scope, field) buffer.
-        const bufKey = `${conn.id}|${scope}|${ephemeralField}`;
+        const bufKey = `${conn.id}|${eventScope}|${ephemeralField}`;
         let entry = paceBuffers.get(bufKey);
         if (!entry) {
           entry = {
             conn,
-            scope,
+            scope: eventScope,
             field: ephemeralField,
             events: [],
             timer: null,
@@ -224,7 +210,6 @@ export function createLiveFanout({ mayVerb = null } = {}) {
           paceBuffers.set(bufKey, entry);
         }
         entry.events.push(committed);
-        // Refresh authzRow with latest re-read so flush-time re-auth is current.
         entry.authzRow = authzRow;
         if (entry.timer === null) {
           entry.timer = setTimeout(() => flushPacedBuffer(bufKey), pace.window);
@@ -234,7 +219,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
   }
 
   function close() {
-    byEntity.clear();
+    byScope.clear();
     connSubs.clear();
     for (const [, entry] of paceBuffers) {
       if (entry.timer !== null) { clearTimeout(entry.timer); entry.timer = null; }

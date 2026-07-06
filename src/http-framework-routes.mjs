@@ -28,18 +28,31 @@ import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 export async function handleResyncRoute(app, req, res, principal) {
   const url = new URL(req.url, 'http://localhost');
   const seg = url.pathname.split('/').filter(Boolean);
-  if (seg.length !== 3 || (seg[0] !== 'snapshot' && seg[0] !== 'events-since')) return false;
+  const isSnapshot = seg[0] === 'snapshot';
+  const isEventsSince = seg[0] === 'events-since';
+  if (!isSnapshot && !isEventsSince) return false;
   if (!app || !app.entities || !app.db) return false;
-  const [, entityName, id] = seg;
-  const entity = app.entities.get(entityName);
-  if (!entity) { sendJson(res, 404, { error: 'not found' }); return true; }
-  // route gate (requireUser) — fail closed for anonymous, same as a mounted route.
+
   if (!principal || principal.id == null) {
     sendJson(res, 401, { error: 'unauthorized' });
     return true;
   }
+
+  // Scope-level requests: GET /snapshot?scope=project:p1 etc.
+  const scopeParam = url.searchParams.get('scope');
+  if (scopeParam) {
+    if (isSnapshot) return snapshotScopeRoute(app, scopeParam, principal, res);
+    const cursor = Number(url.searchParams.get('cursor') ?? 0);
+    return eventsSinceScopeRoute(app, scopeParam, principal, res, cursor);
+  }
+
+  // Per-entity requests: GET /snapshot/:entity/:id or /events-since/:entity/:id
+  if (seg.length !== 3) { sendJson(res, 404, { error: 'not found' }); return true; }
+  const [, entityName, id] = seg;
+  const entity = app.entities.get(entityName);
+  if (!entity) { sendJson(res, 404, { error: 'not found' }); return true; }
   const scopeKey = `${entityName}:${id}`;
-  if (seg[0] === 'snapshot') return snapshotRoute(app, entity, id, scopeKey, principal, res);
+  if (isSnapshot) return snapshotRoute(app, entity, id, scopeKey, principal, res);
   const cursor = Number(url.searchParams.get('cursor') ?? 0);
   return eventsSinceRoute(app, entity, scopeKey, principal, res, cursor);
 }
@@ -57,6 +70,54 @@ async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
     return true;
   }
   sendJson(res, 200, { snapshot: auth.row, seq: lastSeq });
+  return true;
+}
+
+async function snapshotScopeRoute(app, scope, principal, res) {
+  const lastSeq = readSeq(app.db, scope);
+  // Try to resolve the scope as an entity instance
+  const colon = scope.indexOf(':');
+  if (colon > 0) {
+    const entityName = scope.slice(0, colon);
+    const id = scope.slice(colon + 1);
+    const entity = app.entities.get(entityName);
+    if (entity) {
+      const row = readScopedRow(app, entity, id, principal);
+      const auth = await authorizeRow(app, entity, 'read', id, principal, row);
+      if (!auth.status) {
+        sendJson(res, 200, { snapshot: auth.row, cursors: { [scope]: lastSeq } });
+        return true;
+      }
+    }
+  }
+  // Pure scope-level snapshot — app callback or bare cursor
+  const scopeSnapshot = typeof app.scopeSnapshot === 'function'
+    ? await app.scopeSnapshot(scope, principal)
+    : null;
+  if (scopeSnapshot) {
+    sendJson(res, 200, { snapshot: scopeSnapshot, cursors: { [scope]: lastSeq } });
+    return true;
+  }
+  sendJson(res, 404, { error: 'not found' });
+  return true;
+}
+
+async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
+  const minSeq = minSeqForScope(app.db, scope);
+  if (minSeq !== null && cursor + 1 < minSeq) {
+    sendJson(res, 200, { resync: 'stale', reason: 'cursor-behind-retention' });
+    return true;
+  }
+  const rows = readSince(app.db, scope, cursor);
+  const events = rows.map((r) => ({
+    scope: r.scope,
+    seq: r.seq,
+    type: r.eventType,
+    data: JSON.parse(r.eventData),
+    actionId: r.actionId,
+    committedAt: r.committedAt,
+  }));
+  sendJson(res, 200, { scope, cursor, events });
   return true;
 }
 

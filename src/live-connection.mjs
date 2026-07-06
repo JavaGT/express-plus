@@ -109,9 +109,12 @@ export class LiveConnection {
 
   #handleUnsubscribe(msg) {
     const normalized = normalizeSubscribeMsg(msg);
-    if (normalized && normalized.interest.entity && normalized.interest.id !== undefined) {
-      this.#fanout.removeSubscription(normalized.interest.entity, String(normalized.interest.id), this);
-      this.send({ type: 'unsubscribed', entity: normalized.interest.entity, id: normalized.interest.id, scope: normalized.scope });
+    if (normalized) {
+      this.#fanout.removeSubscription(normalized.scope, this);
+      const response = { type: 'unsubscribed', scope: normalized.scope };
+      if (normalized.interest.entity) response.entity = normalized.interest.entity;
+      if (normalized.interest.id !== undefined) response.id = normalized.interest.id;
+      this.send(response);
     }
   }
 
@@ -126,14 +129,15 @@ export class LiveConnection {
       this.error(result.reason);
       return;
     }
-    this.#fanout.addSubscription(result.entityName, result.idStr, this, result.fields, result.pace);
-    this.send({
+    this.#fanout.addSubscription(result.scope, this, result.fields, result.pace, result.interest);
+    const response = {
       type: 'subscribed',
       scope: result.scope,
-      entity: result.entityName,
-      id: result.id,
       currentSeq: this.#currentSeq(result.scope),
-    });
+    };
+    if (result.entityName) response.entity = result.entityName;
+    if (result.id !== undefined) response.id = result.id;
+    this.send(response);
   }
 
   #close() {
