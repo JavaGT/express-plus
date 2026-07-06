@@ -6,7 +6,7 @@
 // (WebSocket upgrade, CSWSH check, principalOf) stays in live.mjs.
 
 import { FrameSender, FrameParser } from './websocket.mjs';
-import { authorizeSubscription } from './live-admission.mjs';
+import { authorizeSubscription, normalizeSubscribeMsg } from './live-admission.mjs';
 
 export class LiveConnection {
   #socket;
@@ -100,13 +100,18 @@ export class LiveConnection {
         this.#authorizeAndSubscribe(msg).catch(() => this.error('forbidden'));
         break;
       case 'unsubscribe':
-        if (typeof msg.entity === 'string' && msg.id !== undefined) {
-          this.#fanout.removeSubscription(msg.entity, String(msg.id), this);
-          this.send({ type: 'unsubscribed', entity: msg.entity, id: msg.id });
-        }
+        this.#handleUnsubscribe(msg);
         break;
       default:
         this.error(`unknown message type: ${msg.type}`);
+    }
+  }
+
+  #handleUnsubscribe(msg) {
+    const normalized = normalizeSubscribeMsg(msg);
+    if (normalized && normalized.interest.entity && normalized.interest.id !== undefined) {
+      this.#fanout.removeSubscription(normalized.interest.entity, String(normalized.interest.id), this);
+      this.send({ type: 'unsubscribed', entity: normalized.interest.entity, id: normalized.interest.id, scope: normalized.scope });
     }
   }
 
@@ -122,10 +127,12 @@ export class LiveConnection {
       return;
     }
     this.#fanout.addSubscription(result.entityName, result.idStr, this, result.fields, result.pace);
-    const key = `${result.entityName}:${result.idStr}`;
     this.send({
-      type: 'subscribed', entity: result.entityName, id: result.id,
-      currentSeq: this.#currentSeq(key),
+      type: 'subscribed',
+      scope: result.scope,
+      entity: result.entityName,
+      id: result.id,
+      currentSeq: this.#currentSeq(result.scope),
     });
   }
 

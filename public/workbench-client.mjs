@@ -5,9 +5,9 @@
 // external dependencies — uses Node's global WebSocket (Node 22+).
 //
 // Protocol (matches src/live.mjs verbatim):
-//   client → server: {type:'subscribe', entity, id, fields?, pace?} / {type:'unsubscribe', entity, id}
-//   server → client: {type:'subscribed', entity, id, currentSeq}
-//                    {type:'unsubscribed', entity, id}
+//   client → server: {type:'subscribe', entity, id, fields?, pace?} / {type:'subscribe', scope, interest?} / {type:'unsubscribe', entity, id} / {type:'unsubscribe', scope}
+//   server → client: {type:'subscribed', scope, entity, id, currentSeq}
+//                    {type:'unsubscribed', scope, entity, id}
 //                    {type:'event', entity, id, seq, seqSpan, event, delta?}
 //                    {type:'error', message}
 
@@ -63,7 +63,7 @@ export class LiveChannel {
   // before the `subscribed` ack.
   async subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
     const { options, onEvent } = normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent);
-    const key = `${entity}\0${String(id)}`;
+    const key = `${entity}:${String(id)}`;
     if (this._subs.has(key)) {
       throw new Error(`already subscribed to ${entity}:${id}`);
     }
@@ -80,10 +80,38 @@ export class LiveChannel {
     });
   }
 
+  // Subscribe to a scope string. The scope is the ordered stream key (e.g. "Entity:id"
+  // for per-entity, "project:<id>" for room/project streams). interest narrows delivery
+  // to a specific entity + id within the scope. Opens the WebSocket lazily on first call.
+  async subscribeScope(scope, optionsOrOnEvent, maybeOnEvent) {
+    const { options, onEvent } = normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent);
+    const key = scope;
+    if (this._subs.has(key)) {
+      throw new Error(`already subscribed to scope ${scope}`);
+    }
+
+    if (!this._socket || this._socket.readyState > 1) {
+      await this._openSocket();
+    }
+
+    return new Promise((resolve, reject) => {
+      this._subs.set(key, { onEvent, fields: options.fields, pace: options.pace, scope, entity: options.interest?.entity, id: options.interest?.id });
+      this._pendingSubs.set(key, { resolve, reject });
+      const envelope = { type: 'subscribe', scope };
+      if (options.interest) envelope.interest = options.interest;
+      else if (options.fields !== undefined || options.pace !== undefined) {
+        envelope.interest = {};
+        if (options.fields !== undefined) envelope.interest.fields = options.fields;
+        if (options.pace !== undefined) envelope.interest.pace = options.pace;
+      }
+      this._send(envelope);
+    });
+  }
+
   // Unsubscribe from an (entity, id). Resolves after the `unsubscribed` ack
   // or a short timeout (2s) if the ack never arrives.
   async unsubscribe(entity, id) {
-    const key = `${entity}\0${String(id)}`;
+    const key = `${entity}:${String(id)}`;
     if (!this._subs.has(key)) return;
 
     return new Promise((resolve) => {
@@ -96,6 +124,24 @@ export class LiveChannel {
 
       this._pendingUnsubs.set(key, { resolve, timeout });
       this._send({ type: 'unsubscribe', entity, id });
+    });
+  }
+
+  // Unsubscribe from a scope string.
+  async unsubscribeScope(scope) {
+    const key = scope;
+    if (!this._subs.has(key)) return;
+
+    return new Promise((resolve) => {
+      const timeout = setTimeout(() => {
+        this._subs.delete(key);
+        this._pendingUnsubs.delete(key);
+        resolve();
+      }, 2000);
+      if (typeof timeout.unref === 'function') timeout.unref();
+
+      this._pendingUnsubs.set(key, { resolve, timeout });
+      this._send({ type: 'unsubscribe', scope });
     });
   }
 
@@ -222,31 +268,31 @@ export class LiveChannel {
 
   // Route one server envelope to the right handler.
   _handleEnvelope(envelope) {
+    const scopeKey = envelope.scope ?? (envelope.entity ? `${envelope.entity}:${String(envelope.id)}` : null);
+
     if (envelope.type === 'subscribed') {
-      const key = `${envelope.entity}\0${String(envelope.id)}`;
-      const pending = this._pendingSubs.get(key);
+      const pending = scopeKey ? this._pendingSubs.get(scopeKey) : null;
       if (pending) {
-        this._pendingSubs.delete(key);
+        this._pendingSubs.delete(scopeKey);
         pending.resolve({ currentSeq: envelope.currentSeq });
       }
     } else if (envelope.type === 'unsubscribed') {
-      const key = `${envelope.entity}\0${String(envelope.id)}`;
-      this._subs.delete(key);
-      const pending = this._pendingUnsubs.get(key);
-      if (pending) {
-        if (pending.timeout) clearTimeout(pending.timeout);
-        this._pendingUnsubs.delete(key);
-        pending.resolve();
+      if (scopeKey) {
+        this._subs.delete(scopeKey);
+        const pending = this._pendingUnsubs.get(scopeKey);
+        if (pending) {
+          if (pending.timeout) clearTimeout(pending.timeout);
+          this._pendingUnsubs.delete(scopeKey);
+          pending.resolve();
+        }
       }
     } else if (envelope.type === 'error') {
-      // Error envelopes carry no entity/id. Reject ALL pending subscribes so
-      // no caller is left hanging.
       for (const [key, pending] of this._pendingSubs) {
         this._pendingSubs.delete(key);
         pending.reject(new Error(envelope.message));
       }
     } else if (envelope.type === 'event') {
-      const key = `${envelope.entity}\0${String(envelope.id)}`;
+      const key = scopeKey ?? `${envelope.entity}:${String(envelope.id)}`;
       const sub = this._subs.get(key);
       if (sub && typeof sub.onEvent === 'function') {
         sub.onEvent(envelope);
@@ -295,10 +341,15 @@ export class LiveChannel {
         // Re-subscribe every active subscription (the server lost state on
         // socket close).
         for (const [key, sub] of this._subs) {
-          const sep = key.indexOf('\0');
-          const entity = key.slice(0, sep);
-          const id = key.slice(sep + 1);
-          this._send(subscribeEnvelope(entity, id, sub));
+          const colon = key.indexOf(':');
+          const nullSep = key.indexOf('\0');
+          if (nullSep > 0) {
+            this._send(subscribeEnvelope(key.slice(0, nullSep), key.slice(nullSep + 1), sub));
+          } else if (colon > 0) {
+            this._send(subscribeEnvelope(key.slice(0, colon), key.slice(colon + 1), sub));
+          } else {
+            this._send({ type: 'subscribe', scope: key, interest: { entity: sub.entity, id: sub.id, fields: sub.fields, pace: sub.pace } });
+          }
         }
       } catch {
         if (!this._closed) this._scheduleReconnect();
