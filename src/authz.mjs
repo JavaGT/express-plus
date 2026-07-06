@@ -59,6 +59,7 @@ export function compileEntityAuthz(name, { fields, grant, declaredChecks }) {
         fields,
         where: `scope on entity('${name}')`,
         registry,
+        entityName: name,
       });
     }
   } else if (clauses && clauses.inherit) {

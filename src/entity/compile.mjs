@@ -183,6 +183,7 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
       fields,
       where: `schedule.${verbName} while on entity('${name}')`,
       registry,
+      entityName: name,
     });
     whileSql = compiled.sql;
     whileParams = compiled.params;
@@ -503,7 +504,9 @@ export function entity(name, declaration = {}) {
       }
       for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
         for (const [fieldName, descriptor] of strategyFields) {
-          row[fieldName] = strategy.handle({ record, entityName, fieldName, descriptor, row, principal, dispatch });
+          if (typeof strategy.handle === 'function') {
+            row[fieldName] = strategy.handle({ record, entityName, fieldName, descriptor, row, principal, dispatch });
+          }
         }
       }
       for (const [fieldName, descriptor] of Object.entries(fields)) {

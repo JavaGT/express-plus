@@ -147,6 +147,7 @@ export function membership(entityRecord, config) {
     fields,
     where: `membership scope on entity('${entityName}')`,
     registry: newRegistry,
+    entityName,
   });
 
   const newReadScope = readScopeResult
