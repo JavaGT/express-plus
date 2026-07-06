@@ -11,7 +11,7 @@ to the logs.
 | W1 auth parity | `W1-auth-parity.md` | slices | `convergence/W1-two-plane` (1), `convergence/W1-passkeys` (2), `convergence/W1-invitations` (3), `convergence/W1-api-keys` (4) | 1378/1378/0 | S1: membership(). S2: passkey WebAuthn. S3: invitation flow. S4: ApiKey principal kind. S5 (TOTP/email) pending. |
 | W2 persistence ownership | `W2-persistence-ownership.md` | **done** | `convergence/W2-fts` (1), `convergence/W2-vector` (2) | 1378/1378/0 | S1: FTS — text({ indexed: 'fts' }), FTS5, .matches(), lifecycle sync. S2: vector(dim) — JSON-stored embeddings, cosine similarity, .nearest(). Both GAPs closed. |
 | W3 job queue parity | `W3-job-queue-parity.md` | slices | `convergence/W3-job-queue` (slice 1) | 1273/1273/0 (merged) | Slice 1: progress (+stage), cancellation (cancelled status), scoping (scope column + scoped claim). 3 BUILD items closed. |
-| W4 UI kit | `W4-ui-kit.md` | census | — | — | 25 primitives — owner checkpoint required before build-out |
+| W4 UI kit | `W4-ui-kit.md` | **design signed** | `docs/convergence/W4-owner-checkpoint.md` | — | Council c02 (Opus 4.8 + GPT 5.5): converged on Option B — DOM factory functions + formal light-DOM token contract. Reject Web Components (Shadow DOM walls off deep restyling). Wave 1 = ActionButton, TextInput, ListView. Build-out pending owner sign-off. |
 | W5 client engine parity | `W5-client-engine-parity.md` | slices | `convergence/W5-scope-subscription` (slices 1+2) | 1216/1216/0 | Slice 1: subscribeScope() + normalizeSubscribeMsg. Slice 2: scope-keyed fan-out (per-entity Map retired), scope-level snapshot/events-since routes, generic subscribed ack. Council c01 adopted B′. |
 | S scope migration | `S-scope-migration.md` | gated | — | — | S0 memo: INCOMPATIBLE — per-project vs per-entity seq. Owner direction (2026-07-06): run W5 scope-wide-subscription design council first (with S0 memo as binding input), come back with joint recommendation on cursor granularity + subscription breadth + what changes on each side. S0 ruling deferred. |
 
@@ -25,7 +25,7 @@ One row per council question. Working files live under `.council/<qid>/`
 
 | qid | Date | Question (one line) | Converged after cross-eval? | GLM tie-break used? | Outcome adopted |
 |---|---|---|---|---|---|
-| c01 | 2026-07-06 | Scope-wide subscription granularity: per-entity vs coarser scope, cursor model, wire changes | Yes — Opus 4.8 + GPT 5.5 converged on B′. No material disagreement. | No | Option B′ adopted. `subscribe(scope, interest?)` as single primitive — scope is ordered stream key. Per-entity is the degenerate scope. Stream-scope separated from row-identity. Old `{entity,id}` is decode shim, not second path. Rejected A/C/D. SINGULAR ordering. |
+| c02 | 2026-07-07 | W4 UI kit: technology (Web Components vs DOM factories vs per-framework adapters), binding contract, 3-primitive API sketch | Yes — Opus 4.8 + GPT 5.5 converged on B (DOM factories). GPT revised from A after Opus's restyling argument. | No (converged) | Option B adopted: DOM factory functions + formal light-DOM token/attribute contract. Reject Web Components (Shadow DOM contradicts 'deep restyling without forking' — the single most-emphasized owner constraint). Reject per-framework adapters (singular-system rule). Binding: factory owns the store projection; component holds no local state. 3 code discoveries: overlayFor() skips failed, LiveList is single-row not collection, dispatch() only overlays CRUD. Wave 1 = ActionButton, TextInput, ListView. |
 
 ## Owner escalations
 
