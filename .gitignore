@@ -4,3 +4,4 @@ node_modules/
 *.log
 .DS_Storetodo.db*
 todo.db*
+.council/
