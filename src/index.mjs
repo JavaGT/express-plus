@@ -4,7 +4,7 @@ export { now } from './deferred.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
 export { entity } from './entity/compile.mjs';
-export { User, Session, Inbox } from './auth-entities.mjs';
+export { User, Session, Inbox, Credential } from './auth-entities.mjs';
 export { everyone, never, anyOf, inherit } from './scope-sql.mjs';
 export { principal, anonymous } from './principal.mjs';
 export { requireUser, allowAnonymous } from './route-gate.mjs';

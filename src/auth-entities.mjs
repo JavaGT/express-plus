@@ -1,4 +1,4 @@
-// The framework-provided auth entities: User and Session.
+// The framework-provided auth entities: User, Session, Credential, and Inbox.
 //
 // session.mjs (the binding exemplar) imports these FROM the framework rather than
 // declaring them, because authentication is the framework's concern, not the
@@ -19,7 +19,7 @@
 // them only through the UNSCOPED, trusted query API, never a request path.
 
 import { entity } from './entity/compile.mjs';
-import { text, hash, ref, date } from './field.mjs';
+import { text, hash, ref, date, number } from './field.mjs';
 import { scope } from './scope.mjs';
 import { never } from './scope-sql.mjs';
 import { grant, deny, read, subscribe } from './grant.mjs';
@@ -118,4 +118,37 @@ export const Inbox = entity('Inbox', {
   // and the recipient read-scope above still gates WHO may read a row. Admitting
   // the effect principal here is the target's opt-in to the effect (ADR #6).
   admitsEffects: () => true,
+});
+
+// Credential — a WebAuthn passkey stored by the framework. Each Credential row
+// binds one authenticator's public key to a User. The authenticator holds the
+// private key; the server stores the public key (DER/SubjectPublicKeyInfo,
+// base64url-encoded) and verifies assertions.
+//
+// Like User/Session, Credential is not request-readable: it is reached only by
+// the trusted auth routes (passkey register/authenticate), never exposed through
+// the request-facing CRUD API. The public key is stored as a base64url string
+// — it is never transmitted to any request principal through the entity API.
+//
+// Fields:
+//   - credentialId — the authenticator's credential ID, base64url-encoded (unique).
+//   - publicKey    — the public key (DER/SPKI, base64url), used to verify assertions.
+//   - userId       — the User this credential authenticates (a typed FK, not
+//                    request-visible).
+//   - signCount    — the last-seen counter from the authenticator (replay protection).
+//   - name         — a human-readable device label (from the RP).
+//   - transports   — comma-separated transport hints (e.g. "internal,hybrid").
+//   - backedUp     — 1 if the credential is synced (multi-device), 0 if single-device.
+//   - createdAt    — timestamp of enrollment.
+export const Credential = entity('Credential', {
+      credentialId: text(),
+          publicKey: text(),
+            userId: ref('User'),
+         signCount: number(),
+              name: text(),
+        transports: text(),
+          backedUp: number(),
+         createdAt: date(),
+
+  grant: () => [notRequestReadable('Credential')],
 });

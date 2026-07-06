@@ -18,12 +18,26 @@
 // production, so the dev drop is the only non-TLS path and it cannot leak into
 // prod). Login/link mint a principal, so they `allowAnonymous()`; logout inherits
 // the default-on `requireUser` gate — you cannot log out a session you don't have.
+//
+// Passkey (WebAuthn) routes: challenge issue/verify, credential registration,
+// assertion verification → session minting, credential list/delete. The ceremony
+// split: workbench owns challenge issue/verify + credential storage; the app owns
+// the UI (button, prompt, error display).
 
 import { router } from './app.mjs';
-import { allowAnonymous } from './route-gate.mjs';
-import { User, Session } from './auth-entities.mjs';
+import { allowAnonymous, requireUser } from './route-gate.mjs';
+import { User, Session, Credential } from './auth-entities.mjs';
 import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.mjs';
 import { config } from './config.mjs';
+import { getActiveDb } from './db.mjs';
+import {
+  generateChallenge,
+  challengeStore,
+  verifyRegistration,
+  verifyAuthentication,
+  rpConfig,
+  parseClientDataJSON,
+} from './passkey.mjs';
 
 // Build the `/auth` router. `secure` follows the app env (true only in
 // production) so the same fail-closed cookie attributes apply on login and
@@ -70,6 +84,145 @@ export function authRoutes({ secure = config.env === 'production' } = {}) {
     // the browser scopes the deletion to the same cookie (Path/Domain match).
     res.setHeader('set-cookie', `${sessionCookie('', { secure })}; Max-Age=0`);
     res.sendStatus(204);
+  });
+
+  // ---- Passkey (WebAuthn) routes -------------------------------------------
+
+  const rp = rpConfig(config);
+
+  // GET /auth/passkey/challenge — issue a new challenge for a WebAuthn ceremony.
+  // allowAnonymous: anyone may request a challenge (the ceremony itself proves
+  // identity). Returns { challenge, rp: { name, id } }.
+  s.get('/passkey/challenge', allowAnonymous(), (req, res) => {
+    const challenge = generateChallenge();
+    challengeStore.set(challenge);
+    res.json({ challenge, rp: { name: rp.name, id: rp.id } });
+  });
+
+  // POST /auth/passkey/register — enroll a new passkey credential.
+  // requireUser: the caller must have an existing session (password login first,
+  // then enroll passkey). The credential's userId is the requesting principal's
+  // id — a passkey is always bound to the authenticated user who registered it.
+  s.post('/passkey/register', requireUser(), (req, res, next) => {
+    const { credential } = req.body ?? {};
+    if (!credential || !credential.response?.clientDataJSON || !credential.response?.attestationObject) {
+      return next({ status: 400, message: 'credential with clientDataJSON and attestationObject is required' });
+    }
+
+    // Extract and consume the challenge from clientDataJSON
+    let clientData;
+    try {
+      clientData = parseClientDataJSON(credential.response.clientDataJSON);
+    } catch (err) {
+      return next({ status: 400, message: `invalid clientDataJSON: ${err.message}` });
+    }
+    const entry = challengeStore.consume(clientData.challenge);
+    if (!entry) {
+      return next({ status: 400, message: 'unknown or expired challenge' });
+    }
+
+    let result;
+    try {
+      result = verifyRegistration(clientData.challenge, credential, rp);
+    } catch (err) {
+      return next({ status: 400, message: `registration failed: ${err.message}` });
+    }
+
+    const userId = req.principal.id;
+    Credential.create({
+      credentialId: result.credentialId,
+      publicKey: result.publicKey,
+      userId,
+      signCount: result.signCount,
+      name: credential.name || 'Passkey',
+      transports: Array.isArray(credential.transports) ? credential.transports.join(',') : '',
+      backedUp: credential.backedUp ? 1 : 0,
+      createdAt: new Date(),
+    });
+    res.status(201).json({ ok: true });
+  });
+
+  // POST /auth/passkey/authenticate — sign in with a passkey.
+  // allowAnonymous: the caller proves identity by demonstrating possession of the
+  // private key. On successful verification, the framework mints a Session and
+  // sets the `sid` cookie — the same authentication pathway as password login.
+  s.post('/passkey/authenticate', allowAnonymous(), (req, res, next) => {
+    const { credential } = req.body ?? {};
+    if (!credential || !credential.response?.clientDataJSON || !credential.response?.authenticatorData || !credential.response?.signature) {
+      return next({ status: 400, message: 'credential with clientDataJSON, authenticatorData, and signature is required' });
+    }
+
+    // Extract and consume the challenge from clientDataJSON
+    let clientData;
+    try {
+      clientData = parseClientDataJSON(credential.response.clientDataJSON);
+    } catch (err) {
+      return next({ status: 400, message: `invalid clientDataJSON: ${err.message}` });
+    }
+    const entry = challengeStore.consume(clientData.challenge);
+    if (!entry) {
+      return next({ status: 400, message: 'unknown or expired challenge' });
+    }
+
+    // Look up the stored credential by credentialId
+    const credId = credential.id || credential.rawId;
+    if (!credId) {
+      return next({ status: 400, message: 'credential id is required' });
+    }
+    const storedCredential = Credential.findOne(Credential.credentialId.is(credId));
+    if (!storedCredential) {
+      return next({ status: 400, message: 'unknown credential' });
+    }
+
+    let result;
+    try {
+      result = verifyAuthentication(clientData.challenge, credential, storedCredential, rp);
+    } catch (err) {
+      return next({ status: 401, message: `authentication failed: ${err.message}` });
+    }
+
+    // Update the counter (replay protection). The unstored query API is the
+    // same trust class the login/lookup paths already use.
+    getActiveDb().prepare('UPDATE Credential SET signCount = ? WHERE id = ?').run(result.signCount, storedCredential.id);
+
+    // Look up the user
+    const user = User.getOrFail(storedCredential.userId);
+    const session = Session.create({ userId: user.id });
+    res.setHeader('set-cookie', sessionCookie(session.token, { secure }));
+    res.status(201).json({ user: { id: user.id, username: user.username } });
+  });
+
+  // DELETE /auth/passkey/:credentialId — remove a passkey credential.
+  // requireUser: only an authenticated user can remove their own credential.
+  s.delete('/passkey/:credentialId', requireUser(), (req, res, next) => {
+    const { credentialId } = req.params;
+    const stored = Credential.findOne(Credential.credentialId.is(credentialId));
+    if (!stored) {
+      return next({ status: 404, message: 'credential not found' });
+    }
+    // Only the owning user can delete their credential
+    if (String(stored.userId) !== String(req.principal.id)) {
+      return next({ status: 403, message: 'not your credential' });
+    }
+    Credential.delete(stored.id);
+    res.sendStatus(204);
+  });
+
+  // GET /auth/passkey — list the current user's passkey credentials.
+  // requireUser: an anonymous caller cannot list credentials.
+  s.get('/passkey', requireUser(), (req, res, next) => {
+    const userId = req.principal.id;
+    Credential.findAll(Credential.userId.is(userId))
+      .sort(Credential.createdAt, 'desc')
+      .then((rows) => {
+        res.json(rows.map((c) => ({
+          credentialId: c.credentialId,
+          name: c.name,
+          createdAt: c.createdAt,
+          backedUp: c.backedUp,
+          transports: c.transports ? c.transports.split(',').filter(Boolean) : [],
+        })));
+      }, (err) => next({ status: 500, message: err.message }));
   });
 
   return s;
