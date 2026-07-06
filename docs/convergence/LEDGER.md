@@ -8,7 +8,7 @@ to the logs.
 
 | Packet | Doc | Stage | Branch(es) | Last full gate | Notes |
 |---|---|---|---|---|---|
-| W1 auth parity | `W1-auth-parity.md` | census | — | — | 25 features — 8 exists, 4 thin-wrap, 10 build, 3 defer-candidate |
+| W1 auth parity | `W1-auth-parity.md` | slices | `convergence/W1-two-plane` (slice 1) | 1230/1230/0 | Slice 1: membership(Entity, { member: { can: [read, subscribe] } }) concentrates two-plane pattern from 15 lines of boilerplate to 1 declaration line. Uses existing primitives only. |
 | W2 persistence ownership | `W2-persistence-ownership.md` | census | — | — | 49 Prisma models — 2 GAPs (FTS + vector) |
 | W3 job queue parity | `W3-job-queue-parity.md` | census | — | — | 3 BUILD (progress, cancel, scoping) |
 | W4 UI kit | `W4-ui-kit.md` | census | — | — | 25 primitives — owner checkpoint required before build-out |
@@ -39,3 +39,4 @@ Append one line per merge to main:
 `YYYY-MM-DD · <packet> · <branch> · <commit range> · node --test <N>/<N>/0 · DECISIONLOG #<n>`
 2026-07-06 · W5 · convergence/W5-scope-subscription (slice 1) · c87407f..c6dc078 · node --test 1206/1206/0 · DECISIONLOG #82
 2026-07-07 · W5 · convergence/W5-scope-subscription (slice 2) · 5ca1fcb..9cad72e · node --test 1216/1216/0 · DECISIONLOG #83
+2026-07-07 · W1 · convergence/W1-two-plane (slice 1) · 3abc225..acb030e · node --test 1230/1230/0 · DECISIONLOG #84
