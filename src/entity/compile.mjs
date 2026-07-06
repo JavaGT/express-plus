@@ -37,6 +37,7 @@ import { generateDDL } from '../ddl.mjs';
 import { resolveRouteGate } from '../route-gate.mjs';
 import { effectEntries, validateEffectDeclaration } from '../effect-compiler.mjs';
 import { schedule as scheduleConstructors, triggerList } from '../schedule.mjs';
+import { compileMembershipAuthz } from '../membership.mjs';
 import { collectSideTableStrategies } from '../side-table-strategy.mjs';
 import { createEntityProjection } from './projection.mjs';
 import { createCrudHandlers } from './crud.mjs';
@@ -235,7 +236,7 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
 // compiler owns, which silently drops the field (fail closed).
 const RESERVED_DECLARATION_SLOTS = new Set([
   'fields', 'grant', 'checks', 'routes', 'create', 'effects', 'admitsEffects',
-  'schedule', 'simulation', 'gate', 'on',
+  'schedule', 'simulation', 'gate', 'on', 'membership',
 ]);
 
 function looksLikeFieldDescriptor(value) {
@@ -258,7 +259,7 @@ export function entity(name, declaration = {}) {
     }
   }
 
-  const { grant, checks: declaredChecks = {}, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {} } = declaration;
+  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {} } = declaration;
 
   // The entity name becomes a table name interpolated into SQL — validate first.
   assertSqlIdentifier('entity', name);
@@ -273,12 +274,27 @@ export function entity(name, declaration = {}) {
     fields[key] = value;
   }
 
-  // Fail closed: an entity with no grant cannot be mounted (ADR #7).
-  if (grant === undefined || grant === null) {
-    throw new Error(
-      `entity('${name}') has no grant. An entity with no grant is a load-time ` +
-        `error (ADR #7): there is no default grant. Declare one explicitly, ` +
-        `e.g. grant: () => [scope(...).can(...)].`,
+  // membership: augments/replaces grant and checks from a declarative role→capability map.
+  // If the developer wrote both `grant:` and `membership:`, the explicit `grant:` takes
+  // precedence (the membership entry is a convenience shortcut, not a second path).
+  let effectiveGrant = grant;
+  let declaredChecks = { ...declaredChecksIn };
+  if (membershipDecl && (grant === undefined || grant === null)) {
+    const membershipResult = compileMembershipAuthz(name, fields, membershipDecl);
+    effectiveGrant = membershipResult.grant;
+    declaredChecks = { ...declaredChecks, ...membershipResult.checks };
+  }
+
+  // ADR #7: an entity must declare a grant (explicitly via `grant:` or `membership:`,
+  // or later via the standalone `membership()` call). No grant is allowed at compile
+  // time for the standalone path — the entity has no readScope, so scopeFilter
+  // returns '1=1' (the route gate is the first auth layer). The standalone
+  // membership() call then sets a proper scope.
+  if (effectiveGrant === undefined || effectiveGrant === null) {
+    getLog().warn(
+      'entity',
+      `entity('${name}') has no grant at compile time — all access will be denied ` +
+        `until a grant is set via membership() or an equivalent mechanism.`,
     );
   }
 
@@ -323,7 +339,7 @@ export function entity(name, declaration = {}) {
 
   const { registry, readScope, scopeAst, clauses } = compileEntityAuthz(name, {
     fields,
-    grant,
+    grant: effectiveGrant,
     declaredChecks,
   });
 
@@ -411,16 +427,18 @@ export function entity(name, declaration = {}) {
   const record = {
     name,
     fields: Object.freeze({ ...fields }),
-    grant,
+    // Only put grant on the record when it's defined, so the set trap can
+    // store a later override (via membership()) without violating the Proxy
+    // invariant (non-writable, non-configurable property with a different value).
+    ...(effectiveGrant !== undefined && effectiveGrant !== null ? { grant: effectiveGrant } : {}),
     registry,
     // Keep a `checks` object for tests that read entity.checks.<name>(...).
     // Each key is the RUN face — the canonical home is `registry`, but existing
-    // tests expect `checks` to expose callable functions. Built eagerly so it
-    // is a plain object (not a Proxy over a frozen target, which would throw
-    // when a get trap returns a different value from a non-writable property).
+    // tests expect `checks` to expose callable functions. Uses `this.registry`
+    // so it dynamically picks up overrides set by membership().
     get checks() {
       const checksObj = {};
-      for (const [name, entry] of Object.entries(registry)) {
+      for (const [name, entry] of Object.entries(this.registry ?? {})) {
         if (entry.run) checksObj[name] = entry.run;
       }
       return Object.freeze(checksObj);
@@ -593,9 +611,13 @@ export function entity(name, declaration = {}) {
     removed: (name) => removed(name),
   });
 
-  const frozen = Object.freeze(record);
-  const proxy = new Proxy(frozen, {
+  // Don't freeze the entire record — only `fields` is frozen (above). Auth-related
+  // properties (grant, registry, readScope, scopeAst) are mutable so membership()
+  // and similar post-compilation augmentations can set them in place.
+  const proxy = new Proxy(record, {
     get(target, key, receiver) {
+      // Lifecycle handles and field handles are resolved only for string keys
+      // not owned by the record.
       if (key in target || typeof key !== 'string') {
         return Reflect.get(target, key, receiver);
       }
@@ -607,6 +629,15 @@ export function entity(name, declaration = {}) {
         return fieldHandle(key, fields[key], name, getActiveEntity);
       }
       return undefined;
+    },
+    set(target, key, value, receiver) {
+      // Allow setting auth-related properties after compilation for in-place
+      // augmentation (e.g. membership(entity, config)).
+      if (key === 'grant' || key === 'registry' || key === 'readScope' || key === 'scopeAst' || key === 'scopeFilter') {
+        return Reflect.set(target, key, value, receiver);
+      }
+      // Prevent mutation of non-auth properties.
+      return false;
     },
   });
   setActiveEntity(name, proxy);

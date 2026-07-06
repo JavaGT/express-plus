@@ -20,4 +20,5 @@ export { serveStatic } from './views.mjs';
 export { sessionCookie, sessionPrincipalOf, sessionTokenOf, parseCookies, SESSION_COOKIE } from './session.mjs';
 export { inc, dec, self, many, effect } from './effect-compiler.mjs';
 export { schedule, tick, simulate } from './schedule.mjs';
+export { membership } from './membership.mjs';
 export { default } from './app.mjs';

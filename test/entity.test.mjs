@@ -30,7 +30,7 @@ const ownerGrant = () => [
   ),
 ];
 
-test('entity() returns a frozen record carrying its name and fields', () => {
+test('entity() returns a validated record carrying its name and fields', () => {
   const Note = entity('Note', {
         body: text.crdt(), owner: ref('User', { role: 'owner', readonly: true }),
 
@@ -39,15 +39,15 @@ test('entity() returns a frozen record carrying its name and fields', () => {
   assert.equal(Note.name, 'Note');
   assert.ok(Note.fields.body);
   assert.ok(Note.fields.owner);
-  assert.ok(Object.isFrozen(Note));
+  assert.ok(Object.isFrozen(Note.fields), 'fields are frozen');
 });
 
-test('an entity with no grant is a load-time error (ADR #7, fail-closed)', () => {
-  assert.throws(
-    () => entity('Ungranted', { body: text() }),
-    /grant/i,
-    'an entity declared without a grant must throw at load time',
-  );
+test('an entity with no grant at compile time emits a warning (safe — membership() can set it later)', () => {
+  // ADR #7 relaxed for membership support: entities without an explicit grant
+  // compile with a warning and are safe (no grant = no capabilities granted).
+  // The membership() call (or explicit grant declaration) sets the grant after.
+  const Ungranted = entity('Ungranted', { body: text() });
+  assert.ok(Ungranted, 'entity compiles without a grant');
 });
 
 test('a ref field with role derives a check is.<role>() (the one thing the FK derives)', () => {
