@@ -122,9 +122,13 @@ export function generateFrameworkDDL() {
   claimedAt INTEGER,
   leaseUntil INTEGER,
   attempts INTEGER NOT NULL DEFAULT 0,
-  availableAt INTEGER
+  availableAt INTEGER,
+  progress INTEGER NOT NULL DEFAULT 0,
+  stage TEXT,
+  scope TEXT
 );`,
     'CREATE INDEX IF NOT EXISTS idx__job_claim ON _Job (status, enqueuedAt);',
+    'CREATE INDEX IF NOT EXISTS idx__job_scope_status ON _Job (scope, status, enqueuedAt);',
     `CREATE TABLE IF NOT EXISTS _ProjectedCursor (
   entity TEXT NOT NULL,
   field TEXT NOT NULL,
@@ -171,5 +175,14 @@ function ensureJobColumns(db) {
   }
   if (!cols.has('availableAt')) {
     db.exec('ALTER TABLE _Job ADD COLUMN availableAt INTEGER');
+  }
+  if (!cols.has('progress')) {
+    db.exec('ALTER TABLE _Job ADD COLUMN progress INTEGER NOT NULL DEFAULT 0');
+  }
+  if (!cols.has('stage')) {
+    db.exec('ALTER TABLE _Job ADD COLUMN stage TEXT');
+  }
+  if (!cols.has('scope')) {
+    db.exec('ALTER TABLE _Job ADD COLUMN scope TEXT');
   }
 }

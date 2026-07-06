@@ -217,7 +217,8 @@ export async function handleJobRoute(app, req, res) {
   if (url.pathname === '/jobs/claim') {
     const workerId = jobs.authenticate(bearer);
     if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
-    const job = jobs.claim(workerId);
+    const scope = url.searchParams.get('scope') || null;
+    const job = jobs.claim(workerId, scope ? { scope } : undefined);
     if (!job) { res.writeHead(204); res.end(); return true; } // no queued work
     sendJson(res, 200, job);
     return true;
@@ -230,6 +231,21 @@ export async function handleJobRoute(app, req, res) {
     const ok = jobs.heartbeat(hb[1], workerId);
     if (!ok) { sendJson(res, 403, { error: 'not the owning worker or job not running' }); return true; }
     sendJson(res, 200, { ok: true });
+    return true;
+  }
+
+  const pg = url.pathname.match(/^\/jobs\/([^/]+)\/progress$/);
+  if (pg) {
+    const workerId = jobs.authenticate(bearer);
+    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
+    let body;
+    try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
+      if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
+      throw err;
+    }
+    const updated = jobs.updateProgress({ jobId: pg[1], workerId, progress: body.progress, stage: body.stage });
+    if (!updated) { sendJson(res, 403, { error: 'not the owning worker or job not in progress' }); return true; }
+    sendJson(res, 200, { id: updated.id, progress: updated.progress, stage: updated.stage, status: updated.status });
     return true;
   }
 
@@ -247,6 +263,18 @@ export async function handleJobRoute(app, req, res) {
     catch (err) { sendJson(res, 400, { error: err.message }); return true; }
     if (!result.accepted) { sendJson(res, 403, { error: 'not the owning worker or job not in progress' }); return true; }
     sendJson(res, 200, result);
+    return true;
+  }
+
+  const cn = url.pathname.match(/^\/jobs\/([^/]+)\/cancel$/);
+  if (cn) {
+    const workerId = jobs.authenticate(bearer);
+    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
+    const cancelled = jobs.cancelJob({ jobId: cn[1], workerId });
+    if (!cancelled) { sendJson(res, 404, { error: 'job not found' }); return true; }
+    if (cancelled.forbidden) { sendJson(res, 403, { error: 'not the owning worker' }); return true; }
+    if (cancelled.terminal) { sendJson(res, 400, { error: 'job already terminal — cannot cancel' }); return true; }
+    sendJson(res, 200, { id: cancelled.id, status: cancelled.status });
     return true;
   }
 

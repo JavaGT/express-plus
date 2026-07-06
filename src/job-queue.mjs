@@ -29,8 +29,8 @@
 import { randomBytes, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
 import { getLog } from './log.mjs';
 
-const STATES = { QUEUED: 'queued', CLAIMED: 'claimed', RUNNING: 'running', COMPLETED: 'completed', FAILED: 'failed' };
-const TERMINAL = new Set([STATES.COMPLETED, STATES.FAILED]);
+const STATES = { QUEUED: 'queued', CLAIMED: 'claimed', RUNNING: 'running', COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' };
+const TERMINAL = new Set([STATES.COMPLETED, STATES.FAILED, STATES.CANCELLED]);
 
 function sha256hex(s) {
   return createHash('sha256').update(s).digest('hex');
@@ -113,13 +113,13 @@ export function createJobQueue({
   // Enqueue a job. A post-commit consumer (or an imperative handler) calls this;
   // the queue owns the lifecycle from here. Mints an id when absent; preserves a
   // caller-supplied id (caller-owned, like entity ids).
-  function enqueue({ kind, payload = null, id } = {}) {
+  function enqueue({ kind, payload = null, id, scope } = {}) {
     if (!kind) throw new Error('enqueue: kind is required');
     const jobId = id ?? randomUUID();
     const t = now();
     db.prepare(
-      'INSERT INTO _Job (id, kind, payload, status, enqueuedAt, workerId, claimedAt, leaseUntil) VALUES (?, ?, ?, ?, ?, NULL, NULL, NULL)',
-    ).run(jobId, kind, payload != null ? JSON.stringify(payload) : null, STATES.QUEUED, t);
+      'INSERT INTO _Job (id, kind, payload, status, enqueuedAt, scope, workerId, claimedAt, leaseUntil) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)',
+    ).run(jobId, kind, payload != null ? JSON.stringify(payload) : null, STATES.QUEUED, t, scope ?? null);
     return parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
   }
 
@@ -129,13 +129,14 @@ export function createJobQueue({
   // `{ kind }` restricts the claim to one kind (an in-process worker runs one
   // kind's handler). Returns the claimed job (status 'claimed', leaseUntil set)
   // or null.
-  function claim(workerId, { kind } = {}) {
+  function claim(workerId, { kind, scope } = {}) {
     const t = now();
     const kindClause = kind ? `AND kind = ${sqlLit(kind)} ` : '';
+    const scopeClause = scope ? `AND scope = ${sqlLit(scope)} ` : '';
     const row = db.prepare(
       `UPDATE _Job
          SET status = ?, workerId = ?, claimedAt = ?, leaseUntil = ?
-       WHERE id = (SELECT id FROM _Job WHERE status = ? AND (availableAt IS NULL OR availableAt <= ?) ${kindClause}ORDER BY enqueuedAt LIMIT 1)
+       WHERE id = (SELECT id FROM _Job WHERE status = ? AND (availableAt IS NULL OR availableAt <= ?) ${kindClause}${scopeClause}ORDER BY enqueuedAt LIMIT 1)
        RETURNING *`,
     ).get(STATES.CLAIMED, workerId, t, t + leaseMs, STATES.QUEUED, t);
     return parseJob(row) ?? null;
@@ -206,6 +207,36 @@ export function createJobQueue({
        WHERE id = ? ${ownerGuard}`,
     ).run(status, output != null ? JSON.stringify(output) : null, attempts, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
     return res.changes > 0 ? { accepted: true, deadLettered: true, attempts } : { accepted: false };
+  }
+
+  // Update progress: the owning worker reports progress (0–100) and an
+  // optional stage label while the job is claimed/running. Non-owner,
+  // not-found, or terminal → null.
+  function updateProgress({ jobId, workerId, progress, stage } = {}) {
+    if (typeof progress !== 'number' || !Number.isFinite(progress)) return null;
+    const clamped = Math.max(0, Math.min(100, Math.round(progress)));
+    const current = db.prepare('SELECT id, workerId, status FROM _Job WHERE id = ?').get(jobId);
+    if (!current) return null;
+    if (current.workerId !== workerId) return null; // only the owning worker may report progress
+    if (current.status !== STATES.CLAIMED && current.status !== STATES.RUNNING) return null;
+    db.prepare(
+      'UPDATE _Job SET progress = ?, stage = ? WHERE id = ?',
+    ).run(clamped, stage ?? null, jobId);
+    return parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
+  }
+
+  // Cancel a job. A queued job can be cancelled without owner check (no worker
+  // owns it yet); a claimed/running job must be cancelled by its owning worker.
+  // Terminal jobs (completed/failed/cancelled) cannot be cancelled.
+  function cancelJob({ jobId, workerId } = {}) {
+    const current = db.prepare('SELECT id, status, workerId FROM _Job WHERE id = ?').get(jobId);
+    if (!current) return null;
+    if (TERMINAL.has(current.status)) return { terminal: true };
+    // If the job has an owner, validate the caller owns it; queued jobs (no
+    // owner) are cancellable without ownership check.
+    if (current.workerId != null && current.workerId !== workerId) return { forbidden: true };
+    db.prepare('UPDATE _Job SET status = ? WHERE id = ?').run(STATES.CANCELLED, jobId);
+    return parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
   }
 
   // Reaper sweep. (1) Reassign jobs whose lease expired (claimed/running → queued,
@@ -302,5 +333,5 @@ export function createJobQueue({
     return { once, stop, workerId };
   }
 
-  return { registerWorker, authenticate, enqueue, claim, heartbeat, submitResult, reap, startReaper, stop, work };
+  return { registerWorker, authenticate, enqueue, claim, heartbeat, submitResult, updateProgress, cancelJob, reap, startReaper, stop, work };
 }
