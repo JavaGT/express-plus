@@ -12,7 +12,7 @@ to the logs.
 | W2 persistence ownership | `W2-persistence-ownership.md` | census | — | — | 49 Prisma models — 2 GAPs (FTS + vector) |
 | W3 job queue parity | `W3-job-queue-parity.md` | census | — | — | 3 BUILD (progress, cancel, scoping) |
 | W4 UI kit | `W4-ui-kit.md` | census | — | — | 25 primitives — owner checkpoint required before build-out |
-| W5 client engine parity | `W5-client-engine-parity.md` | slices | `convergence/W5-scope-subscription` (slice 1 of 2) | 1206/1206/0 | Slice 1 shipped: subscribeScope() client API, normalizeSubscribeMsg, scope-keyed acks. Council c01 adopted B′ (unified stream-scope primitive). Slice 2 (server scope-keyed fan-out) pending. |
+| W5 client engine parity | `W5-client-engine-parity.md` | slices | `convergence/W5-scope-subscription` (slices 1+2) | 1216/1216/0 | Slice 1: subscribeScope() + normalizeSubscribeMsg. Slice 2: scope-keyed fan-out (per-entity Map retired), scope-level snapshot/events-since routes, generic subscribed ack. Council c01 adopted B′. |
 | S scope migration | `S-scope-migration.md` | gated | — | — | S0 memo: INCOMPATIBLE — per-project vs per-entity seq. Owner direction (2026-07-06): run W5 scope-wide-subscription design council first (with S0 memo as binding input), come back with joint recommendation on cursor granularity + subscription breadth + what changes on each side. S0 ruling deferred. |
 
 Stage vocabulary: `not started` → `census` → `design` → `slices` → `done`
@@ -38,3 +38,4 @@ One row per council question. Working files live under `.council/<qid>/`
 Append one line per merge to main:
 `YYYY-MM-DD · <packet> · <branch> · <commit range> · node --test <N>/<N>/0 · DECISIONLOG #<n>`
 2026-07-06 · W5 · convergence/W5-scope-subscription (slice 1) · c87407f..c6dc078 · node --test 1206/1206/0 · DECISIONLOG #82
+2026-07-07 · W5 · convergence/W5-scope-subscription (slice 2) · 5ca1fcb..9cad72e · node --test 1216/1216/0 · DECISIONLOG #83

@@ -400,3 +400,10 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
 - **Files:** `docs/convergence/S0-joint-recommendation.md`
 - **Remaining:** W5 slice 2 (scope-keyed fan-out, scope snapshot/events-since routes, generalised subscribed ack) → then Scope station A adapter → station B later.
 - **Gate:** N/A (spec only)
+
+## 2026-07-07 — W5 slice 2: scope-keyed fan-out, scope-level snapshot/events-since routes
+
+- **Decision:** Replace per-entity fan-out registry (`Map<entity, Map<id, Map<conn>>>`) with scope-keyed registry (`Map<scope, Map<conn, SubSpec>>`). `emit()` delivers events by exact `committedEvent.scope` match — one fan-out path for both per-entity (`"Entity:id"`) and coarse (`"project:p1"`) scopes. Add `GET /snapshot?scope=...` and `GET /events-since?scope=...&cursor=N` for scope-level bootstrap and gap-fill. Per-entity map retired in the same change per AGENTS.md singular-system rule.
+- **Reason:** Council c01 adopted B′ — unified stream-scope primitive where per-entity is a degenerate scope. The per-entity fan-out path was the last remaining second path. Retiring it in the same change that ships coarse-scope fan-out prevents the exact dual-reconciliation drift AGENTS.md forbids. The `_Log(scope, seq)` table already supports any scope string — `readSince`/`minSeqForScope`/`readSeq` are scope-generic; only the URL router was per-entity. Legacy `addSubscription(entity, id, conn)` calls continue to work via overload heuristic (derives scope = `${entity}:${id}`).
+- **Files:** `src/live-fanout.mjs` (scope-keyed registry), `src/http-framework-routes.mjs` (scope-level routes), `src/live-connection.mjs` (generic ack), `test/subscribe-scope-fanout.test.mjs` (10 new tests).
+- **Gate:** `node --test` 1216/1216/0 on main.
