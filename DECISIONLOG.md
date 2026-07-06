@@ -463,3 +463,10 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
 - **Reason:** The owner explicitly reserved taste decisions for W4. This checkpoint settles the one-way-door decisions (technology + binding contract + styling surface) before build-out commits 25 primitives to a shape that would be expensive to unwind. The cross-evaluation was load-bearing: Opus's Shadow-DOM-restyling critique changed GPT's verdict, producing a stronger consensus than either model's solo answer.
 - **Files:** `docs/convergence/W4-owner-checkpoint.md`
 - **Gate:** N/A (design checkpoint — no code build-out yet).
+
+## 2026-07-07 — W1 slice 5: TOTP 2FA + email delivery seam (W1 complete)
+
+- **Decision:** Add TOTP two-factor authentication (RFC 6238, HMAC-SHA1, `node:crypto` only), backup codes (SHA-256 hashed, single-use consume), and a pluggable email delivery seam (`emailSeam({ transport })` — post-commit projection consumer, `noopTransport` default). W1 closes: 10 build items shipped across 5 slices, 3 defer-candidates skipped (all dead Scope features).
+- **Reason:** Scope has TOTP-enabled 2FA via better-auth but no enforcement. The email seam follows AGENTS.md's out-of-band effects rule: email is a post-commit projection consumer, independently durable, never rolling back the origin. The `noopTransport` default ships with the framework; apps plug in SMTP/resend/anything.
+- **Files:** `src/totp.mjs` (145 lines), `src/email-seam.mjs` (69 lines), `src/auth-entities.mjs` (+TwoFactor), `src/auth-routes.mjs` (+4 routes + login update), `src/kernel.mjs` (+emailConsumer), `src/app.mjs` (+TwoFactor DDL), `test/totp.test.mjs` (34 tests).
+- **Gate:** `node --test` 1412/1412/0 on main.

@@ -8,10 +8,10 @@ to the logs.
 
 | Packet | Doc | Stage | Branch(es) | Last full gate | Notes |
 |---|---|---|---|---|---|
-| W1 auth parity | `W1-auth-parity.md` | slices | `convergence/W1-two-plane` (1), `convergence/W1-passkeys` (2), `convergence/W1-invitations` (3), `convergence/W1-api-keys` (4) | 1378/1378/0 | S1: membership(). S2: passkey WebAuthn. S3: invitation flow. S4: ApiKey principal kind. S5 (TOTP/email) pending. |
+| W1 auth parity | `W1-auth-parity.md` | **done** | `convergence/W1-two-plane` (1), `convergence/W1-passkeys` (2), `convergence/W1-invitations` (3), `convergence/W1-api-keys` (4), `convergence/W1-totp` (5) | 1412/1412/0 | S1: membership(). S2: passkey WebAuthn. S3: invitation flow. S4: ApiKey principal. S5: TOTP 2FA + email seam. 10 build items closed, 3 defer-candidates skipped (2FA enforcement, forgot-password, email verification — dead Scope features). |
 | W2 persistence ownership | `W2-persistence-ownership.md` | **done** | `convergence/W2-fts` (1), `convergence/W2-vector` (2) | 1378/1378/0 | S1: FTS — text({ indexed: 'fts' }), FTS5, .matches(), lifecycle sync. S2: vector(dim) — JSON-stored embeddings, cosine similarity, .nearest(). Both GAPs closed. |
 | W3 job queue parity | `W3-job-queue-parity.md` | slices | `convergence/W3-job-queue` (slice 1) | 1273/1273/0 (merged) | Slice 1: progress (+stage), cancellation (cancelled status), scoping (scope column + scoped claim). 3 BUILD items closed. |
-| W4 UI kit | `W4-ui-kit.md` | **design signed** | `docs/convergence/W4-owner-checkpoint.md` | — | Council c02 (Opus 4.8 + GPT 5.5): converged on Option B — DOM factory functions + formal light-DOM token contract. Reject Web Components (Shadow DOM walls off deep restyling). Wave 1 = ActionButton, TextInput, ListView. Build-out pending owner sign-off. |
+| W4 UI kit | `W4-ui-kit.md` | **design signed (c02 overruled by owner)** | `docs/convergence/W4-owner-checkpoint.md` | — | Council c02 converged on Option B (DOM factories). Owner overruled: Option C (per-framework adapters), Svelte-first. Web Components as bridge for vanilla JS. Wave 1 = ActionButton, TextInput, ListView in Svelte. Build-out pending. |
 | W5 client engine parity | `W5-client-engine-parity.md` | slices | `convergence/W5-scope-subscription` (slices 1+2) | 1216/1216/0 | Slice 1: subscribeScope() + normalizeSubscribeMsg. Slice 2: scope-keyed fan-out (per-entity Map retired), scope-level snapshot/events-since routes, generic subscribed ack. Council c01 adopted B′. |
 | S scope migration | `S-scope-migration.md` | gated | — | — | S0 memo: INCOMPATIBLE — per-project vs per-entity seq. Owner direction (2026-07-06): run W5 scope-wide-subscription design council first (with S0 memo as binding input), come back with joint recommendation on cursor granularity + subscription breadth + what changes on each side. S0 ruling deferred. |
 
@@ -32,6 +32,7 @@ One row per council question. Working files live under `.council/<qid>/`
 | Date | Question | Owner ruling | Where recorded |
 |---|---|---|---|
 | 2026-07-06 | S0 wire memo: Scope uses per-project seq numbering, workbench uses per-entity seq. Structurally incompatible. See census/S0-wire-memo.md. | Owner ruled (2026-07-07): Scope's per-project seq IS a valid coarse scope under B′. No re-key, no seq change, no prefix-matching. Joint recommendation: one cursor per project, scope-keyed fan-out in W5 slice 2, adapter maps projectId → scope key. Station A is transport swap only. See `S0-joint-recommendation.md`. | `census/S0-wire-memo.md`, `S0-joint-recommendation.md`, council c01 |
+| 2026-07-07 | W4 UI kit: council c02 converged on Option B (DOM factories). | Owner overrules (2026-07-07): use per-framework adapters (Option C), Svelte-first. Scope is built in Svelte — native Svelte component ergonomics outrank singular-implementation purity. Web Components retained as secondary bridge for plain-JS consumers. | `docs/convergence/W4-owner-checkpoint.md` (updated) |
 
 ## Merged slices
 
@@ -46,3 +47,4 @@ Append one line per merge to main:
 2026-07-07 · W1 · convergence/W1-invitations (slice 3) · 75f4d94..ca77e19 · node --test 1323/1323/0 · DECISIONLOG #88
 2026-07-07 · W1 · convergence/W1-api-keys (slice 4) · ca77e19..4375262 · node --test 1353/1353/0 · DECISIONLOG #89
 2026-07-07 · W2 · convergence/W2-vector (slice 2) · 4375262..e7bd970 · node --test 1378/1378/0 · DECISIONLOG #90
+2026-07-07 · W1 · convergence/W1-totp (slice 5) · e7bd970..f8a71be · node --test 1412/1412/0 · DECISIONLOG #92
