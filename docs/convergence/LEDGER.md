@@ -8,8 +8,8 @@ to the logs.
 
 | Packet | Doc | Stage | Branch(es) | Last full gate | Notes |
 |---|---|---|---|---|---|
-| W1 auth parity | `W1-auth-parity.md` | slices | `convergence/W1-two-plane` (slice 1), `convergence/W1-passkeys` (slice 2), `convergence/W1-invitations` (slice 3) | 1323/1323/0 | S1: membership() two-plane. S2: passkey WebAuthn. S3: generic invitation flow (link + direct). |
-| W2 persistence ownership | `W2-persistence-ownership.md` | slices | `convergence/W2-fts` (slice 1) | 1302/1302/0 (merged) | Slice 1: FTS — text({ indexed: 'fts' }), FTS5 CREATE VIRTUAL TABLE, .matches(query) scope predicate, automatic lifecycle sync via projection. |
+| W1 auth parity | `W1-auth-parity.md` | slices | `convergence/W1-two-plane` (1), `convergence/W1-passkeys` (2), `convergence/W1-invitations` (3), `convergence/W1-api-keys` (4) | 1378/1378/0 | S1: membership(). S2: passkey WebAuthn. S3: invitation flow. S4: ApiKey principal kind. S5 (TOTP/email) pending. |
+| W2 persistence ownership | `W2-persistence-ownership.md` | **done** | `convergence/W2-fts` (1), `convergence/W2-vector` (2) | 1378/1378/0 | S1: FTS — text({ indexed: 'fts' }), FTS5, .matches(), lifecycle sync. S2: vector(dim) — JSON-stored embeddings, cosine similarity, .nearest(). Both GAPs closed. |
 | W3 job queue parity | `W3-job-queue-parity.md` | slices | `convergence/W3-job-queue` (slice 1) | 1273/1273/0 (merged) | Slice 1: progress (+stage), cancellation (cancelled status), scoping (scope column + scoped claim). 3 BUILD items closed. |
 | W4 UI kit | `W4-ui-kit.md` | census | — | — | 25 primitives — owner checkpoint required before build-out |
 | W5 client engine parity | `W5-client-engine-parity.md` | slices | `convergence/W5-scope-subscription` (slices 1+2) | 1216/1216/0 | Slice 1: subscribeScope() + normalizeSubscribeMsg. Slice 2: scope-keyed fan-out (per-entity Map retired), scope-level snapshot/events-since routes, generic subscribed ack. Council c01 adopted B′. |
@@ -44,3 +44,5 @@ Append one line per merge to main:
 2026-07-07 · W3 · convergence/W3-job-queue (slice 1) · 7f56605..999d48a · node --test 1273/1273/0 · DECISIONLOG #86
 2026-07-07 · W2 · convergence/W2-fts (slice 1) · 999d48a..75f4d94 · node --test 1302/1302/0 · DECISIONLOG #87
 2026-07-07 · W1 · convergence/W1-invitations (slice 3) · 75f4d94..ca77e19 · node --test 1323/1323/0 · DECISIONLOG #88
+2026-07-07 · W1 · convergence/W1-api-keys (slice 4) · ca77e19..4375262 · node --test 1353/1353/0 · DECISIONLOG #89
+2026-07-07 · W2 · convergence/W2-vector (slice 2) · 4375262..e7bd970 · node --test 1378/1378/0 · DECISIONLOG #90
