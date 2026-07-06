@@ -288,3 +288,69 @@ export function bindList(store, { id, field, onItemsChange } = {}) {
 
   return handle;
 }
+
+// ---------------------------------------------------------------------------
+// bindConnection(channel)
+// ---------------------------------------------------------------------------
+//
+// Binds to a LiveChannel's connection lifecycle. Uses the channel's
+// onConnectionChange hook if available; falls back to polling _socket state.
+//
+// Exposes:
+//   status    — 'connected' | 'disconnected' | 'reconnecting'
+//   subscribe(cb) — calls cb({ status }) on every change, returns unsub
+//   destroy() — tears down subscriptions
+//
+// Requires channel.onConnectionChange(callback) — the LiveChannel must expose a
+// public connection-state emitter. (W5 filing: add onConnectionChange to LiveChannel.)
+// Without it, status stays 'disconnected' and the UI kit reflects no connection.
+
+export function bindConnection(channel) {
+  let _status = 'disconnected';
+  let _channelUnsub = null;
+  const _callbacks = new Set();
+
+  function _notify() {
+    const state = { status: _status };
+    for (const cb of _callbacks) {
+      try { cb(state); } catch { /* swallow */ }
+    }
+  }
+
+  function _startListening() {
+    if (typeof channel.onConnectionChange === 'function') {
+      _channelUnsub = channel.onConnectionChange((s) => {
+        _status = s;
+        _notify();
+      });
+      return;
+    }
+    // Client does not provide onConnectionChange — stay disconnected.
+    // (W5 filing: LiveChannel should emit connection state changes.)
+  }
+
+  function _stopListening() {
+    if (_channelUnsub) { _channelUnsub(); _channelUnsub = null; }
+  }
+
+  const handle = {
+    get status() { return _status; },
+
+    subscribe(callback) {
+      _callbacks.add(callback);
+      _startListening();
+      callback({ status: _status });
+      return () => {
+        _callbacks.delete(callback);
+        if (_callbacks.size === 0) _stopListening();
+      };
+    },
+
+    destroy() {
+      _stopListening();
+      _callbacks.clear();
+    },
+  };
+
+  return handle;
+}

@@ -1186,3 +1186,1118 @@ describe('Optionality guard', () => {
     assert.equal(typeof createLiveStore, 'function');
   });
 });
+
+// ---------------------------------------------------------------------------
+//  PART 4: bindConnection helper tests (pure JS)
+// ---------------------------------------------------------------------------
+
+describe('bindConnection', () => {
+  let bindConnection;
+
+  before(async () => {
+    const mod = await import('../public/workbench-ui-bindings.mjs');
+    bindConnection = mod.bindConnection;
+  });
+
+  it('initial status is disconnected', () => {
+    const conn = bindConnection({ _closed: false, _socket: null, _reconnectTimer: null });
+    assert.equal(conn.status, 'disconnected');
+    conn.destroy();
+  });
+
+  it('subscribe calls callback immediately with current status', () => {
+    let called = false;
+    const conn = bindConnection({ _closed: false, _socket: null, _reconnectTimer: null });
+    const unsub = conn.subscribe((s) => {
+      called = true;
+      assert.equal(s.status, 'disconnected');
+    });
+    assert.ok(called);
+    unsub();
+    conn.destroy();
+  });
+
+  it('onConnectionChange hook updates status', () => {
+    let changeCb = null;
+    const channel = {
+      _closed: false,
+      _socket: null,
+      _reconnectTimer: null,
+      onConnectionChange(cb) {
+        changeCb = cb;
+        return () => { changeCb = null; };
+      },
+    };
+    const conn = bindConnection(channel);
+    const states = [];
+    conn.subscribe((s) => states.push(s.status));
+    assert.equal(states[0], 'disconnected');
+
+    changeCb('connected');
+    assert.equal(conn.status, 'connected');
+    assert.deepEqual(states, ['disconnected', 'connected']);
+
+    changeCb('reconnecting');
+    assert.equal(conn.status, 'reconnecting');
+    assert.deepEqual(states, ['disconnected', 'connected', 'reconnecting']);
+
+    conn.destroy();
+  });
+
+  it('uses onConnectionChange hook when provided', () => {
+    let listener = null;
+    const channel = {
+      onConnectionChange: (cb) => {
+        listener = cb;
+        return () => { listener = null; };
+      },
+    };
+    const conn = bindConnection(channel);
+    const states = [];
+    conn.subscribe((s) => states.push(s.status));
+    assert.equal(conn.status, 'disconnected');
+
+    listener('connected');
+    assert.equal(conn.status, 'connected');
+    assert.deepEqual(states, ['disconnected', 'connected']);
+
+    listener('reconnecting');
+    assert.equal(conn.status, 'reconnecting');
+
+    conn.destroy();
+  });
+
+  it('stays disconnected when no onConnectionChange hook', () => {
+    const channel = {}; // no hook, no private internals to poll
+    const conn = bindConnection(channel);
+    assert.equal(conn.status, 'disconnected');
+
+    conn.subscribe(() => {});
+    assert.equal(conn.status, 'disconnected');
+
+    conn.destroy();
+  });
+
+  it('notifies all subscribers on status change', () => {
+    let listener = null;
+    const channel = {
+      onConnectionChange: (cb) => { listener = cb; return () => { listener = null; }; },
+    };
+    const conn = bindConnection(channel);
+    const a = [], b = [];
+    conn.subscribe((s) => a.push(s.status));
+    conn.subscribe((s) => b.push(s.status));
+
+    listener('connected');
+    assert.deepEqual(a, ['disconnected', 'connected']);
+    assert.deepEqual(b, ['disconnected', 'connected']);
+
+    conn.destroy();
+  });
+
+  it('subscribe returns unsubscribe that stops notifications', () => {
+    let listener = null;
+    const channel = {
+      onConnectionChange: (cb) => { listener = cb; return () => { listener = null; }; },
+    };
+    const conn = bindConnection(channel);
+    let count = 0;
+    const unsub = conn.subscribe(() => { count++; });
+
+    listener('connected');
+    assert.equal(count, 2); // initial + connected change
+
+    unsub();
+    // After unsub, the listener is disconnected — calling it is a no-op
+    // (the channel's onConnectionChange teardown set listener to null)
+    assert.equal(listener, null);
+
+    conn.destroy();
+  });
+
+  it('destroy cleans up all subscribers and listeners', () => {
+    let listener = null;
+    let cleaned = false;
+    const channel = {
+      onConnectionChange: (cb) => { listener = cb; return () => { cleaned = true; }; },
+    };
+    const conn = bindConnection(channel);
+    conn.subscribe(() => {});
+    conn.destroy();
+
+    assert.equal(cleaned, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+//  PART 5: Wave 2 Component Tests (Svelte, requires browser conditions)
+// ---------------------------------------------------------------------------
+
+describe('Svelte Wave 2 Components (browser)', () => {
+  // --- FormInput ---
+
+  describe('FormInput', () => {
+    it('select renders options and shows current value', async () => {
+      if (!svelteAvailable) return;
+      const FormInput = await importComponent('FormInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const fakeStore = {
+        overlayFor: (id) => (id === '1' ? { id: '1', color: 'blue' } : null),
+        onRender: () => () => {},
+        update: async () => ({ ok: true }),
+      };
+
+      const comp = mount(FormInput, {
+        target: container,
+        props: {
+          store: fakeStore,
+          id: '1',
+          field: 'color',
+          type: 'select',
+          options: [
+            { value: 'red', label: 'Red' },
+            { value: 'blue', label: 'Blue' },
+            { value: 'green', label: 'Green' },
+          ],
+        },
+      });
+
+      const select = container.querySelector('select');
+      assert.ok(select);
+      assert.equal(select.value, 'blue');
+
+      const options = select.querySelectorAll('option');
+      assert.equal(options.length, 3);
+      assert.equal(options[0].value, 'red');
+      assert.equal(options[1].value, 'blue');
+      assert.equal(options[2].value, 'green');
+
+      const wrapper = container.querySelector('[data-wb-part="form-input"]');
+      assert.ok(wrapper);
+      assert.equal(wrapper.getAttribute('data-status'), 'idle');
+      assert.equal(wrapper.getAttribute('data-type'), 'select');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('select change dispatches update', async () => {
+      if (!svelteAvailable) return;
+      const FormInput = await importComponent('FormInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let capturedPayload;
+      const fakeStore = {
+        overlayFor: () => ({ id: '1', color: 'blue' }),
+        onRender: () => () => {},
+        update: async (id, payload) => {
+          capturedPayload = payload;
+          return { ok: true };
+        },
+      };
+
+      const comp = mount(FormInput, {
+        target: container,
+        props: {
+          store: fakeStore,
+          id: '1',
+          field: 'color',
+          type: 'select',
+          options: [
+            { value: 'red', label: 'Red' },
+            { value: 'blue', label: 'Blue' },
+          ],
+        },
+      });
+
+      const select = container.querySelector('select');
+      select.value = 'red';
+      select.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await tick();
+
+      assert.ok(capturedPayload);
+      assert.deepEqual(capturedPayload, { color: 'red' });
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('checkbox toggles boolean value 0/1', async () => {
+      if (!svelteAvailable) return;
+      const FormInput = await importComponent('FormInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let capturedPayload;
+      const fakeStore = {
+        overlayFor: () => ({ id: '1', active: 1 }),
+        onRender: () => () => {},
+        update: async (id, payload) => {
+          capturedPayload = payload;
+          return { ok: true };
+        },
+      };
+
+      const comp = mount(FormInput, {
+        target: container,
+        props: {
+          store: fakeStore,
+          id: '1',
+          field: 'active',
+          type: 'checkbox',
+          options: [{ label: 'Active' }],
+        },
+      });
+
+      const checkbox = container.querySelector('input[type="checkbox"]');
+      assert.ok(checkbox);
+      assert.equal(checkbox.checked, true);
+
+      // Toggle off (1 → 0)
+      checkbox.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await tick();
+      assert.deepEqual(capturedPayload, { active: 0 });
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('checkbox shows label from options', async () => {
+      if (!svelteAvailable) return;
+      const FormInput = await importComponent('FormInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const fakeStore = {
+        overlayFor: () => ({ id: '1', subscribed: 0 }),
+        onRender: () => () => {},
+        update: async () => ({ ok: true }),
+      };
+
+      const comp = mount(FormInput, {
+        target: container,
+        props: {
+          store: fakeStore,
+          id: '1',
+          field: 'subscribed',
+          type: 'checkbox',
+          options: [{ label: 'Subscribe to newsletter' }],
+        },
+      });
+
+      const label = container.querySelector('label.wb-form-input__checkbox-label');
+      assert.ok(label);
+      assert.ok(label.textContent.includes('Subscribe to newsletter'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('radio group renders options and selects value', async () => {
+      if (!svelteAvailable) return;
+      const FormInput = await importComponent('FormInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let capturedPayload;
+      const fakeStore = {
+        overlayFor: () => ({ id: '1', size: 'medium' }),
+        onRender: () => () => {},
+        update: async (id, payload) => {
+          capturedPayload = payload;
+          return { ok: true };
+        },
+      };
+
+      const comp = mount(FormInput, {
+        target: container,
+        props: {
+          store: fakeStore,
+          id: '1',
+          field: 'size',
+          type: 'radio',
+          options: [
+            { value: 'small', label: 'Small' },
+            { value: 'medium', label: 'Medium' },
+            { value: 'large', label: 'Large' },
+          ],
+        },
+      });
+
+      const radios = container.querySelectorAll('input[type="radio"]');
+      assert.equal(radios.length, 3);
+      assert.equal(radios[0].checked, false);
+      assert.equal(radios[1].checked, true);
+      assert.equal(radios[2].checked, false);
+
+      // Select 'large'
+      radios[2].checked = true;
+      radios[2].dispatchEvent(new window.Event('change', { bubbles: true }));
+      await tick();
+      assert.deepEqual(capturedPayload, { size: 'large' });
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('enum button group renders and selects on click', async () => {
+      if (!svelteAvailable) return;
+      const FormInput = await importComponent('FormInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let capturedPayload;
+      const fakeStore = {
+        overlayFor: () => ({ id: '1', theme: 'light' }),
+        onRender: () => () => {},
+        update: async (id, payload) => {
+          capturedPayload = payload;
+          return { ok: true };
+        },
+      };
+
+      const comp = mount(FormInput, {
+        target: container,
+        props: {
+          store: fakeStore,
+          id: '1',
+          field: 'theme',
+          type: 'enum',
+          options: [
+            { value: 'light', label: 'Light' },
+            { value: 'dark', label: 'Dark' },
+          ],
+        },
+      });
+
+      const buttons = container.querySelectorAll('.wb-form-input__enum-btn');
+      assert.equal(buttons.length, 2);
+      assert.equal(buttons[0].getAttribute('data-selected'), 'true');
+      assert.equal(buttons[1].getAttribute('data-selected'), 'false');
+      assert.ok(buttons[0].textContent.includes('Light'));
+      assert.ok(buttons[1].textContent.includes('Dark'));
+
+      // Click 'Dark'
+      buttons[1].click();
+      await tick();
+      assert.deepEqual(capturedPayload, { theme: 'dark' });
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('label prop renders', async () => {
+      if (!svelteAvailable) return;
+      const FormInput = await importComponent('FormInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const fakeStore = {
+        overlayFor: () => ({ id: '1', color: 'blue' }),
+        onRender: () => () => {},
+        update: async () => ({ ok: true }),
+      };
+
+      const comp = mount(FormInput, {
+        target: container,
+        props: {
+          store: fakeStore,
+          id: '1',
+          field: 'color',
+          type: 'select',
+          label: 'Choose color',
+          options: [{ value: 'blue', label: 'Blue' }],
+        },
+      });
+
+      const label = container.querySelector('label.wb-form-input__label');
+      assert.ok(label);
+      assert.equal(label.textContent, 'Choose color');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- Modal ---
+
+  describe('Modal', () => {
+    it('renders when open is true', async () => {
+      if (!svelteAvailable) return;
+      const Modal = await importComponent('Modal');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Modal, {
+        target: container,
+        props: { open: true, title: 'Test Modal' },
+      });
+
+      const backdrop = container.querySelector('[data-wb-part="modal-backdrop"]');
+      assert.ok(backdrop);
+
+      const modal = container.querySelector('[data-wb-part="modal"]');
+      assert.ok(modal);
+      assert.equal(modal.getAttribute('role'), 'dialog');
+      assert.equal(modal.getAttribute('aria-modal'), 'true');
+      assert.equal(modal.getAttribute('aria-label'), 'Test Modal');
+
+      const header = container.querySelector('[data-wb-part="modal-header"]');
+      assert.ok(header);
+      assert.equal(header.textContent, 'Test Modal');
+
+      const body = container.querySelector('[data-wb-part="modal-body"]');
+      assert.ok(body);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('does not render when open is false', async () => {
+      if (!svelteAvailable) return;
+      const Modal = await importComponent('Modal');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Modal, {
+        target: container,
+        props: { open: false, title: 'Hidden' },
+      });
+
+      assert.equal(container.querySelector('[data-wb-part="modal-backdrop"]'), null);
+      assert.equal(container.querySelector('[data-wb-part="modal"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('backdrop click calls onClose', async () => {
+      if (!svelteAvailable) return;
+      const Modal = await importComponent('Modal');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let closed = false;
+      const comp = mount(Modal, {
+        target: container,
+        props: {
+          open: true,
+          title: 'Closable',
+          onClose: () => { closed = true; },
+        },
+      });
+
+      const backdrop = container.querySelector('[data-wb-part="modal-backdrop"]');
+      backdrop.click();
+      assert.equal(closed, true);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('clicking modal body does not call onClose', async () => {
+      if (!svelteAvailable) return;
+      const Modal = await importComponent('Modal');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let closed = false;
+      const comp = mount(Modal, {
+        target: container,
+        props: {
+          open: true,
+          title: 'Non-closable',
+          onClose: () => { closed = true; },
+        },
+      });
+
+      const body = container.querySelector('[data-wb-part="modal-body"]');
+      body.click();
+      // Click event bubbles to backdrop, but handleBackdropClick checks
+      // e.target === e.currentTarget, so this should NOT close.
+      assert.equal(closed, false);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('Escape key calls onClose', async () => {
+      if (!svelteAvailable) return;
+      const Modal = await importComponent('Modal');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let closed = false;
+      const comp = mount(Modal, {
+        target: container,
+        props: {
+          open: true,
+          title: 'Escapable',
+          onClose: () => { closed = true; },
+        },
+      });
+
+      await tick();
+
+      document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+      assert.equal(closed, true);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('Escape does nothing when open is false', async () => {
+      if (!svelteAvailable) return;
+      const Modal = await importComponent('Modal');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let closed = false;
+      const comp = mount(Modal, {
+        target: container,
+        props: {
+          open: false,
+          title: 'Closed',
+          onClose: () => { closed = true; },
+        },
+      });
+
+      document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+      assert.equal(closed, false);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('Escape listener is removed on unmount', async () => {
+      if (!svelteAvailable) return;
+      const Modal = await importComponent('Modal');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let closed = false;
+      const comp = mount(Modal, {
+        target: container,
+        props: {
+          open: true,
+          title: 'Remove',
+          onClose: () => { closed = true; },
+        },
+      });
+
+      unmount(comp);
+      document.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape' }));
+      assert.equal(closed, false);
+
+      document.body.removeChild(container);
+    });
+
+    it('modal disappears on unmount', async () => {
+      if (!svelteAvailable) return;
+      const Modal = await importComponent('Modal');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Modal, {
+        target: container,
+        props: { open: true, title: 'Bye' },
+      });
+
+      assert.ok(container.querySelector('[data-wb-part="modal"]'));
+      unmount(comp);
+      assert.equal(container.querySelector('[data-wb-part="modal"]'), null);
+
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- ConnectionIndicator ---
+
+  describe('ConnectionIndicator', () => {
+    it('renders with disconnected state by default', async () => {
+      if (!svelteAvailable) return;
+      const ConnectionIndicator = await importComponent('ConnectionIndicator');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const channel = {
+        _closed: false,
+        _socket: null,
+        _reconnectTimer: null,
+      };
+
+      const comp = mount(ConnectionIndicator, {
+        target: container,
+        props: { channel },
+      });
+
+      const indicator = container.querySelector('[data-wb-part="connection-indicator"]');
+      assert.ok(indicator);
+      assert.equal(indicator.getAttribute('data-state'), 'disconnected');
+      assert.ok(indicator.textContent.includes('Disconnected'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders connected state via onConnectionChange', async () => {
+      if (!svelteAvailable) return;
+      const ConnectionIndicator = await importComponent('ConnectionIndicator');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let changeCb = null;
+      const channel = {
+        _closed: false,
+        _socket: null,
+        _reconnectTimer: null,
+        onConnectionChange(cb) {
+          changeCb = cb;
+          return () => { changeCb = null; };
+        },
+      };
+
+      const comp = mount(ConnectionIndicator, {
+        target: container,
+        props: { channel },
+      });
+
+      await tick();
+      changeCb('connected');
+      await tick();
+
+      const indicator = container.querySelector('[data-wb-part="connection-indicator"]');
+      assert.equal(indicator.getAttribute('data-state'), 'connected');
+      assert.ok(indicator.textContent.includes('Connected'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders reconnecting state via onConnectionChange', async () => {
+      if (!svelteAvailable) return;
+      const ConnectionIndicator = await importComponent('ConnectionIndicator');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let changeCb = null;
+      const channel = {
+        _closed: false,
+        _socket: null,
+        _reconnectTimer: null,
+        onConnectionChange(cb) {
+          changeCb = cb;
+          return () => { changeCb = null; };
+        },
+      };
+
+      const comp = mount(ConnectionIndicator, {
+        target: container,
+        props: { channel },
+      });
+
+      await tick();
+      changeCb('reconnecting');
+      await tick();
+
+      const indicator = container.querySelector('[data-wb-part="connection-indicator"]');
+      assert.equal(indicator.getAttribute('data-state'), 'reconnecting');
+      assert.ok(indicator.textContent.includes('Reconnecting'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('shows presence dot when showPresence is true', async () => {
+      if (!svelteAvailable) return;
+      const ConnectionIndicator = await importComponent('ConnectionIndicator');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let changeCb = null;
+      const channel = {
+        _closed: false,
+        _socket: null,
+        _reconnectTimer: null,
+        onConnectionChange(cb) {
+          changeCb = cb;
+          return () => { changeCb = null; };
+        },
+      };
+
+      const comp = mount(ConnectionIndicator, {
+        target: container,
+        props: { channel, showPresence: true },
+      });
+
+      await tick();
+      changeCb('connected');
+      await tick();
+
+      const presenceDot = container.querySelector('.wb-presence-dot');
+      assert.ok(presenceDot);
+      assert.ok(presenceDot.classList.contains('wb-presence-dot--online'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('shows custom label when provided', async () => {
+      if (!svelteAvailable) return;
+      const ConnectionIndicator = await importComponent('ConnectionIndicator');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const channel = {
+        _closed: false,
+        _socket: null,
+        _reconnectTimer: null,
+      };
+
+      const comp = mount(ConnectionIndicator, {
+        target: container,
+        props: { channel, label: 'Live' },
+      });
+
+      const label = container.querySelector('.wb-connection-label');
+      assert.ok(label);
+      assert.equal(label.textContent, 'Live');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- Dropdown ---
+
+  describe('Dropdown', () => {
+    it('renders trigger button', async () => {
+      if (!svelteAvailable) return;
+      const Dropdown = await importComponent('Dropdown');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Dropdown, {
+        target: container,
+        props: {
+          trigger: 'Actions',
+          items: [
+            { label: 'Edit', action: () => {} },
+            { label: 'Delete', action: () => {}, danger: true },
+          ],
+        },
+      });
+
+      const trigger = container.querySelector('[data-wb-part="dropdown-trigger"]');
+      assert.ok(trigger);
+      assert.equal(trigger.textContent.trim(), 'Actions');
+
+      // Menu should be closed initially
+      assert.equal(container.querySelector('[data-wb-part="dropdown-item"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('click trigger opens menu', async () => {
+      if (!svelteAvailable) return;
+      const Dropdown = await importComponent('Dropdown');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Dropdown, {
+        target: container,
+        props: {
+          trigger: 'Menu',
+          items: [
+            { label: 'Option 1', action: () => {} },
+            { label: 'Option 2', action: () => {} },
+          ],
+        },
+      });
+
+      const trigger = container.querySelector('[data-wb-part="dropdown-trigger"]');
+      trigger.click();
+      await tick();
+
+      const items = container.querySelectorAll('[data-wb-part="dropdown-item"]');
+      assert.equal(items.length, 2);
+      assert.equal(items[0].textContent.trim(), 'Option 1');
+      assert.equal(items[1].textContent.trim(), 'Option 2');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('click item calls action and closes menu', async () => {
+      if (!svelteAvailable) return;
+      const Dropdown = await importComponent('Dropdown');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let actionCalled = false;
+      const comp = mount(Dropdown, {
+        target: container,
+        props: {
+          trigger: 'Menu',
+          items: [
+            { label: 'Do Thing', action: () => { actionCalled = true; } },
+          ],
+        },
+      });
+
+      const trigger = container.querySelector('[data-wb-part="dropdown-trigger"]');
+      trigger.click();
+      await tick();
+
+      const item = container.querySelector('[data-wb-part="dropdown-item"]');
+      item.click();
+      await tick();
+
+      assert.equal(actionCalled, true);
+      // Menu should be closed after item click
+      assert.equal(container.querySelector('[data-wb-part="dropdown-item"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('disabled item does not call action', async () => {
+      if (!svelteAvailable) return;
+      const Dropdown = await importComponent('Dropdown');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let actionCalled = false;
+      const comp = mount(Dropdown, {
+        target: container,
+        props: {
+          trigger: 'Menu',
+          items: [
+            { label: 'Disabled', action: () => { actionCalled = true; }, disabled: true },
+          ],
+        },
+      });
+
+      const trigger = container.querySelector('[data-wb-part="dropdown-trigger"]');
+      trigger.click();
+      await tick();
+
+      const item = container.querySelector('[data-wb-part="dropdown-item"]');
+      assert.equal(item.disabled, true);
+      item.click();
+      await tick();
+
+      assert.equal(actionCalled, false);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('danger item has danger class', async () => {
+      if (!svelteAvailable) return;
+      const Dropdown = await importComponent('Dropdown');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Dropdown, {
+        target: container,
+        props: {
+          trigger: 'Menu',
+          items: [
+            { label: 'Normal', action: () => {} },
+            { label: 'Delete', action: () => {}, danger: true },
+          ],
+        },
+      });
+
+      const trigger = container.querySelector('[data-wb-part="dropdown-trigger"]');
+      trigger.click();
+      await tick();
+
+      const items = container.querySelectorAll('[data-wb-part="dropdown-item"]');
+      assert.equal(items.length, 2);
+      assert.ok(!items[0].classList.contains('wb-dropdown__item--danger'));
+      assert.ok(items[1].classList.contains('wb-dropdown__item--danger'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('outside click closes menu', async () => {
+      if (!svelteAvailable) return;
+      const Dropdown = await importComponent('Dropdown');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Dropdown, {
+        target: container,
+        props: {
+          trigger: 'Menu',
+          items: [
+            { label: 'Item', action: () => {} },
+          ],
+        },
+      });
+
+      const trigger = container.querySelector('[data-wb-part="dropdown-trigger"]');
+      trigger.click();
+      await tick();
+      assert.ok(container.querySelector('[data-wb-part="dropdown-item"]'));
+
+      // Click outside (on document body)
+      document.body.click();
+      await tick();
+      assert.equal(container.querySelector('[data-wb-part="dropdown-item"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('toggle: second click closes menu', async () => {
+      if (!svelteAvailable) return;
+      const Dropdown = await importComponent('Dropdown');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Dropdown, {
+        target: container,
+        props: {
+          trigger: 'Menu',
+          items: [{ label: 'Item', action: () => {} }],
+        },
+      });
+
+      const trigger = container.querySelector('[data-wb-part="dropdown-trigger"]');
+      trigger.click();
+      await tick();
+      assert.ok(container.querySelector('[data-wb-part="dropdown-item"]'));
+
+      trigger.click();
+      await tick();
+      assert.equal(container.querySelector('[data-wb-part="dropdown-item"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- OptimisticBadge (renders bindAction status) ---
+
+  describe('OptimisticBadge', () => {
+    it('renders nothing when idle', async () => {
+      if (!svelteAvailable) return;
+      const OptimisticBadge = await importComponent('OptimisticBadge');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(OptimisticBadge, {
+        target: container,
+        props: {
+          boundAction: {
+            subscribe(cb) { cb({ status: 'idle', error: null }); return () => {}; },
+          },
+        },
+      });
+
+      await tick();
+      assert.equal(container.querySelector('[data-wb-part="optimistic-badge"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('shows spinner when status is pending', async () => {
+      if (!svelteAvailable) return;
+      const OptimisticBadge = await importComponent('OptimisticBadge');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(OptimisticBadge, {
+        target: container,
+        props: {
+          boundAction: {
+            subscribe(cb) { cb({ status: 'pending', error: null }); return () => {}; },
+          },
+        },
+      });
+
+      await tick();
+      const badge = container.querySelector('[data-wb-part="optimistic-badge"]');
+      assert.ok(badge, 'pending badge renders');
+      assert.equal(badge.getAttribute('data-status'), 'pending');
+      assert.ok(badge.querySelector('.wb-optimistic-badge__spinner'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('shows error when status is failed', async () => {
+      if (!svelteAvailable) return;
+      const OptimisticBadge = await importComponent('OptimisticBadge');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(OptimisticBadge, {
+        target: container,
+        props: {
+          boundAction: {
+            subscribe(cb) { cb({ status: 'failed', error: 'Network error' }); return () => {}; },
+          },
+        },
+      });
+
+      await tick();
+      const badge = container.querySelector('[data-wb-part="optimistic-badge"]');
+      assert.ok(badge, 'failed badge renders');
+      assert.equal(badge.getAttribute('data-status'), 'failed');
+      assert.equal(badge.getAttribute('title'), 'Network error');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders nothing when no boundAction', async () => {
+      if (!svelteAvailable) return;
+      const OptimisticBadge = await importComponent('OptimisticBadge');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(OptimisticBadge, {
+        target: container,
+        props: {},
+      });
+
+      await tick();
+      assert.equal(container.querySelector('[data-wb-part="optimistic-badge"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders nothing for confirmed status', async () => {
+      if (!svelteAvailable) return;
+      const OptimisticBadge = await importComponent('OptimisticBadge');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(OptimisticBadge, {
+        target: container,
+        props: {
+          boundAction: {
+            subscribe(cb) { cb({ status: 'confirmed', error: null }); return () => {}; },
+          },
+        },
+      });
+
+      await tick();
+      assert.equal(container.querySelector('[data-wb-part="optimistic-badge"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+  });
+});
