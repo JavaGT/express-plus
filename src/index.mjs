@@ -4,7 +4,7 @@ export { now } from './deferred.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
 export { entity } from './entity/compile.mjs';
-export { User, Session, Inbox, Credential } from './auth-entities.mjs';
+export { User, Session, Inbox, Credential, Invitation } from './auth-entities.mjs';
 export { everyone, never, anyOf, inherit } from './scope-sql.mjs';
 export { principal, anonymous } from './principal.mjs';
 export { requireUser, allowAnonymous } from './route-gate.mjs';
@@ -21,4 +21,5 @@ export { sessionCookie, sessionPrincipalOf, sessionTokenOf, parseCookies, SESSIO
 export { inc, dec, self, many, effect } from './effect-compiler.mjs';
 export { schedule, tick, simulate } from './schedule.mjs';
 export { membership } from './membership.mjs';
+export { createInvitation, acceptInvitation, rejectInvitation, listInvitationsForUser } from './invitation.mjs';
 export { default } from './app.mjs';

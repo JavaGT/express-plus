@@ -26,7 +26,8 @@
 
 import { router } from './app.mjs';
 import { allowAnonymous, requireUser } from './route-gate.mjs';
-import { User, Session, Credential } from './auth-entities.mjs';
+import { User, Session, Credential, Invitation } from './auth-entities.mjs';
+import { createInvitation, acceptInvitation, rejectInvitation, listInvitationsForUser } from './invitation.mjs';
 import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.mjs';
 import { config } from './config.mjs';
 import { getActiveDb } from './db.mjs';
@@ -223,6 +224,93 @@ export function authRoutes({ secure = config.env === 'production' } = {}) {
           transports: c.transports ? c.transports.split(',').filter(Boolean) : [],
         })));
       }, (err) => next({ status: 500, message: err.message }));
+  });
+
+  // ---- Invitation routes ---------------------------------------------------
+
+  // POST /auth/invitation/create — create an invitation.
+  // requireUser: only an authenticated user may invite. The creator is the
+  // requesting principal. Body: { targetEntity, targetId, role, targetUser?,
+  // maxUses?, expiresAt? }. Returns the invitation with its token.
+  s.post('/invitation/create', requireUser(), (req, res, next) => {
+    const { targetEntity, targetId, role, targetUser, maxUses, expiresAt } = req.body ?? {};
+    if (!targetEntity || !targetId || !role) {
+      return next({ status: 400, message: 'targetEntity, targetId, and role are required' });
+    }
+    try {
+      const invitation = createInvitation({
+        targetEntity,
+        targetId,
+        role,
+        targetUser,
+        maxUses,
+        expiresAt,
+        createdBy: req.principal.id,
+      });
+      res.status(201).json({
+        token: invitation.token,
+        targetEntity: invitation.targetEntity,
+        targetId: invitation.targetId,
+        role: invitation.role,
+        targetUser: invitation.targetUser,
+        maxUses: invitation.maxUses,
+        useCount: invitation.useCount,
+        expiresAt: invitation.expiresAt,
+        createdBy: invitation.createdBy,
+        createdAt: invitation.createdAt,
+      });
+    } catch (err) {
+      return next({ status: err.status ?? 500, message: err.message });
+    }
+  });
+
+  // POST /auth/invitation/:token/accept — accept an invitation by token.
+  // requireUser: an anonymous caller cannot accept. Validates the token,
+  // grants membership on the target entity. Returns { targetEntity, targetId, role }.
+  s.post('/invitation/:token/accept', requireUser(), (req, res, next) => {
+    const { token } = req.params;
+    try {
+      const result = acceptInvitation(token, req.principal);
+      res.json(result);
+    } catch (err) {
+      return next({ status: err.status ?? 500, message: err.message });
+    }
+  });
+
+  // POST /auth/invitation/:token/reject — reject a direct invitation.
+  // requireUser: an anonymous caller cannot reject. Removes the direct
+  // invitation row if the rejecting user matches the target.
+  s.post('/invitation/:token/reject', requireUser(), (req, res, next) => {
+    const { token } = req.params;
+    try {
+      rejectInvitation(token, req.principal);
+      res.sendStatus(204);
+    } catch (err) {
+      return next({ status: err.status ?? 500, message: err.message });
+    }
+  });
+
+  // GET /auth/invitation — list pending invitations for the current user.
+  // requireUser: an anonymous caller has no invitations. Returns both direct
+  // invitations (targetUser === principal) and open link invitations.
+  s.get('/invitation', requireUser(), (req, res, next) => {
+    try {
+      const invitations = listInvitationsForUser(req.principal);
+      res.json(invitations.map((inv) => ({
+        token: inv.token,
+        targetEntity: inv.targetEntity,
+        targetId: inv.targetId,
+        role: inv.role,
+        targetUser: inv.targetUser,
+        maxUses: inv.maxUses,
+        useCount: inv.useCount,
+        expiresAt: inv.expiresAt,
+        createdBy: inv.createdBy,
+        createdAt: inv.createdAt,
+      })));
+    } catch (err) {
+      return next({ status: err.status ?? 500, message: err.message });
+    }
   });
 
   return s;
