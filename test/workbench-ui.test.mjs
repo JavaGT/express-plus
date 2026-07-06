@@ -2301,3 +2301,1278 @@ describe('Svelte Wave 2 Components (browser)', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+//  PART 6: Wave 3 Component Tests (Svelte, requires browser conditions)
+// ---------------------------------------------------------------------------
+
+describe('Svelte Wave 3 Components (browser)', () => {
+  // --- Toast ---
+
+  describe('Toast', () => {
+    it('renders toasts with messages', async () => {
+      if (!svelteAvailable) return;
+      const Toast = await importComponent('Toast');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const toasts = [
+        { id: 't1', type: 'info', message: 'Hello world' },
+      ];
+
+      const comp = mount(Toast, {
+        target: container,
+        props: { toasts },
+      });
+
+      const containerEl = container.querySelector('[data-wb-part="toast-container"]');
+      assert.ok(containerEl);
+
+      const toastEls = container.querySelectorAll('[data-wb-part="toast"]');
+      assert.equal(toastEls.length, 1);
+      assert.equal(toastEls[0].getAttribute('data-toast-type'), 'info');
+
+      const msg = container.querySelector('[data-wb-part="toast-message"]');
+      assert.ok(msg);
+      assert.equal(msg.textContent, 'Hello world');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders multiple toasts', async () => {
+      if (!svelteAvailable) return;
+      const Toast = await importComponent('Toast');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const toasts = [
+        { id: 't1', type: 'info', message: 'First' },
+        { id: 't2', type: 'success', message: 'Second' },
+        { id: 't3', type: 'error', message: 'Third' },
+      ];
+
+      const comp = mount(Toast, { target: container, props: { toasts } });
+
+      const toastEls = container.querySelectorAll('[data-wb-part="toast"]');
+      assert.equal(toastEls.length, 3);
+      assert.equal(toastEls[0].getAttribute('data-toast-type'), 'info');
+      assert.equal(toastEls[1].getAttribute('data-toast-type'), 'success');
+      assert.equal(toastEls[2].getAttribute('data-toast-type'), 'error');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('click dismiss calls onDismiss with toast id', async () => {
+      if (!svelteAvailable) return;
+      const Toast = await importComponent('Toast');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let dismissedId = null;
+      const toasts = [
+        { id: 't1', type: 'info', message: 'Dismiss me' },
+      ];
+
+      const comp = mount(Toast, {
+        target: container,
+        props: {
+          toasts,
+          onDismiss: (id) => { dismissedId = id; },
+        },
+      });
+
+      const closeBtn = container.querySelector('[data-wb-part="toast-close"]');
+      assert.ok(closeBtn);
+      closeBtn.click();
+      await tick();
+
+      assert.equal(dismissedId, 't1');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('auto-dismiss after duration', async () => {
+      if (!svelteAvailable) return;
+      const Toast = await importComponent('Toast');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let dismissedId = null;
+      const toasts = [
+        { id: 't1', type: 'info', message: 'Auto', duration: 50 },
+      ];
+
+      const comp = mount(Toast, {
+        target: container,
+        props: {
+          toasts,
+          onDismiss: (id) => { dismissedId = id; },
+        },
+      });
+
+      await tick(80);
+      assert.equal(dismissedId, 't1');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders with default position class', async () => {
+      if (!svelteAvailable) return;
+      const Toast = await importComponent('Toast');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Toast, {
+        target: container,
+        props: {
+          toasts: [{ id: 't1', type: 'info', message: 'Pos' }],
+        },
+      });
+
+      const containerEl = container.querySelector('[data-wb-part="toast-container"]');
+      assert.ok(containerEl.classList.contains('wb-toast--top-right'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders with custom position class', async () => {
+      if (!svelteAvailable) return;
+      const Toast = await importComponent('Toast');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Toast, {
+        target: container,
+        props: {
+          toasts: [{ id: 't1', type: 'info', message: 'Pos' }],
+          position: 'bottom-left',
+        },
+      });
+
+      const containerEl = container.querySelector('[data-wb-part="toast-container"]');
+      assert.ok(containerEl.classList.contains('wb-toast--bottom-left'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders toast action button', async () => {
+      if (!svelteAvailable) return;
+      const Toast = await importComponent('Toast');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let actionClicked = false;
+      const toasts = [
+        { id: 't1', type: 'info', message: 'Action toast', action: { label: 'Undo', onClick: () => { actionClicked = true; } } },
+      ];
+
+      const comp = mount(Toast, { target: container, props: { toasts } });
+
+      const actionBtn = container.querySelector('[data-wb-part="toast-action"]');
+      assert.ok(actionBtn);
+      assert.equal(actionBtn.textContent, 'Undo');
+      actionBtn.click();
+      assert.equal(actionClicked, true);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders nothing when toasts array is empty', async () => {
+      if (!svelteAvailable) return;
+      const Toast = await importComponent('Toast');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Toast, {
+        target: container,
+        props: { toasts: [] },
+      });
+
+      assert.equal(container.querySelector('[data-wb-part="toast-container"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('has aria-live polite on container', async () => {
+      if (!svelteAvailable) return;
+      const Toast = await importComponent('Toast');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Toast, {
+        target: container,
+        props: {
+          toasts: [{ id: 't1', type: 'info', message: 'A11y' }],
+        },
+      });
+
+      const containerEl = container.querySelector('[data-wb-part="toast-container"]');
+      assert.equal(containerEl.getAttribute('role'), 'status');
+      assert.equal(containerEl.getAttribute('aria-live'), 'polite');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('destroy removes elements from DOM', async () => {
+      if (!svelteAvailable) return;
+      const Toast = await importComponent('Toast');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Toast, {
+        target: container,
+        props: {
+          toasts: [{ id: 't1', type: 'info', message: 'Bye' }],
+        },
+      });
+
+      assert.ok(container.querySelector('[data-wb-part="toast-container"]'));
+      unmount(comp);
+      assert.equal(container.querySelector('[data-wb-part="toast-container"]'), null);
+
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- SearchInput ---
+
+  describe('SearchInput', () => {
+    it('renders input type search', async () => {
+      if (!svelteAvailable) return;
+      const SearchInput = await importComponent('SearchInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(SearchInput, {
+        target: container,
+        props: { placeholder: 'Search...' },
+      });
+
+      const wrapper = container.querySelector('[data-wb-part="search-input"]');
+      assert.ok(wrapper);
+
+      const input = container.querySelector('[data-wb-part="search-input-field"]');
+      assert.ok(input);
+      assert.equal(input.getAttribute('type'), 'search');
+      assert.equal(input.getAttribute('placeholder'), 'Search...');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders with initial value', async () => {
+      if (!svelteAvailable) return;
+      const SearchInput = await importComponent('SearchInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(SearchInput, {
+        target: container,
+        props: { value: 'hello' },
+      });
+
+      const input = container.querySelector('[data-wb-part="search-input-field"]');
+      assert.equal(input.value, 'hello');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('debounces input and calls onSearch', async () => {
+      if (!svelteAvailable) return;
+      const SearchInput = await importComponent('SearchInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let searchedValue = null;
+      const comp = mount(SearchInput, {
+        target: container,
+        props: {
+          debounceMs: 10,
+          onSearch: (v) => { searchedValue = v; },
+        },
+      });
+
+      const input = container.querySelector('[data-wb-part="search-input-field"]');
+      input.value = 'test query';
+      input.dispatchEvent(new window.Event('input', { bubbles: true }));
+
+      // Not called immediately (debounce)
+      assert.equal(searchedValue, null);
+
+      await tick(30);
+      assert.equal(searchedValue, 'test query');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('shows clear button when input has value', async () => {
+      if (!svelteAvailable) return;
+      const SearchInput = await importComponent('SearchInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(SearchInput, {
+        target: container,
+        props: { value: 'search' },
+      });
+
+      const clearBtn = container.querySelector('[data-wb-part="search-input-clear"]');
+      assert.ok(clearBtn);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('does not show clear button when input is empty', async () => {
+      if (!svelteAvailable) return;
+      const SearchInput = await importComponent('SearchInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(SearchInput, {
+        target: container,
+        props: { value: '' },
+      });
+
+      assert.equal(container.querySelector('[data-wb-part="search-input-clear"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('clear button calls onSearch with empty string and onClear', async () => {
+      if (!svelteAvailable) return;
+      const SearchInput = await importComponent('SearchInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let searchedValue = 'not called';
+      let cleared = false;
+      const comp = mount(SearchInput, {
+        target: container,
+        props: {
+          value: 'something',
+          onSearch: (v) => { searchedValue = v; },
+          onClear: () => { cleared = true; },
+        },
+      });
+
+      const clearBtn = container.querySelector('[data-wb-part="search-input-clear"]');
+      clearBtn.click();
+      await tick();
+
+      assert.equal(searchedValue, '');
+      assert.equal(cleared, true);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('destroy removes elements from DOM', async () => {
+      if (!svelteAvailable) return;
+      const SearchInput = await importComponent('SearchInput');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(SearchInput, {
+        target: container,
+        props: {},
+      });
+
+      assert.ok(container.querySelector('[data-wb-part="search-input"]'));
+      unmount(comp);
+      assert.equal(container.querySelector('[data-wb-part="search-input"]'), null);
+
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- DatePicker ---
+
+  describe('DatePicker', () => {
+    it('renders date input', async () => {
+      if (!svelteAvailable) return;
+      const DatePicker = await importComponent('DatePicker');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(DatePicker, {
+        target: container,
+        props: {},
+      });
+
+      const wrapper = container.querySelector('[data-wb-part="date-picker"]');
+      assert.ok(wrapper);
+
+      const input = container.querySelector('[data-wb-part="date-picker-input"]');
+      assert.ok(input);
+      assert.equal(input.getAttribute('type'), 'date');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders with initial value', async () => {
+      if (!svelteAvailable) return;
+      const DatePicker = await importComponent('DatePicker');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(DatePicker, {
+        target: container,
+        props: { value: '2025-01-15' },
+      });
+
+      const input = container.querySelector('[data-wb-part="date-picker-input"]');
+      assert.equal(input.value, '2025-01-15');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('change fires onChange with ISO date string', async () => {
+      if (!svelteAvailable) return;
+      const DatePicker = await importComponent('DatePicker');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let changedValue = null;
+      const comp = mount(DatePicker, {
+        target: container,
+        props: {
+          onChange: (v) => { changedValue = v; },
+        },
+      });
+
+      const input = container.querySelector('[data-wb-part="date-picker-input"]');
+      input.value = '2025-06-30';
+      input.dispatchEvent(new window.Event('change', { bubbles: true }));
+      await tick();
+
+      assert.equal(changedValue, '2025-06-30');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders min/max attributes', async () => {
+      if (!svelteAvailable) return;
+      const DatePicker = await importComponent('DatePicker');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(DatePicker, {
+        target: container,
+        props: { min: '2025-01-01', max: '2025-12-31' },
+      });
+
+      const input = container.querySelector('[data-wb-part="date-picker-input"]');
+      assert.equal(input.getAttribute('min'), '2025-01-01');
+      assert.equal(input.getAttribute('max'), '2025-12-31');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders label when provided', async () => {
+      if (!svelteAvailable) return;
+      const DatePicker = await importComponent('DatePicker');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(DatePicker, {
+        target: container,
+        props: { label: 'Select a date' },
+      });
+
+      const label = container.querySelector('[data-wb-part="date-picker-label"]');
+      assert.ok(label);
+      assert.equal(label.textContent, 'Select a date');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('destroy removes elements from DOM', async () => {
+      if (!svelteAvailable) return;
+      const DatePicker = await importComponent('DatePicker');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(DatePicker, { target: container, props: {} });
+
+      assert.ok(container.querySelector('[data-wb-part="date-picker"]'));
+      unmount(comp);
+      assert.equal(container.querySelector('[data-wb-part="date-picker"]'), null);
+
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- EmptyState ---
+
+  describe('EmptyState', () => {
+    it('renders title', async () => {
+      if (!svelteAvailable) return;
+      const EmptyState = await importComponent('EmptyState');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(EmptyState, {
+        target: container,
+        props: { title: 'No items' },
+      });
+
+      const wrapper = container.querySelector('[data-wb-part="empty-state"]');
+      assert.ok(wrapper);
+
+      const title = container.querySelector('[data-wb-part="empty-state-title"]');
+      assert.ok(title);
+      assert.equal(title.textContent, 'No items');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders description', async () => {
+      if (!svelteAvailable) return;
+      const EmptyState = await importComponent('EmptyState');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(EmptyState, {
+        target: container,
+        props: {
+          title: 'Empty',
+          description: 'Add your first item to get started.',
+        },
+      });
+
+      const desc = container.querySelector('[data-wb-part="empty-state-description"]');
+      assert.ok(desc);
+      assert.equal(desc.textContent, 'Add your first item to get started.');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('does not render description when not provided', async () => {
+      if (!svelteAvailable) return;
+      const EmptyState = await importComponent('EmptyState');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(EmptyState, {
+        target: container,
+        props: { title: 'Empty' },
+      });
+
+      assert.equal(container.querySelector('[data-wb-part="empty-state-description"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders icon when provided', async () => {
+      if (!svelteAvailable) return;
+      const EmptyState = await importComponent('EmptyState');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(EmptyState, {
+        target: container,
+        props: { title: 'Empty', icon: '📁' },
+      });
+
+      const icon = container.querySelector('[data-wb-part="empty-state-icon"]');
+      assert.ok(icon);
+      assert.ok(icon.textContent.includes('📁'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders action button and handles click', async () => {
+      if (!svelteAvailable) return;
+      const EmptyState = await importComponent('EmptyState');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let clicked = false;
+      const comp = mount(EmptyState, {
+        target: container,
+        props: {
+          title: 'Empty',
+          action: { label: 'Create new', onClick: () => { clicked = true; } },
+        },
+      });
+
+      const actionBtn = container.querySelector('[data-wb-part="empty-state-action"]');
+      assert.ok(actionBtn);
+      assert.equal(actionBtn.textContent, 'Create new');
+
+      actionBtn.click();
+      assert.equal(clicked, true);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('does not render action when not provided', async () => {
+      if (!svelteAvailable) return;
+      const EmptyState = await importComponent('EmptyState');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(EmptyState, {
+        target: container,
+        props: { title: 'Empty' },
+      });
+
+      assert.equal(container.querySelector('[data-wb-part="empty-state-action"]'), null);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('destroy removes elements from DOM', async () => {
+      if (!svelteAvailable) return;
+      const EmptyState = await importComponent('EmptyState');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(EmptyState, {
+        target: container,
+        props: { title: 'Bye' },
+      });
+
+      assert.ok(container.querySelector('[data-wb-part="empty-state"]'));
+      unmount(comp);
+      assert.equal(container.querySelector('[data-wb-part="empty-state"]'), null);
+
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- Spinner ---
+
+  describe('Spinner', () => {
+    it('renders spinner with default size', async () => {
+      if (!svelteAvailable) return;
+      const Spinner = await importComponent('Spinner');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Spinner, {
+        target: container,
+        props: {},
+      });
+
+      const spinner = container.querySelector('[data-wb-part="spinner"]');
+      assert.ok(spinner);
+      assert.ok(spinner.classList.contains('wb-spinner--md'));
+      assert.equal(spinner.getAttribute('role'), 'status');
+
+      const circle = container.querySelector('[data-wb-part="spinner-circle"]');
+      assert.ok(circle);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders with size sm', async () => {
+      if (!svelteAvailable) return;
+      const Spinner = await importComponent('Spinner');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Spinner, {
+        target: container,
+        props: { size: 'sm' },
+      });
+
+      const spinner = container.querySelector('[data-wb-part="spinner"]');
+      assert.ok(spinner.classList.contains('wb-spinner--sm'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders with size lg', async () => {
+      if (!svelteAvailable) return;
+      const Spinner = await importComponent('Spinner');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Spinner, {
+        target: container,
+        props: { size: 'lg' },
+      });
+
+      const spinner = container.querySelector('[data-wb-part="spinner"]');
+      assert.ok(spinner.classList.contains('wb-spinner--lg'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders with custom aria label', async () => {
+      if (!svelteAvailable) return;
+      const Spinner = await importComponent('Spinner');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Spinner, {
+        target: container,
+        props: { label: 'Saving...' },
+      });
+
+      const spinner = container.querySelector('[data-wb-part="spinner"]');
+      assert.equal(spinner.getAttribute('aria-label'), 'Saving...');
+      assert.ok(spinner.textContent.includes('Saving...'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('destroy removes elements from DOM', async () => {
+      if (!svelteAvailable) return;
+      const Spinner = await importComponent('Spinner');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Spinner, { target: container, props: {} });
+
+      assert.ok(container.querySelector('[data-wb-part="spinner"]'));
+      unmount(comp);
+      assert.equal(container.querySelector('[data-wb-part="spinner"]'), null);
+
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- Tabs ---
+
+  describe('Tabs', () => {
+    it('renders tabs', async () => {
+      if (!svelteAvailable) return;
+      const Tabs = await importComponent('Tabs');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const tabs = [
+        { id: 'tab1', label: 'First' },
+        { id: 'tab2', label: 'Second' },
+        { id: 'tab3', label: 'Third' },
+      ];
+
+      const comp = mount(Tabs, {
+        target: container,
+        props: { tabs },
+      });
+
+      const wrapper = container.querySelector('[data-wb-part="tabs"]');
+      assert.ok(wrapper);
+
+      const tabButtons = container.querySelectorAll('[data-wb-part="tabs-tab"]');
+      assert.equal(tabButtons.length, 3);
+      assert.equal(tabButtons[0].textContent, 'First');
+      assert.equal(tabButtons[0].getAttribute('role'), 'tab');
+      assert.equal(tabButtons[1].textContent, 'Second');
+      assert.equal(tabButtons[2].textContent, 'Third');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('first tab is active by default', async () => {
+      if (!svelteAvailable) return;
+      const Tabs = await importComponent('Tabs');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const tabs = [
+        { id: 'tab1', label: 'First' },
+        { id: 'tab2', label: 'Second' },
+      ];
+
+      const comp = mount(Tabs, { target: container, props: { tabs } });
+
+      const tabButtons = container.querySelectorAll('[data-wb-part="tabs-tab"]');
+      assert.equal(tabButtons[0].getAttribute('data-tab-active'), 'true');
+      assert.equal(tabButtons[0].getAttribute('aria-selected'), 'true');
+      assert.equal(tabButtons[1].getAttribute('data-tab-active'), 'false');
+      assert.ok(tabButtons[0].classList.contains('wb-tabs__tab--active'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('clicking a tab calls onChange and activates it', async () => {
+      if (!svelteAvailable) return;
+      const Tabs = await importComponent('Tabs');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let changedId = null;
+      const tabs = [
+        { id: 'tab1', label: 'First' },
+        { id: 'tab2', label: 'Second' },
+      ];
+
+      const comp = mount(Tabs, {
+        target: container,
+        props: {
+          tabs,
+          onChange: (id) => { changedId = id; },
+        },
+      });
+
+      const tabButtons = container.querySelectorAll('[data-wb-part="tabs-tab"]');
+      tabButtons[1].click();
+      await tick();
+
+      assert.equal(changedId, 'tab2');
+      assert.equal(tabButtons[1].getAttribute('data-tab-active'), 'true');
+      assert.equal(tabButtons[0].getAttribute('data-tab-active'), 'false');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('respects activeTab prop', async () => {
+      if (!svelteAvailable) return;
+      const Tabs = await importComponent('Tabs');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const tabs = [
+        { id: 'tab1', label: 'First' },
+        { id: 'tab2', label: 'Second' },
+      ];
+
+      const comp = mount(Tabs, {
+        target: container,
+        props: { tabs, activeTab: 'tab2' },
+      });
+
+      const tabButtons = container.querySelectorAll('[data-wb-part="tabs-tab"]');
+      assert.equal(tabButtons[1].getAttribute('data-tab-active'), 'true');
+      assert.equal(tabButtons[0].getAttribute('data-tab-active'), 'false');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('disabled tab cannot be clicked', async () => {
+      if (!svelteAvailable) return;
+      const Tabs = await importComponent('Tabs');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let changedId = null;
+      const tabs = [
+        { id: 'tab1', label: 'First' },
+        { id: 'tab2', label: 'Second', disabled: true },
+      ];
+
+      const comp = mount(Tabs, {
+        target: container,
+        props: {
+          tabs,
+          onChange: (id) => { changedId = id; },
+        },
+      });
+
+      const tabButtons = container.querySelectorAll('[data-wb-part="tabs-tab"]');
+      assert.equal(tabButtons[1].disabled, true);
+
+      tabButtons[1].click();
+      await tick();
+      // Should remain on first tab
+      assert.equal(changedId, null);
+      assert.equal(tabButtons[0].getAttribute('data-tab-active'), 'true');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders tabs panel', async () => {
+      if (!svelteAvailable) return;
+      const Tabs = await importComponent('Tabs');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Tabs, {
+        target: container,
+        props: { tabs: [{ id: 'tab1', label: 'Tab' }] },
+      });
+
+      const panel = container.querySelector('[data-wb-part="tabs-panel"]');
+      assert.ok(panel);
+      assert.equal(panel.getAttribute('role'), 'tabpanel');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('destroy removes elements from DOM', async () => {
+      if (!svelteAvailable) return;
+      const Tabs = await importComponent('Tabs');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Tabs, {
+        target: container,
+        props: {
+          tabs: [{ id: 'tab1', label: 'Tab' }],
+        },
+      });
+
+      assert.ok(container.querySelector('[data-wb-part="tabs"]'));
+      unmount(comp);
+      assert.equal(container.querySelector('[data-wb-part="tabs"]'), null);
+
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- Progress ---
+
+  describe('Progress', () => {
+    it('renders progress bar', async () => {
+      if (!svelteAvailable) return;
+      const Progress = await importComponent('Progress');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Progress, {
+        target: container,
+        props: { value: 50 },
+      });
+
+      const progress = container.querySelector('[data-wb-part="progress"]');
+      assert.ok(progress);
+      assert.ok(progress.classList.contains('wb-progress--bar'));
+      assert.equal(progress.getAttribute('role'), 'progressbar');
+      assert.equal(progress.getAttribute('aria-valuenow'), '50');
+      assert.equal(progress.getAttribute('aria-valuemin'), '0');
+      assert.equal(progress.getAttribute('aria-valuemax'), '100');
+
+      const bar = container.querySelector('[data-wb-part="progress-bar"]');
+      assert.ok(bar);
+
+      const fill = container.querySelector('[data-wb-part="progress-fill"]');
+      assert.ok(fill);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders progress circle variant', async () => {
+      if (!svelteAvailable) return;
+      const Progress = await importComponent('Progress');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Progress, {
+        target: container,
+        props: { value: 75, variant: 'circle' },
+      });
+
+      const progress = container.querySelector('[data-wb-part="progress"]');
+      assert.ok(progress.classList.contains('wb-progress--circle'));
+
+      const circle = container.querySelector('[data-wb-part="progress-circle"]');
+      assert.ok(circle);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('has correct aria attributes', async () => {
+      if (!svelteAvailable) return;
+      const Progress = await importComponent('Progress');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Progress, {
+        target: container,
+        props: { value: 30 },
+      });
+
+      const progress = container.querySelector('[data-wb-part="progress"]');
+      assert.equal(progress.getAttribute('aria-valuenow'), '30');
+      assert.equal(progress.getAttribute('aria-valuemin'), '0');
+      assert.equal(progress.getAttribute('aria-valuemax'), '100');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('shows label', async () => {
+      if (!svelteAvailable) return;
+      const Progress = await importComponent('Progress');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Progress, {
+        target: container,
+        props: { value: 60, label: 'Uploading' },
+      });
+
+      const label = container.querySelector('[data-wb-part="progress-label"]');
+      assert.ok(label);
+      assert.equal(label.textContent, 'Uploading');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('clamps value to 0-100', async () => {
+      if (!svelteAvailable) return;
+      const Progress = await importComponent('Progress');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Progress, {
+        target: container,
+        props: { value: 150 },
+      });
+
+      const progress = container.querySelector('[data-wb-part="progress"]');
+      assert.equal(progress.getAttribute('aria-valuenow'), '100');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('respects max prop', async () => {
+      if (!svelteAvailable) return;
+      const Progress = await importComponent('Progress');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Progress, {
+        target: container,
+        props: { value: 5, max: 10 },
+      });
+
+      const progress = container.querySelector('[data-wb-part="progress"]');
+      assert.equal(progress.getAttribute('aria-valuenow'), '50');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('destroy removes elements from DOM', async () => {
+      if (!svelteAvailable) return;
+      const Progress = await importComponent('Progress');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Progress, {
+        target: container,
+        props: { value: 0 },
+      });
+
+      assert.ok(container.querySelector('[data-wb-part="progress"]'));
+      unmount(comp);
+      assert.equal(container.querySelector('[data-wb-part="progress"]'), null);
+
+      document.body.removeChild(container);
+    });
+  });
+
+  // --- Tag ---
+
+  describe('Tag', () => {
+    it('renders label', async () => {
+      if (!svelteAvailable) return;
+      const Tag = await importComponent('Tag');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Tag, {
+        target: container,
+        props: { label: 'JavaScript' },
+      });
+
+      const tag = container.querySelector('[data-wb-part="tag"]');
+      assert.ok(tag);
+
+      const tagLabel = container.querySelector('[data-wb-part="tag-label"]');
+      assert.ok(tagLabel);
+      assert.equal(tagLabel.textContent, 'JavaScript');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders with default variant pill', async () => {
+      if (!svelteAvailable) return;
+      const Tag = await importComponent('Tag');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Tag, {
+        target: container,
+        props: { label: 'Tag' },
+      });
+
+      const tag = container.querySelector('[data-wb-part="tag"]');
+      assert.ok(tag.classList.contains('wb-tag--pill'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders with box variant', async () => {
+      if (!svelteAvailable) return;
+      const Tag = await importComponent('Tag');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Tag, {
+        target: container,
+        props: { label: 'Tag', variant: 'box' },
+      });
+
+      const tag = container.querySelector('[data-wb-part="tag"]');
+      assert.ok(tag.classList.contains('wb-tag--box'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('renders with color class', async () => {
+      if (!svelteAvailable) return;
+      const Tag = await importComponent('Tag');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Tag, {
+        target: container,
+        props: { label: 'Tag', color: 'blue' },
+      });
+
+      const tag = container.querySelector('[data-wb-part="tag"]');
+      assert.ok(tag.classList.contains('wb-tag--blue'));
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('does not show remove button when not removable', async () => {
+      if (!svelteAvailable) return;
+      const Tag = await importComponent('Tag');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Tag, {
+        target: container,
+        props: { label: 'Tag' },
+      });
+
+      assert.equal(container.querySelector('[data-wb-part="tag-remove"]'), null);
+      const tag = container.querySelector('[data-wb-part="tag"]');
+      assert.equal(tag.getAttribute('data-removable'), 'false');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('shows remove button when removable', async () => {
+      if (!svelteAvailable) return;
+      const Tag = await importComponent('Tag');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Tag, {
+        target: container,
+        props: { label: 'Tag', removable: true, onRemove: () => {} },
+      });
+
+      const removeBtn = container.querySelector('[data-wb-part="tag-remove"]');
+      assert.ok(removeBtn);
+      const tag = container.querySelector('[data-wb-part="tag"]');
+      assert.equal(tag.getAttribute('data-removable'), 'true');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('remove button click calls onRemove', async () => {
+      if (!svelteAvailable) return;
+      const Tag = await importComponent('Tag');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      let removed = false;
+      const comp = mount(Tag, {
+        target: container,
+        props: {
+          label: 'Tag',
+          removable: true,
+          onRemove: () => { removed = true; },
+        },
+      });
+
+      const removeBtn = container.querySelector('[data-wb-part="tag-remove"]');
+      removeBtn.click();
+      await tick();
+
+      assert.equal(removed, true);
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('remove button has aria-label', async () => {
+      if (!svelteAvailable) return;
+      const Tag = await importComponent('Tag');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Tag, {
+        target: container,
+        props: { label: 'React', removable: true, onRemove: () => {} },
+      });
+
+      const removeBtn = container.querySelector('[data-wb-part="tag-remove"]');
+      assert.equal(removeBtn.getAttribute('aria-label'), 'Remove React');
+
+      unmount(comp);
+      document.body.removeChild(container);
+    });
+
+    it('destroy removes elements from DOM', async () => {
+      if (!svelteAvailable) return;
+      const Tag = await importComponent('Tag');
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+
+      const comp = mount(Tag, {
+        target: container,
+        props: { label: 'Tag' },
+      });
+
+      assert.ok(container.querySelector('[data-wb-part="tag"]'));
+      unmount(comp);
+      assert.equal(container.querySelector('[data-wb-part="tag"]'), null);
+
+      document.body.removeChild(container);
+    });
+  });
+});
