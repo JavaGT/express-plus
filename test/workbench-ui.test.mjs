@@ -3575,4 +3575,285 @@ describe('Svelte Wave 3 Components (browser)', () => {
       document.body.removeChild(container);
     });
   });
+
+  // Part 7: Wave 4 Components (browser)
+
+  describe('Wave 4 Components', () => {
+    // --- PaneResizer ---
+    describe('PaneResizer', () => {
+      it('renders with handle', async () => {
+        if (!svelteAvailable) return;
+        const PaneResizer = await importComponent('PaneResizer');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(PaneResizer, { target: container, props: { direction: 'horizontal' } });
+        await tick();
+        assert.ok(container.querySelector('[data-wb-part="pane-resizer-handle"]'));
+        assert.equal(container.querySelector('[data-wb-part="pane-resizer"]').getAttribute('data-direction'), 'horizontal');
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('renders vertical variant', async () => {
+        if (!svelteAvailable) return;
+        const PaneResizer = await importComponent('PaneResizer');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(PaneResizer, { target: container, props: { direction: 'vertical' } });
+        await tick();
+        assert.equal(container.querySelector('[data-wb-part="pane-resizer"]').getAttribute('data-direction'), 'vertical');
+        unmount(comp); document.body.removeChild(container);
+      });
+    });
+
+    // --- ColorPicker ---
+    describe('ColorPicker', () => {
+      it('renders with default value', async () => {
+        if (!svelteAvailable) return;
+        const ColorPicker = await importComponent('ColorPicker');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(ColorPicker, { target: container, props: {} });
+        await tick();
+        const input = container.querySelector('[data-wb-part="color-picker-input"]');
+        assert.ok(input);
+        assert.equal(input.value, '#000000');
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('shows label', async () => {
+        if (!svelteAvailable) return;
+        const ColorPicker = await importComponent('ColorPicker');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(ColorPicker, { target: container, props: { label: 'Fill' } });
+        await tick();
+        assert.equal(container.querySelector('[data-wb-part="color-picker-label"]').textContent, 'Fill');
+        unmount(comp); document.body.removeChild(container);
+      });
+    });
+
+    // --- FileUpload ---
+    describe('FileUpload', () => {
+      it('renders prompt when no files', async () => {
+        if (!svelteAvailable) return;
+        const FileUpload = await importComponent('FileUpload');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(FileUpload, { target: container, props: {} });
+        await tick();
+        assert.ok(container.querySelector('[data-wb-part="file-upload-prompt"]'));
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('shows disabled state', async () => {
+        if (!svelteAvailable) return;
+        const FileUpload = await importComponent('FileUpload');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(FileUpload, { target: container, props: { disabled: true } });
+        await tick();
+        assert.equal(container.querySelector('[data-wb-part="file-upload"]').getAttribute('tabindex'), '-1');
+        unmount(comp); document.body.removeChild(container);
+      });
+    });
+
+    // --- CopyButton ---
+    describe('CopyButton', () => {
+      it('renders with label', async () => {
+        if (!svelteAvailable) return;
+        const CopyButton = await importComponent('CopyButton');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(CopyButton, { target: container, props: { text: 'hello', label: 'Copy' } });
+        await tick();
+        const btn = container.querySelector('[data-wb-part="copy-button"]');
+        assert.ok(btn);
+        assert.ok(btn.textContent.includes('Copy'));
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('has copy-button part', async () => {
+        if (!svelteAvailable) return;
+        const CopyButton = await importComponent('CopyButton');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(CopyButton, { target: container, props: { text: 'hi' } });
+        await tick();
+        assert.ok(container.querySelector('[data-wb-part="copy-button-label"]'));
+        unmount(comp); document.body.removeChild(container);
+      });
+    });
+
+    // --- HotkeyHint ---
+    describe('HotkeyHint', () => {
+      it('renders kbd elements', async () => {
+        if (!svelteAvailable) return;
+        const HotkeyHint = await importComponent('HotkeyHint');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(HotkeyHint, { target: container, props: { keys: ['⌘', 'K'], label: 'Search' } });
+        await tick();
+        const kbds = container.querySelectorAll('kbd');
+        assert.equal(kbds.length, 2);
+        assert.equal(kbds[0].textContent, '⌘');
+        assert.equal(kbds[1].textContent, 'K');
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('shows label', async () => {
+        if (!svelteAvailable) return;
+        const HotkeyHint = await importComponent('HotkeyHint');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(HotkeyHint, { target: container, props: { keys: ['Ctrl', 'S'], label: 'Save' } });
+        await tick();
+        assert.ok(container.querySelector('[data-wb-part="hotkey-hint-label"]'));
+        unmount(comp); document.body.removeChild(container);
+      });
+    });
+
+    // --- CommandPalette ---
+    describe('CommandPalette', () => {
+      it('renders when open', async () => {
+        if (!svelteAvailable) return;
+        const CommandPalette = await importComponent('CommandPalette');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(CommandPalette, { target: container, props: { open: true, commands: [{ id: 'a', label: 'Alpha' }] } });
+        await tick();
+        assert.ok(container.querySelector('[data-wb-part="command-palette"]'));
+        assert.equal(container.querySelectorAll('[data-wb-part="command-palette-item"]').length, 1);
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('renders nothing when closed', async () => {
+        if (!svelteAvailable) return;
+        const CommandPalette = await importComponent('CommandPalette');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(CommandPalette, { target: container, props: { open: false, commands: [{ id: 'a', label: 'A' }] } });
+        await tick();
+        assert.equal(container.querySelector('[data-wb-part="command-palette"]'), null);
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('shows empty state', async () => {
+        if (!svelteAvailable) return;
+        const CommandPalette = await importComponent('CommandPalette');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(CommandPalette, { target: container, props: { open: true, commands: [] } });
+        await tick();
+        assert.ok(container.querySelector('[data-wb-part="command-palette-empty"]'));
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('calls onExecute on item click', async () => {
+        if (!svelteAvailable) return;
+        const CommandPalette = await importComponent('CommandPalette');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        let executed = null;
+        const comp = mount(CommandPalette, { target: container, props: {
+          open: true,
+          commands: [{ id: 'save', label: 'Save' }],
+          onExecute: (id) => { executed = id; },
+        } });
+        await tick();
+        container.querySelector('[data-wb-part="command-palette-item"]').click();
+        assert.equal(executed, 'save');
+        unmount(comp); document.body.removeChild(container);
+      });
+    });
+
+    // --- EntityInspector ---
+    describe('EntityInspector', () => {
+      it('renders field label/value pairs', async () => {
+        if (!svelteAvailable) return;
+        const EntityInspector = await importComponent('EntityInspector');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(EntityInspector, { target: container, props: {
+          fields: [{ label: 'Name', value: 'Alice' }, { label: 'Age', value: 30 }],
+        } });
+        await tick();
+        const rows = container.querySelectorAll('[data-wb-part="entity-inspector-row"]');
+        assert.equal(rows.length, 2);
+        assert.equal(rows[0].querySelector('[data-wb-part="entity-inspector-value"]').textContent, 'Alice');
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('renders empty state', async () => {
+        if (!svelteAvailable) return;
+        const EntityInspector = await importComponent('EntityInspector');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(EntityInspector, { target: container, props: { fields: [] } });
+        await tick();
+        assert.ok(container.querySelector('.wb-entity-inspector__empty'));
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('shows close button when onClose provided', async () => {
+        if (!svelteAvailable) return;
+        const EntityInspector = await importComponent('EntityInspector');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(EntityInspector, { target: container, props: { fields: [], onClose: () => {} } });
+        await tick();
+        assert.ok(container.querySelector('[data-wb-part="entity-inspector-close"]'));
+        unmount(comp); document.body.removeChild(container);
+      });
+    });
+
+    // --- Autocomplete ---
+    describe('Autocomplete', () => {
+      it('renders input', async () => {
+        if (!svelteAvailable) return;
+        const Autocomplete = await importComponent('Autocomplete');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(Autocomplete, { target: container, props: { items: [] } });
+        await tick();
+        assert.ok(container.querySelector('[data-wb-part="autocomplete-input"]'));
+        unmount(comp); document.body.removeChild(container);
+      });
+
+      it('selects item on click', async () => {
+        if (!svelteAvailable) return;
+        const Autocomplete = await importComponent('Autocomplete');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        let selected = null;
+        const comp = mount(Autocomplete, { target: container, props: {
+          value: 'a',
+          items: [{ id: '1', label: 'Alpha' }],
+          onSelect: (item) => { selected = item; },
+        } });
+        await tick();
+        container.querySelector('[data-wb-part="autocomplete-input"]').focus();
+        await tick();
+        const item = container.querySelector('[data-wb-part="autocomplete-item"]');
+        if (item) item.click();
+        assert.ok(selected);
+        unmount(comp); document.body.removeChild(container);
+      });
+    });
+
+    // --- AutoSuggest ---
+    describe('AutoSuggest', () => {
+      it('renders search input', async () => {
+        if (!svelteAvailable) return;
+        const AutoSuggest = await importComponent('AutoSuggest');
+        const container = document.createElement('div');
+        document.body.appendChild(container);
+        const comp = mount(AutoSuggest, { target: container, props: { placeholder: 'Find...' } });
+        await tick();
+        const input = container.querySelector('[data-wb-part="auto-suggest-input"]');
+        assert.ok(input);
+        assert.equal(input.placeholder, 'Find...');
+        unmount(comp); document.body.removeChild(container);
+      });
+    });
+  });
 });
