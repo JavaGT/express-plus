@@ -392,3 +392,11 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
 - **Reason:** The S0 wire memo found Scope uses per-project seq while workbench uses per-entity seq — structurally incompatible. The council recommended the stream-scope model as single subscription primitive covering both per-entity and room/project shapes. The owner directed: run W5 design first (with S0 as binding input), joint recommendation on cursor granularity + subscription breadth before ruling on S0. This slice delivers the wire-surface normalisation only.
 - **Files:** `src/live-admission.mjs` (+`normalizeSubscribeMsg`), `src/live-connection.mjs` (scope-aware acks), `public/workbench-client.mjs` (+`subscribeScope`, `unsubscribeScope`, unified `:` key format), `test/subscribe-scope.test.mjs` (13 new tests).
 - **Gate:** `node --test` 1206/1206/0 on main.
+
+## 2026-07-07 — S0 joint recommendation: cursor granularity for station A
+
+- **Decision:** Scope's per-project seq IS a valid coarse scope under B′. S0 memo's "INCOMPATIBLE" verdict was written under the old per-entity-only reading — the contradiction dissolves once B′'s coarse scopes are first-class. No re-key of `ProjectEventLog` needed for station A; no seq numbering change; no prefix-matching bridge. Boot payload: one cursor per project (`cursors: {"project:p1": lastSeq}`). Station A is transport swap only (SSE→WS); durable store migration waits for station B.
+- **Reason:** Council c01 (Opus 4.8 + GPT 5.5, cross-evaluated) adopted B′ — unified stream-scope primitive where coarse scopes are first-class peers. The S0 joint recommendation (also Opus + GPT, both independently converged) extended B′ to the cursor question: `_Log(scope, seq)` uses a free-form scope string, so `scope = "project:p1"` with a project-wide seq is the same machinery as `scope = "Entity:id"` with a per-entity seq — just a coarser key. The `:` separator in `"project:p1"` vs `"Entity:id"` is convention, not structure.
+- **Files:** `docs/convergence/S0-joint-recommendation.md`
+- **Remaining:** W5 slice 2 (scope-keyed fan-out, scope snapshot/events-since routes, generalised subscribed ack) → then Scope station A adapter → station B later.
+- **Gate:** N/A (spec only)

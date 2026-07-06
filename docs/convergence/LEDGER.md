@@ -31,7 +31,7 @@ One row per council question. Working files live under `.council/<qid>/`
 
 | Date | Question | Owner ruling | Where recorded |
 |---|---|---|---|
-| 2026-07-06 | S0 wire memo: Scope uses per-project seq numbering, workbench uses per-entity seq. Structurally incompatible. See census/S0-wire-memo.md. | Owner ruled (2026-07-06): run W5 scope-wide-subscription design first (with S0 memo as binding input), joint recommendation on cursor granularity + subscription breadth + what changes on each side. S0 ruling deferred. | `census/S0-wire-memo.md`, council c01 |
+| 2026-07-06 | S0 wire memo: Scope uses per-project seq numbering, workbench uses per-entity seq. Structurally incompatible. See census/S0-wire-memo.md. | Owner ruled (2026-07-07): Scope's per-project seq IS a valid coarse scope under B′. No re-key, no seq change, no prefix-matching. Joint recommendation: one cursor per project, scope-keyed fan-out in W5 slice 2, adapter maps projectId → scope key. Station A is transport swap only. See `S0-joint-recommendation.md`. | `census/S0-wire-memo.md`, `S0-joint-recommendation.md`, council c01 |
 
 ## Merged slices
 
