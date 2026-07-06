@@ -3,7 +3,7 @@ import { mayRow } from './row-grant.mjs';
 import { admitSystemMutation } from './schedule.mjs';
 import { createServer, durableMutationVariant } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects, executeEffectsForEvent } from './effect-compiler.mjs';
-import { User, Session, Inbox, Credential, Invitation, ApiKey } from './auth-entities.mjs';
+import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth-entities.mjs';
 import { createWriteQueue } from './write-queue.mjs';
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
@@ -18,7 +18,7 @@ import { getLog } from './log.mjs';
 // may target Inbox without mounting it — auth entities are never request-facing
 // routes). They must be present in the validation set so the admission handshake
 // can resolve them + their `admitsEffects`.
-const FRAMEWORK_ENTITIES = [User, Session, Inbox, Credential, Invitation, ApiKey];
+const FRAMEWORK_ENTITIES = [User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor];
 
 function collectAppEntities(app) {
   const handlers = {};
@@ -141,6 +141,7 @@ export function buildKernel(app) {
     buildLiveFanoutConsumer(app),
     createProjectedAsyncConsumer({ entities }),
     createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }),
+    app._emailConsumer,
   ].filter(Boolean);
   app.durableEffectsRegistry = durableEffectsRegistry;
 

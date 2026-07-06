@@ -26,6 +26,7 @@ import { never } from './scope-sql.mjs';
 import { grant, deny, read, subscribe } from './grant.mjs';
 import { schedule } from './schedule.mjs';
 import { config } from './config.mjs';
+import { generateSecret, generateBackupCodes } from './totp.mjs';
 
 function sha256hex(s) {
   return createHash('sha256').update(s).digest('hex');
@@ -266,4 +267,41 @@ export const ApiKey = entity('ApiKey', {
 
   grant: () => [notRequestReadable('ApiKey')],
   create: mintApiKey,
+});
+
+// TwoFactor — TOTP two-factor authentication. One enrollment per user (userId is
+// unique). The secret is base32-encoded (RFC 4648, no padding), stored readonly
+// so it is never exposed through request paths. Backup codes are stored as a JSON
+// array of SHA-256 hashes — the plain codes are returned ONCE at enrollment time
+// and never stored.
+//
+// enabled: 0 = enrolled but not verified yet (first successful verify sets it to 1)
+// verifiedAt: set on the first successful TOTP verification after enrollment
+//
+// Like User/Session/Credential/Invitation/ApiKey, TwoFactor is not
+// request-readable: it is reached only by trusted server code (the auth routes),
+// never exposed through the entity CRUD API.
+function enrollTotp(payload, { insert }) {
+  const { secret, uri } = generateSecret(payload.username);
+  const { plainCodes, hashedCodes } = generateBackupCodes(8);
+  const now = new Date();
+  const row = insert({
+    userId: payload.userId,
+    secret,
+    backupCodes: JSON.stringify(hashedCodes),
+    enabled: 0,
+    verifiedAt: null,
+  });
+  return { ...row, secret, uri, backupCodes: plainCodes };
+}
+
+export const TwoFactor = entity('TwoFactor', {
+       userId: ref('User'),
+        secret: text({ readonly: true }),
+   backupCodes: text({ readonly: true }),
+       enabled: number(),
+    verifiedAt: date(),
+
+  grant: () => [notRequestReadable('TwoFactor')],
+  create: enrollTotp,
 });

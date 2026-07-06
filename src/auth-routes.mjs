@@ -26,11 +26,12 @@
 
 import { router } from './app.mjs';
 import { allowAnonymous, requireUser } from './route-gate.mjs';
-import { User, Session, Credential, Invitation, ApiKey } from './auth-entities.mjs';
+import { User, Session, Credential, Invitation, ApiKey, TwoFactor } from './auth-entities.mjs';
 import { createInvitation, acceptInvitation, rejectInvitation, listInvitationsForUser } from './invitation.mjs';
 import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.mjs';
 import { config } from './config.mjs';
 import { getActiveDb } from './db.mjs';
+import { verifyTotp, verifyBackupCode } from './totp.mjs';
 import {
   generateChallenge,
   challengeStore,
@@ -65,6 +66,13 @@ export function authRoutes({ secure = config.env === 'production' } = {}) {
     } else if (!user.password.verify(password)) {
       // wrong password → 401 and NO cookie (fail closed: no session minted).
       return next({ status: 401, message: 'bad credentials' });
+    }
+    // Two-factor check: if the user has an enabled TOTP enrollment, do NOT mint a
+    // session yet — return the userId so the client can prompt for the TOTP token
+    // and call /auth/totp/authenticate to complete authentication.
+    const twoFactor = TwoFactor.findOne(TwoFactor.userId.is(user.id));
+    if (twoFactor && twoFactor.enabled === 1) {
+      return res.json({ requiresTotp: true, userId: user.id });
     }
     const session = Session.create({ userId: user.id });
     res.setHeader('set-cookie', sessionCookie(session.token, { secure }));
@@ -384,6 +392,117 @@ export function authRoutes({ secure = config.env === 'production' } = {}) {
       }
       return next({ status: err.status ?? 500, message: err.message });
     }
+  });
+
+  // ---- TOTP (two-factor authentication) routes ------------------------------
+
+  // POST /auth/totp/enroll — enroll in TOTP two-factor authentication.
+  // requireUser: only an authenticated user can enroll. Generates a secret
+  // (base32-encoded), backup codes, and a TwoFactor row. Returns the secret
+  // URI (for QR code) and backup codes ONCE — they are never stored in plaintext.
+  s.post('/totp/enroll', requireUser(), (req, res, next) => {
+    const userId = req.principal.id;
+    // One enrollment per user — reject if already enrolled.
+    const existing = TwoFactor.findOne(TwoFactor.userId.is(userId));
+    if (existing) {
+      return next({ status: 409, message: 'TOTP already enrolled' });
+    }
+    const user = User.getOrFail(userId);
+    try {
+      const result = TwoFactor.create({ userId, username: user.username });
+      res.status(201).json({
+        secret: result.secret,
+        uri: result.uri,
+        backupCodes: result.backupCodes,
+      });
+    } catch (err) {
+      return next({ status: err.status ?? 500, message: err.message });
+    }
+  });
+
+  // POST /auth/totp/verify — verify a TOTP token against the stored secret.
+  // requireUser: only an authenticated user can verify. On the first successful
+  // verify after enrollment, sets enabled=1 and verifiedAt=now. Returns
+  // { verified: true } or 400.
+  s.post('/totp/verify', requireUser(), (req, res, next) => {
+    const { token } = req.body ?? {};
+    if (!token) {
+      return next({ status: 400, message: 'token is required' });
+    }
+    const userId = req.principal.id;
+    const twoFactor = TwoFactor.findOne(TwoFactor.userId.is(userId));
+    if (!twoFactor) {
+      return next({ status: 400, message: 'TOTP not enrolled' });
+    }
+    if (!verifyTotp(twoFactor.secret, token)) {
+      return next({ status: 400, message: 'invalid TOTP token' });
+    }
+    // First successful verification: flip enabled to 1 and set verifiedAt.
+    const db = getActiveDb();
+    if (twoFactor.enabled === 0) {
+      db.prepare('UPDATE TwoFactor SET enabled = 1, verifiedAt = ? WHERE id = ?')
+        .run(new Date().toISOString(), twoFactor.id);
+    }
+    res.json({ verified: true });
+  });
+
+  // POST /auth/totp/disable — remove the TOTP enrollment.
+  // requireUser: only an authenticated user can disable. Requires a valid TOTP
+  // token OR a backup code to confirm the action.
+  s.post('/totp/disable', requireUser(), (req, res, next) => {
+    const { token } = req.body ?? {};
+    if (!token) {
+      return next({ status: 400, message: 'token is required' });
+    }
+    const userId = req.principal.id;
+    const twoFactor = TwoFactor.findOne(TwoFactor.userId.is(userId));
+    if (!twoFactor) {
+      return next({ status: 400, message: 'TOTP not enrolled' });
+    }
+    const backupCodes = JSON.parse(twoFactor.backupCodes || '[]');
+    const isTotpValid = verifyTotp(twoFactor.secret, token);
+    const isBackupValid = verifyBackupCode(backupCodes, token);
+    if (!isTotpValid && !isBackupValid) {
+      return next({ status: 400, message: 'invalid token or backup code' });
+    }
+    // If it was a backup code, persist the consumed code before deleting.
+    if (isBackupValid) {
+      getActiveDb().prepare('UPDATE TwoFactor SET backupCodes = ? WHERE id = ?')
+        .run(JSON.stringify(backupCodes), twoFactor.id);
+    }
+    TwoFactor.delete(twoFactor.id);
+    res.sendStatus(204);
+  });
+
+  // POST /auth/totp/authenticate — complete login with TOTP 2FA.
+  // allowAnonymous: the caller has already provided a password via /auth/login,
+  // which returned { requiresTotp: true, userId }. This route verifies the TOTP
+  // token (or backup code), mints a Session, and sets the sid cookie — the same
+  // authentication pathway as password login.
+  s.post('/totp/authenticate', allowAnonymous(), (req, res, next) => {
+    const { userId, token } = req.body ?? {};
+    if (!userId || !token) {
+      return next({ status: 400, message: 'userId and token are required' });
+    }
+    const twoFactor = TwoFactor.findOne(TwoFactor.userId.is(userId));
+    if (!twoFactor || twoFactor.enabled !== 1) {
+      return next({ status: 400, message: 'TOTP not enabled for this user' });
+    }
+    const backupCodes = JSON.parse(twoFactor.backupCodes || '[]');
+    const isTotpValid = verifyTotp(twoFactor.secret, token);
+    const isBackupValid = verifyBackupCode(backupCodes, token);
+    if (!isTotpValid && !isBackupValid) {
+      return next({ status: 400, message: 'invalid token or backup code' });
+    }
+    // If it was a backup code, persist the consumed code.
+    if (isBackupValid) {
+      getActiveDb().prepare('UPDATE TwoFactor SET backupCodes = ? WHERE id = ?')
+        .run(JSON.stringify(backupCodes), twoFactor.id);
+    }
+    const user = User.getOrFail(userId);
+    const session = Session.create({ userId: user.id });
+    res.setHeader('set-cookie', sessionCookie(session.token, { secure }));
+    res.status(201).json({ user: { id: user.id, username: user.username } });
   });
 
   return s;

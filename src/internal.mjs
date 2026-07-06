@@ -9,7 +9,7 @@ export { computeDelta, createDeltaProjector } from './field-delta.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
 export { entity } from './entity/compile.mjs';
-export { User, Session, Inbox, Credential, Invitation, ApiKey } from './auth-entities.mjs';
+export { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth-entities.mjs';
 export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope, cosineSimilarity, nearest } from './scope-sql.mjs';
 export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectSource } from './principal.mjs';
 export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
