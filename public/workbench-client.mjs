@@ -55,6 +55,7 @@ export class LiveChannel {
     this._maxBackoff = options.maxBackoff ?? 5000;
     this._backoffBase = options.backoffBase ?? 200;
     this._watchdog = null;
+    this._connCallbacks = new Set();
   }
 
   // Subscribe to an (entity, id). Opens the WebSocket lazily on first call.
@@ -165,6 +166,8 @@ export class LiveChannel {
     }
     this._pendingUnsubs.clear();
     this._outbox = [];
+    this._emitConnectionStatus('disconnected');
+    this._connCallbacks.clear();
   }
 
   // --- internal ---
@@ -201,6 +204,7 @@ export class LiveChannel {
         this._reconnectAttempt = 0;
         this._socket = ws;
         this._flushOutbox();
+        this._emitConnectionStatus('connected');
         // Watchdog: some servers (incl. this framework's hand-rolled WS) do
         // not complete the close handshake — they ack the close frame but
         // never destroy the socket, so the client's 'close' event never fires
@@ -237,6 +241,7 @@ export class LiveChannel {
         // socket was replaced. The reconnect timer assigns a new socket when
         // the new connection opens.
         if (this._socket === ws) this._socket = null;
+        this._emitConnectionStatus('disconnected');
         if (!this._closed) this._scheduleReconnect();
       });
       ws.addEventListener('message', (ev) => {
@@ -328,6 +333,7 @@ export class LiveChannel {
   // Schedule a reconnection attempt with exponential backoff.
   _scheduleReconnect() {
     if (this._closed || this._reconnectTimer) return;
+    this._emitConnectionStatus('reconnecting');
     const delay = Math.min(
       this._backoffBase * Math.pow(2, this._reconnectAttempt),
       this._maxBackoff,
@@ -365,6 +371,20 @@ export class LiveChannel {
       this._reconnectTimer = null;
     }
     this._reconnectAttempt = 0;
+  }
+
+  // Public connection-state emitter. Registers a callback that receives the
+  // connection status ('connected' | 'disconnected' | 'reconnecting') on every
+  // transition. Returns an unsubscribe function.
+  onConnectionChange(cb) {
+    this._connCallbacks.add(cb);
+    return () => { this._connCallbacks.delete(cb); };
+  }
+
+  _emitConnectionStatus(status) {
+    for (const cb of this._connCallbacks) {
+      try { cb(status); } catch { /* swallow */ }
+    }
   }
 }
 

@@ -302,7 +302,7 @@ export function bindList(store, { id, field, onItemsChange } = {}) {
 //   destroy() — tears down subscriptions
 //
 // Requires channel.onConnectionChange(callback) — the LiveChannel must expose a
-// public connection-state emitter. (W5 filing: add onConnectionChange to LiveChannel.)
+// public connection-state emitter.
 // Without it, status stays 'disconnected' and the UI kit reflects no connection.
 
 export function bindConnection(channel) {
@@ -326,7 +326,6 @@ export function bindConnection(channel) {
       return;
     }
     // Client does not provide onConnectionChange — stay disconnected.
-    // (W5 filing: LiveChannel should emit connection state changes.)
   }
 
   function _stopListening() {

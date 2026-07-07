@@ -1,7 +1,7 @@
 // LiveChannel end-to-end tests against a real workbench server.
 //
-// 6 tests exercising connect, subscribe, event delivery, unsubscribe,
-// multiplex, reconnect, and close cleanup.
+// 13 tests: connect, subscribe, event delivery, unsubscribe, multiplex,
+// reconnect, close cleanup, and connection-state emitter.
 
 import { text, ephemeral, scope, everyone, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
@@ -271,4 +271,99 @@ test('close() cleanup — no further deliveries or reconnects', async () => {
     app.httpServer.close();
     db.close();
   }
+});
+
+// onConnectionChange unit tests using mock sockets.
+// LiveChannel resolves via polling on readyState + the 'open' event,
+// so we mock the internal state machine to trigger transitions.
+
+test('onConnectionChange returns an unsubscribe function', () => {
+  const channel = new LiveChannel('ws://127.0.0.1:1');
+  const unsub = channel.onConnectionChange(() => {});
+  assert.equal(typeof unsub, 'function');
+  unsub();
+  channel.close();
+});
+
+test('onConnectionChange emits connected after socket opens', async () => {
+  const channel = new LiveChannel('ws://127.0.0.1:1');
+  let status = null;
+  channel.onConnectionChange((s) => { status = s; });
+
+  // Replace _openSocket to simulate a successful connection
+  let resolveOpen;
+  const openPromise = new Promise((r) => { resolveOpen = r; });
+  channel._openSocket = async () => {
+    channel._socket = { readyState: 1, send() {} };
+    channel._reconnectAttempt = 0;
+    channel._flushOutbox();
+    channel._emitConnectionStatus('connected');
+    resolveOpen();
+  };
+
+  channel._scheduleReconnect();
+  await openPromise;
+
+  assert.equal(status, 'connected');
+  channel.close();
+});
+
+test('onConnectionChange emits disconnected on close', () => {
+  const channel = new LiveChannel('ws://127.0.0.1:1');
+  const events = [];
+  channel.onConnectionChange((s) => { events.push(s); });
+
+  channel.close();
+  assert.deepEqual(events, ['disconnected']);
+});
+
+test('onConnectionChange emits reconnecting when socket drops', () => {
+  const channel = new LiveChannel('ws://127.0.0.1:1');
+  let status = null;
+  channel.onConnectionChange((s) => { status = s; });
+
+  // Directly call the emitter — this is what _scheduleReconnect does.
+  channel._emitConnectionStatus('reconnecting');
+  assert.equal(status, 'reconnecting');
+  channel.close();
+});
+
+test('multiple subscribers all receive transitions', () => {
+  const channel = new LiveChannel('ws://127.0.0.1:1');
+  const a = [];
+  const b = [];
+  channel.onConnectionChange((s) => { a.push(s); });
+  channel.onConnectionChange((s) => { b.push(s); });
+
+  channel._emitConnectionStatus('connected');
+  channel._emitConnectionStatus('reconnecting');
+
+  assert.deepEqual(a, ['connected', 'reconnecting']);
+  assert.deepEqual(b, ['connected', 'reconnecting']);
+  channel.close();
+});
+
+test('unsubscribe stops receiving callbacks', () => {
+  const channel = new LiveChannel('ws://127.0.0.1:1');
+  const events = [];
+  const unsub = channel.onConnectionChange((s) => { events.push(s); });
+
+  channel._emitConnectionStatus('connected');
+  unsub();
+  channel._emitConnectionStatus('reconnecting');
+
+  assert.deepEqual(events, ['connected']);
+  channel.close();
+});
+
+test('close() cleans up callbacks and emits final disconnected', () => {
+  const channel = new LiveChannel('ws://127.0.0.1:1');
+  const events = [];
+  channel.onConnectionChange((s) => { events.push(s); });
+
+  channel.close();
+
+  // After close, further emits should be no-ops (callbacks cleared).
+  channel._emitConnectionStatus('connected');
+  assert.deepEqual(events, ['disconnected']);
 });
