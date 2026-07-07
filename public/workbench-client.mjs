@@ -885,7 +885,7 @@ export async function decodeResult(res) {
  *   fetchImpl   – fetch function (optional, defaults to globalThis.fetch)
  *
  * Returns a store object with: subscribe, dispatch, create, update, remove,
- * action, close, overlayFor, pendingCreates, onRender.
+ * action, close, overlayFor, overlayStatusFor, pendingCreates, onRender.
  */
 export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
   const resolvedChannel = channel ?? new LiveChannel(baseUrl);
@@ -1001,6 +1001,16 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
     if (entry.kind === 'remove') return null;
     // Return authoritative row if confirmed, else optimistic guess
     return entry.row ?? entry.optimistic;
+  }
+
+  function overlayStatusFor(id) {
+    let entry = null;
+    for (const e of _overlay.values()) {
+      if (e.status === 'failed') continue;
+      if (e.id === id) entry = e;
+    }
+    if (!entry) return null;
+    return { status: entry.status, kind: entry.kind, error: entry.error ?? null, opId: entry.opId };
   }
 
   function pendingCreates() {
@@ -1180,6 +1190,7 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
     action,
     close,
     overlayFor,
+    overlayStatusFor,
     pendingCreates,
     onRender(cb) {
       _renderCallbacks.add(cb);

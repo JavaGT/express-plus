@@ -698,5 +698,60 @@ describe('LiveStore', () => {
     });
     assert.deepEqual(r4, { id: 'abc', title: 'test' });
   });
+  // --- overlayStatusFor ---
 
+  it('overlayStatusFor returns null when no overlay exists', () => {
+    const store = createLiveStore({ name: 'Test', baseUrl: 'http://localhost:1', path: '/tests', fetchImpl: () => {}, channel: null });
+    assert.equal(store.overlayStatusFor('unknown-id'), null);
+  });
+
+  it('overlayStatusFor returns pending status during dispatch', async () => {
+    let resolvePost;
+    const store = createLiveStore({
+      name: 'Test',
+      baseUrl: 'http://localhost:1',
+      path: '/tests',
+      fetchImpl: (url, opts) => {
+        if (opts.method === 'PATCH' || opts.method === 'PUT') {
+          return new Promise((resolve) => { resolvePost = resolve; });
+        }
+        if (opts.method === 'GET') return Promise.resolve(res204());
+        return Promise.resolve(Response.json({ ok: true }));
+      },
+      channel: null,
+    });
+    // Kick off an UPDATE dispatch (update has an id, so overlayStatusFor can find it)
+    const resultPromise = store.dispatch('Test.update', { id: 'row-1', title: 'x' });
+    // Overlay should be pending immediately
+    const status = store.overlayStatusFor('row-1');
+    assert.equal(status.status, 'pending');
+    assert.equal(status.kind, 'update');
+    // Clean up
+    resolvePost(Response.json({ ok: true, row: { id: 'row-1', title: 'x' } }));
+    await resultPromise;
+  });
+
+  it('overlayStatusFor returns confirmed status after dispatch succeeds', async () => {
+    const store = createLiveStore({
+      name: 'Test',
+      baseUrl: 'http://localhost:1',
+      path: '/tests',
+      fetchImpl: (url, opts) => {
+        if (opts.method === 'PATCH' || opts.method === 'PUT') {
+          return Promise.resolve(Response.json({ ok: true, row: { id: 'done', title: 'ok' } }));
+        }
+        return Promise.resolve(res204());
+      },
+      channel: null,
+    });
+    const result = await store.dispatch('Test.update', { id: 'done', title: 'y' });
+    assert.ok(result.ok);
+    // Confirmed overlays for updates persist (not auto-cleared — cleared by
+    // matching live event in subscribe path)
+    const status = store.overlayStatusFor('done');
+    assert.equal(status.status, 'confirmed');
+    assert.equal(status.kind, 'update');
+    assert.equal(status.error, null);
+  });
 });
+
