@@ -9,8 +9,13 @@
 // This file is a declaration-only artefact for golden parity verification at
 // this stage. Actual cutover: delete Scope's Prisma namespace + wb-scope
 // managed-resource wiring, boot workbench with these entities per-project.
+//
+// LIBRARY MODE: import this module to compile entities (sets up DDL, verbs,
+// projection). Call `initScope(db)` with a better-sqlite3 DatabaseSync
+// instance to run DDL + set active DB so entity CRUD methods work.
 
-import { entity, text, date, ref, number, grant, deny, read, write, subscribe, admin, scope } from '../src/index.mjs';
+import { setActiveDb } from '../src/db.mjs';
+import { entity, text, date, ref, number, grant, deny, read, write, subscribe, admin, scope, generateDDL } from '../src/internal.mjs';
 
 // Capabilities — a project member reads and writes; eventually admin gates
 // specific mutations (e.g. only the project owner can delete a source).
@@ -100,3 +105,19 @@ export const ExternalRef = entity('ExternalRef', {
   ],
   routes: (r) => { r.resource(); },
 });
+
+/**
+ * Library-mode initialisation: run DDL + set active DB so entity CRUD methods
+ * (create, findById, crudHandlers) work on the given SQLite connection.
+ * Call once per project boot, passing a better-sqlite3 DatabaseSync instance
+ * opened to the project's SQLite file.
+ */
+export function initScope(db) {
+  setActiveDb(db, { replace: true });
+  for (const entity of [Source, Note, Theme, ExternalRef]) {
+    const ddl = generateDDL(entity);
+    for (const stmt of ddl) {
+      db.exec(stmt);
+    }
+  }
+}

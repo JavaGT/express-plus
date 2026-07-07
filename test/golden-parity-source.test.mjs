@@ -5,16 +5,19 @@
 // Phase 1 (this test): verify entity shape — name, fields, verbs, grant,
 // DDL generation. No workbench boot required.
 //
-// Phase 2 (future): integration test with workbench kernel boot, CRUD through
-// HTTP dispatch, and WS event fan-out against a :memory: database.
+// Phase 2a (initScope + CRUD): boot a :memory: DB with initScope(), then
+// exercise entity.create() + crudHandlers in library mode.
+//
+// Phase 2b (future integration): HTTP-level dispatch + WS fan-out.
 
-import { describe, it } from 'node:test';
+import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import { generateDDL } from '../src/internal.mjs';
 
 // Import scope entities — this triggers entity() compilation which validates
 // the declaration shape (field kinds, grant syntax, etc.).
-import { Source, Note, Theme, ExternalRef } from '../projects/scope-entities.mjs';
+import { Source, Note, Theme, ExternalRef, initScope } from '../projects/scope-entities.mjs';
 
 describe('station-B golden parity: entity shape', () => {
   describe('Source', () => {
@@ -89,5 +92,81 @@ describe('station-B golden parity: entity shape', () => {
       assert.ok(ExternalRef.fields.url);
       assert.ok(ExternalRef.fields.description);
     });
+  });
+});
+
+describe('station-B golden parity: library-mode CRUD', () => {
+  let db;
+
+  before(() => {
+    db = new DatabaseSync(':memory:');
+    initScope(db);
+  });
+
+  after(() => {
+    db.close();
+  });
+
+  it('Source.create inserts a row and Source.findById reads it back', () => {
+    const row = Source.create({ name: 'Test Source', url: 'https://example.com', createdAt: new Date() });
+    assert.ok(row.id, 'row has an id');
+    assert.equal(row.name, 'Test Source');
+    assert.equal(row.url, 'https://example.com');
+
+    const found = Source.findById(row.id);
+    assert.ok(found);
+    assert.equal(found.name, 'Test Source');
+  });
+
+  it('Source.update crudHandler emits Source.updated event', () => {
+    const created = Source.create({ name: 'Pre Update' });
+    const events = Source.crudHandlers['Source.update']({
+      payload: { id: created.id, name: 'Post Update' },
+      principal: null,
+    });
+    assert.ok(Array.isArray(events));
+    assert.ok(events.length > 0);
+    const ev = events[0];
+    assert.equal(ev.type, 'Source.updated');
+    assert.equal(ev.scope, `Source:${created.id}`);
+  });
+
+  it('Source.remove crudHandler emits Source.removed event', () => {
+    const created = Source.create({ name: 'To Remove' });
+    const events = Source.crudHandlers['Source.remove']({
+      payload: { id: created.id },
+      principal: null,
+    });
+    assert.ok(Array.isArray(events));
+    const ev = events[0];
+    assert.equal(ev.type, 'Source.removed');
+    assert.equal(ev.data.id, created.id);
+  });
+
+  it('create CRUD handler emits Source.created event with correct shape', () => {
+    const events = Source.crudHandlers['Source.create']({
+      payload: { name: 'New Source' },
+      principal: null,
+    });
+    assert.ok(Array.isArray(events));
+    const ev = events[0];
+    assert.equal(ev.type, 'Source.created');
+    assert.ok(ev.scope.startsWith('Source:'), 'scope starts with Source:');
+    assert.equal(ev.data.name, 'New Source');
+    assert.ok(ev.data.id, 'generated id');
+  });
+
+  it('update rejects missing id', () => {
+    assert.throws(() => {
+      Source.crudHandlers['Source.update']({ payload: {}, principal: null });
+    }, /id/);
+  });
+
+  it('all four entities boot on DB without error', () => {
+    // The DDL runs in before() — just verify all entities are queryable
+    assert.ok(Source.findAll);
+    assert.ok(Note.findAll);
+    assert.ok(Theme.findAll);
+    assert.ok(ExternalRef.findAll);
   });
 });
