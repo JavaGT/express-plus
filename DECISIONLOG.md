@@ -491,3 +491,10 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
 - **Reason:** Satisfies COORDINATOR.md §8 definition of done item 1: "configurability sweep documented with tested override seams." Every layer ships sensible defaults that work without configuration; every override seam is proven to exist and be testable. The sweep proves that the framework follows the singular-system rule: one config path per concern, no second path.
 - **Files:** `docs/convergence/census/customisation-surfaces.md` (86 lines, new).
 - **Gate:** `node --test` 1612/1612/0.
+
+## 2026-07-07 — Station C complete: overlay vocabulary + contract lock (6 steps)
+
+- **Decision:** Complete station C (client overlay bridge) in 6 steps. Step 1: lock contract tests (store-adapter, 19 tests). Step 2: `client-overlays.ts` pure adapter (overlayFor/overlayStatusFor/pendingCreates, 7 tests). Step 3: wire into `WorkbenchProjectStore` export so consumers use `store.overlayFor(key)`. Step 4: consumer migration proof (4 integration tests). Step 5: upstream review documented — vocabulary aligns with workbench-client overlay API but semantics differ (journal-based vs in-memory overlay Map). Step 6: transport already configurable (transport, createRealtime, realtimeSubscribe injection seams).
+- **Reason:** Station C is the convergence bridge between Scope's journal engine and workbench's overlay vocabulary. Consumers use the same overlayFor/overlayStatusFor/pendingCreates names regardless of which engine backs them. When workbench absorbs Scope, the overlay primitives converge into createLiveStore and this adapter retires. Contract tests + integration tests guarantee the overlay surface doesn't drift while the bridge is live.
+- **Files:** Scope — `src/lib/wb-scope/client-overlays.ts` (~160 lines), `src/lib/wb-scope/__tests__/client-overlays.test.ts` (7 tests), `src/lib/wb-scope/store.svelte.ts` (overlay wiring), `src/lib/wb-scope/__tests__/store-adapter.test.ts` (23 tests).
+- **Gate:** `pnpm test` 1974/1974, `pnpm check` 0 errors.
