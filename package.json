@@ -17,7 +17,9 @@
       "default": "./public/workbench-client.mjs"
     },
     "./scope-entities": {
-      "default": "./projects/scope-entities.mjs"
+      "default": "./projects/scope-entities.mjs",
+      "import": "./projects/scope-entities.mjs",
+      "node": "./projects/scope-entities.mjs"
     }
   },
   "scripts": {
