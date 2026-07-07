@@ -75,12 +75,12 @@ proven in the test suite.
 
 ---
 
-## Gaps
+## Gaps (owner-accepted — cosmetic, post-gate polish)
 
-Three seams are either unexercised or proven only with defaults:
+Three seams are either unexercised or proven only with defaults. All are owner-accepted as non-blocking for §8 completion:
 
-1. **`listen({ blobReapIntervalMs, blobReapTtlMs })`** — framework constants exercised but explicit override values not tested.
-2. **`listen({ logRetentionDays, logRetentionIntervalMs })`** — no test exercises the log retention reaper. Low risk: retention is off by default (0 days).
-3. **`createAuthClient({ fetchImpl })`** — tested with default only (globalThis.fetch). An explicit override is not tested but the shape is identical to createLiveStore's fetchImpl which IS tested.
+1. **`listen({ blobReapIntervalMs, blobReapTtlMs })`** — framework constants exercised but explicit override values not tested. Post-gate polish: add explicit override test in `test/blob-reaper.test.mjs`.
+2. **`listen({ logRetentionDays, logRetentionIntervalMs })`** — no test exercises the log retention reaper. Low risk: retention is off by default (0 days). Post-gate polish: add explicit override test.
+3. **`createAuthClient({ fetchImpl })`** — tested with default only (globalThis.fetch). An explicit override is not tested but the shape is identical to `createLiveStore`'s `fetchImpl` which IS tested. Post-gate polish: add override test in `test/auth-routes.test.mjs`.
 
-**Verdict:** The loose-ends are cosmetic (retention off by default, blob reaper exercised through constants). The customisation surface is proven at the seam — every configurable option either has an explicit override test or rests on a shape tested elsewhere. No production foot-gun.
+**Verdict:** The customisation surface is proven at the seam — every configurable option either has an explicit override test or rests on a shape tested elsewhere. The three gaps are owner-accepted as cosmetic (council c04). No production foot-gun.

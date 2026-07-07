@@ -1,5 +1,7 @@
 # S0 Wire-Contract Memo — Cursor Semantics Comparison
 
+> **Note (2026-07-07): SUPERSEDED by owner ruling.** Owner ruled that Scope's per-project seq IS a valid coarse scope under workbench's B′ cursor model. No re-key, no seq change, no prefix-matching. Joint recommendation: one cursor per project, scope-keyed fan-out (W5 slice 2), adapter maps projectId → scope key. Station A is transport swap only. See `S0-joint-recommendation.md` and LEDGER council c01.
+
 **Date:** 2026-07-06 | **Agent:** explore-flash | **Source:** workbench `src/cursor.mjs` vs Scope R8 `loadProjectSnapshot`
 
 ## VERDICT: INCOMPATIBLE
