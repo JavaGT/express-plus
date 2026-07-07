@@ -13,7 +13,7 @@ to the logs.
 | W3 job queue parity | `W3-job-queue-parity.md` | slices | `convergence/W3-job-queue` (slice 1) | 1273/1273/0 (merged) | Slice 1: progress (+stage), cancellation (cancelled status), scoping (scope column + scoped claim). 3 BUILD items closed. |
 | W4 UI kit | `W4-ui-kit.md` | **done** | `convergence/W4-wave1` (1), `convergence/W4-wave2` (2), `convergence/W4-wave3` (3), `convergence/W4-wave4` (4) | 1576/1576 + 162/162 browser | All 25 primitives shipped (4 waves). Svelte 5 components + bindAction/bindField/bindList/bindConnection helpers. Owner overruled c02 (Option C, Svelte-first). Council c03 reviewed waves 1-2. W5 filings: onConnectionChange + overlay-status API. |
 | W5 client engine parity | `W5-client-engine-parity.md` | **done** | `convergence/W5-scope-subscription` (slices 1+2), main (c03 filing) | 1583/1583/0 | Slice 1+2: subscribeScope() + scope-keyed fan-out. c03 filing: LiveChannel.onConnectionChange emitter (4 transition points). 2 W5 filings remain: overlay-status API (station C). |
-| S scope migration | `S-scope-migration.md` | **building (station A)** | `phase-S/station-A` (Scope repo) | 1933/1934, 0 check errors | S0 joint recommendation: station A is transport swap (SSE→WS). Adapter: projectId → scope "project:<id>". Boot: snapshot→subscribe→events-since. Single-path pipeline (wb.ingest). Per-surface cutover. Station B (physical migration) and Station C (client engine) deferred. |
+| S scope migration | `S-scope-migration.md` | **building (station A+B+C)** | `phase-S/station-A` (Scope repo) | 1962/1963, 0 check errors | Station A: WS transport adapter (3 surfaces: createRealtime, liveStore, passkey). Station B: Source/Note/ExternalRef writes → workbench entity CRUD. Station C Step 1: contract tests locked (store-adapter, 19 tests). Station C Step 2: client-overlays.ts adapter (overlayFor/overlayStatusFor/pendingCreates, 7 tests). S0 joint recommendation: station A is transport swap (SSE→WS). |
 
 Stage vocabulary: `not started` → `census` → `design` → `slices` → `done`
 (or `gated` / `blocked-on-owner`).
@@ -52,3 +52,4 @@ Append one line per merge to main:
 2026-07-07 · W4 · convergence/W4-wave2 (wave 2) · 91d7264..dbc078f · node --test 1498/1498/0 · DECISIONLOG #94
 2026-07-07 · W4 · convergence/W4-wave3 (wave 3) · dbc078f..e1e4125 · node --test 1556/1556/0 · DECISIONLOG #95
 2026-07-07 · W4 · convergence/W4-wave4 (wave 4) · e1e4125..7609eb6 · node --test 1576/1576/0 · DECISIONLOG #96
+2026-07-07 · convergence · main · 7609eb6..ecaa67f · node --test 1612/1612/0 · DECISIONLOG #97
