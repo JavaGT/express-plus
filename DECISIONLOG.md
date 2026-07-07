@@ -484,3 +484,10 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
 - **Reason:** Satisfies COORDINATOR.md §8 definition of done item 2: "one `projects/*` app exercising passkey auth + job queue + client boot/optimistic/undo + UI kit in a single acceptance run." The client engine's undo capability is tested at the field-law level (`canUndoField`, `undoableFieldKinds`) since client-side undo is not yet a store-level API — the pipeline's optimistic/reducer pattern is exercised in `test/pipeline-integration.test.mjs`. The UI kit binding helpers are tested as plain JS surface contracts (subscribe handles, status lifecycle) — Svelte component rendering is exercised in `test/workbench-ui.test.mjs`.
 - **Files:** `projects/convergence.mjs` (44 lines, new), `test/convergence-integration.test.mjs` (357 lines, 11 tests).
 - **Gate:** `node --test` 1612/1612/0.
+
+## 2026-07-07 — Customisation sweep: 28 override seams catalogued
+
+- **Decision:** Document and verify every configuration seam across all six framework layers (auth, persistence, job queue, client engine, UI kit, ops+log) in `docs/convergence/census/customisation-surfaces.md`. 28 seams recorded with location, zero-config default, and test coverage proof. 3 cosmetic gaps noted (blob reaper override values, log retention reaper, createAuthClient fetchImpl override) — none are production foot-guns.
+- **Reason:** Satisfies COORDINATOR.md §8 definition of done item 1: "configurability sweep documented with tested override seams." Every layer ships sensible defaults that work without configuration; every override seam is proven to exist and be testable. The sweep proves that the framework follows the singular-system rule: one config path per concern, no second path.
+- **Files:** `docs/convergence/census/customisation-surfaces.md` (86 lines, new).
+- **Gate:** `node --test` 1612/1612/0.
