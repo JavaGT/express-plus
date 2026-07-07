@@ -15,6 +15,9 @@
     },
     "./client": {
       "default": "./public/workbench-client.mjs"
+    },
+    "./scope-entities": {
+      "default": "./projects/scope-entities.mjs"
     }
   },
   "scripts": {

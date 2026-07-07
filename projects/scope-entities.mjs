@@ -14,8 +14,8 @@
 // projection). Call `initScope(db)` with a better-sqlite3 DatabaseSync
 // instance to run DDL + set active DB so entity CRUD methods work.
 
-import { setActiveDb } from '../src/db.mjs';
-import { entity, text, date, ref, number, grant, deny, read, write, subscribe, admin, scope, generateDDL } from '../src/internal.mjs';
+import { setActiveDb } from 'workbench/internal';
+import { entity, text, date, ref, number, grant, deny, read, write, subscribe, admin, scope, generateDDL } from 'workbench/internal';
 
 // Capabilities — a project member reads and writes; eventually admin gates
 // specific mutations (e.g. only the project owner can delete a source).

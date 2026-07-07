@@ -13,7 +13,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { generateDDL } from '../src/internal.mjs';
+import { generateDDL } from 'workbench/internal';
 
 // Import scope entities — this triggers entity() compilation which validates
 // the declaration shape (field kinds, grant syntax, etc.).
