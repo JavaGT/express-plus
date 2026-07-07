@@ -26,6 +26,7 @@ const MEMBER = [read, write, subscribe];
 // Mirrors Scope's SourceDto: id, name, url, notes, createdAt.
 // ---------------------------------------------------------------------------
 export const Source = entity('Source', {
+  projectId: text(),
   name: text(),
   url: text({ optional: true }),
   notes: text({ optional: true }),
@@ -47,6 +48,7 @@ export const Source = entity('Source', {
 // Mirrors Scope's NoteDto: id, projectId, title, content, sortOrder, createdAt, updatedAt.
 // ---------------------------------------------------------------------------
 export const Note = entity('Note', {
+  projectId: text(),
   title: text(),
   content: text({ optional: true, default: '' }),
   sortOrder: number({ default: 0 }),
@@ -66,6 +68,7 @@ export const Note = entity('Note', {
 // Mirrors Scope's Theme DTO: id, projectId, label, colour, note, codeIds, createdAt, updatedAt.
 // ---------------------------------------------------------------------------
 export const Theme = entity('Theme', {
+  projectId: text(),
   label: text(),
   colour: text({ optional: true }),
   note: text({ optional: true }),
@@ -92,6 +95,7 @@ export const Theme = entity('Theme', {
 // linked entity type — deferred until the membership two-plane is wired in.
 // ---------------------------------------------------------------------------
 export const ExternalRef = entity('ExternalRef', {
+  projectId: text(),
   entityType: text(),
   entityId: text(), // the id of the segment/transcript/artefact this ref is attached to
   label: text({ optional: true }),
