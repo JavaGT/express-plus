@@ -110,6 +110,185 @@ export const ExternalRef = entity('ExternalRef', {
   routes: (r) => { r.resource(); },
 });
 
+// ---------------------------------------------------------------------------
+// Codebook — a named grouping of codes within a project.
+// Mirrors Scope's Codebook model: id, name, projectId, codes, createdAt.
+// ---------------------------------------------------------------------------
+export const Codebook = entity('Codebook', {
+  projectId: text(),
+  name: text(),
+  createdAt: date({ default: () => new Date() }),
+
+  owner: ref('User', { role: 'owner', readonly: true }),
+  grant: () => [
+    scope(({ is }) => is.owner())
+      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
+  ],
+  routes: (r) => { r.resource(); },
+});
+
+// ---------------------------------------------------------------------------
+// Code — a label (optionally coloured, with inclusion/exclusion criteria)
+// within a codebook, optionally hierarchical via parentId/parentPath.
+// ---------------------------------------------------------------------------
+export const Code = entity('Code', {
+  projectId: text(),
+  codebookId: text(),
+  label: text(),
+  colour: text({ optional: true }),
+  description: text({ optional: true }),
+  inclusionCriteria: text({ optional: true }),
+  exclusionCriteria: text({ optional: true }),
+  parentId: text({ optional: true }),
+  parentPath: text({ optional: true }),
+  createdAt: date({ default: () => new Date() }),
+
+  owner: ref('User', { role: 'owner', readonly: true }),
+  grant: () => [
+    scope(({ is }) => is.owner())
+      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
+  ],
+  routes: (r) => { r.resource(); },
+});
+
+// ---------------------------------------------------------------------------
+// Speaker — a named speaker (optionally coloured, with description) within a
+// project.
+// ---------------------------------------------------------------------------
+export const Speaker = entity('Speaker', {
+  projectId: text(),
+  name: text(),
+  colour: text({ optional: true }),
+  description: text({ optional: true }),
+  createdAt: date({ default: () => new Date() }),
+  updatedAt: date({ default: () => new Date() }),
+
+  owner: ref('User', { role: 'owner', readonly: true }),
+  grant: () => [
+    scope(({ is }) => is.owner())
+      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
+  ],
+  routes: (r) => { r.resource(); },
+});
+
+// ---------------------------------------------------------------------------
+// Collection — a named grouping of artefacts within a project.
+// ---------------------------------------------------------------------------
+export const Collection = entity('Collection', {
+  projectId: text(),
+  name: text(),
+  description: text({ optional: true }),
+  createdAt: date({ default: () => new Date() }),
+
+  owner: ref('User', { role: 'owner', readonly: true }),
+  grant: () => [
+    scope(({ is }) => is.owner())
+      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
+  ],
+  routes: (r) => { r.resource(); },
+});
+
+// ---------------------------------------------------------------------------
+// Artefact — a research item (audio, video, document, etc.) within a project.
+// ---------------------------------------------------------------------------
+export const Artefact = entity('Artefact', {
+  projectId: text(),
+  name: text(),
+  type: text({ optional: true }),
+  description: text({ optional: true }),
+  releaseDate: text({ optional: true }), // ISO date string
+  recordDate: text({ optional: true }),  // ISO date string
+  code: text({ optional: true }),
+  createdAt: date({ default: () => new Date() }),
+
+  owner: ref('User', { role: 'owner', readonly: true }),
+  grant: () => [
+    scope(({ is }) => is.owner())
+      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
+  ],
+  routes: (r) => { r.resource(); },
+});
+
+// ---------------------------------------------------------------------------
+// Transcript — a transcription record (source label, model) within a project.
+// ---------------------------------------------------------------------------
+export const Transcript = entity('Transcript', {
+  projectId: text(),
+  sourceLabel: text({ optional: true }),
+  transcriptionModel: text({ optional: true }),
+  createdAt: date({ default: () => new Date() }),
+
+  owner: ref('User', { role: 'owner', readonly: true }),
+  grant: () => [
+    scope(({ is }) => is.owner())
+      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
+  ],
+  routes: (r) => { r.resource(); },
+});
+
+// ---------------------------------------------------------------------------
+// Comment — a threaded comment on a segment within a project.
+// ---------------------------------------------------------------------------
+export const Comment = entity('Comment', {
+  projectId: text(),
+  body: text(),
+  segmentId: text(),
+  parentId: text({ optional: true }),
+  userId: text(),
+  createdAt: date({ default: () => new Date() }),
+  updatedAt: date({ default: () => new Date() }),
+
+  owner: ref('User', { role: 'owner', readonly: true }),
+  grant: () => [
+    scope(({ is }) => is.owner())
+      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
+  ],
+  routes: (r) => { r.resource(); },
+});
+
+// ---------------------------------------------------------------------------
+// File — a stored media file (audio, video, image, document) within a
+// project, with hash and size metadata.
+// Mirrors Scope's MediaFile model.
+// ---------------------------------------------------------------------------
+export const File = entity('File', {
+  projectId: text(),
+  name: text(),
+  type: text({ optional: true }),   // 'audio' | 'video' | 'image' | 'document' | 'unknown'
+  mime: text({ optional: true }),
+  size: number({ optional: true }),
+  md5: text({ optional: true }),
+  sha256: text({ optional: true }),
+  createdAt: date({ default: () => new Date() }),
+  updatedAt: date({ default: () => new Date() }),
+
+  owner: ref('User', { role: 'owner', readonly: true }),
+  grant: () => [
+    scope(({ is }) => is.owner())
+      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
+  ],
+  routes: (r) => { r.resource(); },
+});
+
+// ---------------------------------------------------------------------------
+// Project — a research project, the top-level container for all other
+// entities in Scope.
+// ---------------------------------------------------------------------------
+export const Project = entity('Project', {
+  projectId: text(),
+  name: text(),
+  description: text({ optional: true }),
+  createdAt: date({ default: () => new Date() }),
+  updatedAt: date({ default: () => new Date() }),
+
+  owner: ref('User', { role: 'owner', readonly: true }),
+  grant: () => [
+    scope(({ is }) => is.owner())
+      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
+  ],
+  routes: (r) => { r.resource(); },
+});
+
 /**
  * Library-mode initialisation: run DDL + set active DB so entity CRUD methods
  * (create, findById, crudHandlers) work on the given SQLite connection.
@@ -118,7 +297,7 @@ export const ExternalRef = entity('ExternalRef', {
  */
 export function initScope(db) {
   setActiveDb(db, { replace: true });
-  for (const entity of [Source, Note, Theme, ExternalRef]) {
+  for (const entity of [Source, Note, Theme, ExternalRef, Codebook, Code, Speaker, Collection, Artefact, Transcript, Comment, File, Project]) {
     const ddl = generateDDL(entity);
     for (const stmt of ddl) {
       db.exec(stmt);
