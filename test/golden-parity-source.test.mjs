@@ -37,8 +37,16 @@ describe('station-B golden parity: entity shape', () => {
       assert.ok(fields.notes, 'notes field');
       assert.ok(fields.createdAt, 'createdAt field');
       assert.equal(fields.createdAt.type, 'date');
-      assert.ok(fields.owner, 'owner field');
-      assert.equal(fields.owner.type, 'ref');
+      assert.ok(fields.projectId, 'projectId field (inherit FK → Project.id)');
+    });
+
+    it('inherits Project grant (two-plane, no per-entity owner)', () => {
+      // Two-plane: Source has no owner ref of its own; its grant is an
+      // inherit() directive joining child.projectId = Project.id.
+      assert.equal(Source.fields.owner, undefined, 'no owner field on child');
+      assert.ok(Source.grant && Source.grant.inherit, 'grant is an inherit directive');
+      assert.equal(Source.grant.inherit.name, 'Project', 'inherits Project');
+      assert.equal(Source.grant.via, 'projectId', 'via projectId');
     });
 
     it('generates DDL', () => {

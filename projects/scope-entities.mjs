@@ -1,5 +1,5 @@
 // scope-entities.mjs — station B pre-work: workbench-native entity declarations
-// for Scope's mechanical-CRUD entities (Source, Note, Theme, ExternalRef).
+// for Scope's entities (Source, Note, Theme, ExternalRef, + 9 more, + Project).
 //
 // Currently these live in /Users/server/Development/scope/src/lib/wb-scope/
 // as Prisma-backed managed resources. Station B migrates them to native
@@ -10,16 +10,58 @@
 // this stage. Actual cutover: delete Scope's Prisma namespace + wb-scope
 // managed-resource wiring, boot workbench with these entities per-project.
 //
+// Two-plane grants (W1 `membership()` pattern, shipped 2026-07-07): Project is
+// the membership root — it carries the owner ref + a members side-table of
+// User→role (viewer|editor). Every child entity inherits Project's grant via
+// `inherit(Project, { via: 'projectId' })`, which lowers to
+// `EXISTS (SELECT 1 FROM Project WHERE Project.id = child.projectId AND <Project scope>)`.
+// Children store Project.id (the workbench auto PK) in their projectId column.
+// NOTE: grants are DECLARATIVE until the Path B cutover (handlers currently
+// write via raw SQL bypassing workbench authz); at cutover a one-shot migration
+// must populate Project_members from existing ProjectMember Prisma rows.
+//
 // LIBRARY MODE: import this module to compile entities (sets up DDL, verbs,
 // projection). Call `initScope(db)` with a better-sqlite3 DatabaseSync
 // instance to run DDL + set active DB so entity CRUD methods work.
 
+import { membership } from 'workbench';
 import { setActiveDb } from 'workbench/internal';
-import { entity, text, date, ref, number, grant, deny, read, write, subscribe, admin, scope, generateDDL } from 'workbench/internal';
+import {
+  entity, text, date, ref, number, map, inherit,
+  grant, deny, read, write, subscribe, admin, scope, generateDDL,
+} from 'workbench/internal';
 
-// Capabilities — a project member reads and writes; eventually admin gates
-// specific mutations (e.g. only the project owner can delete a source).
-const MEMBER = [read, write, subscribe];
+// Two-plane membership config — maps Scope's data-plane roles to workbench
+// capability tokens. Owner is implicit (auto-detected from Project's owner ref,
+// auto-grants read,write,subscribe,admin). Never put `owner` in this config.
+//   viewer → read, subscribe          (read snapshot / SSE)
+//   editor → read, write, subscribe   (all workbench entity mutations)
+// Each key resolves to the `members` map field via role-array match. The
+// explicit `field.role` narrows each key's DB-role filter to just that role,
+// so is.viewer() matches only viewers and is.editor() only editors — without
+// it, dbRoles defaults to ALL map roles and an editor would match the viewer
+// branch first (canBody is first-match-wins) and miss write.
+const projectMembership = {
+  viewer: { can: [read, subscribe], field: { role: 'viewer' } },
+  editor: { can: [read, write, subscribe], field: { role: 'editor' } },
+};
+
+// ---------------------------------------------------------------------------
+// Project — a research project, the top-level container for all other
+// entities in Scope. The membership root: owner ref + members side-table.
+// ---------------------------------------------------------------------------
+export const Project = entity('Project', {
+  projectId: text(),
+  name: text(),
+  description: text({ optional: true }),
+  createdAt: date({ default: () => new Date() }),
+  updatedAt: date({ default: () => new Date() }),
+
+  owner: ref('User', { role: 'owner', readonly: true }),
+  members: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+  routes: (r) => { r.resource(); },
+});
+membership(Project, projectMembership);
 
 // ---------------------------------------------------------------------------
 // Source — a research reference (URL + notes) attached to a project.
@@ -32,14 +74,7 @@ export const Source = entity('Source', {
   notes: text({ optional: true }),
   createdAt: date({ default: () => new Date() }),
 
-  // Station B scaffolding: for now, a simple owner-scope grant. After the
-  // membership two-plane (W1) is wired into the Scope boot context, this
-  // becomes a project-member grant instead.
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -55,11 +90,7 @@ export const Note = entity('Note', {
   createdAt: date({ default: () => new Date() }),
   updatedAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -76,11 +107,7 @@ export const Theme = entity('Theme', {
   createdAt: date({ default: () => new Date() }),
   updatedAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -91,8 +118,10 @@ export const Theme = entity('Theme', {
 //
 // NOTE: this entity spans entity types (segment/transcript/artefact), so its
 // project resolution is indirect. For station B, this is the most complex
-// entity. The grant will need a check that resolves the project through the
-// linked entity type — deferred until the membership two-plane is wired in.
+// entity. The grant inherits Project via the projectId column written by
+// Scope's handlers; the entity-belongs-to-project consistency check that
+// Scope applies at handler level (resolveExternalRefProjectId) is orthogonal
+// to the workbench grant and stays on the Scope side.
 // ---------------------------------------------------------------------------
 export const ExternalRef = entity('ExternalRef', {
   projectId: text(),
@@ -102,11 +131,7 @@ export const ExternalRef = entity('ExternalRef', {
   url: text({ optional: true }),
   description: text({ optional: true }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -119,11 +144,7 @@ export const Codebook = entity('Codebook', {
   name: text(),
   createdAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -143,11 +164,7 @@ export const Code = entity('Code', {
   parentPath: text({ optional: true }),
   createdAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -163,11 +180,7 @@ export const Speaker = entity('Speaker', {
   createdAt: date({ default: () => new Date() }),
   updatedAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -180,11 +193,7 @@ export const Collection = entity('Collection', {
   description: text({ optional: true }),
   createdAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -201,11 +210,7 @@ export const Artefact = entity('Artefact', {
   code: text({ optional: true }),
   createdAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -218,11 +223,7 @@ export const Transcript = entity('Transcript', {
   transcriptionModel: text({ optional: true }),
   createdAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -238,11 +239,7 @@ export const Comment = entity('Comment', {
   createdAt: date({ default: () => new Date() }),
   updatedAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
@@ -262,30 +259,7 @@ export const File = entity('File', {
   createdAt: date({ default: () => new Date() }),
   updatedAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
-  routes: (r) => { r.resource(); },
-});
-
-// ---------------------------------------------------------------------------
-// Project — a research project, the top-level container for all other
-// entities in Scope.
-// ---------------------------------------------------------------------------
-export const Project = entity('Project', {
-  projectId: text(),
-  name: text(),
-  description: text({ optional: true }),
-  createdAt: date({ default: () => new Date() }),
-  updatedAt: date({ default: () => new Date() }),
-
-  owner: ref('User', { role: 'owner', readonly: true }),
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) => (await is.owner()) ? grant(...MEMBER) : deny('not the owner')),
-  ],
+  grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
 });
 
