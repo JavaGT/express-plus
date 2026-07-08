@@ -25,6 +25,7 @@ export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
 export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views.mjs';
 export { mayVerb, mayFieldOp, mayRow } from './row-grant.mjs';
 export { generateDDL, executeDDL, generateFrameworkDDL, executeFrameworkDDL } from './ddl.mjs';
+export { authRoutes } from './auth-routes.mjs';
 export { config, resolveConfig } from './config.mjs';
 export { parseCookies, sessionCookie, sessionPrincipalOf, apiKeyPrincipalOf, SESSION_COOKIE } from './session.mjs';
 export { default, router } from './app.mjs';
