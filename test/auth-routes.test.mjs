@@ -199,3 +199,105 @@ test('createAuthClient.logout clears the session', async (t) => {
   const count = app.db.prepare('SELECT COUNT(*) AS n FROM Session').get().n;
   assert.equal(count, 0, 'logout deleted the session row');
 });
+
+// --- identifyBy: configurable login identity field(s) ---------------------
+//
+// `.auth({ identifyBy })` declares which User field(s) a login credential is
+// matched against, in order. The built-in User now carries an optional `email`
+// field, so an email-login app passes `identifyBy: ['email']` (or
+// `['email', 'username']` to accept either). The credential always travels in
+// the body's `username` slot — only the lookup columns change.
+
+async function bootWithEmail(t) {
+  const app = workbench({ db: ':memory:' })
+    .auth({ identifyBy: ['email', 'username'] })
+    .mount('/notes', ownedNote());
+  app.listen(0);
+  await app.ready;
+  const { port } = app.httpServer.address();
+  t.after(() => app.httpServer.close());
+  return { app, origin: `http://127.0.0.1:${port}` };
+}
+
+test('identifyBy: a credential is matched against email first', async (t) => {
+  const { origin, app } = await bootWithEmail(t);
+  // First login with an email credential → creates a user with that email.
+  const res = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice@example.com', password: 'hunter2' }),
+  });
+  assert.equal(res.status, 201);
+  const cookie = res.headers.get('set-cookie');
+  assert.ok(cookie, 'email login sets a cookie');
+  // The user row stores the email in the `email` column (the primary field).
+  const user = app.db.prepare('SELECT email, username FROM User').get();
+  assert.equal(user.email, 'alice@example.com');
+  assert.equal(user.username, null, 'username was not populated by an email-first login');
+});
+
+test('identifyBy: a second login with the same email verifies the password', async (t) => {
+  const { origin } = await bootWithEmail(t);
+  await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice@example.com', password: 'hunter2' }),
+  });
+  // Correct password → 201 + cookie.
+  const ok = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice@example.com', password: 'hunter2' }),
+  });
+  assert.equal(ok.status, 201);
+  assert.ok(ok.headers.get('set-cookie'));
+  // Wrong password → 401 + no cookie (fail closed).
+  const bad = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice@example.com', password: 'wrong' }),
+  });
+  assert.equal(bad.status, 401);
+  assert.equal(bad.headers.get('set-cookie'), null, 'no cookie on a failed email login');
+});
+
+test('identifyBy: a credential matching no email falls through to username', async (t) => {
+  const { origin, app } = await bootWithEmail(t);
+  // Seed a user directly in the username column (the SECOND identity field),
+  // so the email lookup misses but the username lookup hits.
+  const { User } = await import('../src/auth-entities.mjs');
+  User.create({ username: 'bob', password: 'hunter2' });
+  // A login with the bob username credential: no email match, username match.
+  const res = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'bob', password: 'hunter2' }),
+  });
+  assert.equal(res.status, 201);
+  assert.ok(res.headers.get('set-cookie'), 'username fall-through login mints a session');
+  // Wrong password against the username-matched user fails closed.
+  const bad = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'bob', password: 'wrong' }),
+  });
+  assert.equal(bad.status, 401);
+  assert.equal(bad.headers.get('set-cookie'), null);
+  // No extra user was created by the two logins above.
+  const count = app.db.prepare('SELECT COUNT(*) AS n FROM User').get().n;
+  assert.equal(count, 1, 'fall-through lookup reuses the seeded user, no duplicate');
+});
+
+test('identifyBy: an unknown field fails closed with a 500 at first login', async (t) => {
+  const app = workbench({ db: ':memory:' }).auth({ identifyBy: ['nope'] }).mount('/notes', ownedNote());
+  app.listen(0);
+  await app.ready;
+  const { port } = app.httpServer.address();
+  t.after(() => app.httpServer.close());
+  const res = await fetch(`http://127.0.0.1:${port}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  assert.equal(res.status, 500, 'an unknown identity field fails closed, loudly');
+});

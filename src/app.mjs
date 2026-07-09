@@ -498,7 +498,7 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
   // (chainable). Fail closed: an app with no db cannot serve auth — the routes
   // write User rows and mint Sessions, and sessionPrincipalOf has nothing to
   // look a token up in. Throw at construction (loud), not mid-login (a 500).
-  app.auth = function auth() {
+  app.auth = function auth(options = {}) {
     if (!app.db) {
       throw new Error('app.auth() requires a db — login writes a User row and mints a Session, and the session principal source has nothing to look a token up in without one (fail closed).');
     }
@@ -506,7 +506,11 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
     // `secure` follows THIS app's env, not the process-wide singleton — an app
     // that opts into production cookie behavior does so through `workbench({
     // env: 'production' })`, the one config surface.
-    app.mount('/auth', authRoutes({ secure: app.config.env === 'production' }));
+    //
+    // `identifyBy` declares which User field(s) a login credential matches
+    // (in order). Defaults to `['username']`. Pass `['email', 'username']` for
+    // email-based login. See `authRoutes` for the full contract.
+    app.mount('/auth', authRoutes({ secure: app.config.env === 'production', identifyBy: options.identifyBy }));
     // Per-app session duration: when the app's duration differs from the
     // singleton default, install a shallow copy of Session whose schedule.remove
     // trigger carries the app's delay. The compiled trigger (compile.mjs) is a

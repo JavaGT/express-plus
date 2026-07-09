@@ -45,8 +45,17 @@ import {
 // production) so the same fail-closed cookie attributes apply on login and
 // logout, and plain-http dev works. The router is mounted at `/auth` by
 // `app.auth()`; the paths below are the suffixes under that mount.
-export function authRoutes({ secure = config.env === 'production' } = {}) {
+//
+// `identifyBy` declares which User field(s) a login credential is matched
+// against, in order. Defaults to `['username']` (the built-in shape). An app
+// whose users log in by email passes `identifyBy: ['email', 'username']` so a
+// posted credential is looked up by email first, then username. The credential
+// always travels in the body's `username` slot (kept for backward
+// compatibility); only the lookup columns change. Every named field MUST exist
+// on the User entity — a typo fails closed at first login with a thrown lookup.
+export function authRoutes({ secure = config.env === 'production', identifyBy = ['username'] } = {}) {
   const s = router();
+  const identityFields = Array.isArray(identifyBy) && identifyBy.length > 0 ? identifyBy : ['username'];
 
   // login: find-or-create user (create on first login, else verify the password
   // against the `hash()` field's `.verify()`), mint a Session, and SET THE
@@ -59,10 +68,25 @@ export function authRoutes({ secure = config.env === 'production' } = {}) {
     if (!username || !password) {
       return next({ status: 400, message: 'username and password are required' });
     }
-    let user = User.findOne(User.username.is(username));
+    // Resolve the credential against the configured identity field(s). The
+    // first field that matches a row wins; a credential that matches no row
+    // falls through to find-or-create on the PRIMARY (first) field so existing
+    // first-login create-on-sign-up behavior is preserved.
+    let user;
+    for (let i = 0; i < identityFields.length; i++) {
+      const field = User[identityFields[i]];
+      if (!field) {
+        return next({ status: 500, message: `identifyBy references unknown User field '${identityFields[i]}'` });
+      }
+      user = User.findOne(field.is(username));
+      if (user) break;
+    }
     if (!user) {
       // `password: hash()` digests on write; the plaintext is never stored.
-      user = User.create({ username, password });
+      // Create against the primary identity field so the credential is stored
+      // where a subsequent login will find it.
+      const primary = User[identityFields[0]];
+      user = primary ? User.create({ [identityFields[0]]: username, password }) : User.create({ username, password });
     } else if (!user.password.verify(password)) {
       // wrong password → 401 and NO cookie (fail closed: no session minted).
       return next({ status: 401, message: 'bad credentials' });
