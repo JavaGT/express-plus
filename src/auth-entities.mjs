@@ -44,6 +44,16 @@ const notRequestReadable = (which) =>
 export const User = entity('User', {
     username: text(),
   password: hash(),
+  // Optional profile fields. Apps that need richer identity (e.g. Scope) populate
+  // these; apps that only need username+password leave them null. The login route
+  // and session/membership layers read only username/password/id, so adding fields
+  // here is backward-compatible — existing consumers and tests are unaffected.
+  email: text({ optional: true }),
+  displayName: text({ optional: true }),
+  name: text({ optional: true }),
+  image: text({ optional: true }),
+  phone: text({ optional: true }),
+  bio: text({ optional: true }),
 
   grant: () => [notRequestReadable('User')],
 });
