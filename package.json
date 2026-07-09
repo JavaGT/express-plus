@@ -23,7 +23,8 @@
     }
   },
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "test:coverage": "node --experimental-test-coverage --test"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.2.5",

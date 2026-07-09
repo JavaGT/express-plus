@@ -29,6 +29,7 @@ direction.
 
 ```sh
 node --test                          # run the full suite
+npm run test:coverage                # full suite + Node experimental coverage report (src/)
 node projects/chat/server.mjs        # run the chat sample (open localhost:3000 in two tabs)
 ```
 
