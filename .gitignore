@@ -5,3 +5,5 @@ node_modules/
 .DS_Storetodo.db*
 todo.db*
 .council/
+examples/*.db
+examples/*.db-*
