@@ -3,7 +3,9 @@
 // Exercises the `map` plugin for valued-set membership and the `link`
 // field type for non-user principals.
 import { entity, text, date, ref, map, link, grant, deny, read, write, subscribe, admin, anyOf, never, scope, router, User, Inbox } from 'workbench';
-import { Photo } from './photo.mjs';
+// Photo is NOT imported at top level: Photo's grant harvests Album.collaborators
+// at compile time, so Album must register first. Routes that need Photo load it
+// lazily (dynamic import) after both entities exist.
 
 const VIEWER     = [read, subscribe];
 const CONTRIBUTOR = [read, write, subscribe];  // can add photos, not rename
@@ -157,6 +159,8 @@ export const Album = entity('Album', {
     // album X AND taken in December" work: `.is(id).and(.gte(from)).and(.lte(to))`.
     // =================================================================
     r.get('/photos', async (req, res) => {
+      const { Photo } = await import('./photo.mjs');
+
       const photos = await Photo.findAll(Photo.album.is(req.album.id))
         .sort(Photo.capturedAt, 'desc').limit(50);
       res.json(photos);

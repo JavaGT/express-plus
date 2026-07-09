@@ -6,6 +6,10 @@
 // IMPORTS: the framework exports we WISH existed are imported with a
 // "MISSING" comment — these are the gaps this stress-test documents.
 import { entity, text, number, date, ref, link, map, boolean, grant, deny, read, write, subscribe, admin, anyOf, never, scope, router, User, blob, projected, json, list } from 'workbench';
+// Album must be compiled before Photo: albumMember harvests
+// Photo.album.collaborators (typed-FK → map.has) at entity() load time.
+import { Album } from './album.mjs';
+void Album; // register-only import (used via ref('Album') + harvest)
 
 // ==========================================================================
 // Capability sets
