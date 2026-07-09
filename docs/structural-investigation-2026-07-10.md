@@ -20,23 +20,13 @@ ranked by **machine risk** (second path) then **accidental thickness**.
 
 ## Candidates
 
-### S1 — Live Delivery singular public seam (Worth exploring)
+### S1 — Live Delivery singular public seam (**done** 2026-07-10)
 
-**Observation:** Deliver loop is split across `live.mjs`, `live-delivery.mjs`,
-`live-fanout.mjs`, `live-admission.mjs`, `live-connection.mjs`. Kernel correctly
-imports only `createLivePostCommitConsumer`. `live-delivery.mjs` re-exports
-`createLiveServer` but `serve.mjs` still imports from `live.mjs` — dual import
-story, no second path, mild confusion.
-
-**Change:** One public factory `createLiveDelivery(...)` →
-`{ attach, consumer, emit, close }`; keep internals private or colocated.
-Callers (serve, kernel) cross one interface.
-
-**Deletion test:** Concentrates composition; net files may drop if re-export
-shim goes away. Behavior unchanged.
-
-**Risk:** Medium (WS + tests). **Priority:** High for navigability; low for
-correctness (already one path).
+**Landed:** `createLiveDelivery(httpServer, opts)` →
+`{ emit, count, close, createConsumer }`. Serve wires delivery; Kernel
+registers `app.live.createConsumer(app)`. `createLiveServer` is the same
+function (alias). `live.mjs` re-exports only. Internals remain private
+implementation of the seam.
 
 ### S2 — Client fold parity contract (Worth exploring)
 
@@ -100,7 +90,7 @@ Each must re-defend known-app need (AGENTS now states this).
 
 ## Recommended sequence if executing
 
-1. **S1** Live Delivery singular seam (mechanical, tests already exist).
+1. ~~**S1** Live Delivery singular seam~~ **done**.
 2. **S2** Golden fold fixtures (correctness insurance).
 3. **S3** only as directory packaging if author pain is high — not for purity.
 4. Never un-park **S4** without a compiled-Entity runtime story.

@@ -549,3 +549,17 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
   `docs/structural-investigation-2026-07-10.md` (candidates S1–S7, no code moves).
 - **Next structural slice if desired:** S1 Live Delivery singular public seam,
   then S2 client fold golden fixtures. HTTP leaf deepenings remain parked.
+
+## 2026-07-10 — S1 Live Delivery singular public seam
+
+- **Decision:** One factory `createLiveDelivery(httpServer, opts)` returns
+  `{ emit, count, close, createConsumer }`. Serve engages delivery; Kernel
+  registers `app.live.createConsumer(app)` only. Free-function
+  `createLivePostCommitConsumer` retired. `createLiveServer` is the same
+  function (alias, not a second path). `live.mjs` is a re-export shim.
+- **Reason:** Concentrates Deliver-loop composition behind one interface
+  (architecture-map / structural investigation S1). Behavior unchanged —
+  navigability and singular wiring.
+- **Files:** `src/live-delivery.mjs`, `src/live.mjs`, `src/serve.mjs`,
+  `src/kernel.mjs`, `src/internal.mjs`, `test/live-delivery-seam.test.mjs`,
+  docs architecture-map + structural-investigation.

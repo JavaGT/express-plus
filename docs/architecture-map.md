@@ -53,9 +53,9 @@ Post-commit → re-auth → wire → client Replay decision → fold.
 
 | Module | Role |
 | --- | --- |
-| `live-delivery.mjs` | Post-commit consumer + row latch |
-| `live.mjs` | WS composition root |
-| `live-connection.mjs` / `live-admission.mjs` / `live-fanout.mjs` | Conn / subscribe auth / fan-out |
+| `live-delivery.mjs` | **Singular public seam** `createLiveDelivery` → `{ emit, count, close, createConsumer }` |
+| `live.mjs` | Re-export of createLiveDelivery (compat import path) |
+| `live-connection.mjs` / `live-admission.mjs` / `live-fanout.mjs` | Private impl of the seam (conn / subscribe auth / fan-out) |
 | `websocket.mjs` | Framing |
 | `field-delta.mjs` / `field-pace.mjs` | Delta + pace |
 | `replay-decision.mjs` | Pure dup/next/gap (also embedded in client) |

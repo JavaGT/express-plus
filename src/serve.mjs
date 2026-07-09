@@ -25,7 +25,7 @@ import { mayVerb, mayRow } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './session.mjs';
-import { createLiveServer } from './live.mjs';
+import { createLiveDelivery } from './live-delivery.mjs';
 import { retentionPrune } from './committed-log.mjs';
 import { getLog } from './log.mjs';
 import { buildKernel, buildAndStart } from './kernel.mjs';
@@ -473,17 +473,15 @@ export function listen(app, port, optionsOrCallback = {}) {
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
   httpServer.listen(port);
 
-  // The live WebSocket server for /events subscriptions. It fans out entity-row
-  // change events to authorized subscribers using the SAME mayVerb the REST
-  // dispatch uses (verb='subscribe') — no second auth path. Created after the
-  // HTTP server so the upgrade handler binds to a real socket; stored on the app
-  // so dispatch can reach it at request time.
-  app.live = createLiveServer(httpServer, {
+  // Live Delivery (singular Deliver-loop seam): WS upgrade + fan-out + consumer.
+  // Same mayVerb / principalOf as HTTP — no second auth path. createConsumer is
+  // registered by the Kernel when assembling engaged post-commit seams.
+  app.live = createLiveDelivery(httpServer, {
     path: '/events',
     mayVerb: (entity, verb, row, principal) => mayVerb(entity, verb, row, principal),
-    principalOf,                        // the SAME principal resolver HTTP uses — no second auth identity
+    principalOf,
     db: app.db,
-    resolveEntity: (name) => app.entities?.get(name),  // name → record, for subscribe-time authz
+    resolveEntity: (name) => app.entities?.get(name),
   });
 
   // Resolution runs in the background; `app.ready` completes once routes,

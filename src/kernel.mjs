@@ -11,7 +11,6 @@ import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { reconcileProjectedRecovery } from './projected-async.mjs';
 import { reconcileDurableEffects } from './durable-effects.mjs';
 import { getLog } from './log.mjs';
-import { createLivePostCommitConsumer } from './live-delivery.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -83,10 +82,11 @@ function buildDurableAdmission(app) {
 
 // Post-commit consumers are contributed by the module that owns each seam.
 // Kernel only assembles engaged seams — it does not implement fanout/latch.
+// Live: app.live.createConsumer (singular Live Delivery seam) when engaged.
 function engagedPostCommitConsumers(app, entities, { blobFinalizeConsumer, durableEffectsRegistry }) {
   return [
     blobFinalizeConsumer,
-    createLivePostCommitConsumer(app),
+    typeof app.live?.createConsumer === 'function' ? app.live.createConsumer(app) : null,
     createProjectedAsyncConsumer({ entities }),
     createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }),
     app._emailConsumer,
