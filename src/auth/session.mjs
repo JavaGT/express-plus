@@ -11,9 +11,9 @@
 // replaces, never a second auth path. When an app is constructed with a db
 // (`workbench({ db })`), session hydration becomes the default principal source.
 
-import { principal, anonymous } from './principal.mjs';
-import { config } from './config.mjs';
-import { ApiKey } from './auth-entities.mjs';
+import { principal, anonymous } from '../principal.mjs';
+import { config } from '../config.mjs';
+import { ApiKey } from './entities.mjs';
 import { createHash } from 'node:crypto';
 
 function sha256hex(s) {

@@ -17,7 +17,7 @@ and beyond, so Scope's better-auth can be retired at end state.
 
 ## Current workbench state (verified 2026-07-06)
 
-- `src/session.mjs`, `src/auth-entities.mjs`, `src/auth-routes.mjs`,
+- `src/auth/session.mjs`, `src/auth/entities.mjs`, `src/auth/routes.mjs`,
   `src/principal.mjs` — sessions + principal union (SPEC §6.2, `anonymous`
   first-class).
 - `src/grant.mjs`, `src/row-grant.mjs`, `src/check.mjs`, `src/authz.mjs` —
@@ -87,7 +87,7 @@ whether Scope users must re-login at cutover (session migration).
 
 ## Contention
 
-Owns: `auth-entities.mjs, auth-routes.mjs, session.mjs, principal.mjs,
+Owns: `auth/entities.mjs, auth/routes.mjs, auth/session.mjs, principal.mjs,
 rate-limit.mjs`. Coordinate with W2 only on `ddl.mjs` (new auth tables) and
 with everyone on the barrels (`index.mjs, internal.mjs, index.d.ts`) —
 coordinator resolves barrel conflicts at merge.

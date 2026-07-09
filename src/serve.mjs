@@ -24,7 +24,7 @@ import { anonymous } from './principal.mjs';
 import { mayVerb, mayRow } from './row-grant.mjs';
 import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
-import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './session.mjs';
+import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/session.mjs';
 import { createLiveDelivery } from './live-delivery.mjs';
 import { retentionPrune } from './committed-log.mjs';
 import { getLog } from './log.mjs';

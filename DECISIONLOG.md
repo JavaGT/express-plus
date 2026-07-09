@@ -563,3 +563,18 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Files:** `src/live-delivery.mjs`, `src/live.mjs`, `src/serve.mjs`,
   `src/kernel.mjs`, `src/internal.mjs`, `test/live-delivery-seam.test.mjs`,
   docs architecture-map + structural-investigation.
+
+## 2026-07-10 — S2–S7 structural programme closed
+
+- **S2 done:** Golden fold fixtures (`test/fixtures/fold-golden.mjs`,
+  `test/fold-golden.test.mjs`) lock createClient vs LiveList agreement on
+  lifecycle, value set, CRDT insert, and replay edges. Folds stay separate.
+- **S3 done:** Auth coat packaged under `src/auth/` (entities, routes, session,
+  passkey, totp, invitation, membership, index barrel). Compile authz stays
+  outside the coat directory.
+- **S4 parked:** No further HTTP leaf / Entity splits without runtime story.
+- **S5 rejected:** Keep explicit `engagedPostCommitConsumers` list (no
+  auto-discover).
+- **S6 demand-gated:** `workbench-local-*` no growth without projects/* spine.
+- **S7 process:** Field kinds re-defend known-app bar (AGENTS).
+- **Files:** auth moves + tests + `docs/structural-investigation-2026-07-10.md`.

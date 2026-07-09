@@ -24,15 +24,15 @@
 // split: workbench owns challenge issue/verify + credential storage; the app owns
 // the UI (button, prompt, error display).
 
-import { router } from './app.mjs';
-import { allowAnonymous, requireUser } from './route-gate.mjs';
-import { User, Session, Credential, Invitation, ApiKey, TwoFactor } from './auth-entities.mjs';
+import { router } from '../app.mjs';
+import { allowAnonymous, requireUser } from '../route-gate.mjs';
+import { User, Session, Credential, Invitation, ApiKey, TwoFactor } from './entities.mjs';
 import { createInvitation, acceptInvitation, rejectInvitation, listInvitationsForUser } from './invitation.mjs';
 import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.mjs';
-import { config } from './config.mjs';
-import { getActiveDb } from './db.mjs';
+import { config } from '../config.mjs';
+import { getActiveDb } from '../db.mjs';
 import { verifyTotp, verifyBackupCode } from './totp.mjs';
-import { serializeField } from './field-strategy.mjs';
+import { serializeField } from '../field-strategy.mjs';
 import {
   generateChallenge,
   challengeStore,

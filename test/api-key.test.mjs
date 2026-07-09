@@ -18,7 +18,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, { anonymous, ApiKey } from '../src/internal.mjs';
-import { apiKeyPrincipalOf, sessionPrincipalOf, SESSION_COOKIE } from '../src/session.mjs';
+import { apiKeyPrincipalOf, sessionPrincipalOf, SESSION_COOKIE } from '../src/auth/session.mjs';
 import { principal } from '../src/principal.mjs';
 import { requireUser } from '../src/route-gate.mjs';
 import { entity, text, ref, scope, grant, read, write, subscribe } from '../src/index.mjs';

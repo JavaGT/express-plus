@@ -24,7 +24,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, { User } from '../src/internal.mjs';
-import { sessionPrincipalOf, SESSION_COOKIE } from '../src/session.mjs';
+import { sessionPrincipalOf, SESSION_COOKIE } from '../src/auth/session.mjs';
 
 // Seed the two framework tables. The framework does not generate DDL in Phase 1;
 // the app/test harness owns CREATE TABLE. The Session schema is exactly the shape

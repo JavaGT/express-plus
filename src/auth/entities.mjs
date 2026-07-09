@@ -19,13 +19,13 @@
 // them only through the UNSCOPED, trusted query API, never a request path.
 
 import { randomBytes, createHash } from 'node:crypto';
-import { entity } from './entity/compile.mjs';
-import { text, hash, ref, date, number } from './field.mjs';
-import { scope } from './scope.mjs';
-import { never } from './scope-sql.mjs';
-import { grant, deny, read, subscribe } from './grant.mjs';
-import { schedule } from './schedule.mjs';
-import { config } from './config.mjs';
+import { entity } from '../entity/compile.mjs';
+import { text, hash, ref, date, number } from '../field.mjs';
+import { scope } from '../scope.mjs';
+import { never } from '../scope-sql.mjs';
+import { grant, deny, read, subscribe } from '../grant.mjs';
+import { schedule } from '../schedule.mjs';
+import { config } from '../config.mjs';
 import { generateSecret, generateBackupCodes } from './totp.mjs';
 
 function sha256hex(s) {

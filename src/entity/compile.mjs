@@ -37,7 +37,7 @@ import { generateDDL } from '../ddl.mjs';
 import { resolveRouteGate } from '../route-gate.mjs';
 import { effectEntries, validateEffectDeclaration } from '../effect-compiler.mjs';
 import { schedule as scheduleConstructors, triggerList } from '../schedule.mjs';
-import { compileMembershipAuthz } from '../membership.mjs';
+import { compileMembershipAuthz } from '../auth/membership.mjs';
 import { collectSideTableStrategies } from '../side-table-strategy.mjs';
 import { createEntityProjection } from './projection.mjs';
 import { createCrudHandlers } from './crud.mjs';

@@ -79,14 +79,19 @@ Not a fourth loop — transport over the machine.
 
 ## Coat (known-app seams on the machine)
 
+Auth product lives under **`src/auth/`** (directory packaging, S3). Compile-loop
+authorization (`authz.mjs`, `scope-sql`, `row-grant`) stays outside this folder.
+
 | Module | Role |
 | --- | --- |
-| `session.mjs` / `auth-entities.mjs` / `auth-routes.mjs` | Cookie session + User |
-| `passkey.mjs` / `totp.mjs` / `invitation.mjs` | Auth product |
+| `auth/entities.mjs` / `auth/routes.mjs` / `auth/session.mjs` | User, Session, login routes, cookie principal |
+| `auth/passkey.mjs` / `auth/totp.mjs` / `auth/invitation.mjs` | Auth product |
+| `auth/membership.mjs` | Two-plane membership sugar |
+| `auth/index.mjs` | Coat barrel |
 | `job-queue.mjs` | Worker claim/lease board |
 | `blob-store.mjs` | Blob bytes |
 | `public/workbench-ui*.mjs` + Svelte primitives | UI kit over the client store |
-| `public/workbench-local-*.mjs` | Local log / cross-tab (opt-in client) |
+| `public/workbench-local-*.mjs` | Local log / cross-tab (**demand-gated** — S6) |
 
 ## Structural rules of thumb
 

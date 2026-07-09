@@ -12,8 +12,8 @@
 // (`{Entity}_members` with columns `{Entity}_id`, `member_id`, `role`) using
 // the unscoped query API — the same trust class as auth-entity writes.
 
-import { Invitation } from './auth-entities.mjs';
-import { getActiveDb } from './db.mjs';
+import { Invitation } from './entities.mjs';
+import { getActiveDb } from '../db.mjs';
 
 // createInvitation({ targetEntity, targetId, role, targetUser, maxUses, expiresAt, createdBy })
 // → creates an Invitation row with an auto-generated token (32 random bytes, base64url).

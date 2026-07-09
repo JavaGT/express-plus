@@ -3,7 +3,7 @@ import { mayRow } from './row-grant.mjs';
 import { admitSystemMutation, startClockTriggers } from './schedule.mjs';
 import { createServer, durableMutationVariant } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects, executeEffectsForEvent } from './effect-compiler.mjs';
-import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth-entities.mjs';
+import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
 import { createWriteQueue } from './write-queue.mjs';
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';

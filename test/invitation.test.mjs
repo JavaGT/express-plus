@@ -16,7 +16,7 @@ import {
   acceptInvitation,
   rejectInvitation,
   listInvitationsForUser,
-} from '../src/invitation.mjs';
+} from '../src/auth/invitation.mjs';
 import { principal } from '../src/principal.mjs';
 
 const owner = principal({ type: 'user', id: 'owner-1' });

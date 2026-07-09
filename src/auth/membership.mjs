@@ -27,11 +27,11 @@ import {
   membershipOwnerCol,
   MEMBER_COLUMN,
   anyOf,
-} from './scope-sql.mjs';
-import { scope } from './scope.mjs';
-import { grant, deny, read, write, subscribe, admin } from './grant.mjs';
-import { setActiveEntity } from './db.mjs';
-import { getActiveDb } from './db.mjs';
+} from '../scope-sql.mjs';
+import { scope } from '../scope.mjs';
+import { grant, deny, read, write, subscribe, admin } from '../grant.mjs';
+import { setActiveEntity } from '../db.mjs';
+import { getActiveDb } from '../db.mjs';
 
 // Owner always receives the full capability set.
 const OWNER_CAPABILITIES = Object.freeze([read, write, subscribe, admin]);

@@ -16,7 +16,7 @@ import assert from 'node:assert/strict';
 
 import workbench from '../src/app.mjs';
 import { createLiveStore, LiveChannel, decodeResult } from '../public/workbench-client.mjs';
-import { SESSION_COOKIE } from '../src/session.mjs';
+import { SESSION_COOKIE } from '../src/auth/session.mjs';
 import { canUndoField, undoableFieldKinds } from '../src/field-laws.mjs';
 
 // ---------------------------------------------------------------------------

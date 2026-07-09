@@ -15,7 +15,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import workbench from '../src/app.mjs';
-import { SESSION_COOKIE } from '../src/session.mjs';
+import { SESSION_COOKIE } from '../src/auth/session.mjs';
 import { createAuthClient } from '../public/workbench-client.mjs';
 
 // An owner-scoped Note: the default-on route gate admits a user, the row grant
@@ -388,7 +388,7 @@ test('identifyBy: a credential matching no email falls through to username', asy
   const { origin, app } = await bootWithEmail(t);
   // Seed a user directly in the username column (the SECOND identity field),
   // so the email lookup misses but the username lookup hits.
-  const { User } = await import('../src/auth-entities.mjs');
+  const { User } = await import('../src/auth/entities.mjs');
   User.create({ username: 'bob', password: 'hunter2' });
   // A login with the bob username credential: no email match, username match.
   const res = await fetch(`${origin}/auth/login`, {

@@ -23,8 +23,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import workbench from '../src/app.mjs';
-import { SESSION_COOKIE } from '../src/session.mjs';
-import { User, TwoFactor } from '../src/auth-entities.mjs';
+import { SESSION_COOKIE } from '../src/auth/session.mjs';
+import { User, TwoFactor } from '../src/auth/entities.mjs';
 import {
   generateSecret,
   hotp,
@@ -33,7 +33,7 @@ import {
   verifyBackupCode,
   base32Encode,
   base32Decode,
-} from '../src/totp.mjs';
+} from '../src/auth/totp.mjs';
 
 // ---- helpers -----------------------------------------------------------------
 

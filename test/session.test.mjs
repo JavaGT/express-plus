@@ -19,7 +19,7 @@ import workbench, {
   entity } from '../src/internal.mjs';
 import {
   parseCookies, sessionCookie, sessionPrincipalOf, SESSION_COOKIE,
-} from '../src/session.mjs';
+} from '../src/auth/session.mjs';
 import { anonymous } from '../src/principal.mjs';
 
 // An owner-scoped Note (default-on route gate + owner row grant). Used to prove

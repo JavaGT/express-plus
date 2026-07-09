@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, { entity } from '../src/internal.mjs';
-import { parseCookies, sessionCookie } from '../src/session.mjs';
+import { parseCookies, sessionCookie } from '../src/auth/session.mjs';
 
 // M1: Malformed cookie does not throw → anonymous principal, not 500
 test('parseCookies: malformed % escape does not throw', () => {

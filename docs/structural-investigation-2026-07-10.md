@@ -1,103 +1,74 @@
 # Structural investigation — 2026-07-10
 
-Investigation only. No code moves in this commit. Philosophy is now binding in
-`AGENTS.md` / `CONTEXT.md` / `docs/architecture-map.md`. Candidates below are
-ranked by **machine risk** (second path) then **accidental thickness**.
+Philosophy is binding in `AGENTS.md` / `CONTEXT.md` / `docs/architecture-map.md`.
+Candidates below are ranked by **machine risk** then **accidental thickness**.
 
-## Measured surface (approx line counts)
+## Status
+
+| ID | Candidate | Status |
+| --- | --- | --- |
+| **S1** | Live Delivery singular public seam | **done** (`createLiveDelivery`) |
+| **S2** | Golden fold fixtures createClient vs LiveList | **done** (`test/fold-golden.test.mjs`) |
+| **S3** | Auth coat packaging under `src/auth/` | **done** (directory + barrel; public API unchanged) |
+| **S4** | Further HTTP leaf / Entity splits | **parked** (reaffirmed) |
+| **S5** | Auto-discover post-commit consumers | **rejected** — keep explicit engaged list |
+| **S6** | Grow `workbench-local-*` | **demand-gated** — no growth without projects/* spine |
+| **S7** | New field kinds | **process bar only** (AGENTS known-app bar) |
+
+## Measured surface (approx, pre-S3)
 
 | Surface | Lines | Role |
 | --- | --- | --- |
-| Auth coat (`passkey`, `totp`, `auth-routes`, `auth-entities`, `invitation`, `session`, `membership`) | ~2.2k | Coat |
-| Live deliver (`live*`, `websocket`, `field-delta`, `field-pace`) | ~1.2k | Deliver loop |
-| HTTP skin (`http*`, `serve`, `middleware`) | ~1.5k | Skin |
-| Client (`workbench-client` + local + ui bindings) | ~2.0k | Deliver + coat |
-| `entity/compile` | ~650 | Compile |
-| `effect-compiler` | ~690 | Compile/commit |
-| `scope-sql` | ~715 | Compile |
-| `pipeline` | ~530 | Commit |
-| `kernel` | ~200 | Commit assembly |
+| Auth coat | ~2.2k | Coat → now `src/auth/` |
+| Live deliver | ~1.2k | Deliver loop |
+| HTTP skin | ~1.5k | Skin |
+| Client | ~2.0k | Deliver + coat |
 
-## Candidates
+## Candidates (detail)
 
-### S1 — Live Delivery singular public seam (**done** 2026-07-10)
+### S1 — Live Delivery singular public seam (**done**)
 
-**Landed:** `createLiveDelivery(httpServer, opts)` →
-`{ emit, count, close, createConsumer }`. Serve wires delivery; Kernel
-registers `app.live.createConsumer(app)`. `createLiveServer` is the same
-function (alias). `live.mjs` re-exports only. Internals remain private
-implementation of the seam.
+`createLiveDelivery(httpServer, opts)` → `{ emit, count, close, createConsumer }`.
+Serve engages delivery; Kernel registers `app.live.createConsumer(app)`.
+`createLiveServer` is the same function. `live.mjs` re-exports.
 
-### S2 — Client fold parity contract (Worth exploring)
+### S2 — Client fold parity contract (**done**)
 
-**Observation:** Replay decision is shared. Folds diverge by design:
-`createClient` uses declared `event.reduce`; LiveList uses hardcoded
-`_applyEvent`. Zero-import forces copy of pure grammar only.
+Golden fixtures in `test/fixtures/fold-golden.mjs` + `test/fold-golden.test.mjs`:
+lifecycle CRUD, value `{set}`, CRDT insert, replay edges. createClient reducers
+mirror LiveList whole-value + delta-XOR semantics for those cases. Folds stay
+separate implementations; contract is locked by tests.
 
-**Change (stopgap):** Golden fixtures both folds must pass for lifecycle +
-value/crdt/ordered ops. **Not** full LiveList codegen into pipeline.
+### S3 — Auth coat packaging (**done**)
 
-**Change (later, if folds diverge in production bugs):** Generate field-fold
-core or shared test corpus with stronger parity.
+Moved product auth modules into `src/auth/`:
+`entities`, `routes`, `session`, `passkey`, `totp`, `invitation`, `membership`,
+plus `index.mjs` barrel. Public exports via `index.mjs` / `internal.mjs` paths
+updated. **Not** a second grant system — compile authz remains at top-level
+`authz.mjs` / `scope-sql` / `row-grant`.
 
-**Risk:** Low for fixtures; high for full merge. **Priority:** Medium.
+### S4 — HTTP leaf cluster (**parked**)
 
-### S3 — Auth coat packaging (Speculative / defer)
+`http-*` leaves pass deletion test as focused utilities. No further Entity/HTTP
+deepening without a compiled-Entity runtime story (DECISIONLOG).
 
-**Observation:** Auth product (~2.2k) is larger than Live (~1.2k). Correct as
-coat if it stays on Principal + routes. Cognitive map of `src/` is skewed.
+### S5 — Kernel engaged-consumer list (**rejected**)
 
-**Change options:** (a) document-only (architecture-map already marks coat);
-(b) `src/auth/` directory move without API change; (c) optional
-`workbench/auth` subpath export.
+Keep the explicit list in `engagedPostCommitConsumers`. Auto-discovery by
+convention is a second-path risk and fails the deletion test (relocates wiring
+into magic).
 
-**Deletion test:** (b)/(c) often **relocate** unless import graph simplifies.
-Prefer (a) until a real dual-auth bug appears.
+### S6 — `workbench-local-*` (**demand-gated**)
 
-**Priority:** Low. Do not invent a second grant system while “cleaning.”
+Keep tests and modules. Do not grow inverse/undo journals there (second
+reconciliation path). Expand only when a `projects/*` app is the offline spine.
 
-### S4 — HTTP leaf cluster (Parked — reaffirm)
+### S7 — Field-kind coat (**process**)
 
-**Observation:** Seven `http-*` files + serve. Already parked in DECISIONLOG:
-pass deletion test as focused utilities; further Entity/HTTP deepenings without
-runtime story relocate ceremony.
-
-**Change:** None. Map them as “skin” in architecture-map (done).
-
-### S5 — Kernel engaged-consumer list (Small hygiene)
-
-**Observation:** `engagedPostCommitConsumers` still a hand list in `kernel.mjs`,
-but each item is a module factory — correct thin assembly.
-
-**Change:** Only if a new pattern of “auto-discover consumers” is needed.
-Discovery-by-convention is a second path risk. **Keep explicit list.**
-
-### S6 — `workbench-local-*` (Investigate demand)
-
-**Observation:** Local log/store exist with tests; W5 census mixed build/defer.
-Not on the main createLiveStore happy path for all apps.
-
-**Change:** Keep until a `projects/*` app is the spine for offline/cross-tab;
-then fold vocabulary into the client story. Do not grow inverse/undo there if
-it becomes a second journal (AGENTS / DECISIONLOG #100).
-
-### S7 — Field-kind coat (Ongoing bar)
-
-**Observation:** Replace-stub CRDTs, vector, FTS, etc. are coat/field plugins.
-Each must re-defend known-app need (AGENTS now states this).
-
-**Change:** No structural move; process bar only.
-
-## Recommended sequence if executing
-
-1. ~~**S1** Live Delivery singular seam~~ **done**.
-2. **S2** Golden fold fixtures (correctness insurance).
-3. **S3** only as directory packaging if author pain is high — not for purity.
-4. Never un-park **S4** without a compiled-Entity runtime story.
-5. Leave **S5** explicit list; **S6** demand-gated.
+Each new field kind must re-defend known-app need (AGENTS). No structural move.
 
 ## Revisit triggers
 
-- Production bug from LiveList vs createClient fold divergence → escalate S2.
-- Multi-process writers → Kernel/write-queue/SQLite model reopened (not this list).
+- Production bug from LiveList vs createClient fold divergence → strengthen S2 fixtures.
+- Multi-process writers → Kernel/write-queue/SQLite model reopened.
 - Auth coat invents grant bypass → emergency singular-system fix, not packaging.

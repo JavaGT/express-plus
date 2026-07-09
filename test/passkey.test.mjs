@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import workbench from '../src/app.mjs';
-import { SESSION_COOKIE } from '../src/session.mjs';
+import { SESSION_COOKIE } from '../src/auth/session.mjs';
 import {
   generateChallenge,
   createChallengeStore,
@@ -26,7 +26,7 @@ import {
   verifyAuthentication,
   rpConfig,
   challengeStore,
-} from '../src/passkey.mjs';
+} from '../src/auth/passkey.mjs';
 
 // ---- helpers -----------------------------------------------------------------
 
