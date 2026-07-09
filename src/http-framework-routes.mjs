@@ -16,6 +16,7 @@ import { sendJson } from './http-response.mjs';
 import { readScopedRow, authorizeRow } from './http-crud-dispatch.mjs';
 import { readSeq, readSince, minSeqForScope } from './committed-log.mjs';
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
+import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 
 // routes — resolved at request time from `/snapshot/:entity/:id` and
 // `/events-since/:entity/:id`. The entity table IS the snapshot (scope's proven
@@ -51,7 +52,7 @@ export async function handleResyncRoute(app, req, res, principal) {
   const [, entityName, id] = seg;
   const entity = app.entities.get(entityName);
   if (!entity) { sendJson(res, 404, { error: 'not found' }); return true; }
-  const scopeKey = `${entityName}:${id}`;
+  const scopeKey = scopeOf(entityName, id).key;
   if (isSnapshot) return snapshotRoute(app, entity, id, scopeKey, principal, res);
   const cursor = Number(url.searchParams.get('cursor') ?? 0);
   return eventsSinceRoute(app, entity, scopeKey, principal, res, cursor);
@@ -75,15 +76,13 @@ async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
 
 async function snapshotScopeRoute(app, scope, principal, res) {
   const lastSeq = readSeq(app.db, scope);
-  // Try to resolve the scope as an entity instance
-  const colon = scope.indexOf(':');
-  if (colon > 0) {
-    const entityName = scope.slice(0, colon);
-    const id = scope.slice(colon + 1);
-    const entity = app.entities.get(entityName);
+  // Try to resolve the scope as an entity instance via Scope handle grammar
+  const handle = tryParseScopeKey(scope);
+  if (handle) {
+    const entity = app.entities.get(handle.entity);
     if (entity) {
-      const row = readScopedRow(app, entity, id, principal);
-      const auth = await authorizeRow(app, entity, 'read', id, principal, row);
+      const row = readScopedRow(app, entity, handle.id, principal);
+      const auth = await authorizeRow(app, entity, 'read', handle.id, principal, row);
       if (!auth.status) {
         sendJson(res, 200, { snapshot: auth.row, cursors: { [scope]: lastSeq } });
         return true;
@@ -124,7 +123,8 @@ async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
 async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
   // events-since authorizes against the CURRENT row (fail closed: a deleted or
   // out-of-scope row yields 404). The log is replayed for an admitted viewer.
-  const auth = await authorizeRow(app, entity, 'read', scopeKey.slice(scopeKey.indexOf(':') + 1), principal);
+  const id = tryParseScopeKey(scopeKey)?.id;
+  const auth = await authorizeRow(app, entity, 'read', id, principal);
   if (auth.status) {
     sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
     return true;

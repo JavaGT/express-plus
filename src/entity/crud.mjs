@@ -10,6 +10,7 @@
 
 import { randomUUID } from 'node:crypto';
 import { validateMutation, ValidationError } from '../field-strategy.mjs';
+import { scopeOf } from '../scope-handle.mjs';
 
 function ownerFieldOf(entity) {
   for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
@@ -33,7 +34,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       return [{
         handle: verbs.created.handle,
         type: verbs.created.type,
-        scope: `${name}:${id}`,
+        scope: scopeOf(name, id).key,
         data,
       }];
     },
@@ -89,7 +90,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       return [{
         handle: verbs.updated.handle,
         type: verbs.updated.type,
-        scope: `${name}:${id}`,
+        scope: scopeOf(name, id).key,
         data,
       }];
     },
@@ -98,7 +99,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       return [{
         handle: verbs.removed.handle,
         type: verbs.removed.type,
-        scope: `${name}:${payload.id}`,
+        scope: scopeOf(name, payload.id).key,
         data: { id: payload.id },
       }];
     },

@@ -6,6 +6,7 @@ import { mayFieldOp } from './row-grant.mjs';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
 import { getActiveDb, getActiveEntity } from './db.mjs';
 import * as eventHandles from './event-handle.mjs';
+import { scopeOf } from './scope-handle.mjs';
 import { upsert } from './driver.mjs';
 
 async function authorizeFieldOp(record, fieldName, capability, row, principal) {
@@ -132,7 +133,7 @@ function mapMutateHandlers(entityName, fieldEntries) {
       return [{
         handle,
         type: handle.type,
-        scope: `${entityName}:${owner}`,
+        scope: scopeOf(entityName, owner).key,
         data: { owner, member, role: hasRole ? (payload.role ?? null) : undefined },
       }];
     };
@@ -145,7 +146,7 @@ function mapMutateHandlers(entityName, fieldEntries) {
       return [{
         handle,
         type: handle.type,
-        scope: `${entityName}:${owner}`,
+        scope: scopeOf(entityName, owner).key,
         data: { owner, member, role: payload.role ?? null },
       }];
     };
@@ -155,7 +156,7 @@ function mapMutateHandlers(entityName, fieldEntries) {
       return [{
         handle,
         type: handle.type,
-        scope: `${entityName}:${owner}`,
+        scope: scopeOf(entityName, owner).key,
         data: { owner, member },
       }];
     };
@@ -300,7 +301,7 @@ function orderedMutateHandlers(entityName, fieldEntries) {
       return [{
         handle,
         type: handle.type,
-        scope: `${entityName}:${owner}`,
+        scope: scopeOf(entityName, owner).key,
         data: { owner, id, key: payload.key, value: payload.value },
       }];
     };
@@ -313,7 +314,7 @@ function orderedMutateHandlers(entityName, fieldEntries) {
       return [{
         handle,
         type: handle.type,
-        scope: `${entityName}:${owner}`,
+        scope: scopeOf(entityName, owner).key,
         data: { owner, id: String(payload.id), key: payload.key },
       }];
     };
@@ -324,7 +325,7 @@ function orderedMutateHandlers(entityName, fieldEntries) {
       return [{
         handle,
         type: handle.type,
-        scope: `${entityName}:${owner}`,
+        scope: scopeOf(entityName, owner).key,
         data: { owner, entries: entries.map((e) => ({ id: String(e.id), key: e.key })) },
       }];
     };
@@ -337,7 +338,7 @@ function orderedMutateHandlers(entityName, fieldEntries) {
       return [{
         handle,
         type: handle.type,
-        scope: `${entityName}:${owner}`,
+        scope: scopeOf(entityName, owner).key,
         data: { owner, id: String(payload.id) },
       }];
     };
@@ -437,7 +438,7 @@ function logMutateHandlers(entityName, fieldEntries) {
       return [{
         handle,
         type: handle.type,
-        scope: `${entityName}:${owner}`,
+        scope: scopeOf(entityName, owner).key,
         data: { owner, id, ...entry },
       }];
     };
@@ -524,7 +525,7 @@ function ephemeralMutateHandlers(entityName, fieldEntries) {
       return [{
         handle,
         type: handle.type,
-        scope: `${entityName}:${owner}`,
+        scope: scopeOf(entityName, owner).key,
         data: { owner, client, cells: payload.cells ?? {} },
       }];
     };

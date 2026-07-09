@@ -2,6 +2,7 @@ import { resolveStrategy } from './field-strategy.mjs';
 import { getLog } from './log.mjs';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
 import { upsert } from './driver.mjs';
+import { tryParseScopeKey } from './scope-handle.mjs';
 
 export function resolveProjectedAsyncTriggerTypes(desc, entityName) {
   if (!desc.from) return [`${entityName}.created`, `${entityName}.updated`];
@@ -67,10 +68,10 @@ async function recomputeFields(entityRecord, entityName, rowId, db, fields, { sc
 export function createProjectedAsyncConsumer({ entities }) {
   return async (events, { db }) => {
     for (const ev of events) {
-      const colon = ev.scope?.indexOf(':');
-      if (colon < 0) continue;
-      const entityName = ev.scope.slice(0, colon);
-      const rowId = ev.scope.slice(colon + 1);
+      const handle = tryParseScopeKey(ev.scope);
+      if (!handle) continue;
+      const entityName = handle.entity;
+      const rowId = handle.id;
       const entityRecord = entities?.get(entityName);
       if (!entityRecord || !entityRecord.projectedAsyncFields?.length) continue;
       const triggered = [];
@@ -143,10 +144,10 @@ export async function reconcileProjectedRecovery(db, entities) {
   const recoveryByScope = consumerCursorMap(db, CONSUMER);
 
   for (const { scope, head } of scopes) {
-    const colon = scope.indexOf(':');
-    if (colon < 0) continue;
-    const entityName = scope.slice(0, colon);
-    const rowId = scope.slice(colon + 1);
+    const handle = tryParseScopeKey(scope);
+    if (!handle) continue;
+    const entityName = handle.entity;
+    const rowId = handle.id;
     const entityRecord = projectedEntities.get(entityName);
     if (!entityRecord) continue; // no projected.async fields → nothing to recover
     const applied = recoveryByScope.get(scope) ?? 0;

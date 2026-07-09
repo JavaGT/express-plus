@@ -9,6 +9,7 @@
 import { anonymous } from './principal.mjs';
 import { mayRow } from './row-grant.mjs';
 import { validatePaceSelection } from './field-pace.mjs';
+import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 
 const MAX_SUBS_PER_CONN = 256;
 const MAX_ID_LEN = 256;
@@ -22,10 +23,10 @@ export function normalizeSubscribeMsg(msg) {
     const interest = hasExplicitInterest ? { ...msg.interest } : {};
 
     if (!hasExplicitInterest) {
-      const colon = scope.indexOf(':');
-      if (colon > 0 && colon < scope.length - 1) {
-        interest.entity = scope.slice(0, colon);
-        interest.id = scope.slice(colon + 1);
+      const handle = tryParseScopeKey(scope);
+      if (handle) {
+        interest.entity = handle.entity;
+        interest.id = handle.id;
       }
     }
 
@@ -43,12 +44,11 @@ export function normalizeSubscribeMsg(msg) {
   }
 
   if (typeof msg.entity === 'string' && msg.id !== undefined) {
-    const idStr = String(msg.id);
-    const scope = `${msg.entity}:${idStr}`;
-    const interest = { entity: msg.entity, id: msg.id };
+    const handle = scopeOf(msg.entity, msg.id);
+    const interest = { entity: handle.entity, id: handle.id };
     if (msg.fields !== undefined && msg.fields !== null) interest.fields = msg.fields;
     if (msg.pace !== undefined && msg.pace !== null) interest.pace = msg.pace;
-    return { scope, interest };
+    return { scope: handle.key, interest };
   }
 
   return null;

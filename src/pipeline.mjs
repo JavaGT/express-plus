@@ -17,6 +17,7 @@ import { lifecycleVerb, parseEventType } from './event-handle.mjs';
 import { txn } from './driver.mjs';
 import { isPlainObject } from './field-strategy.mjs';
 import { createRequire } from 'node:module';
+import { decideReplay } from './replay-decision.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -475,10 +476,10 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 // foreign live events — there is no second apply path (AGENTS.md, one
 // reconciliation path).
 //
-// Replay, per incoming event's seq vs expected (cursor + 1):
-//  - duplicate (seq < expected) — idempotent skip; no fold, cursor unchanged.
-//  - gap       (seq > expected) — do NOT apply; signal a resync.
-//  - next      (seq == expected) — reduce once, advance the cursor.
+// Replay decision is shared with LiveList via `decideReplay` (span-aware):
+//  - duplicate — idempotent skip; no fold, cursor unchanged.
+//  - gap       — do NOT apply; signal a resync.
+//  - next      — reduce once, advance the cursor to span hi.
 export function createClient({ events = [] } = {}) {
   // Reducer registry, keyed by event type. An event type with no reducer here
   // has nothing to fold — ingesting it is an error, not a silent drop.
@@ -500,7 +501,7 @@ export function createClient({ events = [] } = {}) {
   }
 
   function ingest(incoming) {
-    const { type, scope, seq } = incoming;
+    const { type, scope, seq, seqSpan } = incoming;
     const reduce = reducers.get(type);
     if (typeof reduce !== 'function') {
       throw new Error(
@@ -510,19 +511,17 @@ export function createClient({ events = [] } = {}) {
       );
     }
 
-    const expected = cursor(scope) + 1;
-    if (seq < expected) {
-      // duplicate — idempotent skip (a later live redelivery of an own event).
+    const decision = decideReplay(cursor(scope), seqSpan ?? seq);
+    if (decision.kind === 'duplicate') {
       return { applied: false, duplicate: true };
     }
-    if (seq > expected) {
-      // gap — a missing event sits between; do not apply, signal resync.
+    if (decision.kind === 'gap') {
       return { applied: false, resync: true };
     }
 
-    // next — fold exactly once and advance the cursor.
+    // next — fold exactly once and advance the cursor to span hi.
     states.set(scope, reduce(state(scope) ?? {}, incoming));
-    cursors.set(scope, seq);
+    cursors.set(scope, decision.cursor);
     return { applied: true };
   }
 

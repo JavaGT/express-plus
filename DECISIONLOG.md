@@ -517,3 +517,24 @@ Decision: Collapse tick-engine and reaper into Schedule startClockTriggers; priv
 - **Commits:** 81e1436
 - **Base at merge:** main @ bfd333bdcafe83643eb01aff720985e8f52f6b97
 - **Conflict resolution:** NONE
+
+## 2026-07-10 — Scope handle + Live Delivery + Kernel assembly + Replay decision
+
+Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
+
+### Scope handle (ADR-0004)
+
+- **Decision:** Typed **Scope handle** owns committed-log scope grammar (`Entity:id`). Module `src/scope-handle.mjs` (`scopeOf`, `parseScopeKey`, `tryParseScopeKey`). Migrated all `entity:id` format/parse callers (live, kernel consumer path, projected-async, effects, HTTP resync, entity CRUD, side-table, field-delta). Peer of Event handle; distinct from Grant row-scope (`src/scope.mjs`).
+- **Files:** `src/scope-handle.mjs`, `docs/adr/0004-typed-scope-handles.md`, callers under `src/`
+- **Gate:** unit tests in `test/scope-handle.test.mjs`
+
+### Live Delivery + Kernel assembly
+
+- **Decision:** Live post-commit fan-out + per-batch row latch moves to `src/live-delivery.mjs` (`createLivePostCommitConsumer`). Kernel public seam is dispatch + durable variant + write queue; post-commit consumers are assembled from engaged seams (`engagedPostCommitConsumers`) rather than implemented in Kernel. `authorize: () => true` stays (route gate + in-txn admission own Grants). Legacy entity+id subscribe still works; both paths format/parse via Scope handle.
+- **Files:** `src/live-delivery.mjs` (new), `src/kernel.mjs`, `src/live-fanout.mjs`, `src/live-admission.mjs`
+
+### Replay decision + Seq cursor
+
+- **Decision:** Pure `decideReplay(cursor, seqOrSpan)` + `normalizeSeqSpan` in `src/replay-decision.mjs`. `createClient.ingest` is span-aware (accepts `seqSpan` or single `seq`). LiveList `_ingest` calls the same decision (inlined under GENERATED markers for zero-import client). Folds stay separate. Parity test locks the client copy to the source predicates.
+- **Files:** `src/replay-decision.mjs`, `src/pipeline.mjs`, `public/workbench-client.mjs`, `test/replay-decision*.test.mjs`
+- **Gate:** `node --test` **1635/1635/0**

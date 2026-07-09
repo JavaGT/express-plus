@@ -2,6 +2,7 @@ import { effectEntries } from './effect-compiler.mjs';
 import { parseEventType } from './event-handle.mjs';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
 import { getLog } from './log.mjs';
+import { tryParseScopeKey } from './scope-handle.mjs';
 
 const CONSUMER = 'effect.durable';
 
@@ -39,7 +40,7 @@ function durableJobId(ev, kind) {
 
 function durablePayload(ev, effect) {
   const delta = ev.data || {};
-  const origin = { id: ev.scope.split(':')[1] };
+  const origin = { id: tryParseScopeKey(ev.scope)?.id };
   const data = typeof effect.with === 'function' ? effect.with({ delta, origin }) : (effect.with ?? {});
   return {
     event: {

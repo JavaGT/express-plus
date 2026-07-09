@@ -11,6 +11,32 @@
 //                    {type:'event', entity, id, seq, seqSpan, event, delta?}
 //                    {type:'error', message}
 
+// --- BEGIN GENERATED from src/replay-decision.mjs (keep in sync; zero-import) ---
+function normalizeSeqSpan(seqOrSpan) {
+  if (Array.isArray(seqOrSpan) && seqOrSpan.length >= 2) {
+    const lo = Number(seqOrSpan[0]);
+    const hi = Number(seqOrSpan[1]);
+    if (!Number.isFinite(lo) || !Number.isFinite(hi)) {
+      throw new Error('seqSpan must be finite numbers');
+    }
+    return [lo, hi];
+  }
+  const seq = Number(seqOrSpan);
+  if (!Number.isFinite(seq)) {
+    throw new Error('seq must be a finite number');
+  }
+  return [seq, seq];
+}
+
+function decideReplay(cursor, seqOrSpan) {
+  const [lo, hi] = normalizeSeqSpan(seqOrSpan);
+  const expected = (Number(cursor) || 0) + 1;
+  if (hi < expected) return { kind: 'duplicate' };
+  if (lo > expected) return { kind: 'gap' };
+  return { kind: 'next', cursor: hi };
+}
+// --- END GENERATED from src/replay-decision.mjs ---
+
 function normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent) {
   if (typeof optionsOrOnEvent === 'function' || optionsOrOnEvent === undefined || optionsOrOnEvent === null) {
     return { options: {}, onEvent: optionsOrOnEvent };
@@ -549,13 +575,12 @@ export class LiveList {
   _ingest(normalized) {
     if (this._closed) return;
     const { seqSpan, event, delta } = normalized;
-    const exp = this._cursor + 1;
+    const decision = decideReplay(this._cursor, seqSpan);
 
-    if (seqSpan[1] < exp) {
-      // Duplicate — already applied
+    if (decision.kind === 'duplicate') {
       return;
     }
-    if (seqSpan[0] > exp) {
+    if (decision.kind === 'gap') {
       // Gap — missing events. Queue this envelope then trigger a resync;
       // after the resync fills the gap, the queue drain will re-process it
       // through _ingest when the cursor is caught up.
@@ -563,9 +588,9 @@ export class LiveList {
       this._resync().catch(() => {});
       return;
     }
-    // Within range — apply the event
+    // next — apply and advance cursor to span hi (shared Replay decision)
     this._applyEvent(event, delta);
-    this._cursor = seqSpan[1];
+    this._cursor = decision.cursor;
     this._render();
   }
 

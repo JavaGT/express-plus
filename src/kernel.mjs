@@ -11,6 +11,7 @@ import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { reconcileProjectedRecovery } from './projected-async.mjs';
 import { reconcileDurableEffects } from './durable-effects.mjs';
 import { getLog } from './log.mjs';
+import { createLivePostCommitConsumer } from './live-delivery.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -43,37 +44,6 @@ function buildEffects(entities) {
     validateEffects(forValidation);
   }
   return effectsRegistry;
-}
-
-function buildLiveFanoutConsumer(app) {
-  if (!app.live) return null;
-  return async (events, { db }) => {
-    // Latch the hydrated authz row per scope within a commit batch: a batch may
-    // carry several events for the same row (e.g. multiple side-table field
-    // updates), and re-reading + re-hydrating via findById for each is wasted
-    // work at 30–60Hz. The first event for a scope reads+hydrates; later events
-    // in the same batch reuse it. A removed row is `undefined` and stays so.
-    const rowLatch = new Map();
-    for (const ev of events) {
-      const colon = ev.scope.indexOf(':');
-      if (colon < 0) continue;
-      const entityName = ev.scope.slice(0, colon);
-      const id = ev.scope.slice(colon + 1);
-      const entity = app.entities?.get(entityName);
-      const scope = ev.scope;
-      let row = rowLatch.get(scope);
-      if (row === undefined && !rowLatch.has(scope)) {
-        try {
-          const raw = db.prepare(`SELECT * FROM ${entityName} WHERE id = ?`).get(id);
-          row = raw ? entity?.hydrate?.(raw, null) ?? raw : undefined;
-        } catch {
-          row = undefined;
-        }
-        rowLatch.set(scope, row);
-      }
-      app.live.emit(entity, id, row, ev, { hydrated: row !== undefined && typeof entity?.hydrate === 'function' });
-    }
-  };
 }
 
 function buildDurableAdmission(app) {
@@ -111,6 +81,18 @@ function buildDurableAdmission(app) {
   };
 }
 
+// Post-commit consumers are contributed by the module that owns each seam.
+// Kernel only assembles engaged seams — it does not implement fanout/latch.
+function engagedPostCommitConsumers(app, entities, { blobFinalizeConsumer, durableEffectsRegistry }) {
+  return [
+    blobFinalizeConsumer,
+    createLivePostCommitConsumer(app),
+    createProjectedAsyncConsumer({ entities }),
+    createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }),
+    app._emailConsumer,
+  ].filter(Boolean);
+}
+
 export function buildKernel(app) {
   const { handlers, projections, entities } = collectAppEntities(app);
   for (const fe of FRAMEWORK_ENTITIES) {
@@ -134,17 +116,13 @@ export function buildKernel(app) {
     entities,
   });
   app.blobColumns = blobColumns;
-  const postCommitConsumers = [
-    blobFinalizeConsumer,
-    buildLiveFanoutConsumer(app),
-    createProjectedAsyncConsumer({ entities }),
-    createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }),
-    app._emailConsumer,
-  ].filter(Boolean);
   app.durableEffectsRegistry = durableEffectsRegistry;
 
   app.writeQueue = createWriteQueue();
 
+  // Kernel public seam: durable mutation server (handlers, admission, write
+  // queue). authorize:()=>true is intentional — route gate + in-txn admission
+  // own Grants (no second auth path at the outer hook).
   return createServer({
     handlers,
     authorize: () => true,
@@ -155,7 +133,10 @@ export function buildKernel(app) {
       blobAdapter,
       effectsRegistry: effectsRegistry.size > 0 ? effectsRegistry : null,
       executeEffectsForEvent,
-      postCommitConsumers,
+      postCommitConsumers: engagedPostCommitConsumers(app, entities, {
+        blobFinalizeConsumer,
+        durableEffectsRegistry,
+      }),
     }),
   });
 }

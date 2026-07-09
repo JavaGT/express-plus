@@ -10,6 +10,7 @@ import { ValidationError } from './field-strategy.mjs';
 import { readProjectedCursors } from './projected-async.mjs';
 import { projectedCursorHeaders } from './http-response.mjs';
 import { mayRow } from './row-grant.mjs';
+import { scopeOf } from './scope-handle.mjs';
 
 // One kernel mutation through the write queue, translating the failure modes
 // shared by create/update/remove: queue starvation → 503, validation → 400
@@ -102,7 +103,7 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
       .prepare(`SELECT * FROM ${table} AS t0 WHERE t0.id = :id`)
       .get({ id });
     entity.deserializeRow(created);
-    sendJson(res, 201, created, committedEventHeaders(result, actionId, `${table}:${id}`));
+    sendJson(res, 201, created, committedEventHeaders(result, actionId, scopeOf(table, id).key));
     return;
   }
 
@@ -122,7 +123,7 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
     if (!result) return;
     const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
     entity.deserializeRow(updated);
-    sendJson(res, 200, updated, committedEventHeaders(result, actionId, `${table}:${params.id}`));
+    sendJson(res, 200, updated, committedEventHeaders(result, actionId, scopeOf(table, params.id).key));
     return;
   }
 
@@ -140,7 +141,7 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
       principal,
     }, { validation400: false });
     if (!result) return;
-    res.writeHead(204, committedEventHeaders(result, actionId, `${table}:${params.id}`));
+    res.writeHead(204, committedEventHeaders(result, actionId, scopeOf(table, params.id).key));
     res.end();
     return;
   }

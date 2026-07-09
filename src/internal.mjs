@@ -20,6 +20,9 @@ export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconc
 export { buildDurableEffectsRegistry, createDurableEffectsConsumer, reconcileDurableEffects } from './durable-effects.mjs';
 export { createBlobLifecycle } from './blob-lifecycle.mjs';
 export { EventKind, created, updated, removed, fieldSet, native, parseEventType, lifecycleVerb } from './event-handle.mjs';
+export { scopeOf, parseScopeKey, tryParseScopeKey, isScopeHandle } from './scope-handle.mjs';
+export { decideReplay, normalizeSeqSpan } from './replay-decision.mjs';
+export { createLivePostCommitConsumer } from './live-delivery.mjs';
 export { createLiveServer } from './live.mjs';
 export { upgradeWebSocket, FrameSender, FrameParser } from './websocket.mjs';
 export { resolveTemplate, matchExtension, isSafePath, escapeHtml } from './views.mjs';

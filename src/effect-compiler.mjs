@@ -21,6 +21,7 @@
 import { principal } from './principal.mjs';
 import { randomUUID } from 'node:crypto';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
+import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 
 // ---- Field-plugin operators for `with` templates (P6b Part 1) ----
 
@@ -321,7 +322,7 @@ function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName, 
 
   // Extract delta and origin from the trigger event
   const delta = triggerEvent.data || {};
-  const originId = triggerEvent.scope.split(':')[1];
+  const originId = tryParseScopeKey(triggerEvent.scope)?.id;
   const origin = { id: originId };
 
   // Target name: self uses source entity, others use real target's name
@@ -404,7 +405,7 @@ function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName, 
 
     // Determine event type based on existence
     const eventType = exists ? `${targetName}.updated` : `${targetName}.created`;
-    const scope = `${targetName}:${rowId}`;
+    const scope = scopeOf(targetName, rowId).key;
 
     events.push({
       type: eventType,
@@ -445,7 +446,7 @@ export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, 
     if (effect.when) {
       try {
         const delta = event.data || {};
-        const origin = { id: event.scope.split(':')[1] };
+        const origin = { id: tryParseScopeKey(event.scope)?.id };
         if (!effect.when({ delta, origin })) {
           continue; // Guard rejected - skip this effect
         }

@@ -10,10 +10,11 @@ import { mayRow } from './row-grant.mjs';
 import { PACE_STRATEGIES } from './field-pace.mjs';
 import { createDeltaProjector } from './field-delta.mjs';
 import { EventKind, parseEventType } from './event-handle.mjs';
+import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 
 export function createLiveFanout({ mayVerb = null } = {}) {
-  const byScope = new Map();   // Map<scope, Map<conn, SubSpec>>
-  const connSubs = new Map();  // Map<conn, Set<scope>>
+  const byScope = new Map();   // Map<scopeKey, Map<conn, SubSpec>>
+  const connSubs = new Map();  // Map<conn, Set<scopeKey>>
   const paceBuffers = new Map();
 
   const deltaProjector = createDeltaProjector();
@@ -23,25 +24,22 @@ export function createLiveFanout({ mayVerb = null } = {}) {
   }
 
   // hasSubscription(conn, scopeOrEntity, id?) — two-arg form checks by scope
-  // string; three-arg form derives scope from `${entity}:${id}` for backward
-  // compatibility with callers that don't yet have a scope string.
+  // key; three-arg form derives the key via Scope handle.
   function hasSubscription(conn, scopeOrEntity, id) {
     if (arguments.length >= 3) {
-      return connSubs.get(conn)?.has(`${scopeOrEntity}:${id}`) ?? false;
+      return connSubs.get(conn)?.has(scopeOf(scopeOrEntity, id).key) ?? false;
     }
     return connSubs.get(conn)?.has(scopeOrEntity) ?? false;
   }
 
   function addSubscription(a, b, c, d, e) {
-    if (arguments.length >= 3 && typeof a === 'string' && (!a.includes(':') || (typeof b === 'string' && typeof c === 'object' && c !== null && c.id !== undefined))) {
-      // Legacy: addSubscription(entity, id, conn, fields?, pace?)
-      // Heuristic: first arg is entity (no ':'), OR there are >=4 args with
-      // the third being a conn (object with .id) — use legacy path.
-      // But actually, conn is always an object so this is unreliable. Use:
-      // first arg has no ':' → legacy. First arg has ':' → scope-keyed.
-    }
+    // Scope key form (contains ':') or Scope handle → scope-keyed path.
+    // Legacy entity+id form still works; both concentrate through Scope handle.
     if (typeof a === 'string' && a.includes(':')) {
       return addSubscriptionScope(a, b, c, d, e);
+    }
+    if (a && a.brand === 'scope-handle') {
+      return addSubscriptionScope(a.key, b, c, d, e);
     }
     return addSubscriptionLegacy(a, b, c, d, e);
   }
@@ -55,13 +53,16 @@ export function createLiveFanout({ mayVerb = null } = {}) {
   }
 
   function addSubscriptionLegacy(entity, id, conn, fields = null, pace = null) {
-    const scope = `${entity}:${id}`;
-    addSubscriptionScope(scope, conn, fields, pace, { entity, id });
+    const handle = scopeOf(entity, id);
+    addSubscriptionScope(handle.key, conn, fields, pace, { entity: handle.entity, id: handle.id });
   }
 
   function removeSubscription(a, b, c) {
     if (typeof a === 'string' && a.includes(':')) {
       return removeSubscriptionScope(a, b);
+    }
+    if (a && a.brand === 'scope-handle') {
+      return removeSubscriptionScope(a.key, b);
     }
     return removeSubscriptionLegacy(a, b, c);
   }
@@ -80,7 +81,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
   }
 
   function removeSubscriptionLegacy(entity, id, conn) {
-    removeSubscriptionScope(`${entity}:${id}`, conn);
+    removeSubscriptionScope(scopeOf(entity, id).key, conn);
   }
 
   function removeAll(conn) {
@@ -121,9 +122,9 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     const coalescer = entry.by ? kind.coalescers[entry.by] : null;
     const coalesced = coalescer ? events.reduce(coalescer) : events[events.length - 1];
     const span = kind.reduceSpan(events);
-    const colon = scope.indexOf(':');
-    const entityName = colon > 0 ? scope.slice(0, colon) : scope;
-    const idStr = colon > 0 ? scope.slice(colon + 1) : scope;
+    const handle = tryParseScopeKey(scope);
+    const entityName = handle?.entity ?? scope;
+    const idStr = handle?.id ?? scope;
     conn.send({
       type: 'event', entity: entityName, id: idStr,
       seq: span.seq, seqSpan: span.seqSpan, event: coalesced,
@@ -146,7 +147,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     const handle = committed.handle;
     if (handle.entity !== name) return;
 
-    const eventScope = committedEvent.scope ?? `${name}:${String(id)}`;
+    const eventScope = committedEvent.scope ?? scopeOf(name, id).key;
     const removed = row === undefined;
 
     let authzRow = row;

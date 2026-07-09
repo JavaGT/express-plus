@@ -2,6 +2,7 @@ import { EventKind } from './event-handle.mjs';
 import { resolveStrategy } from './field-strategy.mjs';
 import { config } from './config.mjs';
 import { getLog } from './log.mjs';
+import { scopeOf } from './scope-handle.mjs';
 
 const DIFF_ELIGIBLE = new Set(['value', 'state', 'crdt', 'struct']);
 const DEFAULT_MAX_SCOPES = 10_000;
@@ -49,7 +50,7 @@ export function createDeltaProjector({ maxScopes = DEFAULT_MAX_SCOPES, diagnosti
   const prevState = new Map();
 
   function scopeFor(entityRecord, id) {
-    return `${entityRecord.name}:${String(id)}`;
+    return scopeOf(entityRecord.name, id).key;
   }
 
   function seed(scope, row) {
