@@ -515,13 +515,24 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
 
   // POST /auth/totp/disable — remove the TOTP enrollment.
   // requireUser: only an authenticated user can disable. Requires a valid TOTP
-  // token OR a backup code to confirm the action.
+  // token, a backup code, or the user's password to confirm the action.
   s.post('/totp/disable', requireUser(), (req, res, next) => {
-    const { token } = req.body ?? {};
-    if (!token) {
-      return next({ status: 400, message: 'token is required' });
+    const { token, password } = req.body ?? {};
+    if (!token && !password) {
+      return next({ status: 400, message: 'token or password is required' });
     }
     const userId = req.principal.id;
+    // Allow password as an alternative to TOTP token.
+    if (password) {
+      const user = User.getOrFail(userId);
+      if (!user.password.verify(password)) {
+        return next({ status: 400, message: 'invalid password' });
+      }
+      // Password verified — proceed to delete.
+      const twoFactor = TwoFactor.findOne(TwoFactor.userId.is(userId));
+      if (twoFactor) TwoFactor.delete(twoFactor.id);
+      return res.sendStatus(204);
+    }
     const twoFactor = TwoFactor.findOne(TwoFactor.userId.is(userId));
     if (!twoFactor) {
       return next({ status: 400, message: 'TOTP not enrolled' });
