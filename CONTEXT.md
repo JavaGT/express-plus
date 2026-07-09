@@ -49,5 +49,5 @@ A recurring time source that repeatedly scans eligible rows and dispatches decla
 _Avoid_: Schedule, loop job
 
 **Kernel**:
-The framework's mutation-dispatch core: authorization, handler execution, event commit, projection, and post-commit consumers.
-_Avoid_: Server, router
+The durable mutation-dispatch core: handlers, named durable pipeline variant, admission, and write-queue serialization. Post-commit consumers and clock starters are contributed by the modules that own each engaged seam (Live Delivery, blob, projected, effects, Schedule), not implemented inside Kernel.
+_Avoid_: Server, router; not a bag of every post-commit side effect

@@ -32,13 +32,16 @@ node projects/chat/server.mjs        # run the chat sample (open localhost:3000 
 
 | Document | Job |
 | --- | --- |
-| **[SPEC.md](SPEC.md)** | The canonical specification — what workbench is, how it behaves, the build order. The single source of truth. |
 | **[AGENTS.md](AGENTS.md)** | The binding design values (naming, architecture, authorization, data, live/sync, defaults). Read this first; the SPEC obeys these. |
+| **[CONTEXT.md](CONTEXT.md)** | Domain glossary — the language of seams (Entity, Grant, Scope handle, Kernel, …). Use these nouns in design and code. |
+| **[SPEC.md](SPEC.md)** | The canonical specification — what workbench is, how it behaves, the build order. |
 | **[DECISIONLOG.md](DECISIONLOG.md)** | The append-only ledger of architectural decisions (ADRs) and implementation decisions. The SPEC cites entries by number. |
+| **[docs/adr/](docs/adr/)** | Numbered ADRs for settled architectural seams (event handles, schedule, entity authz, scope handles). |
 | **[PLANS.md](PLANS.md)** | The restartable execution ledger — current priority state, fork resolutions, step-by-step progress. |
 | **[SCOPE-FINDINGS.md](SCOPE-FINDINGS.md)** | What the shipped `scope` workbench proves is buildable; the validated architecture shape workbench adopts. |
 | **[projects/STRESS-TEST-FINDINGS.md](projects/STRESS-TEST-FINDINGS.md)** | The 9-app synthesis that frames the featureset, with per-app evidence under `projects/<name>/`. |
 
-The retired `CONTEXT.md`, `FEATURES.md`, and `IMPLEMENTATION-PLAN.md` were
-absorbed into **SPEC.md** (glossary, featureset, and build-order roadmap
-respectively) and removed.
+Retired docs: `FEATURES.md` and `IMPLEMENTATION-PLAN.md` were absorbed into
+**SPEC.md** (featureset and build-order roadmap). `CONTEXT.md` remains the live
+domain glossary (it was briefly claimed absorbed — that claim is reversed; the
+glossary is not restated in SPEC).

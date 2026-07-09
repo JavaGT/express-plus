@@ -2,16 +2,17 @@
 
 This is the single source of truth for what workbench is, how it behaves, and
 the order in which it gets built. It absorbs the former `FEATURES.md` (the
-featureset), `CONTEXT.md` (the glossary), and `IMPLEMENTATION-PLAN.md` (the
-roadmap). It is paired with two documents that keep their own job:
+featureset) and `IMPLEMENTATION-PLAN.md` (the roadmap). It is paired with
+documents that keep their own job:
 
 - **`AGENTS.md`** — the binding design values (naming, architecture,
   authorization, data, live/sync, defaults). The SPEC obeys those values; it does
   not restate them. Read AGENTS.md first.
-- **`DECISIONLOG.md`** — the append-only ledger of the architectural decisions
-  (ADRs) and implementation decisions that produced this design. The SPEC cites
-  entries by number; the ledger holds the full reasoning and the alternatives
-  rejected.
+- **`CONTEXT.md`** — the domain glossary (Entity, Grant, Scope handle, Kernel,
+  …). Use these nouns; the SPEC does not restate the glossary.
+- **`DECISIONLOG.md`** — the append-only ledger of architectural and
+  implementation decisions. The SPEC cites entries by number; the ledger holds
+  full reasoning. Short numbered ADRs live under `docs/adr/`.
 
 Findings that motivated the design live in **`SCOPE-FINDINGS.md`** (what the
 shipped `scope` workbench proves is buildable) and
@@ -21,8 +22,9 @@ evidence under `projects/<name>/PAIN-POINTS.md`).
 > **Status: implemented.** The framework is built — zero-dependency (Node 26:
 > `node:http`/`crypto`/`sqlite`/`fs`), suite green under `node --test`. The
 > binding exemplars (`doc.mjs`, `gdoc.mjs`, `note.mjs`, `comment.mjs`,
-> `todo.mjs`, `session.mjs`) are running code. Machinery not yet shipped — the
-> durable event-log kernel and live sync — is written in the future tense below.
+> `todo.mjs`, `session.mjs`) are running code. Some sections below still use
+> future tense from the original roadmap; prefer running code and DECISIONLOG
+> for current shape.
 
 ---
 

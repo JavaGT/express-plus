@@ -13,13 +13,17 @@ whisper transcription, media transcode, and search indexing as job kinds.
   transcription). That's a property of Scope's worker, not of the queue — the
   queue must simply not assume workers are co-located or trusted.
 
-## Current workbench state (verified 2026-07-06)
+## Current workbench state (verified 2026-07-06; paths checked 2026-07-10)
 
 `src/job-queue.mjs` already ships: queued→claimed→running→completed/failed
-lifecycle, reaper reassignment, atomic single-statement claim with kind
-filter, worker registration via shared secret, per-worker revocable bearer
-tokens (constant-time compared), idempotent result submission. `src/reaper.mjs`
-handles lease expiry. This packet is **gap-closing, not greenfield**.
+lifecycle, reaper reassignment (`reap` / `startReaper` on the queue itself),
+atomic single-statement claim with kind filter, worker registration via shared
+secret, per-worker revocable bearer tokens (constant-time compared), idempotent
+result submission. Lease expiry is owned by the job-queue module (not a
+separate `reaper.mjs` — that schedule-deadline file was deleted when Schedule
+clock-dispatch collapsed into `startClockTriggers`). Blob orphan/refcount sweep
+is `blob-store.mjs` `reap`, not the job queue. This packet is **gap-closing, not
+greenfield**.
 
 ## Scope parity surface
 
@@ -70,5 +74,6 @@ differences, dead-letter handling.
 
 ## Contention
 
-Owns: `job-queue.mjs, reaper.mjs`. Reaper also serves blob lifecycle — if a
-slice touches the blob half of `reaper.mjs`, coordinate with W2.
+Owns: `job-queue.mjs` (including its lease reaper). Blob lifecycle reaping is
+`blob-store.mjs` — coordinate with W2 if a slice touches that path. Schedule
+deadline/tick clocks are `schedule.mjs` `startClockTriggers` (not job-queue).
