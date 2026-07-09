@@ -6,21 +6,15 @@ import { entity, Session } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
-import { admitSystemMutation, discoverDueSchedules, schedulerSource } from '../src/schedule.mjs';
-import { startReaper } from '../src/reaper.mjs';
+import { admitSystemMutation, schedulerSource, startClockTriggers } from '../src/schedule.mjs';
 
 // ============================================================
-// Schedule reaper tests — Phase A4b closing loop.
+// Schedule clock-dispatch (deadline) tests — startClockTriggers.
 //
-// The reaper is a CLOCK TRIGGER, not an authority (DECISIONLOG
-// #19, #62). Each interval it discovers due rows via
-// discoverDueSchedules, dispatches `update` under a scheduler
-// system principal, and the dispatch spine routes through the
-// durable variant's beforeProjection admission seam. ONE reconciliation path —
-// no second auth path.
-//
-// Each dispatch has try/catch + stderr — one row's deny/throw
-// NEVER aborts the sweep (mirror tick engine pattern).
+// Clock trigger, not an authority (DECISIONLOG #19, #62, ADR-0002).
+// Immediate scan + interval: discover due rows → dispatch under
+// scheduler principal → durable beforeProjection admission.
+// ONE reconciliation path.
 
 // ---- Shared helpers ----
 
@@ -84,9 +78,9 @@ function poll(fn, { timeoutMs = 3000, intervalMs = 10 } = {}) {
 }
 
 // ============================================================
-// unit: startReaper no-op when no schedule triggers
+// unit: startClockTriggers no-op when no schedule triggers
 // ============================================================
-test('startReaper returns no-op {stop()} when no schedule triggers', () => {
+test('startClockTriggers returns no-op {stop()} when no schedule triggers', () => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('NoSched', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -102,15 +96,15 @@ test('startReaper returns no-op {stop()} when no schedule triggers', () => {
   const entities = new Map();
   entities.set(Blog.name, Blog);
 
-  const reaper = startReaper({ db, entities, dispatch: () => {} });
-  assert.doesNotThrow(() => reaper.stop());
+  const clock = startClockTriggers({ db, entities, dispatch: () => {} });
+  assert.doesNotThrow(() => clock.stop());
   // stop() is a no-op — no timer was created
 });
 
 // ============================================================
-// unit: startReaper no-op for tick-only entities
+// unit: tick-only entities still start (unified starter)
 // ============================================================
-test('startReaper returns no-op {stop()} for tick-only entities', () => {
+test('startClockTriggers starts for tick-only entities (unified seam)', () => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('TickOnly', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -125,18 +119,22 @@ test('startReaper returns no-op {stop()} for tick-only entities', () => {
   });
   const db = new DatabaseSync(':memory:');
   for (const sql of generateDDL(Blog)) db.exec(sql);
+  db.prepare('INSERT INTO TickOnly (id, status) VALUES (?, ?)').run('t1', 'alive');
 
   const entities = new Map();
   entities.set(Blog.name, Blog);
 
-  const reaper = startReaper({ db, entities, dispatch: () => {} });
-  assert.doesNotThrow(() => reaper.stop());
+  const calls = [];
+  const clock = startClockTriggers({ db, entities, dispatch: (a) => calls.push(a) });
+  clock.stop();
+  assert.equal(calls.length, 1, 'tick-only entity fires on immediate scan');
+  assert.equal(calls[0].type, 'TickOnly.update');
 });
 
 // ============================================================
-// unit: discoverDueSchedules returns due rows
+// unit: fire-path returns due rows
 // ============================================================
-test('discoverDueSchedules returns due schedule.at rows, excludes future-due', () => {
+test('startClockTriggers fires due schedule.at rows, excludes future-due', () => {
   const db = new DatabaseSync(':memory:');
   const publishedAt = date();
   const Blog = entity('DiscDue', {
@@ -153,24 +151,25 @@ test('discoverDueSchedules returns due schedule.at rows, excludes future-due', (
   for (const sql of generateDDL(Blog)) db.exec(sql);
 
   const now = Date.now();
-  // Past-due row
   db.prepare('INSERT INTO DiscDue (id, status, publishedAt) VALUES (?, ?, ?)').run('r1', 'draft', now - 5000);
-  // Future-due row (should be excluded)
   db.prepare('INSERT INTO DiscDue (id, status, publishedAt) VALUES (?, ?, ?)').run('r2', 'draft', now + 50000);
-  // Past-due but while fails
   db.prepare('INSERT INTO DiscDue (id, status, publishedAt) VALUES (?, ?, ?)').run('r3', 'archived', now - 5000);
 
-  const results = discoverDueSchedules(db, [Blog], now);
-  assert.equal(results.length, 1, 'only the past-due + while-matching row is discovered');
-  assert.equal(results[0].entity, 'DiscDue');
-  assert.equal(results[0].rowId, 'r1');
-  assert.deepStrictEqual(results[0].payload, { status: 'published' });
+  const calls = [];
+  const clock = startClockTriggers({
+    db, entities: [Blog], dispatch: (a) => calls.push(a), now: () => now,
+  });
+  clock.stop();
+  assert.equal(calls.length, 1, 'only the past-due + while-matching row fires');
+  assert.equal(calls[0].type, 'DiscDue.update');
+  assert.equal(calls[0].payload.id, 'r1');
+  assert.equal(calls[0].payload.status, 'published');
 });
 
 // ============================================================
-// unit: startReaper dispatch receives correct args
+// unit: startClockTriggers dispatch receives correct args
 // ============================================================
-test('startReaper calls dispatch with correct scheduler principal and payload', async (t) => {
+test('startClockTriggers calls dispatch with correct scheduler principal and payload', () => {
   const db = new DatabaseSync(':memory:');
   const publishedAt = date();
   const Blog = entity('ReapDispatch', {
@@ -193,16 +192,12 @@ test('startReaper calls dispatch with correct scheduler principal and payload', 
   entities.set(Blog.name, Blog);
 
   let dispatchCall = null;
-  const captureDispatch = (args) => { dispatchCall = args; };
-
-  const reaper = startReaper({ db, entities, dispatch: captureDispatch, now: () => now });
-  t.after(() => reaper.stop());
-
-  // Wait for the dispatch call (reaper fires every 1s).
-  await poll(() => {
-    assert.ok(dispatchCall !== null, 'dispatch was called');
+  const clock = startClockTriggers({
+    db, entities, dispatch: (args) => { dispatchCall = args; }, now: () => now,
   });
+  clock.stop();
 
+  assert.ok(dispatchCall !== null, 'dispatch was called on immediate scan');
   assert.ok(dispatchCall.actionId, 'dispatch carries actionId');
   assert.equal(dispatchCall.type, 'ReapDispatch.update');
   assert.equal(dispatchCall.principal.type, 'system');
@@ -316,7 +311,7 @@ test('admitSystemMutation DENIES non-system principal', () => {
 // ============================================================
 // e2e: schedule source wired through beforeProjection admission
 // ============================================================
-test('e2e: reaper dispatch updates row through projection (ADMITTED)', async (t) => {
+test('e2e: clock-dispatch dispatch updates row through projection (ADMITTED)', async (t) => {
   const publishedAt = date();
   const Blog = entity('BlogSched', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -336,8 +331,8 @@ test('e2e: reaper dispatch updates row through projection (ADMITTED)', async (t)
   const now = Date.now();
   db.prepare('INSERT INTO BlogSched (id, status, publishedAt) VALUES (?, ?, ?)').run('b1', 'draft', now - 1000);
 
-  const reaper = startReaper({ db, entities, dispatch: server.dispatch });
-  t.after(() => reaper.stop());
+  const clock = startClockTriggers({ db, entities, dispatch: server.dispatch });
+  t.after(() => clock.stop());
 
   // The reaper fires every 1s. Poll for the mutation.
   await poll(() => {
@@ -366,8 +361,8 @@ test('e2e: while-fails — row with mismatched status stays unchanged (DENIED)',
   const now = Date.now();
   db.prepare('INSERT INTO BlogSchedDeny (id, status, publishedAt) VALUES (?, ?, ?)').run('b2', 'archived', now - 1000);
 
-  const reaper = startReaper({ db, entities, dispatch: server.dispatch });
-  t.after(() => reaper.stop());
+  const clock = startClockTriggers({ db, entities, dispatch: server.dispatch });
+  t.after(() => clock.stop());
 
   // After ~2 intervals, the row must NOT have been mutated.
   await new Promise((resolve) => setTimeout(resolve, 2500));
@@ -378,30 +373,29 @@ test('e2e: while-fails — row with mismatched status stays unchanged (DENIED)',
 // ============================================================
 // Session expiry: schedule.after(createdAt, delay) → remove
 // ============================================================
-test('Session: discoverDueSchedules finds expired sessions', () => {
+test('Session: startClockTriggers fires remove for expired sessions', () => {
   const db = new DatabaseSync(':memory:');
-  // Session requires a workbench() context for standalone create.
   db.exec('CREATE TABLE Session (id TEXT PRIMARY KEY, token TEXT, principalType TEXT, principalId TEXT, createdAt TEXT)');
   const now = Date.now();
-  // Past session (createdAt 8 days ago — beyond a 7-day window)
   db.prepare(
     'INSERT INTO Session (id, token, principalType, principalId, createdAt) VALUES (?, ?, ?, ?, ?)',
   ).run('s1', 'tok1', 'user', 'alice', now - 8 * 86_400_000);
-  // Fresh session (createdAt now — not expired)
   db.prepare(
     'INSERT INTO Session (id, token, principalType, principalId, createdAt) VALUES (?, ?, ?, ?, ?)',
   ).run('s2', 'tok2', 'user', 'bob', now);
 
-  // Session has schedule.remove: schedule.after(createdAt, 7 days)
-  const results = discoverDueSchedules(db, [Session], now);
-  // Only the past session should be discovered.
-  const sessionResults = results.filter((r) => r.entity === 'Session');
-  assert.equal(sessionResults.length, 1, 'only the expired session is discovered');
-  assert.equal(sessionResults[0].rowId, 's1');
-  assert.equal(sessionResults[0].verb, 'remove');
+  const calls = [];
+  const clock = startClockTriggers({
+    db, entities: [Session], dispatch: (a) => calls.push(a), now: () => now,
+  });
+  clock.stop();
+  const sessionCalls = calls.filter((c) => c.type.startsWith('Session.'));
+  assert.equal(sessionCalls.length, 1, 'only the expired session fires');
+  assert.equal(sessionCalls[0].payload.id, 's1');
+  assert.equal(sessionCalls[0].type, 'Session.remove');
 });
 
-test('e2e: expired session is deleted by the reaper', async (t) => {
+test('e2e: expired session is deleted by clock-dispatch', async (t) => {
   const db = seededDb();
   for (const sql of generateDDL(Session)) db.exec(sql);
   const now = Date.now();
@@ -436,8 +430,8 @@ test('e2e: expired session is deleted by the reaper', async (t) => {
     }),
   });
 
-  const reaper = startReaper({ db, entities, dispatch: server.dispatch });
-  t.after(() => reaper.stop());
+  const clock = startClockTriggers({ db, entities, dispatch: server.dispatch });
+  t.after(() => clock.stop());
 
   // The reaper fired → expired session deleted, fresh session untouched.
   await poll(() => {
@@ -449,7 +443,7 @@ test('e2e: expired session is deleted by the reaper', async (t) => {
   assert.ok(fresh, 'fresh session is untouched');
 });
 
-test('e2e: entity with NO schedule triggers returns no-op reaper', () => {
+test('e2e: entity with NO schedule triggers returns no-op clock', () => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogNoSchedule', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -463,11 +457,11 @@ test('e2e: entity with NO schedule triggers returns no-op reaper', () => {
   const entities = new Map();
   entities.set(Blog.name, Blog);
 
-  const reaper = startReaper({ db, entities, dispatch: () => {} });
-  assert.doesNotThrow(() => reaper.stop());
+  const clock = startClockTriggers({ db, entities, dispatch: () => {} });
+  assert.doesNotThrow(() => clock.stop());
 });
 
-test('e2e: reaper dispatch error continues sweep (stderr, no throw)', async (t) => {
+test('e2e: clock-dispatch dispatch error continues sweep (stderr, no throw)', async (t) => {
   const publishedAt = date();
   const Blog = entity('BlogSweepCont', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -498,18 +492,18 @@ test('e2e: reaper dispatch error continues sweep (stderr, no throw)', async (t) 
     throw new Error('simulated auth deny');
   };
 
-  const reaper = startReaper({ db, entities, dispatch: throwingDispatch });
+  const clock = startClockTriggers({ db, entities, dispatch: throwingDispatch });
 
   // After ~2 intervals, the engine must have kept running and kept dispatching.
   await new Promise((resolve) => setTimeout(resolve, 2500));
   assert.ok(dispatchCount > 0, 'engine kept dispatching despite errors');
-  assert.doesNotThrow(() => reaper.stop());
+  assert.doesNotThrow(() => clock.stop());
 });
 
 // ============================================================
 // error containment: discovery-phase throw
 // ============================================================
-test('reaper survives discovery-phase throw (bad table)', async (t) => {
+test('clock-dispatch survives discovery-phase throw (bad table)', async (t) => {
   const publishedAt = date();
   const Blog = entity('BadTable', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -531,17 +525,17 @@ test('reaper survives discovery-phase throw (bad table)', async (t) => {
   entities.set('BadTable', { ...Blog, name: 'NonExistentTable' });
 
   let dispatchCalled = false;
-  const reaper = startReaper({
+  const clock = startClockTriggers({
     db,
     entities,
     dispatch: () => { dispatchCalled = true; },
   });
-  t.after(() => reaper.stop());
+  t.after(() => clock.stop());
 
   // Wait for at least one interval — the outer try/catch should catch the SQL error.
   await new Promise((resolve) => setTimeout(resolve, 1500));
 
   // The timer is still alive (engine didn't crash), and dispatch was never called.
-  assert.doesNotThrow(() => reaper.stop());
+  assert.doesNotThrow(() => clock.stop());
   assert.equal(dispatchCalled, false, 'dispatch was not called');
 });

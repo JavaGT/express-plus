@@ -507,3 +507,5 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
 - **Gate:** `node --test` 1612/1612/0.
 
 Decision: Park HTTP leaf / Entity-compile deepenings from the architecture review. Reason: http-route-match, http-body, http-response, and http-response-factory pass the deletion test as focused modules; further Entity splits without a clearer compiled-Entity runtime story would relocate ceremony and must not undo ADR-0003.
+
+Decision: Collapse tick-engine and reaper into Schedule startClockTriggers; privatize discover*; fire-path tests cross that seam. Reason: ADR-0002 unified admission but left two shallow discover→dispatch loops; one interface restores locality and deletes the twin modules in the same change.

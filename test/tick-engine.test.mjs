@@ -6,20 +6,14 @@ import workbench, { entity } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
-import { admitSystemMutation, discoverTickedRows } from '../src/schedule.mjs';
-import { startTickEngine } from '../src/tick-engine.mjs';
+import { admitSystemMutation, startClockTriggers, tickSource } from '../src/schedule.mjs';
 
 // ============================================================
-// Phase 2: tick engine e2e + admission tests.
+// Tick fire-path via startClockTriggers + admission tests.
 //
-// The tick engine is a CLOCK TRIGGER, not an authority. Each
-// interval it discovers rows matching `while`, dispatches
-// `update` under a system principal, and the dispatch spine
-// routes through the durable variant's beforeProjection admission seam.
-// ONE reconciliation path.
-//
-// Each dispatch has try/catch + stderr — one row's deny/throw
-// NEVER aborts the sweep (mirror reaper pattern).
+// Clock trigger, not an authority. Immediate scan + interval:
+// discover matching while → dispatch under tick principal →
+// durable beforeProjection admission. ONE reconciliation path.
 
 // ---- Shared helpers ----
 
@@ -81,9 +75,9 @@ function poll(fn, { timeoutMs = 2000, intervalMs = 10 } = {}) {
 }
 
 // ============================================================
-// unit: discoverTickedRows
+// unit: tick fire-path
 // ============================================================
-test('discoverTickedRows returns rows matching while, null when none match', () => {
+test('startClockTriggers tick fires rows matching while, skips non-matching', () => {
   const db = new DatabaseSync(':memory:');
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('TestDisc', {
@@ -99,17 +93,20 @@ test('discoverTickedRows returns rows matching while, null when none match', () 
   });
   for (const sql of generateDDL(Blog)) db.exec(sql);
 
-  // Row with matching status
   db.prepare('INSERT INTO TestDisc (id, status) VALUES (?, ?)').run('r1', 'alive');
-  // Row NOT matching (should be excluded)
   db.prepare('INSERT INTO TestDisc (id, status) VALUES (?, ?)').run('r2', 'dead');
   const now = Date.now();
 
-  const results = discoverTickedRows(db, [Blog], now);
-  assert.equal(results.length, 1, 'only the alive row is discovered');
-  assert.equal(results[0].entity, 'TestDisc');
-  assert.equal(results[0].rowId, 'r1');
-  assert.deepStrictEqual(results[0].payload, { status: 'moving' });
+  const calls = [];
+  const clock = startClockTriggers({
+    db, entities: [Blog], dispatch: (a) => calls.push(a), now: () => now,
+  });
+  clock.stop();
+  assert.equal(calls.length, 1, 'only the alive row fires');
+  assert.equal(calls[0].type, 'TestDisc.update');
+  assert.equal(calls[0].payload.id, 'r1');
+  assert.equal(calls[0].payload.status, 'moving');
+  assert.equal(calls[0].principal.attributes.source, tickSource('TestDisc', 'update'));
 });
 
 // ============================================================
@@ -293,8 +290,8 @@ test('e2e: tick dispatch updates row through projection', async (t) => {
     }),
   });
 
-  const engine = startTickEngine({ db, entities, dispatch: server.dispatch });
-  t.after(() => engine.stop()); // cleanup to avoid timer leaks
+  const clock = startClockTriggers({ db, entities, dispatch: server.dispatch });
+  t.after(() => clock.stop()); // cleanup to avoid timer leaks
 
   // The engine fires at 50ms intervals (1000/20 hz). Poll for the mutation.
   await poll(() => {
@@ -328,6 +325,10 @@ test('listen tick dispatch waits behind the app write queue', async (t) => {
     db.close();
   });
   await app.ready;
+
+  // Boot catch-up (immediate scan) may already have fired; reset so we can
+  // observe a later interval dispatch behind a held write queue.
+  db.prepare('UPDATE BlogTickQueue SET status = ? WHERE id = ?').run('alive', 'bq1');
 
   let releaseHold;
   const hold = app.writeQueue.run(() => new Promise((resolve) => { releaseHold = resolve; }));
@@ -387,8 +388,8 @@ test('e2e: while-fails — row not matching while is never mutated', async () =>
     }),
   });
 
-  const engine = startTickEngine({ db, entities, dispatch: server.dispatch });
-  const stop = () => engine.stop();
+  const clock = startClockTriggers({ db, entities, dispatch: server.dispatch });
+  const stop = () => clock.stop();
 
   // After multiple intervals, the row must NOT have been mutated.
   await new Promise((resolve) => setTimeout(resolve, 250)); // ~5 intervals
@@ -440,7 +441,7 @@ test('e2e: TOCTOU — row deleted between discover and dispatch does not escape'
     }),
   });
 
-  const engine = startTickEngine({ db, entities, dispatch: server.dispatch });
+  const clock = startClockTriggers({ db, entities, dispatch: server.dispatch });
 
   // Delete the row on the first interval — the engine should discover it,
   // fail to dispatch (row gone), log stderr, and CONTINUE (no exception escapes).
@@ -450,7 +451,7 @@ test('e2e: TOCTOU — row deleted between discover and dispatch does not escape'
 
   // After multiple intervals, the engine must still be alive (didn't crash).
   await new Promise((resolve) => setTimeout(resolve, 400));
-  assert.doesNotThrow(() => engine.stop()); // engine survived the TOCTOU
+  assert.doesNotThrow(() => clock.stop()); // engine survived the TOCTOU
 });
 
 test('e2e: engine with no tick triggers returns no-op', () => {
@@ -469,8 +470,8 @@ test('e2e: engine with no tick triggers returns no-op', () => {
   const entities = new Map();
   entities.set(Blog.name, Blog);
 
-  const engine = startTickEngine({ db, entities, dispatch: () => {} });
-  assert.doesNotThrow(() => engine.stop()); // no-op stop is safe
+  const clock = startClockTriggers({ db, entities, dispatch: () => {} });
+  assert.doesNotThrow(() => clock.stop()); // no-op stop is safe
 });
 
 test('e2e: engine dispatch error continues sweep (stderr, no throw)', async (t) => {
@@ -506,11 +507,11 @@ test('e2e: engine dispatch error continues sweep (stderr, no throw)', async (t) 
 
   const goodEntities = new Map([[Blog.name, Blog]]);
 
-  const engine = startTickEngine({ db, entities: goodEntities, dispatch: throwingDispatch });
+  const clock = startClockTriggers({ db, entities: goodEntities, dispatch: throwingDispatch });
 
   // After multiple intervals, the engine must have kept running (didn't crash)
   // and kept dispatching each pass despite every dispatch throwing.
   await new Promise((resolve) => setTimeout(resolve, 350)); // ~7 intervals
   assert.ok(dispatchCount > 0, 'engine kept dispatching despite errors');
-  assert.doesNotThrow(() => engine.stop());
+  assert.doesNotThrow(() => clock.stop());
 });

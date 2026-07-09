@@ -1,5 +1,5 @@
-// P6d step 4a: schedule `with` payload grammar + CRUD-verb validation + field identity resolution + discoverDueSchedules
-// Tests for: with object/function, CRUD verb restriction, field identity matching, and pure due-discovery function.
+// Schedule constructor grammar + fire-path deadline dispatch via startClockTriggers.
+// Discovery is private; tests assert dispatch calls from the immediate scan.
 
 import { date, text, scope, everyone, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   entity, generateDDL, executeFrameworkDDL } from '../src/internal.mjs';
-import { schedule, discoverDueSchedules } from '../src/schedule.mjs';
+import { schedule, startClockTriggers, schedulerSource } from '../src/schedule.mjs';
 import { setActiveDb } from '../src/db.mjs';
 
 function setupDb() {
@@ -16,6 +16,24 @@ function setupDb() {
   setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   return db;
+}
+
+/** Fire-path helper: run the immediate scan, stop timers, return dispatch calls. */
+function fireDeadline(db, entities, now) {
+  const calls = [];
+  const handle = startClockTriggers({
+    db,
+    entities,
+    dispatch: (args) => { calls.push(args); },
+    now: typeof now === 'function' ? now : () => now,
+  });
+  handle.stop();
+  return calls;
+}
+
+function deadlinePayload(call) {
+  const { id, ...rest } = call.payload ?? {};
+  return rest;
 }
 
 // ============================================================
@@ -225,11 +243,12 @@ test('schedule field must be date/number (value kind, comparable)', () => {
   );
 });
 
+
 // ============================================================
-// discoverDueSchedules: schedule.at
+// startClockTriggers deadline fire-path
 // ============================================================
 
-test('discoverDueSchedules: schedule.at finds past-due rows', () => {
+test('startClockTriggers deadline: schedule.at finds past-due rows', () => {
   const db = setupDb();
   const publishedAt = date();
   const Blog = entity('BlogAtDiscovery', {
@@ -242,22 +261,21 @@ test('discoverDueSchedules: schedule.at finds past-due rows', () => {
   });
   for (const sql of generateDDL(Blog)) db.exec(sql);
 
-  const pastTime = Date.now() - 100_000; // 100s in past
+  const pastTime = Date.now() - 100_000;
   const futureTime = Date.now() + 100_000;
 
-  // Insert rows
   db.prepare('INSERT INTO BlogAtDiscovery (id, publishedAt) VALUES (?, ?)').run('row1', pastTime);
   db.prepare('INSERT INTO BlogAtDiscovery (id, publishedAt) VALUES (?, ?)').run('row2', futureTime);
 
-  const results = discoverDueSchedules(db, [Blog], Date.now());
-  assert.equal(results.length, 1, 'only past-due row should be found');
-  assert.equal(results[0].entity, 'BlogAtDiscovery');
-  assert.equal(results[0].verb, 'update');
-  assert.equal(results[0].rowId, 'row1');
-  assert.deepEqual(results[0].payload, { published: true });
+  const calls = fireDeadline(db, [Blog], Date.now());
+  assert.equal(calls.length, 1, 'only past-due row should fire');
+  assert.equal(calls[0].type, 'BlogAtDiscovery.update');
+  assert.equal(calls[0].payload.id, 'row1');
+  assert.deepEqual(deadlinePayload(calls[0]), { published: true });
+  assert.equal(calls[0].principal.attributes.source, schedulerSource('BlogAtDiscovery', 'update', 'publishedAt'));
 });
 
-test('discoverDueSchedules: schedule.at excludes future rows', () => {
+test('startClockTriggers deadline: schedule.at excludes future rows', () => {
   const db = setupDb();
   const publishedAt = date();
   const Blog = entity('BlogAtFuture', {
@@ -273,19 +291,15 @@ test('discoverDueSchedules: schedule.at excludes future rows', () => {
   const futureTime = Date.now() + 100_000;
   db.prepare('INSERT INTO BlogAtFuture (id, publishedAt) VALUES (?, ?)').run('row1', futureTime);
 
-  const results = discoverDueSchedules(db, [Blog], Date.now());
-  assert.equal(results.length, 0, 'future row should not be due');
+  const calls = fireDeadline(db, [Blog], Date.now());
+  assert.equal(calls.length, 0, 'future row should not fire');
 });
 
-// ============================================================
-// discoverDueSchedules: schedule.after
-// ============================================================
-
-test('discoverDueSchedules: schedule.after finds rows where field + delay <= now', () => {
+test('startClockTriggers deadline: schedule.after finds rows where field + delay <= now', () => {
   const db = setupDb();
   const createdAt = date();
   const now = Date.now();
-  const delay = 1000; // 1s
+  const delay = 1000;
 
   const Todo = entity('TodoAfterDiscovery', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -297,26 +311,19 @@ test('discoverDueSchedules: schedule.after finds rows where field + delay <= now
   });
   for (const sql of generateDDL(Todo)) db.exec(sql);
 
-  // Row created 2s ago: 2s + 1s delay = 3s > now, NOT due... wait, let me recalculate
-  // If createdAt = now - 2000, and delay = 1000, then createdAt + delay = now - 1000 <= now → DUE
   const pastTime = now - 2000;
-  // Row created 0.5s ago: 0.5s + 1s delay = 1.5s > now - 0.5s → now - 500 + 1000 = now + 500 > now → NOT DUE
   const recentTime = now - 500;
 
   db.prepare('INSERT INTO TodoAfterDiscovery (id, createdAt) VALUES (?, ?)').run('row1', pastTime);
   db.prepare('INSERT INTO TodoAfterDiscovery (id, createdAt) VALUES (?, ?)').run('row2', recentTime);
 
-  const results = discoverDueSchedules(db, [Todo], now);
-  assert.equal(results.length, 1, 'only the old enough row should be due');
-  assert.equal(results[0].rowId, 'row1');
-  assert.deepEqual(results[0].payload, { reminded: true });
+  const calls = fireDeadline(db, [Todo], now);
+  assert.equal(calls.length, 1, 'only the old enough row should fire');
+  assert.equal(calls[0].payload.id, 'row1');
+  assert.deepEqual(deadlinePayload(calls[0]), { reminded: true });
 });
 
-// ============================================================
-// with: FUNCTION RESOLVES PER-ROW
-// ============================================================
-
-test('discoverDueSchedules: with function receives full row', () => {
+test('startClockTriggers deadline: with function receives full row', () => {
   const db = setupDb();
   const createdAt = date();
   const title = text();
@@ -342,23 +349,18 @@ test('discoverDueSchedules: with function receives full row', () => {
   db.prepare('INSERT INTO DocFnPayload (id, createdAt, title, owner) VALUES (?, ?, ?, ?)').run('row1', pastTime, 'Doc1', 'user1');
   db.prepare('INSERT INTO DocFnPayload (id, createdAt, title, owner) VALUES (?, ?, ?, ?)').run('row2', pastTime, 'Doc2', 'user2');
 
-  const results = discoverDueSchedules(db, [Doc], now);
-  assert.equal(results.length, 2, 'both rows due');
+  const calls = fireDeadline(db, [Doc], now);
+  assert.equal(calls.length, 2, 'both rows fire');
   assert.equal(payloadCalls.length, 2, 'function called for each row');
   assert.ok(payloadCalls.some((r) => r.id === 'row1'), 'function received row1');
   assert.ok(payloadCalls.some((r) => r.id === 'row2'), 'function received row2');
 
-  // Check payloads include row data
-  const row1Payload = results.find((r) => r.rowId === 'row1').payload;
-  assert.equal(row1Payload.computed, 'row1');
-  assert.equal(row1Payload.title, 'Doc1');
+  const row1 = calls.find((c) => c.payload.id === 'row1');
+  assert.equal(row1.payload.computed, 'row1');
+  assert.equal(row1.payload.title, 'Doc1');
 });
 
-// ============================================================
-// with: OMITTED → EMPTY PAYLOAD
-// ============================================================
-
-test('discoverDueSchedules: with omitted → payload: {}', () => {
+test('startClockTriggers deadline: with omitted → payload fields empty', () => {
   const db = setupDb();
   const publishedAt = date();
 
@@ -375,16 +377,12 @@ test('discoverDueSchedules: with omitted → payload: {}', () => {
   const pastTime = Date.now() - 100_000;
   db.prepare('INSERT INTO BlogNoWith (id, publishedAt) VALUES (?, ?)').run('row1', pastTime);
 
-  const results = discoverDueSchedules(db, [Blog], Date.now());
-  assert.equal(results.length, 1);
-  assert.deepEqual(results[0].payload, {}, 'no with → empty payload');
+  const calls = fireDeadline(db, [Blog], Date.now());
+  assert.equal(calls.length, 1);
+  assert.deepEqual(deadlinePayload(calls[0]), {}, 'no with → empty payload fields');
 });
 
-// ============================================================
-// while: NARROWING
-// ============================================================
-
-test('discoverDueSchedules: while predicate narrows results', () => {
+test('startClockTriggers deadline: while predicate narrows results', () => {
   const db = setupDb();
   const status = text();
   const publishedAt = date();
@@ -404,22 +402,17 @@ test('discoverDueSchedules: while predicate narrows results', () => {
   });
   for (const sql of generateDDL(Blog)) db.exec(sql);
 
-  // Insert rows: all past-due, but only one has status='scheduled'
   db.prepare('INSERT INTO BlogWhileNarrow (id, publishedAt, status) VALUES (?, ?, ?)').run('row1', pastTime, 'scheduled');
   db.prepare('INSERT INTO BlogWhileNarrow (id, publishedAt, status) VALUES (?, ?, ?)').run('row2', pastTime, 'draft');
   db.prepare('INSERT INTO BlogWhileNarrow (id, publishedAt, status) VALUES (?, ?, ?)').run('row3', pastTime, 'published');
 
-  const results = discoverDueSchedules(db, [Blog], now);
-  assert.equal(results.length, 1, 'only scheduled row should match');
-  assert.equal(results[0].rowId, 'row1');
-  assert.equal(results[0].payload.action, 'process');
+  const calls = fireDeadline(db, [Blog], now);
+  assert.equal(calls.length, 1, 'only scheduled row should fire');
+  assert.equal(calls[0].payload.id, 'row1');
+  assert.equal(calls[0].payload.action, 'process');
 });
 
-// ============================================================
-// MULTIPLE DUE ROWS
-// ============================================================
-
-test('discoverDueSchedules: multiple due rows all returned', () => {
+test('startClockTriggers deadline: multiple due rows all fire', () => {
   const db = setupDb();
   const publishedAt = date();
 
@@ -438,17 +431,13 @@ test('discoverDueSchedules: multiple due rows all returned', () => {
   db.prepare('INSERT INTO BlogMultiple (id, publishedAt) VALUES (?, ?)').run('row2', pastTime);
   db.prepare('INSERT INTO BlogMultiple (id, publishedAt) VALUES (?, ?)').run('row3', pastTime);
 
-  const results = discoverDueSchedules(db, [Blog], Date.now());
-  assert.equal(results.length, 3, 'all three rows due');
-  const ids = results.map((r) => r.rowId).sort();
+  const calls = fireDeadline(db, [Blog], Date.now());
+  assert.equal(calls.length, 3, 'all three rows fire');
+  const ids = calls.map((c) => c.payload.id).sort();
   assert.deepEqual(ids, ['row1', 'row2', 'row3']);
 });
 
-// ============================================================
-// NO SCHEDULE DECLARED
-// ============================================================
-
-test('discoverDueSchedules: entity with no schedule skipped', () => {
+test('startClockTriggers deadline: entity with no schedule is no-op', () => {
   const db = setupDb();
   const Blog = entity('BlogNoScheduleEntity', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -457,25 +446,21 @@ test('discoverDueSchedules: entity with no schedule skipped', () => {
   });
   for (const sql of generateDDL(Blog)) db.exec(sql);
 
-  const results = discoverDueSchedules(db, [Blog], Date.now());
-  assert.deepEqual(results, [], 'no schedule → no results');
+  const calls = fireDeadline(db, [Blog], Date.now());
+  assert.equal(calls.length, 0, 'no schedule → no dispatch');
 });
 
-test('discoverDueSchedules: empty entities array returns []', () => {
+test('startClockTriggers deadline: empty entities array is no-op', () => {
   const db = setupDb();
-  const results = discoverDueSchedules(db, [], Date.now());
-  assert.deepEqual(results, []);
+  const calls = fireDeadline(db, [], Date.now());
+  assert.equal(calls.length, 0);
 });
 
-// ============================================================
-// CLOCK INJECTION (now PARAMETER)
-// ============================================================
-
-test('discoverDueSchedules: clock injection - now BEFORE row time → empty', () => {
+test('startClockTriggers deadline: clock injection - now BEFORE row time → empty', () => {
   const db = setupDb();
   const publishedAt = date();
   const baseNow = Date.now();
-  const futureTime = baseNow + 1_000_000; // 1000s in future from our test's perspective
+  const futureTime = baseNow + 1_000_000;
 
   const Blog = entity('BlogClockEarly', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -487,24 +472,17 @@ test('discoverDueSchedules: clock injection - now BEFORE row time → empty', ()
   });
   for (const sql of generateDDL(Blog)) db.exec(sql);
 
-  // Insert row with time far in the future relative to baseNow
   db.prepare('INSERT INTO BlogClockEarly (id, publishedAt) VALUES (?, ?)').run('row1', futureTime);
 
-  // Check with now BEFORE row time (using baseNow as reference)
-  const resultsEarly = discoverDueSchedules(db, [Blog], baseNow);
-  assert.equal(resultsEarly.length, 0, 'now before row time → not due');
+  const early = fireDeadline(db, [Blog], baseNow);
+  assert.equal(early.length, 0, 'now before row time → not due');
 
-  // Check with now AFTER row time
   const late = futureTime + 1000;
-  const resultsLate = discoverDueSchedules(db, [Blog], late);
-  assert.equal(resultsLate.length, 1, 'now after row time → due');
+  const lateCalls = fireDeadline(db, [Blog], late);
+  assert.equal(lateCalls.length, 1, 'now after row time → due');
 });
 
-// ============================================================
-// MULTIPLE ENTITIES
-// ============================================================
-
-test('discoverDueSchedules: multiple entities with schedules', () => {
+test('startClockTriggers deadline: multiple entities with schedules', () => {
   const db = setupDb();
   const now = Date.now();
   const pastTime = now - 100_000;
@@ -534,17 +512,13 @@ test('discoverDueSchedules: multiple entities with schedules', () => {
   db.prepare('INSERT INTO BlogMultiEntity (id, publishedAt) VALUES (?, ?)').run('b1', pastTime);
   db.prepare('INSERT INTO TodoMultiEntity (id, dueAt) VALUES (?, ?)').run('t1', pastTime);
 
-  const results = discoverDueSchedules(db, [Blog, Todo], now);
-  assert.equal(results.length, 2, 'one from each entity');
-  const sources = results.map((r) => r.payload.source).sort();
+  const calls = fireDeadline(db, [Blog, Todo], now);
+  assert.equal(calls.length, 2, 'one from each entity');
+  const sources = calls.map((c) => c.payload.source).sort();
   assert.deepEqual(sources, ['blog', 'todo']);
 });
 
-// ============================================================
-// with: null (explicit sentinel)
-// ============================================================
-
-test('discoverDueSchedules: with: null treated as omitted → {}', () => {
+test('startClockTriggers deadline: with: null treated as omitted → {}', () => {
   const db = setupDb();
   const publishedAt = date();
 
@@ -561,14 +535,10 @@ test('discoverDueSchedules: with: null treated as omitted → {}', () => {
   const pastTime = Date.now() - 100_000;
   db.prepare('INSERT INTO BlogNullWith (id, publishedAt) VALUES (?, ?)').run('row1', pastTime);
 
-  const results = discoverDueSchedules(db, [Blog], Date.now());
-  assert.equal(results.length, 1);
-  assert.deepEqual(results[0].payload, {}, 'with: null → empty payload');
+  const calls = fireDeadline(db, [Blog], Date.now());
+  assert.equal(calls.length, 1);
+  assert.deepEqual(deadlinePayload(calls[0]), {}, 'with: null → empty payload fields');
 });
-
-// ============================================================
-// with function shape: receives { row } with id
-// ============================================================
 
 test('with function receives row with id field', () => {
   const db = setupDb();
@@ -593,6 +563,6 @@ test('with function receives row with id field', () => {
   const pastTime = Date.now() - 100_000;
   db.prepare('INSERT INTO BlogFnRowId (id, publishedAt) VALUES (?, ?)').run('test-id-123', pastTime);
 
-  discoverDueSchedules(db, [Blog], Date.now());
+  fireDeadline(db, [Blog], Date.now());
   assert.equal(receivedId, 'test-id-123', 'function should receive row.id');
 });
