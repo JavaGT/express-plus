@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mayRow } from './row-grant.mjs';
-import { admitSystemMutation } from './schedule.mjs';
+import { admitSystemMutation, startClockTriggers } from './schedule.mjs';
 import { createServer, durableMutationVariant } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects, executeEffectsForEvent } from './effect-compiler.mjs';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth-entities.mjs';
@@ -8,8 +8,6 @@ import { createWriteQueue } from './write-queue.mjs';
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
-import { startTickEngine } from './tick-engine.mjs';
-import { startReaper } from './reaper.mjs';
 import { reconcileProjectedRecovery } from './projected-async.mjs';
 import { reconcileDurableEffects } from './durable-effects.mjs';
 import { getLog } from './log.mjs';
@@ -176,20 +174,14 @@ export async function buildAndStart(app) {
   // an atomic multi-entity write outside the per-route HTTP handlers.
   app.batch = (actions, { principal } = {}) =>
     app.writeQueue.run(() => app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal }));
-  // Start the tick engine now that `app.kernel.dispatch` exists. Only starts
-  // if some entity declares a tick trigger (tick.hz / tick.every); otherwise
-  // startTickEngine returns a no-op and no timer is created. Scheduled on
-  // the shared clock.
-  startTickEngine({
+  // Singular Schedule clock-dispatch: deadline + tick share one starter.
+  // No-op when no triggers exist. Scheduled on the shared clock.
+  startClockTriggers({
     db: app.db,
     entities: app.entities,
     dispatch: dispatchThroughWriteQueue,
     clock: app.clock,
   });
-  // Start the schedule reaper now that app.kernel.dispatch exists. Only
-  // starts if some entity declares a schedule.at / schedule.after deadline
-  // trigger. Scheduled on the shared clock.
-  startReaper({ db: app.db, entities: app.entities, dispatch: dispatchThroughWriteQueue, clock: app.clock });
   // Projected.async boot catch-up. If the process died between committing an
   // event and the post-commit consumer applying its projection, the projected
   // field is stale and nothing reconciles it. One sweep at startup, under the

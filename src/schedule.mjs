@@ -1,13 +1,20 @@
-// P6d Spine A: time-driven sources (ADR #10). Import-surface only —
-// constructuring + entity-slot acceptance. Firing/dispatch/reaper wiring
-// lands in step 4; while/when discovery in step 2; tick in step 5.
+// Schedule module — time-driven sources (ADR #10, ADR-0002) and the singular
+// clock-dispatch seam. Constructors (schedule.at/after, tick.hz/every) declare
+// triggers; admitSystemMutation re-admits in-txn; startClockTriggers owns the
+// discover → principal → dispatch loop for both deadline and tick kinds.
 //
 // Tick triggers (tick.hz / tick.every) are row-set intervals: fire `update`
 // against EVERY row matching `while` per interval. An EMPTY `while` is
 // forbidden (the "run on ALL rows forever" foot-gun) — enforced at
-// entity-load-time in entity.mjs.
+// entity-load-time in entity compile.
+
+import { randomUUID } from 'node:crypto';
+import { principalFrom } from './principal.mjs';
+import { getLog } from './log.mjs';
+import { createClockRunner } from './clock-runner.mjs';
 
 const MS = { d: 86_400_000, h: 3_600_000, m: 60_000, s: 1_000 };
+const DEADLINE_SCAN_INTERVAL_MS = 1000;
 
 function parseDelay(delay) {
   if (typeof delay === 'number' && Number.isFinite(delay) && delay >= 0) return delay;
@@ -70,10 +77,9 @@ export function triggerList(triggerOrTriggers) {
   return Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
 }
 
-// discoverDueSchedules — PURE discovery function for P6d step 4a.
-// Returns an array of { entity, verb, rowId, payload } for all due schedule triggers.
-// Does NOT dispatch, write, or mutate — only reads.
-export function discoverDueSchedules(db, entities, now) {
+// discoverDueSchedules — private discovery for deadline triggers.
+// Returns { entity, verb, rowId, payload, sourceName }[]; does not dispatch.
+function discoverDueSchedules(db, entities, now) {
   const results = [];
   for (const record of entities) {
     if (!record || !record.schedule) continue;
@@ -169,11 +175,9 @@ export function tickSource(entityName, verb) {
   return `${entityName}.${verb}`;
 }
 
-// discoverTickedRows — PURE read-only discovery for tick triggers (parallel to
-// discoverDueSchedules). For each row-set tick (tick.hz / tick.every), finds
-// every row matching `while` and yields { entity, verb, rowId, payload }.
-// `now` is accepted for signature parity but unused — ticks have no due-time.
-export function discoverTickedRows(db, entities, now) {
+// discoverTickedRows — private discovery for tick triggers.
+// Yields { entity, verb, rowId, payload }. `now` is unused (ticks have no due-time).
+function discoverTickedRows(db, entities, now) {
   const results = [];
   for (const entity of entities) {
     if (!entity || !entity.schedule) continue;
@@ -256,4 +260,136 @@ export function admitSystemMutation({ entity, verb, rowId, payload, principal, d
   }
 
   return true;
+}
+
+function normalizeEntityList(entities) {
+  return entities instanceof Map ? [...entities.values()] : entities;
+}
+
+function computeIntervalFromTrigger(trigger) {
+  if (trigger.kind === 'tick.every') return trigger.intervalMs;
+  if (trigger.kind === 'tick.hz') return Math.floor(1000 / trigger.hertz);
+  return NaN;
+}
+
+function computeTickInterval(entities) {
+  let min = Infinity;
+  for (const entity of entities) {
+    if (!entity || !entity.schedule) continue;
+    for (const triggerOrTriggers of Object.values(entity.schedule)) {
+      for (const trigger of triggerList(triggerOrTriggers)) {
+        if (!trigger) continue;
+        const iv = computeIntervalFromTrigger(trigger);
+        if (Number.isFinite(iv) && iv < min) min = iv;
+      }
+    }
+  }
+  return min === Infinity ? 0 : min;
+}
+
+function hasDeadlineTrigger(entities) {
+  for (const entity of entities) {
+    if (!entity || !entity.schedule) continue;
+    for (const triggerOrTriggers of Object.values(entity.schedule)) {
+      for (const trigger of triggerList(triggerOrTriggers)) {
+        if (!trigger) continue;
+        if (trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after') return true;
+      }
+    }
+  }
+  return false;
+}
+
+function scanDeadlines({ db, entityList, entityMap, dispatch, now }) {
+  const rows = discoverDueSchedules(db, entityList, now());
+  for (const { entity: entityName, verb, rowId, payload, sourceName } of rows) {
+    try {
+      const entity = entityMap.get(entityName);
+      if (!entity) continue;
+      const trigger = triggerList(entity.schedule?.[verb]).find((t) => (t.sourceName ?? t.fieldName) === sourceName);
+      if (!trigger?.fieldName) continue;
+      const source = schedulerSource(entityName, verb, sourceName ?? trigger.fieldName);
+      const principal = principalFrom(source);
+      dispatch({ actionId: randomUUID(), type: `${entityName}.${verb}`, principal, payload: { id: rowId, ...payload } });
+    } catch (err) {
+      getLog().warn('system', 'schedule clock-dispatch (deadline) failed', { err, entity: entityName, verb, rowId });
+    }
+  }
+}
+
+function scanTicks({ db, entityList, dispatch, now }) {
+  const rows = discoverTickedRows(db, entityList, now());
+  for (const { entity: entityName, verb, rowId, payload } of rows) {
+    try {
+      const source = tickSource(entityName, verb);
+      const principal = principalFrom(source);
+      dispatch({ actionId: randomUUID(), type: `${entityName}.${verb}`, principal, payload: { id: rowId, ...payload } });
+    } catch (err) {
+      getLog().warn('system', 'schedule clock-dispatch (tick) failed', { err, entity: entityName, verb, rowId });
+    }
+  }
+}
+
+/**
+ * startClockTriggers — singular Schedule clock-dispatch seam.
+ *
+ * Owns discover → principal → dispatch for both deadline (schedule.at/after)
+ * and tick (tick.hz/every) triggers. Returns a no-op `{stop(){}}` when no
+ * triggers of either kind exist. Per-row deny/throw logs and continues —
+ * never aborts the sweep. Admission stays on the durable variant's
+ * beforeProjection seam (ADR-0002); this starter is a clock trigger only.
+ *
+ * @param {object} opts
+ * @param {object} opts.db
+ * @param {Map<string, object>|object[]} opts.entities
+ * @param {function} opts.dispatch
+ * @param {function} [opts.now=Date.now]
+ * @param {object} [opts.clock]
+ * @returns {{stop(): void}}
+ */
+export function startClockTriggers({ db, entities, dispatch, now = Date.now, clock }) {
+  const entityList = normalizeEntityList(entities);
+  const entityMap = new Map(entityList.map((e) => [e.name, e]));
+  const runners = [];
+
+  // One synchronous scan at start so due rows / matching ticks fire without
+  // waiting a full interval (boot catch-up; also the fire-path test surface).
+  // Discovery-phase throws are swallowed here the same way createClockRunner
+  // swallows interval failures — one bad table must not abort startup.
+  if (hasDeadlineTrigger(entityList)) {
+    try {
+      scanDeadlines({ db, entityList, entityMap, dispatch, now });
+    } catch (err) {
+      getLog().warn('system', 'schedule clock-dispatch (deadline) scan failed', { err });
+    }
+    runners.push(createClockRunner({
+      clock,
+      intervalMs: DEADLINE_SCAN_INTERVAL_MS,
+      name: 'schedule-deadline',
+      fn: () => scanDeadlines({ db, entityList, entityMap, dispatch, now }),
+    }));
+  }
+
+  const tickInterval = computeTickInterval(entityList);
+  if (tickInterval > 0) {
+    try {
+      scanTicks({ db, entityList, dispatch, now });
+    } catch (err) {
+      getLog().warn('system', 'schedule clock-dispatch (tick) scan failed', { err });
+    }
+    runners.push(createClockRunner({
+      clock,
+      intervalMs: tickInterval,
+      name: 'schedule-tick',
+      fn: () => scanTicks({ db, entityList, dispatch, now }),
+    }));
+  }
+
+  if (runners.length === 0) return { stop() {} };
+
+  return {
+    stop() {
+      for (const runner of runners) runner.stop();
+    },
+  };
 }

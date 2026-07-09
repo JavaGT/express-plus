@@ -1,8 +1,6 @@
-// Shared clock/setInterval setup — reaper.mjs, tick-engine.mjs, and
-// simulate.mjs share nearly identical timer-driver boilerplate. This extracts
-// the common branching (clock.add vs setInterval) + unref + stop pattern.
-//
-// One clock-runner abstraction — no three files pasting the same timer code.
+// Shared clock/setInterval setup — schedule.mjs (startClockTriggers) and
+// simulate.mjs share timer-driver boilerplate. This extracts the common
+// branching (clock.add vs setInterval) + unref + stop pattern.
 
 import { getLog } from './log.mjs';
 
