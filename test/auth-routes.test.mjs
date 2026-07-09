@@ -200,6 +200,129 @@ test('createAuthClient.logout clears the session', async (t) => {
   assert.equal(count, 0, 'logout deleted the session row');
 });
 
+// --- /auth/me session-read endpoint ---------------------------------------
+//
+// GET /auth/me returns the authenticated user's profile from the active session.
+// requireUser() rejects anonymous callers.
+
+test('/auth/me returns the authenticated user profile', async (t) => {
+  const { origin } = await boot(t);
+  const loginRes = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  const cookie = `sid=${sidFromSetCookie(loginRes.headers.get('set-cookie'))}`;
+
+  const meRes = await fetch(`${origin}/auth/me`, { headers: { cookie } });
+  assert.equal(meRes.status, 200);
+  const body = await meRes.json();
+  assert.equal(body.user.id, (await loginRes.json()).user.id);
+  assert.equal(body.user.username, 'alice');
+  // Optional profile fields are null (not set at login).
+  assert.equal(body.user.email, null);
+});
+
+test('/auth/me returns 401 without a valid session', async (t) => {
+  const { origin } = await boot(t);
+  const res = await fetch(`${origin}/auth/me`);
+  assert.equal(res.status, 401);
+});
+
+test('/auth/me with email identity returns the email field', async (t) => {
+  const { origin } = await bootWithEmail(t);
+  const loginRes = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice@example.com', password: 'hunter2' }),
+  });
+  const cookie = `sid=${sidFromSetCookie(loginRes.headers.get('set-cookie'))}`;
+
+  const meRes = await fetch(`${origin}/auth/me`, { headers: { cookie } });
+  assert.equal(meRes.status, 200);
+  const body = await meRes.json();
+  assert.equal(body.user.email, 'alice@example.com');
+  assert.equal(body.user.username, null, 'username was not populated by an email-first login');
+});
+
+// --- /auth/change-password endpoint ---------------------------------------
+//
+// POST /auth/change-password updates the authenticated user's password.
+// Verifies the current password before setting the new one.
+
+test('/auth/change-password succeeds with a correct current password', async (t) => {
+  const { origin } = await boot(t);
+  const loginRes = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  const cookie = `sid=${sidFromSetCookie(loginRes.headers.get('set-cookie'))}`;
+
+  const changeRes = await fetch(`${origin}/auth/change-password`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ currentPassword: 'hunter2', newPassword: 'newpw' }),
+  });
+  assert.equal(changeRes.status, 204, 'password changed successfully');
+
+  // The old password no longer works; the new password does.
+  const oldLogin = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  assert.equal(oldLogin.status, 401, 'old password is rejected');
+
+  const newLogin = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'newpw' }),
+  });
+  assert.equal(newLogin.status, 201, 'new password is accepted');
+});
+
+test('/auth/change-password returns 401 with a wrong current password', async (t) => {
+  const { origin } = await boot(t);
+  const loginRes = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  const cookie = `sid=${sidFromSetCookie(loginRes.headers.get('set-cookie'))}`;
+
+  const changeRes = await fetch(`${origin}/auth/change-password`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ currentPassword: 'wrong', newPassword: 'newpw' }),
+  });
+  assert.equal(changeRes.status, 401);
+});
+
+test('/auth/change-password returns 400 with missing body fields', async (t) => {
+  const { origin } = await boot(t);
+  const loginRes = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  const cookie = `sid=${sidFromSetCookie(loginRes.headers.get('set-cookie'))}`;
+
+  const noCurrent = await fetch(`${origin}/auth/change-password`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ newPassword: 'newpw' }),
+  });
+  assert.equal(noCurrent.status, 400);
+
+  const noNew = await fetch(`${origin}/auth/change-password`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ currentPassword: 'hunter2' }),
+  });
+  assert.equal(noNew.status, 400);
+});
+
 // --- identifyBy: configurable login identity field(s) ---------------------
 //
 // `.auth({ identifyBy })` declares which User field(s) a login credential is

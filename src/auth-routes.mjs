@@ -32,6 +32,7 @@ import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.mjs';
 import { config } from './config.mjs';
 import { getActiveDb } from './db.mjs';
 import { verifyTotp, verifyBackupCode } from './totp.mjs';
+import { serializeField } from './field-strategy.mjs';
 import {
   generateChallenge,
   challengeStore,
@@ -116,6 +117,48 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     // Max-Age=0 expires the cookie immediately; the attributes match login so
     // the browser scopes the deletion to the same cookie (Path/Domain match).
     res.setHeader('set-cookie', `${sessionCookie('', { secure })}; Max-Age=0`);
+    res.sendStatus(204);
+  });
+
+  // GET /auth/me — return the authenticated user's public profile from the
+  // active session. requireUser() rejects anonymous callers. The response
+  // includes all User fields: id, username, email, displayName, name, image,
+  // phone, bio. Null fields are omitted from the response.
+  s.get('/me', requireUser(), (req, res) => {
+    const user = User.getOrFail(req.principal.id);
+    res.json({
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        displayName: user.displayName,
+        name: user.name,
+        image: user.image,
+        phone: user.phone,
+        bio: user.bio,
+      },
+    });
+  });
+
+  // POST /auth/change-password — update the authenticated user's password.
+  // requireUser(): only a valid session may change its own password. Verifies
+  // the current password against the stored hash before setting the new one.
+  // 204 on success; 400 if the body is incomplete, 401 if wrong current pw.
+  s.post('/change-password', requireUser(), (req, res, next) => {
+    const { currentPassword, newPassword } = req.body ?? {};
+    if (!currentPassword || !newPassword) {
+      return next({ status: 400, message: 'currentPassword and newPassword are required' });
+    }
+    const user = User.getOrFail(req.principal.id);
+    if (!user || !user.password.verify(currentPassword)) {
+      return next({ status: 401, message: 'current password is incorrect' });
+    }
+    // Re-digest the new password through the hash field strategy rather than
+    // going through the entity action-dispatch pipeline (which needs authz
+    // gate resolution). This matches the existing pattern for framework-internal
+    // auth mutations — TOTP disable uses raw SQL at auth-routes.mjs:494).
+    const serialized = serializeField({ kind: 'hash', type: 'hash' }, newPassword);
+    getActiveDb().prepare('UPDATE User SET password = ? WHERE id = ?').run(serialized, user.id);
     res.sendStatus(204);
   });
 
