@@ -509,3 +509,11 @@ Decision: Typed FK traversal from a non-role `ref` to a target map membership is
 Decision: Park HTTP leaf / Entity-compile deepenings from the architecture review. Reason: http-route-match, http-body, http-response, and http-response-factory pass the deletion test as focused modules; further Entity splits without a clearer compiled-Entity runtime story would relocate ceremony and must not undo ADR-0003.
 
 Decision: Collapse tick-engine and reaper into Schedule startClockTriggers; privatize discover*; fire-path tests cross that seam. Reason: ADR-0002 unified admission but left two shallow discover→dispatch loops; one interface restores locality and deletes the twin modules in the same change.
+
+## 2026-07-10 — arch-schedule-clock-dispatch merged into main
+
+- **Purpose:** Collapse tick-engine + reaper into Schedule startClockTriggers; private discover*; fire-path tests
+- **Files touched:** DECISIONLOG.md, src/clock-runner.mjs, src/internal.mjs, src/kernel.mjs, src/reaper.mjs (deleted), src/schedule.mjs, src/tick-engine.mjs (deleted), test/reaper.test.mjs, test/schedule-discovery.test.mjs, test/tick-engine.test.mjs
+- **Commits:** 81e1436
+- **Base at merge:** main @ bfd333bdcafe83643eb01aff720985e8f52f6b97
+- **Conflict resolution:** NONE
