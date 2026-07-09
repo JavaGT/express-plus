@@ -9,8 +9,8 @@ A declared persisted record type with fields, grants, routes, schedules, and mut
 _Avoid_: Model, table, resource
 
 **Field**:
-A named cell on an Entity with a kind that fixes validation, persistence, and merge behavior.
-_Avoid_: Column, property, attribute (when meaning a declared entity field)
+A named cell on an Entity with a kind that fixes validation, persistence, and merge behavior (including binary storage as a kind, not a separate domain object).
+_Avoid_: Column, property, attribute (when meaning a declared entity field); Blob as a first-class identity beside Entity rows
 
 **Grant**:
 A function-declared authorization rule with a row-scope half and a runtime capability half.
@@ -25,7 +25,7 @@ _Avoid_: Permission string, role flag when meaning a grant result
 
 **Principal**:
 The actor for a request or framework-originated mutation, represented as a closed kind plus identity and attributes.
-_Avoid_: User when the actor may be system, link, or anonymous
+_Avoid_: User when meaning who acts (a person account may be an Entity named User; the actor is always a Principal — including system, link, and apiKey)
 
 **Action**:
 An imperative request that may be authorized or rejected; it is not yet a fact.
