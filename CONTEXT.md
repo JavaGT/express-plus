@@ -2,6 +2,24 @@
 
 Workbench is a framework for collaborative, persisted, realtime applications. Its language names the seams app authors declare and the framework executes.
 
+## Structure (the machine)
+
+Three loops — the mental map of the library (see also `AGENTS.md`, `docs/architecture-map.md`):
+
+| Loop | Outcome | Authority |
+| --- | --- | --- |
+| **Compile** | Declaration becomes handlers, DDL, grants, effects, routes | Entity compiler |
+| **Commit** | Action becomes sequenced event + projected row | Kernel / durable pipeline |
+| **Deliver** | Committed event reaches authorized clients and folds | Live Delivery + Replay decision |
+
+**Machine vs coat:** the three loops are the machine. Auth product (passkeys,
+TOTP, invitations), job workers, blobs, and UI kit are the **coat** — justified
+by known apps, always engaged as seams on the machine, never a second write or
+auth authority.
+
+**Grammar:** Event handle, Scope handle, Seq cursor, and Replay decision name
+identity and ordering so loops do not re-parse strings independently.
+
 ## Language
 
 **Entity**:
@@ -51,3 +69,11 @@ _Avoid_: Schedule, loop job
 **Kernel**:
 The durable mutation-dispatch core: handlers, named durable pipeline variant, admission, and write-queue serialization. Post-commit consumers and clock starters are contributed by the modules that own each engaged seam (Live Delivery, blob, projected, effects, Schedule), not implemented inside Kernel.
 _Avoid_: Server, router; not a bag of every post-commit side effect
+
+**Compile loop / Commit loop / Deliver loop**:
+The three essential runtime cycles of the framework (see Structure above).
+_Avoid_: “Layer”, “tier”, “service” when meaning one of these cycles
+
+**Coat**:
+Known-app capability on top of the machine (auth product, jobs, blobs, UI) that must not invent a second mutation or auth authority.
+_Avoid_: Plugin when meaning a second path; microservice

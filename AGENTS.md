@@ -21,6 +21,45 @@ naming, architecture, authorization, data, and live behavior.
 
 ## Architecture
 
+### The machine (three loops)
+
+Workbench is a **small essential machine** wearing a **known-app coat**. The
+machine is three loops — not “whatever files exist under `src/`”:
+
+1. **Compile** — declaration → compiled Entity (handlers, DDL, grants, effects,
+   schedules, routes). Author writes shape once; the framework derives runtime.
+2. **Commit** — action → authorize → handler → sequenced event on the committed
+   log → row projection (+ in-txn effects). One write authority.
+3. **Deliver** — post-commit → re-authorize → transport → client **Replay
+   decision** → fold. Own echoes and foreign events share the same decision.
+
+Every module either serves one loop, names a **grammar** for one loop (Event
+handle, Scope handle, Replay decision), or is coat/ops. If a change invents a
+**second machine** (second write path, second auth engine, second fold), reject
+it. Coat (passkeys, jobs, blobs, UI kit) is allowed; second machines are not.
+
+Map of modules to loops: `docs/architecture-map.md`.
+
+### Kernel stays thin
+
+- **Kernel** assembles the durable mutation server (handlers, named durable
+  variant, admission, write queue) and registers **engaged** post-commit
+  consumers. It does not implement Live latch, blob finalize, email, or clocks.
+- A new post-commit or clock behavior lives in the **module that owns that seam**
+  and contributes a consumer/starter. Declaration-driven engagement, not a
+  growing hand-list of special cases inside `kernel.mjs`.
+
+### Grammar modules are load-bearing
+
+- **Event handle**, **Scope handle**, and **Replay decision** concentrate identity
+  and cursor grammar. Do not reintroduce ad-hoc `indexOf(':')` / dotted-string
+  parse / hand-rolled dup-gap logic beside them.
+- Zero-import browser client may **embed** pure grammar (generated/copied with a
+  parity test). It must not diverge in predicates. Folds may stay separate;
+  replay decision must not.
+
+### Core rules
+
 - **Prefer a singular system.** One way to do a thing. Multiple pathways to the
   same goal drift apart, conflict in unexpected ways, and confuse. If a second
   path seems needed, fold it into the first or remove the first — don't run two
@@ -55,6 +94,7 @@ naming, architecture, authorization, data, and live behavior.
   is built for the `projects/*` stress-test apps up front, not landed
   incrementally as each app stubs its toe. The bar is "a real app in the set needs
   this shape," never "build every conceivable knob" — proactive is not exhaustive.
+  Field kinds, offline stores, and auth product features must re-defend this bar.
 - **When several known-use-case gaps are all required, sequence and start.** Do
   not ask the user to rank prerequisites that the current port clearly needs.
   Pick the safest small order, implement one bridge at a time behind tests, and
@@ -63,10 +103,11 @@ naming, architecture, authorization, data, and live behavior.
 - **Fail closed.** When a default carries a security opinion, the default is the
   restrictive one: auth-on, private-by-default. Allowlists, not denylists.
 - **One reconciliation path.** A client event becomes state in exactly one place
-  (`ingest`), for the client's own echoed events and for foreign live events
-  alike. There is no second "apply" path. Optimistic apply is a *visible
-  placeholder*; `ingest` is what resolves it. A dual reconciliation path is the
-  source of "the two clients disagree" bugs — structurally forbidden.
+  (`ingest` / LiveList fold after **Replay decision**), for the client's own
+  echoed events and for foreign live events alike. There is no second "apply"
+  path. Optimistic apply is a *visible placeholder*; the fold is what resolves
+  it. A dual reconciliation path is the source of "the two clients disagree"
+  bugs — structurally forbidden.
 - **Persistence is opt-in by engaged seam, not a class field.** An action's class
   (durable, ephemeral, volatile) is *emergent* from which seams it engages, never
   a label it carries. Engage the persistence seam and it is durable; don't and it
@@ -76,6 +117,11 @@ naming, architecture, authorization, data, and live behavior.
   pipeline varies (durable vs live), a spec selects a *named, pre-validated
   variant*, never toggles individual stages with independent booleans. Orthogonal
   flags form an incoherent lattice that can half-apply; a named variant cannot.
+- **Transports are skins, not authorities.** HTTP and WebSocket present the
+  Kernel and Live Delivery; they do not invent a second mutation or auth model.
+- **Auth product features are plugins on Principal + routes**, never a parallel
+  grant system. Passkeys, TOTP, invitations, membership sugar expand the *coat*;
+  they must still resolve through the one check registry and route/row gates.
 
 ## Authorization
 

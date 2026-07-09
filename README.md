@@ -7,6 +7,10 @@ request/response apps. Declare your entities, their authorization, and their
 reactions; the framework owns the REST routes, the WebSocket live stream, the
 event log, the reducers, optimistic UI, undo, gap recovery, and cross-tab sync.
 
+Structurally it is a **small machine** (compile → commit → deliver) wearing a
+**known-app coat** (auth product, jobs, blobs, UI). See `AGENTS.md` and
+`docs/architecture-map.md`.
+
 The north star is the same one the shipped `scope` workbench hit in production.
 scope is the working proof; workbench is the cleaner second cut, built
 proactively for a known set of stress-test apps rather than incrementally as
@@ -34,6 +38,7 @@ node projects/chat/server.mjs        # run the chat sample (open localhost:3000 
 | --- | --- |
 | **[AGENTS.md](AGENTS.md)** | The binding design values (naming, architecture, authorization, data, live/sync, defaults). Read this first; the SPEC obeys these. |
 | **[CONTEXT.md](CONTEXT.md)** | Domain glossary — the language of seams (Entity, Grant, Scope handle, Kernel, …). Use these nouns in design and code. |
+| **[docs/architecture-map.md](docs/architecture-map.md)** | Modules mapped to the three loops (Compile / Commit / Deliver) and the known-app coat. |
 | **[SPEC.md](SPEC.md)** | The canonical specification — what workbench is, how it behaves, the build order. |
 | **[DECISIONLOG.md](DECISIONLOG.md)** | The append-only ledger of architectural decisions (ADRs) and implementation decisions. The SPEC cites entries by number. |
 | **[docs/adr/](docs/adr/)** | Numbered ADRs for settled architectural seams (event handles, schedule, entity authz, scope handles). |

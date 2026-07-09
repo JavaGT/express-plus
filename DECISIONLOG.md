@@ -538,3 +538,14 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Decision:** Pure `decideReplay(cursor, seqOrSpan)` + `normalizeSeqSpan` in `src/replay-decision.mjs`. `createClient.ingest` is span-aware (accepts `seqSpan` or single `seq`). LiveList `_ingest` calls the same decision (inlined under GENERATED markers for zero-import client). Folds stay separate. Parity test locks the client copy to the source predicates.
 - **Files:** `src/replay-decision.mjs`, `src/pipeline.mjs`, `public/workbench-client.mjs`, `test/replay-decision*.test.mjs`
 - **Gate:** `node --test` **1635/1635/0**
+
+## 2026-07-10 — three-loop philosophy instilled; structural investigation recorded
+
+- **Decision:** Encode first-principles structure into binding project docs:
+  workbench is a **small machine** (Compile / Commit / Deliver) wearing a
+  **known-app coat**; Kernel stays thin; Event/Scope/Replay grammars are
+  load-bearing; transports are skins; auth product is coat on Principal+routes.
+- **Files:** `AGENTS.md`, `CONTEXT.md`, `docs/architecture-map.md`, `README.md`,
+  `docs/structural-investigation-2026-07-10.md` (candidates S1–S7, no code moves).
+- **Next structural slice if desired:** S1 Live Delivery singular public seam,
+  then S2 client fold golden fixtures. HTTP leaf deepenings remain parked.
