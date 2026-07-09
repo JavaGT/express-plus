@@ -474,14 +474,32 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
   };
   app.ddl = () => app.prepareSchema();
 
-  app.listen = (port, optionsOrCallback) => {
-    // Portless `app.listen()` binds `app.config.port` — the env-or-option value
-    // resolved at construction — so an exemplar writes `workbench({ port:
-    // 3000 }).listen()` with no redundant argument. An explicit port still wins
-    // (the legacy `listen(3000, ...)` shape), preserving one listen path.
-    const p = port ?? app.config.port;
-    app.port = p;
-    return serveListen(app, p, optionsOrCallback);
+  app.listen = (portOrOptionsOrCallback, optionsOrCallback) => {
+    // One listen path, Express-compatible overload:
+    //   listen()                         → config.port
+    //   listen(3000) / listen(3000, cb)  → explicit port
+    //   listen(3000, { principalOf })    → port + options
+    //   listen(callback)                 → config.port + onListening (NOT port=function)
+    //   listen({ principalOf, onListening }) → config.port + options object
+    // An explicit port still wins over config/env. PORT env is applied at
+    // construction via resolveConfig → app.config.port.
+    let port;
+    let options = optionsOrCallback ?? {};
+    if (typeof portOrOptionsOrCallback === 'function') {
+      port = app.config.port;
+      options = portOrOptionsOrCallback;
+    } else if (
+      portOrOptionsOrCallback != null
+      && typeof portOrOptionsOrCallback === 'object'
+      && !Array.isArray(portOrOptionsOrCallback)
+    ) {
+      port = app.config.port;
+      options = portOrOptionsOrCallback;
+    } else {
+      port = portOrOptionsOrCallback ?? app.config.port;
+    }
+    app.port = port;
+    return serveListen(app, port, options);
   };
   // Static file serving — a thin alias over the general `app.use` prefix-intercept
   // seam: `app.static('/public', dir)` is exactly

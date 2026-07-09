@@ -144,3 +144,40 @@ test('an explicit listen(port) still wins over app.config.port', async () => {
   assert.ok(app.httpServer.address().port > 0, 'a socket was bound');
   app.httpServer.close();
 });
+
+test('listen(callback) uses config.port — does not treat the function as a port', async () => {
+  let fired = false;
+  const app = workbench({ db: ':memory:', port: 0 })
+    .mount('/notes', makeNote())
+    .listen(() => { fired = true; });
+  await app.ready;
+  assert.equal(app.port, 0, 'callback is not used as the port argument');
+  assert.equal(typeof app.port, 'number');
+  assert.ok(app.httpServer.address().port > 0);
+  // onListening may fire before or after ready depending on race — wait briefly
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(fired, true, 'callback runs as onListening');
+  app.httpServer.close();
+});
+
+test('listen({ principalOf, onListening }) uses config.port, not the options object as port', async () => {
+  let fired = false;
+  const principal = { type: 'user', id: 'u1' };
+  const app = workbench({ db: ':memory:', port: 0 })
+    .mount('/notes', makeNote())
+    .listen({
+      principalOf: () => principal,
+      onListening: () => { fired = true; },
+    });
+  await app.ready;
+  assert.equal(app.port, 0);
+  assert.equal(typeof app.port, 'number');
+  assert.ok(app.httpServer.address().port > 0);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(fired, true);
+  // Health is public — proves the socket is the configured bind
+  const port = app.httpServer.address().port;
+  const res = await fetch(`http://127.0.0.1:${port}/health`);
+  assert.equal(res.status, 200);
+  app.httpServer.close();
+});

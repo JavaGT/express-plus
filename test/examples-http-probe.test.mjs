@@ -103,3 +103,16 @@ test('HTTP probe: projects/gdoc.mjs /health when PORT set', { concurrency: false
   const r = await probeWithPort('projects/gdoc.mjs', { path: '/health' });
   assert.ok(r.status < 500, `status ${r.status}: ${r.body}\n${r.out}`);
 });
+
+test('HTTP probe: projects/app.mjs /health when PORT set (listen(callback) overload)', { concurrency: false }, async () => {
+  // app.mjs uses listen(() => log) — must bind app.config.port (from PORT), not
+  // treat the function as the port argument.
+  const r = await probeWithPort('projects/app.mjs', { path: '/health' });
+  assert.ok(r.status < 500, `status ${r.status}: ${r.body}\n${r.out}`);
+  assert.equal(r.status, 200);
+});
+
+test('HTTP probe: projects/todo.mjs /health when PORT set', { concurrency: false }, async () => {
+  const r = await probeWithPort('projects/todo.mjs', { path: '/health' });
+  assert.ok(r.status < 500, `status ${r.status}: ${r.body}\n${r.out}`);
+});
