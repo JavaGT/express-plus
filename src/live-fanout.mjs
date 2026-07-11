@@ -4,6 +4,12 @@
 // W5 slice 2: registry is keyed by scope string (e.g. "Entity:id" for
 // per-entity, "project:p1" for coarse). The old entity→id→conn map
 // is retired — per-entity is a degenerate scope, not a separate path.
+//
+// W3 slice 2: a foreign-entity event (e.g. a Job event) may ride the ANCHOR
+// row's own scope stream (e.g. "Project:p1") when its committedEvent.scope
+// equals that anchor's Scope handle key — authz is re-checked against the
+// anchor row, never against the foreign entity. Any other entity mismatch
+// is still dropped (guards caller bugs on the per-entity path).
 
 import { anonymous } from './principal.mjs';
 import { mayRow } from './row-grant.mjs';
@@ -145,7 +151,16 @@ export function createLiveFanout({ mayVerb = null } = {}) {
       } catch { return; }
     }
     const handle = committed.handle;
-    if (handle.entity !== name) return;
+    // Scope-anchored case: a foreign-entity event (e.g. Job.updated) riding
+    // the anchor row's own scope stream. The caller deliberately delivers it
+    // here, authorized against the anchor row — not a per-entity mismatch.
+    let scopeAnchored = false;
+    if (handle.entity !== name) {
+      let anchorKey;
+      try { anchorKey = scopeOf(name, id).key; } catch { return; }
+      if (typeof committedEvent.scope !== 'string' || committedEvent.scope !== anchorKey) return;
+      scopeAnchored = true;
+    }
 
     const eventScope = committedEvent.scope ?? scopeOf(name, id).key;
     const removed = row === undefined;
@@ -156,14 +171,19 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     }
 
     let ephemeralField = null;
-    if (!removed && handle.kind === EventKind.fieldSet) {
+    // Ephemeral-field pacing only makes sense on the per-entity path — a
+    // scope-anchored foreign event (e.g. Job.updated) never has a field on
+    // the anchor entity's fieldSet grammar, so it can't false-trigger this.
+    if (!scopeAnchored && !removed && handle.kind === EventKind.fieldSet) {
       const fd = entityRecord.fields?.[handle.field];
       if (fd?.kind === 'ephemeral') {
         ephemeralField = handle.field;
       }
     }
 
-    const delta = deltaProjector.project(entityRecord, id, authzRow, committed);
+    // Delta projection is per-entity state diffing; a scope-anchored foreign
+    // event carries its own data and must not be fed to the anchor's projector.
+    const delta = scopeAnchored ? undefined : deltaProjector.project(entityRecord, id, authzRow, committed);
 
     const scopeSubs = byScope.get(eventScope);
     if (!scopeSubs) return;
@@ -187,6 +207,9 @@ export function createLiveFanout({ mayVerb = null } = {}) {
       }
 
       if (pace.window === 0) {
+        // Envelope identity (entity, id) is always the ANCHOR — matching the
+        // subscription's scope — even for a scope-anchored foreign event;
+        // the nested `event` carries its own type/data (e.g. Job.updated).
         const envelope = {
           type: 'event', entity: name, id, seq: committed.seq,
           seqSpan: [committed.seq, committed.seq],
