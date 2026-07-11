@@ -1,34 +1,40 @@
 {
-  "name": "workbench",
-  "version": "0.0.0",
-  "description": "Workbench for collaborative, persisted, realtime data.",
-  "type": "module",
-  "main": "src/index.mjs",
-  "types": "index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./index.d.ts",
-      "default": "./src/index.mjs"
-    },
-    "./internal": {
-      "default": "./src/internal.mjs"
-    },
-    "./client": {
-      "default": "./public/workbench-client.mjs"
-    },
-    "./scope-entities": {
-      "default": "./projects/scope-entities.mjs",
-      "import": "./projects/scope-entities.mjs",
-      "node": "./projects/scope-entities.mjs"
-    }
-  },
-  "scripts": {
-    "test": "node --test",
-    "test:coverage": "node --experimental-test-coverage --test"
-  },
-  "devDependencies": {
-    "fake-indexeddb": "^6.2.5",
-    "jsdom": "^29.1.1",
-    "svelte": "^5.56.4"
-  }
+	"name": "workbench",
+	"version": "0.0.0",
+	"description": "Workbench for collaborative, persisted, realtime data.",
+	"type": "module",
+	"main": "src/index.mjs",
+	"types": "index.d.ts",
+	"exports": {
+		".": {
+			"types": "./index.d.ts",
+			"default": "./src/index.mjs"
+		},
+		"./internal": {
+			"default": "./src/internal.mjs"
+		},
+		"./client": {
+			"default": "./public/workbench-client.mjs"
+		},
+		"./scope-entities": {
+			"default": "./projects/scope-entities.mjs",
+			"import": "./projects/scope-entities.mjs",
+			"node": "./projects/scope-entities.mjs"
+		}
+	},
+	"scripts": {
+		"lint": "eslint .",
+		"test": "node --test",
+		"test:coverage": "node --experimental-test-coverage --test"
+	},
+	"devDependencies": {
+		"eslint": "^9.39.5",
+		"fake-indexeddb": "^6.2.5",
+		"globals": "^17.7.0",
+		"jsdom": "^29.1.1",
+		"svelte": "^5.56.4"
+	},
+	"engines": {
+		"node": ">=22"
+	}
 }

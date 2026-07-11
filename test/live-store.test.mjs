@@ -715,7 +715,7 @@ describe('LiveStore', () => {
         if (opts.method === 'PATCH' || opts.method === 'PUT') {
           return new Promise((resolve) => { resolvePost = resolve; });
         }
-        if (opts.method === 'GET') return Promise.resolve(res204());
+        if (opts.method === 'GET') return Promise.resolve({ ok: true, status: 204, json: async () => {} });
         return Promise.resolve(Response.json({ ok: true }));
       },
       channel: null,
@@ -740,7 +740,7 @@ describe('LiveStore', () => {
         if (opts.method === 'PATCH' || opts.method === 'PUT') {
           return Promise.resolve(Response.json({ ok: true, row: { id: 'done', title: 'ok' } }));
         }
-        return Promise.resolve(res204());
+        return Promise.resolve({ ok: true, status: 204, json: async () => {} });
       },
       channel: null,
     });
