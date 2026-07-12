@@ -26,6 +26,7 @@ import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/session.mjs';
 import { createLiveDelivery } from './live-delivery.mjs';
+import { tryParseScopeKey } from './scope-handle.mjs';
 import { retentionPrune } from './committed-log.mjs';
 import { getLog } from './log.mjs';
 import { buildKernel, buildAndStart } from './kernel.mjs';
@@ -483,6 +484,33 @@ export function listen(app, port, optionsOrCallback = {}) {
     db: app.db,
     resolveEntity: (name) => app.entities?.get(name),
   });
+
+  // Job lifecycle events (W3 slice 2): the queue appends its _Job.* events to
+  // _Log itself, not through the durable pipeline, so the post-commit consumer
+  // never sees them. Bridge the queue's listener hook into the SAME fan-out:
+  // resolve the event's scope key to its anchor entity + row (the shape
+  // live-delivery's createConsumer uses) and emit scope-anchored — authz is
+  // re-checked against the anchor row inside the fan-out. Fail closed: an
+  // unparseable scope, unknown entity, or missing anchor row delivers nothing
+  // live (a foreign event must never ride the removed-row path, which skips
+  // re-auth); the event stays durable in _Log for cursor catch-up either way.
+  if (app.jobs) {
+    app.jobs.onEvent((ev) => {
+      const handle = tryParseScopeKey(ev.scope);
+      if (!handle) return;
+      const entity = app.entities?.get(handle.entity);
+      if (!entity) return;
+      let raw;
+      try {
+        raw = app.db.prepare(`SELECT * FROM ${handle.entity} WHERE id = ?`).get(handle.id);
+      } catch { return; }
+      if (!raw) return;
+      const hydrated = typeof entity.hydrate === 'function';
+      const row = hydrated ? entity.hydrate(raw, null) ?? raw : raw;
+      Promise.resolve(app.live.emit(entity, handle.id, row, ev, { hydrated }))
+        .catch((err) => log.warn('live', 'job event fan-out failed', { err, scope: ev.scope }));
+    });
+  }
 
   // Resolution runs in the background; `app.ready` completes once routes,
   // schema, kernel, background consumers, and the socket are ready, so a caller

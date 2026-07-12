@@ -85,13 +85,13 @@
 
 ## Section 4: Gap summary
 
-### BUILD (new substrate work needed)
+### BUILD (new substrate work needed) — ALL CLOSED
 
-| Gap | Why | Spec ref |
-|---|---|---|
-| **Progress reporting** | Workbench has no progress column/endpoint/SSE; Scope has rich `{progress, stage, outputLog}` system with real-time SSE broadcast | Council item #1 |
-| **Cancellation** | Workbench has no `cancelled` state, no cancel API, no in-process cancellation mechanism | Must-add state + API |
-| **Per-project scoping** | Workbench `_Job` has no scope column; every Scope query is scoped by `projectId` | Required for live visibility |
+| Gap | Why | Spec ref | Closed by |
+|---|---|---|---|
+| **Progress reporting** | Workbench has no progress column/endpoint/SSE; Scope has rich `{progress, stage, outputLog}` system with real-time SSE broadcast | Council item #1 | Slice 1: `updateProgress({ jobId, workerId, progress, stage })`; live broadcast via slice 2 `_Job.updated` events (one path, no SSE sidecar) |
+| **Cancellation** | Workbench has no `cancelled` state, no cancel API, no in-process cancellation mechanism | Must-add state + API | Slice 1: `cancelled` terminal state + `cancelJob({ jobId, workerId })` |
+| **Per-project scoping** | Workbench `_Job` has no scope column; every Scope query is scoped by `projectId` | Required for live visibility | Slice 1: `_Job.scope` + `enqueue({ scope })` / `claim(workerId, { scope })` / `list({ scope })`; slice 2 makes the scope the live stream key |
 
 ### THIN-WRAP
 
@@ -115,3 +115,59 @@
 | Job chaining | Already app-side effects in both systems. No queue-native DAG needed |
 | Worker 3-state lifecycle (active→stale→offline) | Workbench has binary revoked/not-revoked; Scope's nuanced lifecycle is fleet-management |
 | Transformation relation on Job | Scope-specific media processing audit trail |
+
+## Section 5: Scope's three kinds as pure plug-ins (census closure)
+
+The done criterion: each of Scope's job kinds is expressible against the
+generic queue as **worker + kind name + payload/result contract** — no
+substrate change, no kind-shaped column. The only queue surface any of them
+touches is `enqueue` / `claim(workerId, { kind })` / `heartbeat` /
+`updateProgress` / `submitResult`. Verified against the shipped API
+(`src/job-queue.mjs`, post slices 1–2).
+
+### 1. Whisper transcription
+
+- **Kind:** `'transcribe'`
+- **Payload:** `{ inputFileId, profile, language? }` — the blob-store id of the
+  media file plus Scope's transcription profile. Opaque JSON to the queue;
+  `inputFileId`/`profile` live HERE, never as `_Job` columns (they were
+  DEFER-CANDIDATE columns above — the payload contract is why they stay out).
+- **Result:** `{ transcriptBlobId, durationMs, model }` — the transcript goes to
+  the blob store (large-results convention, Section 4 THIN-WRAP); the result row
+  carries the reference, not the text.
+- **Worker:** Scope's local whisper process, registered via
+  `registerWorker(sharedSecret)` and polling `claim(workerId, { kind: 'transcribe' })`.
+  The local-only red line (no cloud transcription) is a property of WHERE Scope
+  runs this worker — the queue already assumes workers are neither co-located
+  nor trusted (per-worker revocable bearers), so nothing changes substrate-side.
+- **Progress:** `updateProgress({ progress, stage: 'decoding' | 'transcribing' | … })`
+  on long runs; a `Project:<id>` scope makes progress visible on the live board.
+
+### 2. Media transcode
+
+- **Kind:** `'transcode'`
+- **Payload:** `{ inputFileId, targetProfile, container? }`.
+- **Result:** `{ outputFileId, codec, sizeBytes }` — output rides the blob
+  store by reference, same convention.
+- **Worker:** Scope's ffmpeg-driving worker process, same registration/claim
+  shape, `claim(workerId, { kind: 'transcode' })`.
+- **Chaining:** transcode → transcribe → index is composition at the enqueue
+  edge: the app's result handling (or a post-commit consumer) enqueues the
+  follow-on kind. No queue-native DAG (Section 3 item 5 stands).
+
+### 3. Search indexing
+
+- **Kind:** `'search-index'`
+- **Payload:** `{ postId }` (or Scope's document id) — nothing else.
+- **Result:** `{ accepted: true }`; the worker's side effect is the derived
+  index row, not the result payload.
+- **Worker:** in-process `app.jobs.work('search-index', fn)` — no separate
+  fleet needed for cheap derived-data kinds.
+- **Proven in-repo:** this exact plug-in shape ships as the non-media
+  genericity proof — `projects/blog-platform/entities.mjs`
+  (`SEARCH_INDEX_KIND`, `enqueueSearchIndex`, `searchIndexWorkerFn`) with
+  acceptance tests in `test/blog-platform-search-jobs.test.mjs` asserting the
+  payload is exactly `{ postId }` and no media-shaped key exists.
+
+All three kinds fit the split with zero substrate edits: the census is
+**closed**.

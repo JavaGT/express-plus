@@ -507,6 +507,61 @@ This reuses the committed log the framework already has (subtract before add) an
 keeps the one-reconciliation-path invariant. `projected.async` computed fields
 (§5.3) are the in-framework read-model case of this same projection primitive.
 
+### 9.4 Background jobs — the generic queue substrate (W3)
+
+A **job** is a unit of work with its own lifecycle — it is *not* a derived read
+model, so the queue is a **separate seam** from the projection registry (folding
+it in would only relocate the claim/lease/heartbeat/reaper concept). The two
+compose at the **enqueue edge**: a post-commit consumer (§9.3) or the app's
+write path calls `enqueue()`; the queue owns the lifecycle from there. Chaining
+(transcode → transcribe → index) is composition at that same edge, never a
+queue-native DAG.
+
+The genericity split is the template for every app-driven feature: **workbench
+owns the generic board** (post / claim / heartbeat / result / retry / reaper);
+**apps plug in job kinds** — a kind name, a worker, and a payload/result
+contract. Nothing kind-shaped lives in the substrate.
+
+Engaged as an app seam: `workbench({ db, jobs: { sharedSecret, leaseMs,
+heartbeatGraceMs, maxAttempts, backoffMs, reapIntervalMs } })` → `app.jobs`.
+The surface:
+
+- `enqueue({ kind, payload, scope, id })` — post work. `scope` is optional and,
+  when present, is an entity scope key (`'Post:p1'`) — the live stream key a
+  job board subscribes to.
+- `registerWorker(sharedSecret)` / `authenticate(bearer)` — registration uses a
+  **shared secret**; job operations use a **per-worker revocable bearer token**.
+  Both constant-time compared; the shared secret is never accepted for job
+  operations; unknown/revoked fails closed. Workers are not assumed co-located
+  or trusted.
+- `claim(workerId, { kind, scope })` — atomic single-statement claim
+  (`UPDATE … WHERE id = (SELECT … LIMIT 1) RETURNING *`); concurrent claimants
+  are race-safe by per-statement atomicity, FIFO by `enqueuedAt`.
+- `heartbeat(jobId, workerId)` — extends the lease; the first heartbeat is the
+  claimed→running edge.
+- `updateProgress({ jobId, workerId, progress, stage })` — percent + stage for
+  long runs; rides the one event path (no second progress channel).
+- `submitResult(jobId, workerId, { status, output })` — **idempotent by job id**
+  (first terminal result wins; a retried submission is a no-op ack). A failed
+  result retries with backoff up to `maxAttempts`, then dead-letters (terminal
+  `failed`).
+- `cancelJob`, `reap` / `startReaper` (expired leases reassign to `queued`),
+  `list({ scope, kind, status, limit })`, and `work(kind, fn, { pollIntervalMs })`
+  — the in-process worker loop with an awaitable `once()` for deterministic
+  tests.
+
+**Live visibility** (W3 slice 2): every state-changing mutation on a job with a
+non-NULL `scope` appends exactly one `_Job.created` / `_Job.updated` event to
+the committed log, under the job's scope, using the kernel's own per-scope
+sequence grammar — one seq, not a second one. The serve layer bridges the
+queue's `onEvent(fn)` hook into the live fan-out: the event is delivered
+**scope-anchored** to subscribers of the anchor entity (anchor identity, re-auth
+against the anchor row, no delta), failing closed on an unparseable scope,
+unknown entity, or missing anchor row — the event stays durable in `_Log` for
+cursor catch-up either way. A NULL-scope job has no stream key and is invisible
+to live boards by construction. Job boards are therefore the normal live path
+(§8) — no bespoke polling channel.
+
 ---
 
 ## 10. Time-driven sources (ADR #10)
