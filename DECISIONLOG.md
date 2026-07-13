@@ -634,3 +634,10 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Teardown rule:** Closing invalidates every deferred continuation, settles pending operations, closes lists before transport, releases local-relay leadership, and is idempotent. No async completion may render or broadcast after its owner closes.
 - **Mutation truthfulness:** A locally rejected write is `failed-rolled-back`; a confirmed success is `committed`; once transmission starts, losing the response is `outcome-unknown`. Uncertain optimistic data is removed because the client cannot honestly present it as committed or rolled back.
 - **Testing seam:** Socket construction and lock coordination are injected. Tests drive real lifecycle transitions through those seams instead of mutating connection internals or depending on ambient browser globals.
+
+## 2026-07-13 — each HTTP request body has exactly one bounded reader
+
+- **Decision:** The first body read claims the request. A duplicate reader fails immediately; it never waits on a stream whose `end` event has already passed.
+- **Settlement rule:** Success, size refusal, stream error, client abort, and premature close all pass through one settle-once boundary that removes every listener it installed. Oversized bodies are drained without retaining further chunks so the 413 response can flush cleanly.
+- **Early refusal:** A trustworthy integer `Content-Length` above the configured cap is rejected before buffering. Chunked or missing lengths remain protected by the same byte counter.
+- **Reason:** Request streams are consumable once. Treating them as reusable allowed silent hangs, while leaving callbacks attached after settlement retained request state and performed work after the result was already known.

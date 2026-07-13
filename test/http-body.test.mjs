@@ -12,6 +12,14 @@ function mockReq({ body, contentType, method = 'POST' } = {}) {
   }), { headers, method });
 }
 
+function within(promise, milliseconds = 100) {
+  let timeout;
+  const deadline = new Promise((_, reject) => {
+    timeout = setTimeout(() => reject(new Error('body read timed out')), milliseconds);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timeout));
+}
+
 // BodyError
 
 test('BodyError carries status', () => {
@@ -213,4 +221,70 @@ test('readRawBody rejects oversized upload with 413', async () => {
     () => readRawBody(req, 500),
     (e) => e instanceof BodyError && e.status === 413,
   );
+});
+
+test('a request body has one reader and a duplicate read fails immediately', async () => {
+  const req = Object.assign(new Readable({ read() {} }), { headers: {}, method: 'POST' });
+  const first = readRawBody(req, 1024);
+
+  await assert.rejects(
+    within(readRequestBody(req)),
+    (error) => error instanceof BodyError
+      && error.status === 400
+      && /already been read/i.test(error.message),
+  );
+
+  req.emit('aborted');
+  await assert.rejects(within(first), /aborted/i);
+});
+
+test('an aborted request rejects instead of leaving its body promise pending', async () => {
+  const req = Object.assign(new Readable({ read() {} }), { headers: {}, method: 'POST' });
+  const body = readRequestBody(req);
+
+  req.emit('aborted');
+
+  await assert.rejects(
+    within(body),
+    (error) => error instanceof BodyError
+      && error.status === 400
+      && /aborted/i.test(error.message),
+  );
+});
+
+test('a request that closes before end rejects instead of hanging', async () => {
+  const req = Object.assign(new Readable({ read() {} }), { headers: {}, method: 'POST' });
+  const body = readRequestBody(req);
+
+  req.emit('close');
+
+  await assert.rejects(
+    within(body),
+    (error) => error instanceof BodyError
+      && error.status === 400
+      && /closed before completion/i.test(error.message),
+  );
+});
+
+test('body reader removes all of its listeners after successful completion', async () => {
+  const req = mockReq({ body: '{"ok":true}', contentType: 'application/json' });
+
+  assert.deepEqual(await readRequestBody(req), { ok: true });
+
+  for (const event of ['data', 'end', 'error', 'aborted', 'close']) {
+    assert.equal(req.listenerCount(event), 0, `${event} listener was removed`);
+  }
+});
+
+test('content-length over the cap is rejected before body buffering starts', async () => {
+  const req = Object.assign(new Readable({ read() {} }), {
+    headers: { 'content-length': '2048' },
+    method: 'POST',
+  });
+
+  await assert.rejects(
+    within(readRawBody(req, 1024)),
+    (error) => error instanceof BodyError && error.status === 413,
+  );
+  assert.equal(req.listenerCount('data'), 0);
 });

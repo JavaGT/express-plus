@@ -553,3 +553,10 @@ REMAINING-P1-NOTES resolved/deferred: spec #6 (handler txn signature) RESOLVED b
 - Public client declarations now match the runtime for field masks, pacing, socket injection, checkpoints, and recovery tuning. Tests use the public socket seam instead of relying on the previous private connection timing.
 - Gate: focused live/local/type suites green; full suite 1,786/1,786 and ESLint green.
 - Next: harden HTTP request-body ownership and abort behavior, then redesign undo around compensating mutations and typed preimages.
+
+## 2026-07-13 — rewrite Wave 2: HTTP body ownership is strict
+
+- The body reader now owns a request exactly once and settles exactly once. Duplicate reads fail immediately; client aborts and premature closes reject rather than leaving route handlers pending.
+- All installed stream listeners are removed on every terminal path. Oversized bodies stop accumulating chunks but continue draining, and a declared length over the cap is refused before buffering begins.
+- Focused body gate: 25/25 green; full suite 1,791/1,791; ESLint and diff check green.
+- Next: complete the Wave 2 architecture/security closure, then build the Wave 3 parity harness before persistence cutover work.

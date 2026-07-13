@@ -2,30 +2,73 @@
 // An empty body parses to {}. Entity CRUD still requires JSON; imperative routes
 // can also accept browser forms.
 const BODY_LIMIT = 1_000_000; // ~1mb, SPEC §3 body-parse cap.
+const claimedBodies = new WeakSet();
 
 function readCappedBody(req, limit = BODY_LIMIT, tooLargeMessage = 'request body exceeds the 1mb limit') {
+  if (claimedBodies.has(req)) {
+    return Promise.reject(new BodyError('request body has already been read', 400));
+  }
+  claimedBodies.add(req);
+
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
-    let aborted = false;
-    req.on('data', (chunk) => {
-      if (aborted) return;
+    let settled = false;
+
+    const cleanup = () => {
+      req.off('data', onData);
+      req.off('end', onEnd);
+      req.off('error', onError);
+      req.off('aborted', onAborted);
+      req.off('close', onClose);
+    };
+    const succeed = (body) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(body);
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onData = (chunk) => {
       size += chunk.length;
       if (size > limit) {
         // Stop consuming and reject so the handler can write a 413. Do NOT
         // destroy the socket — an abrupt close would race the response and the
         // client would see a dropped connection instead of the 413. Pausing and
         // resuming (drain-to-end) lets the response flush cleanly.
-        aborted = true;
         req.pause();
-        reject(new BodyError(tooLargeMessage, 413));
+        fail(new BodyError(tooLargeMessage, 413));
         req.resume();
         return;
       }
       chunks.push(chunk);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
+    };
+    const onEnd = () => succeed(Buffer.concat(chunks, size));
+    const onError = (error) => fail(error);
+    const onAborted = () => fail(new BodyError('request body was aborted', 400));
+    const onClose = () => fail(new BodyError('request body closed before completion', 400));
+
+    const declaredLength = Number(req.headers['content-length']);
+    if (Number.isSafeInteger(declaredLength) && declaredLength > limit) {
+      fail(new BodyError(tooLargeMessage, 413));
+      req.resume();
+      return;
+    }
+    if (req.aborted || req.destroyed) {
+      fail(new BodyError('request body was aborted', 400));
+      return;
+    }
+
+    req.on('data', onData);
+    req.on('end', onEnd);
+    req.on('error', onError);
+    req.on('aborted', onAborted);
+    req.on('close', onClose);
   });
 }
 
