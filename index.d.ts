@@ -359,14 +359,39 @@ export const effect: {
 };
 export const now: Readonly<{ kind: 'deferred'; resolve: 'commit-instant' }>;
 
-export interface ScheduleTrigger { readonly kind: string; readonly [key: string]: unknown }
+export interface ScheduleOptions<Row extends object = Record<string, unknown>> {
+  readonly key?: string;
+  readonly while?: (context: { readonly fields: EntityFields<Row> }) => QueryPredicate;
+  readonly when?: (context: { readonly row: Readonly<Row & { id: string }> }) => boolean;
+  readonly with?: Partial<Row> | null | (
+    (context: { readonly row: Readonly<Row & { id: string }> }) => Partial<Row>
+  );
+}
+export type ScheduleTrigger<Row extends object = Record<string, unknown>> =
+  | (ScheduleOptions<Row> & Readonly<{
+      kind: 'schedule.at';
+      field: FieldDescriptor;
+    }>)
+  | (ScheduleOptions<Row> & Readonly<{
+      kind: 'schedule.after';
+      field: FieldDescriptor;
+      delay: number;
+    }>)
+  | (ScheduleOptions<Row> & Readonly<{
+      kind: 'tick.hz';
+      hertz: number;
+    }>)
+  | (ScheduleOptions<Row> & Readonly<{
+      kind: 'tick.every';
+      intervalMs: number;
+    }>);
 export const schedule: {
-  at(field: FieldDescriptor, options?: Readonly<Record<string, unknown>>): ScheduleTrigger;
-  after(field: FieldDescriptor, delay: number | string, options?: Readonly<Record<string, unknown>>): ScheduleTrigger;
+  at<Row extends object = Record<string, unknown>>(field: FieldDescriptor, options?: ScheduleOptions<Row>): ScheduleTrigger<Row>;
+  after<Row extends object = Record<string, unknown>>(field: FieldDescriptor, delay: number | string, options?: ScheduleOptions<Row>): ScheduleTrigger<Row>;
 };
 export const tick: {
-  hz(value: number, options?: Readonly<Record<string, unknown>>): ScheduleTrigger;
-  every(delay: number | string, options?: Readonly<Record<string, unknown>>): ScheduleTrigger;
+  hz<Row extends object = Record<string, unknown>>(value: number, options?: ScheduleOptions<Row>): ScheduleTrigger<Row>;
+  every<Row extends object = Record<string, unknown>>(delay: number | string, options?: ScheduleOptions<Row>): ScheduleTrigger<Row>;
 };
 export function simulate(options: Readonly<Record<string, unknown>>): unknown;
 

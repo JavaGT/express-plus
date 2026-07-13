@@ -2,7 +2,7 @@ import { scope, everyone, grant, read, tick, date, schedule } from '../src/index
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity, Session } from '../src/internal.mjs';
+import workbench, { entity, Session, executeFrameworkDDL } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
@@ -20,8 +20,13 @@ import { admitSystemMutation, schedulerSource, startClockTriggers } from '../src
 
 function seededDb() {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
-  db.exec('CREATE TABLE _Cursor (scope TEXT PRIMARY KEY, lastSeq INTEGER)');
+  executeFrameworkDDL(db);
+  return db;
+}
+
+function frameworkDb() {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
   return db;
 }
 
@@ -93,7 +98,7 @@ test('startClockTriggers returns no-op {stop()} when no schedule triggers', () =
       // No schedule triggers at all
     },
   });
-  const db = new DatabaseSync(':memory:');
+  const db = frameworkDb();
   for (const sql of generateDDL(Blog)) db.exec(sql);
 
   const entities = new Map();
@@ -120,7 +125,7 @@ test('startClockTriggers starts for tick-only entities (unified seam)', () => {
       }),
     },
   });
-  const db = new DatabaseSync(':memory:');
+  const db = frameworkDb();
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.prepare('INSERT INTO TickOnly (id, status) VALUES (?, ?)').run('t1', 'alive');
 
@@ -138,7 +143,7 @@ test('startClockTriggers starts for tick-only entities (unified seam)', () => {
 // unit: fire-path returns due rows
 // ============================================================
 test('startClockTriggers fires due schedule.at rows, excludes future-due', () => {
-  const db = new DatabaseSync(':memory:');
+  const db = frameworkDb();
   const publishedAt = date();
   const Blog = entity('DiscDue', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -173,7 +178,7 @@ test('startClockTriggers fires due schedule.at rows, excludes future-due', () =>
 // unit: startClockTriggers dispatch receives correct args
 // ============================================================
 test('startClockTriggers calls dispatch with correct scheduler principal and payload', () => {
-  const db = new DatabaseSync(':memory:');
+  const db = frameworkDb();
   const publishedAt = date();
   const Blog = entity('ReapDispatch', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -213,7 +218,7 @@ test('startClockTriggers calls dispatch with correct scheduler principal and pay
 // unit: admitSystemMutation direct (gate unit test)
 // ============================================================
 test('admitSystemMutation admits an exact-match scheduler dispatch', () => {
-  const db = new DatabaseSync(':memory:');
+  const db = frameworkDb();
   const publishedAt = date();
   const Blog = entity('AdmitSched', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -238,7 +243,7 @@ test('admitSystemMutation admits an exact-match scheduler dispatch', () => {
 });
 
 test('admitSystemMutation DENIES wrong payload', () => {
-  const db = new DatabaseSync(':memory:');
+  const db = frameworkDb();
   const publishedAt = date();
   const Blog = entity('AdmitWrongPayload', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -263,7 +268,7 @@ test('admitSystemMutation DENIES wrong payload', () => {
 });
 
 test('admitSystemMutation DENIES row deleted between discover + dispatch', () => {
-  const db = new DatabaseSync(':memory:');
+  const db = frameworkDb();
   const publishedAt = date();
   const Blog = entity('AdmitTOCTOU', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -288,7 +293,7 @@ test('admitSystemMutation DENIES row deleted between discover + dispatch', () =>
 });
 
 test('admitSystemMutation DENIES non-system principal', () => {
-  const db = new DatabaseSync(':memory:');
+  const db = frameworkDb();
   const publishedAt = date();
   const Blog = entity('AdmitNonSystem', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -377,7 +382,7 @@ test('e2e: while-fails — row with mismatched status stays unchanged (DENIED)',
 // Session expiry: schedule.after(createdAt, delay) → remove
 // ============================================================
 test('Session: startClockTriggers fires remove for expired sessions', () => {
-  const db = new DatabaseSync(':memory:');
+  const db = frameworkDb();
   db.exec('CREATE TABLE Session (id TEXT PRIMARY KEY, token TEXT, principalType TEXT, principalId TEXT, createdAt TEXT)');
   const now = Date.now();
   db.prepare(

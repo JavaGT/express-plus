@@ -1,10 +1,16 @@
-import { schedule, date, scope, everyone, grant, read } from '../src/index.mjs';
+import { schedule, date, scope, everyone, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity } from '../src/internal.mjs';
+import workbench, { entity, executeFrameworkDDL } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
-import { admitSystemMutation } from '../src/schedule.mjs';
+import {
+  admitSystemMutation,
+  clearRemovedScheduleReceipts,
+  pruneInactiveScheduleReceipts,
+  rearmChangedScheduleReceipts,
+  schedulerSource,
+} from '../src/schedule.mjs';
 
 // P6d Spine A step 4b — scheduler admission (Option A, in-txn re-check).
 // A reaper-fired dispatch runs under a SCHEDULER SYSTEM PRINCIPAL. The scheduler
@@ -19,6 +25,7 @@ import { admitSystemMutation } from '../src/schedule.mjs';
 
 function setupEntity(now) {
   const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
   const publishedAt = date();
   const Blog = entity('BlogAdmit', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -144,6 +151,7 @@ test('admitSystemMutation DENIES a missing row (TOCTOU: row deleted between disc
 
 test('admitSystemMutation recomputes the `with` function-form payload from the CURRENT row', () => {
   const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
   const dueAt = date();
   const Todo = entity('TodoAdmit', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -178,6 +186,7 @@ test('admitSystemMutation recomputes the `with` function-form payload from the C
 
 test('admitSystemMutation: schedule.after due = row.field + delay <= now', () => {
   const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
   const createdAt = date();
   const Task = entity('TaskAfter', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -191,7 +200,10 @@ test('admitSystemMutation: schedule.after due = row.field + delay <= now', () =>
   const now = Date.now();
   // createdAt 10s ago + 5s delay = 5s before now → DUE
   db.prepare('INSERT INTO TaskAfter (id, createdAt, status) VALUES (?, ?, ?)').run('k1', now - 10_000, 'open');
-  const principal = { type: 'system', attributes: { source: 'TaskAfter.update.createdAt' } };
+  const principal = {
+    type: 'system',
+    attributes: { source: `TaskAfter.update.${Task.schedule.update.triggerId}` },
+  };
   const granted = admitSystemMutation({
     entity: Task, verb: 'update', rowId: 'k1',
     payload: { status: 'stale' }, principal, db, now,
@@ -216,7 +228,7 @@ import { principal as makePrincipal } from '../src/principal.mjs';
 
 function setupAppServer() {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
+  executeFrameworkDDL(db);
   const publishedAt = date();
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('BlogE2E', {
@@ -231,7 +243,6 @@ function setupAppServer() {
     },
   });
   for (const sql of generateDDL(Blog)) db.exec(sql);
-  db.exec('CREATE TABLE _Cursor (scope TEXT PRIMARY KEY, lastSeq INTEGER)');
   const app = workbench({ db, entities: [Blog] });
   const Blog_b = app.entity(Blog);
   const server = createServer({
@@ -254,6 +265,262 @@ function setupAppServer() {
   });
   return { db, Blog: Blog_b, server };
 }
+
+test('a deadline receipt makes successful admission one-shot', () => {
+  const { db, Blog } = setupEntity();
+  const now = Date.now();
+  db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('once', now - 1000, 'draft');
+  const principal = {
+    type: 'system',
+    attributes: { source: `BlogAdmit.update.${Blog.schedule.update.triggerId}` },
+  };
+  const request = {
+    entity: Blog,
+    verb: 'update',
+    rowId: 'once',
+    payload: { published: true },
+    principal,
+    db,
+    now,
+  };
+
+  assert.equal(admitSystemMutation(request), true);
+  assert.equal(admitSystemMutation(request), false);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ScheduleReceipt').get().count, 1);
+});
+
+test('a changed deadline replaces its old receipt instead of growing receipt history', () => {
+  const { db, Blog, publishedAt } = setupEntity();
+  const now = Date.now();
+  const firstDueAt = now - 2000;
+  const secondDueAt = now - 1000;
+  db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('moved', firstDueAt, 'draft');
+  const request = {
+    entity: Blog,
+    verb: 'update',
+    rowId: 'moved',
+    payload: { published: true },
+    principal: {
+      type: 'system',
+      attributes: { source: `BlogAdmit.update.${Blog.schedule.update.triggerId}` },
+    },
+    db,
+    now,
+  };
+
+  assert.equal(admitSystemMutation(request), true);
+  db.prepare('UPDATE BlogAdmit SET publishedAt = ? WHERE id = ?').run(secondDueAt, 'moved');
+  assert.equal(rearmChangedScheduleReceipts({
+    entity: Blog,
+    event: { data: { id: 'moved', publishedAt: secondDueAt } },
+    principal: { type: 'user', id: 'owner' },
+    db,
+  }), 1);
+  assert.equal(admitSystemMutation(request), true);
+
+  const receipts = db.prepare(
+    'SELECT dueAt FROM _ScheduleReceipt WHERE rowId = ? ORDER BY dueAt',
+  ).all('moved');
+  assert.deepEqual(receipts.map((row) => ({ ...row })), [{ dueAt: secondDueAt }]);
+  assert.equal(admitSystemMutation(request), false, 'the replacement value is still one-shot');
+  assert.equal(publishedAt, Blog.fields.publishedAt);
+});
+
+test('receipt rearming is field-scoped and scheduler mutations cannot rearm themselves', () => {
+  const { db, Blog } = setupEntity();
+  const source = `BlogAdmit.update.${Blog.schedule.update.triggerId}`;
+  db.prepare(
+    'INSERT INTO _ScheduleReceipt (source, rowId, dueAt) VALUES (?, ?, ?)',
+  ).run(source, 'row1', 123);
+
+  assert.equal(rearmChangedScheduleReceipts({
+    entity: Blog,
+    event: { data: { id: 'row1', status: 'published' } },
+    principal: { type: 'user', id: 'owner' },
+    db,
+  }), 0);
+  assert.equal(rearmChangedScheduleReceipts({
+    entity: Blog,
+    event: { data: { id: 'row1', publishedAt: 123 } },
+    principal: { type: 'system', attributes: { source } },
+    db,
+  }), 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ScheduleReceipt').get().count, 1);
+});
+
+test('one scheduler rearms a sibling deadline source but retains its own receipt', () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const dueAt = date();
+  const Multi = entity('MultiDeadlineRearm', {
+    dueAt,
+    grant: scope(() => everyone()).can(() => grant(read)),
+    schedule: {
+      update: [
+        schedule.at(dueAt, { key: 'first', with: { first: true } }),
+        schedule.at(dueAt, { key: 'second', with: { second: true } }),
+      ],
+    },
+  });
+  const first = schedulerSource(Multi.name, 'update', 'first');
+  const second = schedulerSource(Multi.name, 'update', 'second');
+  const insert = db.prepare(
+    'INSERT INTO _ScheduleReceipt (source, rowId, dueAt) VALUES (?, ?, ?)',
+  );
+  insert.run(first, 'row1', 123);
+  insert.run(second, 'row1', 123);
+
+  assert.equal(rearmChangedScheduleReceipts({
+    entity: Multi,
+    event: { data: { id: 'row1', dueAt: 456 } },
+    principal: { type: 'system', attributes: { source: first } },
+    db,
+  }), 1);
+  assert.deepEqual(
+    db.prepare('SELECT source FROM _ScheduleReceipt ORDER BY source').all()
+      .map((row) => row.source),
+    [first],
+  );
+});
+
+test('inactive trigger receipts are pruned while active sources survive', () => {
+  const { db, Blog } = setupEntity();
+  const active = schedulerSource(Blog.name, 'update', Blog.schedule.update.triggerId);
+  const insert = db.prepare(
+    'INSERT INTO _ScheduleReceipt (source, rowId, dueAt) VALUES (?, ?, ?)',
+  );
+  insert.run(active, 'active-row', 1);
+  insert.run('RenamedEntity.update.old-key', 'orphan', 2);
+
+  assert.equal(pruneInactiveScheduleReceipts({ db, entities: [Blog] }), 1);
+  assert.deepEqual(
+    db.prepare('SELECT source, rowId FROM _ScheduleReceipt').all()
+      .map((row) => ({ ...row })),
+    [{ source: active, rowId: 'active-row' }],
+  );
+});
+
+test('removing a row clears all of its deadline receipts and no others', () => {
+  const { db, Blog } = setupEntity();
+  const source = `BlogAdmit.update.${Blog.schedule.update.triggerId}`;
+  const insert = db.prepare(
+    'INSERT INTO _ScheduleReceipt (source, rowId, dueAt) VALUES (?, ?, ?)',
+  );
+  insert.run(source, 'gone', 1);
+  insert.run(source, 'kept', 2);
+
+  assert.equal(clearRemovedScheduleReceipts({ entity: Blog, rowId: 'gone', db }), 1);
+  assert.deepEqual(
+    db.prepare('SELECT rowId, dueAt FROM _ScheduleReceipt ORDER BY rowId').all()
+      .map((row) => ({ ...row })),
+    [{ rowId: 'kept', dueAt: 2 }],
+  );
+});
+
+test('the canonical app kernel rearms updates and clears removals in-transaction', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const dueAt = date();
+  const Lifecycle = entity('ScheduleReceiptLifecycle', {
+    dueAt,
+    status: { kind: 'value', type: 'text' },
+    grant: () => grant(read, write, subscribe),
+    schedule: {
+      update: schedule.at(dueAt, { with: { status: 'fired' } }),
+    },
+  });
+  const app = workbench({ db }).mount('/schedule-receipt-lifecycle', Lifecycle).listen(0);
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+  await app.ready;
+
+  const bound = app.entity('ScheduleReceiptLifecycle');
+  const source = schedulerSource(
+    bound.name,
+    'update',
+    bound.schedule.update.triggerId,
+  );
+  const future = Date.now() + 60_000;
+  db.prepare(
+    'INSERT INTO ScheduleReceiptLifecycle (id, dueAt, status) VALUES (?, ?, ?)',
+  ).run('lifecycle', future, 'armed');
+  db.prepare(
+    'INSERT INTO _ScheduleReceipt (source, rowId, dueAt) VALUES (?, ?, ?)',
+  ).run(source, 'lifecycle', future);
+
+  const user = makePrincipal({ type: 'user', id: 'owner' });
+  const updated = await app.dispatch({
+    actionId: 'schedule-receipt-update',
+    type: 'ScheduleReceiptLifecycle.update',
+    payload: { id: 'lifecycle', dueAt: future + 1000 },
+    principal: user,
+  });
+  assert.equal(updated.granted, true);
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS count FROM _ScheduleReceipt WHERE rowId = ?').get('lifecycle').count,
+    0,
+  );
+
+  db.prepare(
+    'INSERT INTO _ScheduleReceipt (source, rowId, dueAt) VALUES (?, ?, ?)',
+  ).run(source, 'lifecycle', future + 1000);
+  const removed = await app.dispatch({
+    actionId: 'schedule-receipt-remove',
+    type: 'ScheduleReceiptLifecycle.remove',
+    payload: { id: 'lifecycle' },
+    principal: user,
+  });
+  assert.equal(removed.granted, true);
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS count FROM _ScheduleReceipt WHERE rowId = ?').get('lifecycle').count,
+    0,
+  );
+});
+
+test('deadline receipt rolls back with the mutation transaction', () => {
+  const { db, Blog } = setupEntity();
+  const now = Date.now();
+  db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('retry', now - 1000, 'draft');
+  const request = {
+    entity: Blog,
+    verb: 'update',
+    rowId: 'retry',
+    payload: { published: true },
+    principal: {
+      type: 'system',
+      attributes: { source: `BlogAdmit.update.${Blog.schedule.update.triggerId}` },
+    },
+    db,
+    now,
+  };
+
+  db.exec('BEGIN');
+  assert.equal(admitSystemMutation(request), true);
+  db.exec('ROLLBACK');
+  assert.equal(admitSystemMutation(request), true);
+});
+
+test('a denied deadline payload does not consume its one-shot receipt', () => {
+  const { db, Blog } = setupEntity();
+  const now = Date.now();
+  db.prepare('INSERT INTO BlogAdmit (id, publishedAt, status) VALUES (?, ?, ?)').run('deny-first', now - 1000, 'draft');
+  const base = {
+    entity: Blog,
+    verb: 'update',
+    rowId: 'deny-first',
+    principal: {
+      type: 'system',
+      attributes: { source: `BlogAdmit.update.${Blog.schedule.update.triggerId}` },
+    },
+    db,
+    now,
+  };
+
+  assert.equal(admitSystemMutation({ ...base, payload: { published: false } }), false);
+  assert.equal(admitSystemMutation({ ...base, payload: { published: true } }), true);
+});
 
 test('e2e: a bound scheduler dispatch is ADMITTED through the wired dispatch hook', async () => {
   const { db, Blog, server } = setupAppServer();
@@ -299,6 +566,27 @@ test('e2e: a scheduler principal with the WRONG source is DENIED', async () => {
     principal: makePrincipal({ type: 'system', attributes: { source: 'Other.update.publishedAt' } }),
   });
   assert.equal(res.granted, false, 'wrong source → deny; principal must bind to the declared schedule');
+});
+
+test('e2e: production ISO transaction time still denies a future deadline', async () => {
+  const { db, server } = setupAppServer();
+  db.prepare('INSERT INTO BlogE2E (id, publishedAt, status) VALUES (?, ?, ?)')
+    .run('future', Date.now() + 60_000, 'draft');
+
+  const res = await server.dispatch({
+    actionId: 'sched-future-iso-now',
+    type: 'BlogE2E.update',
+    payload: { id: 'future', status: 'published' },
+    principal: makePrincipal({
+      type: 'system',
+      attributes: { source: 'BlogE2E.update.publishedAt' },
+    }),
+  });
+  assert.equal(res.granted, false, 'a future deadline is never admitted through the production pipeline');
+  assert.equal(
+    db.prepare('SELECT status FROM BlogE2E WHERE id = ?').get('future').status,
+    'draft',
+  );
 });
 
 test('e2e: a scheduler dispatch on a NON-draft row (while-fails) is DENIED', async () => {

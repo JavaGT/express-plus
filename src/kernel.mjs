@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { mayRow } from './row-grant.mjs';
-import { admitSystemMutation, startClockTriggers } from './schedule.mjs';
+import {
+  admitSystemMutation,
+  clearRemovedScheduleReceipts,
+  pruneInactiveScheduleReceipts,
+  rearmChangedScheduleReceipts,
+  startClockTriggers,
+} from './schedule.mjs';
 import { createServer, durableMutationVariant } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects, executeEffectsForEvent } from './effect-compiler.mjs';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
@@ -86,16 +92,40 @@ function buildDurableAdmission(app) {
         });
       }
       if (principal?.type === 'system' && principal.attributes?.effect && verb !== 'create') {
-        return admitsExistingRow({ entityName, verb, principal, event });
+        const granted = await admitsExistingRow({ entityName, verb, principal, event });
+        if (granted && verb === 'update') {
+          rearmChangedScheduleReceipts({
+            entity: app.entities?.get(entityName),
+            event,
+            principal,
+            db: hookDb ?? app.db,
+          });
+        }
+        return granted;
+      }
+      if (verb === 'update') {
+        rearmChangedScheduleReceipts({
+          entity: app.entities?.get(entityName),
+          event,
+          principal,
+          db: hookDb ?? app.db,
+        });
       }
       return true;
     },
-    async afterProjection({ entityName, verb, principal, event }) {
+    async afterProjection({ entityName, verb, principal, event, db: hookDb }) {
       if (
         entityName === Invitation.name
         && verb === 'create'
         && isInvitationCreationAuthority(principal)
       ) return true;
+      if (verb === 'remove') {
+        clearRemovedScheduleReceipts({
+          entity: app.entities?.get(entityName),
+          rowId: event?.data?.id,
+          db: hookDb ?? app.db,
+        });
+      }
       if (verb !== 'create') return true;
       return admitsExistingRow({ entityName, verb, principal, event });
     },
@@ -200,6 +230,13 @@ export async function buildAndStart(app) {
   // Singular Schedule clock-dispatch: deadline + tick share one starter.
   // No-op when no triggers exist. Scheduled on the shared clock.
   if (app.db) {
+    // Receipt pruning assumes the framework schema exists. `serve` prepares
+    // that schema only for database adapters exposing `exec`; lightweight
+    // request-test adapters intentionally omit it and must remain lazy until a
+    // handler actually touches the database.
+    if (typeof app.db.exec === 'function') {
+      pruneInactiveScheduleReceipts({ db: app.db, entities: app.entities });
+    }
     startClockTriggers({
       db: app.db,
       entities: app.entities,

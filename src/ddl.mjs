@@ -8,9 +8,9 @@
 // migration file.
 //
 // Column type mappings (SQLite):
-//   text / ref / crdt / hash / date / json → TEXT
-//   boolean                             → INTEGER (node:sqlite refuses JS booleans)
-//   number                              → REAL
+//   text / ref / crdt / hash / json → TEXT
+//   date / boolean                  → INTEGER
+//   number                          → REAL
 //   struct (link)                       → one column per struct cell
 //   id                                  → TEXT PRIMARY KEY (caller-owned UUID)
 //
@@ -28,12 +28,56 @@ function sqlType(descriptor) {
   if (kind === 'value' || kind === 'store' || kind === 'crdt' || kind === 'hash') {
     switch (type) {
       case 'boolean': return 'INTEGER';
+      case 'date': return 'INTEGER';
       case 'number': return 'REAL';
       default: return 'TEXT';
     }
   }
   if (kind === 'struct') return 'TEXT'; // each struct cell is a TEXT column
   return 'TEXT'; // fallback (state, ephemeral, etc.)
+}
+
+function isMainTableField(descriptor) {
+  return descriptor?.kind === 'value'
+    || descriptor?.kind === 'crdt'
+    || descriptor?.kind === 'hash'
+    || descriptor?.kind === 'state'
+    || descriptor?.kind === 'projected'
+    || (descriptor?.kind === 'computed' && descriptor.mode === 'stored');
+}
+
+function collectAstFields(ast, result, seen = new Set()) {
+  if (ast === null || typeof ast !== 'object' || seen.has(ast)) return;
+  seen.add(ast);
+  if (typeof ast.field === 'string') result.add(ast.field);
+  for (const value of Object.values(ast)) {
+    if (typeof value === 'function') continue;
+    if (Array.isArray(value)) {
+      for (const entry of value) collectAstFields(entry, result, seen);
+    } else {
+      collectAstFields(value, result, seen);
+    }
+  }
+}
+
+function scheduleIndexDDL(entity) {
+  const fields = new Set();
+  for (const triggerOrTriggers of Object.values(entity.schedule ?? {})) {
+    const triggers = Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
+    for (const trigger of triggers) {
+      if (trigger?.kind === 'schedule.at' || trigger?.kind === 'schedule.after') {
+        if (trigger.fieldName) fields.add(trigger.fieldName);
+      }
+      collectAstFields(trigger?.whileAst, fields);
+    }
+  }
+  return [...fields]
+    .filter((fieldName) => isMainTableField(entity.fields?.[fieldName]))
+    .sort()
+    .map((fieldName) => (
+      `CREATE INDEX IF NOT EXISTS idx_${entity.name}_schedule_${fieldName} ` +
+      `ON ${entity.name} (${fieldName});`
+    ));
 }
 
 // Generate the main table DDL for one entity.
@@ -86,6 +130,11 @@ export function generateDDL(entity) {
     }
   }
 
+  // Preserve the documented main-table/side-table ordering. Indexes are
+  // independent trailing statements, which also keeps generated migrations
+  // stable for callers that inspect the table statements by position.
+  statements.push(...scheduleIndexDDL(entity));
+
   return statements;
 }
 
@@ -110,6 +159,12 @@ export function generateFrameworkDDL() {
     'CREATE INDEX IF NOT EXISTS idx_blob_status ON BlobStore(status);',
     // _Log, _Cursor, and their index are owned by committed-log.mjs.
     ...frameworkLogDDL(),
+    `CREATE TABLE IF NOT EXISTS _ScheduleReceipt (
+  source TEXT NOT NULL,
+  rowId TEXT NOT NULL,
+  dueAt INTEGER NOT NULL,
+  PRIMARY KEY (source, rowId, dueAt)
+);`,
     // Job-queue substrate (spec #5). A job is a unit of work with its own
     // lifecycle (queued/claimed/running/completed/failed), NOT a derived read
     // model — separate seam from the projection registry. Timestamps are ms-epoch

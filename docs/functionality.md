@@ -235,7 +235,19 @@ in-txn effect — use post-commit seams.
 | `simulate` | Test helper for time-driven paths |
 
 Clock dispatch is unified (`startClockTriggers` internally). Jobs’ lease reaper
-is separate (`jobs` option).
+is separate (`jobs` option). Deadline triggers are durable one-shots: Workbench
+records the exact trigger, row, and due time in the same transaction as the
+mutation. If that transaction fails, the deadline remains eligible to retry. A
+normal update to the deadline field starts a new generation, so changing away
+and later back to the same value can fire again. Removing the row clears its
+receipts, and only the current receipt per trigger/row is retained.
+
+Use `while` for the database-searchable condition and `when` for a final,
+synchronous check of the current row. Both `when` and a function-form `with`
+receive an immutable, deserialized application row; they cannot perform async
+work. Workbench generates indexes for deadline fields and fields referenced by
+`while`. Give triggers a stable `key` when one verb has more than one trigger;
+duplicate identities are rejected while the app starts.
 
 ---
 

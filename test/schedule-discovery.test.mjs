@@ -1,14 +1,14 @@
 // Schedule constructor grammar + fire-path deadline dispatch via startClockTriggers.
 // Discovery is private; tests assert dispatch calls from the immediate scan.
 
-import { date, text, scope, everyone, grant, read } from '../src/index.mjs';
+import { boolean, date, json, link, text, scope, everyone, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
   entity, generateDDL, executeFrameworkDDL } from '../src/internal.mjs';
-import { schedule, startClockTriggers, schedulerSource } from '../src/schedule.mjs';
+import { admitSystemMutation, schedule, startClockTriggers, schedulerSource } from '../src/schedule.mjs';
 
 function setupDb() {
   const db = new DatabaseSync(':memory:');
@@ -56,11 +56,11 @@ test('schedule.at rejects with: boolean (fail-closed)', () => {
   const f = date();
   assert.throws(
     () => schedule.at(f, { with: true }),
-    /schedule \.at: 'with' must be an object or a function/,
+    /schedule\.at: 'with' must be an object or a function/,
   );
   assert.throws(
     () => schedule.at(f, { with: false }),
-    /schedule \.at: 'with' must be an object or a function/,
+    /schedule\.at: 'with' must be an object or a function/,
   );
 });
 
@@ -68,7 +68,7 @@ test('schedule.after rejects with: array (fail-closed)', () => {
   const f = date();
   assert.throws(
     () => schedule.after(f, '1h', { with: [1, 2, 3] }),
-    /schedule \.after: 'with' must be an object or a function/,
+    /schedule\.after: 'with' must be an object or a function/,
   );
 });
 
@@ -76,7 +76,7 @@ test('schedule.at rejects with: string (fail-closed)', () => {
   const f = date();
   assert.throws(
     () => schedule.at(f, { with: 'not-an-object' }),
-    /schedule \.at: 'with' must be an object or a function/,
+    /schedule\.at: 'with' must be an object or a function/,
   );
 });
 
@@ -90,6 +90,32 @@ test('schedule.at without with option: with is undefined', () => {
   const f = date();
   const trigger = schedule.at(f);
   assert.strictEqual(trigger.with, undefined);
+});
+
+test('startClockTriggers deadline applies when as a runtime guard after due discovery', () => {
+  const db = setupDb();
+  const publishedAt = date();
+  const status = text();
+  const Blog = entity('DeadlineWhenGuard', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    publishedAt,
+    status,
+    schedule: {
+      update: schedule.at(publishedAt, {
+        when: ({ row }) => row.status === 'ready',
+        with: { status: 'published' },
+      }),
+    },
+  });
+  for (const sql of generateDDL(Blog)) db.exec(sql);
+  db.prepare('INSERT INTO DeadlineWhenGuard (id, publishedAt, status) VALUES (?, ?, ?)')
+    .run('ready', 100, 'ready');
+  db.prepare('INSERT INTO DeadlineWhenGuard (id, publishedAt, status) VALUES (?, ?, ?)')
+    .run('blocked', 100, 'blocked');
+
+  const calls = fireDeadline(db, [Blog], 200);
+  assert.deepEqual(calls.map((call) => call.payload.id), ['ready']);
+  db.close();
 });
 
 // ============================================================
@@ -115,7 +141,7 @@ test('schedule.at rejects with: number (fail-closed)', () => {
   const f = date();
   assert.throws(
     () => schedule.at(f, { with: 123 }),
-    /schedule \.at: 'with' must be an object or a function/,
+    /schedule\.at: 'with' must be an object or a function/,
   );
 });
 
@@ -563,4 +589,92 @@ test('with function receives row with id field', () => {
 
   fireDeadline(db, [Blog], Date.now());
   assert.equal(receivedId, 'test-id-123', 'function should receive row.id');
+});
+
+test('schedule callbacks receive an immutable public row, not SQLite storage cells', () => {
+  const db = setupDb();
+  const publishedAt = date();
+  let callbackRow;
+  const Article = entity('PublicScheduleRow', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    publishedAt,
+    enabled: boolean(),
+    metadata: json(),
+    share: link({ tiers: ['comment'], tier: 'comment' }),
+    schedule: {
+      update: schedule.at(publishedAt, {
+        when: ({ row }) => {
+          callbackRow = row;
+          return row.enabled === true && row.metadata.tags[0] === 'ready' && row.share.tier === 'comment';
+        },
+        with: ({ row }) => ({ enabled: row.enabled }),
+      }),
+    },
+  });
+  for (const sql of generateDDL(Article)) db.exec(sql);
+  db.prepare(
+    'INSERT INTO PublicScheduleRow (id, publishedAt, enabled, metadata, share__token, share__tier) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run('article-1', Date.now() - 1000, 1, JSON.stringify({ tags: ['ready'] }), 'token-1', 'comment');
+
+  const calls = fireDeadline(db, [Article], Date.now());
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].payload.enabled, true);
+  assert.deepEqual(callbackRow.metadata, { tags: ['ready'] });
+  assert.deepEqual(callbackRow.share, { token: 'token-1', tier: 'comment' });
+  assert.equal(callbackRow.share__token, undefined);
+  assert.equal(Object.isFrozen(callbackRow), true);
+});
+
+test('one throwing lifecycle callback does not skip later due rows', () => {
+  const db = setupDb();
+  const dueAt = date();
+  const Scheduled = entity('IsolatedScheduleCallback', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    dueAt,
+    schedule: {
+      update: schedule.at(dueAt, {
+        when: ({ row }) => {
+          if (row.id === 'bad') throw new Error('bad callback');
+          return true;
+        },
+        with: { fired: true },
+      }),
+    },
+  });
+  for (const sql of generateDDL(Scheduled)) db.exec(sql);
+  const past = Date.now() - 1000;
+  db.prepare('INSERT INTO IsolatedScheduleCallback (id, dueAt) VALUES (?, ?)').run('bad', past);
+  db.prepare('INSERT INTO IsolatedScheduleCallback (id, dueAt) VALUES (?, ?)').run('good', past);
+
+  const calls = fireDeadline(db, [Scheduled], Date.now());
+  assert.deepEqual(calls.map((call) => call.payload.id), ['good']);
+});
+
+test('deadline discovery excludes a row after its one-shot receipt is admitted', () => {
+  const db = setupDb();
+  const dueAt = date();
+  const Scheduled = entity('ReceivedDeadline', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    dueAt,
+    schedule: {
+      update: schedule.at(dueAt, { with: { fired: true } }),
+    },
+  });
+  for (const sql of generateDDL(Scheduled)) db.exec(sql);
+  const now = Date.now();
+  db.prepare('INSERT INTO ReceivedDeadline (id, dueAt) VALUES (?, ?)').run('received', now - 1000);
+  const first = fireDeadline(db, [Scheduled], now);
+  assert.equal(first.length, 1);
+
+  const granted = admitSystemMutation({
+    entity: Scheduled,
+    verb: 'update',
+    rowId: 'received',
+    payload: { fired: true },
+    principal: first[0].principal,
+    db,
+    now,
+  });
+  assert.equal(granted, true);
+  assert.equal(fireDeadline(db, [Scheduled], now).length, 0);
 });

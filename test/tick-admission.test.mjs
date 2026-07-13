@@ -326,3 +326,43 @@ test('admitSystemMutation DENIES a schedule.after trigger with a tick-style sour
   });
   assert.equal(granted, false, 'schedule.after requires the 3-part scheduler source, not the 2-part tick source');
 });
+
+test('one keyed tick principal cannot authorize a sibling tick on the same verb', () => {
+  const db = makeDb();
+  const status = text();
+  const MultiTick = entity('MultiTickAuthority', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    status,
+    schedule: {
+      update: [
+        tick.every('1s', {
+          key: 'advance',
+          while: ({ fields }) => fields.status.is('moving'),
+          with: { status: 'advanced' },
+        }),
+        tick.every('2s', {
+          key: 'stop',
+          while: ({ fields }) => fields.status.is('moving'),
+          with: { status: 'stopped' },
+        }),
+      ],
+    },
+  });
+  for (const sql of generateDDL(MultiTick)) db.exec(sql);
+  seedRow(db, 'MultiTickAuthority', 'row1', 'moving');
+  const principal = {
+    type: 'system',
+    attributes: { source: tickSource('MultiTickAuthority', 'update', 'advance') },
+  };
+  const base = {
+    entity: MultiTick,
+    verb: 'update',
+    rowId: 'row1',
+    principal,
+    db,
+    now: Date.now(),
+  };
+
+  assert.equal(admitSystemMutation({ ...base, payload: { status: 'stopped' } }), false);
+  assert.equal(admitSystemMutation({ ...base, payload: { status: 'advanced' } }), true);
+});

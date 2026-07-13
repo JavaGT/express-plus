@@ -1,8 +1,8 @@
-import { scope, everyone, grant, read, tick, date, schedule } from '../src/index.mjs';
+import { scope, everyone, grant, read, tick, date, schedule, text } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity } from '../src/internal.mjs';
+import workbench, { createClock, entity, executeFrameworkDDL } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
@@ -19,8 +19,7 @@ import { admitSystemMutation, startClockTriggers, tickSource } from '../src/sche
 
 function seededDb() {
   const db = new DatabaseSync(':memory:');
-  db.exec('CREATE TABLE _Log (scope TEXT, seq INTEGER, eventType TEXT, eventData TEXT, actionId TEXT, committedAt TEXT)');
-  db.exec('CREATE TABLE _Cursor (scope TEXT PRIMARY KEY, lastSeq INTEGER)');
+  executeFrameworkDDL(db);
   return db;
 }
 
@@ -112,6 +111,187 @@ test('startClockTriggers tick fires rows matching while, skips non-matching', ()
   assert.equal(calls[0].principal.attributes.source, tickSource('TestDisc', 'update'));
 });
 
+test('startClockTriggers tick applies when after indexed while discovery', () => {
+  const db = new DatabaseSync(':memory:');
+  const status = { kind: 'value', type: 'text' };
+  const enabled = { kind: 'value', type: 'text' };
+  const Enemy = entity('TickWhenGuard', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    status,
+    enabled,
+    schedule: {
+      update: tick.hz(100, {
+        while: ({ fields }) => fields.status.is('alive'),
+        when: ({ row }) => row.enabled === 'yes',
+        with: { status: 'moving' },
+      }),
+    },
+  });
+  for (const sql of generateDDL(Enemy)) db.exec(sql);
+  db.prepare('INSERT INTO TickWhenGuard (id, status, enabled) VALUES (?, ?, ?)').run('on', 'alive', 'yes');
+  db.prepare('INSERT INTO TickWhenGuard (id, status, enabled) VALUES (?, ?, ?)').run('off', 'alive', 'no');
+
+  const calls = [];
+  const preparedSql = [];
+  const tracedDb = {
+    prepare(sql) {
+      preparedSql.push(sql);
+      return db.prepare(sql);
+    },
+  };
+  const clock = startClockTriggers({ db: tracedDb, entities: [Enemy], dispatch: (args) => calls.push(args) });
+  clock.stop();
+  assert.deepEqual(calls.map((call) => call.payload.id), ['on']);
+  assert.match(preparedSql[0], /WHERE \(t0\.status =/);
+  assert.equal(preparedSql.some((sql) => sql.startsWith('SELECT 1 FROM')), false);
+  db.close();
+});
+
+test('mixed tick rates fire only the triggers due at each interval', () => {
+  const fastStatus = text();
+  const slowStatus = text();
+  const Fast = entity('FastTickRate', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    status: fastStatus,
+    schedule: {
+      update: tick.every(100, {
+        while: ({ fields }) => fields.status.is('ready'),
+        with: { status: 'fast' },
+      }),
+    },
+  });
+  const Slow = entity('SlowTickRate', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    status: slowStatus,
+    schedule: {
+      update: tick.every(1000, {
+        while: ({ fields }) => fields.status.is('ready'),
+        with: { status: 'slow' },
+      }),
+    },
+  });
+  const db = seededDb();
+  for (const sql of [...generateDDL(Fast), ...generateDDL(Slow)]) db.exec(sql);
+  db.prepare('INSERT INTO FastTickRate (id, status) VALUES (?, ?)').run('fast-1', 'ready');
+  db.prepare('INSERT INTO SlowTickRate (id, status) VALUES (?, ?)').run('slow-1', 'ready');
+  const calls = [];
+  const clock = createClock({ now: () => 0 });
+  const runner = startClockTriggers({ db, entities: [Fast, Slow], dispatch: (args) => calls.push(args), clock, now: () => 0 });
+
+  assert.deepEqual(calls.map((call) => call.type).sort(), ['FastTickRate.update', 'SlowTickRate.update']);
+  calls.length = 0;
+  clock._tick(100);
+  assert.deepEqual(calls.map((call) => call.type), ['FastTickRate.update']);
+  clock._tick(1000);
+  assert.equal(calls.filter((call) => call.type === 'FastTickRate.update').length, 10);
+  assert.equal(calls.filter((call) => call.type === 'SlowTickRate.update').length, 1);
+  runner.stop();
+  clock.stop();
+  db.close();
+});
+
+test('admitSystemMutation rechecks when and rejects Promise-returning guards', () => {
+  const db = new DatabaseSync(':memory:');
+  const status = { kind: 'value', type: 'text' };
+  const enabled = { kind: 'value', type: 'text' };
+  const Enemy = entity('TickWhenAdmission', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    status,
+    enabled,
+    schedule: {
+      update: tick.hz(100, {
+        while: ({ fields }) => fields.status.is('alive'),
+        when: () => Promise.resolve(true),
+        with: { status: 'moving' },
+      }),
+    },
+  });
+  for (const sql of generateDDL(Enemy)) db.exec(sql);
+  db.prepare('INSERT INTO TickWhenAdmission (id, status, enabled) VALUES (?, ?, ?)').run('r1', 'alive', 'yes');
+  const principal = makePrincipal({ type: 'system', attributes: { source: tickSource('TickWhenAdmission', 'update') } });
+
+  assert.throws(
+    () => admitSystemMutation({
+      entity: Enemy,
+      verb: 'update',
+      rowId: 'r1',
+      payload: { id: 'r1', status: 'moving' },
+      principal,
+      db,
+      now: Date.now(),
+    }),
+    /when must return a boolean synchronously/,
+  );
+  db.close();
+});
+
+test('admitSystemMutation rejects a payload function that returns a Promise', () => {
+  const status = text();
+  const AsyncPayload = entity('AsyncTickPayload', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    status,
+    schedule: {
+      update: {
+        ...tick.every('1m', {
+          while: ({ fields }) => fields.status.is('ready'),
+          with: () => ({ status: 'done' }),
+        }),
+        with: () => Promise.resolve({ status: 'done' }),
+      },
+    },
+  });
+  const db = seededDb();
+  for (const sql of generateDDL(AsyncPayload)) db.exec(sql);
+  db.prepare('INSERT INTO AsyncTickPayload (id, status) VALUES (?, ?)').run('row1', 'ready');
+
+  assert.throws(
+    () => admitSystemMutation({
+      entity: AsyncPayload,
+      verb: 'update',
+      rowId: 'row1',
+      payload: { status: 'done' },
+      principal: makePrincipal({ type: 'system', attributes: { source: tickSource('AsyncTickPayload', 'update') } }),
+      db,
+      now: Date.now(),
+    }),
+    /with must return an object synchronously/,
+  );
+  db.close();
+});
+
+test('admitSystemMutation denies when the current row no longer passes when', () => {
+  const db = new DatabaseSync(':memory:');
+  const status = { kind: 'value', type: 'text' };
+  const enabled = { kind: 'value', type: 'text' };
+  const Enemy = entity('TickWhenChanged', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    status,
+    enabled,
+    schedule: {
+      update: tick.hz(100, {
+        while: ({ fields }) => fields.status.is('alive'),
+        when: ({ row }) => row.enabled === 'yes',
+        with: { status: 'moving' },
+      }),
+    },
+  });
+  for (const sql of generateDDL(Enemy)) db.exec(sql);
+  db.prepare('INSERT INTO TickWhenChanged (id, status, enabled) VALUES (?, ?, ?)').run('r1', 'alive', 'no');
+  const principal = makePrincipal({ type: 'system', attributes: { source: tickSource('TickWhenChanged', 'update') } });
+
+  const admitted = admitSystemMutation({
+    entity: Enemy,
+    verb: 'update',
+    rowId: 'r1',
+    payload: { id: 'r1', status: 'moving' },
+    principal,
+    db,
+    now: Date.now(),
+  });
+  assert.equal(admitted, false);
+  db.close();
+});
+
 // ============================================================
 // unit: admitSystemMutation direct
 // ============================================================
@@ -132,7 +312,7 @@ test('admitSystemMutation admits an exact-match dispatch', () => {
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.prepare('INSERT INTO AdmitDirect (id, status) VALUES (?, ?)').run('x1', 'alive');
 
-  const principal = makePrincipal({ type: 'system', attributes: { source: 'AdmitDirect.update' } });
+  const principal = makePrincipal({ type: 'system', attributes: { source: tickSource('AdmitDirect', 'update') } });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x1',
     payload: { id: 'x1', status: 'moving' }, principal, db, now: Date.now(),
@@ -157,7 +337,7 @@ test('admitSystemMutation DENIES wrong payload', () => {
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.prepare('INSERT INTO AdmitWrongPayload (id, status) VALUES (?, ?)').run('x2', 'alive');
 
-  const principal = makePrincipal({ type: 'system', attributes: { source: 'AdmitWrongPayload.update' } });
+  const principal = makePrincipal({ type: 'system', attributes: { source: tickSource('AdmitWrongPayload', 'update') } });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'x2',
     payload: { id: 'x2', status: 'hijacked' }, principal, db, now: Date.now(),
@@ -182,7 +362,7 @@ test('admitSystemMutation DENIES row deleted between discover + dispatch', () =>
   for (const sql of generateDDL(Blog)) db.exec(sql);
   // No row inserted — row was "deleted" after discovery.
 
-  const principal = makePrincipal({ type: 'system', attributes: { source: 'AdmitTOCTOU.update' } });
+  const principal = makePrincipal({ type: 'system', attributes: { source: tickSource('AdmitTOCTOU', 'update') } });
   const granted = admitSystemMutation({
     entity: Blog, verb: 'update', rowId: 'gone',
     payload: { id: 'gone', status: 'moving' }, principal, db, now: Date.now(),
@@ -216,6 +396,7 @@ test('admitSystemMutation DENIES non-system principal', () => {
 
 test('admitSystemMutation admits and denies the 3-part scheduler source through the same seam', () => {
   const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
   const publishedAt = date();
   const status = { kind: 'value', type: 'text' };
   const Blog = entity('AdmitSystemSchedule', {

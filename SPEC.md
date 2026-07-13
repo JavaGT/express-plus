@@ -578,17 +578,25 @@ Time-driven mutations are a typed **source** feeding the one pipeline. There are
 
 `state.auto` and entity-TTL **demote to sugar** over `schedule.after` /
 `schedule.at`. The source runs as a **bounded scheduler/tick principal** (not a
-`SYSTEM` god), admitted by the target's own grant via an `effectSource(handle)` /
-`principalFrom(handle)` check the developer declares. The clock is a new
-*trigger*, never a new *authority*; there is no second auth path.
+`SYSTEM` god). In the mutation transaction, Workbench rechecks the exact declared
+trigger, current row, due time, `while`, `when`, and derived payload. The clock is
+a new *trigger*, never general write authority; there is no second mutation path.
 
-**Two scale guards:** the `when`/`while` discovery predicate **must** be indexed —
-a non-compilable `while` is a load-time error (the tick-layer analog of a
-non-compilable `scope`), otherwise it is a full-table-scan `findAll` leak at
-scale. A non-compilable `while` is allowed only as a post-discovery runtime guard
-when another indexed discovery source exists. An **empty `while` is forbidden**
-for row-set ticks (the run-on-all-rows-forever foot-gun); it is legal only for
-singleton or explicit-finite handles. Tick durability is a field-type
+Deadline admission writes a durable receipt in that same transaction. A receipt
+is one-shot for one `(trigger, row, due value)` generation. A canonical update to
+the deadline field rearms it, including when an application deliberately returns
+to a previously used value; removal clears the row's receipts. Workbench retains
+at most one receipt per trigger and row, so changing deadlines does not grow an
+unbounded history. Failed mutations roll receipt changes back and remain eligible
+for retry.
+
+**Two scale guards:** `while` is the database-searchable discovery predicate. It
+must compile to SQL (the tick-layer analog of a compilable `scope`), and the DDL
+generator indexes main-table fields it references. `when` is a separate,
+synchronous lifecycle guard over each deserialized row after SQL discovery; it
+must not return a Promise. An **empty `while` is forbidden** for row-set ticks
+(the run-on-all-rows-forever foot-gun); deadline triggers already have their
+indexed date/number field as a bounded discovery source. Tick durability is a field-type
 persistence-strategy decision (ephemeral = no durable events; a
 coalesced-snapshot-with-sequence-span for high-frequency persisted fields so
 cursor replay stays correct; per-event for the rare case).

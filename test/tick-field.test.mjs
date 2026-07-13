@@ -187,21 +187,41 @@ test('entity with tick.every no while throws at compile', () => {
 });
 
 // ============================================================
-// 'when' LIFECYCLE GUARD: rejected on ticks
+// 'when' LIFECYCLE GUARD: runtime-only after indexed discovery
 // ============================================================
 
-test('tick.hz with when: rejected at entity compile', () => {
+test('tick.hz with when: compiles when the guard is a function', () => {
   const status = text();
-  assert.throws(
-    () => entity('EnemyWhenTick', {
-      grant: scope(() => everyone()).can(() => grant(read)),
-            status,
+  const when = ({ row }) => row.status === 'alive';
+  const Enemy = entity('EnemyWhenTick', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    status,
+    schedule: {
+      update: tick.hz(30, {
+        while: ({ fields }) => fields.status.is('alive'),
+        when,
+      }),
+    },
+  });
+  assert.strictEqual(Enemy.schedule.update.when, when);
+});
 
-      schedule: {
-        update: tick.hz(30, { when: true }),
-      },
-    }),
-    /'when' lifecycle guard is not yet supported/,
+test('tick.hz rejects a non-function when guard', () => {
+  assert.throws(() => tick.hz(30, { when: true }), /tick\.hz: when must be a function/);
+});
+
+test('tick declarations reject explicitly async lifecycle functions', () => {
+  assert.throws(
+    () => tick.hz(30, { while: async ({ fields }) => fields.status.is('alive') }),
+    /tick\.hz: while must be synchronous/,
+  );
+  assert.throws(
+    () => tick.every('1m', { when: async () => true }),
+    /tick\.every: when must be synchronous/,
+  );
+  assert.throws(
+    () => tick.hz(30, { with: async () => ({ status: 'moving' }) }),
+    /tick\.hz: with must be synchronous/,
   );
 });
 
@@ -222,10 +242,39 @@ test('tick.hz with while: "not a fn" throws at constructor', () => {
 // tickSource: derived identity
 // ============================================================
 
-test("tickSource('Enemy','update') === 'Enemy.update'", () => {
-  assert.equal(tickSource('Enemy', 'update'), 'Enemy.update');
+test("tickSource includes the compiled trigger identity", () => {
+  assert.equal(tickSource('Enemy', 'update', 'hz-30'), 'Enemy.update.hz-30');
 });
 
-test("tickSource('Doc','create') === 'Doc.create'", () => {
-  assert.equal(tickSource('Doc', 'create'), 'Doc.create');
+test('tick key becomes the stable compiled trigger identity', () => {
+  const status = text();
+  const Enemy = entity('KeyedTick', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    status,
+    schedule: {
+      update: tick.hz(30, {
+        key: 'physics-loop',
+        while: ({ fields }) => fields.status.is('alive'),
+      }),
+    },
+  });
+  assert.equal(Enemy.schedule.update.triggerId, 'physics-loop');
+  assert.equal(tickSource('KeyedTick', 'update', Enemy.schedule.update.triggerId), 'KeyedTick.update.physics-loop');
+});
+
+test('two ticks on one verb require distinct identities', () => {
+  const status = text();
+  assert.throws(
+    () => entity('CollidingTicks', {
+      grant: scope(() => everyone()).can(() => grant(read)),
+      status,
+      schedule: {
+        update: [
+          tick.hz(30, { while: ({ fields }) => fields.status.is('alive') }),
+          tick.hz(30, { while: ({ fields }) => fields.status.is('alive') }),
+        ],
+      },
+    }),
+    /duplicate trigger identity/,
+  );
 });

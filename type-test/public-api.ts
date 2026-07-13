@@ -1,5 +1,6 @@
 import workbench, {
-  action, event, entity, text, ref, projected, computed, ephemeral, inherit, log, state,
+  action, event, entity, text, date, ref, projected, computed, ephemeral, inherit, log, state,
+  schedule, tick,
   principal, read, write, grant, membership, parseCookies, SESSION_COOKIE,
   apiKeyPrincipalOf, createInvitationApi as createRootInvitationApi, emailSeam,
   matchRoute, noopTransport, serveStatic, sessionCookie, sessionPrincipalOf,
@@ -201,6 +202,24 @@ const transitionType: 'transition:draft->shared' = tx.type;
 // @ts-expect-error transition requires two string arguments
 state.transition();
 void [statusField, tx, transitionType];
+
+// schedule/tick lifecycle guards are synchronous row predicates
+const dueAt = date();
+schedule.at<{ status: string }>(dueAt, {
+  key: 'publish',
+  when: ({ row }) => row.status === 'ready',
+  with: { status: 'published' },
+});
+tick.every<{ status: string }>('1m', {
+  while: ({ fields }) => fields.status.is('ready'),
+  when: ({ row }) => row.status === 'ready',
+});
+// @ts-expect-error when must be a function
+schedule.at(dueAt, { when: 'ready' });
+// @ts-expect-error lifecycle guards must return a boolean synchronously
+tick.hz(10, { when: async () => true });
+// @ts-expect-error trigger keys must be strings
+schedule.after(dueAt, '1m', { key: 42 });
 
 // projected.async(...)
 const proj = projected.async({

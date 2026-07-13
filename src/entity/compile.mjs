@@ -27,8 +27,9 @@ import { compileEntityAuthz } from '../authz.mjs';
 import { getLog } from '../log.mjs';
 import {
   serializeField, validateMutation, ValidationError, flattenStruct,
-  deserializeField, verifyHash, structCellColumn,
+  structCellColumn,
 } from '../field-strategy.mjs';
+import { materializeStoredRow } from './materialize-row.mjs';
 import { action, event } from '../pipeline.mjs';
 import * as eventHandle from '../event-handle.mjs';
 import { created, updated, removed } from '../event-handle.mjs';
@@ -164,10 +165,11 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
   let withValue;
   let fieldName = null;
 
+  if (trigger.when !== undefined && typeof trigger.when !== 'function') {
+    throw new Error(`schedule.${verbName}: 'when' must be a function ({row}) => boolean`);
+  }
+
   if (isDeadline) {
-    if (trigger.when) {
-      throw new Error(`schedule.${verbName}: 'when' lifecycle guard is not yet supported (ships with state runtime)`);
-    }
     if (!trigger.field || typeof trigger.field !== 'object') {
       throw new Error(`schedule.${verbName}: field must be a field descriptor (no bare strings)`);
     }
@@ -190,9 +192,6 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
     }
     withValue = trigger.with;
   } else {
-    if (trigger.when) {
-      throw new Error(`schedule.${verbName}: 'when' lifecycle guard is not yet supported (ships with state runtime)`);
-    }
     if (trigger.while === undefined) {
       throw new Error(
         `schedule.${verbName}: a row-set tick requires a 'while' predicate ` +
@@ -233,6 +232,13 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
   }
 
   const sourceName = trigger.sourceName ?? fieldName;
+  const triggerId = trigger.key ?? (
+    trigger.sourceName ?? (
+      trigger.kind === 'schedule.at' ? fieldName
+        : trigger.kind === 'schedule.after' ? `${fieldName}.after.${trigger.delay}`
+          : 'tick'
+    )
+  );
 
   // matches(db, row) — run the while predicate against one row after discovery.
   // The whileSql is still compiled (used in discovery queries), but callers that
@@ -255,8 +261,11 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
       whileSql,
       whileParams,
       whileAst,
+      when: trigger.when,
       with: withValue,
+      autoState: trigger.autoState,
       sourceName,
+      triggerId,
       matches,
     });
   }
@@ -267,8 +276,10 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
     whileSql,
     whileParams,
     whileAst,
+    when: trigger.when,
     with: withValue,
     sourceName: trigger.sourceName ?? null,
+    triggerId,
     matches,
   });
 }
@@ -452,6 +463,27 @@ export function entity(name, declaration = {}) {
         fields,
         registry,
       }));
+      const triggerIds = new Set();
+      for (const trigger of validated) {
+        if (
+          verbName === 'update'
+          && (trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after')
+          && !trigger.autoState
+          && fields[trigger.fieldName]?.touch === true
+        ) {
+          throw new Error(
+            `schedule.${verbName} on entity '${name}': deadline field '${trigger.fieldName}' ` +
+              'cannot be a touch field because the scheduled update would move its own deadline and fire repeatedly',
+          );
+        }
+        if (triggerIds.has(trigger.triggerId)) {
+          throw new Error(
+            `schedule.${verbName}: duplicate trigger identity '${trigger.triggerId}' on entity '${name}'; ` +
+              `give each trigger a distinct { key }`,
+          );
+        }
+        triggerIds.add(trigger.triggerId);
+      }
       validatedSchedule[verbName] = triggers.length === 1 ? Object.freeze(validated[0]) : Object.freeze(validated);
     }
     validatedSchedule = Object.freeze(validatedSchedule);
@@ -513,44 +545,22 @@ export function entity(name, declaration = {}) {
   const sideTableStrategyEntries = collectSideTableStrategies(fields);
 
   function createEntityHydrator({ record, entityName, fields, sideTableStrategyEntries, runtime }) {
-    const hashFields = Object.entries(fields)
-      .filter(([, descriptor]) => descriptor.kind === 'hash')
-      .map(([fieldName]) => fieldName);
-    const storedValueFields = Object.entries(fields)
-      .filter(([, descriptor]) => descriptor.kind === 'value' || descriptor.kind === 'projected' || (descriptor.kind === 'computed' && descriptor.mode === 'stored'));
-    const structFields = Object.entries(fields).filter(([, d]) => d.kind === 'struct');
-
+    // Keep the long-standing public contract: callers may ignore this return
+    // value and still observe the row deserialized in place. Lifecycle code
+    // uses materializeStoredRow directly when it needs a detached snapshot.
     const deserializeStoredCells = (row) => {
       if (!row) return row;
-      for (const [fieldName, descriptor] of storedValueFields) {
-        if (Object.prototype.hasOwnProperty.call(row, fieldName)) {
-          row[fieldName] = deserializeField(descriptor, row[fieldName]);
-        }
+      const materialized = materializeStoredRow(row, fields);
+      for (const key of Object.keys(row)) {
+        if (!Object.prototype.hasOwnProperty.call(materialized, key)) delete row[key];
       }
+      Object.assign(row, materialized);
       return row;
     };
 
     const hydrate = (row, principal = null, dispatch = null) => {
       if (!row) return row;
-      deserializeStoredCells(row);
-      for (const fieldName of hashFields) {
-        const stored = row[fieldName];
-        if (stored === null || stored === undefined) continue;
-        row[fieldName] = { verify: (plaintext) => verifyHash(plaintext, stored) };
-      }
-      for (const [fieldName, descriptor] of structFields) {
-        const namespace = {};
-        let any = false;
-        for (const cellName of Object.keys(descriptor.cells)) {
-          const column = structCellColumn(fieldName, cellName);
-          if (column in row) {
-            namespace[cellName] = row[column];
-            delete row[column];
-            if (row[column] !== null) any = true;
-          }
-        }
-        row[fieldName] = any || Object.keys(namespace).length > 0 ? namespace : null;
-      }
+      row = deserializeStoredCells(row);
       for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
         for (const [fieldName, descriptor] of strategyFields) {
           if (typeof strategy.handle === 'function') {
@@ -566,11 +576,6 @@ export function entity(name, declaration = {}) {
               entityOf: runtime.entityOf,
             });
           }
-        }
-      }
-      for (const [fieldName, descriptor] of Object.entries(fields)) {
-        if (descriptor.kind === 'computed' && descriptor.mode === 'pull') {
-          try { row[fieldName] = descriptor.compute(row); } catch {}
         }
       }
       return row;

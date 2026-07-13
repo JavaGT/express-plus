@@ -44,12 +44,12 @@ function seed() {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, body TEXT, owner TEXT)');
   db.exec(
-    'CREATE TABLE Session (token TEXT PRIMARY KEY, principalType TEXT, principalId TEXT)',
+    'CREATE TABLE Session (id TEXT PRIMARY KEY, token TEXT, principalType TEXT, principalId TEXT, createdAt INTEGER)',
   );
   db.prepare('INSERT INTO Note (id, body, owner) VALUES (?, ?, ?)').run(1, 'a', 'alice');
   db.prepare(
-    'INSERT INTO Session (token, principalType, principalId) VALUES (?, ?, ?)',
-  ).run('alice-token', 'user', 'alice');
+    'INSERT INTO Session (id, token, principalType, principalId, createdAt) VALUES (?, ?, ?, ?, ?)',
+  ).run('session-alice', 'alice-token', 'user', 'alice', Date.now());
   return db;
 }
 

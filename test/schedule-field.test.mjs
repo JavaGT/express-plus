@@ -2,6 +2,7 @@ import { schedule, date, scope, everyone, grant, read, text } from '../src/index
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { entity } from '../src/internal.mjs';
+import { schedulerSource } from '../src/schedule.mjs';
 
 // P6d Spine A step 1: time-driven sources (ADR #10). Import-surface only —
 // constructuring + entity-slot acceptance. Firing/dispatch/reaper wiring
@@ -91,6 +92,20 @@ test('entity with schedule.after: builds correctly', () => {
   assert.ok(Todo.schedule);
   assert.equal(Todo.schedule.update.kind, 'schedule.after');
   assert.equal(Todo.schedule.update.delay, 604_800_000);
+});
+
+test('entity rejects a deadline field that auto-touches during its own mutation', () => {
+  const updatedAt = date({ touch: true });
+  assert.throws(
+    () => entity('SelfMovingDeadline', {
+      grant: scope(() => everyone()).can(() => grant(read)),
+      updatedAt,
+      schedule: {
+        update: schedule.at(updatedAt),
+      },
+    }),
+    /deadline field 'updatedAt'.*touch.*repeatedly/i,
+  );
 });
 
 test('entity rejects malformed schedule: bogus kind', () => {
@@ -216,6 +231,22 @@ test('schedule.at(field, { while: "notafn" }) throws at construction', () => {
   );
 });
 
+test('schedule declarations reject explicitly async lifecycle functions', () => {
+  const f = date();
+  assert.throws(
+    () => schedule.at(f, { while: async ({ fields }) => fields.status.is('queued') }),
+    /schedule\.at: while must be synchronous/,
+  );
+  assert.throws(
+    () => schedule.after(f, '1m', { when: async () => true }),
+    /schedule\.after: when must be synchronous/,
+  );
+  assert.throws(
+    () => schedule.at(f, { with: async () => ({ status: 'published' }) }),
+    /schedule\.at: with must be synchronous/,
+  );
+});
+
 test('schedule.at(f) and schedule.after(f, 1000) without options still work (backward-compat)', () => {
   const f1 = date();
   const f2 = date();
@@ -296,19 +327,26 @@ test('non-compilable while: load-time error (NonCompilableError propagates)', ()
   );
 });
 
-test("'when' rejection: trigger with when throws not-yet-supported error", () => {
+test("'when' lifecycle guard compiles when it is a function", () => {
   const publishedAt = date();
-  const handBuiltTrigger = { kind: 'schedule.at', field: publishedAt, when: 'playing' };
-  assert.throws(
-    () => entity('BadWhenEntity', {
-      grant: scope(() => everyone()).can(() => grant(read)),
-            publishedAt,
+  const when = ({ row }) => row.status === 'playing';
+  const status = text();
+  const Scheduled = entity('WhenEntity', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    publishedAt,
+    status,
+    schedule: {
+      update: schedule.at(publishedAt, { when }),
+    },
+  });
+  assert.strictEqual(Scheduled.schedule.update.when, when);
+});
 
-      schedule: {
-        update: handBuiltTrigger,
-      },
-    }),
-    /schedule\.update: 'when' lifecycle guard is not yet supported/,
+test("schedule.at rejects a non-function 'when' guard", () => {
+  const publishedAt = date();
+  assert.throws(
+    () => schedule.at(publishedAt, { when: 'playing' }),
+    /schedule\.at: when must be a function/,
   );
 });
 
@@ -328,4 +366,54 @@ test('while referencing a value-kind comparable field compiles', () => {
   assert.ok(Doc.schedule.update);
   assert.ok(typeof Doc.schedule.update.whileSql === 'string');
   assert.ok(Doc.schedule.update.whileParams);
+});
+
+test('schedule key becomes the stable compiled trigger identity', () => {
+  const dueAt = date();
+  const Doc = entity('KeyedDeadline', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    dueAt,
+    schedule: {
+      update: schedule.at(dueAt, { key: 'publish-primary' }),
+    },
+  });
+
+  assert.equal(Doc.schedule.update.triggerId, 'publish-primary');
+  assert.equal(
+    schedulerSource('KeyedDeadline', 'update', Doc.schedule.update.triggerId),
+    'KeyedDeadline.update.publish-primary',
+  );
+});
+
+test('entity rejects colliding schedule trigger identities unless keys distinguish them', () => {
+  const dueAt = date();
+  assert.throws(
+    () => entity('CollidingDeadlines', {
+      grant: scope(() => everyone()).can(() => grant(read)),
+      dueAt,
+      schedule: {
+        update: [schedule.at(dueAt), schedule.at(dueAt)],
+      },
+    }),
+    /duplicate trigger identity/,
+  );
+
+  const Distinct = entity('DistinctDeadlines', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    dueAt,
+    schedule: {
+      update: [
+        schedule.at(dueAt, { key: 'first' }),
+        schedule.at(dueAt, { key: 'second' }),
+      ],
+    },
+  });
+  assert.deepEqual(Distinct.schedule.update.map((trigger) => trigger.triggerId), ['first', 'second']);
+});
+
+test('schedule constructors reject malformed trigger keys', () => {
+  const dueAt = date();
+  for (const key of ['', 'has spaces', 'slash/not-allowed', 42]) {
+    assert.throws(() => schedule.at(dueAt, { key }), /schedule\.at: key/);
+  }
 });
