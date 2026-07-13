@@ -34,7 +34,7 @@ import * as eventHandle from '../event-handle.mjs';
 import { created, updated, removed } from '../event-handle.mjs';
 import { generateDDL } from '../ddl.mjs';
 import { resolveRouteGate } from '../route-gate.mjs';
-import { effectEntries, validateEffectDeclaration } from '../effect-compiler.mjs';
+import { effectEntries, self, validateEffectDeclaration } from '../effect-compiler.mjs';
 import { schedule as scheduleConstructors, triggerList } from '../schedule.mjs';
 import { compileMembershipAuthz } from '../auth/membership.mjs';
 import { collectSideTableStrategies } from '../side-table-strategy.mjs';
@@ -47,6 +47,49 @@ import { installEntityQueries } from './query.mjs';
 // generates an unguessable token without reaching for node:crypto itself.
 function mintToken() {
   return randomBytes(24).toString('hex');
+}
+
+function stateEffectEntries(entityName, fieldName, descriptor) {
+  const declared = descriptor.effects;
+  if (declared == null || Object.keys(declared).length === 0) return [];
+
+  const legalTransitions = new Map();
+  for (const [from, targets] of Object.entries(descriptor.transitions ?? {})) {
+    for (const to of targets ?? []) {
+      const key = `transition:${from}->${to}`;
+      const existing = legalTransitions.get(key);
+      if (existing && (existing.from !== from || existing.to !== to)) {
+        throw new Error(
+          `state effects on ${entityName}.${fieldName} contain ambiguous transition values ` +
+          `'${existing.from}' -> '${existing.to}' and '${from}' -> '${to}'.`,
+        );
+      }
+      legalTransitions.set(key, { from, to });
+    }
+  }
+
+  return Object.entries(declared).map(([key, declaredEffect]) => {
+    const transition = legalTransitions.get(key);
+    if (!transition) {
+      throw new Error(
+        `state effect '${key}' on ${entityName}.${fieldName} must name a declared legal transition. ` +
+        `Use [state.transition(from, to)] as the key.`,
+      );
+    }
+    if (declaredEffect?.durable !== undefined) {
+      throw new Error(
+        `state effect '${key}' on ${entityName}.${fieldName} cannot be durable because ` +
+        'transition preimages are transaction-local.',
+      );
+    }
+    const mutate = Object.hasOwn(declaredEffect ?? {}, 'mutate') ? declaredEffect.mutate : self;
+    const effect = Object.freeze({
+      ...declaredEffect,
+      mutate,
+      _stateTransition: Object.freeze({ fieldName, ...transition }),
+    });
+    return [updated(entityName), effect];
+  });
 }
 
 // A declared name (entity, field, struct sub-cell) is interpolated verbatim into
@@ -369,7 +412,11 @@ export function entity(name, declaration = {}) {
   // map mutations use entity-specific typed handles such as
   // Doc.collaborators.added, not generic field-local aliases.
   const declaredEffectsArray = typeof effects === 'function' ? effects(selfHandle) : effects;
-  const entries = effectEntries(declaredEffectsArray, { sourceEntityName: name });
+  const entries = [
+    ...effectEntries(declaredEffectsArray, { sourceEntityName: name }),
+    ...Object.entries(fields).flatMap(([fieldName, descriptor]) =>
+      descriptor.kind === 'state' ? stateEffectEntries(name, fieldName, descriptor) : []),
+  ];
   const validatedEffects = entries.length > 0 ? Object.freeze([...entries]) : null;
   for (const [triggerHandle, effect] of entries) {
     if (effect && typeof effect === 'object' && typeof effect.durable === 'string') continue;

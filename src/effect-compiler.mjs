@@ -411,6 +411,13 @@ export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, 
   const allTargetEvents = [];
 
   for (const { sourceEntity, effect, overFieldName } of eventEffects) {
+    if (effect._stateTransition) {
+      const matched = event._stateTransitions?.some((transition) =>
+        transition.fieldName === effect._stateTransition.fieldName
+        && transition.from === effect._stateTransition.from
+        && transition.to === effect._stateTransition.to);
+      if (!matched) continue;
+    }
     // Check the `when` guard if present
     if (effect.when) {
       try {

@@ -73,6 +73,41 @@ test('a state field compiles into an entity at import', () => {
   assert.ok(Doc);
 });
 
+test('state.effects rejects a transition that is not declared legal', () => {
+  assert.throws(
+    () => entity('DocStateEffectIllegalTransition', {
+      status: state({
+        values: ['draft', 'shared', 'archived'],
+        transitions: { draft: ['shared'] },
+        effects: {
+          [state.transition('draft', 'archived')]: { with: { status: 'archived' } },
+        },
+      }),
+      grant: scope(() => everyone()).can(() => grant(read)),
+    }),
+    /must name a declared legal transition/,
+  );
+});
+
+test('state.effects rejects durable delivery because transition preimages are transaction-local', () => {
+  assert.throws(
+    () => entity('DocStateEffectDurable', {
+      status: state({
+        values: ['draft', 'shared'],
+        transitions: { draft: ['shared'] },
+        effects: {
+          [state.transition('draft', 'shared')]: {
+            durable: 'publish-state-change',
+            with: { status: 'shared' },
+          },
+        },
+      }),
+      grant: scope(() => everyone()).can(() => grant(read)),
+    }),
+    /cannot be durable because transition preimages are transaction-local/,
+  );
+});
+
 test('state.auto lowers to a schedule.after update trigger', () => {
   const updatedAt = date({ touch: true });
   const Doc = entity('DocStateAutoSchedule', {
@@ -125,7 +160,7 @@ test('a state handle cannot be compared in scope (fail closed)', () => {
 
 import { resolveStrategy, ValidationError } from '../src/field-strategy.mjs';
 import { generateDDL } from '../src/ddl.mjs';
-import { executeFrameworkDDL, createServer, durableMutationVariant } from '../src/internal.mjs';
+import { executeFrameworkDDL, createServer, durableMutationVariant, buildEffectsRegistry } from '../src/internal.mjs';
 
 function setupDoc() {
   const Doc = entity('DocState', {
@@ -271,6 +306,76 @@ test('update legal transition (draft -> shared) persists', async (t) => {
   assert.equal(result.granted, true);
   const row = Doc_b.findById(docId);
   assert.equal(row.status, 'shared');
+});
+
+test('state.effects runs only for its declared transition and defaults to the same row', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const Doc = entity('DocStateEffectsRuntime', {
+    title: text(),
+    status: state({
+      values: ['draft', 'shared', 'archived'],
+      transitions: { draft: ['shared'], shared: ['archived'] },
+      effects: {
+        [state.transition('draft', 'shared')]: { with: { title: 'shared by effect' } },
+      },
+    }),
+    reviewStatus: state({
+      values: ['draft', 'shared'],
+      transitions: { draft: ['shared'] },
+    }),
+    grant: scope(() => everyone()).can(() => grant(read)),
+  });
+  for (const sql of generateDDL(Doc)) db.exec(sql);
+  const app = workbench({ db, entities: [Doc] });
+  const boundDoc = app.entity(Doc);
+  const server = createServer({
+    db,
+    handlers: boundDoc.crudHandlers,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [boundDoc.projection],
+      effectsRegistry: buildEffectsRegistry([boundDoc]),
+    }),
+    authorize: () => true,
+  });
+  t.after(() => db.close());
+
+  const created = await server.dispatch({
+    actionId: 'state-effect-create',
+    type: 'DocStateEffectsRuntime.create',
+    payload: { title: 'draft title', status: 'draft', reviewStatus: 'draft' },
+    principal: { id: 'u1' },
+  });
+  const id = created.events[0].data.id;
+  await server.dispatch({
+    actionId: 'state-effect-unrelated-field',
+    type: 'DocStateEffectsRuntime.update',
+    payload: { id, reviewStatus: 'shared' },
+    principal: { id: 'u1' },
+  });
+  const unrelatedRow = db.prepare('SELECT title, reviewStatus FROM DocStateEffectsRuntime WHERE id = ?').get(id);
+  assert.equal(unrelatedRow.title, 'draft title');
+  assert.equal(unrelatedRow.reviewStatus, 'shared');
+
+  await server.dispatch({
+    actionId: 'state-effect-share',
+    type: 'DocStateEffectsRuntime.update',
+    payload: { id, status: 'shared' },
+    principal: { id: 'u1' },
+  });
+  const sharedRow = db.prepare('SELECT title, status FROM DocStateEffectsRuntime WHERE id = ?').get(id);
+  assert.equal(sharedRow.title, 'shared by effect');
+  assert.equal(sharedRow.status, 'shared');
+
+  await server.dispatch({
+    actionId: 'state-effect-archive',
+    type: 'DocStateEffectsRuntime.update',
+    payload: { id, title: 'archive title', status: 'archived' },
+    principal: { id: 'u1' },
+  });
+  const archivedRow = db.prepare('SELECT title, status FROM DocStateEffectsRuntime WHERE id = ?').get(id);
+  assert.equal(archivedRow.title, 'archive title');
+  assert.equal(archivedRow.status, 'archived');
 });
 
 test('update illegal transition (draft -> archived) throws 400 with zero footprint', async (t) => {

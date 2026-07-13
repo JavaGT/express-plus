@@ -42,6 +42,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       const { id, ...rest } = payload;
       if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
       validateMutation(record, rest);
+      const stateTransitions = [];
       // Transition guard: for every state field in the payload, pre-read the
       // current row and verify the move is in the declared transition graph.
       // Runs after structural validation so invalid targets report as domain
@@ -82,6 +83,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
             { status: 400 },
           );
         }
+        stateTransitions.push({ fieldName, from: currentValue, to: rest[fieldName] });
       }
       const data = { ...rest, id };
       for (const [fieldName, descriptor] of Object.entries(fields)) {
@@ -92,6 +94,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         type: verbs.updated.type,
         scope: scopeOf(name, id).key,
         data,
+        ...(stateTransitions.length > 0 ? { _stateTransitions: stateTransitions } : {}),
       }];
     },
     [`${name}.remove`]: ({ payload, principal: _p }) => {

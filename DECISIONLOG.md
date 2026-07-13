@@ -618,3 +618,10 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Decision:** `maxEffectDepth` is a validated `durableMutationVariant` setting and counts generated effect hops. The effect compiler has no independent recursion counter.
 - **Reason:** The pipeline is the component that sees both the current hop and whether another generated mutation actually exists. Enforcing the bound there lets a terminal event at the limit succeed while an attempted extra hop fails atomically.
 - **Compatibility:** The private `createEffectContext` and `checkEffectDepth` exports were removed. They had no production caller and duplicated the runtime rule.
+
+## 2026-07-13 — state-transition effects lower into the ordinary effect pipeline
+
+- **Decision:** A field-local transition effect compiles as an updated-event effect annotated with its exact state field and from/to pair. CRUD supplies matching transition metadata for the duration of the transaction; the effect registry and mutation pipeline remain singular.
+- **Default target:** Omitting `mutate` means `self`. This makes the compact field-local declaration useful while preserving explicit cross-entity targets.
+- **Durability boundary:** Transition metadata is not committed to `_Log`, so transition effects cannot declare durable delivery. Load-time rejection is safer than live/recovery disagreement.
+- **Authority:** Lowering does not create a privileged path. Generated mutations pass the same source admission, target row grant, effect-depth, and atomic rollback rules as entity-level effects.

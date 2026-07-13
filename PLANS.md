@@ -535,3 +535,11 @@ REMAINING-P1-NOTES resolved/deferred: spec #6 (handler txn signature) RESOLVED b
 - Invalid negative or fractional budgets fail at pipeline construction instead of producing ambiguous runtime behavior.
 - Focused effect/auth/admission gate: 53/53 green; existing runaway self-recursion proofs still throw and roll back.
 - Next: wire the public `state.effects` descriptor through entity compilation, then complete schedule/tick lifecycle guards.
+
+## 2026-07-13 — rewrite Wave 2: state-transition effects are real runtime behavior
+
+- Field-local `state.effects` declarations now lower to the entity's ordinary updated-event effect registry. Exact field/from/to metadata travels only inside the active transaction, so an effect fires for its declared transition and cannot be triggered by another state field or another transition on the same update event.
+- A state effect defaults to `self`, matching the field-local API: `{ with }` updates the same row unless the declaration names another target explicitly. The generated mutation still uses the normal effect principal, row grant, depth budget, projection, and rollback path.
+- The compiler rejects effect keys that are not declared legal transitions. Durable state-transition effects are rejected because the old-value preimage is intentionally transaction-local and is not present in the committed event log; pretending they were replayable would make recovery behavior differ from live behavior.
+- Focused state/effect/auth gate: 57/57 green.
+- Next: complete schedule/tick lifecycle guards, then harden client resync/outbox/close races.
