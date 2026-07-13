@@ -21,6 +21,7 @@
 import { structCellColumn } from './field-strategy.mjs';
 import { sideTableDDL } from './side-table-strategy.mjs';
 import { frameworkLogDDL } from './committed-log.mjs';
+import { defineSqliteSchema } from './sqlite-schema.mjs';
 
 // Map a field's kind+type to its SQLite column type.
 function sqlType(descriptor) {
@@ -145,6 +146,37 @@ export function executeDDL(entity, db) {
   }
 }
 
+// _ProjectedCursor is a response-staleness counter. _ConsumerCursor is the
+// durable per-scope recovery position for post-commit consumers; keeping them
+// together does not make their meanings interchangeable.
+const FRAMEWORK_CURSOR_SCHEMA = defineSqliteSchema({
+  name: 'framework-cursors',
+  tables: [
+    {
+      name: '_ProjectedCursor',
+      columns: [
+        { name: 'entity', type: 'text', notNull: true },
+        { name: 'field', type: 'text', notNull: true },
+        { name: 'lastSeq', type: 'integer', notNull: true, default: 0 },
+      ],
+      primaryKey: ['entity', 'field'],
+    },
+    {
+      name: '_ConsumerCursor',
+      columns: [
+        { name: 'consumer', type: 'text', notNull: true },
+        { name: 'scope', type: 'text', notNull: true },
+        { name: 'lastSeq', type: 'integer', notNull: true },
+      ],
+      primaryKey: ['consumer', 'scope'],
+    },
+  ],
+});
+
+export function frameworkCursorSchema() {
+  return FRAMEWORK_CURSOR_SCHEMA;
+}
+
 export function generateFrameworkDDL() {
   return [
     `CREATE TABLE IF NOT EXISTS BlobStore (
@@ -187,24 +219,9 @@ export function generateFrameworkDDL() {
 );`,
     'CREATE INDEX IF NOT EXISTS idx__job_claim ON _Job (status, enqueuedAt);',
     'CREATE INDEX IF NOT EXISTS idx__job_scope_status ON _Job (scope, status, enqueuedAt);',
-    `CREATE TABLE IF NOT EXISTS _ProjectedCursor (
-  entity TEXT NOT NULL,
-  field TEXT NOT NULL,
-  lastSeq INTEGER NOT NULL DEFAULT 0,
-  PRIMARY KEY (entity, field)
-);`,
-    // Per-scope cursor for post-commit consumers over _Log. Tracks the real
-    // per-scope log seq last successfully consumed by a named consumer, so a
-    // boot-time sweep can detect scopes that fell behind (process died between
-    // COMMIT and a post-commit consumer) and catch them up. _ProjectedCursor is
-    // separate: it is a staleness version counter (self-incrementing count) for
-    // response headers, not a recovery cursor.
-    `CREATE TABLE IF NOT EXISTS _ConsumerCursor (
-  consumer TEXT NOT NULL,
-  scope TEXT NOT NULL,
-  lastSeq INTEGER NOT NULL,
-  PRIMARY KEY (consumer, scope)
-);`,
+    // Cursor tables for post-commit consumer tracking — declared via
+    // defineSqliteSchema through frameworkCursorSchema().
+    ...frameworkCursorSchema().ddl,
     `CREATE TABLE IF NOT EXISTS _Worker (
   id TEXT PRIMARY KEY,
   tokenHash TEXT NOT NULL,
