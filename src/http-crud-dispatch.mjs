@@ -11,7 +11,8 @@ import { readProjectedCursors } from './projected-async.mjs';
 import { projectedCursorHeaders } from './http-response.mjs';
 import { mayRow } from './row-grant.mjs';
 import { scopeOf } from './scope-handle.mjs';
-import { statusForFailure } from './outcome.mjs';
+import { failure } from './outcome.mjs';
+import { sendFailure } from './http-failure.mjs';
 
 // One kernel mutation through the write queue, translating the failure modes
 // shared by create/update/remove: queue starvation → 503, validation → 400
@@ -24,17 +25,17 @@ async function runKernelMutation(app, kernel, res, sendJson, action, { validatio
     result = await app.writeQueue.run(() => kernel.dispatch(action));
   } catch (err) {
     if (err?.status === 503) {
-      sendJson(res, 503, { error: 'service busy' });
+      sendFailure(sendJson, res, failure('conflict', 'service busy'), { status: 503 });
       return null;
     }
     if (validation400 && err instanceof ValidationError) {
-      sendJson(res, 400, { error: err.message });
+      sendFailure(sendJson, res, failure('invalid-input', err.message));
       return null;
     }
     throw err;
   }
   if (!result.ok) {
-    sendJson(res, statusForFailure(result.failure), { error: result.failure.message });
+    sendFailure(sendJson, res, result.failure);
     return null;
   }
   return result;
@@ -59,7 +60,7 @@ export async function authorizeRow(app, entity, verb, id, principal, preRow = nu
 export async function dispatchCrud({ entity, verb, db, principal, params, body, app, res,
   sendJson, committedEventHeaders, mayRow }) {
   if (!db) {
-    sendJson(res, 500, { error: 'no database configured for entity dispatch' });
+    sendFailure(sendJson, res, failure('internal', 'Internal error.'));
     return;
   }
   const actionId = randomUUID();
@@ -87,7 +88,10 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
     // Scoped load + capability check: absent-or-invisible → 404, denied → 403.
     const auth = await authorizeRow(app, entity, 'read', params.id, principal);
     if (auth.status) {
-      return void sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
+      const denied = auth.status === 404
+        ? failure('not-found', 'not found')
+        : failure('denied', 'forbidden');
+      return void sendFailure(sendJson, res, denied);
     }
     const cursorHeaders = projectedCursorHeaders(readProjectedCursors(db, entity));
     sendJson(res, 200, auth.row, { 'x-workbench-action-id': actionId, ...cursorHeaders });
@@ -96,7 +100,7 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
 
   if (verb === 'create') {
     const kernel = app?.kernel;
-    if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
+    if (!kernel) return void sendFailure(sendJson, res, failure('internal', 'Internal error.'));
     const result = await runKernelMutation(app, kernel, res, sendJson, { actionId, type: `${table}.create`, payload: body, principal });
     if (!result) return;
     const id = result.events[0].data.id;
@@ -110,10 +114,13 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
 
   if (verb === 'update') {
     const kernel = app?.kernel;
-    if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
+    if (!kernel) return void sendFailure(sendJson, res, failure('internal', 'Internal error.'));
     const auth = await authorizeRow(app, entity, 'update', params.id, principal);
     if (auth.status) {
-      return void sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
+      const denied = auth.status === 404
+        ? failure('not-found', 'not found')
+        : failure('denied', 'forbidden');
+      return void sendFailure(sendJson, res, denied);
     }
     const result = await runKernelMutation(app, kernel, res, sendJson, {
       actionId,
@@ -130,10 +137,13 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
 
   if (verb === 'remove') {
     const kernel = app?.kernel;
-    if (!kernel) return void sendJson(res, 500, { error: 'no mutation kernel configured' });
+    if (!kernel) return void sendFailure(sendJson, res, failure('internal', 'Internal error.'));
     const auth = await authorizeRow(app, entity, 'remove', params.id, principal);
     if (auth.status) {
-      return void sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
+      const denied = auth.status === 404
+        ? failure('not-found', 'not found')
+        : failure('denied', 'forbidden');
+      return void sendFailure(sendJson, res, denied);
     }
     const result = await runKernelMutation(app, kernel, res, sendJson, {
       actionId,
@@ -148,5 +158,5 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
   }
 
   // an unknown verb is fail-closed (the routing table only mints the five).
-  sendJson(res, 500, { error: `unknown verb '${verb}'` });
+  sendFailure(sendJson, res, failure('internal', 'Internal error.'));
 }

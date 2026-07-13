@@ -35,6 +35,8 @@ import { matchRoute } from './http-route-match.mjs';
 import { committedEventHeaders, responseHasStarted, warnLateResponse, sendJson } from './http-response.mjs';
 import { createResponseFacade } from './http-response-factory.mjs';
 import { dispatchCrud } from './http-crud-dispatch.mjs';
+import { failure } from './outcome.mjs';
+import { sendFailure } from './http-failure.mjs';
 import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute, handleClientSdkRoute } from './http-framework-routes.mjs';
 
 // Framework-owned snapshot + resync endpoints (spec #1, D6/D7). NOT mounted
@@ -160,7 +162,12 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
         const r = rateLimiter.check({ ip: req.socket?.remoteAddress, sessionId: sessionTokenOf(req) });
         if (!r.allowed) {
           res.setHeader('Retry-After', String(Math.ceil(r.retryAfterMs / 1000)));
-          sendJson(res, 429, { error: 'rate limit exceeded', retryAfterMs: r.retryAfterMs });
+          sendFailure(
+            sendJson,
+            res,
+            failure('conflict', 'rate limit exceeded', { retryAfterMs: r.retryAfterMs }),
+            { status: 429 },
+          );
           return;
         }
       }
@@ -169,7 +176,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // rejected before it reaches the route gate or any state change. Bare
       // non-browser requests (no Origin/Referer — Node fetch, curl) pass.
       if (isApp && !csrfGuard(req)) {
-        sendJson(res, 403, { error: 'forbidden' });
+        sendFailure(sendJson, res, failure('denied', 'forbidden'));
         return;
       }
 
@@ -282,9 +289,9 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // no path match → 404; path matched but method did not → 405.
       if (!route) {
         if (pathMatched) {
-          sendJson(res, 405, { error: 'method not allowed' });
+          sendFailure(sendJson, res, failure('invalid-input', 'method not allowed'), { status: 405 });
         } else {
-          sendJson(res, 404, { error: 'not found' });
+          sendFailure(sendJson, res, failure('not-found', 'not found'));
         }
         return;
       }
@@ -292,7 +299,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // the first default-on auth layer: the route gate decides admission.
       const principal = principalOf(req);
       if (!route.gate(principal)) {
-        sendJson(res, 401, { error: 'unauthorized' });
+        sendFailure(sendJson, res, failure('denied', 'unauthorized'), { status: 401 });
         return;
       }
 
@@ -304,7 +311,14 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
           body = await readRequestBody(req, { jsonOnly: !route.handlers });
         } catch (err) {
           // a refused body carries its own status (413 oversized, 400 malformed).
-          if (err instanceof BodyError) return void sendJson(res, err.status, { error: err.message });
+          if (err instanceof BodyError) {
+            return void sendFailure(
+              sendJson,
+              res,
+              failure('invalid-input', err.message),
+              { status: err.status },
+            );
+          }
           throw err;
         }
       }

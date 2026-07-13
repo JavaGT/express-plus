@@ -257,7 +257,10 @@ test('next({status, message}) renders a deliberate client error with that status
     const res = await fetch(`${origin}/api/login`, { method: 'POST' });
     assert.equal(res.status, 401);
     const body = await res.json();
-    assert.equal(body.error, 'bad credentials');
+    assert.deepEqual(body, {
+      ok: false,
+      failure: { category: 'denied', message: 'bad credentials' },
+    });
   } finally {
     await close();
   }
@@ -286,7 +289,10 @@ test('a thrown exception in a handler renders an opaque 500 (no leaked message i
     const res = await fetch(`${origin}/api/boom`);
     assert.equal(res.status, 500);
     const body = await res.json();
-    assert.equal(body.error, 'internal error');
+    assert.deepEqual(body, {
+      ok: false,
+      failure: { category: 'internal', message: 'Internal error.' },
+    });
     assert.equal(body.message, undefined, 'no leaked internal message in prod');
   } finally {
     await close();
@@ -305,7 +311,10 @@ test('chain middleware runs in order and can short-circuit via next(err)', async
   try {
     const res = await fetch(`${origin}/api/guarded`);
     assert.equal(res.status, 403);
-    assert.equal((await res.json()).error, 'nope');
+    assert.deepEqual(await res.json(), {
+      ok: false,
+      failure: { category: 'denied', message: 'nope' },
+    });
   } finally {
     await close();
   }

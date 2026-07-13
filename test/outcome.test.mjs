@@ -9,7 +9,6 @@ import {
   sanitizeUnexpectedFailure,
 } from '../src/index.mjs';
 import { failureFromError } from '../src/outcome.mjs';
-import { statusForFailure } from '../src/outcome.mjs';
 
 test('failure categories are the six stable public categories', () => {
   assert.deepEqual(FAILURE_CATEGORIES, [
@@ -34,6 +33,37 @@ test('failure rejects categories outside the public grammar', () => {
   assert.throws(() => failure('unauthorized', 'No.'), /unknown failure category/);
 });
 
+test('failure rejects details that are not a structured record', () => {
+  for (const details of [null, 'retry later', 3, true, ['not', 'a', 'record']]) {
+    assert.throws(
+      () => failure('conflict', 'Try again.', details),
+      /failure details must be a record/,
+    );
+  }
+});
+
+test('failure details must be JSON-safe and are detached from caller mutation', () => {
+  const cyclic = {};
+  cyclic.self = cyclic;
+  for (const details of [
+    { value: 1n },
+    { value: undefined },
+    { value: Number.NaN },
+    { value: new Date() },
+    cyclic,
+  ]) {
+    assert.throws(() => failure('conflict', 'Try again.', details), /JSON-safe/);
+  }
+
+  const source = { retry: { afterMs: 10 }, causes: ['busy'] };
+  const result = failure('conflict', 'Try again.', source);
+  source.retry.afterMs = 99;
+  source.causes.push('later');
+  assert.deepEqual(result.details, { retry: { afterMs: 10 }, causes: ['busy'] });
+  assert.equal(Object.isFrozen(result.details.retry), true);
+  assert.equal(Object.isFrozen(result.details.causes), true);
+});
+
 test('failureOutcome creates the exact public failure result', () => {
   assert.deepEqual(failureOutcome(failure('denied', 'Forbidden.')), {
     ok: false,
@@ -43,6 +73,18 @@ test('failureOutcome creates the exact public failure result', () => {
 
 test('isWorkbenchFailure recognizes only complete canonical failures', () => {
   assert.equal(isWorkbenchFailure({ category: 'conflict', message: 'Already exists.' }), true);
+  assert.equal(isWorkbenchFailure({ category: 'conflict', message: 'Already exists.', details: {} }), true);
+
+  for (const value of [
+    null,
+    'failure',
+    {},
+    { category: 'other', message: 'No.' },
+    { category: 'conflict', message: '' },
+    { category: 'conflict', message: 'No.', details: [] },
+  ]) {
+    assert.equal(isWorkbenchFailure(value), false);
+  }
 });
 
 test('sanitizeUnexpectedFailure never exposes the original exception', () => {
@@ -57,15 +99,10 @@ test('failureFromError preserves deliberate transport-neutral failures', () => {
   assert.equal(failureFromError(deliberate), deliberate);
 });
 
-test('failureFromError maps deliberate status errors to stable categories', () => {
+test('failureFromError normalizes legacy status-bearing kernel errors', () => {
   assert.deepEqual(
-    [400, 403, 404, 409].map((status) => failureFromError(Object.assign(new Error(`status ${status}`), { status }))),
-    [
-      { category: 'invalid-input', message: 'status 400' },
-      { category: 'denied', message: 'status 403' },
-      { category: 'not-found', message: 'status 404' },
-      { category: 'conflict', message: 'status 409' },
-    ],
+    failureFromError({ status: 403, message: 'Forbidden.' }),
+    { category: 'denied', message: 'Forbidden.' },
   );
 });
 
@@ -81,13 +118,4 @@ test('failureFromError sanitizes unexpected errors', () => {
     category: 'internal',
     message: 'Internal error.',
   });
-});
-
-test('failure categories have one canonical HTTP status mapping', () => {
-  assert.equal(statusForFailure(failure('invalid-input', 'bad')), 400);
-  assert.equal(statusForFailure(failure('denied', 'no')), 403);
-  assert.equal(statusForFailure(failure('unknown-action', 'missing')), 404);
-  assert.equal(statusForFailure(failure('not-found', 'missing')), 404);
-  assert.equal(statusForFailure(failure('conflict', 'duplicate')), 409);
-  assert.equal(statusForFailure(failure('internal', 'safe')), 500);
 });

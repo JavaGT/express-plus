@@ -164,10 +164,24 @@ export interface StaleResponse<Row> {
 // decodeResult — HTTP response decoder
 // ---------------------------------------------------------------------------
 
+export type FailureCategory =
+  | 'invalid-input'
+  | 'denied'
+  | 'unknown-action'
+  | 'not-found'
+  | 'conflict'
+  | 'internal';
+
+export interface WorkbenchFailure {
+  readonly category: FailureCategory;
+  readonly message: string;
+  readonly details?: Readonly<Record<string, unknown>>;
+}
+
 export type DecodeResult<T = unknown> =
-  | { ok: true }
-  | { ok: false; error: string }
-  | T;
+  | { ok: true; httpStatus: number; value: T | undefined }
+  | { ok: false; httpStatus: number; failure: WorkbenchFailure }
+  | { ok: false; httpStatus: number; error: string };
 
 export function decodeResult<T = unknown>(res: Response): Promise<DecodeResult<T>>;
 
@@ -183,14 +197,27 @@ export interface LiveStoreConfig {
   fetchImpl?: typeof globalThis.fetch;
 }
 
-export interface DispatchResult {
-  ok: boolean;
-  status: 'committed' | 'failed-rolled-back' | 'outcome-unknown';
-  opId: string;
-  id?: string | number;
-  row?: unknown;
-  error?: string;
-}
+export type DispatchResult =
+  | {
+      ok: true;
+      status: 'committed';
+      opId: string;
+      id?: string | number;
+      row?: unknown;
+      value?: unknown;
+    }
+  | {
+      ok: false;
+      status: 'failed-rolled-back';
+      opId: string;
+      failure: WorkbenchFailure;
+    }
+  | {
+      ok: false;
+      status: 'outcome-unknown';
+      opId: string;
+      deliveryError: { message: string };
+    };
 
 export interface OverlayStatus {
   status: 'pending' | 'confirmed';
@@ -215,7 +242,7 @@ export interface LiveStore<Row extends Record<string, unknown> = Record<string, 
   create: (payload: Record<string, unknown>) => Promise<DispatchResult>;
   update: (id: string | number, payload: Record<string, unknown>) => Promise<DispatchResult>;
   remove: (id: string | number) => Promise<DispatchResult>;
-  action: (actionType: string, config: { method: string; path: string }) => (body?: unknown) => Promise<DecodeResult>;
+  action: (actionType: string, config: { method: string; path: string }) => (body?: unknown) => Promise<DispatchResult>;
   close: () => void;
   overlayFor: (id: string | number) => Row | null;
   overlayStatusFor: (id: string | number) => OverlayStatus | null;

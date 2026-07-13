@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 
 import { resolveTemplate, escapeHtml, matchExtension, isSafePath } from '../src/internal.mjs';
-import { stripPrefix, sendStatic, serveStatic } from '../src/views.mjs';
+import { stripPrefix, serveStatic } from '../src/views.mjs';
 
 function withTemplate(source, run) {
   const dir = path.join(os.tmpdir(), 'express-views-' + randomUUID());
@@ -120,6 +120,10 @@ test('serveStatic serves a file under the root and 404s missing/unsafe paths', a
       const res = mockRes();
       handler({ params: { path: 'nope.txt' }, url: '/files/nope.txt' }, res, null);
       assert.equal(res.status, 404);
+      assert.deepEqual(JSON.parse(res.body), {
+        ok: false,
+        failure: { category: 'not-found', message: 'not found' },
+      });
     }
     // Unsafe path → next() when provided
     {
@@ -128,13 +132,6 @@ test('serveStatic serves a file under the root and 404s missing/unsafe paths', a
       handler({ params: { path: '../secret' }, url: '/files/../secret' }, res, () => { nextCalled = true; });
       assert.equal(nextCalled, true);
       assert.equal(res.status, null);
-    }
-    // sendStatic helper
-    {
-      const res = mockRes();
-      sendStatic(res, 500, { error: 'internal error' });
-      assert.equal(res.status, 500);
-      assert.equal(res.body, JSON.stringify({ error: 'internal error' }));
     }
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

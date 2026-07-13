@@ -1139,14 +1139,70 @@ export class LiveList {
 
 /**
  * Shared HTTP response decoder.
- *  - 204 (remove): returns `{ ok: true }`
- *  - non-ok:       returns `{ ok: false, error: 'http ' + res.status }`
- *  - ok with body: returns the parsed JSON body as-is
+ * The HTTP status is authoritative. Bodies are values on success, even when an
+ * entity happens to contain an `ok` field of its own.
  */
+const FAILURE_CATEGORIES = new Set([
+  'invalid-input',
+  'denied',
+  'unknown-action',
+  'not-found',
+  'conflict',
+  'internal',
+]);
+
+function isJsonValue(value, ancestors = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || ancestors.has(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  const isArray = Array.isArray(value);
+  if (!isArray && prototype !== Object.prototype && prototype !== null) return false;
+  ancestors.add(value);
+  const valid = (isArray ? value : Object.values(value))
+    .every((item) => isJsonValue(item, ancestors));
+  ancestors.delete(value);
+  return valid;
+}
+
+function isJsonRecord(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return (prototype === Object.prototype || prototype === null) && isJsonValue(value);
+}
+
+function isWorkbenchFailure(value) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && FAILURE_CATEGORIES.has(value.category)
+    && typeof value.message === 'string'
+    && value.message.length > 0
+    && (value.details === undefined || isJsonRecord(value.details)),
+  );
+}
+
+function clientFailure(category, message, details) {
+  return { category, message, ...(details === undefined ? {} : { details }) };
+}
+
 export async function decodeResult(res) {
-  if (res.status === 204) return { ok: true };
-  if (!res.ok) return { ok: false, error: 'http ' + res.status };
-  return res.json();
+  if (res.status === 204) {
+    return { ok: true, httpStatus: 204, value: undefined };
+  }
+  if (!res.ok) {
+    let body;
+    try {
+      body = typeof res.json === 'function' ? await res.json() : null;
+    } catch {
+      body = null;
+    }
+    if (body?.ok === false && isWorkbenchFailure(body.failure)) {
+      return { ok: false, httpStatus: res.status, failure: body.failure };
+    }
+    return { ok: false, httpStatus: res.status, error: 'http ' + res.status };
+  }
+  return { ok: true, httpStatus: res.status, value: await res.json() };
 }
 
 /**
@@ -1306,7 +1362,12 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
     // dispatch NEVER throws. Failures before transmission are known rollbacks;
     // a lost response after fetch starts has an unknown server outcome.
     if (_closed) {
-      return { ok: false, status: 'failed-rolled-back', opId, error: 'store is closed' };
+      return {
+        ok: false,
+        status: 'failed-rolled-back',
+        opId,
+        failure: clientFailure('conflict', 'Store is closed.'),
+      };
     }
 
     let kind, id;
@@ -1319,7 +1380,12 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
       kind = 'remove';
       id = payload.id;
     } else {
-      return { ok: false, status: 'failed-rolled-back', opId, error: 'unknown action type: ' + type };
+      return {
+        ok: false,
+        status: 'failed-rolled-back',
+        opId,
+        failure: clientFailure('unknown-action', 'Unknown action type: ' + type),
+      };
     }
 
     // Capture preimage for rollback (the effective state before this op)
@@ -1370,16 +1436,29 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
       const res = await resolvedFetch(url, fetchOpts);
       const decoded = await decodeResult(res);
 
-      if (decoded && decoded.ok === false) {
+      if (!decoded.ok) {
         // Failure — roll back
         _overlay.delete(opId);
         _storeRender();
-        return { ok: false, status: 'failed-rolled-back', opId, error: decoded.error };
+        if (decoded.failure) {
+          return {
+            ok: false,
+            status: 'failed-rolled-back',
+            opId,
+            failure: decoded.failure,
+          };
+        }
+        return {
+          ok: false,
+          status: 'outcome-unknown',
+          opId,
+          deliveryError: { message: decoded.error },
+        };
       }
 
       // Success
       const is204 = res.status === 204;
-      const returnedRow = is204 ? undefined : decoded;
+      const returnedRow = is204 ? undefined : decoded.value;
       let realId = id;
 
       if (kind === 'create') {
@@ -1408,12 +1487,20 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
       // Never leave uncertain optimistic data visible as if it were committed.
       _overlay.delete(opId);
       _storeRender();
-      return {
-        ok: false,
-        status: requestAttempted ? 'outcome-unknown' : 'failed-rolled-back',
-        opId,
-        error: err.message ?? String(err),
-      };
+      const message = err.message ?? String(err);
+      return requestAttempted
+        ? {
+          ok: false,
+          status: 'outcome-unknown',
+          opId,
+          deliveryError: { message },
+        }
+        : {
+          ok: false,
+          status: 'failed-rolled-back',
+          opId,
+          failure: clientFailure('invalid-input', message),
+        };
     }
   }
 
@@ -1424,20 +1511,64 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
 
     // Return a helper function the caller can invoke
     const fn = async (body) => {
+      const opId = _nextOpId();
       const route = _actionRoutes.get(actionType);
-      if (!route) throw new Error(`unknown action: ${actionType}`);
-
-      const opts = { method: route.method, credentials: 'include' };
-      if (body !== undefined) {
-        opts.headers = { 'Content-Type': 'application/json' };
-        opts.body = JSON.stringify(body);
+      if (!route) {
+        return {
+          ok: false,
+          status: 'failed-rolled-back',
+          opId,
+          failure: clientFailure('unknown-action', `Unknown action: ${actionType}`),
+        };
       }
 
+      let requestAttempted = false;
       try {
+        const opts = { method: route.method, credentials: 'include' };
+        if (body !== undefined) {
+          opts.headers = { 'Content-Type': 'application/json' };
+          opts.body = JSON.stringify(body);
+        }
+
+        requestAttempted = true;
         const res = await resolvedFetch(`${baseUrl}${route.path}`, opts);
-        return decodeResult(res);
+        const decoded = await decodeResult(res);
+        if (decoded.ok) {
+          return {
+            ok: true,
+            status: 'committed',
+            opId,
+            value: decoded.value,
+          };
+        }
+        return decoded.failure
+          ? {
+            ok: false,
+            status: 'failed-rolled-back',
+            opId,
+            failure: decoded.failure,
+          }
+          : {
+            ok: false,
+            status: 'outcome-unknown',
+            opId,
+            deliveryError: { message: decoded.error },
+          };
       } catch (err) {
-        return { ok: false, error: err.message ?? String(err) };
+        const message = err.message ?? String(err);
+        return requestAttempted
+          ? {
+            ok: false,
+            status: 'outcome-unknown',
+            opId,
+            deliveryError: { message },
+          }
+          : {
+            ok: false,
+            status: 'failed-rolled-back',
+            opId,
+            failure: clientFailure('invalid-input', message),
+          };
       }
     };
 
@@ -1511,12 +1642,9 @@ export function createAuthClient({ baseUrl, fetchImpl } = {}) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username, password }),
     });
-    if (!res.ok) {
-      let message = `http ${res.status}`;
-      try { const body = await res.json(); if (body?.error) message = body.error; } catch { /* keep status */ }
-      throw new Error(message);
-    }
-    return res.json();
+    const decoded = await decodeResult(res);
+    if (!decoded.ok) throw new Error(decoded.failure?.message ?? decoded.error);
+    return decoded.value;
   }
 
   async function logout() {
@@ -1524,11 +1652,8 @@ export function createAuthClient({ baseUrl, fetchImpl } = {}) {
       method: 'POST',
       credentials: 'include',
     });
-    if (!res.ok && res.status !== 204) {
-      let message = `http ${res.status}`;
-      try { const body = await res.json(); if (body?.error) message = body.error; } catch { /* keep status */ }
-      throw new Error(message);
-    }
+    const decoded = await decodeResult(res);
+    if (!decoded.ok) throw new Error(decoded.failure?.message ?? decoded.error);
     // logout responds 204 with no body; return a plain ok marker for callers.
     return { ok: true };
   }

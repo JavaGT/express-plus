@@ -16,8 +16,8 @@ export {
   failureOutcome,
   isWorkbenchFailure,
   sanitizeUnexpectedFailure,
-  statusForFailure,
 } from './outcome.mjs';
+export { statusForFailure } from './http-failure.mjs';
 export { matchRoute } from './http-route-match.mjs';
 export { serveStatic } from './views.mjs';
 // Session cookie helpers — promoted to the public surface so an app hand-rolling

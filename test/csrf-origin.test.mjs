@@ -85,7 +85,7 @@ test('CSRF: a foreign Origin header is rejected (403)', async (t) => {
   });
   assert.equal(r.status, 403);
   const body = await r.json();
-  assert.equal(body.error, 'forbidden');
+  assert.equal(body.failure.message, 'forbidden');
 });
 
 test('CSRF: a foreign Referer (no Origin) is rejected (403)', async (t) => {

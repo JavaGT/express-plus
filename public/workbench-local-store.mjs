@@ -344,7 +344,12 @@ export async function createLocalStore({ baseUrl, name, path, local, channel, fe
   store.undo = async (opId) => {
     const entry = _history.get(opId);
     if (!entry) {
-      return { ok: false, status: 'failed-rolled-back', opId, error: 'no history for undo: ' + opId };
+      return {
+        ok: false,
+        status: 'failed-rolled-back',
+        opId,
+        failure: { category: 'conflict', message: 'no history for undo: ' + opId },
+      };
     }
     _history.delete(opId);
 
@@ -358,7 +363,12 @@ export async function createLocalStore({ baseUrl, name, path, local, channel, fe
       return store.create(entry.preimage);
     }
 
-    return { ok: false, status: 'failed-rolled-back', opId, error: 'unknown undo kind: ' + entry.kind };
+    return {
+      ok: false,
+      status: 'failed-rolled-back',
+      opId,
+      failure: { category: 'internal', message: 'unknown undo kind: ' + entry.kind },
+    };
   };
 
   // Override close to also tear down the relay (log + broadcast).

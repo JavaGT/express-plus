@@ -4,7 +4,10 @@
 // needs no per-app knowledge.
 
 import { config } from './config.mjs';
-import { canWriteResponse, warnLateResponse } from './http-response.mjs';
+import { getLog } from './log.mjs';
+import { failureForHttpError, failureResponse } from './http-failure.mjs';
+import { canWriteResponse } from './http-response.mjs';
+import { isWorkbenchFailure } from './outcome.mjs';
 
 // Security headers set on EVERY response — including 401/404/500. These are the
 // safe-without-per-app-knowledge defaults: stop MIME sniffing, deny framing
@@ -57,27 +60,26 @@ export function isSameOriginRequest(req) {
 // the ONE place an error becomes a client response, so the dev/prod and
 // deliberate/unexpected decisions are all made in one spot.
 //
-// Two shapes reach here, distinguished by a NUMERIC `status`:
-//   * a DELIBERATE client error — `next({ status, message })` from a handler, a
-//     thrown error carrying a numeric `status` — is the handler SAYING WHAT TO
-//     SEND. Its status and message are client-visible by intent (e.g. 401 "bad
-//     credentials"), in every environment.
+// Deliberate failures reach here either as a stable WorkbenchFailure or as the
+// older `{ status, message }` handler form. Both are client-visible by intent.
 //   * an UNEXPECTED exception — a thrown Error with no numeric `status` — is a
 //     failure the handler did not anticipate. It is opaque in production (no
-//     stack, no internal message, so an internal failure never leaks
-//     implementation detail) and a 500-with-stack in development.
+//     stack and no internal message) in every environment. The useful detail is
+//     retained in the server log instead of being sent to the browser.
 //
 // `env` is server-owned (a listen option, defaulting to config.env) — never
 // client-controlled.
 export function renderError(res, err, { env = config.env } = {}) {
   if (!canWriteResponse(res, 'renderError', err)) return;
-  const deliberate = typeof err?.status === 'number';
-  const status = deliberate ? err.status : 500;
-  const body = deliberate
-    ? { error: String(err.message ?? '') }
-    : env === 'production'
-      ? { error: 'internal error' }
-      : { error: 'internal error', message: String(err?.message ?? err), stack: err?.stack };
+  const normalized = failureForHttpError(err);
+  const canonicalInput = isWorkbenchFailure(err) || isWorkbenchFailure(err?.failure);
+  const deliberate = canonicalInput || normalized.category !== 'internal';
+  if (!deliberate) {
+    getLog().error('http', 'request failed', { err, env });
+  }
+  const { status, body } = failureResponse(normalized, {
+    status: typeof err?.status === 'number' ? err.status : undefined,
+  });
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     'content-type': 'application/json; charset=utf-8',

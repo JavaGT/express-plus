@@ -6,7 +6,7 @@
 //
 //   - security headers on EVERY response (even 401/404/500) — fail-closed
 //     defaults that need no per-app knowledge (nosniff, frame DENY, no-referrer);
-//   - a single error renderer that branches on `config.env` — a dev stack trace
+//   - a single error renderer that logs details but always sends a safe body
 //     vs an opaque prod-safe body — the SPEC §3 "4-argument JSON error handler";
 //   - body parsing capped (~1mb) so an unbounded upload is rejected, not buffered;
 //   - graceful shutdown: SIGTERM/SIGINT close the live server, and an
@@ -135,7 +135,10 @@ test('the error renderer is prod-safe (no stack leak) in production', async (t) 
   const res = await fetch(`${origin}/notes`);
   assert.equal(res.status, 500);
   const body = await res.json();
-  assert.equal(body.error, 'internal error', 'opaque error in prod');
+  assert.deepEqual(body, {
+    ok: false,
+    failure: { category: 'internal', message: 'Internal error.' },
+  }, 'opaque error in prod');
   assert.equal(body.stack, undefined, 'no stack leaked in prod');
   assert.ok(
     !JSON.stringify(body).includes('simulated internal db failure'),
@@ -143,14 +146,17 @@ test('the error renderer is prod-safe (no stack leak) in production', async (t) 
   );
 });
 
-test('the error renderer includes a stack trace in development', async (t) => {
+test('the error renderer keeps public JSON sanitized in development', async (t) => {
   const app = workbench({ db: throwingDb() }).mount('/notes', makePublicListNote());
   const { origin } = await serve(t, app, { env: 'development' });
 
   const res = await fetch(`${origin}/notes`);
   assert.equal(res.status, 500);
   const body = await res.json();
-  assert.equal(typeof body.stack, 'string', 'dev includes a stack trace');
+  assert.deepEqual(body, {
+    ok: false,
+    failure: { category: 'internal', message: 'Internal error.' },
+  });
 });
 
 test('graceful shutdown closes the live server', async (t) => {

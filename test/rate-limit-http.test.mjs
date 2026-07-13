@@ -53,7 +53,10 @@ test('rate-limit (opt-in): the Nth+1 request in the window is 429 with Retry-Aft
   assert.equal(over.status, 429);
   assert.ok(over.headers.get('retry-after'), 'Retry-After header set');
   const body = await over.json();
-  assert.equal(body.error, 'rate limit exceeded');
+  assert.equal(body.ok, false);
+  assert.equal(body.failure.category, 'conflict');
+  assert.equal(body.failure.message, 'rate limit exceeded');
+  assert.equal(body.failure.details.retryAfterMs > 0, true);
 });
 
 test('rate-limit: a configured per-session window is enforced against the session cookie', async (t) => {

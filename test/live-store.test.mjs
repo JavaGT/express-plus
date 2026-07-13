@@ -243,7 +243,14 @@ describe('LiveStore', () => {
       }
       if (url.includes('/docs/1') && opts && opts.method === 'PATCH') {
         fetchCallCount++;
-        return { ok: false, status: 500, json: async () => ({ error: 'server error' }) };
+        return {
+          ok: false,
+          status: 500,
+          json: async () => ({
+            ok: false,
+            failure: { category: 'internal', message: 'Internal error.' },
+          }),
+        };
       }
       return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
     };
@@ -262,7 +269,7 @@ describe('LiveStore', () => {
     // dispatch must NOT throw
     assert.ok(result.ok === false);
     assert.equal(result.status, 'failed-rolled-back');
-    assert.ok(result.error.includes('500'));
+    assert.equal(result.failure.category, 'internal');
 
     // Overlay should be rolled back (overlayFor falls through to LiveList state)
     const rendered = store.overlayFor('1');
@@ -342,7 +349,7 @@ describe('LiveStore', () => {
     assert.equal(threw, false, 'dispatch must never throw');
     assert.ok(result.ok === false);
     assert.equal(result.status, 'outcome-unknown');
-    assert.ok(result.error);
+    assert.equal(result.deliveryError.message, 'network down');
 
     // Overlay rolled back
     const rendered = store.overlayFor('1');
@@ -626,7 +633,12 @@ describe('LiveStore', () => {
     assert.equal(actionUrl, 'http://test/docs/1/archive');
     assert.equal(actionMethod, 'POST');
     assert.deepEqual(actionBody, { reason: 'cleanup' });
-    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(result, {
+      ok: true,
+      status: 'committed',
+      opId: result.opId,
+      value: { ok: true },
+    });
 
     // Also test calling via store.<actionType>()
     actionUrl = null;
@@ -734,7 +746,7 @@ describe('LiveStore', () => {
       ok: false,
       status: 'outcome-unknown',
       opId: result.opId,
-      error: 'connection reset after upload',
+      deliveryError: { message: 'connection reset after upload' },
     });
     assert.deepEqual(store.pendingCreates(), [], 'uncertain optimistic state is not shown as truth');
     store.close();
@@ -744,21 +756,25 @@ describe('LiveStore', () => {
   it('decodeResult handles 204, non-ok, and ok-with-body', async () => {
     // 204
     const r1 = await decodeResult({ status: 204 });
-    assert.deepEqual(r1, { ok: true });
+    assert.deepEqual(r1, { ok: true, httpStatus: 204, value: undefined });
 
     // non-ok
     const r2 = await decodeResult({ status: 404, ok: false });
-    assert.deepEqual(r2, { ok: false, error: 'http 404' });
+    assert.deepEqual(r2, { ok: false, httpStatus: 404, error: 'http 404' });
 
     const r3 = await decodeResult({ status: 500, ok: false });
-    assert.deepEqual(r3, { ok: false, error: 'http 500' });
+    assert.deepEqual(r3, { ok: false, httpStatus: 500, error: 'http 500' });
 
     // ok with body
     const r4 = await decodeResult({
       status: 200, ok: true,
       json: async () => ({ id: 'abc', title: 'test' }),
     });
-    assert.deepEqual(r4, { id: 'abc', title: 'test' });
+    assert.deepEqual(r4, {
+      ok: true,
+      httpStatus: 200,
+      value: { id: 'abc', title: 'test' },
+    });
   });
   // --- overlayStatusFor ---
 

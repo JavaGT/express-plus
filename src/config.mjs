@@ -5,9 +5,9 @@
 // them. Values are sourced from the process environment with sensible defaults,
 // so an app that sets nothing still runs.
 //
-// `env` drives the error renderer's mode (a dev stack trace vs an opaque
-// prod-safe body). It is process-level, never client-controlled — a client must
-// never be able to force a stack trace.
+// `env` remains process-level and never client-controlled. Unexpected errors
+// are opaque on the wire in every mode; environment belongs in server logs and
+// other deployment behavior, not in the public failure grammar.
 
 function readPort(raw) {
   const n = Number.parseInt(raw ?? '', 10);

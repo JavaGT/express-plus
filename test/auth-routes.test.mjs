@@ -124,7 +124,10 @@ test('wrong password → 401 and no cookie', async (t) => {
   assert.equal(res.status, 401);
   assert.equal(res.headers.get('set-cookie'), null, 'no cookie on a failed login');
   const body = await res.json();
-  assert.match(body.error, /bad credentials/i);
+  assert.deepEqual(body, {
+    ok: false,
+    failure: { category: 'denied', message: 'bad credentials' },
+  });
 });
 
 test('logout deletes the session and clears the cookie; the old cookie is anonymous afterwards', async (t) => {

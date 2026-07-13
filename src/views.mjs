@@ -22,6 +22,9 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
+import { failure } from './outcome.mjs';
+import { sendFailure } from './http-failure.mjs';
+import { sendJson } from './http-response.mjs';
 
 // HTML-context escaping (OWASP): the five characters that can break out of text
 // or an attribute value. `&` is replaced first so an already-escaped entity is
@@ -105,9 +108,9 @@ export function serveStatic(dir, options = {}) {
   return (req, res, next) => {
     const rel = req.params?.path ?? stripPrefix(req.url, options.prefix);
     const relPath = String(rel).replace(/^\/+/, '');
-    if (!relPath || !isSafePath(dir, relPath)) return next ? next() : sendStatic(res, 404, { error: 'not found' });
+    if (!relPath || !isSafePath(dir, relPath)) return next ? next() : sendStaticFailure(res, failure('not-found', 'not found'));
     const fullPath = resolve(dir, relPath);
-    if (!existsSync(fullPath)) return next ? next() : sendStatic(res, 404, { error: 'not found' });
+    if (!existsSync(fullPath)) return next ? next() : sendStaticFailure(res, failure('not-found', 'not found'));
     try {
       const content = readFileSync(fullPath);
       const mime = matchExtension(relPath);
@@ -119,18 +122,12 @@ export function serveStatic(dir, options = {}) {
       }
       res.end(content);
     } catch {
-      return sendStatic(res, 500, { error: 'internal error' });
+      return sendStaticFailure(res, failure('internal', 'Internal error.'));
     }
   };
 }
 
-// JSON response helper for static-file error paths (matches `sendJson`'s shape so
-// a 404 from the file layer reads the same as a 404 from the router).
-export function sendStatic(res, status, body) {
-  const payload = JSON.stringify(body);
-  res.writeHead(status, {
-    'content-type': 'application/json; charset=utf-8',
-    'content-length': Buffer.byteLength(payload),
-  });
-  res.end(payload);
+// Static files share the same failure encoder as every other HTTP edge.
+function sendStaticFailure(res, workbenchFailure) {
+  return sendFailure(sendJson, res, workbenchFailure);
 }

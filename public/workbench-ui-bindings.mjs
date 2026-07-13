@@ -24,6 +24,21 @@
 //   subscribe(cb) — calls cb({ status, error, row }) on every change, returns unsub
 //   destroy() — tears down subscriptions
 
+function failedMessage(result, fallback) {
+  if (result.status === 'failed-rolled-back') return result.failure.message;
+  if (result.status === 'outcome-unknown') return result.deliveryError.message;
+  return fallback;
+}
+
+function unknownOutcome(error) {
+  return {
+    ok: false,
+    status: 'outcome-unknown',
+    opId: 'ui-binding',
+    deliveryError: { message: error instanceof Error ? error.message : String(error) },
+  };
+}
+
 export function bindAction(store, { id, action, payload, onStatusChange } = {}) {
   let _status = 'idle';
   let _error = null;
@@ -58,15 +73,16 @@ export function bindAction(store, { id, action, payload, onStatusChange } = {}) 
       try {
         result = await store.dispatch(action, typeof payload === 'function' ? payload() : payload);
       } catch (err) {
-        // dispatch should never throw, but guard anyway
-        result = { ok: false, status: 'failed-rolled-back', error: err.message ?? String(err) };
+        // A conforming store never throws. If an adapter does, the server's
+        // outcome is unknowable, so preserve that distinction for the caller.
+        result = unknownOutcome(err);
       }
 
       if (result.ok) {
         _status = 'confirmed';
       } else {
         _status = 'failed';
-        _error = result.error ?? 'dispatch failed';
+        _error = failedMessage(result, 'dispatch failed');
       }
       _notify();
       return result;
@@ -155,14 +171,14 @@ export function bindField(store, { id, field, onValueChange } = {}) {
       try {
         result = await store.update(id, { [field]: newValue });
       } catch (err) {
-        result = { ok: false, status: 'failed-rolled-back', error: err.message ?? String(err) };
+        result = unknownOutcome(err);
       }
 
       if (result.ok) {
         _status = 'confirmed';
       } else {
         _status = 'failed';
-        _error = result.error ?? 'update failed';
+        _error = failedMessage(result, 'update failed');
       }
       _notify();
       return result;

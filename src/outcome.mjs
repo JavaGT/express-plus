@@ -9,6 +9,46 @@ export const FAILURE_CATEGORIES = Object.freeze([
 
 const failureCategories = new Set(FAILURE_CATEGORIES);
 
+function isPlainRecord(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+function cloneJsonValue(value, ancestors = new Set()) {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'object' || ancestors.has(value)) {
+    throw new TypeError('failure details must be JSON-safe');
+  }
+
+  ancestors.add(value);
+  let clone;
+  if (Array.isArray(value)) {
+    clone = value.map((item) => cloneJsonValue(item, ancestors));
+  } else if (isPlainRecord(value)) {
+    clone = {};
+    for (const [key, item] of Object.entries(value)) {
+      clone[key] = cloneJsonValue(item, ancestors);
+    }
+  } else {
+    ancestors.delete(value);
+    throw new TypeError('failure details must be JSON-safe');
+  }
+  ancestors.delete(value);
+  return Object.freeze(clone);
+}
+
+function isJsonRecord(value) {
+  if (!isPlainRecord(value)) return false;
+  try {
+    cloneJsonValue(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function failure(category, message, details) {
   if (!failureCategories.has(category)) {
     throw new TypeError(`unknown failure category '${category}'`);
@@ -19,9 +59,10 @@ export function failure(category, message, details) {
 
   const result = { category, message };
   if (details !== undefined) {
-    result.details = details && typeof details === 'object'
-      ? Object.freeze({ ...details })
-      : details;
+    if (!isPlainRecord(details)) {
+      throw new TypeError('failure details must be a record');
+    }
+    result.details = cloneJsonValue(details);
   }
   return Object.freeze(result);
 }
@@ -39,7 +80,8 @@ export function isWorkbenchFailure(value) {
     && typeof value === 'object'
     && failureCategories.has(value.category)
     && typeof value.message === 'string'
-    && value.message.length > 0,
+    && value.message.length > 0
+    && (value.details === undefined || isJsonRecord(value.details)),
   );
 }
 
@@ -47,21 +89,33 @@ export function sanitizeUnexpectedFailure() {
   return failure('internal', 'Internal error.');
 }
 
-const categoryByStatus = new Map([
+// Older kernel seams still use status-bearing errors to mark deliberate
+// validation and authorization failures. Keep their normalization here until
+// those producers emit WorkbenchFailure directly.
+const categoryByLegacyStatus = new Map([
   [400, 'invalid-input'],
   [401, 'denied'],
   [403, 'denied'],
   [404, 'not-found'],
+  [405, 'invalid-input'],
   [409, 'conflict'],
+  [413, 'invalid-input'],
+  [415, 'invalid-input'],
+  [429, 'conflict'],
+  [503, 'conflict'],
 ]);
 
 export function failureFromError(error) {
   if (isWorkbenchFailure(error)) return error;
   if (isWorkbenchFailure(error?.failure)) return error.failure;
 
-  const statusCategory = categoryByStatus.get(error?.status);
-  if (statusCategory) {
-    return failure(statusCategory, String(error?.message || 'Request failed.'));
+  const legacyCategory = categoryByLegacyStatus.get(error?.status);
+  if (legacyCategory) {
+    return failure(
+      legacyCategory,
+      String(error?.message || 'Request failed.'),
+      error?.details,
+    );
   }
 
   if (typeof error?.code === 'string' && error.code.startsWith('SQLITE_CONSTRAINT')) {
@@ -69,16 +123,4 @@ export function failureFromError(error) {
   }
 
   return sanitizeUnexpectedFailure(error);
-}
-
-export function statusForFailure(value) {
-  const category = isWorkbenchFailure(value) ? value.category : 'internal';
-  switch (category) {
-    case 'invalid-input': return 400;
-    case 'denied': return 403;
-    case 'unknown-action':
-    case 'not-found': return 404;
-    case 'conflict': return 409;
-    default: return 500;
-  }
 }

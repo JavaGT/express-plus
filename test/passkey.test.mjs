@@ -652,7 +652,7 @@ test('authenticate with an expired challenge fails', async (t) => {
   });
   assert.equal(res.status, 400);
   const body = await res.json();
-  assert.match(body.error, /unknown or expired challenge/i);
+  assert.match(body.failure.message, /unknown or expired challenge/i);
 });
 
 test('delete a credential that does not exist returns 404', async (t) => {

@@ -878,7 +878,10 @@ describe('undo', () => {
 
     const result = await store.undo('bogus-op');
     assert.equal(result.ok, false);
-    assert.equal(result.error, 'no history for undo: bogus-op');
+    assert.deepEqual(result.failure, {
+      category: 'conflict',
+      message: 'no history for undo: bogus-op',
+    });
 
     store.close();
   });

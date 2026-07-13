@@ -145,7 +145,10 @@ test('a request with an unsupported method on a known path returns 405', async (
     const res = await fetch(`${origin}/notes`, { method: 'PUT' });
     assert.equal(res.status, 405);
     const body = await res.json();
-    assert.equal(body.error, 'method not allowed');
+    assert.deepEqual(body, {
+      ok: false,
+      failure: { category: 'invalid-input', message: 'method not allowed' },
+    });
   } finally {
     await close();
   }

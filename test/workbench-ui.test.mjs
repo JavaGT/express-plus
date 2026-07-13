@@ -203,7 +203,12 @@ describe('bindAction', () => {
   it('dispatch failure → status = failed, error set', async () => {
     const store = {
       overlayFor: () => null,
-      dispatch: async () => ({ ok: false, status: 'failed-rolled-back', error: 'server error' }),
+      dispatch: async () => ({
+        ok: false,
+        status: 'failed-rolled-back',
+        opId: 'op-failed',
+        failure: { category: 'internal', message: 'server error' },
+      }),
       onRender: () => () => {},
     };
     const action = bindAction(store, { id: '1', action: 'Doc.update', payload: () => ({}) });
@@ -300,7 +305,12 @@ describe('bindAction', () => {
     const statuses = [];
     const store = {
       overlayFor: () => null,
-      dispatch: async () => ({ ok: false, status: 'failed-rolled-back', error: 'boom' }),
+      dispatch: async () => ({
+        ok: false,
+        status: 'failed-rolled-back',
+        opId: 'op-failed',
+        failure: { category: 'internal', message: 'boom' },
+      }),
       onRender: () => () => {},
     };
     const action = bindAction(store, { id: '1', action: 'Doc.update', payload: () => ({}) });
@@ -385,7 +395,12 @@ describe('bindField', () => {
     const store = {
       overlayFor: () => null,
       onRender: () => () => {},
-      update: async () => ({ ok: false, error: 'conflict' }),
+      update: async () => ({
+        ok: false,
+        status: 'failed-rolled-back',
+        opId: 'op-failed',
+        failure: { category: 'conflict', message: 'conflict' },
+      }),
     };
     const field = bindField(store, { id: '1', field: 'title' });
     await field.update('x');
@@ -720,7 +735,12 @@ describe('Svelte Components (browser)', () => {
       const fakeStore = {
         overlayFor: () => null,
         onRender: () => () => {},
-        dispatch: async () => ({ ok: false, status: 'failed-rolled-back', error: 'boom' }),
+        dispatch: async () => ({
+          ok: false,
+          status: 'failed-rolled-back',
+          opId: 'op-failed',
+          failure: { category: 'internal', message: 'boom' },
+        }),
       };
 
       const comp = mount(ActionButton, {

@@ -13,10 +13,16 @@ import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { sendJson } from './http-response.mjs';
+import { failureForHttpError, sendFailure } from './http-failure.mjs';
 import { readScopedRow, authorizeRow } from './http-crud-dispatch.mjs';
 import { readSeq, readSince, minSeqForScope } from './committed-log.mjs';
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
+
+function reject(res, status, message, details) {
+  const workbenchFailure = failureForHttpError({ status, message, details });
+  sendFailure(sendJson, res, workbenchFailure, { status });
+}
 
 // routes — resolved at request time from `/snapshot/:entity/:id` and
 // `/events-since/:entity/:id`. The entity table IS the snapshot (scope's proven
@@ -35,7 +41,7 @@ export async function handleResyncRoute(app, req, res, principal) {
   if (!app || !app.entities || !app.db) return false;
 
   if (!principal || principal.id == null) {
-    sendJson(res, 401, { error: 'unauthorized' });
+    reject(res, 401, 'unauthorized');
     return true;
   }
 
@@ -48,10 +54,10 @@ export async function handleResyncRoute(app, req, res, principal) {
   }
 
   // Per-entity requests: GET /snapshot/:entity/:id or /events-since/:entity/:id
-  if (seg.length !== 3) { sendJson(res, 404, { error: 'not found' }); return true; }
+  if (seg.length !== 3) { reject(res, 404, 'not found'); return true; }
   const [, entityName, id] = seg;
   const entity = app.entities.get(entityName);
-  if (!entity) { sendJson(res, 404, { error: 'not found' }); return true; }
+  if (!entity) { reject(res, 404, 'not found'); return true; }
   const scopeKey = scopeOf(entityName, id).key;
   if (isSnapshot) return snapshotRoute(app, entity, id, scopeKey, principal, res);
   const cursor = Number(url.searchParams.get('cursor') ?? 0);
@@ -67,7 +73,7 @@ async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
   const lastSeq = readSeq(app.db, scopeKey);
   const auth = await authorizeRow(app, entity, 'read', id, principal, row);
   if (auth.status) {
-    sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
+    reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
   sendJson(res, 200, { snapshot: auth.row, seq: lastSeq });
@@ -97,7 +103,7 @@ async function snapshotScopeRoute(app, scope, principal, res) {
     sendJson(res, 200, { snapshot: scopeSnapshot, cursors: { [scope]: lastSeq } });
     return true;
   }
-  sendJson(res, 404, { error: 'not found' });
+  reject(res, 404, 'not found');
   return true;
 }
 
@@ -126,7 +132,7 @@ async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
   const id = tryParseScopeKey(scopeKey)?.id;
   const auth = await authorizeRow(app, entity, 'read', id, principal);
   if (auth.status) {
-    sendJson(res, auth.status, { error: auth.status === 404 ? 'not found' : 'forbidden' });
+    reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
   const minSeq = minSeqForScope(app.db, scopeKey);
@@ -167,7 +173,7 @@ export async function handleBlobUploadRoute(app, req, res, principal) {
   if (!app || !app.blobs) return false;
   // route gate (requireUser) — fail closed for anonymous, same as a mounted route.
   if (!principal || principal.id == null) {
-    sendJson(res, 401, { error: 'unauthorized' });
+    reject(res, 401, 'unauthorized');
     return true;
   }
   let bytes;
@@ -175,7 +181,7 @@ export async function handleBlobUploadRoute(app, req, res, principal) {
     bytes = await readRawBody(req, BLOB_LIMIT);
   } catch (err) {
     if (err instanceof BodyError) {
-      sendJson(res, err.status, { error: err.message });
+      reject(res, err.status, err.message);
       return true;
     }
     throw err;
@@ -205,18 +211,18 @@ export async function handleJobRoute(app, req, res) {
   if (url.pathname === '/workers/register') {
     let body;
     try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
-      if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
+      if (err instanceof BodyError) { reject(res, err.status, err.message); return true; }
       throw err;
     }
     const w = jobs.registerWorker(body.secret);
-    if (!w) { sendJson(res, 401, { error: 'invalid shared secret' }); return true; }
+    if (!w) { reject(res, 401, 'invalid shared secret'); return true; }
     sendJson(res, 200, w);
     return true;
   }
 
   if (url.pathname === '/jobs/claim') {
     const workerId = jobs.authenticate(bearer);
-    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
+    if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
     const scope = url.searchParams.get('scope') || null;
     const job = jobs.claim(workerId, scope ? { scope } : undefined);
     if (!job) { res.writeHead(204); res.end(); return true; } // no queued work
@@ -227,9 +233,9 @@ export async function handleJobRoute(app, req, res) {
   const hb = url.pathname.match(/^\/jobs\/([^/]+)\/heartbeat$/);
   if (hb) {
     const workerId = jobs.authenticate(bearer);
-    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
+    if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
     const ok = jobs.heartbeat(hb[1], workerId);
-    if (!ok) { sendJson(res, 403, { error: 'not the owning worker or job not running' }); return true; }
+    if (!ok) { reject(res, 403, 'not the owning worker or job not running'); return true; }
     sendJson(res, 200, { ok: true });
     return true;
   }
@@ -237,14 +243,14 @@ export async function handleJobRoute(app, req, res) {
   const pg = url.pathname.match(/^\/jobs\/([^/]+)\/progress$/);
   if (pg) {
     const workerId = jobs.authenticate(bearer);
-    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
+    if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
     let body;
     try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
-      if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
+      if (err instanceof BodyError) { reject(res, err.status, err.message); return true; }
       throw err;
     }
     const updated = jobs.updateProgress({ jobId: pg[1], workerId, progress: body.progress, stage: body.stage });
-    if (!updated) { sendJson(res, 403, { error: 'not the owning worker or job not in progress' }); return true; }
+    if (!updated) { reject(res, 403, 'not the owning worker or job not in progress'); return true; }
     sendJson(res, 200, { id: updated.id, progress: updated.progress, stage: updated.stage, status: updated.status });
     return true;
   }
@@ -252,16 +258,16 @@ export async function handleJobRoute(app, req, res) {
   const rs = url.pathname.match(/^\/jobs\/([^/]+)\/result$/);
   if (rs) {
     const workerId = jobs.authenticate(bearer);
-    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
+    if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
     let body;
     try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
-      if (err instanceof BodyError) { sendJson(res, err.status, { error: err.message }); return true; }
+      if (err instanceof BodyError) { reject(res, err.status, err.message); return true; }
       throw err;
     }
     let result;
     try { result = jobs.submitResult(rs[1], workerId, body); }
-    catch (err) { sendJson(res, 400, { error: err.message }); return true; }
-    if (!result.accepted) { sendJson(res, 403, { error: 'not the owning worker or job not in progress' }); return true; }
+    catch (err) { reject(res, 400, err.message); return true; }
+    if (!result.accepted) { reject(res, 403, 'not the owning worker or job not in progress'); return true; }
     sendJson(res, 200, result);
     return true;
   }
@@ -269,11 +275,11 @@ export async function handleJobRoute(app, req, res) {
   const cn = url.pathname.match(/^\/jobs\/([^/]+)\/cancel$/);
   if (cn) {
     const workerId = jobs.authenticate(bearer);
-    if (!workerId) { sendJson(res, 401, { error: 'unauthorized' }); return true; }
+    if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
     const cancelled = jobs.cancelJob({ jobId: cn[1], workerId });
-    if (!cancelled) { sendJson(res, 404, { error: 'job not found' }); return true; }
-    if (cancelled.forbidden) { sendJson(res, 403, { error: 'not the owning worker' }); return true; }
-    if (cancelled.terminal) { sendJson(res, 400, { error: 'job already terminal — cannot cancel' }); return true; }
+    if (!cancelled) { reject(res, 404, 'job not found'); return true; }
+    if (cancelled.forbidden) { reject(res, 403, 'not the owning worker'); return true; }
+    if (cancelled.terminal) { reject(res, 400, 'job already terminal — cannot cancel'); return true; }
     sendJson(res, 200, { id: cancelled.id, status: cancelled.status });
     return true;
   }
@@ -297,7 +303,7 @@ export function handleClientSdkRoute(app, req, res) {
   try {
     body = readFileSync(CLIENT_SDK_PATH);
   } catch {
-    sendJson(res, 404, { error: 'not found' });
+    reject(res, 404, 'not found');
     return true;
   }
   res.writeHead(200, {

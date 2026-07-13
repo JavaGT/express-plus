@@ -493,7 +493,7 @@ test('authenticate with wrong TOTP token → 400', async (t) => {
   });
   assert.equal(authRes.status, 400);
   const body = await authRes.json();
-  assert.match(body.error, /invalid token/i);
+  assert.match(body.failure.message, /invalid token/i);
 });
 
 test('verify with wrong TOTP token → 400', async (t) => {
@@ -513,7 +513,7 @@ test('verify with wrong TOTP token → 400', async (t) => {
   });
   assert.equal(verifyRes.status, 400);
   const body = await verifyRes.json();
-  assert.match(body.error, /invalid TOTP token/i);
+  assert.match(body.failure.message, /invalid TOTP token/i);
 });
 
 test('disable with backup code works', async (t) => {
@@ -570,7 +570,7 @@ test('verify requires enrollment → 400 when not enrolled', async (t) => {
   });
   assert.equal(verifyRes.status, 400);
   const body = await verifyRes.json();
-  assert.match(body.error, /not enrolled/i);
+  assert.match(body.failure.message, /not enrolled/i);
 });
 
 test('disable requires enrollment → 400 when not enrolled', async (t) => {
@@ -583,7 +583,7 @@ test('disable requires enrollment → 400 when not enrolled', async (t) => {
   });
   assert.equal(disableRes.status, 400);
   const body = await disableRes.json();
-  assert.match(body.error, /not enrolled/i);
+  assert.match(body.failure.message, /not enrolled/i);
 });
 
 test('authenticate for non-enabled user → 400', async (t) => {
@@ -603,7 +603,7 @@ test('authenticate for non-enabled user → 400', async (t) => {
   });
   assert.equal(authRes.status, 400);
   const body = await authRes.json();
-  assert.match(body.error, /not enabled/i);
+  assert.match(body.failure.message, /not enabled/i);
 });
 
 test('login without TOTP when 2FA not enabled returns session', async (t) => {
