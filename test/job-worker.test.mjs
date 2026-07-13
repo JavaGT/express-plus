@@ -129,7 +129,7 @@ test('work stop() halts the poll loop (no job runs after stop)', async () => {
   db.close();
 });
 
-test('reaper re-queues an expired job as immediately available (availableAt NULL)', () => {
+test('reaper re-queues an expired job with the retry backoff (a lease loss is an attempt)', () => {
   let t = 1000;
   const now = () => t;
   const { db, queue } = freshQueue({ leaseMs: 500, now, maxAttempts: 3, backoffMs: 1000 });
@@ -138,10 +138,12 @@ test('reaper re-queues an expired job as immediately available (availableAt NULL
   t = 2000; // past the 1500 lease
   const { reassigned } = queue.reap({ now });
   assert.equal(reassigned, 1);
-  const row = db.prepare('SELECT status, availableAt FROM _Job WHERE id=?').get(job.id);
+  const row = db.prepare('SELECT status, availableAt, attempts FROM _Job WHERE id=?').get(job.id);
   assert.equal(row.status, 'queued');
-  assert.equal(row.availableAt, null, 'reassigned job is immediately available');
-  // immediately claimable again (no backoff wait)
+  assert.equal(row.attempts, 1, 'lease loss counted as an attempt');
+  assert.equal(row.availableAt, 2000 + 1000, 'requeued behind the retry backoff — instant reclaim by the same stuck worker is the runaway-loop shape');
+  assert.equal(queue.claim('w-any2'), null, 'not claimable inside the backoff window');
+  t = 3500; // past the backoff
   const reclaimed = queue.claim('w-any2');
   assert.equal(reclaimed.id, job.id);
   db.close();

@@ -84,10 +84,10 @@ test('heartbeat: extends lease + flips claimed→running; only for the owning wo
   db.close();
 });
 
-test('reaper: re-queues a job whose lease expired (claimable again)', () => {
+test('reaper: re-queues a job whose lease expired (claimable again after backoff, attempt counted)', () => {
   let t = 10_000;
   const now = () => t;
-  const { db, queue } = freshQueue({ leaseMs: 1000, heartbeatGraceMs: 100_000, now });
+  const { db, queue } = freshQueue({ leaseMs: 1000, heartbeatGraceMs: 100_000, backoffMs: 5000, now });
   const w1 = queue.registerWorker(SECRET);
   const w2 = queue.registerWorker(SECRET);
   queue.enqueue({ kind: 'k', payload: {} });     // enqueuedAt=10000
@@ -95,12 +95,49 @@ test('reaper: re-queues a job whose lease expired (claimable again)', () => {
   t = 20_000;                                    // advance past the lease
   const { reassigned } = queue.reap({ now });
   assert.equal(reassigned, 1, 'one job reassigned');
-  const row = db.prepare('SELECT status, workerId FROM _Job WHERE id=?').get(job.id);
+  const row = db.prepare('SELECT status, workerId, attempts, availableAt FROM _Job WHERE id=?').get(job.id);
   assert.equal(row.status, 'queued', 'expired job back to queued');
   assert.equal(row.workerId, null, 'workerId cleared on reassign');
-  // a DIFFERENT worker can now claim it
+  assert.equal(row.attempts, 1, 'a lease loss counts as an attempt');
+  assert.equal(row.availableAt, 20_000 + 5000, 'requeued with the retry backoff, not immediately');
+  // not claimable inside the backoff window (instant reclaim by the same stuck
+  // worker is the tight-loop shape) …
+  assert.equal(queue.claim(w2.workerId), null, 'not claimable during backoff');
+  // … but a DIFFERENT worker can claim it once the backoff elapses
+  t = 26_000;
   const reclaimed = queue.claim(w2.workerId);
-  assert.equal(reclaimed.id, job.id, 'reassigned job claimable by another worker');
+  assert.equal(reclaimed.id, job.id, 'reassigned job claimable by another worker after backoff');
+  db.close();
+});
+
+test('reaper: repeated lease losses dead-letter at maxAttempts (the 529× runaway shape)', () => {
+  let t = 10_000;
+  const now = () => t;
+  const { db, queue } = freshQueue({ leaseMs: 1000, heartbeatGraceMs: 100_000, backoffMs: 1000, maxAttempts: 2, now });
+  const w = queue.registerWorker(SECRET);
+  queue.enqueue({ kind: 'k', payload: { url: 'a' } });
+  queue.claim(w.workerId);
+  t = 20_000; // lease expired
+  const r1 = queue.reap({ now });
+  assert.equal(r1.reassigned, 1, 'first loss requeues');
+  assert.equal(r1.deadLettered, 0);
+  t = 30_000; // past backoff
+  const job = queue.claim(w.workerId); // same worker re-claims (heartbeats still broken)
+  t = 40_000; // lease expired again — attempts would reach maxAttempts
+  const r2 = queue.reap({ now });
+  assert.equal(r2.reassigned, 0, 'second loss does not requeue');
+  assert.equal(r2.deadLettered, 1, 'second loss dead-letters');
+  const row = db.prepare('SELECT status, attempts, workerId, payload FROM _Job WHERE id=?').get(job.id);
+  assert.equal(row.status, 'failed', 'terminal failed');
+  assert.equal(row.attempts, 2, 'both losses counted');
+  assert.equal(row.workerId, w.workerId, 'last owner kept for forensics');
+  const payload = JSON.parse(row.payload);
+  assert.equal(payload.deadLetterReason, 'lease-expired', 'reason recorded in payload');
+  assert.equal(payload.url, 'a', 'original payload fields preserved');
+  // a further reap sweep is a no-op — the loop is dead
+  t = 50_000;
+  const r3 = queue.reap({ now });
+  assert.equal(r3.reassigned + r3.deadLettered, 0, 'terminal job never reaped again');
   db.close();
 });
 

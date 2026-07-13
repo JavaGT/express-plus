@@ -351,29 +351,59 @@ export function createJobQueue({
     return job;
   }
 
-  // Reaper sweep. (1) Reassign jobs whose lease expired (claimed/running → queued,
-  // workerId cleared) so another worker may claim them. (2) Revoke workers whose
-  // lastHeartbeat is older than the grace window — their bearer is rejected after.
-  // The worker's work must be idempotent (documented) because a reassigned job is
-  // re-run from scratch by the new claimant.
+  // Reaper sweep. (1) Jobs whose lease expired: a lease loss COUNTS as an attempt
+  // — the same counter and maxAttempts cap as a worker-reported failure. Under the
+  // cap the job is re-queued with the standard retry backoff (NOT immediately
+  // available: instant reclaim by the same stuck worker is the tight-loop shape —
+  // a worker whose heartbeats silently fail would otherwise re-claim and re-lose
+  // the job forever, which is how one transcription ran 529×). At the cap it
+  // dead-letters (terminal failed, `deadLetterReason: 'lease-expired'` merged into
+  // the payload; workerId kept for forensics, matching submitResult's dead-letter).
+  // (2) Revoke workers whose lastHeartbeat is older than the grace window — their
+  // bearer is rejected after. The worker's work must be idempotent (documented)
+  // because a reassigned job is re-run from scratch by the new claimant.
   function reap({ now: nowFn = now } = {}) {
     const t = (typeof nowFn === 'function' ? nowFn : now)();
+    // Dead-letter first, then requeue: any expired row matches exactly one
+    // predicate, and the two back-to-back synchronous statements are race-safe
+    // (single-threaded sync DB, same as the claim path).
+    const deadRows = db.prepare(
+      `UPDATE _Job SET status = ?, attempts = attempts + 1, leaseUntil = NULL
+       WHERE status IN (?, ?) AND leaseUntil < ? AND attempts + 1 >= ${Number(maxAttempts)}
+       RETURNING *`,
+    ).all(STATES.FAILED, STATES.CLAIMED, STATES.RUNNING, t);
+    for (const row of deadRows) {
+      const payload = row.payload != null ? JSON.parse(row.payload) : {};
+      db.prepare('UPDATE _Job SET payload = ? WHERE id = ?').run(
+        JSON.stringify({ ...payload, deadLetterReason: 'lease-expired' }), row.id,
+      );
+      if (row.scope != null) {
+        const job = parseJob(row);
+        if (job) emit(buildEvent(job, 'deadLettered', t));
+      }
+    }
     const reassignedRows = db.prepare(
-      `UPDATE _Job SET status = ?, workerId = NULL, claimedAt = NULL, leaseUntil = NULL, availableAt = NULL
+      `UPDATE _Job SET status = ?, workerId = NULL, claimedAt = NULL, leaseUntil = NULL, attempts = attempts + 1, availableAt = ?
        WHERE status IN (?, ?) AND leaseUntil < ?
        RETURNING *`,
-    ).all(STATES.QUEUED, STATES.CLAIMED, STATES.RUNNING, t);
+    ).all(STATES.QUEUED, t + backoffMs, STATES.CLAIMED, STATES.RUNNING, t);
     for (const row of reassignedRows) {
       if (row.scope != null) {
         const job = parseJob(row);
         if (job) emit(buildEvent(job, 'reassigned', t));
       }
     }
+    if (deadRows.length > 0 || reassignedRows.length > 0) {
+      getLog().warn('system', 'job-queue reaper: lease-expired jobs', {
+        reassigned: reassignedRows.map((r) => ({ id: r.id, kind: r.kind, attempts: r.attempts })),
+        deadLettered: deadRows.map((r) => ({ id: r.id, kind: r.kind, attempts: r.attempts })),
+      });
+    }
     const revoked = db.prepare(
       `UPDATE _Worker SET revoked = 1
        WHERE revoked = 0 AND lastHeartbeat < ?`,
     ).run(t - heartbeatGraceMs).changes;
-    return { reassigned: reassignedRows.length, revoked };
+    return { reassigned: reassignedRows.length, deadLettered: deadRows.length, revoked };
   }
 
   // Periodic reaper, owned by the framework (the listen() layer registers the
