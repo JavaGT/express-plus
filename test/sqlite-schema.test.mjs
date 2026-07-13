@@ -196,6 +196,41 @@ test('defineSqliteSchema rejects ambiguous or unsafe declarations before touchin
   );
 });
 
+test('prepare does not create declared indexes on an existing legacy table when a migration fails', () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('CREATE TABLE "Legacy" (id TEXT PRIMARY KEY, status TEXT, dueAt INTEGER)');
+
+    const schema = defineSqliteSchema({
+      name: 'legacy-test',
+      tables: [
+        {
+          name: 'Legacy',
+          columns: [
+            { name: 'id', type: 'text', primaryKey: true },
+            { name: 'status', type: 'text' },
+            { name: 'dueAt', type: 'integer' },
+          ],
+          indexes: [
+            { name: 'idx_legacy_status', columns: ['status', 'dueAt'] },
+          ],
+        },
+      ],
+      migrations: [{
+        version: 1,
+        up() { throw new Error('explosion'); },
+      }],
+    });
+
+    assert.throws(() => schema.prepare(db), /migration 1 failed/);
+
+    const indexes = db.prepare("SELECT name FROM pragma_index_list('Legacy') WHERE origin = 'c' ORDER BY name").all();
+    assert.deepEqual(indexes, [], 'indexes must not be created when migration fails');
+  } finally {
+    db.close();
+  }
+});
+
 test('foreign keys may target explicitly-declared external tables without claiming their DDL', () => {
   const schema = defineSqliteSchema({
     name: 'comments',

@@ -196,10 +196,9 @@ function validateColumnList(columns, knownColumns, label) {
 
 export function defineSqliteSchema(spec) {
   validateSpec(spec);
-  const ddl = [
-    ...spec.tables.map(compileTable),
-    ...spec.tables.flatMap((table) => (table.indexes ?? []).map((index) => compileIndex(table.name, index))),
-  ];
+  const tableDdl = spec.tables.map(compileTable);
+  const indexDdl = spec.tables.flatMap((table) => (table.indexes ?? []).map((index) => compileIndex(table.name, index)));
+  const ddl = [...tableDdl, ...indexDdl];
   const tableNames = spec.tables.map((table) => table.name);
   const migrations = [...(spec.migrations ?? [])];
 
@@ -208,15 +207,27 @@ export function defineSqliteSchema(spec) {
     tableNames: Object.freeze(tableNames),
     ddl: Object.freeze(ddl),
     prepare(db, options) {
-      begin(db);
-      try {
-        for (const sql of ddl) db.exec(sql);
-        commit(db);
-      } catch (error) {
-        try { rollback(db); } catch { /* transaction is already unusable */ }
-        throw error;
+      if (tableDdl.length > 0) {
+        begin(db);
+        try {
+          for (const sql of tableDdl) db.exec(sql);
+          commit(db);
+        } catch (error) {
+          try { rollback(db); } catch { /* transaction is already unusable */ }
+          throw error;
+        }
       }
       runMigrations(db, migrations, options);
+      if (indexDdl.length > 0) {
+        begin(db);
+        try {
+          for (const sql of indexDdl) db.exec(sql);
+          commit(db);
+        } catch (error) {
+          try { rollback(db); } catch { /* transaction is already unusable */ }
+          throw error;
+        }
+      }
     },
   });
 }
