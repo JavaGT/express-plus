@@ -130,6 +130,32 @@ test('only maps whose members are User rows can be invitation roles', async () =
   db.close();
 });
 
+test('expired user-targeted invitation cannot be accepted', async () => {
+  const { db, api, Invitation } = await fixture();
+  const past = Date.now() - 1000;
+  const invitation = await api.createInvitation({
+    targetEntity: 'InvitationSecurityProject', targetId: 'p1', role: 'member',
+    targetUser: member.id, expiresAt: past, principal: owner,
+  });
+
+  await assert.rejects(
+    api.acceptInvitation(invitation.token, member),
+    (error) => error.status === 400 && /expired/.test(error.message),
+  );
+
+  // Targeted invitation was NOT consumed (no delete, no useCount bump)
+  const stored = Invitation.findOne(Invitation.token.is(invitation.token));
+  assert.ok(stored);
+  assert.equal(stored.useCount, 0);
+
+  // No membership row was created
+  const memberRow = db.prepare(
+    'SELECT role FROM InvitationSecurityProject_members WHERE InvitationSecurityProject_id = :owner AND member_id = :member',
+  ).get({ owner: 'p1', member: member.id });
+  assert.equal(memberRow, undefined);
+  db.close();
+});
+
 test('only a human user principal can create an invitation', async () => {
   const { db, api } = await fixture();
   const apiKeyWithOwnerId = principal({ type: 'apiKey', id: owner.id });
