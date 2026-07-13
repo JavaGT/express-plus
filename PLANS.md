@@ -609,3 +609,10 @@ REMAINING-P1-NOTES resolved/deferred: spec #6 (handler txn signature) RESOLVED b
 - Five executable TODO fixtures pin the persistence behavior Wave 4.9 must supply: the same action ID is independent across owning scopes; retries preserve exact multi-scope emission order; and both single and batch zero-event actions leave durable receipts that survive reopening SQLite and prevent handler re-entry.
 - Discovery: `_Log` currently deduplicates `actionId` globally, reconstructs duplicate results in `(scope, seq)` order, and cannot represent a committed action with no events. The request's optional `scope` is typed publicly but is not part of runtime identity.
 - Decision: do not patch these gaps into the event table piecemeal. Wave 4.9 will introduce an explicit owning-stream action receipt with stored result and stable emission ordinal; the Wave 3.6 TODOs are the acceptance contracts for that migration.
+
+## 2026-07-14 — Wave 3.7 hostile recovery destination contracts
+
+- A public HTTP fixture proves the current entity replay route loses authorization after the entity row is deleted, even though its committed removal history remains in `_Log`.
+- Public `LiveList` fixtures pin all-or-nothing recovery: an internal sequence hole, unknown event type, or malformed historical row must leave both document state and cursor at the pre-fetch checkpoint.
+- A deterministic two-epoch custom-scope fixture proves the asynchronous projection and its cursor can currently split as `after/0`; an atomic read may return only `before/0` or `after/5`.
+- Decision: Wave 4.10 will validate the complete fetched run before publishing state/cursor and will introduce one authorization-safe history anchor for deleted entities. These are destination contracts, not permission to weaken ordinary row grants or expose another owner's history.
