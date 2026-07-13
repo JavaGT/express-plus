@@ -7,14 +7,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import {
+import workbench, {
   entity, generateDDL, generateFrameworkDDL, executeFrameworkDDL, action, event, createServer, durableMutationVariant, createEffectContext, checkEffectDepth, buildEffectsRegistry, detectCrossEntityCycles, validateEffects, created, updated } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 // Helper to set up a fresh in-memory db with framework tables
 function setupDb() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   return db;
 }
@@ -43,14 +41,18 @@ test('CRUD-trigger effect: Note.created → creates one Counter row', async () =
   });
   for (const sql of generateDDL(Note)) db.exec(sql);
 
+  const app = workbench({ db, entities: [Counter, Note] });
+  const boundNote = app.entity(Note);
+  const boundCounter = app.entity(Counter);
+
   // Build effects registry and create server with effects
-  const registry = buildEffectsRegistry([Note, Counter]);
+  const registry = buildEffectsRegistry([boundNote, boundCounter]);
   const server = createServer({
-    handlers: Note.crudHandlers,
+    handlers: boundNote.crudHandlers,
     db,
     authorize: () => true, // Allow all for test
     pipeline: durableMutationVariant({
-      projectionConsumers: [Note.projection, Counter.projection],
+      projectionConsumers: [boundNote.projection, boundCounter.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -95,14 +97,18 @@ test('effect with set operator: with: { title: "x" }', async () => {
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
+  const app = workbench({ db, entities: [Target, Source] });
+  const boundSource = app.entity(Source);
+  const boundTarget = app.entity(Target);
+
   // Build effects registry and create server with effects
-  const registry = buildEffectsRegistry([Source, Target]);
+  const registry = buildEffectsRegistry([boundSource, boundTarget]);
   const server = createServer({
-    handlers: Source.crudHandlers,
+    handlers: boundSource.crudHandlers,
     db,
     authorize: () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Source.projection, Target.projection],
+      projectionConsumers: [boundSource.projection, boundTarget.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -123,7 +129,7 @@ test('effect with set operator: with: { title: "x" }', async () => {
 });
 
 // ---- RED: when guard rejects effect when predicate returns false ----
-test('effect when guard: prevents effect when predicate returns false', () => {
+test('effect when guard: prevents effect when predicate returns false', async () => {
   const db = setupDb();
 
   const Counter = entity('Counter', {
@@ -148,8 +154,29 @@ test('effect when guard: prevents effect when predicate returns false', () => {
   });
   for (const sql of generateDDL(Note)) db.exec(sql);
 
-  // Create a note with title that does NOT match the guard
-  Note.create({ title: 'not-trigger' });
+  const app = workbench({ db, entities: [Counter, Note] });
+  const boundNote = app.entity(Note);
+  const boundCounter = app.entity(Counter);
+
+  const registry = buildEffectsRegistry([boundNote, boundCounter]);
+  const server = createServer({
+    handlers: boundNote.crudHandlers,
+    db,
+    authorize: () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [boundNote.projection, boundCounter.projection],
+      effectsRegistry: registry,
+      admission: { beforeProjection: async () => true, afterProjection: async () => true },
+    }),
+  });
+
+  // Dispatch a create with title that does NOT match the guard
+  await server.dispatch({
+    actionId: 'when-test',
+    type: 'Note.create',
+    payload: { title: 'not-trigger' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
 
   // Verify NO counter was created (guard rejected)
   const counters = db.prepare('SELECT * FROM Counter').all();
@@ -322,13 +349,16 @@ test('self inc: emits :updated with read-modify-write (seed=5, inc(2) → 7)', a
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
-  const registry = buildEffectsRegistry([Counter]);
+  const app = workbench({ db, entities: [Counter] });
+  const boundCounter = app.entity(Counter);
+
+  const registry = buildEffectsRegistry([boundCounter]);
   const server = createServer({
-    handlers: Counter.crudHandlers,
+    handlers: boundCounter.crudHandlers,
     db,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Counter.projection],
+      projectionConsumers: [boundCounter.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -364,13 +394,16 @@ test('self dec: emits :updated with read-modify-write (seed=10, dec(3) → 7)', 
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
-  const registry = buildEffectsRegistry([Counter]);
+  const app = workbench({ db, entities: [Counter] });
+  const boundCounter = app.entity(Counter);
+
+  const registry = buildEffectsRegistry([boundCounter]);
   const server = createServer({
-    handlers: Counter.crudHandlers,
+    handlers: boundCounter.crudHandlers,
     db,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Counter.projection],
+      projectionConsumers: [boundCounter.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -413,13 +446,17 @@ test('inc-on-create (non-self): degenerate literal (0+4=4), emits :created', asy
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
-  const registry = buildEffectsRegistry([Source, Target]);
+  const app = workbench({ db, entities: [Target, Source] });
+  const boundSource = app.entity(Source);
+  const boundTarget = app.entity(Target);
+
+  const registry = buildEffectsRegistry([boundSource, boundTarget]);
   const server = createServer({
-    handlers: Source.crudHandlers,
+    handlers: boundSource.crudHandlers,
     db,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Source.projection, Target.projection],
+      projectionConsumers: [boundSource.projection, boundTarget.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -458,13 +495,16 @@ test('depth cap: self-recursion bounded (Counter.updated → Counter.updated)', 
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
-  const registry = buildEffectsRegistry([Counter]);
+  const app = workbench({ db, entities: [Counter] });
+  const boundCounter = app.entity(Counter);
+
+  const registry = buildEffectsRegistry([boundCounter]);
   const server = createServer({
-    handlers: Counter.crudHandlers,
+    handlers: boundCounter.crudHandlers,
     db,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Counter.projection],
+      projectionConsumers: [boundCounter.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -525,13 +565,16 @@ test('db threaded through effects executor: RMW read uses in-txn db handle', asy
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
-  const registry = buildEffectsRegistry([Counter]);
+  const app = workbench({ db, entities: [Counter] });
+  const boundCounter = app.entity(Counter);
+
+  const registry = buildEffectsRegistry([boundCounter]);
   const server = createServer({
-    handlers: Counter.crudHandlers,
+    handlers: boundCounter.crudHandlers,
     db,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Counter.projection],
+      projectionConsumers: [boundCounter.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -592,13 +635,17 @@ test('many fan-out: creates N target rows (one per collection member at trigger 
   });
   for (const sql of generateDDL(User)) db.exec(sql);
 
-  const registry = buildEffectsRegistry([User, Inbox]);
+  const app = workbench({ db, entities: [Inbox, User] });
+  const boundInbox = app.entity(Inbox);
+  const boundUser = app.entity(User);
+
+  const registry = buildEffectsRegistry([boundUser, boundInbox]);
   const server = createServer({
-    handlers: User.crudHandlers,
+    handlers: boundUser.crudHandlers,
     db,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [User.projection, Inbox.projection],
+      projectionConsumers: [boundUser.projection, boundInbox.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -635,7 +682,7 @@ test('many fan-out: creates N target rows (one per collection member at trigger 
   // Get a row handle and add 3rd collaborator
   // At trigger time, collection has 3 members (c1, c2, c3 just added), so fan-out creates 3 Inboxes
   const ownerRow = db.prepare('SELECT * FROM User WHERE name = ?').get('Owner');
-  const ownerHandle = User.hydrate(ownerRow, null, server.dispatch);
+  const ownerHandle = boundUser.hydrate(ownerRow, null, server.dispatch);
 
   // Add 3rd collaborator - at this point collection has {c3} only (first add)
   // Fan-out reads the collection and creates 1 Inbox (for c3)
@@ -695,13 +742,17 @@ test('many fan-out: create-only (no dedup, two origins each add member → separ
   });
   for (const sql of generateDDL(User)) db.exec(sql);
 
-  const registry = buildEffectsRegistry([User, Inbox]);
+  const app = workbench({ db, entities: [Inbox, User] });
+  const boundInbox = app.entity(Inbox);
+  const boundUser = app.entity(User);
+
+  const registry = buildEffectsRegistry([boundUser, boundInbox]);
   const server = createServer({
-    handlers: User.crudHandlers,
+    handlers: boundUser.crudHandlers,
     db,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [User.projection, Inbox.projection],
+      projectionConsumers: [boundUser.projection, boundInbox.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -731,8 +782,8 @@ test('many fan-out: create-only (no dedup, two origins each add member → separ
 
   const owner1Row = db.prepare('SELECT * FROM User WHERE name = ?').get('Owner1');
   const owner2Row = db.prepare('SELECT * FROM User WHERE name = ?').get('Owner2');
-  const owner1Handle = User.hydrate(owner1Row, null, server.dispatch);
-  const owner2Handle = User.hydrate(owner2Row, null, server.dispatch);
+  const owner1Handle = boundUser.hydrate(owner1Row, null, server.dispatch);
+  const owner2Handle = boundUser.hydrate(owner2Row, null, server.dispatch);
 
   // Add c1 to owner1: collection has {c1} → fan-out creates 1 Inbox
   await owner1Handle.collaborators.set('c1', { role: 'collaborator' });
@@ -811,13 +862,17 @@ test('Fan-IN: anyOf(Source.created, Source.updated) fires on EITHER event', asyn
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
-  const registry = buildEffectsRegistry([Source, Target]);
+  const app = workbench({ db, entities: [Target, Source] });
+  const boundSource = app.entity(Source);
+  const boundTarget = app.entity(Target);
+
+  const registry = buildEffectsRegistry([boundSource, boundTarget]);
   const server = createServer({
-    handlers: Source.crudHandlers,
+    handlers: boundSource.crudHandlers,
     db,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Source.projection, Target.projection],
+      projectionConsumers: [boundSource.projection, boundTarget.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -906,7 +961,11 @@ test('Dedupe: anyOf(X.created, X.created) registers effect ONCE', async () => {
   });
   for (const sql of generateDDL(Source)) db.exec(sql);
 
-  const registry = buildEffectsRegistry([Source, Target]);
+  const app = workbench({ db, entities: [Target, Source] });
+  const boundSource = app.entity(Source);
+  const boundTarget = app.entity(Target);
+
+  const registry = buildEffectsRegistry([boundSource, boundTarget]);
 
   // Check that Source.created has exactly one effect entry (not two)
   const createdEffects = registry.get('Source.created');
@@ -915,11 +974,11 @@ test('Dedupe: anyOf(X.created, X.created) registers effect ONCE', async () => {
 
   // Fire the event and verify only one target row created
   const server = createServer({
-    handlers: Source.crudHandlers,
+    handlers: boundSource.crudHandlers,
     db,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Source.projection, Target.projection],
+      projectionConsumers: [boundSource.projection, boundTarget.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),
@@ -954,13 +1013,16 @@ test('Self-recursion depth cap: anyOf effect with self-mutate bounded by maxDept
   });
   for (const sql of generateDDL(Counter)) db.exec(sql);
 
-  const registry = buildEffectsRegistry([Counter]);
+  const app = workbench({ db, entities: [Counter] });
+  const boundCounter = app.entity(Counter);
+
+  const registry = buildEffectsRegistry([boundCounter]);
   const server = createServer({
-    handlers: Counter.crudHandlers,
+    handlers: boundCounter.crudHandlers,
     db,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Counter.projection],
+      projectionConsumers: [boundCounter.projection],
       effectsRegistry: registry,
       admission: { beforeProjection: async () => true, afterProjection: async () => true },
     }),

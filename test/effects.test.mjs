@@ -12,12 +12,10 @@
 import { text, ref, map, grant, read, write, subscribe, principal } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-import {
+import workbench, {
   entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL, buildEffectsRegistry } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 const Inbox = entity('Inbox', {
     recipient: text(), doc: text(), kind: text(),
@@ -46,22 +44,22 @@ const Doc = entity('Doc', {
 
 function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(Inbox)) db.exec(sql);
   for (const sql of generateDDL(Doc)) db.exec(sql);
   db.prepare('INSERT INTO Doc (id, title, owner) VALUES (?, ?, ?)').run('1', 'Test', 'u1');
-  return db;
+  const app = workbench({ db, entities: [Inbox, Doc] });
+  return { db, Inbox: app.entity(Inbox), Doc: app.entity(Doc) };
 }
 
-async function makeServer(db, postAuth) {
+async function makeServer(db, boundDoc, boundInbox, postAuth) {
   return createServer({
     db,
-    handlers: Doc.crudHandlers,
+    handlers: boundDoc.crudHandlers,
     authorize: async () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Doc.projection, Inbox.projection],
-      effectsRegistry: buildEffectsRegistry([Doc, Inbox]),
+      projectionConsumers: [boundDoc.projection, boundInbox.projection],
+      effectsRegistry: buildEffectsRegistry([boundDoc, boundInbox]),
       admission: {
         beforeProjection: async () => true,
         afterProjection: postAuth ?? (async () => true),
@@ -71,18 +69,18 @@ async function makeServer(db, postAuth) {
 }
 
 test('map .set on a NEW member fires native added effect as the effect principal, creating the target row in-txn', async () => {
-  const db = setup();
+  const { db, Inbox: boundInbox, Doc: boundDoc } = setup();
   // Spy: capture every principal seen for an Inbox.created event. The OLD
   // fireMapEffects path calls Inbox.create DIRECTLY (no dispatch), so the spy
   // would see NO Inbox.created event. The new compiler path re-enters the
   // durable variant as Inbox.created under the EFFECT principal.
   const inboxCreatedPrincipals = [];
-  const server = await makeServer(db, async (auth) => {
+  const server = await makeServer(db, boundDoc, boundInbox, async (auth) => {
     if (auth.eventType === 'Inbox.created') inboxCreatedPrincipals.push(auth.event._effectPrincipal);
     return true;
   });
 
-  const doc = Doc.hydrate({ id: '1' }, null, server.dispatch);
+  const doc = boundDoc.hydrate({ id: '1' }, null, server.dispatch);
   await doc.collaborators.set('u2', { role: 'viewer' });
 
   // the effect ran THROUGH dispatch (under the effect principal, not the raw
@@ -105,10 +103,10 @@ test('map .set on a NEW member fires native added effect as the effect principal
 });
 
 test('a role CHANGE is roleChanged, NOT a fresh native added (idempotent re-share, DECISIONLOG #57)', async () => {
-  const db = setup();
-  const server = await makeServer(db);
+  const { db, Doc: boundDoc, Inbox: boundInbox } = setup();
+  const server = await makeServer(db, boundDoc, boundInbox);
 
-  const doc = Doc.hydrate({ id: '1' }, null, server.dispatch);
+  const doc = boundDoc.hydrate({ id: '1' }, null, server.dispatch);
   await doc.collaborators.set('u2', { role: 'viewer' });
   await doc.collaborators.set('u2', { role: 'editor' });
 
@@ -123,10 +121,10 @@ test('a role CHANGE is roleChanged, NOT a fresh native added (idempotent re-shar
 });
 
 test('a repeat share with the SAME role is a no-op (no dispatch, no event)', async () => {
-  const db = setup();
-  const server = await makeServer(db);
+  const { db, Doc: boundDoc, Inbox: boundInbox } = setup();
+  const server = await makeServer(db, boundDoc, boundInbox);
 
-  const doc = Doc.hydrate({ id: '1' }, null, server.dispatch);
+  const doc = boundDoc.hydrate({ id: '1' }, null, server.dispatch);
   await doc.collaborators.set('u2', { role: 'viewer' });
   await doc.collaborators.set('u2', { role: 'viewer' });
 
@@ -137,12 +135,12 @@ test('a repeat share with the SAME role is a no-op (no dispatch, no event)', asy
 });
 
 test('.remove applies the native removed store event projection', async () => {
-  const db = setup();
-  const server = await makeServer(db);
+  const { db, Doc: boundDoc, Inbox: boundInbox } = setup();
+  const server = await makeServer(db, boundDoc, boundInbox);
 
-  const Doc2 = Doc; // same entity — declare a removed effect below would need a distinct entity;
+  const Doc2 = boundDoc; // same entity — declare a removed effect below would need a distinct entity;
   void Doc2;
-  const doc = Doc.hydrate({ id: '1' }, null, server.dispatch);
+  const doc = boundDoc.hydrate({ id: '1' }, null, server.dispatch);
   await doc.collaborators.set('u2', { role: 'viewer' });
   await doc.collaborators.remove('u2');
 
@@ -151,10 +149,9 @@ test('.remove applies the native removed store event projection', async () => {
 });
 
 test('.set with no dispatch ref throws (no silent direct-SQL fallback — dual-path ban)', async () => {
-  const db = setup();
-  const server = await makeServer(db);
+  const { db, Doc: boundDoc } = setup();
 
-  const doc = Doc.hydrate({ id: '1' }, null); // pre-dispatch, trusted-query shape
+  const doc = boundDoc.hydrate({ id: '1' }, null); // pre-dispatch, trusted-query shape
   await assert.rejects(
     () => doc.collaborators.set('u2', { role: 'viewer' }),
     /without a dispatch ref/,

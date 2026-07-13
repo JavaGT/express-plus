@@ -7,8 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { setActiveDb } from '../src/db.mjs';
-import {
+import workbench, {
   entity, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
 import { ValidationError } from '../src/field-strategy.mjs';
 
@@ -26,7 +25,8 @@ const TodoList = entity('TodoList', {
 
 async function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [TodoList] });
+  const todoList = app.entity(TodoList);
   executeFrameworkDDL(db);
   // Manual DDL: role column is nullable (matches old test, allows .set without role)
   db.exec(`CREATE TABLE IF NOT EXISTS TodoList (
@@ -41,28 +41,28 @@ async function setup() {
   )`);
   const server = await createServer({
     db,
-    handlers: TodoList.crudHandlers,
+    handlers: todoList.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [TodoList.projection],
+      projectionConsumers: [todoList.projection],
       admission: { beforeProjection: () => true, afterProjection: async () => true },
     }),
     authorize: async () => true,
   });
-  return { db, server };
+  return { db, server, todoList };
 }
 
 // hydrate threading the dispatch ref (3rd arg)
-function listWith(server, id) {
-  return TodoList.hydrate({ id }, null, server.dispatch);
+function listWith(server, id, todoList) {
+  return todoList.hydrate({ id }, null, server.dispatch);
 }
 
 // ---- Test 1: write API (add / has) on a loaded row -----------------------
 
 test('loaded row map field add and has', async (t) => {
-  const { db, server } = await setup();
+  const { db, server, todoList } = await setup();
   t.after(() => db.close());
-  const created = TodoList.create({ title: 'Buy groceries', owner: 'u1' });
-  const list = listWith(server, created.id);
+  const created = todoList.create({ title: 'Buy groceries', owner: 'u1' });
+  const list = listWith(server, created.id, todoList);
 
   assert.ok(list.collaborators, 'map field should exist on hydrated row');
   assert.equal(typeof list.collaborators.set, 'function', 'set should be a function');
@@ -78,10 +78,10 @@ test('loaded row map field add and has', async (t) => {
 // ---- Test 2: set without role, remove, has false after remove -------------
 
 test('set without role stores null; remove then has returns false', async (t) => {
-  const { db, server } = await setup();
+  const { db, server, todoList } = await setup();
   t.after(() => db.close());
-  const created = TodoList.create({ title: 'Chores', owner: 'u1' });
-  const list = listWith(server, created.id);
+  const created = todoList.create({ title: 'Chores', owner: 'u1' });
+  const list = listWith(server, created.id, todoList);
 
   // set with no role
   await list.collaborators.set('u4');
@@ -95,10 +95,10 @@ test('set without role stores null; remove then has returns false', async (t) =>
 // ---- Test 3: the side-table actually got the row --------------------------
 
 test('side-table row written correctly', async (t) => {
-  const { db, server } = await setup();
+  const { db, server, todoList } = await setup();
   t.after(() => db.close());
-  const created = TodoList.create({ title: 'Side table check', owner: 'u1' });
-  const list = listWith(server, created.id);
+  const created = todoList.create({ title: 'Side table check', owner: 'u1' });
+  const list = listWith(server, created.id, todoList);
   await list.collaborators.set('u5', { role: 'viewer' });
 
   const row = db.prepare(
@@ -114,9 +114,12 @@ test('side-table row written correctly', async (t) => {
 // ---- Test 4: map field in create payload → ValidationError ----------------
 
 test('map field in create payload throws ValidationError', () => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, entities: [TodoList] });
+  const todoList = app.entity(TodoList);
   assert.throws(
     () => {
-      TodoList.create({ title: 'x', owner: 'u1', collaborators: { u2: 'editor' } });
+      todoList.create({ title: 'x', owner: 'u1', collaborators: { u2: 'editor' } });
     },
     (err) => {
       assert.ok(err instanceof ValidationError, 'should throw ValidationError');
@@ -126,4 +129,5 @@ test('map field in create payload throws ValidationError', () => {
     },
     'map field should be rejected from create payload',
   );
+  db.close();
 });
