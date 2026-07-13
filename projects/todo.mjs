@@ -20,6 +20,7 @@
 //     axis); there is no `hide()`.
 
 import workbench, { entity, text, number, boolean, date, ref, map, grant, deny, read, write, subscribe, scope, anyOf, inherit } from 'workbench';
+import { pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------------------
 // TIER 1 — the floor. A private, single-user todo. ~20 honest lines.
@@ -96,12 +97,12 @@ export const TodoList = entity('TodoList', {
 // auth logic is hand-copied into the child.
 const inheritList = inherit(TodoList, { via: 'list' });
 
-export const SharedTodo = entity('Todo', {
+export const SharedTodo = entity('SharedTodo', {
     title:     text({ validate: (v) => (v?.length > 0) || 'title required' }),
   completed: boolean({ default: false }),
   dueDate:   date({ optional: true }),
   list:      ref('TodoList', { required: true }),  // typed FK → parent list; grant inherits through it
-  parent:    ref('Todo', { optional: true }),       // self-referential subtask tree
+  parent:    ref('SharedTodo', { optional: true }), // self-referential subtask tree
   position:  number({ default: 0 }),                // sibling order (a ref alone carries no order)
   createdAt: date({ default: () => new Date() }),
 
@@ -122,8 +123,15 @@ export const SharedTodo = entity('Todo', {
 // stream, graceful shutdown) live in the framework — nothing to mount here.
 // ---------------------------------------------------------------------------
 
-workbench({ db: 'todo.db' })
-  .mount('/todos', Todo)            // tier 1: private todos
-  .mount('/lists', TodoList)        // tier 2: shared lists …
-  .mount('/lists/:listId/items', SharedTodo)  // … with items inheriting the list grant
-  .listen();
+// Keep declarations safe to import from another application. Run the standalone
+// server only when this file itself is the command-line entry point.
+const isDirectRun = process.argv[1]
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (isDirectRun) {
+  workbench({ db: 'todo.db' })
+    .mount('/todos', Todo)            // tier 1: private todos
+    .mount('/lists', TodoList)        // tier 2: shared lists …
+    .mount('/lists/:listId/items', SharedTodo)  // … with items inheriting the list grant
+    .listen();
+}
