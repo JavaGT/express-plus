@@ -2,7 +2,7 @@ import { scope, everyone, grant, read, tick, date, schedule } from '../src/index
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { entity, Session } from '../src/internal.mjs';
+import workbench, { entity, Session } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
@@ -30,15 +30,18 @@ function makeAppWithSchedule(entityDef) {
   const db = seededDb();
   for (const sql of generateDDL(entityDef)) db.exec(sql);
 
+  const app = workbench({ db, entities: [entityDef] });
+  const boundEntity = app.entity(entityDef);
+
   const entities = new Map();
-  entities.set(entityDef.name, entityDef);
+  entities.set(boundEntity.name, boundEntity);
 
   const server = createServer({
-    handlers: entityDef.crudHandlers,
+    handlers: boundEntity.crudHandlers,
     db,
     authorize: () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [entityDef.projection],
+      projectionConsumers: [boundEntity.projection],
       admission: {
         beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
@@ -54,7 +57,7 @@ function makeAppWithSchedule(entityDef) {
     }),
   });
 
-  return { db, entity: entityDef, entities, server };
+  return { db, entity: boundEntity, entities, server };
 }
 
 // Poll helper: wait for a condition, retrying at ~10ms intervals.
@@ -398,6 +401,8 @@ test('Session: startClockTriggers fires remove for expired sessions', () => {
 test('e2e: expired session is deleted by clock-dispatch', async (t) => {
   const db = seededDb();
   for (const sql of generateDDL(Session)) db.exec(sql);
+  const app = workbench({ db, entities: [Session] });
+  const boundSession = app.entity(Session);
   const now = Date.now();
   db.prepare(
     'INSERT INTO Session (id, token, principalType, principalId, createdAt) VALUES (?, ?, ?, ?, ?)',
@@ -407,14 +412,14 @@ test('e2e: expired session is deleted by clock-dispatch', async (t) => {
   ).run('s2', 'tok-fresh', 'user', 'bob', now);
 
   const entities = new Map();
-  entities.set(Session.name, Session);
+  entities.set(boundSession.name, boundSession);
 
   const server = createServer({
-    handlers: Session.crudHandlers,
+    handlers: boundSession.crudHandlers,
     db,
     authorize: () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Session.projection],
+      projectionConsumers: [boundSession.projection],
       admission: {
         beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now: hookNow }) => {
           if (p?.type !== 'system' || !p.attributes?.source) return true;
@@ -493,6 +498,7 @@ test('e2e: clock-dispatch dispatch error continues sweep (stderr, no throw)', as
   };
 
   const clock = startClockTriggers({ db, entities, dispatch: throwingDispatch });
+  t.after(() => clock.stop());
 
   // After ~2 intervals, the engine must have kept running and kept dispatching.
   await new Promise((resolve) => setTimeout(resolve, 2500));

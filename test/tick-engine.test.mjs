@@ -28,19 +28,22 @@ function makeAppWithTick(entityDef, entityName) {
   const db = seededDb();
   for (const sql of generateDDL(entityDef)) db.exec(sql);
 
+  const app = workbench({ db, entities: [entityDef] });
+  const boundEntity = app.entity(entityDef);
+
   const entities = new Map();
-  entities.set(entityDef.name, entityDef);
+  entities.set(boundEntity.name, boundEntity);
 
   const server = createServer({
-    handlers: entityDef.crudHandlers,
+    handlers: boundEntity.crudHandlers,
     db,
     authorize: () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [entityDef.projection],
+      projectionConsumers: [boundEntity.projection],
       admission: {
         beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
-      const ent = entities.get(en) ?? entityDef;
+      const ent = entities.get(en) ?? boundEntity;
       return admitSystemMutation({
         entity: ent, verb, rowId: event?.data?.id,
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
@@ -51,7 +54,7 @@ function makeAppWithTick(entityDef, entityName) {
     }),
   });
 
-  return { db, entity: entityDef, entities, server, entityName };
+  return { db, entity: boundEntity, entities, server, entityName };
 }
 
 // Poll helper: wait for a condition, retrying at ~10ms intervals.
@@ -262,24 +265,26 @@ test('e2e: tick dispatch updates row through projection', async (t) => {
   });
   const db = seededDb();
   for (const sql of generateDDL(Blog)) db.exec(sql);
+  const app = workbench({ db, entities: [Blog] });
+  const boundBlog = app.entity(Blog);
 
   // Seed a row matching while ('alive')
   db.prepare('INSERT INTO BlogTick (id, status) VALUES (?, ?)').run('b1', 'alive');
 
   const entities = new Map();
-  entities.set(Blog.name, Blog);
+  entities.set(boundBlog.name, boundBlog);
 
   // Mirror production beforeProjection admission: tick branch + pass-through
   const server = createServer({
-    handlers: Blog.crudHandlers,
+    handlers: boundBlog.crudHandlers,
     db,
     authorize: () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Blog.projection],
+      projectionConsumers: [boundBlog.projection],
       admission: {
         beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
-      const ent = entities.get(en) ?? Blog;
+      const ent = entities.get(en) ?? boundBlog;
       return admitSystemMutation({
         entity: ent, verb, rowId: event?.data?.id,
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
@@ -346,7 +351,7 @@ test('listen tick dispatch waits behind the app write queue', async (t) => {
   }, { timeoutMs: 3000 });
 });
 
-test('e2e: while-fails — row not matching while is never mutated', async () => {
+test('e2e: while-fails — row not matching while is never mutated', async (t) => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogWhileFail', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -361,23 +366,25 @@ test('e2e: while-fails — row not matching while is never mutated', async () =>
   });
   const db = seededDb();
   for (const sql of generateDDL(Blog)) db.exec(sql);
+  const app = workbench({ db, entities: [Blog] });
+  const boundBlog = app.entity(Blog);
 
   // Seed a row NOT matching while ('dead' ≠ 'alive')
   db.prepare('INSERT INTO BlogWhileFail (id, status) VALUES (?, ?)').run('b2', 'dead');
 
   const entities = new Map();
-  entities.set(Blog.name, Blog);
+  entities.set(boundBlog.name, boundBlog);
 
   const server = createServer({
-    handlers: Blog.crudHandlers,
+    handlers: boundBlog.crudHandlers,
     db,
     authorize: () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Blog.projection],
+      projectionConsumers: [boundBlog.projection],
       admission: {
         beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
-      const ent = entities.get(en) ?? Blog;
+      const ent = entities.get(en) ?? boundBlog;
       return admitSystemMutation({
         entity: ent, verb, rowId: event?.data?.id,
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
@@ -389,17 +396,17 @@ test('e2e: while-fails — row not matching while is never mutated', async () =>
   });
 
   const clock = startClockTriggers({ db, entities, dispatch: server.dispatch });
-  const stop = () => clock.stop();
+  t.after(() => clock.stop());
 
   // After multiple intervals, the row must NOT have been mutated.
   await new Promise((resolve) => setTimeout(resolve, 250)); // ~5 intervals
-  assert.doesNotThrow(stop); // verify engine didn't throw
+  assert.doesNotThrow(() => clock.stop()); // verify engine didn't throw
 
   const row = db.prepare('SELECT status FROM BlogWhileFail WHERE id = ?').get('b2');
   assert.equal(row.status, 'dead', 'while-failed row stays unmutated');
 });
 
-test('e2e: TOCTOU — row deleted between discover and dispatch does not escape', async () => {
+test('e2e: TOCTOU — row deleted between discover and dispatch does not escape', async (t) => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogTOCTOU', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -414,23 +421,25 @@ test('e2e: TOCTOU — row deleted between discover and dispatch does not escape'
   });
   const db = seededDb();
   for (const sql of generateDDL(Blog)) db.exec(sql);
+  const app = workbench({ db, entities: [Blog] });
+  const boundBlog = app.entity(Blog);
 
   // Seed a matching row — it will be discovered.
   db.prepare('INSERT INTO BlogTOCTOU (id, status) VALUES (?, ?)').run('b3', 'alive');
 
   const entities = new Map();
-  entities.set(Blog.name, Blog);
+  entities.set(boundBlog.name, boundBlog);
 
   const server = createServer({
-    handlers: Blog.crudHandlers,
+    handlers: boundBlog.crudHandlers,
     db,
     authorize: () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Blog.projection],
+      projectionConsumers: [boundBlog.projection],
       admission: {
         beforeProjection: async ({ entityName: en, verb, principal: p, event, payload, db: hookDb, now }) => {
       if (p?.type !== 'system' || !p.attributes?.source) return true;
-      const ent = entities.get(en) ?? Blog;
+      const ent = entities.get(en) ?? boundBlog;
       return admitSystemMutation({
         entity: ent, verb, rowId: event?.data?.id,
         payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
@@ -442,6 +451,7 @@ test('e2e: TOCTOU — row deleted between discover and dispatch does not escape'
   });
 
   const clock = startClockTriggers({ db, entities, dispatch: server.dispatch });
+  t.after(() => clock.stop());
 
   // Delete the row on the first interval — the engine should discover it,
   // fail to dispatch (row gone), log stderr, and CONTINUE (no exception escapes).
@@ -508,6 +518,7 @@ test('e2e: engine dispatch error continues sweep (stderr, no throw)', async (t) 
   const goodEntities = new Map([[Blog.name, Blog]]);
 
   const clock = startClockTriggers({ db, entities: goodEntities, dispatch: throwingDispatch });
+  t.after(() => clock.stop());
 
   // After multiple intervals, the engine must have kept running (didn't crash)
   // and kept dispatching each pass despite every dispatch throwing.
