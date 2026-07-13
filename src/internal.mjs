@@ -31,7 +31,7 @@ export { authRoutes } from './auth/routes.mjs';
 export { config, resolveConfig } from './config.mjs';
 export { parseCookies, sessionCookie, sessionPrincipalOf, apiKeyPrincipalOf, SESSION_COOKIE } from './auth/session.mjs';
 export { default, router } from './app.mjs';
-export { inc, dec, self, many, effect, validateEffectDeclaration, createEffectContext, checkEffectDepth, executeEffectsForEvent, buildEffectsRegistry, buildEffectsGraph, validateEffects, verifyAdmissionHandshake, detectCrossEntityCycles, compileEntityEffects } from './effect-compiler.mjs';
+export { inc, dec, self, many, effect, validateEffectDeclaration, executeEffectsForEvent, buildEffectsRegistry, buildEffectsGraph, validateEffects, verifyAdmissionHandshake, detectCrossEntityCycles, compileEntityEffects } from './effect-compiler.mjs';
 export { schedule, tick, tickSource, schedulerSource, admitSystemMutation, startClockTriggers } from './schedule.mjs';
 export { createJobQueue } from './job-queue.mjs';
 export { explain } from './explain.mjs';

@@ -212,28 +212,6 @@ function validateWhenPredicate(fn, { triggerHandle, sourceEntityName }) {
   }
 }
 
-// ---- Runtime depth cap backstop ----
-
-const DEFAULT_MAX_EFFECT_DEPTH = 8;
-
-// Context for effect execution — threads the depth counter.
-export function createEffectContext({ maxDepth = DEFAULT_MAX_EFFECT_DEPTH } = {}) {
-  return {
-    depth: 0,
-    maxDepth,
-  };
-}
-
-// Check if we've exceeded the effect depth cap.
-export function checkEffectDepth(context) {
-  if (context.depth >= context.maxDepth) {
-    throw new Error(
-      `Effect reentrancy depth limit exceeded (max: ${context.maxDepth}).\n` +
-      `This is a runtime backstop against runaway effect chains (ADR #22).`,
-    );
-  }
-}
-
 // Compile all declared effects for an entity at load time.
 // Returns a compiled effects map or null if no effects declared.
 export function compileEntityEffects(entityRecord, allEntities) {
@@ -422,17 +400,8 @@ function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName, 
 
 // Execute effects for a committed event.
 // Returns an array of target events to apply through the caller's durable variant.
-// depth/maxDepth: recursion tracking to cap runaway chains (ADR #22 runtime backstop).
 // db: the in-txn database handle for RMW reads (P6c-C).
-export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, depth = 0, maxDepth = 8, db }) {
-  // Check depth cap
-  if (depth >= maxDepth) {
-    throw new Error(
-      `Effect reentrancy depth limit exceeded (max: ${maxDepth}). ` +
-      `This is a runtime backstop against runaway effect chains (ADR #22).`,
-    );
-  }
-
+export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, db }) {
   // Find effects registered for this event type
   const eventEffects = effectsRegistry.get(event.type);
   if (!eventEffects || eventEffects.length === 0) {

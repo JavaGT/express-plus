@@ -104,10 +104,10 @@ function requireAdmission(granted) {
 
 function effectEventsFor(registry, executeEffectsForEvent) {
   if (!registry) return null;
-  return (event, { now, actionId, depth, maxEffectDepth, db }) => {
+  return (event, { now, actionId, db }) => {
     const impl = executeEffectsForEvent ??
       createRequire(import.meta.url)('./effect-compiler.mjs').executeEffectsForEvent;
-    return impl(event, registry, { now, actionId, depth, maxDepth: maxEffectDepth, db });
+    return impl(event, registry, { now, actionId, db });
   };
 }
 
@@ -118,7 +118,11 @@ export function durableMutationVariant({
   effectsRegistry = null,
   executeEffectsForEvent = null,
   postCommitConsumers = [],
+  maxEffectDepth = 8,
 } = {}) {
+  if (!Number.isInteger(maxEffectDepth) || maxEffectDepth < 0) {
+    throw new Error('durableMutationVariant: maxEffectDepth must be a non-negative integer');
+  }
   const effectsExecutor = effectEventsFor(effectsRegistry, executeEffectsForEvent);
   const variant = {
     name: 'durable.mutation',
@@ -128,7 +132,6 @@ export function durableMutationVariant({
       nextSeq,
       principal,
       depth = 0,
-      maxEffectDepth = 8,
       payload,
     } = {}) {
       const finalizedEvents = [];
@@ -201,10 +204,16 @@ export function durableMutationVariant({
       // Effects recurse through this SAME named variant. The implementation is
       // local to the variant so dispatch and batch get identical depth behavior
       // and leverage one pipeline interface rather than an options lattice.
-      if (effectsExecutor && depth < maxEffectDepth) {
+      if (effectsExecutor) {
         for (const ev of finalizedEvents) {
-          const effectEvents = effectsExecutor(ev, { now, actionId, depth: depth + 1, maxEffectDepth, db });
+          const effectEvents = effectsExecutor(ev, { now, actionId, db });
           if (effectEvents && effectEvents.length > 0) {
+            if (depth >= maxEffectDepth) {
+              throw new Error(
+                `Effect reentrancy depth limit exceeded (max: ${maxEffectDepth}). ` +
+                'This is a runtime backstop against runaway effect chains (ADR #22).',
+              );
+            }
             const effectPrincipal = effectEvents[0]?._effectPrincipal ?? principal;
             await variant.applyInTxn(db, effectEvents, {
               now,
@@ -212,7 +221,6 @@ export function durableMutationVariant({
               nextSeq,
               principal: effectPrincipal,
               depth: depth + 1,
-              maxEffectDepth,
               payload,
             });
           }

@@ -612,3 +612,9 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Decision:** For a committed event, durable job insertion and `effect.durable` cursor advancement share one database transaction in live consumption and recovery.
 - **Reason:** A cursor written without all jobs loses work; jobs written without the cursor make recovery repeat partial work. The only safe unit is all derived jobs plus cursor, or none.
 - **Recovery rule:** A failed transaction does not update the in-memory recovery cursor or enqueue count. A later sweep retries the same log event from durable truth.
+
+## 2026-07-13 — the mutation pipeline owns effect depth
+
+- **Decision:** `maxEffectDepth` is a validated `durableMutationVariant` setting and counts generated effect hops. The effect compiler has no independent recursion counter.
+- **Reason:** The pipeline is the component that sees both the current hop and whether another generated mutation actually exists. Enforcing the bound there lets a terminal event at the limit succeed while an attempted extra hop fails atomically.
+- **Compatibility:** The private `createEffectContext` and `checkEffectDepth` exports were removed. They had no production caller and duplicated the runtime rule.

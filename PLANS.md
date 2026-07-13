@@ -527,3 +527,11 @@ REMAINING-P1-NOTES resolved/deferred: spec #6 (handler txn signature) RESOLVED b
 - The transaction uses the public embedded-driver `txn` seam, so raw SQLite handles and conforming Workbench drivers retain the same behavior.
 - Focused gate: durable-effects, consumer-cursor, and job-queue tests 17/17; focused ESLint and diff check green.
 - Next: make the pipeline the single owner of the effect-depth budget and prove one allowed hop succeeds while an attempted second hop rolls back.
+
+## 2026-07-13 — rewrite Wave 2: one exact effect-depth budget
+
+- `durableMutationVariant` now owns and validates `maxEffectDepth`; the effect compiler only translates one event into generated events. The unused second depth counter and its internal exports were removed.
+- The limit counts generated hops. With a budget of 1, an origin may generate one terminal event. If that generated event would itself generate another event, the pipeline throws and its transaction rolls back the origin, first hop, log, and projections.
+- Invalid negative or fractional budgets fail at pipeline construction instead of producing ambiguous runtime behavior.
+- Focused effect/auth/admission gate: 53/53 green; existing runaway self-recursion proofs still throw and roll back.
+- Next: wire the public `state.effects` descriptor through entity compilation, then complete schedule/tick lifecycle guards.

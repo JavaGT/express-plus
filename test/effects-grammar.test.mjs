@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, generateDDL, generateFrameworkDDL, executeFrameworkDDL, action, event, createServer, durableMutationVariant, createEffectContext, checkEffectDepth, buildEffectsRegistry, detectCrossEntityCycles, validateEffects, created, updated } from '../src/internal.mjs';
+  entity, generateDDL, generateFrameworkDDL, executeFrameworkDDL, action, event, createServer, durableMutationVariant, buildEffectsRegistry, detectCrossEntityCycles, validateEffects, created, updated } from '../src/internal.mjs';
 
 // Helper to set up a fresh in-memory db with framework tables
 function setupDb() {
@@ -285,22 +285,111 @@ test('target grant denial rolls back origin (in-txn atomic)', () => {
   assert.ok(Source.effects);
 });
 
-// ---- RED: runtime depth cap backstop aborts runaway effect batch ----
-test('runtime depth cap prevents runaway effect chains', () => {
-  // This test requires the full effect runtime with depth tracking
-  // For Part 1, we verify the depth cap mechanism exists
-
-  const ctx = createEffectContext({ maxDepth: 8 });
-
-  // Increment depth up to limit
-  for (let i = 0; i < 8; i++) {
-    ctx.depth = i;
-    checkEffectDepth(ctx); // Should not throw
+test('maxEffectDepth 1 allows one effect hop when the generated event is terminal', async () => {
+  const db = setupDb();
+  const Target = entity('OneHopTarget', {
+    name: text(),
+    grant: () => grant(read, write, subscribe),
+  });
+  const Source = entity('OneHopSource', {
+    name: text(),
+    grant: () => grant(read, write, subscribe),
+    effects: (OneHopSource) => [
+      [OneHopSource.created, { mutate: Target, with: { name: 'generated' } }],
+    ],
+  });
+  for (const declaration of [Source, Target]) {
+    for (const sql of generateDDL(declaration)) db.exec(sql);
   }
+  const app = workbench({ db, entities: [Source, Target] });
+  const boundSource = app.entity(Source);
+  const boundTarget = app.entity(Target);
+  const server = createServer({
+    handlers: boundSource.crudHandlers,
+    db,
+    authorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [boundSource.projection, boundTarget.projection],
+      effectsRegistry: buildEffectsRegistry([boundSource, boundTarget]),
+      maxEffectDepth: 1,
+    }),
+  });
 
-  // Exceed limit
-  ctx.depth = 8;
-  assert.throws(() => checkEffectDepth(ctx), /depth limit exceeded/);
+  await server.dispatch({
+    actionId: 'one-effect-hop',
+    type: 'OneHopSource.create',
+    payload: { name: 'origin' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM OneHopSource').get().n, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM OneHopTarget').get().n, 1);
+  db.close();
+});
+
+test('maxEffectDepth rejects invalid budgets at pipeline construction', () => {
+  assert.throws(
+    () => durableMutationVariant({ maxEffectDepth: -1 }),
+    /non-negative integer/,
+  );
+  assert.throws(
+    () => durableMutationVariant({ maxEffectDepth: 1.5 }),
+    /non-negative integer/,
+  );
+});
+
+test('maxEffectDepth 1 rejects a second effect hop and rolls back the whole chain', async () => {
+  const db = setupDb();
+  const Target = entity('TwoHopTarget', {
+    name: text(),
+    grant: () => grant(read, write, subscribe),
+  });
+  const Middle = entity('TwoHopMiddle', {
+    name: text(),
+    grant: () => grant(read, write, subscribe),
+    effects: (TwoHopMiddle) => [
+      [TwoHopMiddle.created, { mutate: Target, with: { name: 'second hop' } }],
+    ],
+  });
+  const Source = entity('TwoHopSource', {
+    name: text(),
+    grant: () => grant(read, write, subscribe),
+    effects: (TwoHopSource) => [
+      [TwoHopSource.created, { mutate: Middle, with: { name: 'first hop' } }],
+    ],
+  });
+  for (const declaration of [Source, Middle, Target]) {
+    for (const sql of generateDDL(declaration)) db.exec(sql);
+  }
+  const app = workbench({ db, entities: [Source, Middle, Target] });
+  const boundSource = app.entity(Source);
+  const boundMiddle = app.entity(Middle);
+  const boundTarget = app.entity(Target);
+  const server = createServer({
+    handlers: boundSource.crudHandlers,
+    db,
+    authorize: async () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [boundSource.projection, boundMiddle.projection, boundTarget.projection],
+      effectsRegistry: buildEffectsRegistry([boundSource, boundMiddle, boundTarget]),
+      maxEffectDepth: 1,
+    }),
+  });
+
+  await assert.rejects(
+    server.dispatch({
+      actionId: 'two-effect-hops',
+      type: 'TwoHopSource.create',
+      payload: { name: 'origin' },
+      principal: principal({ type: 'user', id: 'u1' }),
+    }),
+    /depth limit exceeded/i,
+  );
+
+  for (const table of ['TwoHopSource', 'TwoHopMiddle', 'TwoHopTarget', '_Log']) {
+    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0);
+  }
+  db.close();
 });
 
 // ---- inc/dec operators ----
@@ -1056,4 +1145,3 @@ test('Self-recursion depth cap: anyOf effect with self-mutate bounded by maxDept
   assert.ok(threw, 'should throw depth-cap error, not hang');
   assert.ok(/depth limit exceeded/i.test(errorMsg), `error should mention depth cap: ${errorMsg}`);
 });
-
