@@ -592,9 +592,10 @@ export function entity(name, declaration = {}) {
         }
         return undefined;
       },
-      set(target, key, value, receiver) {
+      set(target, key, value, _receiver) {
         if (mutableAuth && (key === 'grant' || key === 'registry' || key === 'readScope' || key === 'scopeAst' || key === 'scopeFilter')) {
-          return Reflect.set(target, key, value, receiver);
+          target[key] = value;
+          return true;
         }
         return false;
       },
@@ -630,7 +631,7 @@ export function entity(name, declaration = {}) {
         declaration: { value: proxy, enumerable: false },
         runtime: { value: runtime, enumerable: false },
       });
-      const bound = handleProxy(boundRecord, runtime.entityOf);
+      const bound = handleProxy(boundRecord, runtime.entityOf, { mutableAuth: true });
       const { hydrate, deserializeStoredCells } = createEntityHydrator({
         record: bound,
         entityName: name,

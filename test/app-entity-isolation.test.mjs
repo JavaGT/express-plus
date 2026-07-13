@@ -55,21 +55,47 @@ test('one declaration binds trusted queries independently to two applications', 
   appB.db.close();
 });
 
-test('membership applied through a facade updates the shared declaration policy', () => {
+test('membership applied through a facade scopes policy to that application', () => {
   const Team = entity('BoundMembershipTeam', {
     members: map(ref('User'), { role: ['member'] }),
     grant: () => [scope(() => everyone()).can(() => grant(read))],
   });
   const app = workbench({ db: new DatabaseSync(':memory:'), entities: [Team] });
 
-  const result = membership(app.entity(Team), {
+  const facade = app.entity(Team);
+  const result = membership(facade, {
     member: { can: [read, subscribe] },
   });
 
-  assert.equal(result, Team);
-  assert.ok(Team.registry.member);
-  assert.equal(app.entity(Team).registry, Team.registry);
+  assert.equal(result, facade);
+  assert.ok(facade.registry.member);
+  assert.notEqual(facade.registry, Team.registry);
   app.db.close();
+});
+
+test('membership applied through one app facade does not leak to another app sharing the declaration', () => {
+  const Team = entity('IsolatedMembershipTeam', {
+    members: map(ref('User'), { role: ['member'] }),
+  });
+  const appA = workbench({ db: new DatabaseSync(':memory:'), entities: [Team] });
+  const appB = workbench({ db: new DatabaseSync(':memory:'), entities: [Team] });
+
+  membership(appA.entity(Team), {
+    member: { can: [read, subscribe] },
+  });
+
+  const teamA = appA.entity(Team);
+  const teamB = appB.entity(Team);
+  assert.notEqual(teamA.registry, Team.registry);
+  assert.equal(teamB.registry, Team.registry);
+  assert.equal(typeof teamA.grant, 'function');
+  assert.equal(teamB.grant, undefined);
+  assert.match(teamA.readScope.sql, /IsolatedMembershipTeam_members/);
+  assert.equal(teamB.readScope, undefined);
+  assert.equal(teamB.scopeFilter({ type: 'user', id: 'user-b' }).sql, '1=0');
+
+  appA.db.close();
+  appB.db.close();
 });
 
 test('the field namespace keeps metadata separate from a field named name', async () => {

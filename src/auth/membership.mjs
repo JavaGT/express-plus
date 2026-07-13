@@ -120,13 +120,10 @@ export function compileMembershipAuthz(entityName, fields, config) {
 
 // ---- Standalone: augment a compiled entity record in place ----
 // Sets entity.grant, entity.registry, entity.readScope, entity.checks, and
-// entity.scopeFilter directly on the declaration proxy. Any app binding reads
-// these declaration-owned policy properties through its prototype.
+// entity.scopeFilter on the record it receives. Passing a declaration defines
+// the policy inherited by future bindings; passing an app-bound facade creates
+// an application-local policy overlay without changing the declaration.
 export function membership(entityRecord, config) {
-  // Policy belongs to the application-independent declaration. Accepting a
-  // bound facade here is convenient, but mutating it would couple policy to a
-  // single application (and the facade deliberately rejects such writes).
-  entityRecord = entityRecord?.declaration ?? entityRecord;
   if (!entityRecord || typeof entityRecord !== 'object' || !entityRecord.name) {
     throw new Error(
       'membership(entity, config): first argument must be a compiled entity record (from entity())',
