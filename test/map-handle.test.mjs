@@ -18,8 +18,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
+import workbench, { entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
 
 // A User with a hash password — the security reason toArray must hydrate.
 const User = entity('User', {
@@ -31,14 +30,13 @@ const User = entity('User', {
 const Doc = entity('Doc', {
     title: text(),
   owner: ref('User', { role: 'owner', readonly: true }),
-  collaborators: map(ref('User'), { role: ['viewer', 'editor'] }),
+  collaborators: map(ref(User), { role: ['viewer', 'editor'] }),
 
   grant: () => grant(read),
 });
 
 async function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(User)) db.exec(sql);
   for (const sql of generateDDL(Doc)) db.exec(sql);
@@ -47,27 +45,29 @@ async function setup() {
   db.prepare("INSERT INTO User (id, username, password) VALUES ('2', 'bob', 'salt:digest2')")
     .run();
   db.prepare("INSERT INTO Doc (id, title, owner) VALUES ('10', 'Hello', '1')").run();
+  const app = workbench({ db, entities: [User, Doc] });
+  const BoundDoc = app.entity(Doc);
   const server = await createServer({
     db,
-    handlers: Doc.crudHandlers,
+    handlers: BoundDoc.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Doc.projection],
+      projectionConsumers: [BoundDoc.projection],
       admission: { beforeProjection: () => true, afterProjection: async () => true },
     }),
     authorize: async () => true,
   });
-  return { db, server };
+  return { db, server, BoundDoc };
 }
 
 // hydrate threading the dispatch ref (3rd arg); principal null = trusted query
 // API (mayFieldOp bypassed — mirrors the log-field handle test).
-function docWith(server, id) {
-  return Doc.hydrate({ id }, null, server.dispatch);
+function docWith(BoundDoc, server, id) {
+  return BoundDoc.hydrate({ id }, null, server.dispatch);
 }
 
 test('.set adds a new member; a role change updates the role (no duplicate row)', async () => {
-  const { db, server } = await setup();
-  const doc = docWith(server, '10');
+  const { db, server, BoundDoc } = await setup();
+  const doc = docWith(BoundDoc, server, '10');
 
   await doc.collaborators.set('2', { role: 'viewer' });
   assert.equal(doc.collaborators.has('2'), true);
@@ -81,8 +81,8 @@ test('.set adds a new member; a role change updates the role (no duplicate row)'
 });
 
 test('.toArray() populates members as hydrated [member, role] pairs', async () => {
-  const { server } = await setup();
-  const doc = docWith(server, '10');
+  const { server, BoundDoc } = await setup();
+  const doc = docWith(BoundDoc, server, '10');
   await doc.collaborators.set('2', { role: 'viewer' });
 
   const rows = await doc.collaborators.toArray();
@@ -97,30 +97,27 @@ test('.toArray() populates members as hydrated [member, role] pairs', async () =
   assert.equal(member.password.digest, undefined, 'no raw digest on the handle');
 });
 
-test('.toArray() with no registered target returns [null, role] pairs (graceful degrade)', async () => {
-  // A map whose of-target is an entity that was never registered (e.g. a ref to
-  // a name with no compiled entity). toArray degrades rather than throwing.
+test('.toArray() fails loudly when its string target is not registered', async () => {
   const Phantom = entity('Phantom', {
         tag: text(), members: map(ref('Nonexistent')),
 
     grant: () => grant(read),
   });
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(Phantom)) db.exec(sql);
   db.prepare("INSERT INTO Phantom (id, tag) VALUES ('1', 'p')").run();
+  const BoundPhantom = workbench({ db, entities: [Phantom] }).entity(Phantom);
   const server = await createServer({
     db,
-    handlers: Phantom.crudHandlers,
+    handlers: BoundPhantom.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Phantom.projection],
+      projectionConsumers: [BoundPhantom.projection],
       admission: { beforeProjection: () => true, afterProjection: async () => true },
     }),
     authorize: async () => true,
   });
-  const row = Phantom.hydrate({ id: '1' }, null, server.dispatch);
+  const row = BoundPhantom.hydrate({ id: '1' }, null, server.dispatch);
   await row.members.set('m1');
-  const rows = await row.members.toArray();
-  assert.deepEqual(rows, [[null, null]]);
+  await assert.rejects(row.members.toArray(), /not registered with this application/);
 });

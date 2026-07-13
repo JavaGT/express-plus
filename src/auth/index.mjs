@@ -10,7 +10,7 @@ export {
   apiKeyPrincipalOf, SESSION_COOKIE,
 } from './session.mjs';
 export {
-  createInvitation, acceptInvitation, rejectInvitation, listInvitationsForUser,
+  createInvitationApi,
 } from './invitation.mjs';
 export { membership, compileMembershipAuthz } from './membership.mjs';
 export {

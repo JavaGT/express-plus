@@ -21,7 +21,6 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   entity, bindReadScope, mayVerb } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 // ---- helpers ----
 
@@ -33,8 +32,8 @@ function scopedIds(db, entityRecord, prin) {
     .map((r) => r.id);
 }
 
-async function serve(t, db, routes, who) {
-  const app = workbench({ db });
+async function serve(t, db, routes, who, entities) {
+  const app = workbench({ db, entities });
   for (const { path, entity } of routes) app.mount(path, entity);
   app.listen(0, { principalOf: () => who });
   await app.ready;
@@ -80,7 +79,7 @@ function declareAlbumPhoto() {
 
   const Photo = entity('Photo', {
         title: text(),
-    album: ref('Album'),
+    album: ref(Album),
     capturedAt: date({ optional: true }),
     owner: ref('User', { role: 'owner', readonly: true }),
 
@@ -176,16 +175,17 @@ test('SQL scope returns only photos whose album the principal can access (or own
   const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Album, Photo] });
+  const boundPhoto = app.entity(Photo);
 
   // Alice owns a-shared → sees p1 (in a-shared).
-  assert.deepEqual(scopedIds(db, Photo, alice), ['p1']);
+  assert.deepEqual(scopedIds(db, boundPhoto, alice), ['p1']);
   // Bob is editor on a-shared AND owns a-private → sees p1 + p2.
-  assert.deepEqual(scopedIds(db, Photo, bob).sort(), ['p1', 'p2']);
+  assert.deepEqual(scopedIds(db, boundPhoto, bob).sort(), ['p1', 'p2']);
   // Carol is viewer on a-shared → sees only p1.
-  assert.deepEqual(scopedIds(db, Photo, carol), ['p1']);
+  assert.deepEqual(scopedIds(db, boundPhoto, carol), ['p1']);
   // Stranger has no album access and owns nothing → sees nothing.
-  assert.deepEqual(scopedIds(db, Photo, stranger), []);
+  assert.deepEqual(scopedIds(db, boundPhoto, stranger), []);
 
   db.close();
 });
@@ -196,17 +196,18 @@ test('runtime mayVerb grants the correct capabilities per album role', async () 
   const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Album, Photo] });
+  const boundPhoto = app.entity(Photo);
 
-  const p1 = Photo.getOrFail('p1');
+  const p1 = boundPhoto.getOrFail('p1');
 
-  assert.equal(await mayVerb(Photo, 'read', p1, alice), true);
-  assert.equal(await mayVerb(Photo, 'update', p1, alice), true);
-  assert.equal(await mayVerb(Photo, 'read', p1, bob), true);
-  assert.equal(await mayVerb(Photo, 'update', p1, bob), true);
-  assert.equal(await mayVerb(Photo, 'read', p1, carol), true);
-  assert.equal(await mayVerb(Photo, 'update', p1, carol), false);
-  assert.equal(await mayVerb(Photo, 'read', p1, stranger), false);
+  assert.equal(await mayVerb(boundPhoto, 'read', p1, alice), true);
+  assert.equal(await mayVerb(boundPhoto, 'update', p1, alice), true);
+  assert.equal(await mayVerb(boundPhoto, 'read', p1, bob), true);
+  assert.equal(await mayVerb(boundPhoto, 'update', p1, bob), true);
+  assert.equal(await mayVerb(boundPhoto, 'read', p1, carol), true);
+  assert.equal(await mayVerb(boundPhoto, 'update', p1, carol), false);
+  assert.equal(await mayVerb(boundPhoto, 'read', p1, stranger), false);
 
   db.close();
 });
@@ -217,23 +218,24 @@ test('null and dangling album FKs fail closed for non-owning principals', async 
   const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Album, Photo] });
+  const boundPhoto = app.entity(Photo);
 
   // Orphan (album=null, owner=dave) — not visible to any test principal
-  const p3 = Photo.getOrFail('p3');
-  assert.equal(await mayVerb(Photo, 'read', p3, carol), false);
-  assert.equal(await mayVerb(Photo, 'read', p3, bob), false);
-  assert.equal(await mayVerb(Photo, 'read', p3, alice), false);
+  const p3 = boundPhoto.getOrFail('p3');
+  assert.equal(await mayVerb(boundPhoto, 'read', p3, carol), false);
+  assert.equal(await mayVerb(boundPhoto, 'read', p3, bob), false);
+  assert.equal(await mayVerb(boundPhoto, 'read', p3, alice), false);
 
   // Dangling (album=no-such-album, owner=dave) — no one gets in
-  const p4 = Photo.getOrFail('p4');
-  assert.equal(await mayVerb(Photo, 'read', p4, bob), false);
-  assert.equal(await mayVerb(Photo, 'read', p4, alice), false);
+  const p4 = boundPhoto.getOrFail('p4');
+  assert.equal(await mayVerb(boundPhoto, 'read', p4, bob), false);
+  assert.equal(await mayVerb(boundPhoto, 'read', p4, alice), false);
 
   // Scoped IDs exclude orphan and dangling for everyone
-  const allIds = scopedIds(db, Photo, alice)
-    .concat(scopedIds(db, Photo, bob))
-    .concat(scopedIds(db, Photo, carol));
+  const allIds = scopedIds(db, boundPhoto, alice)
+    .concat(scopedIds(db, boundPhoto, bob))
+    .concat(scopedIds(db, boundPhoto, carol));
   assert.ok(!allIds.includes('p3'), 'orphan photo not visible to anyone');
   assert.ok(!allIds.includes('p4'), 'dangling photo not visible to anyone');
 
@@ -246,11 +248,12 @@ test('removing a collaborator revokes SQL scope AND runtime .can', async () => {
   const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Album, Photo] });
+  const boundPhoto = app.entity(Photo);
 
-  const p1 = Photo.getOrFail('p1');
+  const p1 = boundPhoto.getOrFail('p1');
   // Carol is a viewer on a-shared → sees p1
-  assert.equal(await mayVerb(Photo, 'read', p1, carol), true);
+  assert.equal(await mayVerb(boundPhoto, 'read', p1, carol), true);
 
   // Remove carol from the album
   db.prepare(
@@ -258,8 +261,8 @@ test('removing a collaborator revokes SQL scope AND runtime .can', async () => {
   ).run({ aid: 'a-shared', mid: 'carol' });
 
   // Now carol is denied by BOTH layers
-  assert.equal(await mayVerb(Photo, 'read', p1, carol), false);
-  assert.deepEqual(scopedIds(db, Photo, carol), []);
+  assert.equal(await mayVerb(boundPhoto, 'read', p1, carol), false);
+  assert.deepEqual(scopedIds(db, boundPhoto, carol), []);
 
   db.close();
 });
@@ -268,7 +271,6 @@ test('removing a collaborator revokes SQL scope AND runtime .can', async () => {
 
 test('async declared checks use await to read target scalar fields', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   db.exec('CREATE TABLE Album2 (id TEXT, owner TEXT, title TEXT)');
   db.exec('CREATE TABLE Album2_collaborators (Album2_id TEXT, member_id TEXT, role TEXT)');
@@ -294,7 +296,7 @@ test('async declared checks use await to read target scalar fields', async () =>
 
   const Photo2 = entity('Photo2', {
         title: text(),
-    album: ref('Album2'),
+    album: ref(Album2),
     owner: ref('User', { role: 'owner' }),
 
     checks: {
@@ -309,12 +311,15 @@ test('async declared checks use await to read target scalar fields', async () =>
     })],
   });
 
-  const p1Row = Photo2.getOrFail('p1');
+  const app = workbench({ db, entities: [Album2, Photo2] });
+  const boundPhoto2 = app.entity(Photo2);
 
-  assert.equal(await mayVerb(Photo2, 'read', p1Row, alice), true);
-  assert.equal(await mayVerb(Photo2, 'update', p1Row, alice), true);
-  assert.equal(await mayVerb(Photo2, 'read', p1Row, bob), false);
-  assert.equal(await mayVerb(Photo2, 'read', p1Row, stranger), false);
+  const p1Row = boundPhoto2.getOrFail('p1');
+
+  assert.equal(await mayVerb(boundPhoto2, 'read', p1Row, alice), true);
+  assert.equal(await mayVerb(boundPhoto2, 'update', p1Row, alice), true);
+  assert.equal(await mayVerb(boundPhoto2, 'read', p1Row, bob), false);
+  assert.equal(await mayVerb(boundPhoto2, 'read', p1Row, stranger), false);
 
   db.close();
 });
@@ -326,7 +331,7 @@ test('HTTP list returns only photos in albums the principal can access', async (
   const db = new DatabaseSync(':memory:');
   seed(db);
 
-  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], bob);
+  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], bob, [Album, Photo]);
 
   const res = await fetch(`${origin}/photos`);
   assert.equal(res.status, 200);
@@ -338,11 +343,11 @@ test('HTTP list returns only photos in albums the principal can access', async (
 });
 
 test('HTTP list for a viewer returns only shared-album photos', async (t) => {
-  const { Photo } = declareAlbumPhoto();
+  const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
 
-  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], carol);
+  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], carol, [Album, Photo]);
 
   const res = await fetch(`${origin}/photos`);
   assert.equal(res.status, 200);
@@ -352,11 +357,11 @@ test('HTTP list for a viewer returns only shared-album photos', async (t) => {
 });
 
 test('HTTP list for a stranger returns empty', async (t) => {
-  const { Photo } = declareAlbumPhoto();
+  const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
 
-  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], stranger);
+  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], stranger, [Album, Photo]);
 
   const res = await fetch(`${origin}/photos`);
   assert.equal(res.status, 200);
@@ -365,11 +370,11 @@ test('HTTP list for a stranger returns empty', async (t) => {
 });
 
 test('HTTP read of a photo in a visible album returns 200', async (t) => {
-  const { Photo } = declareAlbumPhoto();
+  const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
 
-  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], bob);
+  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], bob, [Album, Photo]);
 
   const res = await fetch(`${origin}/photos/p1`);
   assert.equal(res.status, 200);
@@ -379,11 +384,11 @@ test('HTTP read of a photo in a visible album returns 200', async (t) => {
 });
 
 test('HTTP read of a photo in a forbidden album returns 404', async (t) => {
-  const { Photo } = declareAlbumPhoto();
+  const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
 
-  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], carol);
+  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], carol, [Album, Photo]);
 
   // p2 is in a-private (bob's album) → carol has no access
   const res = await fetch(`${origin}/photos/p2`);
@@ -391,12 +396,12 @@ test('HTTP read of a photo in a forbidden album returns 404', async (t) => {
 });
 
 test('HTTP read returns 404 for orphan photo not owned by the principal', async (t) => {
-  const { Photo } = declareAlbumPhoto();
+  const { Album, Photo } = declareAlbumPhoto();
   const db = new DatabaseSync(':memory:');
   seed(db);
 
   // p3 is orphan (album=null) owned by dave → carol has no access
-  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], carol);
+  const origin = await serve(t, db, [{ path: '/photos', entity: Photo }], carol, [Album, Photo]);
 
   const res = await fetch(`${origin}/photos/p3`);
   assert.equal(res.status, 404);

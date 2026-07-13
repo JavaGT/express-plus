@@ -26,13 +26,10 @@ import { isRuntimeGrantClause } from './scope.mjs';
 // a thrown error (fail closed) rather than a silent false.
 function makeIs(entityRecord, row, principal) {
   const is = {};
-  // Read from the unified registry's RUN faces — a check with no run face
-  // simply isn't present at runtime (calling it → undefined → would throw;
-  // fail-closed). The canonical home is `registry`; `checks` is a backward-
-  // compat bridge exposed on the entity record.
+  const { runtime } = entityRecord;
   for (const [role, entry] of Object.entries(entityRecord.registry)) {
     if (entry.run) {
-      is[role] = check(() => entry.run({ entity: row, principal }), { name: role });
+      is[role] = check(() => entry.run({ entity: row, principal, runtime }), { name: role });
     }
   }
   return is;
@@ -57,7 +54,8 @@ export async function rowCapabilities(entityRecord, row, principal) {
   if (inherited) {
     const parentRow = inheritedParentRow(entityRecord, row, principal);
     if (!parentRow) return { granted: false, capabilities: [] };
-    return await rowCapabilities(inherited.inherit, parentRow, principal);
+    const parentRecord = resolveInheritedParent(entityRecord, inherited);
+    return await rowCapabilities(parentRecord, parentRow, principal);
   }
   // Resolve through the SAME `grantClauses` the sibling resolvers use
   // (hasOwnCanGrant / inheritedGrant). A grant may be a function (a thunk
@@ -162,19 +160,28 @@ export async function mayVerb(entityRecord, verb, row, principal) {
 function inheritedParentRow(entityRecord, row, principal) {
   const inherited = inheritedGrant(entityRecord);
   if (!inherited) return null;
-  const parent = inherited.inherit;
   const parentId = row?.[inherited.via];
-  if (parentId == null || !parent || typeof parent.findById !== 'function') return null;
-  return parent.findById(String(parentId), principal);
+  if (parentId == null) return null;
+  const parentRecord = resolveInheritedParent(entityRecord, inherited);
+  if (typeof parentRecord?.findById !== 'function') return null;
+  return parentRecord.findById(String(parentId), principal);
+}
+
+function resolveInheritedParent(entityRecord, inherited) {
+  const parent = inherited.inherit;
+  const { runtime } = entityRecord;
+  return runtime ? runtime.entityOf(parent) : parent;
 }
 
 export async function mayRow(entityRecord, verb, row, principal, authz = mayVerb) {
   try {
+    if (entityRecord.grant == null) return false;
     const inherited = inheritedGrant(entityRecord);
     if (inherited) {
       const parentRow = inheritedParentRow(entityRecord, row, principal);
       if (!parentRow) return false;
-      return await mayRow(inherited.inherit, verb, parentRow, principal, authz);
+      const parentRecord = resolveInheritedParent(entityRecord, inherited);
+      return await mayRow(parentRecord, verb, parentRow, principal, authz);
     }
     if (!hasOwnCanGrant(entityRecord)) return true;
     return await authz(entityRecord, verb, row, principal);

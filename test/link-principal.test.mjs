@@ -15,11 +15,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import {
+import workbench, {
   entity, executeDDL, bindReadScope } from '../src/internal.mjs';
 import { mayVerb } from '../src/row-grant.mjs';
 import { principal } from '../src/principal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 const norm = (sql) => sql.replace(/\s+/g, ' ').trim();
 const COMMENT = [read, subscribe];
@@ -60,15 +59,16 @@ function makeDoc() {
 
 function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   const Doc = makeDoc();
+  const app = workbench({ db, entities: [Doc] });
   executeDDL(Doc, db);
   // Seed a doc owned by alice, shared by link token 'share-xyz' at tier comment.
   db.prepare(
     "INSERT INTO Doc (id, title, owner, linkShare__token, linkShare__tier) " +
     "VALUES ('1', 'Shared Doc', 'alice', 'share-xyz', 'comment')",
   ).run();
-  return { db, Doc };
+  const Doc_b = app.entity(Doc);
+  return { db, Doc: Doc_b };
 }
 
 // ---- compile (scope→SQL) face ----------------------------------------------

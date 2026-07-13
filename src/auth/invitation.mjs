@@ -1,152 +1,194 @@
-// invitation.mjs — the framework's generic invitation flow helpers.
-//
-// Four operations, each one path to the same outcome — no second access
-// surface behind the entity query API:
-//
-//   createInvitation(params)     → creates an Invitation row (with auto-generated token)
-//   acceptInvitation(token, user) → validates, increments useCount, grants membership
-//   rejectInvitation(token, user) → removes a direct invitation row
-//   listInvitationsForUser(user) → pending invites for a user
-//
-// The accept flow inserts into the target entity's membership map side-table
-// (`{Entity}_members` with columns `{Entity}_id`, `member_id`, `role`) using
-// the unscoped query API — the same trust class as auth-entity writes.
+// Generic invitations are application-scoped. The bound Invitation facade is
+// the authority for both the database and the entity registry, which prevents
+// a caller from pairing an entity from one application with another database.
 
-import { Invitation } from './entities.mjs';
-import { getActiveDb } from '../db.mjs';
+import { txn } from '../driver.mjs';
+import { admin } from '../grant.mjs';
+import { rowCapabilities } from '../row-grant.mjs';
+import { MEMBER_COLUMN, membershipOwnerCol, membershipTable } from '../scope-sql.mjs';
 
-// createInvitation({ targetEntity, targetId, role, targetUser, maxUses, expiresAt, createdBy })
-// → creates an Invitation row with an auto-generated token (32 random bytes, base64url).
-// Returns the hydrated invitation row so the caller can read its token.
-export function createInvitation({ targetEntity, targetId, role, targetUser, maxUses, expiresAt, createdBy }) {
-  if (!targetEntity || !targetId || !role || !createdBy) {
-    throw new Error('createInvitation requires targetEntity, targetId, role, and createdBy');
-  }
-  return Invitation.create({
-    targetEntity,
-    targetId,
-    role,
-    targetUser: targetUser ?? null,
-    maxUses: maxUses ?? null,
-    expiresAt: expiresAt ?? null,
-    createdBy,
-  });
+function httpError(status, message) {
+  return Object.assign(new Error(message), { status });
 }
 
-// acceptInvitation(token, user) → validates the token, increments useCount,
-// and grants membership on the target entity by inserting into the membership
-// map side-table. Returns { targetEntity, targetId, role }.
-//
-// Validation:
-//   - Token must exist
-//   - Must not be expired (expiresAt set and in the past)
-//   - For link invites (targetUser is null): useCount must be < maxUses (if maxUses is set)
-//   - For direct invites (targetUser is set): the accepting user must match targetUser
-export function acceptInvitation(token, user) {
-  if (!token || !user || !user.id) {
-    throw Object.assign(new Error('acceptInvitation requires a token and a user with an id'), { status: 400 });
+export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
+  const runtime = Invitation?.runtime;
+  if (!Invitation || !runtime?.db || typeof runtime.entityOf !== 'function') {
+    throw new Error('createInvitationApi requires an application-bound Invitation entity');
   }
-
-  const invitation = Invitation.findOne(Invitation.token.is(token));
-  if (!invitation) {
-    throw Object.assign(new Error('invitation not found'), { status: 404 });
+  if (suppliedDb && suppliedDb !== runtime.db) {
+    throw new Error('Invitation and db must belong to the same application runtime');
   }
+  const db = runtime.db;
 
-  const now = Date.now();
-
-  // Check expiration
-  if (invitation.expiresAt !== null && now > invitation.expiresAt) {
-    throw Object.assign(new Error('invitation has expired'), { status: 400 });
-  }
-
-  const db = getActiveDb();
-
-  if (invitation.targetUser === null) {
-    // Link invitation — anyone with the token can accept
-    if (invitation.maxUses !== null && invitation.useCount >= invitation.maxUses) {
-      throw Object.assign(new Error('invitation has reached its maximum uses'), { status: 400 });
+  function targetFor(name, role) {
+    let target;
+    try {
+      target = runtime.entityOf(name);
+    } catch {
+      throw httpError(400, `unknown invitation target entity '${name}'`);
     }
 
-    // Increment useCount via raw SQL (entity update not available for auth entities)
-    db.prepare('UPDATE Invitation SET useCount = useCount + 1 WHERE id = :id')
-      .run({ id: invitation.id });
-  } else {
-    // Direct invitation — must match the target user
+    const roleCandidates = Object.entries(target.fields).filter(([, descriptor]) =>
+      descriptor?.kind === 'store'
+      && descriptor.type === 'map'
+      && descriptor.of?.type === 'ref'
+      && Array.isArray(descriptor.roles)
+      && descriptor.roles.includes(role));
+    const candidates = roleCandidates.filter(([, descriptor]) => {
+      try {
+        return runtime.entityOf(descriptor.of.target).name === 'User';
+      } catch {
+        return false;
+      }
+    });
+    if (candidates.length !== 1) {
+      throw httpError(
+        400,
+        candidates.length === 0 && roleCandidates.length > 0
+          ? `invitation role '${role}' on ${target.name} must be a map of User references`
+          : candidates.length === 0
+          ? `role '${role}' is not an invitation role on ${target.name}`
+          : `role '${role}' is ambiguous on ${target.name}`,
+      );
+    }
+    const [fieldName] = candidates[0];
+    return {
+      entity: target,
+      fieldName,
+      table: membershipTable(target.name, fieldName),
+      ownerColumn: membershipOwnerCol(target.name),
+    };
+  }
+
+  async function createInvitation({
+    targetEntity, targetId, role, targetUser, maxUses, expiresAt, principal,
+  }) {
+    if (!targetEntity || !targetId || !role || !principal?.id) {
+      throw httpError(400, 'createInvitation requires targetEntity, targetId, role, and principal');
+    }
+    if (principal.type !== 'user') {
+      throw httpError(403, 'a user principal is required to create an invitation');
+    }
+    if (maxUses != null && (!Number.isInteger(maxUses) || maxUses < 1)) {
+      throw httpError(400, 'maxUses must be a positive integer');
+    }
+
+    const target = targetFor(targetEntity, role);
+    const row = target.entity.findById(targetId, principal);
+    if (!row) throw httpError(404, `${target.entity.name} ${targetId} not found`);
+    const decision = await rowCapabilities(target.entity, row, principal);
+    if (!decision.granted || !decision.capabilities.includes(admin)) {
+      throw httpError(403, 'admin capability is required to create an invitation');
+    }
+
+    return Invitation.create({
+      targetEntity: target.entity.name,
+      targetId,
+      role,
+      targetUser: targetUser ?? null,
+      maxUses: maxUses ?? null,
+      expiresAt: expiresAt ?? null,
+      createdBy: principal.id,
+    });
+  }
+
+  async function acceptInvitation(token, user) {
+    if (!token || !user?.id) {
+      throw httpError(400, 'acceptInvitation requires a token and a user with an id');
+    }
+
+    return txn(db, () => {
+      const invitation = Invitation.findOne(Invitation.token.is(token));
+      if (!invitation) throw httpError(404, 'invitation not found');
+      if (invitation.expiresAt !== null && Date.now() > invitation.expiresAt) {
+        throw httpError(400, 'invitation has expired');
+      }
+      if (invitation.targetUser !== null && String(invitation.targetUser) !== String(user.id)) {
+        throw httpError(403, 'this invitation is for a different user');
+      }
+
+      // Resolve the stored name through the application registry before it can
+      // influence an identifier. Only load-time validated declarations supply
+      // the table and column names used below.
+      const target = targetFor(invitation.targetEntity, invitation.role);
+      if (!target.entity.findById(invitation.targetId)) {
+        throw httpError(404, `${target.entity.name} ${invitation.targetId} not found`);
+      }
+
+      let existing;
+      try {
+        existing = db.prepare(
+          `SELECT role FROM ${target.table} WHERE ${target.ownerColumn} = :owner AND ${MEMBER_COLUMN} = :member`,
+        ).get({ owner: invitation.targetId, member: user.id });
+
+        // A replay by an existing member is idempotent and does not exhaust a
+        // public link. The declared invitation role still wins if it changed.
+        if (existing) {
+          if (existing.role !== invitation.role) {
+            db.prepare(
+              `UPDATE ${target.table} SET role = :role WHERE ${target.ownerColumn} = :owner AND ${MEMBER_COLUMN} = :member`,
+            ).run({ owner: invitation.targetId, member: user.id, role: invitation.role });
+          }
+        } else {
+          if (
+            invitation.targetUser === null
+            && invitation.maxUses !== null
+            && invitation.useCount >= invitation.maxUses
+          ) {
+            throw httpError(400, 'invitation has reached its maximum uses');
+          }
+          db.prepare(
+            `INSERT INTO ${target.table} (${target.ownerColumn}, ${MEMBER_COLUMN}, role) VALUES (:owner, :member, :role)`,
+          ).run({ owner: invitation.targetId, member: user.id, role: invitation.role });
+        }
+      } catch (error) {
+        if (error.status) throw error;
+        throw httpError(500, `failed to grant membership on ${target.entity.name}: ${error.message}`);
+      }
+
+      if (invitation.targetUser === null) {
+        if (!existing) {
+          db.prepare('UPDATE Invitation SET useCount = useCount + 1 WHERE id = :id')
+            .run({ id: invitation.id });
+        }
+      } else {
+        Invitation.delete(invitation.id);
+      }
+
+      return {
+        targetEntity: target.entity.name,
+        targetId: invitation.targetId,
+        role: invitation.role,
+      };
+    });
+  }
+
+  function rejectInvitation(token, user) {
+    if (!token || !user?.id) {
+      throw httpError(400, 'rejectInvitation requires a token and a user with an id');
+    }
+    const invitation = Invitation.findOne(Invitation.token.is(token));
+    if (!invitation) throw httpError(404, 'invitation not found');
+    if (invitation.targetUser === null) {
+      throw httpError(400, 'cannot reject an open link invitation');
+    }
     if (String(invitation.targetUser) !== String(user.id)) {
-      throw Object.assign(new Error('this invitation is for a different user'), { status: 403 });
+      throw httpError(403, 'this invitation is for a different user');
     }
-
-    // Remove the direct invitation on accept
     Invitation.delete(invitation.id);
   }
 
-  // Grant membership: insert into the target entity's members side-table.
-  // Convention: {Entity}_members with columns {Entity}_id, member_id, role.
-  const table = `${invitation.targetEntity}_members`;
-  const ownerCol = `${invitation.targetEntity}_id`;
-
-  try {
-    db.prepare(`INSERT OR IGNORE INTO ${table} (${ownerCol}, member_id, role) VALUES (:__owner, :__member, :__role)`)
-      .run({ __owner: invitation.targetId, __member: user.id, __role: invitation.role });
-  } catch (err) {
-    // If the side-table doesn't exist (e.g. target entity has no members field),
-    // surface a clear error rather than a raw SQLite failure.
-    throw Object.assign(
-      new Error(`failed to grant membership on ${invitation.targetEntity}: ${err.message}`),
-      { status: 500 },
-    );
+  function listInvitationsForUser(user) {
+    if (!user?.id) return [];
+    const rows = db.prepare(`
+      SELECT * FROM Invitation AS t0
+      WHERE t0.targetUser = :userId
+        AND (t0.expiresAt IS NULL OR t0.expiresAt > :now)
+      ORDER BY t0.createdAt DESC
+    `).all({ userId: user.id, now: Date.now() });
+    return rows.map((row) => Invitation.hydrate(row));
   }
 
-  return {
-    targetEntity: invitation.targetEntity,
-    targetId: invitation.targetId,
-    role: invitation.role,
-  };
-}
-
-// rejectInvitation(token, user) → for direct invitations, removes the row.
-// Open link invitations cannot be rejected (they expire naturally or reach
-// maxUses). The rejecting user must match the targetUser on the invitation.
-export function rejectInvitation(token, user) {
-  if (!token || !user || !user.id) {
-    throw Object.assign(new Error('rejectInvitation requires a token and a user with an id'), { status: 400 });
-  }
-
-  const invitation = Invitation.findOne(Invitation.token.is(token));
-  if (!invitation) {
-    throw Object.assign(new Error('invitation not found'), { status: 404 });
-  }
-
-  if (invitation.targetUser === null) {
-    throw Object.assign(new Error('cannot reject an open link invitation'), { status: 400 });
-  }
-
-  if (String(invitation.targetUser) !== String(user.id)) {
-    throw Object.assign(new Error('this invitation is for a different user'), { status: 403 });
-  }
-
-  Invitation.delete(invitation.id);
-}
-
-// listInvitationsForUser(user) → pending invitations for this user.
-// Returns both direct invitations (where targetUser === user.id) and open
-// link invitations (where targetUser is null), excluding expired ones.
-// Results are sorted newest-first by createdAt.
-export function listInvitationsForUser(user) {
-  if (!user || !user.id) {
-    return [];
-  }
-
-  const db = getActiveDb();
-  const now = Date.now();
-
-  // Use raw SQL for the OR condition (entity query API doesn't support OR)
-  const rows = db.prepare(`
-    SELECT * FROM Invitation AS t0
-    WHERE (t0.targetUser = :userId OR t0.targetUser IS NULL)
-      AND (t0.expiresAt IS NULL OR t0.expiresAt > :now)
-    ORDER BY t0.createdAt DESC
-  `).all({ userId: user.id, now });
-
-  return rows.map((row) => Invitation.hydrate(row));
+  return { createInvitation, acceptInvitation, rejectInvitation, listInvitationsForUser };
 }

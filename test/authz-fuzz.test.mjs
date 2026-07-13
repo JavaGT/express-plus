@@ -1,6 +1,5 @@
 import { DatabaseSync } from 'node:sqlite';
 import { text, boolean, ref, map, scope, grant, read, write, subscribe, inherit, entity, generateDDL, executeFrameworkDDL, principal, anonymous, anyOf, bindReadScope } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -8,7 +7,6 @@ let db;
 test.beforeEach(() => {
   db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  setActiveDb(db, { replace: true });
 });
 
 test.afterEach(() => {
@@ -127,11 +125,11 @@ test('dual-face conformance: map-role check NOT in scope does not drift', async 
   db.prepare(`INSERT INTO Doc_collaborators (Doc_id, member_id, role) VALUES ('r1', 'bob', 'editor')`).run();
 
   // Runtime check passing: bob IS an editor
-  const editorResult = Boolean(Doc.registry.editor.run({ entity: row, principal: p }));
+  const editorResult = Boolean(Doc.registry.editor.run({ entity: row, principal: p, runtime: { db } }));
   assert.equal(editorResult, true, 'bob should be an editor via runtime check');
 
   // Owner check: bob is NOT the owner
-  const ownerResult = Boolean(Doc.registry.owner.run({ entity: row, principal: p }));
+  const ownerResult = Boolean(Doc.registry.owner.run({ entity: row, principal: p, runtime: { db } }));
   assert.equal(ownerResult, false);
 
   // The scope DOES NOT consult map-role — only owner. So scope denies bob.

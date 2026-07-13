@@ -18,8 +18,7 @@ import {
   entity, NonCompilableError, bindReadScope,
   generateDDL,
 } from '../src/internal.mjs';
-import { principal, anonymous } from '../src/principal.mjs';
-import { setActiveDb } from '../src/db.mjs';
+import { principal } from '../src/principal.mjs';
 import { FTS_STRATEGY, ftsTableName, ftsOwnerCol } from '../src/fts-strategy.mjs';
 import { lowerToSql, makeNode } from '../src/scope-sql.mjs';
 
@@ -162,9 +161,6 @@ function setupFtsDb() {
   for (const sql of generateDDL(Doc)) {
     db.exec(sql);
   }
-
-  // Set active db so Doc.create() uses this db
-  setActiveDb(db);
 
   return { db, Doc };
 }

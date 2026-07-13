@@ -84,20 +84,19 @@ test('workbench({ env, viewsDir, session }) threads through to app.config', () =
   app.db.close();
 });
 
-// --- per-app session duration installs a shallow Session copy ---
+// --- per-app session duration configures the canonical bound Session ---
 
-test('a non-default session duration installs app._sessionEntity with the app delay', () => {
+test('a non-default session duration records an app-local schedule override', () => {
   const app = workbench({ db: ':memory:', session: { durationMs: 60_000 } }).auth();
-  assert.ok(app._sessionEntity, 'auth() installed a per-app Session copy');
-  assert.equal(app._sessionEntity.schedule.remove.delay, 60_000, 'the copy carries the app delay');
-  assert.notEqual(app._sessionEntity.schedule.remove.delay, config.sessionDurationMs, 'differs from the singleton');
+  assert.equal(app._sessionSchedule.remove.delay, 60_000);
+  assert.notEqual(app._sessionSchedule.remove.delay, config.sessionDurationMs);
   app.db.close();
 });
 
-test('the per-app Session copy preserves the compiled trigger shape (fieldName etc.)', () => {
+test('the per-app Session schedule preserves the compiled trigger shape', () => {
   const app = workbench({ db: ':memory:', session: { durationMs: 60_000 } }).auth();
   const orig = Session.schedule.remove;
-  const copy = app._sessionEntity.schedule.remove;
+  const copy = app._sessionSchedule.remove;
   // The compiled trigger stamps fieldName/whileSql/whileParams/sourceName; the
   // spread preserves every stamped prop and overrides only delay.
   assert.equal(copy.fieldName, orig.fieldName, 'fieldName preserved');
@@ -109,19 +108,20 @@ test('the per-app Session copy preserves the compiled trigger shape (fieldName e
   app.db.close();
 });
 
-test('a default session duration does NOT install a per-app copy', () => {
+test('a default session duration does not install an override', () => {
   const app = workbench({ db: ':memory:' }).auth();
-  assert.equal(app._sessionEntity, undefined, 'no copy when the duration matches the singleton');
+  assert.equal(app._sessionSchedule, undefined);
   app.db.close();
 });
 
-test('buildKernel prefers app._sessionEntity in app.entities', async () => {
+test('buildKernel applies the override to the canonical app-bound Session', async () => {
   const app = workbench({ db: ':memory:', session: { durationMs: 90_000 } })
     .mount('/notes', makeNote())
     .auth()
     .listen(0);
   await app.ready;
   const entity = app.entities.get('Session');
+  assert.equal(entity, app.entity(Session));
   assert.equal(entity.schedule.remove.delay, 90_000, 'the kernel registered the per-app copy');
   app.httpServer.close();
 });

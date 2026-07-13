@@ -8,7 +8,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import workbench, { entity } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 import { LiveChannel } from '../public/workbench-client.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -24,7 +23,6 @@ const Doc = entity('Doc', {
 // port. Returns { app, origin, port }. Caller must close both.
 async function bootApp() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   const app = workbench({ db }).mount('/docs', Doc);
   await app.ddl(); // creates Doc table + framework _Log/_Cursor
   app.listen(0, { principalOf: () => ({ type: 'user', id: 'test' }) });

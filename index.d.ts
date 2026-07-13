@@ -76,6 +76,25 @@ export interface FieldDescriptor<Value = unknown> {
   readonly [property: string]: unknown;
 }
 
+declare const queryPredicateBrand: unique symbol;
+export interface QueryPredicate {
+  readonly [queryPredicateBrand]: true;
+}
+
+export interface FieldHandle<Value = unknown, Key extends PropertyKey = string> {
+  readonly fieldName: Key;
+  is(value: Value): QueryPredicate;
+  in(values: readonly Value[]): QueryPredicate;
+  isNull(): QueryPredicate;
+  gte(value: Value): QueryPredicate;
+  lte(value: Value): QueryPredicate;
+  matches(query: string): QueryPredicate;
+}
+
+export type EntityFields<Row extends object> = Readonly<{
+  [Key in keyof Row]-?: FieldHandle<Row[Key], Key>;
+}> & Readonly<{ id: FieldHandle<string, 'id'> }>;
+
 export type FieldOptions<Value = unknown> = Readonly<{
   optional?: boolean;
   readonly?: boolean;
@@ -207,20 +226,43 @@ export interface DispatchResult<Event extends CommittedEvent = CommittedEvent> {
 export interface WorkbenchEntity<Row extends object = Record<string, unknown>> {
   readonly name: string;
   readonly fields: Readonly<Record<string, FieldDescriptor>>;
+  readonly field: EntityFields<Row>;
   readonly verbs: Readonly<Record<string, ActionHandle | EventHandle>>;
-  readonly routes?: (routes: RouteBuilder, entity: WorkbenchEntity<Row>) => unknown | Promise<unknown>;
+  readonly routes?: (routes: RouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
+  readonly [member: string]: unknown;
+}
+
+type SelectedKeys<Row extends object, Fields extends readonly FieldHandle<any, any>[]> =
+  Extract<Fields[number] extends FieldHandle<any, infer Key> ? Key : never, keyof Row>;
+
+export interface QueryBuilder<Row extends object> extends PromiseLike<Row[]> {
+  sort(field: FieldHandle, direction?: 'asc' | 'desc'): this;
+  limit(count: number): this;
+  select<Fields extends readonly FieldHandle<any, any>[]>(
+    ...fields: Fields
+  ): QueryBuilder<Pick<Row, SelectedKeys<Row, Fields>>>;
+}
+
+export interface HydratedRows<Row extends object> extends Array<Row> {
+  select<Fields extends readonly FieldHandle<any, any>[]>(
+    ...fields: Fields
+  ): Array<Pick<Row, SelectedKeys<Row, Fields>>>;
+}
+
+export interface BoundWorkbenchEntity<Row extends object = Record<string, unknown>>
+  extends WorkbenchEntity<Row> {
   create(payload: Partial<Row> & Record<string, unknown>): Row;
   insert(payload: Partial<Row> & Record<string, unknown>): Row;
   delete(id: string): void;
   findById(id: string, principal?: Principal): Row | null;
-  findOne(where?: Partial<Row>, principal?: Principal): Row | null;
-  findAll(where?: Partial<Row>, principal?: Principal): Row[];
+  findOne(where: QueryPredicate): Row | null;
+  findAll(): HydratedRows<Row>;
+  findAll(where: QueryPredicate): QueryBuilder<Row>;
   getOrFail(id: string, principal?: Principal): Row;
-  readonly [member: string]: unknown;
 }
 
 export type EntityDeclaration<Row extends object> = Readonly<Record<string, unknown>> & {
-  routes?: (routes: RouteBuilder, entity: WorkbenchEntity<Row>) => unknown | Promise<unknown>;
+  routes?: (routes: RouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
   grant?: ScopeClause | ScopePredicate | GrantDecision | ((context: unknown) => GrantDecision);
 };
 export function entity<Row extends object = Record<string, unknown>>(
@@ -229,9 +271,9 @@ export function entity<Row extends object = Record<string, unknown>>(
 ): WorkbenchEntity<Row>;
 
 export function membership(
-  entity: WorkbenchEntity,
+  entity: WorkbenchEntity | BoundWorkbenchEntity,
   roles: Readonly<Record<string, unknown>>,
-): void;
+): WorkbenchEntity;
 
 export function inc(value: number): Readonly<{ kind: 'inc'; value: number }>;
 export function dec(value: number): Readonly<{ kind: 'dec'; value: number }>;
@@ -258,6 +300,7 @@ export function simulate(options: Readonly<Record<string, unknown>>): unknown;
 
 export interface WorkbenchOptions {
   db?: string | unknown;
+  entities?: readonly WorkbenchEntity[];
   port?: number;
   env?: string;
   session?: { durationMs?: number };
@@ -277,6 +320,9 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly ready?: Promise<WorkbenchApp>;
   mount(path: string, target: EntityTarget | RouteBuilder | Handler): this;
   use(path: string, target: EntityTarget | RouteBuilder | Handler): this;
+  entity<Row extends object>(declaration: WorkbenchEntity<Row>): BoundWorkbenchEntity<Row>;
+  entity<Row extends object = Record<string, unknown>>(name: string): BoundWorkbenchEntity<Row>;
+  register(...declarations: readonly (WorkbenchEntity | readonly WorkbenchEntity[])[]): this;
   auth(options?: { identifyBy?: readonly string[] }): this;
   static(prefix: string, directory: string): this;
   prepareSchema(): Promise<this>;

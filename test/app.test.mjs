@@ -117,7 +117,7 @@ test('each route entry carries the entity it was mounted for', async () => {
   const app = workbench().mount('/notes', Note);
   const routes = await resolved(app);
   for (const route of routes) {
-    assert.equal(route.entity, Note);
+    assert.equal(route.entity, app.entity(Note));
   }
 });
 

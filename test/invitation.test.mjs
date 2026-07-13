@@ -4,19 +4,13 @@
 // grants membership, direct removes row), reject (direct only), list, expiry,
 // maxUses cap, wrong-user rejection, and full HTTP integration.
 
-import { entity, ref, text, map, membership, grant, read, Invitation } from '../src/index.mjs';
+import workbench, {
+  entity, ref, text, map, membership, read, Invitation, createInvitationApi,
+} from '../src/index.mjs';
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { executeDDL } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
-import {
-  createInvitation,
-  acceptInvitation,
-  rejectInvitation,
-  listInvitationsForUser,
-} from '../src/auth/invitation.mjs';
 import { principal } from '../src/principal.mjs';
 
 const owner = principal({ type: 'user', id: 'owner-1' });
@@ -26,15 +20,27 @@ const otherUser = principal({ type: 'user', id: 'other-1' });
 // ---- Test helpers ----
 
 // Set up a db with Invitation + Project tables for unit-level helper tests.
-function setupDb() {
+async function setupDb() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
-  executeDDL(Invitation, db);
-  db.exec(`
-    CREATE TABLE Project (id TEXT PRIMARY KEY, title TEXT, owner TEXT);
-    CREATE TABLE Project_members (Project_id TEXT, member_id TEXT, role TEXT);
-  `);
-  return db;
+  const Project = entity('Project', {
+    title: text(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    members: map(ref('User'), { role: ['member'], default: {} }),
+  });
+  membership(Project, { member: { can: [read] } });
+  const app = workbench({ db, entities: [Project, Invitation] });
+  await app.prepareSchema();
+  for (const id of ['p1', 'p2', 'p3']) {
+    db.prepare('INSERT INTO Project (id, title, owner) VALUES (?, ?, ?)')
+      .run(id, `Project ${id}`, owner.id);
+  }
+  const Invitation_b = app.entity(Invitation);
+  return {
+    db,
+    Project: app.entity(Project),
+    Invitation: Invitation_b,
+    ...createInvitationApi({ Invitation: Invitation_b }),
+  };
 }
 
 // Set up a full workbench app with auth + Project entity for HTTP tests.
@@ -49,16 +55,15 @@ async function setupApp(t) {
 
   membership(Project, { member: { can: [read] } });
 
-  // Execute DDL before seeding
-  executeDDL(Project, db);
-
-  // Seed a project
-  db.prepare('INSERT INTO Project (id, title, owner) VALUES (?, ?, ?)')
-    .run('p1', 'Test Project', 'owner-1');
-
-  const app = workbench({ db });
+  const app = workbench({ db, entities: [Project] });
   app.mount('/projects', Project);
   app.auth();
+
+  await app.prepareSchema();
+  for (const id of ['p1', 'p2', 'p3']) {
+    db.prepare('INSERT INTO Project (id, title, owner) VALUES (?, ?, ?)')
+      .run(id, `Test Project ${id}`, owner.id);
+  }
 
   app.listen(0, {
     principalOf: (req) => {
@@ -76,7 +81,7 @@ async function setupApp(t) {
   });
 
   const { port } = app.httpServer.address();
-  return { origin: `http://127.0.0.1:${port}`, db, app, Project };
+  return { origin: `http://127.0.0.1:${port}`, db, app, Project: app.entity(Project) };
 }
 
 async function fetchJson(url, options = {}) {
@@ -89,15 +94,15 @@ async function fetchJson(url, options = {}) {
 
 // ---- Unit tests (helpers without HTTP) ----
 
-test('create invitation with auto-generated token', () => {
-  const db = setupDb();
+test('create invitation with auto-generated token', async () => {
+  const { db, Invitation, createInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
       maxUses: 10,
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
     assert.ok(inv, 'invitation created');
@@ -122,14 +127,14 @@ test('create invitation with auto-generated token', () => {
   }
 });
 
-test('create link-type invitation (no targetUser)', () => {
-  const db = setupDb();
+test('create link-type invitation (no targetUser)', async () => {
+  const { db, createInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
     assert.equal(inv.targetUser, null, 'targetUser is null for link invite');
@@ -139,15 +144,15 @@ test('create link-type invitation (no targetUser)', () => {
   }
 });
 
-test('create direct invitation (with targetUser)', () => {
-  const db = setupDb();
+test('create direct invitation (with targetUser)', async () => {
+  const { db, createInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
       targetUser: 'member-1',
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
     assert.equal(inv.targetUser, 'member-1', 'targetUser is set');
@@ -157,18 +162,18 @@ test('create direct invitation (with targetUser)', () => {
   }
 });
 
-test('accept link invitation → increments useCount, grants membership', () => {
-  const db = setupDb();
+test('accept link invitation → increments useCount, grants membership', async () => {
+  const { db, Invitation, createInvitation, acceptInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
       maxUses: 10,
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
-    const result = acceptInvitation(inv.token, member);
+    const result = await acceptInvitation(inv.token, member);
 
     assert.deepEqual(result, {
       targetEntity: 'Project',
@@ -190,42 +195,42 @@ test('accept link invitation → increments useCount, grants membership', () => 
   }
 });
 
-test('accept link invitation → same user twice is idempotent (INSERT OR IGNORE)', () => {
-  const db = setupDb();
+test('accept link invitation → same user twice is idempotent', async () => {
+  const { db, Invitation, createInvitation, acceptInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
       maxUses: 10,
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
-    acceptInvitation(inv.token, member);
+    await acceptInvitation(inv.token, member);
 
     // Second accept — still works (idempotent membership insert)
-    const result = acceptInvitation(inv.token, member);
+    const result = await acceptInvitation(inv.token, member);
     assert.deepEqual(result, { targetEntity: 'Project', targetId: 'p1', role: 'member' });
 
     const updated = Invitation.findOne(Invitation.token.is(inv.token));
-    assert.equal(updated.useCount, 2, 'useCount incremented again');
+    assert.equal(updated.useCount, 1, 'idempotent replay does not consume another use');
   } finally {
     db.close();
   }
 });
 
-test('accept direct invitation → removes invitation row', () => {
-  const db = setupDb();
+test('accept direct invitation → removes invitation row', async () => {
+  const { db, Invitation, createInvitation, acceptInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
       targetUser: 'member-1',
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
-    const result = acceptInvitation(inv.token, member);
+    const result = await acceptInvitation(inv.token, member);
 
     assert.deepEqual(result, { targetEntity: 'Project', targetId: 'p1', role: 'member' });
 
@@ -242,23 +247,23 @@ test('accept direct invitation → removes invitation row', () => {
   }
 });
 
-test('link invitation reaches maxUses → accept fails with 400', () => {
-  const db = setupDb();
+test('link invitation reaches maxUses → accept fails with 400', async () => {
+  const { db, createInvitation, acceptInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
       maxUses: 2,
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
-    acceptInvitation(inv.token, principal({ type: 'user', id: 'u1' }));
-    acceptInvitation(inv.token, principal({ type: 'user', id: 'u2' }));
+    await acceptInvitation(inv.token, principal({ type: 'user', id: 'u1' }));
+    await acceptInvitation(inv.token, principal({ type: 'user', id: 'u2' }));
 
     // Third accept should fail
-    assert.throws(
-      () => acceptInvitation(inv.token, principal({ type: 'user', id: 'u3' })),
+    await assert.rejects(
+      acceptInvitation(inv.token, principal({ type: 'user', id: 'u3' })),
       (err) => err.message.includes('maximum uses') && err.status === 400,
     );
   } finally {
@@ -266,19 +271,19 @@ test('link invitation reaches maxUses → accept fails with 400', () => {
   }
 });
 
-test('expired invitation → accept fails with 400', () => {
-  const db = setupDb();
+test('expired invitation → accept fails with 400', async () => {
+  const { db, createInvitation, acceptInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
       expiresAt: Date.now() - 1000, // 1 second in the past
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
-    assert.throws(
-      () => acceptInvitation(inv.token, member),
+    await assert.rejects(
+      acceptInvitation(inv.token, member),
       (err) => err.message.includes('expired') && err.status === 400,
     );
   } finally {
@@ -286,15 +291,15 @@ test('expired invitation → accept fails with 400', () => {
   }
 });
 
-test('reject direct invitation → removes row', () => {
-  const db = setupDb();
+test('reject direct invitation → removes row', async () => {
+  const { db, Invitation, createInvitation, rejectInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
       targetUser: 'member-1',
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
     rejectInvitation(inv.token, member);
@@ -306,15 +311,15 @@ test('reject direct invitation → removes row', () => {
   }
 });
 
-test('reject direct invitation → wrong user fails with 403', () => {
-  const db = setupDb();
+test('reject direct invitation → wrong user fails with 403', async () => {
+  const { db, Invitation, createInvitation, rejectInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
       targetUser: 'member-1',
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
     assert.throws(
@@ -330,14 +335,14 @@ test('reject direct invitation → wrong user fails with 403', () => {
   }
 });
 
-test('cannot reject open link invitation', () => {
-  const db = setupDb();
+test('cannot reject open link invitation', async () => {
+  const { db, createInvitation, rejectInvitation } = await setupDb();
   try {
-    const inv = createInvitation({
+    const inv = await createInvitation({
       targetEntity: 'Project',
       targetId: 'p1',
       role: 'member',
-      createdBy: 'owner-1',
+      principal: owner,
     });
 
     assert.throws(
@@ -349,21 +354,21 @@ test('cannot reject open link invitation', () => {
   }
 });
 
-test('list invitations for user — direct invites', () => {
-  const db = setupDb();
+test('list invitations for user — direct invites', async () => {
+  const { db, createInvitation, listInvitationsForUser } = await setupDb();
   try {
-    const inv1 = createInvitation({
+    const inv1 = await createInvitation({
       targetEntity: 'Project', targetId: 'p1', role: 'member',
-      targetUser: 'member-1', createdBy: 'owner-1',
+      targetUser: 'member-1', principal: owner,
     });
-    const inv2 = createInvitation({
+    const inv2 = await createInvitation({
       targetEntity: 'Project', targetId: 'p2', role: 'member',
-      targetUser: 'member-1', createdBy: 'owner-1',
+      targetUser: 'member-1', principal: owner,
     });
     // Another user's invite — should NOT appear for member-1
-    createInvitation({
+    await createInvitation({
       targetEntity: 'Project', targetId: 'p3', role: 'member',
-      targetUser: 'other-1', createdBy: 'owner-1',
+      targetUser: 'other-1', principal: owner,
     });
 
     const list = listInvitationsForUser(member);
@@ -376,39 +381,38 @@ test('list invitations for user — direct invites', () => {
   }
 });
 
-test('list invitations for user — includes open link invites', () => {
-  const db = setupDb();
+test('list invitations for user — hides open link tokens', async () => {
+  const { db, createInvitation, listInvitationsForUser } = await setupDb();
   try {
-    const linkInv = createInvitation({
+    const linkInv = await createInvitation({
       targetEntity: 'Project', targetId: 'p1', role: 'member',
-      createdBy: 'owner-1',
+      principal: owner,
     });
-    const directInv = createInvitation({
+    const directInv = await createInvitation({
       targetEntity: 'Project', targetId: 'p2', role: 'member',
-      targetUser: 'member-1', createdBy: 'owner-1',
+      targetUser: 'member-1', principal: owner,
     });
 
     const list = listInvitationsForUser(member);
-    // Should include both: direct invite for member-1 AND open link invite
-    assert.ok(list.length >= 2, 'should include both direct and link invites');
+    assert.equal(list.length, 1, 'only the direct invitation is visible');
     const tokens = list.map((r) => r.token);
-    assert.ok(tokens.includes(linkInv.token), 'includes link invite');
+    assert.ok(!tokens.includes(linkInv.token), 'does not disclose an open-link secret');
     assert.ok(tokens.includes(directInv.token), 'includes direct invite');
   } finally {
     db.close();
   }
 });
 
-test('list invitations excludes expired ones', () => {
-  const db = setupDb();
+test('list invitations excludes expired ones', async () => {
+  const { db, createInvitation, listInvitationsForUser } = await setupDb();
   try {
-    createInvitation({
+    await createInvitation({
       targetEntity: 'Project', targetId: 'p1', role: 'member',
-      targetUser: 'member-1', expiresAt: Date.now() - 1000, createdBy: 'owner-1',
+      targetUser: 'member-1', expiresAt: Date.now() - 1000, principal: owner,
     });
-    const valid = createInvitation({
+    const valid = await createInvitation({
       targetEntity: 'Project', targetId: 'p2', role: 'member',
-      targetUser: 'member-1', createdBy: 'owner-1',
+      targetUser: 'member-1', principal: owner,
     });
 
     const list = listInvitationsForUser(member);
@@ -419,11 +423,11 @@ test('list invitations excludes expired ones', () => {
   }
 });
 
-test('acceptInvitation with nonexistent token → 404', () => {
-  const db = setupDb();
+test('acceptInvitation with nonexistent token → 404', async () => {
+  const { db, acceptInvitation } = await setupDb();
   try {
-    assert.throws(
-      () => acceptInvitation('nonexistent-token', member),
+    await assert.rejects(
+      acceptInvitation('nonexistent-token', member),
       (err) => err.message.includes('not found') && err.status === 404,
     );
   } finally {

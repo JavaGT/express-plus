@@ -26,11 +26,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { setActiveDb } from '../src/db.mjs';
 import { randomUUID } from 'node:crypto';
 import { bindReadScope } from '../src/scope-sql.mjs';
 import { mayVerb } from '../src/row-grant.mjs';
-import {
+import workbench, {
   entity, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
 
@@ -58,23 +57,26 @@ function buildTodoListEntity() {
 
 function seed() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
+  const TodoListDecl = buildTodoListEntity();
+  const app = workbench({ db, entities: [TodoListDecl] });
   db.exec('CREATE TABLE TodoList (id TEXT PRIMARY KEY, title TEXT, owner TEXT)');
   db.exec(
     'CREATE TABLE TodoList_collaborators (TodoList_id TEXT, member_id TEXT, role TEXT)',
   );
-  return db;
+  const TodoList = app.entity(TodoListDecl);
+  return { db, TodoList };
 }
 
 async function seedWithServer() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE TodoList (id TEXT PRIMARY KEY, title TEXT, owner TEXT)');
   db.exec(
     'CREATE TABLE TodoList_collaborators (TodoList_id TEXT, member_id TEXT, role TEXT)',
   );
-  const TodoList = buildTodoListEntity();
+  const TodoListDecl = buildTodoListEntity();
+  const app = workbench({ db, entities: [TodoListDecl] });
+  const TodoList = app.entity(TodoListDecl);
   const server = await createServer({
     db,
     handlers: TodoList.crudHandlers,
@@ -122,8 +124,7 @@ function scopedRowIds(db, TodoList, who) {
 }
 
 test('owner is admitted by BOTH the scope filter and the runtime .can', async () => {
-  const db = seed();
-  const TodoList = buildTodoListEntity();
+  const { db, TodoList } = seed();
 
   const owner = principal({ type: 'user', id: 'owner-1' });
   const row = seedOwnedRow(db, TodoList, { title: 'mine', owner: 'owner-1' });
@@ -154,8 +155,7 @@ test('a collaborator (membership row) is admitted by BOTH layers', async (t) => 
 });
 
 test('a non-member is denied by BOTH layers (the two agree)', async () => {
-  const db = seed();
-  const TodoList = buildTodoListEntity();
+  const { db, TodoList } = seed();
 
   const row = seedOwnedRow(db, TodoList, { title: 'private', owner: 'owner-1' });
   const stranger = principal({ type: 'user', id: 'stranger-1' });
@@ -169,12 +169,11 @@ test('a non-member is denied by BOTH layers (the two agree)', async () => {
 
 test('a photo can inherit album membership through a typed FK in BOTH layers', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Album (id TEXT PRIMARY KEY, title TEXT)');
   db.exec('CREATE TABLE Album_collaborators (Album_id TEXT, member_id TEXT, role TEXT)');
   db.exec('CREATE TABLE Photo (id TEXT PRIMARY KEY, title TEXT, album TEXT)');
 
-  entity('Album', {
+  const Album = entity('Album', {
         title: text(),
     collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
 
@@ -183,7 +182,7 @@ test('a photo can inherit album membership through a typed FK in BOTH layers', a
 
   const Photo = entity('Photo', {
         title: text(),
-    album: ref('Album'),
+    album: ref(Album),
 
     checks: {
       albumMember: ({ Photo, principal: p }) => Photo.album.collaborators.has(p.id),
@@ -198,6 +197,9 @@ test('a photo can inherit album membership through a typed FK in BOTH layers', a
       }),
     ],
   });
+
+  const app = workbench({ db, entities: [Album, Photo] });
+  const Photo_b = app.entity(Photo);
 
   db.prepare('INSERT INTO Album (id, title) VALUES (:id, :title)').run({ id: 'a1', title: 'Shared' });
   db.prepare('INSERT INTO Photo (id, title, album) VALUES (:id, :title, :album)').run({
@@ -223,18 +225,20 @@ test('a photo can inherit album membership through a typed FK in BOTH layers', a
 
   const member = principal({ type: 'user', id: 'member-1' });
   const stranger = principal({ type: 'user', id: 'stranger-1' });
-  const row = Photo.getOrFail('p1');
-  const nullAlbumRow = Photo.getOrFail('p-null');
-  const danglingAlbumRow = Photo.getOrFail('p-dangling');
+  const row = Photo_b.getOrFail('p1');
+  const nullAlbumRow = Photo_b.getOrFail('p-null');
+  const danglingAlbumRow = Photo_b.getOrFail('p-dangling');
 
-  assert.deepEqual(scopedPhotoIds(db, Photo, member), ['p1']);
-  assert.equal(await mayVerb(Photo, 'read', row, member), true);
-  assert.equal(await mayVerb(Photo, 'update', row, member), true);
-  assert.equal(await mayVerb(Photo, 'read', nullAlbumRow, member), false);
-  assert.equal(await mayVerb(Photo, 'read', danglingAlbumRow, member), false);
+  assert.deepEqual(scopedPhotoIds(db, Photo_b, member), ['p1']);
+  assert.equal(await mayVerb(Photo_b, 'read', row, member), true);
+  assert.equal(await mayVerb(Photo_b, 'update', row, member), true);
+  assert.equal(await mayVerb(Photo_b, 'read', nullAlbumRow, member), false);
+  assert.equal(await mayVerb(Photo_b, 'read', danglingAlbumRow, member), false);
 
-  assert.deepEqual(scopedPhotoIds(db, Photo, stranger), []);
-  assert.equal(await mayVerb(Photo, 'read', row, stranger), false);
+  assert.deepEqual(scopedPhotoIds(db, Photo_b, stranger), []);
+  assert.equal(await mayVerb(Photo_b, 'read', row, stranger), false);
+
+  db.close();
 });
 
 function scopedPhotoIds(db, Photo, who) {
@@ -247,7 +251,6 @@ function scopedPhotoIds(db, Photo, who) {
 
 test('runtime ref traversal resolves target scalar fields through await', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   db.exec(`CREATE TABLE Canvas (id TEXT, owner TEXT, title TEXT)`);
   db.exec(`CREATE TABLE Canvas_collaborators (Canvas_id TEXT, member_id TEXT, role TEXT)`);
@@ -282,6 +285,9 @@ test('runtime ref traversal resolves target scalar fields through await', async 
     })],
   });
 
+  const app = workbench({ db, entities: [Canvas, RasterLayer] });
+  const RasterLayer_b = app.entity(RasterLayer);
+
   db.prepare('INSERT INTO Canvas (id, owner, title) VALUES (:id, :owner, :title)').run({
     id: 'c1', owner: 'owner-1', title: 'My Canvas',
   });
@@ -299,17 +305,19 @@ test('runtime ref traversal resolves target scalar fields through await', async 
   const editor = principal({ type: 'user', id: 'editor-1' });
   const stranger = principal({ type: 'user', id: 'stranger-1' });
 
-  const L1 = RasterLayer.getOrFail('L1');
-  const L2 = RasterLayer.getOrFail('L2');
+  const L1 = RasterLayer_b.getOrFail('L1');
+  const L2 = RasterLayer_b.getOrFail('L2');
 
-  assert.equal(await mayVerb(RasterLayer, 'read', L1, owner), true);
-  assert.equal(await mayVerb(RasterLayer, 'subscribe', L1, owner), true);
-  assert.equal(await mayVerb(RasterLayer, 'update', L1, editor), true);
-  assert.equal(await mayVerb(RasterLayer, 'read', L1, editor), true);
-  assert.equal(await mayVerb(RasterLayer, 'read', L1, stranger), false);
+  assert.equal(await mayVerb(RasterLayer_b, 'read', L1, owner), true);
+  assert.equal(await mayVerb(RasterLayer_b, 'subscribe', L1, owner), true);
+  assert.equal(await mayVerb(RasterLayer_b, 'update', L1, editor), true);
+  assert.equal(await mayVerb(RasterLayer_b, 'read', L1, editor), true);
+  assert.equal(await mayVerb(RasterLayer_b, 'read', L1, stranger), false);
 
-  assert.equal(await mayVerb(RasterLayer, 'read', L2, owner), false);
-  assert.equal(await mayVerb(RasterLayer, 'read', L2, editor), false);
+  assert.equal(await mayVerb(RasterLayer_b, 'read', L2, owner), false);
+  assert.equal(await mayVerb(RasterLayer_b, 'read', L2, editor), false);
+
+  db.close();
 });
 
 test('removing a collaborator revokes BOTH layers (scope + .can)', async (t) => {

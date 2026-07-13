@@ -3,8 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
-import { entity } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
+import workbench, { entity } from '../src/internal.mjs';
 
 // `state({ values, transitions, effects, auto })` — a finite-state-machine field.
 // It is its own KIND (`state`): a closed value domain plus a declared legal-
@@ -172,10 +171,12 @@ test('DDL includes a TEXT column for state fields', () => {
 
 test('create with valid state value persists the row', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
+
+  const app = workbench({ db, entities: [Doc] });
+  const Doc_b = app.entity(Doc);
 
   const server = createServer({
     db,
@@ -194,14 +195,13 @@ test('create with valid state value persists the row', async (t) => {
     principal: { id: 'u1' },
   });
   assert.equal(result.granted, true);
-  const row = Doc.findById(result.events[0].data.id);
+  const row = Doc_b.findById(result.events[0].data.id);
   assert.ok(row);
   assert.equal(row.status, 'draft');
 });
 
 test('create with invalid state value throws ValidationError', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
@@ -232,10 +232,12 @@ test('create with invalid state value throws ValidationError', async (t) => {
 
 test('update legal transition (draft -> shared) persists', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
+
+  const app = workbench({ db, entities: [Doc] });
+  const Doc_b = app.entity(Doc);
 
   const server = createServer({
     db,
@@ -264,16 +266,18 @@ test('update legal transition (draft -> shared) persists', async (t) => {
     principal: { id: 'u1' },
   });
   assert.equal(result.granted, true);
-  const row = Doc.findById(docId);
+  const row = Doc_b.findById(docId);
   assert.equal(row.status, 'shared');
 });
 
 test('update illegal transition (draft -> archived) throws 400 with zero footprint', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
+
+  const app = workbench({ db, entities: [Doc] });
+  const Doc_b = app.entity(Doc);
 
   const server = createServer({
     db,
@@ -316,16 +320,18 @@ test('update illegal transition (draft -> archived) throws 400 with zero footpri
   assert.equal(logAfter.cnt, logBefore.cnt, 'illegal transition must not append _Log rows');
 
   // Row unchanged
-  const row = Doc.findById(docId);
+  const row = Doc_b.findById(docId);
   assert.equal(row.status, 'draft');
 });
 
 test('update state to current value is a no-op (skips transition check)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
+
+  const app = workbench({ db, entities: [Doc] });
+  const Doc_b = app.entity(Doc);
 
   const server = createServer({
     db,
@@ -353,13 +359,12 @@ test('update state to current value is a no-op (skips transition check)', async 
     principal: { id: 'u1' },
   });
   assert.equal(result.granted, true);
-  const row = Doc.findById(docId);
+  const row = Doc_b.findById(docId);
   assert.equal(row.status, 'draft');
 });
 
 test('update nonexistent row with state change throws 400 (no current state)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);

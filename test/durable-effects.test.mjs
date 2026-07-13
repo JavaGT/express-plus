@@ -14,13 +14,11 @@ import {
   reconcileDurableEffects,
 } from '../src/internal.mjs';
 import { createJobQueue } from '../src/job-queue.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 const SECRET = 'durable-effects-test-secret';
 
 function setupDb() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   return db;
 }
@@ -42,9 +40,10 @@ function testSourceEntity() {
   });
 }
 
-test('durable effect enqueues a job after commit and advances the consumer cursor', async () => {
+test('durable effect enqueues a job after commit and advances the consumer cursor', async (t) => {
   const db = setupDb();
-  const Source = testSourceEntity();
+  const app = workbench({ db, entities: [testSourceEntity()] });
+  const Source = app.entity('SourceDurableEffect');
   mountEntity(db, Source);
   const jobs = createJobQueue({ db, sharedSecret: SECRET, now: () => 1000 });
   const durableEffectsRegistry = buildDurableEffectsRegistry([Source]);
@@ -84,7 +83,7 @@ test('durable effect enqueues a job after commit and advances the consumer curso
   assert.equal(cursor.consumer, 'effect.durable');
   assert.equal(cursor.scope, scope);
   assert.equal(cursor.lastSeq, 1);
-  db.close();
+  t.after(() => { app.httpServer?.close?.(); db.close(); });
 });
 
 test('reconcileDurableEffects enqueues missed jobs from _Log and is idempotent', async () => {

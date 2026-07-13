@@ -16,13 +16,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import {
-  entity, action, event, createServer, createClient, generateDDL } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
+import { entity, action, event } from '../src/index.mjs';
+import workbench from '../src/app.mjs';
+import { createServer, createClient, generateDDL } from '../src/internal.mjs';
 
 test('an app opts into the pipeline: action → event → reducer fold', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   // A product entity with a published flag.
   const Post = entity('Post', {
@@ -103,7 +102,6 @@ test('pipeline and direct CRUD coexist — one does not subsume the other', asyn
   // The live-sync sequence numbers bridge both: every mutation, whichever
   // path it took, produces a sequenced live event.
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   const Note = entity('Note', {
         body: text(), owner: ref('User', { role: 'owner', readonly: true }),
@@ -112,8 +110,11 @@ test('pipeline and direct CRUD coexist — one does not subsume the other', asyn
   });
   for (const sql of generateDDL(Note)) db.exec(sql);
 
+  const app = workbench({ db, entities: [Note] });
+  const Note_b = app.entity(Note);
+
   // Direct CRUD path: create a note the plain way.
-  const note = Note.create({ body: 'via direct CRUD' });
+  const note = Note_b.create({ body: 'via direct CRUD' });
   assert.equal(note.body, 'via direct CRUD');
 
   // Pipeline path: a custom action that also writes a note.
@@ -123,7 +124,7 @@ test('pipeline and direct CRUD coexist — one does not subsume the other', asyn
   const server = createServer({
     handlers: {
       'note.draft': ({ payload }) => {
-        const n = Note.create({ body: payload.body });
+        const n = Note_b.create({ body: payload.body });
         return [{ type: 'note.drafted', scope: n.id, data: { body: n.body } }];
       },
     },

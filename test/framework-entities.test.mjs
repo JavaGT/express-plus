@@ -29,13 +29,13 @@ import { sessionPrincipalOf, SESSION_COOKIE } from '../src/auth/session.mjs';
 // Seed the two framework tables. The framework does not generate DDL in Phase 1;
 // the app/test harness owns CREATE TABLE. The Session schema is exactly the shape
 // sessionPrincipalOf queries.
-function seed() {
+function bootApp() {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   db.exec(
     'CREATE TABLE Session (id TEXT PRIMARY KEY, token TEXT, principalType TEXT, principalId TEXT, createdAt TEXT)',
   );
-  return db;
+  return workbench({ db, entities: [User, Session] });
 }
 
 // --- User: an ordinary entity over the generic query API ---
@@ -47,8 +47,8 @@ test('User is a compiled entity with username and a hash password', () => {
 });
 
 test('User.create digests the password; user.password.verify checks it', () => {
-  workbench({ db: seed() });
-  const user = User.create({ username: 'alice', password: 'hunter2' });
+  const app = bootApp();
+  const user = app.entity(User).create({ username: 'alice', password: 'hunter2' });
   assert.ok(user.id);
   assert.equal(user.username, 'alice');
   // the stored cell is a digest, never the plaintext
@@ -58,19 +58,19 @@ test('User.create digests the password; user.password.verify checks it', () => {
 });
 
 test('User.findOne(User.username.is(name)) round-trips with a verifiable password', () => {
-  workbench({ db: seed() });
-  User.create({ username: 'bob', password: 'sekret' });
-  const found = User.findOne(User.username.is('bob'));
+  const app = bootApp();
+  app.entity(User).create({ username: 'bob', password: 'sekret' });
+  const found = app.entity(User).findOne(User.username.is('bob'));
   assert.equal(found.username, 'bob');
   assert.equal(found.password.verify('sekret'), true);
-  assert.equal(User.findOne(User.username.is('nobody')), null);
+  assert.equal(app.entity(User).findOne(User.username.is('nobody')), null);
 });
 
 test('User.findAll().select(User.id, User.username) projects without the password', () => {
-  workbench({ db: seed() });
-  User.create({ username: 'alice', password: 'a' });
-  User.create({ username: 'bob', password: 'b' });
-  const rows = User.findAll().select(User.id, User.username);
+  const app = bootApp();
+  app.entity(User).create({ username: 'alice', password: 'a' });
+  app.entity(User).create({ username: 'bob', password: 'b' });
+  const rows = app.entity(User).findAll().select(User.id, User.username);
   assert.equal(rows.length, 2);
   for (const row of rows) {
     assert.deepEqual(Object.keys(row).sort(), ['id', 'username']);
@@ -87,24 +87,24 @@ test('Session declares its stored cells as readonly framework-owned fields', () 
 });
 
 test('Session.create({ userId }) mints a token and a user principal row', () => {
-  workbench({ db: seed() });
-  const session = Session.create({ userId: 'alice' });
+  const app = bootApp();
+  const session = app.entity(Session).create({ userId: 'alice' });
   assert.ok(session.token, 'a session token is minted');
   assert.equal(session.principalType, 'user');
   assert.equal(session.principalId, 'alice');
 });
 
 test('two Session.create calls mint distinct tokens', () => {
-  workbench({ db: seed() });
-  const a = Session.create({ userId: 'alice' });
-  const b = Session.create({ userId: 'alice' });
+  const app = bootApp();
+  const a = app.entity(Session).create({ userId: 'alice' });
+  const b = app.entity(Session).create({ userId: 'alice' });
   assert.notEqual(a.token, b.token);
 });
 
 test('Session.create({ kind: "link", token }) mints a link principal carrying the share token', () => {
-  workbench({ db: seed() });
+  const app = bootApp();
   const shareToken = 'share-abc';
-  const session = Session.create({ kind: 'link', token: shareToken });
+  const session = app.entity(Session).create({ kind: 'link', token: shareToken });
   assert.ok(session.token, 'a fresh session token is minted (distinct from the share token)');
   assert.notEqual(session.token, shareToken);
   assert.equal(session.principalType, 'link');
@@ -113,15 +113,14 @@ test('Session.create({ kind: "link", token }) mints a link principal carrying th
 });
 
 test('Session.create rejects an unknown intent (fail closed)', () => {
-  workbench({ db: seed() });
-  assert.throws(() => Session.create({ bogus: 1 }), /session/i);
+  const app = bootApp();
+  assert.throws(() => app.entity(Session).create({ bogus: 1 }), /session/i);
 });
 
 test('a minted user session resolves through sessionPrincipalOf', () => {
-  const db = seed();
-  workbench({ db });
-  const session = Session.create({ userId: 'alice' });
-  const principalOf = sessionPrincipalOf(db);
+  const app = bootApp();
+  const session = app.entity(Session).create({ userId: 'alice' });
+  const principalOf = sessionPrincipalOf(app.db);
   const req = { headers: { cookie: `${SESSION_COOKIE}=${session.token}` } };
   const who = principalOf(req);
   assert.equal(who.type, 'user');
@@ -129,10 +128,9 @@ test('a minted user session resolves through sessionPrincipalOf', () => {
 });
 
 test('a minted link session resolves to a link principal through sessionPrincipalOf', () => {
-  const db = seed();
-  workbench({ db });
-  const session = Session.create({ kind: 'link', token: 'share-xyz' });
-  const principalOf = sessionPrincipalOf(db);
+  const app = bootApp();
+  const session = app.entity(Session).create({ kind: 'link', token: 'share-xyz' });
+  const principalOf = sessionPrincipalOf(app.db);
   const req = { headers: { cookie: `${SESSION_COOKIE}=${session.token}` } };
   const who = principalOf(req);
   assert.equal(who.type, 'link');
@@ -143,10 +141,10 @@ test('a minted link session resolves to a link principal through sessionPrincipa
 });
 
 test('Session.delete(id) removes the session row', () => {
-  workbench({ db: seed() });
-  const session = Session.create({ userId: 'alice' });
-  const row = Session.findOne(Session.token.is(session.token));
+  const app = bootApp();
+  const session = app.entity(Session).create({ userId: 'alice' });
+  const row = app.entity(Session).findOne(Session.token.is(session.token));
   assert.ok(row);
-  Session.delete(row.id);
-  assert.equal(Session.findOne(Session.token.is(session.token)), null);
+  app.entity(Session).delete(row.id);
+  assert.equal(app.entity(Session).findOne(Session.token.is(session.token)), null);
 });

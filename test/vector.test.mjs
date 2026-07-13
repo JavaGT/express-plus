@@ -4,12 +4,13 @@
 // is computed in pure JS (brute-force, zero runtime dependencies), matching
 // Scope's approach. The .nearest(query, k) predicate returns top-K rows.
 
-import { vector, scope, grant, read, write, subscribe, everyone, text } from '../src/index.mjs';
+import { vector, scope, grant, read, write, subscribe, everyone, text, entity } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, cosineSimilarity } from '../src/internal.mjs';
+import workbench from '../src/app.mjs';
+import { cosineSimilarity } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
 
 // A test entity with a vector field.
@@ -46,7 +47,8 @@ async function serveVecItems(t, { dimensions = 3, Entity = vecEntity(dimensions)
     app.httpServer.close();
     db.close();
   });
-  return { app, db, origin: `http://127.0.0.1:${app.httpServer.address().port}`, Entity };
+  const bound = app.entity(Entity);
+  return { app, db, origin: `http://127.0.0.1:${app.httpServer.address().port}`, Entity: bound };
 }
 
 // ---- descriptor tests ----

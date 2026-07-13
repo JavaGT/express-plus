@@ -30,8 +30,6 @@ import {
 } from '../scope-sql.mjs';
 import { scope } from '../scope.mjs';
 import { grant, deny, read, write, subscribe, admin } from '../grant.mjs';
-import { setActiveEntity } from '../db.mjs';
-import { getActiveDb } from '../db.mjs';
 
 // Owner always receives the full capability set.
 const OWNER_CAPABILITIES = Object.freeze([read, write, subscribe, admin]);
@@ -122,10 +120,13 @@ export function compileMembershipAuthz(entityName, fields, config) {
 
 // ---- Standalone: augment a compiled entity record in place ----
 // Sets entity.grant, entity.registry, entity.readScope, entity.checks, and
-// entity.scopeFilter directly on the entity proxy. The entity proxy's set trap
-// stores overrides; subsequent reads get the overridden values. Re-registers
-// in the active entity registry so ref('Entity') resolves to the augmented entity.
+// entity.scopeFilter directly on the declaration proxy. Any app binding reads
+// these declaration-owned policy properties through its prototype.
 export function membership(entityRecord, config) {
+  // Policy belongs to the application-independent declaration. Accepting a
+  // bound facade here is convenient, but mutating it would couple policy to a
+  // single application (and the facade deliberately rejects such writes).
+  entityRecord = entityRecord?.declaration ?? entityRecord;
   if (!entityRecord || typeof entityRecord !== 'object' || !entityRecord.name) {
     throw new Error(
       'membership(entity, config): first argument must be a compiled entity record (from entity())',
@@ -157,9 +158,9 @@ export function membership(entityRecord, config) {
 
   // Build scopeFilter function (re-bound to new readScope)
   const scopeFilterFn = (principal) => {
-    if (!newReadScope) return { sql: '1=1', params: {} };
+    if (!newReadScope) return { sql: '1=0', params: {} };
     const bound = bindReadScope(newReadScope, principal);
-    return bound ? { sql: bound.sql, params: bound.params } : { sql: '1=1', params: {} };
+    return bound ? { sql: bound.sql, params: bound.params } : { sql: '1=0', params: {} };
   };
 
   // In-place mutation: set properties on the entity proxy. The proxy's set trap
@@ -171,10 +172,6 @@ export function membership(entityRecord, config) {
   entityRecord.readScope = newReadScope;
   entityRecord.scopeAst = newScopeAst;
   entityRecord.scopeFilter = scopeFilterFn;
-
-  // Re-register in the active entity registry so ref('Entity') resolves to the
-  // augmented entity (the proxy is the same object, just with overrides set).
-  setActiveEntity(entityName, entityRecord);
 
   return entityRecord;
 }
@@ -256,8 +253,8 @@ function buildCheckEntry(entityName, fieldName, dbRoles) {
   };
 
   // Run face: queries the membership side-table at runtime.
-  const run = ({ entity: row, principal }) => {
-    const db = getActiveDb();
+  const run = ({ entity: row, principal, runtime }) => {
+    const db = runtime.db;
     if (dbRoles.length > 0) {
       const roleParams = {};
       const conditions = dbRoles.map((role, i) => {

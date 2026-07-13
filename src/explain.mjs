@@ -38,7 +38,7 @@ export async function explain({ entity, row, principal, verb, field }) {
     if (!entry.run) continue;
     let result;
     try {
-      const raw = entry.run({ entity: row, principal });
+      const raw = entry.run({ entity: row, principal, runtime: entity.runtime });
       if (raw instanceof Promise) {
         result = await raw;
       } else {

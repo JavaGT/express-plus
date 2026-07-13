@@ -9,7 +9,6 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   entity, resolveStrategy, validateMutation, ValidationError, createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 // --- Slice 1: declaration + DDL ---
 
@@ -110,7 +109,6 @@ test('projected.async consumer owns trigger selection, compute, write-back, and 
 
 test('projected.async value is computed and stored after create dispatch', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
@@ -147,7 +145,6 @@ test('projected.async value is computed and stored after create dispatch', async
 test('projected.async compute receives the committed db handle', async (t) => {
   const appDb = new DatabaseSync(':memory:');
   const ambientDb = new DatabaseSync(':memory:');
-  setActiveDb(appDb, { replace: true });
   appDb.exec('CREATE TABLE PostCtx (id TEXT, title TEXT, score REAL, hotRank TEXT)');
   ambientDb.exec('CREATE TABLE PostCtx (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
@@ -189,7 +186,6 @@ test('projected.async compute receives the committed db handle', async (t) => {
 
 test('projected.async value is recomputed after update', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
@@ -239,7 +235,6 @@ test('projected.async value is recomputed after update', async (t) => {
 
 test('projected.async compute failure leaves the column unchanged', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
@@ -295,7 +290,6 @@ test('projected.async compute failure leaves the column unchanged', async (t) =>
 
 test('projected.async compute failure is logged on the projected channel', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
@@ -353,7 +347,6 @@ test('projected.async compute failure is logged on the projected channel', async
 
 test('projected.async field is rejected in client create payload (readonly)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
@@ -394,7 +387,6 @@ test('computed.stored constructor validates compute is a function', () => {
 
 test('computed.stored value is stored immediately in the create response', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Blog = entity('Blog', {
@@ -431,7 +423,6 @@ test('computed.stored value is stored immediately in the create response', async
 
 test('computed.stored value is recomputed on update', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Blog = entity('Blog', {
@@ -473,7 +464,6 @@ test('computed.stored value is recomputed on update', async (t) => {
 
 test('computed.stored compute failure rolls back the mutation', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Blog (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Blog = entity('Blog', {
@@ -522,7 +512,6 @@ test('computed.stored compute failure rolls back the mutation', async (t) => {
 
 test('projected.async with from:created only recomputes on create, not update', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
@@ -568,7 +557,6 @@ test('projected.async with from:created only recomputes on create, not update', 
 
 test('projected.async with from:updated only recomputes on update', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
@@ -615,7 +603,6 @@ test('projected.async with from:updated only recomputes on update', async (t) =>
 
 test('projected.async without from recomputes on both create and update (default)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
 
   const Post = entity('Post', {
@@ -661,7 +648,6 @@ test('projected.async without from recomputes on both create and update (default
 
 test('compute counter advances with each successful compute, survives across events', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   const { executeFrameworkDDL } = await import('../src/ddl.mjs');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');
@@ -853,7 +839,8 @@ test('text({ oneOf }) validates through the pipeline', () => {
 
 test('projected.async compute can findAll related entities', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
+
+  let _TCommentBound;
 
   const TComment = entity('TComment_FindAll', {
         post: ref('TPost_FindAll'),
@@ -868,7 +855,7 @@ test('projected.async compute can findAll related entities', async (t) => {
     commentRank: projected.async({
       from: ['created', 'updated'],
       compute: async (post) => {
-        const cmts = await TComment.findAll(TComment.post.is(post.id));
+        const cmts = await _TCommentBound.findAll(_TCommentBound.post.is(post.id));
         return cmts.length + (post.score ?? 0);
       },
     }),
@@ -876,7 +863,8 @@ test('projected.async compute can findAll related entities', async (t) => {
     grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
   });
 
-  const app = workbench({ db });
+  const app = workbench({ db, entities: [TPost, TComment] });
+  _TCommentBound = app.entity(TComment);
   app.mount('/tpost', TPost);
   app.mount('/tcomment', TComment);
   await app.ddl();
@@ -934,7 +922,6 @@ test('projected.async compute can findAll related entities', async (t) => {
 
 test('read response includes projected cursor headers for staleness detection', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   const Post = entity('Post_Stale', {
         title: text(),
@@ -1097,7 +1084,6 @@ test('reconcileProjectedRecovery leaves current scopes untouched', async () => {
 // fills any projected fields left stale by a prior crash before serving traffic.
 test('app.ready runs the projected recovery sweep (backfill before serving)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   const { executeFrameworkDDL } = await import('../src/ddl.mjs');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Post (id TEXT, title TEXT, score REAL, hotRank TEXT)');

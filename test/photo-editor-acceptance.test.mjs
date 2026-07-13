@@ -20,7 +20,6 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   entity, bindReadScope, mayVerb } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 // ---- helpers ----
 
@@ -213,7 +212,6 @@ test('SQL scope returns only layers whose canvas the principal can access', () =
   const { RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
 
   assert.deepEqual(scopedIds(db, RasterLayer, alice).sort(), ['l1', 'l2']);
   assert.deepEqual(scopedIds(db, RasterLayer, bob).sort(), ['l1', 'l2', 'l3']);
@@ -229,17 +227,18 @@ test('runtime mayVerb grants correct capabilities per canvas role on the parent'
   const { Canvas } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Canvas] });
+  const Canvas_b = app.entity(Canvas);
 
-  const c = Canvas.getOrFail('c-shared');
+  const c = Canvas_b.getOrFail('c-shared');
 
-  assert.equal(await mayVerb(Canvas, 'read', c, alice), true);
-  assert.equal(await mayVerb(Canvas, 'update', c, alice), true);
-  assert.equal(await mayVerb(Canvas, 'read', c, bob), true);
-  assert.equal(await mayVerb(Canvas, 'update', c, bob), true);
-  assert.equal(await mayVerb(Canvas, 'read', c, carol), true);
-  assert.equal(await mayVerb(Canvas, 'update', c, carol), false);
-  assert.equal(await mayVerb(Canvas, 'read', c, stranger), false);
+  assert.equal(await mayVerb(Canvas_b, 'read', c, alice), true);
+  assert.equal(await mayVerb(Canvas_b, 'update', c, alice), true);
+  assert.equal(await mayVerb(Canvas_b, 'read', c, bob), true);
+  assert.equal(await mayVerb(Canvas_b, 'update', c, bob), true);
+  assert.equal(await mayVerb(Canvas_b, 'read', c, carol), true);
+  assert.equal(await mayVerb(Canvas_b, 'update', c, carol), false);
+  assert.equal(await mayVerb(Canvas_b, 'read', c, stranger), false);
 
   db.close();
 });
@@ -247,24 +246,25 @@ test('runtime mayVerb grants correct capabilities per canvas role on the parent'
 // ---- ACCEPTANCE 4: field .can with is.editor()/is.owner() ----
 
 test('visible field .can admits editors/owners for hidden layers via mayFieldOp', async () => {
-  const { RasterLayer } = declareCanvasLayer();
+  const { Canvas, RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Canvas, RasterLayer] });
+  const RasterLayer_b = app.entity(RasterLayer);
 
-  const l2 = RasterLayer.getOrFail('l2');
+  const l2 = RasterLayer_b.getOrFail('l2');
   assert.equal(l2.visible, false, 'l2 is hidden');
 
   const { mayFieldOp } = await import('../src/row-grant.mjs');
 
   // Alice (owner) can read hidden layer
-  assert.equal(await mayFieldOp(RasterLayer, 'visible', read, l2, alice), true);
+  assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l2, alice), true);
   // Bob (editor) can read hidden layer
-  assert.equal(await mayFieldOp(RasterLayer, 'visible', read, l2, bob), true);
+  assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l2, bob), true);
   // Carol (viewer) cannot read hidden layer — denied by field .can
-  assert.equal(await mayFieldOp(RasterLayer, 'visible', read, l2, carol), false);
+  assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l2, carol), false);
   // Stranger is not scoped (SQL scope excludes them) — denied by field .can
-  assert.equal(await mayFieldOp(RasterLayer, 'visible', read, l2, stranger), false);
+  assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l2, stranger), false);
 
   db.close();
 });
@@ -272,19 +272,20 @@ test('visible field .can admits editors/owners for hidden layers via mayFieldOp'
 // ---- ACCEPTANCE 5: visible field .can admits all for visible layers ----
 
 test('visible field .can passes for visible layers to all scoped members', async () => {
-  const { RasterLayer } = declareCanvasLayer();
+  const { Canvas, RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Canvas, RasterLayer] });
+  const RasterLayer_b = app.entity(RasterLayer);
 
-  const l1 = RasterLayer.getOrFail('l1');
+  const l1 = RasterLayer_b.getOrFail('l1');
   assert.equal(l1.visible, true, 'l1 is visible');
 
   const { mayFieldOp } = await import('../src/row-grant.mjs');
 
-  assert.equal(await mayFieldOp(RasterLayer, 'visible', read, l1, alice), true);
-  assert.equal(await mayFieldOp(RasterLayer, 'visible', read, l1, bob), true);
-  assert.equal(await mayFieldOp(RasterLayer, 'visible', read, l1, carol), true);
+  assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l1, alice), true);
+  assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l1, bob), true);
+  assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l1, carol), true);
 
   db.close();
 });
@@ -292,16 +293,17 @@ test('visible field .can passes for visible layers to all scoped members', async
 // ---- ACCEPTANCE 6: null canvas FK fails closed ----
 
 test('null canvas FK fails closed for all principals', async () => {
-  const { RasterLayer } = declareCanvasLayer();
+  const { Canvas, RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Canvas, RasterLayer] });
+  const RasterLayer_b = app.entity(RasterLayer);
 
-  const l4 = RasterLayer.getOrFail('l4');
-  assert.equal(await mayVerb(RasterLayer, 'read', l4, alice), false);
-  assert.equal(await mayVerb(RasterLayer, 'read', l4, bob), false);
-  assert.equal(await mayVerb(RasterLayer, 'read', l4, carol), false);
-  assert.equal(await mayVerb(RasterLayer, 'read', l4, stranger), false);
+  const l4 = RasterLayer_b.getOrFail('l4');
+  assert.equal(await mayVerb(RasterLayer_b, 'read', l4, alice), false);
+  assert.equal(await mayVerb(RasterLayer_b, 'read', l4, bob), false);
+  assert.equal(await mayVerb(RasterLayer_b, 'read', l4, carol), false);
+  assert.equal(await mayVerb(RasterLayer_b, 'read', l4, stranger), false);
 
   assert.deepEqual(scopedIds(db, RasterLayer, alice), ['l1', 'l2']);
 
@@ -311,20 +313,21 @@ test('null canvas FK fails closed for all principals', async () => {
 // ---- ACCEPTANCE 7: removing a collaborator revokes access ----
 
 test('removing a collaborator revokes SQL scope AND field read', async () => {
-  const { RasterLayer } = declareCanvasLayer();
+  const { Canvas, RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Canvas, RasterLayer] });
+  const RasterLayer_b = app.entity(RasterLayer);
 
   const { mayFieldOp } = await import('../src/row-grant.mjs');
-  const l1 = RasterLayer.getOrFail('l1');
-  assert.equal(await mayFieldOp(RasterLayer, 'visible', read, l1, carol), true);
+  const l1 = RasterLayer_b.getOrFail('l1');
+  assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l1, carol), true);
 
   db.prepare(
     'DELETE FROM Canvas_collaborators WHERE Canvas_id = :cid AND member_id = :mid',
   ).run({ cid: 'c-shared', mid: 'carol' });
 
-  assert.equal(await mayFieldOp(RasterLayer, 'visible', read, l1, carol), false);
+  assert.equal(await mayFieldOp(RasterLayer_b, 'visible', read, l1, carol), false);
   assert.deepEqual(scopedIds(db, RasterLayer, carol), []);
 
   db.close();
@@ -336,19 +339,20 @@ test('removing a collaborator revokes SQL scope AND field read', async () => {
 // silent {granted:false}. `name` and `opacity` have no .can on RasterLayer.)
 
 test('inherit-child field without explicit .can strong-inherits the resolved row grant', async () => {
-  const { RasterLayer } = declareCanvasLayer();
+  const { Canvas, RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Canvas, RasterLayer] });
+  const RasterLayer_b = app.entity(RasterLayer);
 
   const { mayFieldOp } = await import('../src/row-grant.mjs');
-  const l1 = RasterLayer.getOrFail('l1'); // canvas c-shared
+  const l1 = RasterLayer_b.getOrFail('l1'); // canvas c-shared
 
   // owner (alice) and editor (bob) get read+write on Canvas; viewer (carol) gets read.
-  assert.equal(await mayFieldOp(RasterLayer, 'name', read, l1, alice), true, 'owner reads no-.can field');
-  assert.equal(await mayFieldOp(RasterLayer, 'name', read, l1, bob), true, 'editor reads no-.can field');
-  assert.equal(await mayFieldOp(RasterLayer, 'name', read, l1, carol), true, 'viewer reads no-.can field');
-  assert.equal(await mayFieldOp(RasterLayer, 'name', read, l1, stranger), false, 'non-scoped stranger cannot read');
+  assert.equal(await mayFieldOp(RasterLayer_b, 'name', read, l1, alice), true, 'owner reads no-.can field');
+  assert.equal(await mayFieldOp(RasterLayer_b, 'name', read, l1, bob), true, 'editor reads no-.can field');
+  assert.equal(await mayFieldOp(RasterLayer_b, 'name', read, l1, carol), true, 'viewer reads no-.can field');
+  assert.equal(await mayFieldOp(RasterLayer_b, 'name', read, l1, stranger), false, 'non-scoped stranger cannot read');
 
   db.close();
 });
@@ -359,7 +363,6 @@ test('HTTP list and read respect inherited canvas grant', async (t) => {
   const { Canvas, RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
 
   const app2 = workbench({ db });
   app2.mount('/canvases', Canvas);
@@ -390,15 +393,16 @@ test('HTTP list and read respect inherited canvas grant', async (t) => {
 // ---- ACCEPTANCE 9: thenable ref traversal in RasterLayer checks ----
 
 test('RasterLayer checks traverse canvas FK through thenable ref handle', async () => {
-  const { RasterLayer } = declareCanvasLayer();
+  const { Canvas, RasterLayer } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
   seed(db);
-  setActiveDb(db, { replace: true });
+  const app = workbench({ db, entities: [Canvas, RasterLayer] });
+  const RasterLayer_b = app.entity(RasterLayer);
 
-  const l1 = RasterLayer.getOrFail('l1');
+  const l1 = RasterLayer_b.getOrFail('l1');
 
   // Access registry run face directly to verify thenable traversal
-  const editorEntry = RasterLayer.registry.editor;
+  const editorEntry = RasterLayer_b.registry.editor;
   assert.ok(editorEntry && editorEntry.run, 'editor check has a run face');
 
   // Bob is editor on c-shared → editor check should return true
@@ -412,7 +416,7 @@ test('RasterLayer checks traverse canvas FK through thenable ref handle', async 
   assert.equal(isEditor2, false);
 
   // Owner check: alice is owner of c-shared
-  const ownerEntry = RasterLayer.registry.owner;
+  const ownerEntry = RasterLayer_b.registry.owner;
   const isOwner = await ownerEntry.run({ entity: l1, principal: alice });
   assert.equal(isOwner, true);
 
@@ -424,10 +428,10 @@ test('RasterLayer checks traverse canvas FK through thenable ref handle', async 
 test('projected.async computes a renderable preview for Canvas', async (t) => {
   const { Canvas } = declareCanvasLayer();
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   // Create canvas through the framework pipeline so projected.async fires
-  const app = workbench({ db });
+  const app = workbench({ db, entities: [Canvas] });
+  const Canvas_b = app.entity(Canvas);
   app.mount('/canvases', Canvas);
   await app.ddl();
   app.listen(0, { principalOf: () => alice });
@@ -447,7 +451,7 @@ test('projected.async computes a renderable preview for Canvas', async (t) => {
   // Wait a tick for post-commit consumer
   await new Promise((r) => setTimeout(r, 200));
 
-  const c = Canvas.getOrFail(canvasId);
+  const c = Canvas_b.getOrFail(canvasId);
   assert.ok(c.preview, 'preview is set after create compute');
   assert.ok(c.preview.rendered, 'preview has rendered flag');
 });

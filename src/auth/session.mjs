@@ -13,7 +13,6 @@
 
 import { principal, anonymous } from '../principal.mjs';
 import { config } from '../config.mjs';
-import { ApiKey } from './entities.mjs';
 import { createHash } from 'node:crypto';
 
 function sha256hex(s) {
@@ -118,7 +117,7 @@ export function apiKeyPrincipalOf(db) {
     if (!token) return anonymous;
     try {
       const tokenHash = sha256hex(token);
-      const row = ApiKey.findOne(ApiKey.tokenHash.is(tokenHash));
+      const row = db.prepare('SELECT * FROM ApiKey WHERE tokenHash = ? LIMIT 1').get(tokenHash);
       if (!row) return anonymous;
       // Expiration: an expired key is anonymous.
       if (row.expiresAt != null && row.expiresAt <= Date.now()) return anonymous;

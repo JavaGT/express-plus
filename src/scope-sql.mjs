@@ -390,10 +390,11 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   if (descriptor.type !== 'ref' || descriptor.role || typeof resolveEntity !== 'function') {
     return handle;
   }
-  const targetName = typeof descriptor.target === 'string'
-    ? descriptor.target
-    : descriptor.target?.name;
-  const target = targetName ? resolveEntity(targetName) : null;
+  const targetReference = descriptor.target;
+  const targetName = typeof targetReference === 'string'
+    ? targetReference
+    : targetReference?.name;
+  const target = targetReference ? resolveEntity(targetReference) : null;
   if (!target?.fields) {
     return handle;
   }

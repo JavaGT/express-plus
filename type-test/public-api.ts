@@ -5,9 +5,9 @@ import workbench, {
   type WorkbenchApp, type WorkbenchEntity,
 } from 'workbench';
 import {
-  createBlobStore, createJobQueue, readCommittedCursor,
+  createBlobStore, createInvitationApi, createJobQueue, readCommittedCursor,
   readCommittedEventsSince, runMigrations, type BlobStore,
-  type JobQueue, type JobRow, type Migration, type WorkbenchDatabase,
+  type Invitation, type JobQueue, type JobRow, type Migration, type WorkbenchDatabase,
 } from 'workbench/server';
 import {
   LiveChannel, LiveList, createAuthClient, createLiveStore, decodeResult,
@@ -33,6 +33,18 @@ declare const db: WorkbenchDatabase;
 const migration: Migration = { version: 1, up: (database) => database.exec('SELECT 1') };
 const app: WorkbenchApp = workbench({ db, migrations: [migration] }).mount('/projects', Project);
 void app.prepareSchema();
+const Projects = app.entity(Project);
+const namedProjects: PromiseLike<ProjectRow[]> = Projects
+  .findAll(Projects.field.name.is('Research'))
+  .sort(Projects.field.name, 'asc')
+  .limit(10);
+const projectedProjects: Array<Pick<ProjectRow, 'id' | 'name'>> = Projects.findAll().select(
+  Projects.field.id,
+  Projects.field.name,
+);
+// @ts-expect-error a projection does not contain fields that were not selected
+const wronglyFullProjects: ProjectRow[] = projectedProjects;
+void [namedProjects, projectedProjects, wronglyFullProjects];
 const request: DispatchRequest = {
   actionId: 'action-1',
   type: Rename.type,
@@ -51,6 +63,13 @@ void committed;
 
 const actor: Principal = principal({ type: 'apiKey', id: 'key-1' });
 void actor;
+declare const Invitations: import('workbench').BoundWorkbenchEntity<Invitation>;
+const invitationApi = createInvitationApi({ Invitation: Invitations });
+const createdInvitation: Promise<Invitation> = invitationApi.createInvitation({
+  targetEntity: 'Project', targetId: 'project-1', role: 'member',
+  principal: principal({ type: 'user', id: 'user-1' }),
+});
+void createdInvitation;
 const channel = new LiveChannel('https://example.test');
 const list: LiveList<ProjectRow> = new LiveList({ id: 'project-1', snapshot: [], cursor: 0 } as never);
 const store: LiveStore<ProjectRow> = createLiveStore({

@@ -29,7 +29,6 @@ import { entity } from '../src/internal.mjs';
 import { rowCapabilities, mayVerb } from '../src/row-grant.mjs';
 import workbench, { executeDDL, executeFrameworkDDL } from '../src/internal.mjs';
 import { User } from '../src/index.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 // The handwritten expansion D4 says owner.only() must be identical to. Reused
 // verbatim by the runtime/HTTP comparisons so equivalence is literal, not
@@ -98,7 +97,6 @@ test('owner.only() confers owner capabilities and denies others identically at r
 // sequence so status codes are directly comparable.
 function setupDb(E) {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   executeDDL(User, db);
   executeDDL(E, db);

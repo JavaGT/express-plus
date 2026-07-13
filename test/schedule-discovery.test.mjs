@@ -9,11 +9,9 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   entity, generateDDL, executeFrameworkDDL } from '../src/internal.mjs';
 import { schedule, startClockTriggers, schedulerSource } from '../src/schedule.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 function setupDb() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   return db;
 }

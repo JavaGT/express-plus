@@ -23,7 +23,6 @@
 
 import { randomBytes, randomUUID } from 'node:crypto';
 import { compileReadScope, fieldHandle, bindReadScope } from '../scope-sql.mjs';
-import { getActiveDb, getActiveEntity, setActiveEntity } from '../db.mjs';
 import { compileEntityAuthz } from '../authz.mjs';
 import { getLog } from '../log.mjs';
 import {
@@ -237,7 +236,7 @@ function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) 
 // compiler owns, which silently drops the field (fail closed).
 const RESERVED_DECLARATION_SLOTS = new Set([
   'fields', 'grant', 'checks', 'routes', 'create', 'effects', 'admitsEffects',
-  'schedule', 'simulation', 'gate', 'on', 'membership',
+  'schedule', 'simulation', 'gate', 'on', 'membership', 'field',
 ]);
 
 function looksLikeFieldDescriptor(value) {
@@ -449,6 +448,7 @@ export function entity(name, declaration = {}) {
     readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
     scopeAst,
     scopeFilter(principal) {
+      if (this.grant == null) return { sql: '1=0', params: {} };
       if (!readScope) return { sql: '1=1', params: {} };
       const bound = bindReadScope(readScope, principal);
       return bound ? { sql: bound.sql, params: bound.params } : { sql: '1=1', params: {} };
@@ -463,7 +463,7 @@ export function entity(name, declaration = {}) {
 
   const sideTableStrategyEntries = collectSideTableStrategies(fields);
 
-  function createEntityHydrator({ record, entityName, fields, sideTableStrategyEntries }) {
+  function createEntityHydrator({ record, entityName, fields, sideTableStrategyEntries, runtime }) {
     const hashFields = Object.entries(fields)
       .filter(([, descriptor]) => descriptor.kind === 'hash')
       .map(([fieldName]) => fieldName);
@@ -505,7 +505,17 @@ export function entity(name, declaration = {}) {
       for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
         for (const [fieldName, descriptor] of strategyFields) {
           if (typeof strategy.handle === 'function') {
-            row[fieldName] = strategy.handle({ record, entityName, fieldName, descriptor, row, principal, dispatch });
+            row[fieldName] = strategy.handle({
+              record,
+              entityName,
+              fieldName,
+              descriptor,
+              row,
+              principal,
+              dispatch,
+              db: runtime.db,
+              entityOf: runtime.entityOf,
+            });
           }
         }
       }
@@ -520,15 +530,6 @@ export function entity(name, declaration = {}) {
     return { hydrate, deserializeStoredCells };
   }
 
-  const { hydrate, deserializeStoredCells } = createEntityHydrator({
-    record,
-    entityName: name,
-    fields,
-    sideTableStrategyEntries,
-  });
-
-  installEntityQueries(record, { name, hydrate, deserializeStoredCells });
-
   // insert(cells) — the trusted low-level write core: serialize each declared
   // field's value to its stored cell, INSERT, and return the hydrated new row.
   // It does NOT run validateMutation — its caller has already decided the cells
@@ -536,55 +537,6 @@ export function entity(name, declaration = {}) {
   // create POLICY mints server-side cells it owns). This is the ONE place the
   // INSERT/return-row mechanics live; both write paths compose it (singular
   // system, deletion test: the policy override adds intent, not a second insert).
-  const insert = (cells) => {
-    const id = cells.id ?? randomUUID();
-    const stored = { id };
-    for (const [key, value] of Object.entries(cells)) {
-      if (key === 'id') continue;
-      const descriptor = fields[key];
-      if (descriptor && descriptor.kind === 'store' && descriptor.type === 'map') {
-        continue;
-      }
-      if (descriptor && (descriptor.kind === 'projected' || descriptor.kind === 'computed')) {
-        continue; // computed by the framework, never set by client
-      }
-      if (descriptor && descriptor.kind === 'struct') {
-        Object.assign(stored, flattenStruct(key, descriptor, value));
-        continue;
-      }
-      if (!descriptor) continue;
-      stored[key] = serializeField(descriptor, value);
-    }
-    const cols = Object.keys(stored);
-    getActiveDb()
-      .prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`)
-      .run(stored);
-    return hydrate(
-      getActiveDb()
-        .prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`)
-        .get({ id }),
-    );
-  };
-
-  // create(payload). By default it validates an untrusted payload (fail closed:
-  // undeclared keys, readonly fields, and required-clears are rejected) and
-  // inserts. A framework entity may DECLARE a `create` policy that absorbs a
-  // bespoke minting intent (Session mints token/principalType/principalId from a
-  // closed set of session intents) — declaration absorbs the imperative wiring.
-  // The policy receives the call payload and a trusted toolkit { insert, mintToken }
-  // so it composes the same insert core rather than opening a second write path.
-  record.create = (payload) => {
-    if (typeof createPolicy === 'function') {
-      return createPolicy(payload, { insert, mintToken });
-    }
-    validateMutation(record, payload);
-    return insert(payload);
-  };
-
-  record.delete = (id) => {
-    getActiveDb().prepare(`DELETE FROM ${name} WHERE id = :id`).run({ id });
-  };
-
   record.verbs = Object.freeze({
     create: action(`${name}.create`),
     created: event(eventHandle.created(name), (state, { data }) => ({ ...state, ...data })),
@@ -602,11 +554,7 @@ export function entity(name, declaration = {}) {
     sideTableStrategyEntries,
   });
 
-  record.insert = (cells) => insert(cells);
-
   record.generateDDL = () => generateDDL(record);
-
-  record.crudHandlers = createCrudHandlers({ record, sideTableStrategyEntries });
 
   const LIFECYCLE_HANDLES = Object.freeze({
     created: (name) => created(name),
@@ -617,32 +565,129 @@ export function entity(name, declaration = {}) {
   // Don't freeze the entire record — only `fields` is frozen (above). Auth-related
   // properties (grant, registry, readScope, scopeAst) are mutable so membership()
   // and similar post-compilation augmentations can set them in place.
-  const proxy = new Proxy(record, {
-    get(target, key, receiver) {
-      // Lifecycle handles and field handles are resolved only for string keys
-      // not owned by the record.
-      if (key in target || typeof key !== 'string') {
-        return Reflect.get(target, key, receiver);
+  function handleProxy(target, resolveEntity, { mutableAuth = false } = {}) {
+    const fieldNamespace = new Proxy(Object.create(null), {
+      get(_namespace, key) {
+        if (key === 'id') return { fieldName: 'id' };
+        if (typeof key === 'string' && Object.hasOwn(fields, key)) {
+          return fieldHandle(key, fields[key], name, resolveEntity);
+        }
+        return undefined;
+      },
+      set() { return false; },
+    });
+    return new Proxy(target, {
+      get(target, key, receiver) {
+        if (key === 'field') return fieldNamespace;
+        // Lifecycle handles and legacy direct field handles are resolved only
+        // for string keys not owned by the record. `.field` is the unambiguous
+        // path when a field name collides with entity metadata such as `name`.
+        if (key in target || typeof key !== 'string') {
+          return Reflect.get(target, key, receiver);
+        }
+        if (key === 'id') return { fieldName: 'id' };
+        if (LIFECYCLE_HANDLES[key]) return LIFECYCLE_HANDLES[key](name);
+        if (Object.hasOwn(fields, key)) {
+          return fieldHandle(key, fields[key], name, resolveEntity);
+        }
+        return undefined;
+      },
+      set(target, key, value, receiver) {
+        if (mutableAuth && (key === 'grant' || key === 'registry' || key === 'readScope' || key === 'scopeAst' || key === 'scopeFilter')) {
+          return Reflect.set(target, key, value, receiver);
+        }
+        return false;
+      },
+    });
+  }
+
+  // A declaration owns schema, policy, events, projection and DDL. It owns no
+  // database operations. Binding is deliberately app-scoped so the same
+  // declaration can be mounted by several applications without ambient state.
+  Object.defineProperty(record, 'bind', {
+    enumerable: false,
+    value(runtime) {
+      if (!runtime || typeof runtime.entityOf !== 'function') {
+        throw new Error(`cannot bind entity '${name}' without an application runtime`);
       }
-      if (key === 'id') return { fieldName: 'id' };
-      if (LIFECYCLE_HANDLES[key]) {
-        return LIFECYCLE_HANDLES[key](name);
-      }
-      if (Object.prototype.hasOwnProperty.call(fields, key)) {
-        return fieldHandle(key, fields[key], name, getActiveEntity);
-      }
-      return undefined;
-    },
-    set(target, key, value, receiver) {
-      // Allow setting auth-related properties after compilation for in-place
-      // augmentation (e.g. membership(entity, config)).
-      if (key === 'grant' || key === 'registry' || key === 'readScope' || key === 'scopeAst' || key === 'scopeFilter') {
-        return Reflect.set(target, key, value, receiver);
-      }
-      // Prevent mutation of non-auth properties.
-      return false;
+      const requireDb = () => {
+        if (!runtime.db) {
+          throw new Error(`entity '${name}' database operation requires an application database`);
+        }
+        return runtime.db;
+      };
+      // A database-less app can still resolve and inspect routes. Database
+      // operations remain present but fail loudly when invoked, preserving one
+      // facade shape across construction and startup.
+      const queryDb = Object.freeze({
+        prepare(...args) {
+          return requireDb().prepare(...args);
+        },
+      });
+
+      const boundRecord = Object.create(record);
+      Object.defineProperties(boundRecord, {
+        declaration: { value: proxy, enumerable: false },
+        runtime: { value: runtime, enumerable: false },
+      });
+      const bound = handleProxy(boundRecord, runtime.entityOf);
+      const { hydrate, deserializeStoredCells } = createEntityHydrator({
+        record: bound,
+        entityName: name,
+        fields,
+        sideTableStrategyEntries,
+        runtime,
+      });
+
+      installEntityQueries(boundRecord, {
+        name,
+        hydrate,
+        deserializeStoredCells,
+        db: queryDb,
+      });
+
+      const insert = (cells) => {
+        const id = cells.id ?? randomUUID();
+        const stored = { id };
+        for (const [key, value] of Object.entries(cells)) {
+          if (key === 'id') continue;
+          const descriptor = fields[key];
+          if (descriptor?.kind === 'store' && descriptor.type === 'map') continue;
+          if (descriptor && (descriptor.kind === 'projected' || descriptor.kind === 'computed')) continue;
+          if (descriptor?.kind === 'struct') {
+            Object.assign(stored, flattenStruct(key, descriptor, value));
+            continue;
+          }
+          if (descriptor) stored[key] = serializeField(descriptor, value);
+        }
+        const cols = Object.keys(stored);
+        const db = requireDb();
+        db
+          .prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`)
+          .run(stored);
+        return hydrate(db.prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`).get({ id }));
+      };
+
+      boundRecord.create = (payload) => {
+        if (typeof createPolicy === 'function') {
+          return createPolicy(payload, { insert, mintToken });
+        }
+        validateMutation(bound, payload);
+        return insert(payload);
+      };
+      boundRecord.insert = insert;
+      boundRecord.delete = (id) => {
+        requireDb().prepare(`DELETE FROM ${name} WHERE id = :id`).run({ id });
+      };
+      boundRecord.crudHandlers = createCrudHandlers({ record: bound, sideTableStrategyEntries });
+      return bound;
     },
   });
-  setActiveEntity(name, proxy);
+
+  const proxy = handleProxy(
+    record,
+    (target) => typeof target === 'object' ? target : null,
+    { mutableAuth: true },
+  );
   return proxy;
 }

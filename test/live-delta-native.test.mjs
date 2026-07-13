@@ -16,7 +16,6 @@ import http from 'node:http';
 
 import {
   entity, generateDDL, executeFrameworkDDL, createLiveServer } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 // --- test entity ---
 
@@ -134,7 +133,6 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 function bootServer() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(User)) db.exec(sql);
   for (const sql of generateDDL(Doc)) db.exec(sql);

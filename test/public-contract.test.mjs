@@ -31,8 +31,7 @@ export const PUBLIC_API = Object.freeze({
     named: Object.freeze([
       'sessionCookie', 'sessionPrincipalOf', 'sessionTokenOf',
       'apiKeyPrincipalOf', 'parseCookies', 'SESSION_COOKIE',
-      'createInvitation', 'acceptInvitation', 'rejectInvitation',
-      'listInvitationsForUser', 'emailSeam', 'noopTransport',
+      'createInvitationApi', 'emailSeam', 'noopTransport',
       'matchRoute', 'serveStatic', 'createJobQueue', 'createBlobStore',
       'runMigrations', 'readCommittedCursor', 'readCommittedEventsSince',
     ]),

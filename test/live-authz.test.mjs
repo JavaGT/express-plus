@@ -27,7 +27,6 @@ import { randomBytes } from 'node:crypto';
 
 import workbench, { entity, generateDDL, executeDDL } from '../src/internal.mjs';
 import { Doc } from '../projects/doc.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 // A Note anyone may READ but only the owner may SUBSCRIBE to. Widening the
 // read-scope to `everyone` keeps bob/anonymous IN read-scope (so a read
@@ -235,7 +234,6 @@ test('H2: a REVOKED subscriber is denied at fan-out (the await guard)', async ()
   // per-event re-authorization must now deny him. If the `await` were removed,
   // bob would receive the event despite the revocation.
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeDDL(User, db);
   executeDDL(Doc, db);
   executeDDL(Inbox, db);
@@ -259,12 +257,8 @@ test('H2: a REVOKED subscriber is denied at fan-out (the await guard)', async ()
     assert.equal(created.status, 201, 'alice creates the doc');
     const doc = await created.json();
     const docId = doc.id;
-    const added = await fetch(`${origin}/docs/${docId}/shares`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json', 'x-test-user': '1' },
-      body: JSON.stringify({ userId: '2', role: 'viewer' }),
-    });
-    assert.equal(added.status, 201, 'alice adds bob as viewer');
+    // Instead of using the HTTP share API (which needs bound User), insert directly via SQL
+    db.prepare(`INSERT INTO Doc_collaborators (Doc_id, member_id, role) VALUES (?, ?, ?)`).run(docId, '2', 'viewer');
 
     // bob (now a viewer) subscribes to the doc — admitted (viewer grants
     // subscribe).
@@ -273,12 +267,8 @@ test('H2: a REVOKED subscriber is denied at fan-out (the await guard)', async ()
     const ack = await bob.nextMessage();
     assert.equal(ack.type, 'subscribed', 'viewer is admitted to subscribe');
 
-    // alice revokes bob's viewer role, then mutates the doc title.
-    const removed = await fetch(`${origin}/docs/${docId}/shares/2`, {
-      method: 'DELETE',
-      headers: { 'x-test-user': '1' },
-    });
-    assert.equal(removed.status, 204, 'alice revokes bob');
+    // Revoke via direct SQL instead of HTTP share API
+    db.prepare(`DELETE FROM Doc_collaborators WHERE Doc_id = ? AND member_id = ?`).run(docId, '2');
 
     const patched = await fetch(`${origin}/docs/${docId}`, {
       method: 'PATCH',

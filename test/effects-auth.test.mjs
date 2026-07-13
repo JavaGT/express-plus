@@ -22,11 +22,9 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   entity, buildEffectsRegistry, validateEffects, generateDDL, generateFrameworkDDL, executeFrameworkDDL, created } from '../src/internal.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 function setupDb() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   return db;
 }
@@ -35,22 +33,26 @@ function setupDb() {
 test('#2 effect target event is authorized under the effect principal, not the user', async () => {
   const db = setupDb();
 
-  const Target = entity('Target', {
+  const TargetDecl = entity('Target', {
         name: text(),
 
     grant: () => grant(read, write, subscribe),
   });
-  for (const sql of generateDDL(Target)) db.exec(sql);
+  for (const sql of generateDDL(TargetDecl)) db.exec(sql);
 
-  const Source = entity('Source', {
+  const SourceDecl = entity('Source', {
         title: text(),
 
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
-      [Source.created, { mutate: Target, with: { name: 'from-effect' } },],
+      [Source.created, { mutate: TargetDecl, with: { name: 'from-effect' } },],
     ],
   });
-  for (const sql of generateDDL(Source)) db.exec(sql);
+  for (const sql of generateDDL(SourceDecl)) db.exec(sql);
+
+  const app = workbench({ db, entities: [TargetDecl, SourceDecl] });
+  const Source = app.entity('Source');
+  const Target = app.entity('Target');
 
   const recorded = [];
   const server = createServer({
@@ -88,28 +90,33 @@ test('#2 effect target event is authorized under the effect principal, not the u
   assert.ok(targetAuth, 'Target.created (effect) was authorized');
   assert.equal(targetAuth.type, 'system', 'effect event runs under a system principal');
   assert.equal(targetAuth.effect, 'Source', 'effect principal is tagged with its source entity');
+  app.httpServer?.close?.();
 });
 
 // ---- #2 (atomicity): target row-grant DENY of the effect principal rolls back origin ----
 test('#2 target row-grant deny of effect principal rolls back origin (in-txn atomic)', async () => {
   const db = setupDb();
 
-  const Target = entity('Target', {
+  const TargetDecl = entity('Target', {
         name: text(),
 
     grant: () => grant(read, write, subscribe),
   });
-  for (const sql of generateDDL(Target)) db.exec(sql);
+  for (const sql of generateDDL(TargetDecl)) db.exec(sql);
 
-  const Source = entity('Source', {
+  const SourceDecl = entity('Source', {
         title: text(),
 
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
-      [Source.created, { mutate: Target, with: { name: 'x' } },],
+      [Source.created, { mutate: TargetDecl, with: { name: 'x' } },],
     ],
   });
-  for (const sql of generateDDL(Source)) db.exec(sql);
+  for (const sql of generateDDL(SourceDecl)) db.exec(sql);
+
+  const app = workbench({ db, entities: [TargetDecl, SourceDecl] });
+  const Source = app.entity('Source');
+  const Target = app.entity('Target');
 
   const server = createServer({
     handlers: Source.crudHandlers,
@@ -139,29 +146,34 @@ test('#2 target row-grant deny of effect principal rolls back origin (in-txn ato
   assert.equal(result.granted, false, 'origin denied because effect was denied');
   assert.equal(db.prepare('SELECT count(*) AS c FROM Source').get().c, 0, 'origin rolled back');
   assert.equal(db.prepare('SELECT count(*) AS c FROM Target').get().c, 0, 'no target created');
+  app.httpServer?.close?.();
 });
 
 // ---- #3: admitsEffects DENY throws 403 → rolls back origin ----
 test('#3 admitsEffects deny rolls back origin', async () => {
   const db = setupDb();
 
-  const Target = entity('Target', {
+  const TargetDecl = entity('Target', {
         name: text(),
 
     grant: () => grant(read, write, subscribe),
     admitsEffects: () => false, // deny every effect principal
   });
-  for (const sql of generateDDL(Target)) db.exec(sql);
+  for (const sql of generateDDL(TargetDecl)) db.exec(sql);
 
-  const Source = entity('Source', {
+  const SourceDecl = entity('Source', {
         title: text(),
 
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
-      [Source.created, { mutate: Target, with: { name: 'x' } },],
+      [Source.created, { mutate: TargetDecl, with: { name: 'x' } },],
     ],
   });
-  for (const sql of generateDDL(Source)) db.exec(sql);
+  for (const sql of generateDDL(SourceDecl)) db.exec(sql);
+
+  const app = workbench({ db, entities: [TargetDecl, SourceDecl] });
+  const Source = app.entity('Source');
+  const Target = app.entity('Target');
 
   const server = createServer({
     handlers: Source.crudHandlers,
@@ -184,29 +196,34 @@ test('#3 admitsEffects deny rolls back origin', async () => {
   assert.equal(result.granted, false, 'admit deny → origin denied');
   assert.equal(db.prepare('SELECT count(*) AS c FROM Source').get().c, 0, 'origin rolled back');
   assert.equal(db.prepare('SELECT count(*) AS c FROM Target').get().c, 0, 'no target');
+  app.httpServer?.close?.();
 });
 
 // ---- #3: admitsEffects ADMIT lets the effect apply ----
 test('#3 admitsEffects admit applies the effect', async () => {
   const db = setupDb();
 
-  const Target = entity('Target', {
+  const TargetDecl = entity('Target', {
         name: text(),
 
     grant: () => grant(read, write, subscribe),
     admitsEffects: ({ effect }) => effect === 'Source',
   });
-  for (const sql of generateDDL(Target)) db.exec(sql);
+  for (const sql of generateDDL(TargetDecl)) db.exec(sql);
 
-  const Source = entity('Source', {
+  const SourceDecl = entity('Source', {
         title: text(),
 
     grant: () => grant(read, write, subscribe),
     effects: (Source) => [
-      [Source.created, { mutate: Target, with: { name: 'made' } },],
+      [Source.created, { mutate: TargetDecl, with: { name: 'made' } },],
     ],
   });
-  for (const sql of generateDDL(Source)) db.exec(sql);
+  for (const sql of generateDDL(SourceDecl)) db.exec(sql);
+
+  const app = workbench({ db, entities: [TargetDecl, SourceDecl] });
+  const Source = app.entity('Source');
+  const Target = app.entity('Target');
 
   const server = createServer({
     handlers: Source.crudHandlers,
@@ -229,6 +246,7 @@ test('#3 admitsEffects admit applies the effect', async () => {
   const targets = db.prepare('SELECT * FROM Target').all();
   assert.equal(targets.length, 1, 'effect created the target row');
   assert.equal(targets[0].name, 'made');
+  app.httpServer?.close?.();
 });
 
 // ---- #4: validateEffects detects a structural cycle (the boot pass function) ----

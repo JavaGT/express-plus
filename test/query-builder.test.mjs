@@ -11,8 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { entity, generateDDL } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
+import workbench, { entity, generateDDL } from '../src/internal.mjs';
 
 const Note = entity('Note', {
     body: text(),
@@ -25,7 +24,6 @@ const Note = entity('Note', {
 
 function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   for (const sql of generateDDL(Note)) db.exec(sql);
   // Three notes owned by u1 with different updatedAt, one by u2.
   db.prepare("INSERT INTO Note (id, body, stars, updatedAt, owner) VALUES (1, 'a', 1, 100, 'u1')").run();
@@ -35,34 +33,43 @@ function setup() {
   return db;
 }
 
+function bindNote(db) {
+  const app = workbench({ db, entities: [Note] });
+  return app.entity(Note);
+}
+
 test('findAll(predicate) returns matching rows (awaited)', async () => {
-  setup();
-  const rows = await Note.findAll(Note.owner.is('u1'));
+  const db = setup();
+  const Note_b = bindNote(db);
+  const rows = await Note_b.findAll(Note_b.owner.is('u1'));
   assert.equal(rows.length, 3);
   assert.deepEqual(rows.map((r) => r.body).sort(), ['a', 'b', 'c']);
 });
 
 test('.sort(field, dir) orders the rows', async () => {
-  setup();
-  const asc = await Note.findAll(Note.owner.is('u1')).sort(Note.updatedAt, 'asc');
+  const db = setup();
+  const Note_b = bindNote(db);
+  const asc = await Note_b.findAll(Note_b.owner.is('u1')).sort(Note_b.updatedAt, 'asc');
   assert.deepEqual(asc.map((r) => r.body), ['a', 'c', 'b']); // 100, 200, 300
 
-  const desc = await Note.findAll(Note.owner.is('u1')).sort(Note.updatedAt, 'desc');
+  const desc = await Note_b.findAll(Note_b.owner.is('u1')).sort(Note_b.updatedAt, 'desc');
   assert.deepEqual(desc.map((r) => r.body), ['b', 'c', 'a']); // 300, 200, 100
 });
 
 test('.limit(n) caps the result count', async () => {
-  setup();
-  const rows = await Note.findAll(Note.owner.is('u1')).sort(Note.updatedAt, 'desc').limit(2);
+  const db = setup();
+  const Note_b = bindNote(db);
+  const rows = await Note_b.findAll(Note_b.owner.is('u1')).sort(Note_b.updatedAt, 'desc').limit(2);
   assert.equal(rows.length, 2);
   assert.deepEqual(rows.map((r) => r.body), ['b', 'c']); // top-2 newest
 });
 
 test('findAll(predicate) works in Promise.all (the exemplar shape)', async () => {
-  setup();
+  const db = setup();
+  const Note_b = bindNote(db);
   const [owned, shared] = await Promise.all([
-    Note.findAll(Note.owner.is('u1')).sort(Note.updatedAt, 'desc').limit(10),
-    Note.findAll(Note.owner.is('u2')).sort(Note.updatedAt, 'desc').limit(10),
+    Note_b.findAll(Note_b.owner.is('u1')).sort(Note_b.updatedAt, 'desc').limit(10),
+    Note_b.findAll(Note_b.owner.is('u2')).sort(Note_b.updatedAt, 'desc').limit(10),
   ]);
   assert.equal(owned.length, 3);
   assert.equal(shared.length, 1);
@@ -70,10 +77,11 @@ test('findAll(predicate) works in Promise.all (the exemplar shape)', async () =>
 });
 
 test('no-arg findAll() stays synchronous with .select()', () => {
-  setup();
-  const rows = Note.findAll();
+  const db = setup();
+  const Note_b = bindNote(db);
+  const rows = Note_b.findAll();
   assert.equal(rows.length, 4);
-  const projected = rows.select(Note.id, Note.body);
+  const projected = rows.select(Note_b.id, Note_b.body);
   assert.equal(projected.length, 4);
   assert.deepEqual(Object.keys(projected[0]).sort(), ['body', 'id']);
 });

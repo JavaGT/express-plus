@@ -4,7 +4,6 @@ import { read, write } from './grant.mjs';
 import { serializeField } from './field-strategy.mjs';
 import { mayFieldOp } from './row-grant.mjs';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.mjs';
-import { getActiveDb, getActiveEntity } from './db.mjs';
 import * as eventHandles from './event-handle.mjs';
 import { scopeOf } from './scope-handle.mjs';
 import { upsert } from './driver.mjs';
@@ -35,23 +34,23 @@ async function dispatchFieldMutation({ entityName, fieldName, dispatch, type, pa
   return result;
 }
 
-function mapHandle({ record, entityName, fieldName, descriptor, row, principal, dispatch }) {
+function mapHandle({ record, entityName, fieldName, descriptor, row, principal, dispatch, db, entityOf }) {
   const table = membershipTable(entityName, fieldName);
   const ownerCol = membershipOwnerCol(entityName);
   const oid = String(row.id);
   const ofDescriptor = descriptor.of;
-  const targetName = ofDescriptor && ofDescriptor.kind === 'value' && ofDescriptor.type === 'ref'
+  const targetDeclaration = ofDescriptor && ofDescriptor.kind === 'value' && ofDescriptor.type === 'ref'
     ? ofDescriptor.target
     : null;
   const hasRole = Array.isArray(descriptor.roles) && descriptor.roles.length > 0;
 
   const probe = (memberId) =>
-    getActiveDb()
+    db
       .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
       .get({ owner: oid, member: String(memberId) });
 
   const probeRow = (memberId) =>
-    getActiveDb()
+    db
       .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
       .get({ owner: oid, member: String(memberId) });
 
@@ -84,19 +83,19 @@ function mapHandle({ record, entityName, fieldName, descriptor, row, principal, 
     has: (memberId) => probe(memberId) !== undefined,
     get: (memberId) => {
       const mid = String(memberId);
-      return getActiveDb()
+      return db
         .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
         .get({ owner: oid, member: mid }) ?? undefined;
     },
     toArray: async () => {
       await authorizeFieldOp(record, fieldName, read, row, principal);
-      const db = getActiveDb();
       const selectCols = hasRole ? `${MEMBER_COLUMN} AS member_id, role` : `${MEMBER_COLUMN} AS member_id`;
       const rows = db
         .prepare(`SELECT ${selectCols} FROM ${table} WHERE ${ownerCol} = :owner`)
         .all({ owner: oid });
-      const target = targetName ? getActiveEntity(targetName) : null;
+      const target = targetDeclaration ? entityOf(targetDeclaration) : null;
       if (!target) return rows.map((r) => [null, hasRole ? r.role : null]);
+      const targetName = target.name;
       const memberIds = rows.map((r) => r.member_id);
       const members = [];
       for (let i = 0; i < memberIds.length; i += 500) {
@@ -203,13 +202,13 @@ function mapDDL(entityName, fieldName, descriptor) {
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
-function orderedHandle({ record, entityName, fieldName, row, principal, dispatch }) {
+function orderedHandle({ record, entityName, fieldName, row, principal, dispatch, db }) {
   const table = membershipTable(entityName, fieldName);
   const ownerCol = membershipOwnerCol(entityName);
   const oid = String(row.id);
 
   const rowsOrdered = () =>
-    getActiveDb()
+    db
       .prepare(`SELECT id, key, item FROM ${table} WHERE ${ownerCol} = :owner ORDER BY key`)
       .all({ owner: oid });
 
@@ -265,11 +264,11 @@ function orderedHandle({ record, entityName, fieldName, row, principal, dispatch
       });
     },
     has: (id) =>
-      getActiveDb()
+      db
         .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND id = :id`)
         .get({ owner: oid, id: String(id) }) !== undefined,
     get: (id) => {
-      const r = getActiveDb()
+      const r = db
         .prepare(`SELECT item FROM ${table} WHERE ${ownerCol} = :owner AND id = :id`)
         .get({ owner: oid, id: String(id) });
       return r ? JSON.parse(r.item) : undefined;
@@ -390,7 +389,7 @@ function orderedDDL(entityName, fieldName) {
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
-function logHandle({ record, entityName, fieldName, descriptor, row, principal, dispatch }) {
+function logHandle({ record, entityName, fieldName, descriptor, row, principal, dispatch, db }) {
   const table = membershipTable(entityName, fieldName);
   const ownerCol = membershipOwnerCol(entityName);
   const oid = String(row.id);
@@ -407,7 +406,7 @@ function logHandle({ record, entityName, fieldName, descriptor, row, principal, 
     },
     entries: async () => {
       await authorizeFieldOp(record, fieldName, read, row, principal);
-      const rows = getActiveDb()
+      const rows = db
         .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner ORDER BY rowid`)
         .all({ owner: oid });
       return rows.map((r) => {
@@ -482,7 +481,7 @@ function logDDL(entityName, fieldName, descriptor) {
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
-function ephemeralHandle({ record, entityName, fieldName, row, principal, dispatch }) {
+function ephemeralHandle({ record, entityName, fieldName, row, principal, dispatch, db }) {
   const table = membershipTable(entityName, fieldName);
   const ownerCol = membershipOwnerCol(entityName);
   const oid = String(row.id);
@@ -498,7 +497,7 @@ function ephemeralHandle({ record, entityName, fieldName, row, principal, dispat
       });
     },
     get: () => {
-      const r = getActiveDb()
+      const r = db
         .prepare(`SELECT cells FROM ${table} WHERE ${ownerCol} = :owner AND client_id = :client`)
         .get({ owner: oid, client: clientId });
       return r ? JSON.parse(r.cells ?? '{}') : {};

@@ -26,11 +26,9 @@
 
 import { router } from '../app.mjs';
 import { allowAnonymous, requireUser } from '../route-gate.mjs';
-import { User, Session, Credential, Invitation, ApiKey, TwoFactor } from './entities.mjs';
-import { createInvitation, acceptInvitation, rejectInvitation, listInvitationsForUser } from './invitation.mjs';
+import { createInvitationApi } from './invitation.mjs';
 import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.mjs';
 import { config } from '../config.mjs';
-import { getActiveDb } from '../db.mjs';
 import { verifyTotp, verifyBackupCode } from './totp.mjs';
 import { serializeField } from '../field-strategy.mjs';
 import {
@@ -54,7 +52,12 @@ import {
 // always travels in the body's `username` slot (kept for backward
 // compatibility); only the lookup columns change. Every named field MUST exist
 // on the User entity — a typo fails closed at first login with a thrown lookup.
-export function authRoutes({ secure = config.env === 'production', identifyBy = ['username'] } = {}) {
+export function authRoutes({ secure = config.env === 'production', identifyBy = ['username'], entities, db } = {}) {
+  if (!entities || !db) {
+    throw new Error('authRoutes requires entities and db options');
+  }
+  const { User, Session, Credential, Invitation, ApiKey, TwoFactor } = entities;
+  const { createInvitation, acceptInvitation, rejectInvitation, listInvitationsForUser } = createInvitationApi({ Invitation });
   const s = router();
   const identityFields = Array.isArray(identifyBy) && identifyBy.length > 0 ? identifyBy : ['username'];
 
@@ -158,7 +161,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     // gate resolution). This matches the existing pattern for framework-internal
     // auth mutations — TOTP disable uses raw SQL at auth-routes.mjs:494).
     const serialized = serializeField({ kind: 'hash', type: 'hash' }, newPassword);
-    getActiveDb().prepare('UPDATE User SET password = ? WHERE id = ?').run(serialized, user.id);
+    db.prepare('UPDATE User SET password = ? WHERE id = ?').run(serialized, user.id);
     res.sendStatus(204);
   });
 
@@ -259,7 +262,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
 
     // Update the counter (replay protection). The unstored query API is the
     // same trust class the login/lookup paths already use.
-    getActiveDb().prepare('UPDATE Credential SET signCount = ? WHERE id = ?').run(result.signCount, storedCredential.id);
+    db.prepare('UPDATE Credential SET signCount = ? WHERE id = ?').run(result.signCount, storedCredential.id);
 
     // Look up the user
     const user = User.getOrFail(storedCredential.userId);
@@ -307,20 +310,20 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // requireUser: only an authenticated user may invite. The creator is the
   // requesting principal. Body: { targetEntity, targetId, role, targetUser?,
   // maxUses?, expiresAt? }. Returns the invitation with its token.
-  s.post('/invitation/create', requireUser(), (req, res, next) => {
+  s.post('/invitation/create', requireUser(), async (req, res, next) => {
     const { targetEntity, targetId, role, targetUser, maxUses, expiresAt } = req.body ?? {};
     if (!targetEntity || !targetId || !role) {
       return next({ status: 400, message: 'targetEntity, targetId, and role are required' });
     }
     try {
-      const invitation = createInvitation({
+      const invitation = await createInvitation({
         targetEntity,
         targetId,
         role,
         targetUser,
         maxUses,
         expiresAt,
-        createdBy: req.principal.id,
+        principal: req.principal,
       });
       res.status(201).json({
         token: invitation.token,
@@ -342,10 +345,10 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // POST /auth/invitation/:token/accept — accept an invitation by token.
   // requireUser: an anonymous caller cannot accept. Validates the token,
   // grants membership on the target entity. Returns { targetEntity, targetId, role }.
-  s.post('/invitation/:token/accept', requireUser(), (req, res, next) => {
+  s.post('/invitation/:token/accept', requireUser(), async (req, res, next) => {
     const { token } = req.params;
     try {
-      const result = acceptInvitation(token, req.principal);
+      const result = await acceptInvitation(token, req.principal);
       res.json(result);
     } catch (err) {
       return next({ status: err.status ?? 500, message: err.message });
@@ -366,8 +369,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   });
 
   // GET /auth/invitation — list pending invitations for the current user.
-  // requireUser: an anonymous caller has no invitations. Returns both direct
-  // invitations (targetUser === principal) and open link invitations.
+  // Open link tokens are bearer secrets and are never disclosed by this list.
   s.get('/invitation', requireUser(), (req, res, next) => {
     try {
       const invitations = listInvitationsForUser(req.principal);
@@ -505,7 +507,6 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
       return next({ status: 400, message: 'invalid TOTP token' });
     }
     // First successful verification: flip enabled to 1 and set verifiedAt.
-    const db = getActiveDb();
     if (twoFactor.enabled === 0) {
       db.prepare('UPDATE TwoFactor SET enabled = 1, verifiedAt = ? WHERE id = ?')
         .run(new Date().toISOString(), twoFactor.id);
@@ -545,7 +546,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     }
     // If it was a backup code, persist the consumed code before deleting.
     if (isBackupValid) {
-      getActiveDb().prepare('UPDATE TwoFactor SET backupCodes = ? WHERE id = ?')
+      db.prepare('UPDATE TwoFactor SET backupCodes = ? WHERE id = ?')
         .run(JSON.stringify(backupCodes), twoFactor.id);
     }
     TwoFactor.delete(twoFactor.id);
@@ -574,7 +575,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     }
     // If it was a backup code, persist the consumed code.
     if (isBackupValid) {
-      getActiveDb().prepare('UPDATE TwoFactor SET backupCodes = ? WHERE id = ?')
+      db.prepare('UPDATE TwoFactor SET backupCodes = ? WHERE id = ?')
         .run(JSON.stringify(backupCodes), twoFactor.id);
     }
     const user = User.getOrFail(userId);

@@ -47,8 +47,8 @@ function seed(tables = []) {
   return db;
 }
 
-function bootApp(t) {
-  const app = workbench({ db: ':memory:' });
+function bootApp() {
+  const app = workbench({ db: ':memory:', entities: [ApiKey] });
   // Manually create the User table (framework would do this via .auth())
   app.db.exec('CREATE TABLE User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   app.db.exec(
@@ -92,10 +92,10 @@ function sidFromSetCookie(header) {
 
 test('mintApiKey generates a random token, stores hash, returns plain token once', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
   const user = { id: 'u1' };
-  const result = ApiKey.create({ name: 'my-key', createdBy: user.id });
+  const result = ApiKey_b.create({ name: 'my-key', createdBy: user.id });
 
   assert.ok(result.id, 'row has id');
   assert.ok(result.plainToken, 'plain token is returned');
@@ -109,7 +109,7 @@ test('mintApiKey generates a random token, stores hash, returns plain token once
   assert.equal(result.tokenHash.length, 64);
 
   // Fetch the stored row via findOne — plainToken should NOT be present
-  const stored = ApiKey.findOne(ApiKey.tokenHash.is(result.tokenHash));
+  const stored = ApiKey_b.findOne(ApiKey.tokenHash.is(result.tokenHash));
   assert.ok(stored, 'stored row found');
   assert.equal(stored.plainToken, undefined, 'plain token is not on the stored row');
   assert.ok(stored.tokenHash, 'tokenHash is on the stored row');
@@ -131,12 +131,12 @@ test('different tokens produce different hashes', () => {
 
 test('ApiKey.findOne by tokenHash returns correct key', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
   const user = { id: 'u1' };
-  const result = ApiKey.create({ name: 'test-key', createdBy: user.id });
+  const result = ApiKey_b.create({ name: 'test-key', createdBy: user.id });
 
-  const found = ApiKey.findOne(ApiKey.tokenHash.is(result.tokenHash));
+  const found = ApiKey_b.findOne(ApiKey.tokenHash.is(result.tokenHash));
   assert.ok(found, 'key is found by tokenHash');
   assert.equal(found.id, result.id);
   assert.equal(found.name, 'test-key');
@@ -145,22 +145,22 @@ test('ApiKey.findOne by tokenHash returns correct key', () => {
 
 test('ApiKey.findOne by wrong hash returns null', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  ApiKey.create({ name: 'real-key', createdBy: 'u1' });
+  ApiKey_b.create({ name: 'real-key', createdBy: 'u1' });
 
   const wrongHash = sha256hex('this-is-not-a-valid-token');
-  const found = ApiKey.findOne(ApiKey.tokenHash.is(wrongHash));
+  const found = ApiKey_b.findOne(ApiKey.tokenHash.is(wrongHash));
   assert.equal(found, null, 'wrong hash → null');
 });
 
 test('ApiKey.findOne by nonsense hash returns null', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  ApiKey.create({ name: 'real-key', createdBy: 'u1' });
+  ApiKey_b.create({ name: 'real-key', createdBy: 'u1' });
 
-  const found = ApiKey.findOne(ApiKey.tokenHash.is('completely-wrong-value'));
+  const found = ApiKey_b.findOne(ApiKey.tokenHash.is('completely-wrong-value'));
   assert.equal(found, null);
 });
 
@@ -168,9 +168,9 @@ test('ApiKey.findOne by nonsense hash returns null', () => {
 
 test('expired key is not returned by findOne-like check', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  const result = ApiKey.create({
+  const result = ApiKey_b.create({
     name: 'expiring-key',
     createdBy: 'u1',
     expiresAt: Date.now() - 1000, // expired 1 second ago
@@ -178,7 +178,7 @@ test('expired key is not returned by findOne-like check', () => {
 
   // The entity query API doesn't filter by expiration — the key is still in the DB.
   // The expiration check is in apiKeyPrincipalOf, not in the query layer.
-  const stored = ApiKey.findOne(ApiKey.tokenHash.is(result.tokenHash));
+  const stored = ApiKey_b.findOne(ApiKey.tokenHash.is(result.tokenHash));
   assert.ok(stored, 'key is still in DB even if expired');
   assert.ok(stored.expiresAt <= Date.now(), 'expiresAt is in the past');
 });
@@ -187,9 +187,9 @@ test('expired key is not returned by findOne-like check', () => {
 
 test('apiKeyPrincipalOf resolves a valid Bearer token to an apiKey principal', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  const result = ApiKey.create({ name: 'api-key', createdBy: 'u1' });
+  const result = ApiKey_b.create({ name: 'api-key', createdBy: 'u1' });
 
   const resolver = apiKeyPrincipalOf(app.db);
   const req = {
@@ -205,7 +205,7 @@ test('apiKeyPrincipalOf resolves a valid Bearer token to an apiKey principal', (
 
 test('apiKeyPrincipalOf returns anonymous for no Authorization header', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
   const resolver = apiKeyPrincipalOf(app.db);
   const p = resolver({ headers: {} });
@@ -214,9 +214,9 @@ test('apiKeyPrincipalOf returns anonymous for no Authorization header', () => {
 
 test('apiKeyPrincipalOf returns anonymous for wrong Bearer token', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  ApiKey.create({ name: 'real-key', createdBy: 'u1' });
+  ApiKey_b.create({ name: 'real-key', createdBy: 'u1' });
 
   const resolver = apiKeyPrincipalOf(app.db);
   const req = {
@@ -230,9 +230,9 @@ test('apiKeyPrincipalOf returns anonymous for wrong Bearer token', () => {
 
 test('apiKeyPrincipalOf returns anonymous for expired key', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  const result = ApiKey.create({
+  const result = ApiKey_b.create({
     name: 'expired',
     createdBy: 'u1',
     expiresAt: Date.now() - 60_000, // expired 1 min ago
@@ -250,7 +250,6 @@ test('apiKeyPrincipalOf returns anonymous for expired key', () => {
 
 test('apiKeyPrincipalOf returns anonymous for malformed Authorization header', () => {
   const app = bootApp();
-  workbench({ db: app.db });
 
   const resolver = apiKeyPrincipalOf(app.db);
   assert.equal(resolver({ headers: { authorization: 'NotBearer xxx' } }).type, 'anonymous');
@@ -260,9 +259,9 @@ test('apiKeyPrincipalOf returns anonymous for malformed Authorization header', (
 
 test('apiKey principal carries entityName and role from the key row', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  const result = ApiKey.create({
+  const result = ApiKey_b.create({
     name: 'scoped-key',
     createdBy: 'u1',
     entityName: 'Project',
@@ -280,9 +279,9 @@ test('apiKey principal carries entityName and role from the key row', () => {
 
 test('apiKey principal with no entityName/role has undefined attributes', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  const result = ApiKey.create({ name: 'plain-key', createdBy: 'u1' });
+  const result = ApiKey_b.create({ name: 'plain-key', createdBy: 'u1' });
 
   const resolver = apiKeyPrincipalOf(app.db);
   const p = resolver({
@@ -297,9 +296,9 @@ test('apiKey principal with no entityName/role has undefined attributes', () => 
 
 test('attacker with tokenHash cannot construct a valid Bearer token', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  const result = ApiKey.create({ name: 'target-key', createdBy: 'u1' });
+  const result = ApiKey_b.create({ name: 'target-key', createdBy: 'u1' });
 
   // An attacker somehow gets the tokenHash (e.g. DB dump). They try to use it
   // as a Bearer token. But the resolver hashes whatever is in the header, so
@@ -587,10 +586,10 @@ test('anonymous principal does NOT pass requireUser', () => {
 
 test('two keys with the same name have different tokenHashes and prefixes', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  const k1 = ApiKey.create({ name: 'same-name', createdBy: 'u1' });
-  const k2 = ApiKey.create({ name: 'same-name', createdBy: 'u1' });
+  const k1 = ApiKey_b.create({ name: 'same-name', createdBy: 'u1' });
+  const k2 = ApiKey_b.create({ name: 'same-name', createdBy: 'u1' });
 
   assert.notEqual(k1.tokenHash, k2.tokenHash, 'different plain tokens → different hashes');
   assert.notEqual(k1.prefix, k2.prefix, 'prefixes are different');
@@ -601,9 +600,9 @@ test('two keys with the same name have different tokenHashes and prefixes', () =
 
 test('apiKeyPrincipalOf handles "Bearer" with extra whitespace', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  const result = ApiKey.create({ name: 'ws-key', createdBy: 'u1' });
+  const result = ApiKey_b.create({ name: 'ws-key', createdBy: 'u1' });
   const resolver = apiKeyPrincipalOf(app.db);
 
   const p = resolver({
@@ -614,9 +613,9 @@ test('apiKeyPrincipalOf handles "Bearer" with extra whitespace', () => {
 
 test('apiKeyPrincipalOf handles lowercase "bearer"', () => {
   const app = bootApp();
-  workbench({ db: app.db });
+  const ApiKey_b = app.entity(ApiKey);
 
-  const result = ApiKey.create({ name: 'case-key', createdBy: 'u1' });
+  const result = ApiKey_b.create({ name: 'case-key', createdBy: 'u1' });
   const resolver = apiKeyPrincipalOf(app.db);
 
   const p = resolver({

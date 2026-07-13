@@ -9,7 +9,6 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   entity, action, event, createServer, generateFrameworkDDL } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 test('durable dispatch appends events to the _Log table with per-scope seq', async () => {
   const db = new DatabaseSync(':memory:');

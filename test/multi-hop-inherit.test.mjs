@@ -34,11 +34,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { setActiveDb } from '../src/db.mjs';
 import { bindReadScope } from '../src/scope-sql.mjs';
 import { mayVerb } from '../src/row-grant.mjs';
-import {
-  entity } from '../src/internal.mjs';
+import { entity } from '../src/index.mjs';
+import workbench from '../src/app.mjs';
 import { principal, anonymous } from '../src/principal.mjs';
 
 // The parent: Feed is readable only by a subscriber (membership recorded in the
@@ -88,7 +87,6 @@ const norm = (s) => s.replace(/\s+/g, ' ').trim();
 
 function seed() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   db.exec('CREATE TABLE Feed (id TEXT PRIMARY KEY, title TEXT)');
   db.exec('CREATE TABLE Feed_subscribers (Feed_id TEXT, member_id TEXT)');
   db.exec('CREATE TABLE Episode (id TEXT PRIMARY KEY, feed TEXT, title TEXT)');
@@ -183,18 +181,20 @@ test('LOAD-BEARING: a scoped read at EVERY depth admits exactly the rows whose F
 test('the parent (Feed) admits its subscriber through BOTH the SQL scope and the runtime mayVerb', async () => {
   const db = seed();
   const { Feed } = makeChain();
+  const app = workbench({ db, entities: [Feed] });
+  const Feed_b = app.entity(Feed);
 
   const userA = principal({ type: 'user', id: 'user-A' });
   const stranger = principal({ type: 'user', id: 'stranger' });
 
   // A Feed row user-A subscribes to: admitted by scope, granted read by .can.
-  const f1 = Feed.findById('F1');
-  assert.equal(await mayVerb(Feed, 'read', f1, userA), true);
+  const f1 = Feed_b.findById('F1');
+  assert.equal(await mayVerb(Feed_b, 'read', f1, userA), true);
   // A Feed row user-A does NOT subscribe to: scope hides it; .can denies read.
-  const f2 = Feed.findById('F2');
-  assert.equal(await mayVerb(Feed, 'read', f2, userA), false);
+  const f2 = Feed_b.findById('F2');
+  assert.equal(await mayVerb(Feed_b, 'read', f2, userA), false);
   // A stranger is denied on both.
-  assert.equal(await mayVerb(Feed, 'read', f1, stranger), false);
+  assert.equal(await mayVerb(Feed_b, 'read', f1, stranger), false);
 
   db.close();
 });

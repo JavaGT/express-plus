@@ -12,10 +12,7 @@ export {
   SESSION_COOKIE,
 } from './auth/session.mjs';
 export {
-  createInvitation,
-  acceptInvitation,
-  rejectInvitation,
-  listInvitationsForUser,
+  createInvitationApi,
 } from './auth/invitation.mjs';
 export { emailSeam, noopTransport } from './email-seam.mjs';
 export { matchRoute } from './http-route-match.mjs';

@@ -17,7 +17,6 @@ import { randomBytes } from 'node:crypto';
 
 import workbench, {
   entity, generateDDL, executeFrameworkDDL } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 // --- test entity ---
 
@@ -393,7 +392,6 @@ test('B2: removed event bypasses coalescing (delivered immediately to paced subs
 test('B2: revoked subscriber receives NOTHING at flush time', async () => {
   // Directly create a live server with a controllable mayVerb.
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(Canvas)) db.exec(sql);
   db.prepare('INSERT INTO Canvas (id, title) VALUES (?, ?)').run('c1', 'Drawing 1');

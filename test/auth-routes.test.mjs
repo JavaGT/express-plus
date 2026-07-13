@@ -389,7 +389,7 @@ test('identifyBy: a credential matching no email falls through to username', asy
   // Seed a user directly in the username column (the SECOND identity field),
   // so the email lookup misses but the username lookup hits.
   const { User } = await import('../src/auth/entities.mjs');
-  User.create({ username: 'bob', password: 'hunter2' });
+  app.entity(User).create({ username: 'bob', password: 'hunter2' });
   // A login with the bob username credential: no email match, username match.
   const res = await fetch(`${origin}/auth/login`, {
     method: 'POST',

@@ -9,13 +9,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createServer, durableMutationVariant, NOW, executeFrameworkDDL } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 
 function setupDb() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   return db;
 }

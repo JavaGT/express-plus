@@ -7,7 +7,6 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import { generateFrameworkDDL, executeFrameworkDDL } from '../src/ddl.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 test('generateFrameworkDDL returns Log and Cursor CREATE TABLE statements', () => {
   const statements = generateFrameworkDDL();
@@ -121,7 +120,6 @@ test('app.ddl() creates framework tables (Log and Cursor) alongside entity table
   const { entity: entityFn, text, ref, grant, read, write, scope } = await import('../src/index.mjs');
 
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   const Note = entityFn('Note', {
     body: text(),

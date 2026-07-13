@@ -18,7 +18,6 @@ import {
   sideTableDDL,
 } from '../src/side-table-strategy.mjs';
 
-import { setActiveDb, setActiveEntity } from '../src/db.mjs';
 import * as eventHandle from '../src/event-handle.mjs';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from '../src/scope-sql.mjs';
 
@@ -26,7 +25,6 @@ import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from '../src/scope
 
 function freshDb() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db);
   return db;
 }
 
@@ -231,7 +229,7 @@ describe('mapStrategy', () => {
     const h = MAP_SIDE_TABLE_STRATEGY.handle({
       record, entityName, fieldName,
       descriptor: { kind: 'store', type: 'map', roles: ['editor'] },
-      row, principal: null, dispatch: fakeDispatch(true),
+      row, principal: null, dispatch: fakeDispatch(true), db,
     });
     // should not throw
     await h.set('user1', { role: 'editor' });
@@ -258,7 +256,7 @@ describe('mapStrategy', () => {
     const h = MAP_SIDE_TABLE_STRATEGY.handle({
       record, entityName, fieldName,
       descriptor: { kind: 'store', type: 'map' },
-      row: mockRow('doc1'), principal: null, dispatch: fakeDispatch(true),
+      row: mockRow('doc1'), principal: null, dispatch: fakeDispatch(true), db,
     });
     assert.ok(h.has('user1'));
     assert.ok(!h.has('user2'));
@@ -285,7 +283,7 @@ describe('mapStrategy', () => {
     const h = MAP_SIDE_TABLE_STRATEGY.handle({
       record, entityName, fieldName,
       descriptor: { kind: 'store', type: 'map' },
-      row: mockRow('doc1'), principal: null, dispatch: fakeDispatch(true),
+      row: mockRow('doc1'), principal: null, dispatch: fakeDispatch(true), db,
     });
     assert.ok(h.has('user1'));
     await h.remove('user1');
@@ -473,7 +471,7 @@ describe('listStrategy', () => {
       record, entityName, fieldName,
       descriptor: { kind: 'ordered' },
       row: mockRow('doc1'), principal: null,
-      dispatch: fakeDispatch(true, [{ type: 'Doc.blocks.inserted', data: { id: 'item1' } }]),
+      dispatch: fakeDispatch(true, [{ type: 'Doc.blocks.inserted', data: { id: 'item1' } }]), db,
     });
     // should not throw — dispatch is invoked and returns the inserted event id
     const id = await h.insertAt(0, { text: 'hello' });
@@ -496,7 +494,7 @@ describe('listStrategy', () => {
     const h = ORDERED_SIDE_TABLE_STRATEGY.handle({
       record, entityName, fieldName,
       descriptor: { kind: 'ordered' },
-      row: mockRow('doc1'), principal: null, dispatch: fakeDispatch(true),
+      row: mockRow('doc1'), principal: null, dispatch: fakeDispatch(true), db,
     });
     assert.ok(h.has('item1'));
     assert.ok(!h.has('item2'));
@@ -521,7 +519,7 @@ describe('listStrategy', () => {
     const h = ORDERED_SIDE_TABLE_STRATEGY.handle({
       record, entityName, fieldName,
       descriptor: { kind: 'ordered' },
-      row: mockRow('doc1'), principal: null, dispatch: fakeDispatch(true),
+      row: mockRow('doc1'), principal: null, dispatch: fakeDispatch(true), db,
     });
     const arr = await h.toArray();
     assert.deepEqual(arr, ['first', 'second', 'third']);
@@ -705,7 +703,7 @@ describe('logStrategy', () => {
     const record = mockRecord(entityName, { [fieldName]: descriptor });
     const h = LOG_SIDE_TABLE_STRATEGY.handle({
       record, entityName, fieldName, descriptor,
-      row: mockRow('doc1'), principal: null, dispatch: fakeDispatch(true),
+      row: mockRow('doc1'), principal: null, dispatch: fakeDispatch(true), db,
     });
     const entries = await h.entries();
     assert.equal(entries.length, 2);
@@ -856,7 +854,7 @@ describe('ephemeralStrategy', () => {
       descriptor: { kind: 'ephemeral' },
       row: mockRow('doc1'),
       principal: { id: 'user1' },
-      dispatch: fakeDispatch(true),
+      dispatch: fakeDispatch(true), db,
     });
     assert.deepEqual(h.get(), { x: 10 });
   });
@@ -872,7 +870,7 @@ describe('ephemeralStrategy', () => {
       descriptor: { kind: 'ephemeral' },
       row: mockRow('doc1'),
       principal: { id: 'unknown' },
-      dispatch: fakeDispatch(true),
+      dispatch: fakeDispatch(true), db,
     });
     assert.deepEqual(h.get(), {});
   });

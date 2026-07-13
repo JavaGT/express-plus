@@ -9,13 +9,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import {
+import workbench, {
   entity, generateFrameworkDDL, mayVerb } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 test('in-txn row-grant hook: deny after projections roll back the txn', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -30,8 +28,11 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
 
   for (const sql of Note.generateDDL()) db.exec(sql);
 
+  const app = workbench({ db, entities: [Note] });
+  const Note_b = app.entity(Note);
+
   // Seed a row owned by u1 (trusted insert, bypasses readonly check)
-  const row = Note.insert({ body: 'original', owner: 'u1' });
+  const row = Note_b.insert({ body: 'original', owner: 'u1' });
 
   const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
@@ -54,7 +55,7 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
           const currentRow = db.prepare(`SELECT * FROM ${entityName} WHERE id = ?`).get(event.data.id);
           if (!currentRow) return true; // no row to check
           // Use the SAME mayVerb as the REST dispatch — no second auth path
-          return mayVerb(Note, 'update', currentRow, principal);
+          return mayVerb(Note_b, 'update', currentRow, principal);
         },
       },
     }),
@@ -68,7 +69,7 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
     principal: { id: 'u1' },
   });
   assert.equal(r1.granted, true);
-  let updated = Note.findById(row.id);
+  let updated = Note_b.findById(row.id);
   assert.equal(updated.body, 'updated');
 
   // u2 is NOT the owner — update should fail (row-grant hook denies)
@@ -81,7 +82,7 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
   assert.equal(r2.granted, false, 'non-owner denied by in-txn row-grant hook');
 
   // The row is unchanged — txn rolled back
-  updated = Note.findById(row.id);
+  updated = Note_b.findById(row.id);
   assert.equal(updated.body, 'updated', 'row unchanged — txn rolled back');
 
   // Nothing was logged for the denied action
@@ -91,7 +92,6 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
 
 test('in-txn row-grant hook: create — runs on the newly projected row', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {

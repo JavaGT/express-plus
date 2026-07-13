@@ -28,7 +28,6 @@
 
 import { requireUser, isGate } from './route-gate.mjs';
 import { listen as serveListen } from './serve.mjs';
-import { setActiveDb } from './db.mjs';
 import { wrapDriver } from './driver.mjs';
 import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
@@ -38,7 +37,7 @@ import { createClock } from './clock.mjs';
 import { createLog, setAmbientLog, getLog } from './log.mjs';
 import { serveStatic } from './views.mjs';
 import { authRoutes } from './auth/routes.mjs';
-import { User, Session, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
+import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
 import { config, resolveConfig } from './config.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
@@ -138,7 +137,7 @@ function rebaseRoute(route, parentBase) {
 // router mounted under a parametric parent path (`/:docId/notes`) can read the
 // parent's path param. `resource` is present only on the per-entity builder
 // (bound to its entity + base); a bare router/app has no resource of its own.
-function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) {
+function makeMountable({ mergeParams = false, entity = null, base = '/', entityOf = (value) => value } = {}) {
   const declarations = [];
   const routes = [];
   let resolution = null; // the in-flight/resolved finalization promise (idempotent)
@@ -174,6 +173,9 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
     if (typeof target === 'function') {
       declarations.push({ kind: 'handler', prefix: normalizePrefix(path), fn: target });
       return surface;
+    }
+    if (typeof target?.bind === 'function' || target?.runtime) {
+      target = entityOf(target);
     }
     declarations.push({ kind: 'mount', path, target, autoLoad: makeAutoLoad(path) });
     return surface;
@@ -244,7 +246,7 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
           // declaration order so the first matching prefix wins.
           (surface._handlers ??= []).push({ prefix: decl.prefix, fn: decl.fn });
         } else if (decl.kind === 'mount') {
-          for (const route of await resolveMount(decl.path, decl.target)) {
+          for (const route of await resolveMount(decl.path, decl.target, entityOf)) {
             const rebased = rebaseRoute(route, base);
             // Stamp the entity auto-load onto every descendant route so a
             // handler under `/:docId/shares` finds req.doc regardless of how
@@ -266,12 +268,16 @@ function makeMountable({ mergeParams = false, entity = null, base = '/' } = {}) 
 // declarations + resolveRoutes) is finalized recursively and its routes re-based;
 // a compiled entity target is wired through a fresh per-entity builder so its
 // `routes:(r, Entity)=>...` thunk runs (awaited — it may be async).
-async function resolveMount(path, target) {
+async function resolveMount(path, target, entityOf) {
+  if (target && typeof target.resolveFor === 'function') {
+    const resolved = await target.resolveFor(entityOf);
+    return resolved.map((route) => rebaseRoute(route, path));
+  }
   if (target && typeof target.resolveRoutes === 'function' && Array.isArray(target.declarations)) {
     await target.resolveRoutes();
     return target.routes.map((route) => rebaseRoute(route, path));
   }
-  return buildEntityRoutes(target, path);
+  return buildEntityRoutes(entityOf(target), path, entityOf);
 }
 
 // Expand the five CRUD verbs for `entity` at `base`. The per-verb route gate is
@@ -298,8 +304,8 @@ function resolveResource(entity, base) {
 // surface that also carries `.resource()` bound to this entity+base). The thunk
 // may be async (it can dynamic-import a child module at wiring time); we await it.
 // An entity that omits `routes` is auto-CRUD'd via a default `r.resource()`.
-async function buildEntityRoutes(entity, base) {
-  const r = makeMountable({ entity, base });
+async function buildEntityRoutes(entity, base, entityOf) {
+  const r = makeMountable({ entity, base, entityOf });
   if (typeof entity.routes === 'function') {
     await entity.routes(r, entity);
   } else {
@@ -314,7 +320,18 @@ async function buildEntityRoutes(entity, base) {
 // path param. A router resolves its routes relative to its own base ('/') and is
 // re-based when mounted.
 export function router(options = {}) {
-  return makeMountable({ mergeParams: options.mergeParams === true });
+  const mergeParams = options.mergeParams === true;
+  const surface = makeMountable({ mergeParams });
+  // A router is a reusable declaration blueprint. Each parent application
+  // resolves a private instance with that application's entity registry, so a
+  // cached route can never retain another application's database-bound facade.
+  surface.resolveFor = async (entityOf) => {
+    const instance = makeMountable({ mergeParams, entityOf });
+    instance.declarations.push(...surface.declarations);
+    await instance.resolveRoutes();
+    return instance.routes;
+  };
+  return surface;
 }
 
 // workbench() — the default export. A chainable app. `.mount(path, Entity)`
@@ -323,7 +340,7 @@ export function router(options = {}) {
 // (chainable). The server is exposed on `app.httpServer`. `options.principalOf`
 // overrides the request→principal source (default: anonymous, fail-closed). Both
 // chain.
-export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts, log: logOpts, port, env, session, viewsDir } = {}) {
+export default function workbench({ db, entities = [], blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts, log: logOpts, port, env, session, viewsDir } = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
     const val = process.env[v];
@@ -351,7 +368,55 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
   // One construction path: a bare-string app gets the same treatment as a
   // pre-built handle. (seam-review §2.1, priority #7.)
   if (db) db = wrapDriver(db);
-  const app = makeMountable();
+
+  const declarationsByName = new Map();
+  const bindingsByDeclaration = new Map();
+  const bindingsByName = new Map();
+  const ownedBindings = new WeakSet();
+  let registryLocked = false;
+  const runtime = {
+    db,
+    entityOf(value) {
+      if (ownedBindings.has(value)) return value;
+      if (value?.runtime) {
+        throw new Error(`entity '${value.name ?? 'unknown'}' belongs to a different application`);
+      }
+      const declaration = typeof value === 'string' ? declarationsByName.get(value) : value;
+      if (!declaration || typeof declaration.bind !== 'function') {
+        const label = typeof value === 'string' ? `'${value}'` : String(value);
+        throw new Error(`entity ${label} is not registered with this application`);
+      }
+      const existing = declarationsByName.get(declaration.name);
+      if (existing && existing !== declaration) {
+        throw new Error(`entity name '${declaration.name}' is already registered with a different declaration`);
+      }
+      if (!existing && registryLocked) {
+        throw new Error(`cannot register entity '${declaration.name}' after the application schema is prepared`);
+      }
+      declarationsByName.set(declaration.name, declaration);
+      if (!bindingsByDeclaration.has(declaration)) {
+        const bound = declaration.bind(runtime);
+        bindingsByDeclaration.set(declaration, bound);
+        bindingsByName.set(declaration.name, bound);
+        ownedBindings.add(bound);
+      }
+      return bindingsByDeclaration.get(declaration);
+    },
+  };
+  const app = makeMountable({ entityOf: runtime.entityOf });
+  app.dispatch = async () => {
+    throw new Error('application is not started; call listen() and await app.ready before dispatching');
+  };
+  app.entity = runtime.entityOf;
+  app.register = (...declared) => {
+    for (const declaration of declared.flat()) runtime.entityOf(declaration);
+    return app;
+  };
+  app.register(entities);
+  for (const frameworkEntity of [User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor]) {
+    if (!declarationsByName.has(frameworkEntity.name)) runtime.entityOf(frameworkEntity);
+  }
+  app.entities = bindingsByName;
   // Per-app config — options override env fallbacks (SPEC §3). `app.config` is
   // the one place a mounted route / transport reads this app's port, env,
   // viewsDir, and session duration instead of the process-wide singleton. An
@@ -371,10 +436,6 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
   // dispatch seam, not this field). An app with no db simply cannot serve
   // DB-backed entity CRUD — fail closed at dispatch.
   app.db = db;
-  // Bind the ambient active database so an entity's query API (declared
-  // independently of any app) reaches this same handle with no db argument.
-  // One shared db — the singular-system rule — not a second persistence path.
-  if (db) setActiveDb(db);
   // The blob store is an app-level resource, constructed when a db is engaged
   // (blobs are adopted by dispatch commits — no db, no durable kernel, no
   // blobs). The root defaults to a `.blobs` dir under cwd, durable across
@@ -437,30 +498,12 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
         // Framework tables come first — Log and Cursor are the durable event substrate.
         executeFrameworkDDL(app.db);
         await app.resolveRoutes();
+        registryLocked = true;
         const seen = new Set();
-        for (const decl of app.declarations) {
-          if (decl.kind === 'mount') {
-            const entity = decl.target;
-            if (entity && typeof entity.name === 'string' && !seen.has(entity.name)) {
-              seen.add(entity.name);
-              executeDDL(entity, app.db);
-            }
-          }
-        }
-        // When `.auth()` is engaged, the framework auth entities (User, Session)
-        // back the /auth routes' login/logout but are NOT mounted as entity
-        // routes — `app.auth()` mounts an imperative router, not the entities.
-        // Their tables would therefore never be created by the mount loop above,
-        // yet login writes a User row and mints a Session. Create them here so the
-        // battery works out of the box — fail-closed loud otherwise (a missing
-        // table would surface as a 500 mid-login). buildKernel already registers
-        // these in app.entities for the live/reaper seams; this is the DDL half.
-        if (app._authEngaged) {
-          for (const fe of [User, Session, Credential, Invitation, ApiKey, TwoFactor]) {
-            if (!seen.has(fe.name)) {
-              seen.add(fe.name);
-              executeDDL(fe, app.db);
-            }
+        for (const entity of app.entities.values()) {
+          if (!seen.has(entity.name)) {
+            seen.add(entity.name);
+            executeDDL(entity, app.db);
           }
         }
         // Migrations run last, pre-traffic, after every entity table exists. Each
@@ -528,27 +571,24 @@ export default function workbench({ db, blobs: blobOpts, requireEnv = [], migrat
     // `identifyBy` declares which User field(s) a login credential matches
     // (in order). Defaults to `['username']`. Pass `['email', 'username']` for
     // email-based login. See `authRoutes` for the full contract.
-    app.mount('/auth', authRoutes({ secure: app.config.env === 'production', identifyBy: options.identifyBy }));
-    // Per-app session duration: when the app's duration differs from the
-    // singleton default, install a shallow copy of Session whose schedule.remove
-    // trigger carries the app's delay. The compiled trigger (compile.mjs) is a
-    // frozen object stamped with fieldName/whileSql/whileParams/whileAst/
-    // sourceName/matches/delay — spreading it and overriding `delay` preserves
-    // every stamped prop, so no re-compile is needed. buildKernel prefers this
-    // copy over the framework Session, and the reaper / admitSystemMutation read
-    // the delay off the entity in `app.entities` at runtime. Shallow spread is
-    // safe: Session is a frozen Proxy whose field-handle/lifecycle-handle
-    // resolution was used at declaration time, not runtime; the record's own
-    // props (crudHandlers/projection/hydrate/findById/grant/registry/schedule)
-    // are what downstream seams read.
+    const authEntities = Object.fromEntries(
+      [User, Session, Credential, Invitation, ApiKey, TwoFactor]
+        .map((declaration) => [declaration.name, app.entity(declaration)]),
+    );
+    app.mount('/auth', authRoutes({
+      secure: app.config.env === 'production',
+      identifyBy: options.identifyBy,
+      entities: authEntities,
+      db: app.db,
+    }));
+    // Per-app session duration changes only the schedule metadata. The kernel
+    // applies it to the app-bound Session facade, preserving its database-bound
+    // query and mutation closures.
     if (app.config.sessionDurationMs !== config.sessionDurationMs) {
-      app._sessionEntity = {
-        ...Session,
-        schedule: Object.freeze({
-          ...Session.schedule,
-          remove: Object.freeze({ ...Session.schedule.remove, delay: app.config.sessionDurationMs }),
-        }),
-      };
+      app._sessionSchedule = Object.freeze({
+        ...Session.schedule,
+        remove: Object.freeze({ ...Session.schedule.remove, delay: app.config.sessionDurationMs }),
+      });
     }
     return app;
   };

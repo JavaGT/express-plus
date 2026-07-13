@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import type { CommittedEvent, Principal, Handler } from '../index.d.ts';
+import type { BoundWorkbenchEntity, CommittedEvent, Principal, Handler } from '../index.d.ts';
 
 // ---------------------------------------------------------------------------
 // WorkbenchDatabase — the minimum structural SQLite/driver interface
@@ -185,27 +185,29 @@ export interface Invitation {
   createdAt: unknown;
 }
 
-export function createInvitation(params: {
-  targetEntity: string;
-  targetId: string;
-  role: string;
-  createdBy: string;
-  targetUser?: string;
-  maxUses?: number;
-  expiresAt?: number;
-}): Invitation;
+export interface InvitationApi {
+  createInvitation(params: {
+    targetEntity: string;
+    targetId: string;
+    role: string;
+    principal: Principal;
+    targetUser?: string;
+    maxUses?: number;
+    expiresAt?: number;
+  }): Promise<Invitation>;
+  acceptInvitation(token: string, user: { id: string }): Promise<{
+    targetEntity: string;
+    targetId: string;
+    role: string;
+  }>;
+  rejectInvitation(token: string, user: { id: string }): void;
+  listInvitationsForUser(user: { id: string }): Invitation[];
+}
 
-export function acceptInvitation(
-  token: string,
-  user: { id: string },
-): { targetEntity: string; targetId: string; role: string };
-
-export function rejectInvitation(
-  token: string,
-  user: { id: string },
-): void;
-
-export function listInvitationsForUser(user: { id: string }): Invitation[];
+export function createInvitationApi(options: {
+  db?: WorkbenchDatabase;
+  Invitation: BoundWorkbenchEntity<Invitation>;
+}): InvitationApi;
 
 // ---------------------------------------------------------------------------
 // Route / static helpers

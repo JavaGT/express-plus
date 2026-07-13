@@ -17,10 +17,10 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, { entity } from '../src/internal.mjs';
 import { lowerToSql } from '../src/scope-sql.mjs';
 
-// A trivial public-read entity (the query API is unscoped, so the grant's scope
-// does not constrain it — see the unscoped test below).
-function makeUser() {
-  return entity('User', { username: text(), password: text(), grant: () => [scope(() => everyone()).can(() => grant(read))], });
+function bindUser(db) {
+  const decl = entity('User', { username: text(), password: text(), grant: () => [scope(() => everyone()).can(() => grant(read))], });
+  const app = workbench({ db, entities: [decl] });
+  return app.entity(decl);
 }
 
 // A real on-disk-shaped in-memory DB seeded with a User table.
@@ -30,10 +30,6 @@ function seedDb() {
   db.prepare("INSERT INTO User (id, username, password) VALUES (1, 'alice', 'pw-a')").run();
   db.prepare("INSERT INTO User (id, username, password) VALUES (2, 'bob', 'pw-b')").run();
   return db;
-}
-
-function makeEvent() {
-  return entity('Event', { title: text(), startsAt: date(), grant: () => [scope(() => everyone()).can(() => grant(read))], });
 }
 
 function seedEventDb() {
@@ -48,7 +44,8 @@ function seedEventDb() {
 }
 
 test('Entity.<field> is a typed handle whose .is(value) lowers to a value-eq WHERE', () => {
-  const User = makeUser();
+  const UserDecl = entity('User', { username: text(), password: text(), grant: () => [scope(() => everyone()).can(() => grant(read))], });
+  const User = UserDecl;  // field handles work on declarations, not bindings
   const node = User.username.is('alice');
   const { sql, params } = lowerToSql(node);
   assert.match(sql, /t0\.username = :/);
@@ -58,8 +55,7 @@ test('Entity.<field> is a typed handle whose .is(value) lowers to a value-eq WHE
 });
 
 test('Entity.findOne(predicate) returns the matching row, or null when absent', () => {
-  const User = makeUser();
-  workbench({ db: seedDb() });
+  const User = bindUser(seedDb());
   const found = User.findOne(User.username.is('alice'));
   assert.equal(found.username, 'alice');
   assert.equal(found.password, 'pw-a');
@@ -67,16 +63,14 @@ test('Entity.findOne(predicate) returns the matching row, or null when absent', 
 });
 
 test('Entity.findAll() returns every row', () => {
-  const User = makeUser();
-  workbench({ db: seedDb() });
+  const User = bindUser(seedDb());
   const rows = User.findAll();
   assert.equal(rows.length, 2);
   assert.deepEqual(rows.map((r) => r.username).sort(), ['alice', 'bob']);
 });
 
 test('Entity.findAll().select(...handles) projects only the named columns', () => {
-  const User = makeUser();
-  workbench({ db: seedDb() });
+  const User = bindUser(seedDb());
   const rows = User.findAll().select(User.id, User.username);
   assert.equal(rows.length, 2);
   for (const row of rows) {
@@ -86,8 +80,7 @@ test('Entity.findAll().select(...handles) projects only the named columns', () =
 });
 
 test('Entity.getOrFail(id) returns the row; a missing id throws a 404-status error', () => {
-  const User = makeUser();
-  workbench({ db: seedDb() });
+  const User = bindUser(seedDb());
   const row = User.getOrFail('1');
   assert.equal(row.username, 'alice');
   assert.throws(
@@ -97,8 +90,7 @@ test('Entity.getOrFail(id) returns the row; a missing id throws a 404-status err
 });
 
 test('Entity.create(payload) inserts and returns the new row with its id', () => {
-  const User = makeUser();
-  workbench({ db: seedDb() });
+  const User = bindUser(seedDb());
   const created = User.create({ username: 'carol', password: 'pw-c' });
   assert.ok(created.id);
   assert.equal(created.username, 'carol');
@@ -108,32 +100,31 @@ test('Entity.create(payload) inserts and returns the new row with its id', () =>
 });
 
 test('Entity.delete(id) removes the row', () => {
-  const User = makeUser();
-  workbench({ db: seedDb() });
+  const User = bindUser(seedDb());
   const target = User.findOne(User.username.is('bob'));
   User.delete(target.id);
   assert.equal(User.findOne(User.username.is('bob')), null);
 });
 
 test('the query API runs UNSCOPED — it bypasses the read-scope (trusted server code)', () => {
-  // An entity whose grant scope hides EVERY row (never-readable) for any request
-  // principal. The query API must still return rows, proving it does not thread
-  // bindReadScope — it is the privileged server-side primitive, not a request.
-  const Hidden = entity('User', {
+  const db = seedDb();
+  const HiddenDecl = entity('User', {
         username: text(), password: text(),
 
     // owner-scoped with no owner field would be empty; use a scope that compiles
     // to a column comparison that no seeded row satisfies if it WERE applied.
     grant: () => [scope(({ fields }) => fields.username.is('___never___')).can(() => grant(read))],
   });
-  workbench({ db: seedDb() });
+  const app = workbench({ db, entities: [HiddenDecl] });
+  const Hidden = app.entity(HiddenDecl);
   // unscoped: both seeded rows come back despite the restrictive scope
   assert.equal(Hidden.findAll().length, 2);
 });
 
 test('findAll(predicate) supports date range predicates for timeline queries', async () => {
-  const Event = makeEvent();
-  workbench({ db: seedEventDb() });
+  const EventDecl = entity('Event', { title: text(), startsAt: date(), grant: () => [scope(() => everyone()).can(() => grant(read))], });
+  const app = workbench({ db: seedEventDb(), entities: [EventDecl] });
+  const Event = app.entity(EventDecl);
 
   const rows = await Event
     .findAll(

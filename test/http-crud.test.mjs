@@ -314,13 +314,10 @@ test('non-owner cannot see or mutate an inherit-child row (scope hides it)', asy
   assert.equal(del.status, 404, 'non-owner cannot see inherit-child row');
 });
 
-test('serving an entity CRUD route without a db fails closed', async (t) => {
+test('mounting an entity CRUD route without a db fails closed immediately', () => {
   const app = workbench();
-  app.mount('/notes', ownedNote());
-  app.listen(0, { principalOf: () => alice });
-  await new Promise((resolve) => app.httpServer.once('listening', resolve));
-  t.after(() => app.httpServer.close());
-  const { port } = app.httpServer.address();
-  const res = await fetch(`http://127.0.0.1:${port}/notes`);
-  assert.equal(res.status, 500);
+  assert.throws(
+    () => app.mount('/notes', ownedNote()),
+    /no database/i,
+  );
 });

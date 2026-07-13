@@ -21,14 +21,10 @@ const FRAMEWORK_ENTITIES = [User, Session, Inbox, Credential, Invitation, ApiKey
 function collectAppEntities(app) {
   const handlers = {};
   const projections = [];
-  const entities = new Map();
-  for (const route of app.routes) {
-    const entity = route.entity;
-    if (entity && !entities.has(entity.name)) {
-      entities.set(entity.name, entity);
-      Object.assign(handlers, entity.crudHandlers);
-      projections.push(entity.projection);
-    }
+  const entities = new Map(app.entities ?? []);
+  for (const entity of entities.values()) {
+    Object.assign(handlers, entity.crudHandlers);
+    projections.push(entity.projection);
   }
   return { handlers, projections, entities };
 }
@@ -95,13 +91,20 @@ function engagedPostCommitConsumers(app, entities, { blobFinalizeConsumer, durab
 
 export function buildKernel(app) {
   const { handlers, projections, entities } = collectAppEntities(app);
+  const sessionEntity = entities.get(Session.name);
+  if (sessionEntity && app._sessionSchedule) {
+    Object.defineProperty(sessionEntity, 'schedule', {
+      value: app._sessionSchedule,
+      enumerable: true,
+      configurable: true,
+    });
+  }
   for (const fe of FRAMEWORK_ENTITIES) {
     if (fe && !entities.has(fe.name)) {
-      // A per-app Session copy (app._sessionEntity) carries this app's session-
-      // duration schedule trigger; prefer it over the framework singleton when
-      // the app installed one. Same shape (shallow spread, overridden delay),
-      // so the reaper / admission / projection read the right expiry.
-      const entity = fe === Session && app._sessionEntity ? app._sessionEntity : fe;
+      const bound = app.entity(fe);
+      // Session timing is app configuration, so override only the declarative
+      // schedule while retaining the app-bound query and mutation closures.
+      const entity = bound;
       entities.set(entity.name, entity);
       Object.assign(handlers, entity.crudHandlers);
       projections.push(entity.projection);
@@ -147,6 +150,7 @@ export function buildKernel(app) {
 export async function buildAndStart(app) {
   const log = getLog();
   const dispatchThroughWriteQueue = (args) => app.writeQueue.run(() => app.kernel.dispatch(args));
+  app.dispatch = dispatchThroughWriteQueue;
   // app.batch(actions, { principal }) — a server-side composed mutation
   // (SPEC §11, ADR #13). N actions run as ONE transaction = ONE composed
   // commit (one actionId, one `now`), all-or-nothing. This reuses the SAME
@@ -157,12 +161,14 @@ export async function buildAndStart(app) {
     app.writeQueue.run(() => app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal }));
   // Singular Schedule clock-dispatch: deadline + tick share one starter.
   // No-op when no triggers exist. Scheduled on the shared clock.
-  startClockTriggers({
-    db: app.db,
-    entities: app.entities,
-    dispatch: dispatchThroughWriteQueue,
-    clock: app.clock,
-  });
+  if (app.db) {
+    startClockTriggers({
+      db: app.db,
+      entities: app.entities,
+      dispatch: dispatchThroughWriteQueue,
+      clock: app.clock,
+    });
+  }
   // Projected.async boot catch-up. If the process died between committing an
   // event and the post-commit consumer applying its projection, the projected
   // field is stale and nothing reconciles it. One sweep at startup, under the
