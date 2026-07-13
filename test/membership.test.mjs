@@ -255,6 +255,7 @@ test('membership: non-members cannot see inherited child rows', async (t) => {
 
 test('membership: members can subscribe to live events on parent rows', async (t) => {
   const { app, port, Project } = await serveProjectDocumentsByHeader(t);
+  const Project_b = app.entity(Project);
   let ws;
   try {
     ws = await openRawWS(port, member.id);
@@ -263,7 +264,7 @@ test('membership: members can subscribe to live events on parent rows', async (t
     assert.equal(ack.type, 'subscribed');
 
     await app.live.emit(
-      Project,
+      Project_b,
       'p1',
       { id: 'p1', title: 'Shared project', owner: owner.id },
       {
@@ -285,6 +286,7 @@ test('membership: members can subscribe to live events on parent rows', async (t
 
 test('membership: members can subscribe to live events on inherited child rows', async (t) => {
   const { app, port, ProjectDocument } = await serveProjectDocumentsByHeader(t);
+  const ProjectDocument_b = app.entity(ProjectDocument);
   let ws;
   try {
     ws = await openRawWS(port, member.id);
@@ -293,7 +295,7 @@ test('membership: members can subscribe to live events on inherited child rows',
     assert.equal(ack.type, 'subscribed');
 
     await app.live.emit(
-      ProjectDocument,
+      ProjectDocument_b,
       'd1',
       { id: 'd1', project: 'p1', title: 'Shared document' },
       {

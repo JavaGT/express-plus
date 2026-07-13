@@ -407,17 +407,17 @@ test('RasterLayer checks traverse canvas FK through thenable ref handle', async 
 
   // Bob is editor on c-shared → editor check should return true
   const bobP = principal({ type: 'user', id: 'bob' });
-  const isEditor = await editorEntry.run({ entity: l1, principal: bobP });
+  const isEditor = await editorEntry.run({ entity: l1, principal: bobP, runtime: RasterLayer_b.runtime });
   assert.equal(isEditor, true);
 
   // Stranger is not a member → editor check should return false
   const strangerP = principal({ type: 'user', id: 'stranger' });
-  const isEditor2 = await editorEntry.run({ entity: l1, principal: strangerP });
+  const isEditor2 = await editorEntry.run({ entity: l1, principal: strangerP, runtime: RasterLayer_b.runtime });
   assert.equal(isEditor2, false);
 
   // Owner check: alice is owner of c-shared
   const ownerEntry = RasterLayer_b.registry.owner;
-  const isOwner = await ownerEntry.run({ entity: l1, principal: alice });
+  const isOwner = await ownerEntry.run({ entity: l1, principal: alice, runtime: RasterLayer_b.runtime });
   assert.equal(isOwner, true);
 
   db.close();

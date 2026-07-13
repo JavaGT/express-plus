@@ -87,7 +87,7 @@ test('a map field is still NOT whole-value comparable in scope (.is throws, .has
 });
 
 test('a typed FK can traverse to a target map membership in scope', () => {
-  entity('Album', {
+  const Album = entity('Album', {
         title: text(),
     collaborators: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
 
@@ -96,7 +96,7 @@ test('a typed FK can traverse to a target map membership in scope', () => {
 
   const Photo = entity('Photo', {
         title: text(),
-    album: ref('Album'),
+    album: ref(Album),
 
     checks: {
       albumMember: ({ Photo, principal }) => Photo.album.collaborators.has(principal.id),

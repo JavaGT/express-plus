@@ -234,6 +234,7 @@ test('non-members cannot see child documents inherited from private projects', a
 
 test('project members receive live child events through inherited project membership', async (t) => {
   const { app, port, ProjectDocument } = await serveProjectDocumentsByHeader(t);
+  const ProjectDocument_b = app.entity(ProjectDocument);
   let ws;
   try {
     ws = await openRawWS(port, member.id);
@@ -241,7 +242,7 @@ test('project members receive live child events through inherited project member
     const ack = await ws.nextMessage();
     assert.equal(ack.type, 'subscribed');
 
-    await app.live.emit(ProjectDocument, 'd1', { id: 'd1', project: 'p1', title: 'Shared document' }, {
+    await app.live.emit(ProjectDocument_b, 'd1', { id: 'd1', project: 'p1', title: 'Shared document' }, {
       type: 'ProjectDocument.updated',
       seq: 1,
       data: { id: 'd1', title: 'Changed remotely' },

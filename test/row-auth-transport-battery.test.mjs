@@ -247,7 +247,8 @@ test('D5 readable-but-not-writable rows deny write through every row-auth seam',
   const ws = await assertSubscribeAdmitted(port, 'D5Article', 'a1', alice.id);
   try {
     db.prepare('UPDATE D5Article SET owner = ? WHERE id = ?').run('charlie', 'a1');
-    await app.live.emit(Article, 'a1', { id: 'a1', title: 'Changed', owner: 'charlie' }, {
+    const Article_b = app.entity(Article);
+    await app.live.emit(Article_b, 'a1', { id: 'a1', title: 'Changed', owner: 'charlie' }, {
       type: 'D5Article.updated',
       seq: 1,
       data: { id: 'a1', title: 'Changed' },
@@ -293,7 +294,8 @@ test('D5 inherited rows delegate every transport decision to the parent row gran
 
   const ws = await assertSubscribeAdmitted(port, 'D5ProjectChild', 'c1', bob.id);
   try {
-    await app.live.emit(Child, 'c1', { id: 'c1', project: 'p1', title: 'Changed' }, {
+    const Child_b = app.entity(Child);
+    await app.live.emit(Child_b, 'c1', { id: 'c1', project: 'p1', title: 'Changed' }, {
       type: 'D5ProjectChild.updated',
       seq: 1,
       data: { id: 'c1', title: 'Changed' },
@@ -336,7 +338,8 @@ test('D5 scope-only rows stay admitted by mayRow across transports', async (t) =
 
   const ws = await assertSubscribeAdmitted(port, 'D5ScopeOnlyRecord', row.id, bob.id);
   try {
-    await app.live.emit(ScopeOnly, row.id, { id: row.id, title: 'Live' }, {
+    const ScopeOnly_b = app.entity(ScopeOnly);
+    await app.live.emit(ScopeOnly_b, row.id, { id: row.id, title: 'Live' }, {
       type: 'D5ScopeOnlyRecord.updated',
       seq: 2,
       data: { id: row.id, title: 'Live' },
