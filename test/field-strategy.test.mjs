@@ -216,6 +216,17 @@ test('validateMutation still allows a partial update that does not touch readonl
   assert.deepEqual(validateMutation(Article, { title: 'hello' }), { title: 'hello' });
 });
 
+test('validateMutation accepts null only for an explicitly nullable field', () => {
+  const NullableNote = entity('NullableNote', {
+    note: text({ optional: true, nullable: true }),
+    label: text({ optional: true }),
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+
+  assert.deepEqual(validateMutation(NullableNote, { note: null }), { note: null });
+  assert.throws(() => validateMutation(NullableNote, { label: null }), /expected a text value/);
+});
+
 // --- serializeField: the value-kind's value→stored-cell mapping ---
 // SPEC §7.2: the field-type plugin owns the persistence strategy. node:sqlite
 // refuses to bind a JS boolean and has no boolean type, so a `boolean` field

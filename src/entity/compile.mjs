@@ -364,6 +364,14 @@ export function entity(name, declaration = {}) {
     // then reject the reserved '__' separator that would alias the generated
     // struct-column namespace.
     assertSqlIdentifier(`entity('${name}') field`, fieldName);
+    if (descriptor.immutable === true && (descriptor.readonly === true || descriptor.touch === true)) {
+      const conflictingMode = descriptor.touch === true ? 'touch' : 'readonly';
+      throw new Error(
+        `entity('${name}') field '${fieldName}' cannot combine immutable with ${conflictingMode}. ` +
+          'Immutable fields are supplied by a client on create and frozen afterwards; ' +
+          `${conflictingMode} fields are owned by the framework.`,
+      );
+    }
     if (fieldName.includes('__')) {
       throw new Error(
         `entity('${name}') field '${fieldName}' contains the reserved '__' separator, ` +

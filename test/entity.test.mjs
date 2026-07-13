@@ -42,6 +42,18 @@ test('entity() returns a validated record carrying its name and fields', () => {
   assert.ok(Object.isFrozen(Note.fields), 'fields are frozen');
 });
 
+test('immutable is create-only and cannot be combined with server-owned field modes', () => {
+  for (const conflictingMode of [{ readonly: true }, { touch: true }]) {
+    assert.throws(
+      () => entity('ContradictoryField', {
+        projectId: text({ immutable: true, ...conflictingMode }),
+        grant: () => grant(read, write, subscribe),
+      }),
+      /immutable.*(?:readonly|touch)|(?:readonly|touch).*immutable/i,
+    );
+  }
+});
+
 test('an entity with no grant at compile time emits a warning (safe — membership() can set it later)', () => {
   // ADR #7 relaxed for membership support: entities without an explicit grant
   // compile with a warning and are safe (no grant = no capabilities granted).

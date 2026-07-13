@@ -114,6 +114,13 @@ void [startedApp, stoppedApp, dispatchResult, batchResult, plannedBatchResult, m
 const inherited: InheritDirective = inherit(Project, { via: 'projectId' });
 const Child = entity('Child', { projectId: ref(Project), grant: inherited });
 void Child;
+const AuditedChild = entity('AuditedChild', {
+  projectId: ref(Project, { immutable: true }),
+  createdAt: date({ readonly: true, default: () => new Date() }),
+  updatedAt: date({ touch: true, default: () => new Date() }),
+  grant: inherited,
+});
+void AuditedChild;
 
 const queue: JobQueue = createJobQueue({ db, sharedSecret: 'secret' });
 const job: JobRow = queue.enqueue({ kind: 'index', payload: { projectId: 'project-1' } });

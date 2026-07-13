@@ -9,7 +9,7 @@
 // focused on the entity-row lifecycle.
 
 import { randomUUID } from 'node:crypto';
-import { validateMutation, ValidationError } from '../field-strategy.mjs';
+import { validateMaterializedField, validateMutation, ValidationError } from '../field-strategy.mjs';
 import { scopeOf } from '../scope-handle.mjs';
 
 function ownerFieldOf(entity) {
@@ -19,6 +19,11 @@ function ownerFieldOf(entity) {
     }
   }
   return null;
+}
+
+function materializeDefault(defaultValue) {
+  const value = typeof defaultValue === 'function' ? defaultValue() : defaultValue;
+  return value !== null && typeof value === 'object' ? structuredClone(value) : value;
 }
 
 export function createCrudHandlers({ record, sideTableStrategyEntries }) {
@@ -34,6 +39,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       }
       const id = requestedId ?? randomUUID();
       const data = { ...fieldsPayload, id };
+      for (const [fieldName, descriptor] of Object.entries(fields)) {
+        if (!(fieldName in data) && descriptor.default !== undefined) {
+          data[fieldName] = materializeDefault(descriptor.default);
+          validateMaterializedField(record, fieldName, data[fieldName]);
+        }
+      }
       if (ownerField) data[ownerField] = principal?.id;
       return [{
         handle: verbs.created.handle,
@@ -45,6 +56,14 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     [`${name}.update`]: ({ payload, principal: _p }) => {
       const { id, ...rest } = payload;
       if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
+      if (Object.keys(rest).length === 0) {
+        throw new ValidationError(`${name}.update requires at least one field to change`);
+      }
+      for (const fieldName of Object.keys(rest)) {
+        if (fields[fieldName]?.immutable === true) {
+          throw new ValidationError(`${name}.${fieldName} is immutable: a client may set it on create but may not change it.`);
+        }
+      }
       validateMutation(record, rest);
       const stateTransitions = [];
       // Transition guard: for every state field in the payload, pre-read the

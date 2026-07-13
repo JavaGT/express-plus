@@ -5,6 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   entity,
+  date,
   grant,
   principal,
   read,
@@ -74,6 +75,113 @@ test('generated create preserves a caller-owned id through commit and projection
   const row = db.prepare('SELECT id, body FROM StartNote WHERE id = ?').get('theme-client-1');
   assert.equal(row.id, 'theme-client-1');
   assert.equal(row.body, 'stable identity');
+});
+
+test('generated update rejects an id-only payload without committing an event', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/start-notes', startNote());
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+
+  await app.start();
+  await app.dispatch({
+    actionId: 'empty-update-create',
+    type: 'StartNote.create',
+    payload: { id: 'empty-update-note', body: 'unchanged' },
+    principal: user,
+  });
+  const result = await app.dispatch({
+    actionId: 'empty-update',
+    type: 'StartNote.update',
+    payload: { id: 'empty-update-note' },
+    principal: user,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.match(result.failure.message, /at least one field/i);
+  assert.equal(result.events, undefined);
+  assert.equal(db.prepare('SELECT body FROM StartNote WHERE id = ?').get('empty-update-note').body, 'unchanged');
+});
+
+test('generated CRUD owns audit timestamps and rejects immutable field updates', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const AuditNote = entity('AuditNote', {
+    projectId: text({ immutable: true }),
+    body: text(),
+    createdAt: date({ readonly: true, default: () => new Date('2000-01-01T00:00:00.000Z') }),
+    updatedAt: date({ touch: true, default: () => new Date('2000-01-01T00:00:00.000Z') }),
+    grant: () => grant(read, write, subscribe),
+  });
+  const app = workbench({ db }).mount('/audit-notes', AuditNote);
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+
+  await app.start();
+  const created = await app.dispatch({
+    actionId: 'audit-create',
+    type: 'AuditNote.create',
+    payload: { id: 'audit-note', projectId: 'project-a', body: 'before' },
+    principal: user,
+  });
+  assert.equal(created.ok, true);
+  const initial = db.prepare('SELECT * FROM AuditNote WHERE id = ?').get('audit-note');
+  assert.equal(initial.projectId, 'project-a');
+  const initialAuditTime = new Date('2000-01-01T00:00:00.000Z').getTime();
+  assert.equal(initial.createdAt, initialAuditTime);
+  assert.equal(initial.updatedAt, initialAuditTime);
+
+  const reparented = await app.dispatch({
+    actionId: 'audit-reparent',
+    type: 'AuditNote.update',
+    payload: { id: 'audit-note', projectId: 'project-b' },
+    principal: user,
+  });
+  assert.equal(reparented.ok, false);
+  assert.equal(reparented.failure.category, 'invalid-input');
+  assert.match(reparented.failure.message, /immutable/i);
+  assert.equal(db.prepare('SELECT projectId FROM AuditNote WHERE id = ?').get('audit-note').projectId, 'project-a');
+
+  const updated = await app.dispatch({
+    actionId: 'audit-update',
+    type: 'AuditNote.update',
+    payload: { id: 'audit-note', body: 'after' },
+    principal: user,
+  });
+  assert.equal(updated.ok, true);
+  const final = db.prepare('SELECT * FROM AuditNote WHERE id = ?').get('audit-note');
+  assert.equal(final.createdAt, initial.createdAt);
+  assert.notEqual(final.updatedAt, initial.updatedAt);
+});
+
+test('generated create validates a server-owned default before committing it', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const InvalidDefault = entity('InvalidDefault', {
+    label: text({ readonly: true, default: () => 42 }),
+    grant: () => grant(read, write, subscribe),
+  });
+  const app = workbench({ db }).mount('/invalid-defaults', InvalidDefault);
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+
+  await app.start();
+  const result = await app.dispatch({
+    actionId: 'invalid-default-create',
+    type: 'InvalidDefault.create',
+    payload: { id: 'invalid-default' },
+    principal: user,
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.match(result.failure.message, /InvalidDefault\.label.*text/i);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM InvalidDefault').get().count, 0);
 });
 
 test('headless start without a database still assembles the application kernel', async () => {

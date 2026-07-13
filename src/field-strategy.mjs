@@ -550,6 +550,35 @@ export function verifyHash(candidate, stored) {
 //    is the write path's job (Phase 2), where all sources are merged.
 //  - `default` is materialization, not validation — it belongs to the write/apply
 //    path (Phase 2), never to this accept/reject seam.
+function validateFieldValue(entityName, key, descriptor, value) {
+  if (descriptor.required === true && (value === null || value === undefined)) {
+    throw new ValidationError(
+      `${entityName}.${key} is required and may not be cleared (set to null).`,
+    );
+  }
+  if (value === null && descriptor.nullable === true) return value;
+
+  const { validate } = resolveStrategy(descriptor.kind);
+  const structural = validate(value, descriptor);
+  if (structural !== true) {
+    throw new ValidationError(`${entityName}.${key}: ${structural}`);
+  }
+  if (typeof descriptor.validate === 'function') {
+    const declared = descriptor.validate(value);
+    if (declared !== true) {
+      const reason = typeof declared === 'string' ? declared : 'failed validate';
+      throw new ValidationError(`${entityName}.${key}: ${reason}`);
+    }
+  }
+  return value;
+}
+
+export function validateMaterializedField(entityRecord, key, value) {
+  const descriptor = entityRecord.fields[key];
+  if (!descriptor) throw new ValidationError(`${entityRecord.name}.${key} is not a declared field.`);
+  return validateFieldValue(entityRecord.name, key, descriptor, value);
+}
+
 export function validateMutation(entityRecord, payload) {
   const { name, fields } = entityRecord;
   for (const [key, value] of Object.entries(payload)) {
@@ -590,25 +619,7 @@ export function validateMutation(entityRecord, payload) {
 
     // required: the payload may not explicitly CLEAR a required field. (Whether a
     // required field is present at all on create is the write path's concern.)
-    if (descriptor.required === true && (value === null || value === undefined)) {
-      throw new ValidationError(
-        `${name}.${key} is required and may not be cleared (set to null).`,
-      );
-    }
-
-    const { validate } = resolveStrategy(descriptor.kind);
-    const structural = validate(value, descriptor);
-    if (structural !== true) {
-      throw new ValidationError(`${name}.${key}: ${structural}`);
-    }
-
-    if (typeof descriptor.validate === 'function') {
-      const declared = descriptor.validate(value);
-      if (declared !== true) {
-        const reason = typeof declared === 'string' ? declared : 'failed validate';
-        throw new ValidationError(`${name}.${key}: ${reason}`);
-      }
-    }
+    validateFieldValue(name, key, descriptor, value);
   }
   return payload;
 }

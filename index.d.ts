@@ -169,7 +169,10 @@ export type EntityFields<Row extends object> = Readonly<{
 
 export type FieldOptions<Value = unknown> = Readonly<{
   optional?: boolean;
+  nullable?: boolean;
   readonly?: boolean;
+  immutable?: boolean;
+  touch?: boolean;
   default?: Value | (() => Value);
   validate?: (value: Value) => true | string;
   oneOf?: readonly Value[];
