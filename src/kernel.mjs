@@ -10,7 +10,7 @@ import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './dur
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { reconcileProjectedRecovery } from './projected-async.mjs';
 import { reconcileDurableEffects } from './durable-effects.mjs';
-import { getLog } from './log.mjs';
+import { getLog, withLog } from './log.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -148,8 +148,9 @@ export function buildKernel(app) {
 // Called from serve.mjs inside app.ready, after resolveRoutes + prepareSchema
 // and after app.kernel = buildKernel(app).
 export async function buildAndStart(app) {
-  const log = getLog();
-  const dispatchThroughWriteQueue = (args) => app.writeQueue.run(() => app.kernel.dispatch(args));
+  const log = app.log ?? getLog();
+  const dispatchThroughWriteQueue = (args) =>
+    withLog(app.log, () => app.writeQueue.run(() => app.kernel.dispatch(args)));
   app.dispatch = dispatchThroughWriteQueue;
   // app.batch(actions, { principal }) — a server-side composed mutation
   // (SPEC §11, ADR #13). N actions run as ONE transaction = ONE composed
@@ -158,7 +159,9 @@ export async function buildAndStart(app) {
   // writeQueue — not a second pipeline. Exposed for server code that needs
   // an atomic multi-entity write outside the per-route HTTP handlers.
   app.batch = (actions, { principal } = {}) =>
-    app.writeQueue.run(() => app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal }));
+    withLog(app.log, () =>
+      app.writeQueue.run(() => app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal })),
+    );
   // Singular Schedule clock-dispatch: deadline + tick share one starter.
   // No-op when no triggers exist. Scheduled on the shared clock.
   if (app.db) {

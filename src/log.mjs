@@ -1,7 +1,8 @@
 // Framework-wide structured logger. Agents and humans can read it.
 //
 // DESIGN:
-//   One singleton logger on the framework, set by workbench() at construction.
+//   One logger per application runtime. Nested asynchronous work resolves the
+//   logger from its owning application context.
 //   Every channel (auth, dispatch, http, live, projected, system) has its own
 //   minimum level; messages below that level are dropped.  Output is configurable
 //   — stderr (default), a file stream, or a callback for custom sinks.
@@ -29,10 +30,10 @@
 //   system     — server start/stop, shutdown hooks, tick/reaper sweeps
 //
 // CONFIG:
-//   The logger is an ambient singleton — like the active DB, it is set once at
-//   app construction time.  Every framework module imports `getLog()` to reach it.
-//   This avoids threading a log argument through every signature (the framework
-//   already uses ambient singletons for the DB and the entity registry).
+//   Every framework module imports `getLog()` to reach the logger selected by
+//   the current application operation. `withLog()` establishes that context at
+//   application boundaries (request, dispatch, schema preparation). The fallback
+//   logger is process-wide only for work that has no owning application.
 //
 //   const log = createLog({
 //     level: 'info',               // global floor — channels override
@@ -51,7 +52,10 @@
 //   The context object is serialized as-is into the JSON `ctx` field. Error objects
 //   are keyed as `err` with { message, code, stack } expansion.
 
-let ambientLog = null;
+import { AsyncLocalStorage } from 'node:async_hooks';
+
+const applicationLog = new AsyncLocalStorage();
+let fallbackLog = null;
 
 const LEVELS = Object.freeze({ error: 0, warn: 1, info: 2, debug: 3, trace: 4 });
 
@@ -154,11 +158,20 @@ export function createLog({ level = 'info', channels = {}, format = 'json', outp
   return log;
 }
 
-export function setAmbientLog(log) { ambientLog = log; }
+// Retained for compatibility with callers that configure framework work lacking
+// an application owner. Application construction never calls this function.
+export function setAmbientLog(log) { fallbackLog = log; }
+
+export function withLog(log, operation) {
+  if (!log) return operation();
+  return applicationLog.run(log, operation);
+}
 
 export function getLog() {
-  if (!ambientLog) {
-    ambientLog = createLog({ level: 'warn', format: 'json', output: process.stderr });
+  const ownedLog = applicationLog.getStore();
+  if (ownedLog) return ownedLog;
+  if (!fallbackLog) {
+    fallbackLog = createLog({ level: 'warn', format: 'json', output: process.stderr });
   }
-  return ambientLog;
+  return fallbackLog;
 }

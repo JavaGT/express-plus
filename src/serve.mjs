@@ -28,7 +28,7 @@ import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/se
 import { createLiveDelivery } from './live-delivery.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 import { retentionPrune } from './committed-log.mjs';
-import { getLog } from './log.mjs';
+import { getLog, withLog } from './log.mjs';
 import { buildKernel, buildAndStart } from './kernel.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
 import { BodyError, readRequestBody } from './http-body.mjs';
@@ -119,9 +119,9 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
   // Request log (opt-in via `listen(port, {requestLog:true})`). The structured
   // logger also captures every request at info-level on the 'http' channel.
   const shouldLogRequest = requestLog;
-  const log = getLog();
+  const log = (isApp && source.log) ? source.log : getLog();
   const requestCount = { count: 0 };
-  return async function handle(req, res) {
+  async function handle(req, res) {
     const startTime = Date.now();
     if (isApp) requestCount.count += 1;
     if (shouldLogRequest) {
@@ -341,7 +341,8 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       }
       renderError(res, err, { env });
     }
-  };
+  }
+  return (req, res) => withLog(log, () => handle(req, res));
 }
 
 // Open a real node:http server for a resolved app and start listening. The
@@ -367,7 +368,7 @@ export function listen(app, port, optionsOrCallback = {}) {
   const isCallback = typeof optionsOrCallback === 'function';
   const options = isCallback ? {} : optionsOrCallback;
   const onListening = isCallback ? optionsOrCallback : options.onListening;
-  const log = getLog();
+  const log = app.log ?? getLog();
 
   // The default principal source is session hydration when the app has a db: the
   // principal is built server-side from the request's session cookie (SPEC §572).

@@ -1,7 +1,164 @@
 // Structured logger tests — agent-readable JSON output + level gating.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createLog } from '../src/log.mjs';
+import { DatabaseSync } from 'node:sqlite';
+import workbench from '../src/app.mjs';
+import { entity } from '../src/entity/compile.mjs';
+import { text } from '../src/field.mjs';
+import { grant, read, write } from '../src/grant.mjs';
+import { allowAnonymous } from '../src/route-gate.mjs';
+import { createLog, getLog } from '../src/log.mjs';
+
+test('constructing another application does not replace the first application logger', () => {
+  const messagesA = [];
+  const messagesB = [];
+  const appA = workbench({ log: { output: (_level, _channel, message) => messagesA.push(message) } });
+  workbench({ log: { output: (_level, _channel, message) => messagesB.push(message) } });
+
+  appA.log.info('system', 'app A after app B');
+
+  assert.deepEqual(
+    { messagesA, messagesB },
+    {
+      messagesA: ['workbench() constructed', 'app A after app B'],
+      messagesB: ['workbench() constructed'],
+    },
+  );
+});
+
+test('application startup keeps using its own logger after another application is constructed', async (t) => {
+  const messagesA = [];
+  const messagesB = [];
+  const appA = workbench({ log: { output: (_level, _channel, message) => messagesA.push(message) } });
+  workbench({ log: { output: (_level, _channel, message) => messagesB.push(message) } });
+  appA.listen(0);
+  await appA.ready;
+  t.after(() => appA.httpServer.close());
+
+  assert.deepEqual(
+    {
+      aStarted: messagesA.some((message) => message.startsWith('server listening on port ')),
+      bStarted: messagesB.some((message) => message.startsWith('server listening on port ')),
+    },
+    { aStarted: true, bStarted: false },
+  );
+});
+
+test('application requests keep using their owning application logger', async (t) => {
+  const entriesA = [];
+  const entriesB = [];
+  const appA = workbench({ log: { output: (level, channel, message) => entriesA.push({ level, channel, message }) } });
+  workbench({ log: { output: (level, channel, message) => entriesB.push({ level, channel, message }) } });
+  appA.listen(0, { requestLog: true });
+  await appA.ready;
+  t.after(() => appA.httpServer.close());
+
+  await fetch(`http://127.0.0.1:${appA.httpServer.address().port}/health`);
+
+  assert.deepEqual(
+    {
+      aHttpEntries: entriesA.filter(({ channel }) => channel === 'http').length,
+      bHttpEntries: entriesB.filter(({ channel }) => channel === 'http').length,
+    },
+    { aHttpEntries: 1, bHttpEntries: 0 },
+  );
+});
+
+test('nested request work resolves the owning application logger', async (t) => {
+  const messagesA = [];
+  const messagesB = [];
+  const appA = workbench({ log: { output: (_level, _channel, message) => messagesA.push(message) } });
+  appA.get('/probe', allowAnonymous(), (_req, res) => {
+    getLog().info('system', 'nested app A operation');
+    res.json({ ok: true });
+  });
+  workbench({ log: { output: (_level, _channel, message) => messagesB.push(message) } });
+  appA.listen(0);
+  await appA.ready;
+  t.after(() => appA.httpServer.close());
+
+  await fetch(`http://127.0.0.1:${appA.httpServer.address().port}/probe`);
+
+  assert.deepEqual(
+    {
+      appA: messagesA.includes('nested app A operation'),
+      appB: messagesB.includes('nested app A operation'),
+    },
+    { appA: true, appB: false },
+  );
+});
+
+test('concurrent application requests cannot cross-log', async (t) => {
+  const messagesA = [];
+  const messagesB = [];
+  const appA = workbench({ log: { output: (_level, channel, message) => {
+    if (channel === 'isolation') messagesA.push(message);
+  } } });
+  const appB = workbench({ log: { output: (_level, channel, message) => {
+    if (channel === 'isolation') messagesB.push(message);
+  } } });
+  appA.get('/probe', allowAnonymous(), async (_req, res) => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    getLog().info('isolation', 'A');
+    res.json({ ok: true });
+  });
+  appB.get('/probe', allowAnonymous(), async (_req, res) => {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    getLog().info('isolation', 'B');
+    res.json({ ok: true });
+  });
+  appA.listen(0);
+  appB.listen(0);
+  await Promise.all([appA.ready, appB.ready]);
+  t.after(() => {
+    appA.httpServer.close();
+    appB.httpServer.close();
+  });
+
+  await Promise.all([
+    fetch(`http://127.0.0.1:${appA.httpServer.address().port}/probe`),
+    fetch(`http://127.0.0.1:${appB.httpServer.address().port}/probe`),
+  ]);
+
+  assert.deepEqual({ messagesA, messagesB }, { messagesA: ['A'], messagesB: ['B'] });
+});
+
+test('direct application dispatch resolves its owning application logger', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const messagesA = [];
+  const messagesB = [];
+  const Note = entity('LoggingIsolationNote', {
+    body: text(),
+    grant: () => [grant(read, write)],
+  });
+  const appA = workbench({
+    db,
+    entities: [Note],
+    log: { level: 'debug', output: (_level, _channel, message) => messagesA.push(message) },
+  });
+  workbench({ log: { level: 'debug', output: (_level, _channel, message) => messagesB.push(message) } });
+  appA.listen(0);
+  await appA.ready;
+  t.after(() => {
+    appA.httpServer.close();
+    db.close();
+  });
+
+  await appA.dispatch({
+    actionId: 'logging-isolation-create',
+    type: 'LoggingIsolationNote.create',
+    payload: { body: 'hello' },
+    principal: { type: 'user', id: 'user-1' },
+  });
+
+  assert.deepEqual(
+    {
+      appA: messagesA.includes('LoggingIsolationNote.created'),
+      appB: messagesB.includes('LoggingIsolationNote.created'),
+    },
+    { appA: true, appB: false },
+  );
+});
 
 test('default level is info — debug and trace are dropped', () => {
   const lines = [];

@@ -34,7 +34,7 @@ import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { createClock } from './clock.mjs';
-import { createLog, setAmbientLog, getLog } from './log.mjs';
+import { createLog, withLog } from './log.mjs';
 import { serveStatic } from './views.mjs';
 import { authRoutes } from './auth/routes.mjs';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
@@ -423,12 +423,11 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
   // option left absent behaves exactly like the singleton (env-sourced
   // defaults), so an app that sets nothing still runs.
   app.config = resolveConfig({ port, env, session, viewsDir });
-  // Set up the framework-wide structured logger BEFORE any module imports log.
-  // The ambient logger is used by every layer — auth, dispatch, HTTP, live.
+  // Logging is an application-owned runtime resource. Constructing another
+  // application must not replace the logger used by this one.
   // Callers pass `workbench({ log: { level: 'debug', channels: {...} } })`.
-  const log = createLog(logOpts);
-  setAmbientLog(log);
-  log.info('system', 'workbench() constructed', { db: !!db, jobs: !!jobOpts, migrations: migrations.length });
+  app.log = createLog(logOpts);
+  app.log.info('system', 'workbench() constructed', { db: !!db, jobs: !!jobOpts, migrations: migrations.length });
   // The DB handle is an app-level resource, supplied once at construction and
   // read by every transport (HTTP now, WS /events later) — not a per-transport
   // listen option (DECISIONLOG: the SQLite handle lives on the app because
@@ -491,7 +490,7 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
   // traffic, after routes resolve and before the kernel starts. The method stays
   // callable for server-only/tests that prepare schema without listening, but it
   // is the same cached path `app.ready` uses — not a second DDL algorithm.
-  app.prepareSchema = async () => {
+  app.prepareSchema = async () => withLog(app.log, async () => {
     if (!app.schemaReady) {
       app.schemaReady = (async () => {
         if (!app.db) throw new Error('cannot generate DDL — no db configured on the app');
@@ -514,7 +513,7 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
       })();
     }
     return app.schemaReady;
-  };
+  });
   app.ddl = () => app.prepareSchema();
 
   app.listen = (portOrOptionsOrCallback, optionsOrCallback) => {
@@ -542,7 +541,7 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
       port = portOrOptionsOrCallback ?? app.config.port;
     }
     app.port = port;
-    return serveListen(app, port, options);
+    return withLog(app.log, () => serveListen(app, port, options));
   };
   // Static file serving — a thin alias over the general `app.use` prefix-intercept
   // seam: `app.static('/public', dir)` is exactly
