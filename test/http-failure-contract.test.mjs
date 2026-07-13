@@ -1,6 +1,6 @@
 // Canonical HTTP failure contract: {ok:false, failure:{category,message,details?}}.
 
-import { allowAnonymous, statusForFailure } from '../src/index.mjs';
+import { allowAnonymous, statusForFailure, text } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -33,14 +33,14 @@ test('HTTP errors map every supported status and preserve structured details', (
 
 function ownedNote() {
   return entity('Note', {
-    body: 'a', owner: 'b',
+    body: text(), owner: text(),
     grant: () => [],
   });
 }
 
 function makePublicListNote() {
   return entity('Note', {
-    body: 'a', owner: 'b',
+    body: text(), owner: text(),
     grant: () => [],
     gate: { list: allowAnonymous(), create: allowAnonymous() },
   });
@@ -48,7 +48,7 @@ function makePublicListNote() {
 
 function makePublicNote() {
   return entity('Note', {
-    body: 'a', owner: 'b',
+    body: text(), owner: text(),
     grant: () => [],
     gate: { list: allowAnonymous(), create: allowAnonymous(), read: allowAnonymous() },
   });

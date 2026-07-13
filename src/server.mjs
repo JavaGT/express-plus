@@ -22,6 +22,7 @@ export { createJobQueue } from './job-queue.mjs';
 export { createBlobStore } from './blob-store.mjs';
 export { runMigrations } from './migrations.mjs';
 export { defineSqliteSchema } from './sqlite-schema.mjs';
+export { describeEntityStorage, describeSqliteStorage } from './sqlite-storage-description.mjs';
 export { readSeq as readCommittedCursor } from './committed-log.mjs';
 import { readSince } from './committed-log.mjs';
 

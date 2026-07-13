@@ -616,3 +616,10 @@ REMAINING-P1-NOTES resolved/deferred: spec #6 (handler txn signature) RESOLVED b
 - Public `LiveList` fixtures pin all-or-nothing recovery: an internal sequence hole, unknown event type, or malformed historical row must leave both document state and cursor at the pre-fetch checkpoint.
 - A deterministic two-epoch custom-scope fixture proves the asynchronous projection and its cursor can currently split as `after/0`; an atomic read may return only `before/0` or `after/5`.
 - Decision: Wave 4.10 will validate the complete fetched run before publishing state/cursor and will introduce one authorization-safe history anchor for deleted entities. These are destination contracts, not permission to weaken ordinary row grants or expose another owner's history.
+
+## 2026-07-14 — Wave 4.2 compiled storage descriptions
+
+- The server package now exposes one immutable, normalized SQLite storage description for both compiled entities and live database tables. Entity descriptions execute the real DDL compiler in an isolated in-memory database, so consumers do not duplicate Workbench's field-to-storage rules.
+- The DDL boundary now rejects unknown field kinds, types, and modes instead of silently treating future descriptors as text. Three HTTP contract fixtures using raw string placeholders were corrected to declare real text fields.
+- Gate: 66 focused schema tests, the complete sequential package suite, packed runtime/type checks, and ESLint all pass. One unrelated inherited-membership assertion failed once in the first full run and passed 5/5 in isolation plus the clean complete rerun.
+- Next: Scope consumes the public description through a fail-closed logical-versus-physical compatibility gate; Scope may declare deliberate relational extensions, but every Workbench-required table, column, primary key, and index must be present.

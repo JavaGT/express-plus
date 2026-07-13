@@ -23,7 +23,51 @@ import { sideTableDDL } from './side-table-strategy.mjs';
 import { frameworkLogDDL } from './committed-log.mjs';
 import { defineSqliteSchema } from './sqlite-schema.mjs';
 
+const SUPPORTED_FIELD_TYPES = Object.freeze({
+  value: new Set(['text', 'boolean', 'date', 'number', 'json', 'vector', 'ref']),
+  crdt: new Set(['text', 'raster', 'polyline']),
+  hash: new Set(['hash']),
+  store: new Set(['map', 'log']),
+  ordered: new Set(['list']),
+  ephemeral: new Set(['ephemeral']),
+  state: new Set(['state']),
+  struct: new Set(['link']),
+});
+
 // Map a field's kind+type to its SQLite column type.
+function unknownField(entityName, fieldName, message) {
+  throw new Error(`${message} at ${entityName}.${fieldName}`);
+}
+
+function assertSupportedField(entityName, fieldName, descriptor) {
+  if (descriptor === null || typeof descriptor !== 'object') {
+    unknownField(entityName, fieldName, 'invalid field descriptor');
+  }
+  if (descriptor.kind === 'computed') {
+    if (descriptor.mode !== 'pull' && descriptor.mode !== 'stored') {
+      unknownField(entityName, fieldName, `unknown computed field mode '${String(descriptor.mode)}'`);
+    }
+    return;
+  }
+  if (descriptor.kind === 'projected') {
+    if (descriptor.mode !== 'async') {
+      unknownField(entityName, fieldName, `unknown projected field mode '${String(descriptor.mode)}'`);
+    }
+    return;
+  }
+  const supportedTypes = SUPPORTED_FIELD_TYPES[descriptor.kind];
+  if (supportedTypes === undefined) {
+    unknownField(entityName, fieldName, `unknown field kind '${String(descriptor.kind)}'`);
+  }
+  if (!supportedTypes.has(descriptor.type)) {
+    unknownField(
+      entityName,
+      fieldName,
+      `unknown ${descriptor.kind} field type '${String(descriptor.type)}'`,
+    );
+  }
+}
+
 function sqlType(descriptor) {
   const { kind, type } = descriptor;
   if (kind === 'value' || kind === 'store' || kind === 'crdt' || kind === 'hash') {
@@ -110,6 +154,10 @@ export function generateDDL(entity) {
   const statements = [];
   const { fields } = entity;
   if (!fields) return statements;
+
+  for (const [name, descriptor] of Object.entries(fields)) {
+    assertSupportedField(entity.name, name, descriptor);
+  }
 
   statements.push(mainTableDDL(entity));
 

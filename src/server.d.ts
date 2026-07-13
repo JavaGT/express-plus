@@ -252,6 +252,56 @@ export function defineSqliteSchema(spec: {
   migrations?: readonly Migration[];
 }): SqliteSchemaResult;
 
+export interface SqliteStorageColumnDescription {
+  readonly name: string;
+  readonly type: string;
+  readonly notNull: boolean;
+  readonly defaultValue: string | null;
+  readonly primaryKeyPosition: number;
+  readonly hidden: number;
+}
+
+export interface SqliteStorageIndexDescription {
+  readonly name: string;
+  readonly unique: boolean;
+  readonly origin: string;
+  readonly partial: boolean;
+  readonly columns: readonly (string | null)[];
+}
+
+export interface SqliteStorageForeignKeyDescription {
+  readonly table: string;
+  readonly columns: readonly string[];
+  readonly referencedColumns: readonly (string | null)[];
+  readonly onUpdate: string;
+  readonly onDelete: string;
+  readonly match: string;
+}
+
+export interface SqliteStorageTableDescription {
+  readonly name: string;
+  readonly virtual: boolean;
+  readonly withoutRowid: boolean;
+  readonly columns: readonly SqliteStorageColumnDescription[];
+  readonly primaryKey: readonly string[];
+  readonly foreignKeys: readonly SqliteStorageForeignKeyDescription[];
+  readonly indexes: readonly SqliteStorageIndexDescription[];
+}
+
+export interface SqliteStorageDescription {
+  readonly tableNames: readonly string[];
+  readonly tables: readonly SqliteStorageTableDescription[];
+}
+
+export function describeSqliteStorage(
+  db: WorkbenchDatabase,
+  tableNames: readonly string[],
+): SqliteStorageDescription;
+
+export function describeEntityStorage(
+  entity: EntityDeclaration<Record<string, unknown>>,
+): SqliteStorageDescription;
+
 // ---------------------------------------------------------------------------
 // Route / static helpers
 // ---------------------------------------------------------------------------
