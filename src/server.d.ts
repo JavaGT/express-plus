@@ -3,6 +3,7 @@
 import type {
   BoundWorkbenchEntity,
   CommittedEvent,
+  EntityDeclaration,
   Principal,
   UserPrincipal,
   Handler,
@@ -16,6 +17,10 @@ export type { WorkbenchDatabase, WorkbenchStatement, UserPrincipal } from '../in
 // ---------------------------------------------------------------------------
 
 export const frameworkTableNames: readonly string[];
+
+export function declaredTableNames(
+  entities: readonly EntityDeclaration<Record<string, unknown>>[],
+): readonly string[];
 
 // ---------------------------------------------------------------------------
 // Job types — both raw rows and the parsed runtime shape

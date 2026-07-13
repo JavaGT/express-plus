@@ -75,4 +75,14 @@ function collectFrameworkTableNames() {
   return collectTableNamesFromDdl(entries);
 }
 
+export function declaredTableNames(entities) {
+  const entries = [];
+  for (const entity of entities) {
+    for (const sql of generateDDL(entity)) {
+      entries.push({ source: `entity ${entity.name}`, sql });
+    }
+  }
+  return collectTableNamesFromDdl(entries);
+}
+
 export const frameworkTableNames = collectFrameworkTableNames();
