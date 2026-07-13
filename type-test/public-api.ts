@@ -19,6 +19,7 @@ import {
   type EventsSinceResponse, type LiveStore, type SnapshotResponse,
   type StaleResponse, type WsEnvelope,
 } from 'workbench/client';
+import { DatabaseSync } from 'node:sqlite';
 
 type ProjectRow = { id: string; name: string; ownerId: string };
 const Project: WorkbenchEntity<ProjectRow> = entity('Project', {
@@ -41,6 +42,9 @@ const Renamed: EventHandle<ProjectRow, { name: string }> = event(
 );
 
 declare const db: WorkbenchDatabase;
+const nativeDb = new DatabaseSync(':memory:');
+const nativeApp: WorkbenchApp = workbench({ db: nativeDb });
+void nativeApp;
 const migration: Migration = { version: 1, up: (database) => database.exec('SELECT 1') };
 const app: WorkbenchApp = workbench({
   db,

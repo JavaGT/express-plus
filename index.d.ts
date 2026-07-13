@@ -3,7 +3,7 @@
 import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 
 export interface WorkbenchStatement {
-  run(...params: unknown[]): { changes: number };
+  run(...params: unknown[]): { changes: number | bigint };
   get(...params: unknown[]): unknown;
   all(...params: unknown[]): unknown[];
 }
