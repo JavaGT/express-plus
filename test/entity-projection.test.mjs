@@ -10,13 +10,10 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { randomUUID } from 'node:crypto';
 
-import {
-  entity, generateFrameworkDDL } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
+import workbench, { entity, generateFrameworkDDL } from '../src/internal.mjs';
 
 test('entity-projection: create — handler emits event — entity.projection writes row', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -30,6 +27,8 @@ test('entity-projection: create — handler emits event — entity.projection wr
   });
 
   for (const sql of Note.generateDDL()) db.exec(sql);
+  const app = workbench({ db, entities: [Note] });
+  const Note_b = app.entity(Note);
 
   const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
@@ -45,7 +44,7 @@ test('entity-projection: create — handler emits event — entity.projection wr
     authorize: () => true,
     db,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Note.projection],
+      projectionConsumers: [Note_b.projection],
     }),
   });
 
@@ -70,7 +69,6 @@ test('entity-projection: create — handler emits event — entity.projection wr
 
 test('entity-projection: create — round-trip: row == reducer fold', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -84,6 +82,8 @@ test('entity-projection: create — round-trip: row == reducer fold', async () =
   });
 
   for (const sql of Note.generateDDL()) db.exec(sql);
+  const app = workbench({ db, entities: [Note] });
+  const Note_b = app.entity(Note);
 
   const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
@@ -99,7 +99,7 @@ test('entity-projection: create — round-trip: row == reducer fold', async () =
     authorize: () => true,
     db,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Note.projection],
+      projectionConsumers: [Note_b.projection],
     }),
   });
 
@@ -126,7 +126,6 @@ test('entity-projection: create — round-trip: row == reducer fold', async () =
 
 test('entity-projection: update — projection updates row', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -140,8 +139,10 @@ test('entity-projection: update — projection updates row', async () => {
   });
 
   for (const sql of Note.generateDDL()) db.exec(sql);
+  const app = workbench({ db, entities: [Note] });
+  const Note_b = app.entity(Note);
 
-  const row = Note.create({ body: 'original' });
+  const row = Note_b.create({ body: 'original' });
 
   const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
@@ -154,7 +155,7 @@ test('entity-projection: update — projection updates row', async () => {
     authorize: () => true,
     db,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Note.projection],
+      projectionConsumers: [Note_b.projection],
     }),
   });
 
@@ -166,7 +167,7 @@ test('entity-projection: update — projection updates row', async () => {
   });
 
   assert.equal(result.granted, true);
-  const updated = Note.findById(row.id);
+  const updated = Note_b.findById(row.id);
   assert.equal(updated.body, 'updated body');
 
   // Reducer fold matches
@@ -184,7 +185,6 @@ test('entity-projection: update — projection updates row', async () => {
 // disagreed. This asserts the update path flattens struct cells like create.
 test('entity-projection: update — struct (link) cells persist to the row', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Doc = entity('Doc', {
@@ -199,8 +199,10 @@ test('entity-projection: update — struct (link) cells persist to the row', asy
   });
 
   for (const sql of Doc.generateDDL()) db.exec(sql);
+  const app = workbench({ db, entities: [Doc] });
+  const Doc_b = app.entity(Doc);
 
-  const row = Doc.create({ title: 'memo', linkShare: { token: 'tok-1', tier: 'view' } });
+  const row = Doc_b.create({ title: 'memo', linkShare: { token: 'tok-1', tier: 'view' } });
   assert.equal(row.linkShare.tier, 'view');
 
   const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
@@ -214,7 +216,7 @@ test('entity-projection: update — struct (link) cells persist to the row', asy
     authorize: () => true,
     db,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Doc.projection],
+      projectionConsumers: [Doc_b.projection],
     }),
   });
 
@@ -228,7 +230,7 @@ test('entity-projection: update — struct (link) cells persist to the row', asy
   assert.equal(result.granted, true);
 
   // The row (bootstrap read) must reflect the struct-cell change.
-  const updated = Doc.findById(row.id);
+  const updated = Doc_b.findById(row.id);
   assert.equal(updated.linkShare.tier, 'edit', 'struct cell persisted to row on update');
   // Partial struct update leaves the untouched cell intact.
   assert.equal(updated.linkShare.token, 'tok-1', 'untouched struct cell preserved');
@@ -236,7 +238,6 @@ test('entity-projection: update — struct (link) cells persist to the row', asy
 
 test('entity-projection: remove — projection deletes row', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -250,8 +251,10 @@ test('entity-projection: remove — projection deletes row', async () => {
   });
 
   for (const sql of Note.generateDDL()) db.exec(sql);
+  const app = workbench({ db, entities: [Note] });
+  const Note_b = app.entity(Note);
 
-  const row = Note.create({ body: 'delete me' });
+  const row = Note_b.create({ body: 'delete me' });
 
   const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 
@@ -264,7 +267,7 @@ test('entity-projection: remove — projection deletes row', async () => {
     authorize: () => true,
     db,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Note.projection],
+      projectionConsumers: [Note_b.projection],
     }),
   });
 
@@ -276,7 +279,7 @@ test('entity-projection: remove — projection deletes row', async () => {
   });
 
   assert.equal(result.granted, true);
-  const deleted = Note.findById(row.id);
+  const deleted = Note_b.findById(row.id);
   assert.equal(deleted, null, 'row deleted by projection consumer');
 
   // Reducer fold: _removed flag set
@@ -286,7 +289,6 @@ test('entity-projection: remove — projection deletes row', async () => {
 
 test('entity-projection: projection failure rolls back the whole txn', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
   const Note = entity('Note', {
@@ -296,6 +298,7 @@ test('entity-projection: projection failure rolls back the whole txn', async () 
   });
 
   for (const sql of Note.generateDDL()) db.exec(sql);
+  workbench({ db, entities: [Note] }).entity(Note);
 
   const { createServer, durableMutationVariant } = await import('../src/pipeline.mjs');
 

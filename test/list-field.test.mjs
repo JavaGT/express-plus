@@ -19,8 +19,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { setActiveDb } from '../src/db.mjs';
-import {
+import workbench, {
   entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
 
 const Items = entity('Items', {
@@ -31,24 +30,25 @@ const Items = entity('Items', {
 
 async function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(Items)) db.exec(sql);
   db.prepare("INSERT INTO Items (id) VALUES ('r1')").run();
+  const app = workbench({ db, entities: [Items] });
+  const boundItems = app.entity(Items);
   const server = await createServer({
     db,
-    handlers: Items.crudHandlers,
+    handlers: boundItems.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Items.projection],
+      projectionConsumers: [boundItems.projection],
       admission: { beforeProjection: () => true, afterProjection: async () => true },
     }),
     authorize: async () => true,
   });
-  return { db, server };
+  return { db, server, boundItems };
 }
 
-function rowWith(server, id) {
-  return Items.hydrate({ id }, null, server.dispatch);
+function rowWith(server, boundItems, id) {
+  return boundItems.hydrate({ id }, null, server.dispatch);
 }
 
 function keyOf(db, id) {
@@ -59,9 +59,9 @@ function keyOf(db, id) {
 }
 
 test('insertAt mints a fractional key between neighbors — sibling keys unchanged', async (t) => {
-  const { db, server } = await setup();
+  const { db, server, boundItems } = await setup();
   t.after(() => db.close());
-  const row = rowWith(server, 'r1');
+  const row = rowWith(server, boundItems, 'r1');
   const aId = await row.parts.insertAt(0, 'a');
   const cId = await row.parts.insertAt(1, 'c');
   const aKey = keyOf(db, aId);
@@ -78,9 +78,9 @@ test('insertAt mints a fractional key between neighbors — sibling keys unchang
 });
 
 test('move(id, i) re-keys only the moved element; unaffected siblings keep their keys', async (t) => {
-  const { db, server } = await setup();
+  const { db, server, boundItems } = await setup();
   t.after(() => db.close());
-  const row = rowWith(server, 'r1');
+  const row = rowWith(server, boundItems, 'r1');
   const aId = await row.parts.insertAt(0, 'a');
   const bId = await row.parts.insertAt(1, 'b');
   const cId = await row.parts.insertAt(2, 'c');
@@ -98,9 +98,9 @@ test('move(id, i) re-keys only the moved element; unaffected siblings keep their
 });
 
 test('reorder([ids]) reorders to the given sequence — sugar over per-element re-key', async (t) => {
-  const { db, server } = await setup();
+  const { db, server, boundItems } = await setup();
   t.after(() => db.close());
-  const row = rowWith(server, 'r1');
+  const row = rowWith(server, boundItems, 'r1');
   const aId = await row.parts.insertAt(0, 'a');
   const bId = await row.parts.insertAt(1, 'b');
   const cId = await row.parts.insertAt(2, 'c');
@@ -116,9 +116,9 @@ test('reorder([ids]) reorders to the given sequence — sugar over per-element r
 });
 
 test('remove(id) deletes one element without disturbing the others', async (t) => {
-  const { db, server } = await setup();
+  const { db, server, boundItems } = await setup();
   t.after(() => db.close());
-  const row = rowWith(server, 'r1');
+  const row = rowWith(server, boundItems, 'r1');
   const aId = await row.parts.insertAt(0, 'a');
   const bId = await row.parts.insertAt(1, 'b');
   const cId = await row.parts.insertAt(2, 'c');
