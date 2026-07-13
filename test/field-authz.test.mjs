@@ -18,9 +18,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { executeDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
+import workbench, {
+  createServer,
+  durableMutationVariant,
+  executeDDL,
+  executeFrameworkDDL,
+} from '../src/internal.mjs';
 import { Doc } from '../projects/doc.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 // ---- helpers ---------------------------------------------------------------
 
@@ -36,7 +40,7 @@ function setup() {
 
 // Start an app with the given principal and return { app, origin, port }.
 async function startApp(db, principalId) {
-  const app = workbench({ db }).mount('/docs', Doc);
+  const app = workbench({ db, entities: [Doc] }).mount('/docs', Doc);
   app.listen(0, { principalOf: () => ({ type: 'user', id: principalId }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -156,7 +160,6 @@ test('Owner can manage collaborators (regression guard)', async () => {
 
 test('Trusted query API (no principal) bypasses field authz (mechanics)', async (t) => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   executeDDL(User, db);
   executeDDL(Doc, db);
@@ -168,18 +171,20 @@ test('Trusted query API (no principal) bypasses field authz (mechanics)', async 
   // principal→owner assignment; the query API is unscoped — DECISIONLOG #41).
   db.prepare("INSERT INTO Doc (id, title, owner) VALUES (1, 'Trusted Test', 1)").run();
 
+  const app = workbench({ db, entities: [Doc] });
+  const BoundDoc = app.entity(Doc);
   const server = await createServer({
     db,
-    handlers: Doc.crudHandlers,
+    handlers: BoundDoc.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Doc.projection],
+      projectionConsumers: [BoundDoc.projection],
       admission: { beforeProjection: () => true, afterProjection: async () => true },
     }),
     authorize: async () => true,
   });
   t.after(() => db.close());
 
-  const doc = Doc.hydrate({ id: '1' }, null, server.dispatch);
+  const doc = BoundDoc.hydrate({ id: '1' }, null, server.dispatch);
   assert.ok(doc, 'doc must exist');
 
   // set with no principal: field authz is bypassed (trusted query path).
