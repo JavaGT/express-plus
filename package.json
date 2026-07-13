@@ -16,6 +16,9 @@
 		"./client": {
 			"default": "./public/workbench-client.mjs"
 		},
+		"./server": {
+			"default": "./src/server.mjs"
+		},
 		"./scope-entities": {
 			"default": "./projects/scope-entities.mjs",
 			"import": "./projects/scope-entities.mjs",
