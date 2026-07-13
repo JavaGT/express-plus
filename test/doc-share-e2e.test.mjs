@@ -39,7 +39,7 @@ test('doc.mjs share routes: list (empty), add, list (populated), remove', async 
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'Shared Doc' }),
     });
-    assert.equal(created.status, 201);
+    assert.equal(created.status, 201, await created.clone().text());
     const doc = await created.json();
 
     // List shares — empty.
@@ -52,7 +52,7 @@ test('doc.mjs share routes: list (empty), add, list (populated), remove', async 
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ userId: '2', role: 'editor' }),
     });
-    assert.equal(added.status, 201);
+    assert.equal(added.status, 201, await added.clone().text());
     const addBody = await added.json();
     assert.equal(addBody.sharedWith.id, '2');
     assert.equal(addBody.sharedWith.role, 'editor');
@@ -92,6 +92,7 @@ test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', asyn
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'Alices doc' }),
     });
+    assert.equal(a.status, 201, await a.clone().text());
     const aDoc = await a.json();
 
     // bob creates a doc by swapping the principal via a second app on the same db.
@@ -106,13 +107,14 @@ test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', asyn
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ title: 'Bobs doc' }),
     });
+    assert.equal(b.status, 201, await b.clone().text());
     const bDoc = await b.json();
     // bob shares bDoc with alice.
     const shared = await fetch(`${origin2}/docs/${bDoc.id}/shares`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ userId: '1', role: 'viewer' }),
     });
-    assert.equal(shared.status, 201);
+    assert.equal(shared.status, 201, await shared.clone().text());
     app2.httpServer.close();
 
     // Back as alice: /feed lists her owned doc AND the doc bob shared with her.

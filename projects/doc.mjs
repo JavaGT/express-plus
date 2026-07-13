@@ -8,7 +8,7 @@
 // `effects`, and batched mutation. Comment (see comment.mjs) is a child entity
 // whose grant INHERITS this entity's — the typed-FK-traversal compilation
 // (abstraction #5).
-import { entity, text, computed, date, ref, map, ephemeral, log, state, link, grant, deny, read, write, subscribe, admin, anyOf, scope, router, User, Inbox, now } from 'workbench';
+import { entity, text, computed, date, ref, map, ephemeral, log, state, link, grant, deny, read, write, subscribe, admin, anyOf, scope, router, User as UserEntity, Inbox, now } from 'workbench';
 // comment.mjs is imported LAZILY inside the routes thunk (below), not here:
 // comment.mjs reads `Doc` at module-eval (`inherit(Doc, ...)`), so an eager
 // top-level import here would form a cycle and hit `Doc` in its temporal dead
@@ -238,6 +238,7 @@ function strip(doc) {
 }
 
 function shareRoutes(Doc) {
+  const User = Doc.runtime.entityOf(UserEntity);
   const r = router({ mergeParams: true });
   // No hand-rolled owner checks: field reads (collaborators.toArray) and
   // mutations (set/remove) run through the field's `.can()` pipeline, which
