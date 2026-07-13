@@ -71,18 +71,42 @@ function validateSpec(spec) {
   if (spec === null || typeof spec !== 'object') throw new Error('schema declaration must be an object');
   requireName(spec.name, 'schema name');
   if (!Array.isArray(spec.tables)) throw new Error('schema tables must be an array');
+  if (spec.externalTables !== undefined && !Array.isArray(spec.externalTables)) {
+    throw new Error('schema externalTables must be an array');
+  }
   if (spec.migrations !== undefined && !Array.isArray(spec.migrations)) {
     throw new Error('schema migrations must be an array');
   }
 
   const tablesByName = new Map();
+  const referencedTablesByName = new Map();
   const globalIndexes = new Set();
+
+  for (const externalTable of spec.externalTables ?? []) {
+    if (externalTable === null || typeof externalTable !== 'object') {
+      throw new Error('external table declaration must be an object');
+    }
+    requireName(externalTable.name, 'external table name');
+    const externalKey = folded(externalTable.name);
+    if (referencedTablesByName.has(externalKey)) throw new Error(`duplicate external table "${externalTable.name}"`);
+    if (!Array.isArray(externalTable.columns) || externalTable.columns.length === 0) {
+      throw new Error(`external table "${externalTable.name}" must declare at least one column`);
+    }
+    const columnsByName = new Map();
+    for (const columnName of externalTable.columns) {
+      requireName(columnName, `column name in external table "${externalTable.name}"`);
+      const columnKey = folded(columnName);
+      if (columnsByName.has(columnKey)) throw new Error(`duplicate column "${columnName}" in external table "${externalTable.name}"`);
+      columnsByName.set(columnKey, { name: columnName });
+    }
+    referencedTablesByName.set(externalKey, { table: externalTable, columnsByName });
+  }
 
   for (const table of spec.tables) {
     if (table === null || typeof table !== 'object') throw new Error('table declaration must be an object');
     requireName(table.name, 'table name');
     const tableKey = folded(table.name);
-    if (tablesByName.has(tableKey)) throw new Error(`duplicate table "${table.name}"`);
+    if (tablesByName.has(tableKey) || referencedTablesByName.has(tableKey)) throw new Error(`duplicate table "${table.name}"`);
     if (!Array.isArray(table.columns) || table.columns.length === 0) {
       throw new Error(`table "${table.name}" must declare at least one column`);
     }
@@ -124,6 +148,7 @@ function validateSpec(spec) {
     }
 
     tablesByName.set(tableKey, { table, columnsByName });
+    referencedTablesByName.set(tableKey, { table, columnsByName });
   }
 
   for (const { table, columnsByName } of tablesByName.values()) {
@@ -133,7 +158,7 @@ function validateSpec(spec) {
       }
       validateColumnList(foreignKey.columns, columnsByName, `foreign key on table "${table.name}"`);
       requireName(foreignKey.references.table, `referenced table for foreign key on "${table.name}"`);
-      const referenced = tablesByName.get(folded(foreignKey.references.table));
+      const referenced = referencedTablesByName.get(folded(foreignKey.references.table));
       if (referenced === undefined) {
         throw new Error(`foreign key on table "${table.name}" references missing table "${foreignKey.references.table}"`);
       }

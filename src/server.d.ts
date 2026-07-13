@@ -247,6 +247,7 @@ export interface SqliteSchemaResult {
 
 export function defineSqliteSchema(spec: {
   name: string;
+  externalTables?: readonly { name: string; columns: readonly string[] }[];
   tables: readonly TableDeclaration[];
   migrations?: readonly Migration[];
 }): SqliteSchemaResult;

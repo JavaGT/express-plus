@@ -195,3 +195,22 @@ test('defineSqliteSchema rejects ambiguous or unsafe declarations before touchin
     /duplicate migration/i,
   );
 });
+
+test('foreign keys may target explicitly-declared external tables without claiming their DDL', () => {
+  const schema = defineSqliteSchema({
+    name: 'comments',
+    externalTables: [{ name: 'Project', columns: ['id'] }],
+    tables: [{
+      name: 'Comment',
+      columns: [
+        { name: 'id', type: 'text', primaryKey: true },
+        { name: 'projectId', type: 'text', notNull: true },
+      ],
+      foreignKeys: [{ columns: ['projectId'], references: { table: 'Project', columns: ['id'] } }],
+    }],
+  });
+
+  assert.deepEqual(schema.tableNames, ['Comment']);
+  assert.doesNotMatch(schema.ddl.join('\n'), /CREATE TABLE IF NOT EXISTS "Project"/);
+  assert.match(schema.ddl.join('\n'), /REFERENCES "Project" \("id"\)/);
+});
