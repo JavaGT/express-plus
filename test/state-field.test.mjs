@@ -180,9 +180,9 @@ test('create with valid state value persists the row', async (t) => {
 
   const server = createServer({
     db,
-    handlers: Doc.crudHandlers,
+    handlers: Doc_b.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Doc.projection],
+      projectionConsumers: [Doc_b.projection],
     }),
     authorize: () => true,
   });
@@ -206,11 +206,14 @@ test('create with invalid state value throws ValidationError', async (t) => {
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
 
+  const app = workbench({ db, entities: [Doc] });
+  const Doc_b = app.entity(Doc);
+
   const server = createServer({
     db,
-    handlers: Doc.crudHandlers,
+    handlers: Doc_b.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Doc.projection],
+      projectionConsumers: [Doc_b.projection],
     }),
     authorize: () => true,
   });
@@ -241,9 +244,9 @@ test('update legal transition (draft -> shared) persists', async (t) => {
 
   const server = createServer({
     db,
-    handlers: Doc.crudHandlers,
+    handlers: Doc_b.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Doc.projection],
+      projectionConsumers: [Doc_b.projection],
     }),
     authorize: () => true,
   });
@@ -281,9 +284,9 @@ test('update illegal transition (draft -> archived) throws 400 with zero footpri
 
   const server = createServer({
     db,
-    handlers: Doc.crudHandlers,
+    handlers: Doc_b.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Doc.projection],
+      projectionConsumers: [Doc_b.projection],
     }),
     authorize: () => true,
   });
@@ -335,9 +338,9 @@ test('update state to current value is a no-op (skips transition check)', async 
 
   const server = createServer({
     db,
-    handlers: Doc.crudHandlers,
+    handlers: Doc_b.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Doc.projection],
+      projectionConsumers: [Doc_b.projection],
     }),
     authorize: () => true,
   });
@@ -369,11 +372,14 @@ test('update nonexistent row with state change throws 400 (no current state)', a
   const Doc = setupDoc();
   for (const s of generateDDL(Doc)) db.exec(s);
 
+  const app = workbench({ db, entities: [Doc] });
+  const Doc_b = app.entity(Doc);
+
   const server = createServer({
     db,
-    handlers: Doc.crudHandlers,
+    handlers: Doc_b.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Doc.projection],
+      projectionConsumers: [Doc_b.projection],
     }),
     authorize: () => true,
   });

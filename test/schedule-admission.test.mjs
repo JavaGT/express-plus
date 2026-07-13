@@ -2,7 +2,7 @@ import { schedule, date, scope, everyone, grant, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { entity } from '../src/internal.mjs';
+import workbench, { entity } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { admitSystemMutation } from '../src/schedule.mjs';
 
@@ -232,22 +232,19 @@ function setupAppServer() {
   });
   for (const sql of generateDDL(Blog)) db.exec(sql);
   db.exec('CREATE TABLE _Cursor (scope TEXT PRIMARY KEY, lastSeq INTEGER)');
-  // The production durable variant seam (mirrored here): scheduler admission
-  // runs before projection so admitSystemMutation re-checks due/while/with
-  // against the row as it stood at discovery — NOT after this dispatch's own
-  // projection has applied the payload. On denial it throws 403 with zero
-  // footprint (no _Log row, no projection write).
+  const app = workbench({ db, entities: [Blog] });
+  const Blog_b = app.entity(Blog);
   const server = createServer({
-    handlers: Blog.crudHandlers,
+    handlers: Blog_b.crudHandlers,
     db,
     authorize: () => true,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Blog.projection],
+      projectionConsumers: [Blog_b.projection],
       admission: {
         beforeProjection: async ({ entityName, verb, principal: p, event, payload, db: hookDb, now }) => {
           if (p?.type !== 'system' || !p.attributes?.source) return true;
           return admitSystemMutation({
-            entity: Blog, verb, rowId: event?.data?.id,
+            entity: Blog_b, verb, rowId: event?.data?.id,
             payload, principal: p, db: hookDb ?? db, now: now ?? Date.now(),
           });
         },
@@ -255,7 +252,7 @@ function setupAppServer() {
       },
     }),
   });
-  return { db, Blog, server };
+  return { db, Blog: Blog_b, server };
 }
 
 test('e2e: a bound scheduler dispatch is ADMITTED through the wired dispatch hook', async () => {
