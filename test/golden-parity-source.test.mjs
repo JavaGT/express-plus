@@ -6,7 +6,7 @@
 // DDL generation. No workbench boot required.
 //
 // Phase 2a (initScope + CRUD): boot a :memory: DB with initScope(), then
-// exercise entity.create() + crudHandlers in library mode.
+// exercise the application-bound entity facade in library mode.
 //
 // Phase 2b (future integration): HTTP-level dispatch + WS fan-out.
 
@@ -105,10 +105,19 @@ describe('station-B golden parity: entity shape', () => {
 
 describe('station-B golden parity: library-mode CRUD', () => {
   let db;
+  let app;
+  let BoundSource;
+  let BoundNote;
+  let BoundTheme;
+  let BoundExternalRef;
 
-  before(() => {
+  before(async () => {
     db = new DatabaseSync(':memory:');
-    initScope(db);
+    app = await initScope(db);
+    BoundSource = app.entity(Source);
+    BoundNote = app.entity(Note);
+    BoundTheme = app.entity(Theme);
+    BoundExternalRef = app.entity(ExternalRef);
   });
 
   after(() => {
@@ -116,19 +125,19 @@ describe('station-B golden parity: library-mode CRUD', () => {
   });
 
   it('Source.create inserts a row and Source.findById reads it back', () => {
-    const row = Source.create({ name: 'Test Source', url: 'https://example.com', createdAt: new Date() });
+    const row = BoundSource.create({ name: 'Test Source', url: 'https://example.com', createdAt: new Date() });
     assert.ok(row.id, 'row has an id');
     assert.equal(row.name, 'Test Source');
     assert.equal(row.url, 'https://example.com');
 
-    const found = Source.findById(row.id);
+    const found = BoundSource.findById(row.id);
     assert.ok(found);
     assert.equal(found.name, 'Test Source');
   });
 
   it('Source.update crudHandler emits Source.updated event', () => {
-    const created = Source.create({ name: 'Pre Update' });
-    const events = Source.crudHandlers['Source.update']({
+    const created = BoundSource.create({ name: 'Pre Update' });
+    const events = BoundSource.crudHandlers['Source.update']({
       payload: { id: created.id, name: 'Post Update' },
       principal: null,
     });
@@ -140,8 +149,8 @@ describe('station-B golden parity: library-mode CRUD', () => {
   });
 
   it('Source.remove crudHandler emits Source.removed event', () => {
-    const created = Source.create({ name: 'To Remove' });
-    const events = Source.crudHandlers['Source.remove']({
+    const created = BoundSource.create({ name: 'To Remove' });
+    const events = BoundSource.crudHandlers['Source.remove']({
       payload: { id: created.id },
       principal: null,
     });
@@ -152,7 +161,7 @@ describe('station-B golden parity: library-mode CRUD', () => {
   });
 
   it('create CRUD handler emits Source.created event with correct shape', () => {
-    const events = Source.crudHandlers['Source.create']({
+    const events = BoundSource.crudHandlers['Source.create']({
       payload: { name: 'New Source' },
       principal: null,
     });
@@ -166,15 +175,26 @@ describe('station-B golden parity: library-mode CRUD', () => {
 
   it('update rejects missing id', () => {
     assert.throws(() => {
-      Source.crudHandlers['Source.update']({ payload: {}, principal: null });
+      BoundSource.crudHandlers['Source.update']({ payload: {}, principal: null });
     }, /id/);
   });
 
   it('all four entities boot on DB without error', () => {
     // The DDL runs in before() — just verify all entities are queryable
-    assert.ok(Source.findAll);
-    assert.ok(Note.findAll);
-    assert.ok(Theme.findAll);
-    assert.ok(ExternalRef.findAll);
+    assert.ok(BoundSource.findAll);
+    assert.ok(BoundNote.findAll);
+    assert.ok(BoundTheme.findAll);
+    assert.ok(BoundExternalRef.findAll);
+  });
+
+  it('keeps entity state isolated between Scope applications', async () => {
+    const otherDb = new DatabaseSync(':memory:');
+    const otherApp = await initScope(otherDb);
+    const OtherSource = otherApp.entity(Source);
+
+    const local = BoundSource.create({ name: 'Primary app only' });
+    assert.equal(OtherSource.findById(local.id), null);
+
+    otherDb.close();
   });
 });

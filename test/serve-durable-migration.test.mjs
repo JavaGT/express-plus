@@ -30,8 +30,9 @@ function ownedNote() {
 test('HTTP create/update/remove flow through the durable kernel — every mutation appends to _Log', async (t) => {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db });
-  const Note = ownedNote();
-  app.mount('/notes', Note);
+  const NoteDeclaration = ownedNote();
+  app.mount('/notes', NoteDeclaration);
+  const Note = app.entity(NoteDeclaration);
   await app.ddl(); // framework _Log/_Cursor + Note table
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
   await app.ready;
@@ -81,8 +82,9 @@ test('HTTP create denied by mayVerb writes nothing to _Log (txn rolled back is N
   // to _Log — the dispatch never ran.
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db });
-  const Note = ownedNote();
-  app.mount('/notes', Note);
+  const NoteDeclaration = ownedNote();
+  app.mount('/notes', NoteDeclaration);
+  const Note = app.entity(NoteDeclaration);
   await app.ddl();
   // Seed a row owned by u1 (trusted insert bypasses the readonly owner check).
   Note.insert({ body: 'mine', owner: 'u1' });

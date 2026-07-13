@@ -314,10 +314,14 @@ test('non-owner cannot see or mutate an inherit-child row (scope hides it)', asy
   assert.equal(del.status, 404, 'non-owner cannot see inherit-child row');
 });
 
-test('mounting an entity CRUD route without a db fails closed immediately', () => {
+test('mounting an entity CRUD route without a db succeeds, but data access fails loudly', () => {
   const app = workbench();
+  const NoteDeclaration = ownedNote();
+  app.mount('/notes', NoteDeclaration);
+  const Note = app.entity(NoteDeclaration);
+
   assert.throws(
-    () => app.mount('/notes', ownedNote()),
-    /no database/i,
+    () => Note.findAll(),
+    /requires an application database/i,
   );
 });

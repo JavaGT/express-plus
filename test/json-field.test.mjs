@@ -20,8 +20,9 @@ function documentEntity() {
 async function serveJsonDocuments(t) {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db });
-  const JsonDocument = documentEntity();
-  app.mount('/json-documents', JsonDocument);
+  const JsonDocumentDeclaration = documentEntity();
+  app.mount('/json-documents', JsonDocumentDeclaration);
+  const JsonDocument = app.entity(JsonDocumentDeclaration);
   await app.ddl();
   app.listen(0, { principalOf: () => principal({ type: 'user', id: 'alice' }) });
   await app.ready;

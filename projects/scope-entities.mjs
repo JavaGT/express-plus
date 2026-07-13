@@ -20,16 +20,16 @@
 // write via raw SQL bypassing workbench authz); at cutover a one-shot migration
 // must populate Project_members from existing ProjectMember Prisma rows.
 //
-// LIBRARY MODE: import this module to compile entities (sets up DDL, verbs,
-// projection). Call `initScope(db)` with a better-sqlite3 DatabaseSync
-// instance to run DDL + set active DB so entity CRUD methods work.
+// LIBRARY MODE: import this module to compile the declarations, then call
+// `await initScope(db)` with a SQLite connection. It returns the application;
+// use `app.entity(Source)` (and the other declarations) to obtain facades bound
+// to that application and database.
 
-import { membership } from 'workbench';
-import { setActiveDb } from 'workbench/internal';
-import {
+import workbench, {
+  membership,
   entity, text, date, ref, number, map, inherit,
-  grant, deny, read, write, subscribe, admin, scope, generateDDL,
-} from 'workbench/internal';
+  read, write, subscribe,
+} from 'workbench';
 
 // Two-plane membership config — maps Scope's data-plane roles to workbench
 // capability tokens. Owner is implicit (auto-detected from Project's owner ref,
@@ -263,18 +263,29 @@ export const File = entity('File', {
   routes: (r) => { r.resource(); },
 });
 
+export const scopeEntities = Object.freeze([
+  Source,
+  Note,
+  Theme,
+  ExternalRef,
+  Codebook,
+  Code,
+  Speaker,
+  Collection,
+  Artefact,
+  Transcript,
+  Comment,
+  File,
+  Project,
+]);
+
 /**
- * Library-mode initialisation: run DDL + set active DB so entity CRUD methods
- * (create, findById, crudHandlers) work on the given SQLite connection.
- * Call once per project boot, passing a better-sqlite3 DatabaseSync instance
- * opened to the project's SQLite file.
+ * Build one isolated Scope application around the supplied SQLite connection.
+ * Schema preparation and entity binding are owned by the application, so two
+ * Scope applications can safely use the same declarations with different DBs.
  */
-export function initScope(db) {
-  setActiveDb(db, { replace: true });
-  for (const entity of [Source, Note, Theme, ExternalRef, Codebook, Code, Speaker, Collection, Artefact, Transcript, Comment, File, Project]) {
-    const ddl = generateDDL(entity);
-    for (const stmt of ddl) {
-      db.exec(stmt);
-    }
-  }
+export async function initScope(db) {
+  const app = workbench({ db, entities: scopeEntities });
+  await app.prepareSchema();
+  return app;
 }
