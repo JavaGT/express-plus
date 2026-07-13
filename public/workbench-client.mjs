@@ -51,7 +51,14 @@ function subscribeEnvelope(entity, id, { fields, pace } = {}) {
   return envelope;
 }
 
-export class LiveChannel {
+class ClientClosedError extends Error {
+  constructor(message = 'Live channel is closed') {
+    super(message);
+    this.name = 'ClientClosedError';
+  }
+}
+
+class LiveSyncSession {
   // `baseUrl` is e.g. 'http://127.0.0.1:5432'. Derives ws:// URL by swapping
   // scheme and appending '/events'. If already ws:// or wss://, uses as-is.
   constructor(baseUrl, options = {}) {
@@ -65,8 +72,11 @@ export class LiveChannel {
         .replace(/\/$/, '') + '/events';
     }
     this._wsUrl = wsUrl;
+    this._socketFactory = options.socketFactory ?? ((url) => new WebSocket(url));
 
-    // Subscription registry: `${entity}\0${id}` → { onEvent, fields, pace }
+    // Desired subscriptions are the source of truth. Wire messages are derived
+    // from this registry for each socket generation; there is deliberately no
+    // raw-message outbox to become stale or contradictory while offline.
     this._subs = new Map();
     // Pending subscribe promises: key → { resolve, reject }
     this._pendingSubs = new Map();
@@ -74,8 +84,10 @@ export class LiveChannel {
     this._pendingUnsubs = new Map();
 
     this._socket = null;
+    this._state = 'idle';
+    this._generation = 0;
+    this._connecting = null;
     this._closed = false;
-    this._outbox = [];
     this._reconnectTimer = null;
     this._reconnectAttempt = 0;
     this._maxBackoff = options.maxBackoff ?? 5000;
@@ -88,94 +100,134 @@ export class LiveChannel {
   // Returns a handle `{ currentSeq }` from the server's `subscribed` ack.
   // Rejects with `new Error(message)` if the server sends an `error` envelope
   // before the `subscribed` ack.
-  async subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
+  subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
     const { options, onEvent } = normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent);
     const key = `${entity}:${String(id)}`;
+    if (this._closed) throw new ClientClosedError();
     if (this._subs.has(key)) {
       throw new Error(`already subscribed to ${entity}:${id}`);
     }
-
-    // Open socket lazily on first subscribe.
-    if (!this._socket || this._socket.readyState > 1) {
-      await this._openSocket();
+    if (this._pendingUnsubs.has(key)) {
+      throw new Error(`unsubscribe is still pending for ${entity}:${id}`);
     }
 
-    return new Promise((resolve, reject) => {
-      this._subs.set(key, { onEvent, fields: options.fields, pace: options.pace });
+    const ready = new Promise((resolve, reject) => {
+      this._subs.set(key, {
+        onEvent,
+        onCheckpoint: options.onCheckpoint,
+        fields: options.fields,
+        pace: options.pace,
+        envelope: subscribeEnvelope(entity, id, options),
+        sentGeneration: 0,
+      });
       this._pendingSubs.set(key, { resolve, reject });
-      this._send(subscribeEnvelope(entity, id, options));
     });
+    this._openSocket().then(() => {
+      this._sendSubscription(key);
+    }).catch((err) => {
+      const pending = this._pendingSubs.get(key);
+      if (pending) {
+        this._pendingSubs.delete(key);
+        this._subs.delete(key);
+        pending.reject(err);
+      }
+    });
+    return ready;
   }
 
   // Subscribe to a scope string. The scope is the ordered stream key (e.g. "Entity:id"
   // for per-entity, "project:<id>" for room/project streams). interest narrows delivery
   // to a specific entity + id within the scope. Opens the WebSocket lazily on first call.
-  async subscribeScope(scope, optionsOrOnEvent, maybeOnEvent) {
+  subscribeScope(scope, optionsOrOnEvent, maybeOnEvent) {
     const { options, onEvent } = normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent);
     const key = scope;
+    if (this._closed) throw new ClientClosedError();
     if (this._subs.has(key)) {
       throw new Error(`already subscribed to scope ${scope}`);
     }
-
-    if (!this._socket || this._socket.readyState > 1) {
-      await this._openSocket();
+    if (this._pendingUnsubs.has(key)) {
+      throw new Error(`unsubscribe is still pending for scope ${scope}`);
     }
 
-    return new Promise((resolve, reject) => {
-      this._subs.set(key, { onEvent, fields: options.fields, pace: options.pace, scope, entity: options.interest?.entity, id: options.interest?.id });
+    const envelope = { type: 'subscribe', scope };
+    if (options.interest) envelope.interest = options.interest;
+    else if (options.fields !== undefined || options.pace !== undefined) {
+      envelope.interest = {};
+      if (options.fields !== undefined) envelope.interest.fields = options.fields;
+      if (options.pace !== undefined) envelope.interest.pace = options.pace;
+    }
+    const ready = new Promise((resolve, reject) => {
+      this._subs.set(key, {
+        onEvent,
+        onCheckpoint: options.onCheckpoint,
+        fields: options.fields,
+        pace: options.pace,
+        scope,
+        entity: options.interest?.entity,
+        id: options.interest?.id,
+        envelope,
+        sentGeneration: 0,
+      });
       this._pendingSubs.set(key, { resolve, reject });
-      const envelope = { type: 'subscribe', scope };
-      if (options.interest) envelope.interest = options.interest;
-      else if (options.fields !== undefined || options.pace !== undefined) {
-        envelope.interest = {};
-        if (options.fields !== undefined) envelope.interest.fields = options.fields;
-        if (options.pace !== undefined) envelope.interest.pace = options.pace;
-      }
-      this._send(envelope);
     });
+    this._openSocket().then(() => {
+      this._sendSubscription(key);
+    }).catch((err) => {
+      const pending = this._pendingSubs.get(key);
+      if (pending) {
+        this._pendingSubs.delete(key);
+        this._subs.delete(key);
+        pending.reject(err);
+      }
+    });
+    return ready;
   }
 
   // Unsubscribe from an (entity, id). Resolves after the `unsubscribed` ack
   // or a short timeout (2s) if the ack never arrives.
   async unsubscribe(entity, id) {
     const key = `${entity}:${String(id)}`;
+    return this._unsubscribe(key, { type: 'unsubscribe', entity, id });
+  }
+
+  async _unsubscribe(key, envelope) {
     if (!this._subs.has(key)) return;
+    this._subs.delete(key);
+    const pendingSub = this._pendingSubs.get(key);
+    if (pendingSub) {
+      this._pendingSubs.delete(key);
+      pendingSub.reject(new ClientClosedError('Live subscription was cancelled'));
+    }
+    if (!this._socket || this._socket.readyState !== 1) return;
 
     return new Promise((resolve) => {
       const timeout = setTimeout(() => {
-        this._subs.delete(key);
         this._pendingUnsubs.delete(key);
         resolve();
       }, 2000);
       if (typeof timeout.unref === 'function') timeout.unref();
 
       this._pendingUnsubs.set(key, { resolve, timeout });
-      this._send({ type: 'unsubscribe', entity, id });
+      if (!this._send(envelope)) {
+        clearTimeout(timeout);
+        this._pendingUnsubs.delete(key);
+        resolve();
+      }
     });
   }
 
   // Unsubscribe from a scope string.
   async unsubscribeScope(scope) {
-    const key = scope;
-    if (!this._subs.has(key)) return;
-
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        this._subs.delete(key);
-        this._pendingUnsubs.delete(key);
-        resolve();
-      }, 2000);
-      if (typeof timeout.unref === 'function') timeout.unref();
-
-      this._pendingUnsubs.set(key, { resolve, timeout });
-      this._send({ type: 'unsubscribe', scope });
-    });
+    return this._unsubscribe(scope, { type: 'unsubscribe', scope });
   }
 
   // Tear down: close socket, clear all subscriptions, cancel reconnect timer.
   // After close(), no further reconnects or deliveries happen.
   close() {
+    if (this._closed) return;
     this._closed = true;
+    this._state = 'closing';
+    this._generation++;
     this._clearReconnect();
     if (this._watchdog) {
       clearInterval(this._watchdog);
@@ -186,12 +238,17 @@ export class LiveChannel {
       this._socket = null;
     }
     this._subs.clear();
+    for (const [, pending] of this._pendingSubs) {
+      pending.reject(new ClientClosedError());
+    }
     this._pendingSubs.clear();
     for (const [, p] of this._pendingUnsubs) {
       if (p.timeout) clearTimeout(p.timeout);
+      p.resolve();
     }
     this._pendingUnsubs.clear();
-    this._outbox = [];
+    this._connecting = null;
+    this._state = 'closed';
     this._emitConnectionStatus('disconnected');
     this._connCallbacks.clear();
   }
@@ -203,8 +260,16 @@ export class LiveChannel {
   // Uses polling on readyState because Node's global WebSocket does not reliably
   // emit the 'open' event across versions.
   _openSocket() {
-    return new Promise((resolve, reject) => {
-      const ws = new WebSocket(this._wsUrl);
+    if (this._closed) return Promise.reject(new ClientClosedError());
+    if (this._socket?.readyState === 1 && this._state === 'online') {
+      return Promise.resolve();
+    }
+    if (this._connecting) return this._connecting;
+
+    this._state = 'connecting';
+    const generation = ++this._generation;
+    const ws = this._socketFactory(this._wsUrl);
+    const connecting = new Promise((resolve, reject) => {
       let settled = false;
       let pollTimer = null;
       let connectTimeout = null;
@@ -219,18 +284,16 @@ export class LiveChannel {
         if (settled) return;
         settled = true;
         stopTimers();
-        // Race guard: if close() ran while this socket was opening, tear it
-        // down and resolve WITHOUT installing it (a leaked open socket would
-        // keep the event loop alive + steal the _socket slot).
-        if (this._closed) {
+        if (this._closed || generation !== this._generation) {
           try { ws.close(); } catch { /* ignore */ }
-          resolve();
+          reject(new ClientClosedError());
           return;
         }
         this._reconnectAttempt = 0;
         this._socket = ws;
-        this._flushOutbox();
+        this._state = 'online';
         this._emitConnectionStatus('connected');
+        this._reconcileDesired();
         // Watchdog: some servers (incl. this framework's hand-rolled WS) do
         // not complete the close handshake — they ack the close frame but
         // never destroy the socket, so the client's 'close' event never fires
@@ -238,14 +301,13 @@ export class LiveChannel {
         // same drop path the 'close' listener would when the socket is no
         // longer OPEN. unref'd so it never pins the event loop on its own.
         this._watchdog = setInterval(() => {
-          if (this._closed || ws !== this._socket) {
+          if (this._closed || generation !== this._generation || ws !== this._socket) {
             clearInterval(this._watchdog); this._watchdog = null;
             return;
           }
           if (ws.readyState !== 1) {
             clearInterval(this._watchdog); this._watchdog = null;
-            this._socket = null;
-            this._scheduleReconnect();
+            this._retireSocket(ws, generation);
           }
         }, 100);
         if (typeof this._watchdog.unref === 'function') this._watchdog.unref();
@@ -256,22 +318,26 @@ export class LiveChannel {
         if (settled) return;
         settled = true;
         stopTimers();
+        if (generation === this._generation) {
+          this._socket = null;
+          this._state = 'idle';
+        }
         reject(new Error('WebSocket connection failed'));
       };
 
       ws.addEventListener('open', resolveOpen);
       ws.addEventListener('error', onError);
       ws.addEventListener('close', () => {
-        if (this._watchdog) { clearInterval(this._watchdog); this._watchdog = null; }
-        // Clear socket reference immediately so the test can detect the old
-        // socket was replaced. The reconnect timer assigns a new socket when
-        // the new connection opens.
-        if (this._socket === ws) this._socket = null;
-        this._emitConnectionStatus('disconnected');
-        if (!this._closed) this._scheduleReconnect();
+        if (generation !== this._generation) return;
+        if (!settled) {
+          settled = true;
+          stopTimers();
+          reject(new Error('WebSocket connection closed before opening'));
+        }
+        this._retireSocket(ws, generation);
       });
       ws.addEventListener('message', (ev) => {
-        if (this._closed) return;
+        if (this._closed || generation !== this._generation || ws !== this._socket) return;
         try {
           this._handleEnvelope(JSON.parse(ev.data));
         } catch { /* malformed frame — ignore */ }
@@ -290,11 +356,67 @@ export class LiveChannel {
         if (!settled) {
           settled = true;
           stopTimers();
+          if (generation === this._generation) {
+            this._socket = null;
+            this._state = 'idle';
+          }
+          try { ws.close(); } catch { /* ignore */ }
           reject(new Error('WebSocket connection timeout'));
         }
       }, 5000);
       if (typeof connectTimeout.unref === 'function') connectTimeout.unref();
     });
+    this._connecting = connecting;
+    connecting.finally(() => {
+      if (this._connecting === connecting) this._connecting = null;
+    }).catch(() => {});
+    return connecting;
+  }
+
+  _retireSocket(ws, generation) {
+    if (this._closed || generation !== this._generation) return;
+    if (this._watchdog) { clearInterval(this._watchdog); this._watchdog = null; }
+    if (this._socket === ws) this._socket = null;
+    this._generation++;
+    for (const sub of this._subs.values()) sub.sentGeneration = 0;
+    this._state = 'backoff';
+    this._emitConnectionStatus('disconnected');
+    try {
+      if (ws.readyState < 2) ws.close();
+    } catch { /* ignore */ }
+    this._scheduleReconnect();
+  }
+
+  _subscriptionEnvelope(key, sub) {
+    if (sub.envelope) return sub.envelope;
+    const nullSep = key.indexOf('\0');
+    if (nullSep > 0) {
+      return subscribeEnvelope(key.slice(0, nullSep), key.slice(nullSep + 1), sub);
+    }
+    const colon = key.indexOf(':');
+    if (colon > 0) {
+      return subscribeEnvelope(key.slice(0, colon), key.slice(colon + 1), sub);
+    }
+    const envelope = { type: 'subscribe', scope: key };
+    const interest = {};
+    if (sub.entity !== undefined) interest.entity = sub.entity;
+    if (sub.id !== undefined) interest.id = sub.id;
+    if (sub.fields !== undefined) interest.fields = sub.fields;
+    if (sub.pace !== undefined) interest.pace = sub.pace;
+    if (Object.keys(interest).length > 0) envelope.interest = interest;
+    return envelope;
+  }
+
+  _sendSubscription(key) {
+    const sub = this._subs.get(key);
+    if (!sub || sub.sentGeneration === this._generation) return;
+    if (this._send(this._subscriptionEnvelope(key, sub))) {
+      sub.sentGeneration = this._generation;
+    }
+  }
+
+  _reconcileDesired() {
+    for (const key of this._subs.keys()) this._sendSubscription(key);
   }
 
   // Route one server envelope to the right handler.
@@ -302,6 +424,10 @@ export class LiveChannel {
     const scopeKey = envelope.scope ?? (envelope.entity ? `${envelope.entity}:${String(envelope.id)}` : null);
 
     if (envelope.type === 'subscribed') {
+      const sub = scopeKey ? this._subs.get(scopeKey) : null;
+      if (sub && typeof sub.onCheckpoint === 'function') {
+        try { sub.onCheckpoint({ currentSeq: envelope.currentSeq }); } catch { /* isolate consumer */ }
+      }
       const pending = scopeKey ? this._pendingSubs.get(scopeKey) : null;
       if (pending) {
         this._pendingSubs.delete(scopeKey);
@@ -309,7 +435,6 @@ export class LiveChannel {
       }
     } else if (envelope.type === 'unsubscribed') {
       if (scopeKey) {
-        this._subs.delete(scopeKey);
         const pending = this._pendingUnsubs.get(scopeKey);
         if (pending) {
           if (pending.timeout) clearTimeout(pending.timeout);
@@ -331,28 +456,18 @@ export class LiveChannel {
     }
   }
 
-  // Buffer-safe send: queues into outbox if socket is not yet open.
+  // Send only on the current online generation. Desired subscriptions, rather
+  // than raw messages, are replayed after a drop.
   _send(data) {
-    const msg = JSON.stringify(data);
-    if (this._socket && this._socket.readyState === 1) {
-      try { this._socket.send(msg); } catch { /* will retry via outbox */ }
-    } else {
-      this._outbox.push(msg);
-    }
-  }
-
-  // Flush the buffered outbox into the socket.
-  _flushOutbox() {
-    const queue = this._outbox;
-    this._outbox = [];
-    for (const msg of queue) {
-      try {
-        if (this._socket && this._socket.readyState === 1) {
-          this._socket.send(msg);
-        } else {
-          this._outbox.push(msg);
-        }
-      } catch { /* skip */ }
+    const ws = this._socket;
+    const generation = this._generation;
+    if (!ws || ws.readyState !== 1 || this._state !== 'online') return false;
+    try {
+      ws.send(JSON.stringify(data));
+      return true;
+    } catch {
+      this._retireSocket(ws, generation);
+      return false;
     }
   }
 
@@ -370,19 +485,7 @@ export class LiveChannel {
       if (this._closed) return;
       try {
         await this._openSocket();
-        // Re-subscribe every active subscription (the server lost state on
-        // socket close).
-        for (const [key, sub] of this._subs) {
-          const colon = key.indexOf(':');
-          const nullSep = key.indexOf('\0');
-          if (nullSep > 0) {
-            this._send(subscribeEnvelope(key.slice(0, nullSep), key.slice(nullSep + 1), sub));
-          } else if (colon > 0) {
-            this._send(subscribeEnvelope(key.slice(0, colon), key.slice(colon + 1), sub));
-          } else {
-            this._send({ type: 'subscribe', scope: key, interest: { entity: sub.entity, id: sub.id, fields: sub.fields, pace: sub.pace } });
-          }
-        }
+        this._reconcileDesired();
       } catch {
         if (!this._closed) this._scheduleReconnect();
       }
@@ -414,6 +517,11 @@ export class LiveChannel {
   }
 }
 
+// Public façade. The state machine stays private so transport lifecycle details
+// do not become package API, while existing LiveChannel consumers retain the
+// small subscribe/unsubscribe/close surface.
+export class LiveChannel extends LiveSyncSession {}
+
 // LiveList — tracks ONE document's live state: a single (entity, id) row,
 // including its sub-collection fields. Bootstraps from a REST snapshot, then
 // folds live events through ONE reducer path (_ingest → _applyEvent),
@@ -423,7 +531,19 @@ export class LiveChannel {
 // Zero external deps — uses injected fetch and channel (no real server needed
 // for tests).
 export class LiveList {
-  constructor({ entity, id, channel, fetchImpl, snapshotUrl, eventsSinceUrl, fields, pace }) {
+  constructor({
+    entity,
+    id,
+    channel,
+    fetchImpl,
+    snapshotUrl,
+    eventsSinceUrl,
+    fields,
+    pace,
+    maxBufferedEvents = 1000,
+    resyncBackoffBase = 200,
+    maxResyncBackoff = 5000,
+  }) {
     this._entity = entity;
     this._id = id;
     this._channel = channel;
@@ -437,9 +557,17 @@ export class LiveList {
     this._cursor = 0;
     this._ready = false;
     this._closed = false;
+    this._epoch = 0;
+    this._abortController = new AbortController();
     this._subscribeCalled = false;
     this._resyncing = false;
     this._queue = [];               // Buffered live envelopes (before ready / during resync)
+    this._maxBufferedEvents = maxBufferedEvents;
+    this._bufferOverflow = false;
+    this._resyncBackoffBase = resyncBackoffBase;
+    this._maxResyncBackoff = maxResyncBackoff;
+    this._resyncAttempt = 0;
+    this._resyncRetryTimer = null;
     this._renderCallbacks = new Set();
     this._ordered = {};             // { [field]: [{id, key, item}] } — internal ordered tracking
     this._removed = false;
@@ -451,6 +579,9 @@ export class LiveList {
       this._readyResolve = resolve;
       this._readyReject = reject;
     });
+    // Consumers may await either subscribe() or .ready. Keep an ignored branch
+    // so rejecting readiness during teardown never becomes an unhandled promise.
+    this._readyPromise.catch(() => {});
   }
 
   // --- Public API ---
@@ -471,11 +602,16 @@ export class LiveList {
   async subscribe() {
     if (this._subscribeCalled) throw new Error('subscribe already called');
     this._subscribeCalled = true;
+    const epoch = this._epoch;
 
     try {
       // 1. GET snapshot → initial state + cursor
-      const snapRes = await this._fetchImpl(this._snapshotUrl(this._entity, this._id));
+      const snapRes = await this._fetchImpl(
+        this._snapshotUrl(this._entity, this._id),
+        { signal: this._abortController.signal },
+      );
       const { snapshot, seq } = await this._decode(snapRes);
+      this._assertActive(epoch);
       this._state = snapshot;
       this._cursor = seq;
       this._removed = false;
@@ -486,14 +622,20 @@ export class LiveList {
       const ack = await this._channel.subscribe(this._entity, this._id, {
         fields: this._fields,
         pace: this._pace,
+        onCheckpoint: ({ currentSeq }) => this._onCheckpoint(currentSeq),
       }, (envelope) => {
         this._onLiveEnvelope(envelope);
       });
+      this._assertActive(epoch);
 
       // 3. If the server has progressed past our snapshot cursor, there is a
       //    race-gap — resync via events-since BEFORE releasing the queue.
-      if (ack.currentSeq > this._cursor) {
+      if (this._bufferOverflow) {
+        await this._resync(true);
+        this._assertActive(epoch);
+      } else if (ack.currentSeq > this._cursor) {
         await this._resync();
+        this._assertActive(epoch);
       }
 
       // 4. Drain the queue (envelopes that arrived during subscribe + resync).
@@ -526,9 +668,16 @@ export class LiveList {
   async close() {
     if (this._closed) return;
     this._closed = true;
-    try { await this._channel.unsubscribe(this._entity, this._id); } catch { /* ignore */ }
+    this._epoch++;
+    this._abortController.abort();
+    if (this._resyncRetryTimer) {
+      clearTimeout(this._resyncRetryTimer);
+      this._resyncRetryTimer = null;
+    }
     this._renderCallbacks.clear();
     this._queue = [];
+    if (!this._ready) this._readyReject(new ClientClosedError('Live list closed before it became ready'));
+    try { await this._channel.unsubscribe(this._entity, this._id); } catch { /* ignore */ }
   }
 
   // --- Internal ---
@@ -539,6 +688,17 @@ export class LiveList {
     return res.json();
   }
 
+  _assertActive(epoch) {
+    if (this._closed || epoch !== this._epoch) {
+      throw new ClientClosedError('Live list is closed');
+    }
+  }
+
+  _onCheckpoint(currentSeq) {
+    if (this._closed || !this._ready || currentSeq <= this._cursor) return;
+    this._resync().catch(() => {});
+  }
+
   /**
    * Called by the channel for every live envelope. Queues if not yet ready
    * or currently resyncing; otherwise ingests directly.
@@ -546,10 +706,19 @@ export class LiveList {
   _onLiveEnvelope(envelope) {
     if (this._closed) return;
     if (!this._ready || this._resyncing) {
-      this._queue.push(envelope);
+      this._bufferEnvelope(envelope);
       return;
     }
     this._ingest(this._normalizeLive(envelope));
+  }
+
+  _bufferEnvelope(envelope) {
+    if (this._queue.length >= this._maxBufferedEvents) {
+      this._queue = [];
+      this._bufferOverflow = true;
+      return;
+    }
+    if (!this._bufferOverflow) this._queue.push(envelope);
   }
 
   /** Normalize a live WS envelope to internal shape {seq, seqSpan, event, delta}. */
@@ -584,7 +753,7 @@ export class LiveList {
       // Gap — missing events. Queue this envelope then trigger a resync;
       // after the resync fills the gap, the queue drain will re-process it
       // through _ingest when the cursor is caught up.
-      this._queue.push({ seq: normalized.seq, seqSpan, event, delta });
+      this._bufferEnvelope({ seq: normalized.seq, seqSpan, event, delta });
       this._resync().catch(() => {});
       return;
     }
@@ -603,23 +772,38 @@ export class LiveList {
    * During resync, any arriving live envelopes are queued; they are drained and
    * ingested after the resync completes.
    */
-  async _resync() {
+  async _resync(forceSnapshot = false) {
     if (this._resyncing) return; // prevent re-entrancy
     this._resyncing = true;
+    const epoch = this._epoch;
+    let failed = false;
 
     try {
-      const res = await this._fetchImpl(this._eventsSinceUrl(this._entity, this._id, this._cursor));
-      const body = await this._decode(res);
+      let body = null;
+      if (!forceSnapshot) {
+        const res = await this._fetchImpl(
+          this._eventsSinceUrl(this._entity, this._id, this._cursor),
+          { signal: this._abortController.signal },
+        );
+        body = await this._decode(res);
+        this._assertActive(epoch);
+      }
 
-      if (body.resync === 'stale') {
+      if (forceSnapshot || this._bufferOverflow || body?.resync === 'stale') {
         // Forced re-bootstrap: fresh snapshot replaces state entirely.
-        const snapRes = await this._fetchImpl(this._snapshotUrl(this._entity, this._id));
+        const snapRes = await this._fetchImpl(
+          this._snapshotUrl(this._entity, this._id),
+          { signal: this._abortController.signal },
+        );
         const { snapshot, seq } = await this._decode(snapRes);
+        this._assertActive(epoch);
         this._state = snapshot;
         this._cursor = seq;
         this._removed = false;
         this._ordered = {};
-      } else if (body.events) {
+        this._bufferOverflow = false;
+        this._queue = [];
+      } else if (body?.events) {
         // Fold events-since rows in order. Events-since is authoritative
         // ordered fill — apply seq>cursor rows directly without span checks.
         for (const row of body.events) {
@@ -636,10 +820,16 @@ export class LiveList {
         }
       }
     } catch {
-      // Resync fetch failed — continue with current state.
+      failed = true;
     }
 
     this._resyncing = false;
+    if (this._closed || epoch !== this._epoch) return;
+    if (failed) {
+      this._scheduleResync();
+      return;
+    }
+    this._resyncAttempt = 0;
 
     // Drain any envelopes that arrived during the resync.
     const queue = this._queue;
@@ -649,6 +839,20 @@ export class LiveList {
     }
 
     this._render();
+  }
+
+  _scheduleResync() {
+    if (this._closed || this._resyncRetryTimer) return;
+    const delay = Math.min(
+      this._resyncBackoffBase * Math.pow(2, this._resyncAttempt),
+      this._maxResyncBackoff,
+    );
+    this._resyncAttempt++;
+    this._resyncRetryTimer = setTimeout(() => {
+      this._resyncRetryTimer = null;
+      if (!this._closed) this._resync(this._bufferOverflow).catch(() => {});
+    }, delay);
+    if (typeof this._resyncRetryTimer.unref === 'function') this._resyncRetryTimer.unref();
   }
 
   /**
@@ -1053,9 +1257,8 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
   async function dispatch(type, payload) {
     const opId = _nextOpId();
 
-    // dispatch NEVER throws — a closed store returns a failed Result like any
-    // other failure (contract: the returned Promise resolves to committed or
-    // failed-rolled-back, never rejects).
+    // dispatch NEVER throws. Failures before transmission are known rollbacks;
+    // a lost response after fetch starts has an unknown server outcome.
     if (_closed) {
       return { ok: false, status: 'failed-rolled-back', opId, error: 'store is closed' };
     }
@@ -1092,7 +1295,9 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
     _overlay.set(opId, entry);
     _storeRender();
 
-    // Fire REST
+    // Fire REST. Keep requestAttempted separate from the optimistic state so a
+    // local encoding failure cannot be mistaken for an uncertain server write.
+    let requestAttempted = false;
     try {
       let method, url, body;
       if (kind === 'create') {
@@ -1115,6 +1320,7 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
         fetchOpts.body = body;
       }
 
+      requestAttempted = true;
       const res = await resolvedFetch(url, fetchOpts);
       const decoded = await decodeResult(res);
 
@@ -1153,10 +1359,15 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
         row: kind === 'remove' ? undefined : returnedRow,
       };
     } catch (err) {
-      // Network / exception error — roll back
+      // Never leave uncertain optimistic data visible as if it were committed.
       _overlay.delete(opId);
       _storeRender();
-      return { ok: false, status: 'failed-rolled-back', opId, error: err.message ?? String(err) };
+      return {
+        ok: false,
+        status: requestAttempted ? 'outcome-unknown' : 'failed-rolled-back',
+        opId,
+        error: err.message ?? String(err),
+      };
     }
   }
 
@@ -1192,11 +1403,17 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
   // --- Close ---
 
   function close() {
+    if (_closed) return;
     _closed = true;
-    resolvedChannel.close();
+
     for (const unsub of _listUnsubs.values()) {
       unsub();
     }
+    for (const list of _listCache.values()) {
+      list.close().catch(() => {});
+    }
+    resolvedChannel.close();
+
     _listCache.clear();
     _listOptions.clear();
     _listUnsubs.clear();

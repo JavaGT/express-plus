@@ -67,23 +67,34 @@ export async function createLocalRelay({ name, channel, locks }) {
   const LOCK_NAME = `workbench:live:${name}`;
   const broadcast = new BroadcastChannel(`workbench:live:${name}`);
   const subs = new Map(); // key → { onEnvelope, entity, id }
+  const upstream = new Map(); // key → { promise, active }
   const cursors = new Map(); // scope → lastSeq delivered
   let closed = false;
+  let generation = 0;
   let isLeader = !locks; // no locks → always leader
   let _ready = Promise.resolve(); // settles when leader/follower is decided
+  let lockFallback = null;
+  let releaseLeadership = null;
 
   if (locks) {
     _ready = new Promise((resolve) => {
       // Don't hang forever — settle as follower after a short window.
-      const fallback = setTimeout(() => resolve(), 50);
-      locks.request(LOCK_NAME, (lock) => {
-        clearTimeout(fallback);
+      lockFallback = setTimeout(() => resolve(), 50);
+      lockFallback.unref?.();
+      locks.request(LOCK_NAME, () => {
+        clearTimeout(lockFallback);
+        lockFallback = null;
         if (closed) { resolve(); return Promise.resolve(); }
         isLeader = true;
         resolve();
-        // Hold the lock indefinitely — released when the tab closes.
-        return new Promise(() => {});
-      }).catch(() => { clearTimeout(fallback); resolve(); });
+        void reconcileUpstream();
+        // Hold the lock until close(), then allow the next tab to take over.
+        return new Promise((release) => { releaseLeadership = release; });
+      }).catch(() => {
+        clearTimeout(lockFallback);
+        lockFallback = null;
+        resolve();
+      });
     });
   }
 
@@ -98,18 +109,84 @@ export async function createLocalRelay({ name, channel, locks }) {
     return cursors.get(scope);
   }
 
+  function isActive(key, expectedGeneration, onEnvelope) {
+    return !closed
+      && generation === expectedGeneration
+      && subs.get(key)?.onEnvelope === onEnvelope;
+  }
+
+  function deliver(onEnvelope, envelope) {
+    try {
+      onEnvelope(envelope);
+    } catch {
+      // Consumer code is outside the relay's trust boundary. One callback
+      // cannot reject asynchronous delivery or block later log entries.
+    }
+  }
+
+  async function forwardUpstream(key, sub, envelope) {
+    if (!isActive(key, sub.generation, sub.onEnvelope)) return;
+    const scope = `${sub.entity}:${sub.id}`;
+    try {
+      const entry = await log.append(normalizeEnvelope(envelope, sub.entity));
+      if (!isActive(key, sub.generation, sub.onEnvelope)) return;
+      cursors.set(scope, entry.seq);
+      broadcast.postMessage({ type: 'log-update' });
+    } catch {
+      // Local persistence is best-effort; the live event is still useful.
+    }
+    if (!isActive(key, sub.generation, sub.onEnvelope)) return;
+    deliver(sub.onEnvelope, envelope);
+  }
+
+  function ensureUpstream(key, sub) {
+    const existing = upstream.get(key);
+    if (existing) return existing.promise;
+
+    const record = { promise: null, active: false };
+    record.promise = channel.subscribe(
+      sub.entity,
+      sub.id,
+      sub.options,
+      (envelope) => { void forwardUpstream(key, sub, envelope); },
+    ).then(async (ack) => {
+      if (!isLeader || !isActive(key, sub.generation, sub.onEnvelope)) {
+        try { await channel.unsubscribe(sub.entity, sub.id); } catch { /* ignore */ }
+        throw new Error('relay is closed or subscription was cancelled');
+      }
+      record.active = true;
+      return ack;
+    }).catch((error) => {
+      if (upstream.get(key) === record) upstream.delete(key);
+      throw error;
+    });
+    upstream.set(key, record);
+    return record.promise;
+  }
+
+  async function reconcileUpstream() {
+    if (closed || !isLeader) return;
+    await Promise.allSettled(
+      [...subs.entries()].map(([key, sub]) => ensureUpstream(key, sub)),
+    );
+  }
+
   // Broadcast listener: when another tab signals new entries, read from
   // the shared log and deliver to all registered onEnvelope callbacks.
   broadcast.onmessage = async () => {
     if (closed) return;
+    subscriptions:
     for (const [key, sub] of subs) {
+      const expectedGeneration = generation;
       const scope = `${sub.entity}:${sub.id}`;
       const cursor = cursors.get(scope) ?? 0;
       try {
         const entries = await log.entriesSince(scope, cursor);
+        if (!isActive(key, expectedGeneration, sub.onEnvelope)) continue;
         for (const entry of entries) {
+          if (!isActive(key, expectedGeneration, sub.onEnvelope)) continue subscriptions;
           cursors.set(scope, entry.seq);
-          sub.onEnvelope({
+          deliver(sub.onEnvelope, {
             type: 'event',
             entity: sub.entity,
             id: sub.id,
@@ -139,47 +216,58 @@ export async function createLocalRelay({ name, channel, locks }) {
 
     const key = `${entity}\0${String(id)}`;
     const scope = `${entity}:${id}`;
-    subs.set(key, { onEnvelope, entity, id });
+    const expectedGeneration = generation;
+    const sub = { onEnvelope, entity, id, options, generation: expectedGeneration };
+    subs.set(key, sub);
 
     await ensureCursor(scope);
+    await _ready;
+    if (!isActive(key, expectedGeneration, onEnvelope)) {
+      throw new Error('relay is closed or subscription was cancelled');
+    }
 
     if (isLeader) {
-      // Leader: subscribe to the real channel, intercept events for log+broadcast
-      const ack = await channel.subscribe(entity, id, options, async (envelope) => {
-        if (closed) return;
-        try {
-          const entry = await log.append(normalizeEnvelope(envelope, entity));
-          cursors.set(scope, entry.seq);
-          broadcast.postMessage({ type: 'log-update' });
-        } catch {
-          // Log write failed — deliver event anyway.
-        }
-        onEnvelope(envelope);
-      });
-      return ack;
+      return ensureUpstream(key, sub);
     }
 
     // Follower: no real channel subscription. Return ack with log head
     // so LiveList can detect a gap vs its snapshot cursor.
-    return { currentSeq: await log.head(scope) };
+    const currentSeq = await log.head(scope);
+    if (!isActive(key, expectedGeneration, onEnvelope)) {
+      throw new Error('relay is closed or subscription was cancelled');
+    }
+    return { currentSeq };
   }
 
   async function unsubscribe(entity, id) {
     const key = `${entity}\0${String(id)}`;
     subs.delete(key);
-    if (isLeader) {
+    const record = upstream.get(key);
+    upstream.delete(key);
+    if (record) {
+      try { await record.promise; } catch { return; }
       try { await channel.unsubscribe(entity, id); } catch { /* ignore */ }
     }
   }
 
   function close() {
+    if (closed) return;
     closed = true;
+    generation += 1;
+    if (lockFallback) {
+      clearTimeout(lockFallback);
+      lockFallback = null;
+    }
     subs.clear();
+    upstream.clear();
     cursors.clear();
     try { broadcast.close(); } catch { /* ignore */ }
     if (isLeader) {
       try { channel.close(); } catch { /* ignore */ }
     }
+    isLeader = false;
+    releaseLeadership?.();
+    releaseLeadership = null;
     try { log.close(); } catch { /* ignore */ }
   }
 
@@ -208,7 +296,7 @@ export async function createLocalStore({ baseUrl, name, path, local, channel, fe
   const resolvedChannel = channel ?? new LiveChannel(baseUrl);
   const resolvedFetch = fetchImpl ?? globalThis.fetch;
 
-  const relay = await createLocalRelay({ name: local.name, channel: resolvedChannel });
+  const relay = await createLocalRelay({ name: local.name, channel: resolvedChannel, locks });
 
   const store = createLiveStore({
     baseUrl,
@@ -276,8 +364,8 @@ export async function createLocalStore({ baseUrl, name, path, local, channel, fe
   // Override close to also tear down the relay (log + broadcast).
   const originalClose = store.close;
   store.close = () => {
+    _history.clear();
     originalClose();
-    relay.close();
   };
 
   return store;

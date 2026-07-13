@@ -4,6 +4,19 @@ import assert from 'node:assert/strict';
 import { normalizeSubscribeMsg } from '../src/live-admission.mjs';
 import { LiveChannel } from '../public/workbench-client.mjs';
 
+function makeOpenChannel() {
+  const sent = [];
+  const channel = new LiveChannel('ws://127.0.0.1:1', { backoffBase: 1, maxBackoff: 1 });
+  channel._socket = {
+    readyState: 1,
+    send(data) { sent.push(JSON.parse(data)); },
+    close() {},
+  };
+  channel._state = 'online';
+  channel._generation = 1;
+  return { channel, sent };
+}
+
 test('normalizeSubscribeMsg — old shape {entity, id}', () => {
   const result = normalizeSubscribeMsg({ type: 'subscribe', entity: 'Doc', id: 'd1' });
   assert.deepEqual(result, { scope: 'Doc:d1', interest: { entity: 'Doc', id: 'd1' } });
@@ -75,13 +88,11 @@ test('normalizeSubscribeMsg — rejects null/undefined/empty scope', () => {
   assert.equal(normalizeSubscribeMsg('hello'), null);
 });
 
-test('LiveChannel.subscribe — uses ":" as internal key (not \\0)', () => {
-  const channel = new LiveChannel('ws://127.0.0.1:1', { backoffBase: 1, maxBackoff: 1 });
-  const sent = [];
-  channel._socket = { readyState: 1, send() {} };
-  channel._send = (data) => { sent.push(data); };
+test('LiveChannel.subscribe — uses ":" as internal key (not \\0)', async () => {
+  const { channel } = makeOpenChannel();
 
   channel.subscribe('Doc', 'd1', { fields: { body: true } }, () => {});
+  await Promise.resolve();
 
   assert.equal(channel._subs.size, 1);
   assert.ok(channel._subs.has('Doc:d1'), 'uses : as key separator');
@@ -95,14 +106,12 @@ test('LiveChannel.subscribe — uses ":" as internal key (not \\0)', () => {
 });
 
 test('LiveChannel.subscribeScope — sends {scope, interest} wire format', async () => {
-  const channel = new LiveChannel('ws://127.0.0.1:1', { backoffBase: 1, maxBackoff: 1 });
-  const sent = [];
-  channel._socket = { readyState: 1, send() {} };
-  channel._send = (data) => { sent.push(data); };
+  const { channel, sent } = makeOpenChannel();
 
-  channel.subscribeScope('project:p1', {
+  const ready = channel.subscribeScope('project:p1', {
     interest: { entity: 'Segment', id: 's1', fields: { text: true } },
   }, () => {});
+  await Promise.resolve();
 
   assert.equal(channel._subs.size, 1);
   assert.ok(channel._subs.has('project:p1'));
@@ -113,15 +122,16 @@ test('LiveChannel.subscribeScope — sends {scope, interest} wire format', async
     interest: { entity: 'Segment', id: 's1', fields: { text: true } },
   });
 
+  channel._handleEnvelope({ type: 'subscribed', scope: 'project:p1', currentSeq: 0 });
+  await ready;
   channel.close();
 });
 
-test('LiveChannel.subscribeScope — resolves when subscribed ack received', () => {
-  const channel = new LiveChannel('ws://127.0.0.1:1', { backoffBase: 1, maxBackoff: 1 });
-  channel._socket = { readyState: 1, send() {} };
-  channel._send = () => {};
+test('LiveChannel.subscribeScope — resolves when subscribed ack received', async () => {
+  const { channel } = makeOpenChannel();
 
   const subPromise = channel.subscribeScope('room:r1', () => {});
+  await Promise.resolve();
 
   channel._handleEnvelope({ type: 'subscribed', scope: 'room:r1', currentSeq: 42 });
 
@@ -133,10 +143,7 @@ test('LiveChannel.subscribeScope — resolves when subscribed ack received', () 
 });
 
 test('LiveChannel.unsubscribeScope — sends {scope} wire format', () => {
-  const channel = new LiveChannel('ws://127.0.0.1:1', { backoffBase: 1, maxBackoff: 1 });
-  const sent = [];
-  channel._socket = { readyState: 1, send() {} };
-  channel._send = (data) => { sent.push(data); };
+  const { channel, sent } = makeOpenChannel();
   channel._subs.set('project:p1', { onEvent() {} });
 
   const unsubPromise = channel.unsubscribeScope('project:p1');
@@ -152,12 +159,11 @@ test('LiveChannel.unsubscribeScope — sends {scope} wire format', () => {
   });
 });
 
-test('LiveChannel — backward compat: old subscribe still works end-to-end', () => {
-  const channel = new LiveChannel('ws://127.0.0.1:1', { backoffBase: 1, maxBackoff: 1 });
-  channel._socket = { readyState: 1, send() {} };
-  channel._send = () => {};
+test('LiveChannel — backward compat: old subscribe still works end-to-end', async () => {
+  const { channel } = makeOpenChannel();
 
   const subPromise = channel.subscribe('Note', 'n1', () => {});
+  await Promise.resolve();
 
   channel._handleEnvelope({ type: 'subscribed', scope: 'Note:n1', entity: 'Note', id: 'n1', currentSeq: 0 });
 

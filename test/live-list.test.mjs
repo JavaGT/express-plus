@@ -17,6 +17,7 @@ function deferred() {
 /** Build a FakeChannel. */
 function makeFakeChannel() {
   const subs = new Map();
+  const checkpoints = new Map();
   let subscribeAck = { currentSeq: 1 };
 
   const channel = {
@@ -26,10 +27,15 @@ function makeFakeChannel() {
       const key = `${entity}\0${String(id)}`;
       if (subs.has(key)) throw new Error(`already subscribed to ${entity}:${id}`);
       subs.set(key, onEvent);
+      if (typeof optionsOrOnEvent?.onCheckpoint === 'function') {
+        checkpoints.set(key, optionsOrOnEvent.onCheckpoint);
+      }
       return Promise.resolve(subscribeAck);
     },
     unsubscribe(entity, id) {
-      subs.delete(`${entity}\0${String(id)}`);
+      const key = `${entity}\0${String(id)}`;
+      subs.delete(key);
+      checkpoints.delete(key);
       return Promise.resolve();
     },
     close() {},
@@ -37,6 +43,9 @@ function makeFakeChannel() {
       const key = `${envelope.entity}\0${String(envelope.id)}`;
       const onEvent = subs.get(key);
       if (onEvent) onEvent(envelope);
+    },
+    checkpoint(entity, id, currentSeq) {
+      checkpoints.get(`${entity}\0${String(id)}`)?.({ currentSeq });
     },
   };
   return channel;
@@ -94,7 +103,13 @@ describe('LiveList', () => {
     const calls = [];
     const channel = {
       subscribe(entity, id, options, onEvent) {
-        calls.push({ entity, id, options, hasOnEvent: typeof onEvent === 'function' });
+        calls.push({
+          entity,
+          id,
+          options: { fields: options.fields, pace: options.pace },
+          hasCheckpoint: typeof options.onCheckpoint === 'function',
+          hasOnEvent: typeof onEvent === 'function',
+        });
         return Promise.resolve({ currentSeq: 1 });
       },
       unsubscribe() { return Promise.resolve(); },
@@ -116,6 +131,7 @@ describe('LiveList', () => {
       entity: 'ticket',
       id: '1',
       options: { fields: { cursor: true }, pace: { profile: '15fps' } },
+      hasCheckpoint: true,
       hasOnEvent: true,
     }]);
     await list.close();
@@ -640,6 +656,168 @@ describe('LiveList', () => {
     assert.equal(list.state.val, 'initial');
     assert.equal(renders.length, 0);
     await list.close(); // idempotent — should not throw
+  });
+
+  it('reconnect checkpoint resyncs missed events without waiting for another live event', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 1 });
+    const fetch = makeFakeFetch([
+      { match: '/snapshot', response: { snapshot: { title: 'old' }, seq: 1 } },
+      {
+        match: '/events',
+        response: {
+          events: [{
+            seq: 2,
+            type: 'ticket.updated',
+            data: { title: 'new' },
+            actionId: 'a2',
+          }],
+        },
+      },
+    ]);
+    const list = new LiveList({
+      entity: 'ticket', id: '1', channel, fetchImpl: fetch,
+      snapshotUrl, eventsSinceUrl,
+    });
+    await list.subscribe();
+
+    channel.checkpoint('ticket', '1', 2);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(list.cursor, 2);
+    assert.equal(list.state.title, 'new');
+    await list.close();
+  });
+
+  it('close during a deferred snapshot prevents subscription and rejects readiness', async () => {
+    const snapshot = deferred();
+    let subscribeCalls = 0;
+    const channel = {
+      subscribe() { subscribeCalls++; return Promise.resolve({ currentSeq: 1 }); },
+      unsubscribe() { return Promise.resolve(); },
+    };
+    const list = new LiveList({
+      entity: 'ticket', id: '1', channel,
+      fetchImpl: () => snapshot.promise,
+      snapshotUrl, eventsSinceUrl,
+    });
+    const subscribing = list.subscribe();
+    const rejected = assert.rejects(subscribing, /closed/i);
+
+    await list.close();
+    snapshot.resolve({ ok: true, json: async () => ({ snapshot: { title: 'late' }, seq: 1 }) });
+    await rejected;
+    assert.equal(subscribeCalls, 0);
+    assert.equal(list.state, null);
+  });
+
+  it('close during deferred resync cannot mutate state, cursor, or renders', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 1 });
+    const resync = deferred();
+    const fetch = async (url) => {
+      if (url.includes('/snapshot')) {
+        return { ok: true, json: async () => ({ snapshot: { title: 'old' }, seq: 1 }) };
+      }
+      return resync.promise;
+    };
+    const list = new LiveList({
+      entity: 'ticket', id: '1', channel, fetchImpl: fetch,
+      snapshotUrl, eventsSinceUrl,
+    });
+    await list.subscribe();
+    let renders = 0;
+    list.onRender(() => { renders++; });
+    channel.emit({
+      type: 'event', entity: 'ticket', id: '1', seq: 3, seqSpan: [3, 3],
+      event: { type: 'ticket.updated', data: { title: 'late' } },
+    });
+    await Promise.resolve();
+    await list.close();
+    resync.resolve({
+      ok: true,
+      json: async () => ({
+        events: [{ seq: 2, type: 'ticket.updated', data: { title: 'new' }, actionId: 'a2' }],
+      }),
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    assert.equal(list.cursor, 1);
+    assert.equal(list.state.title, 'old');
+    assert.equal(renders, 0);
+  });
+
+  it('buffer overflow discards deltas and performs one authoritative snapshot recovery', async () => {
+    const subs = new Map();
+    const deferredAck = deferred();
+    const channel = {
+      subscribe(entity, id, _options, onEvent) {
+        subs.set(`${entity}\0${id}`, onEvent);
+        return deferredAck.promise;
+      },
+      unsubscribe() { return Promise.resolve(); },
+      emit(envelope) { subs.get(`${envelope.entity}\0${envelope.id}`)?.(envelope); },
+    };
+    let snapshots = 0;
+    const fetch = async (url) => {
+      if (url.includes('/snapshot')) {
+        snapshots++;
+        const body = snapshots === 1
+          ? { snapshot: { title: 'old' }, seq: 1 }
+          : { snapshot: { title: 'server' }, seq: 4 };
+        return { ok: true, json: async () => body };
+      }
+      return { ok: true, json: async () => ({ events: [] }) };
+    };
+    const list = new LiveList({
+      entity: 'ticket', id: '1', channel, fetchImpl: fetch,
+      snapshotUrl, eventsSinceUrl, maxBufferedEvents: 2,
+    });
+    const subscribing = list.subscribe();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let seq = 2; seq <= 4; seq++) {
+      channel.emit({
+        type: 'event', entity: 'ticket', id: '1', seq, seqSpan: [seq, seq],
+        event: { type: 'ticket.updated', data: { title: `delta-${seq}` } },
+      });
+    }
+    deferredAck.resolve({ currentSeq: 4 });
+    await subscribing;
+
+    assert.equal(snapshots, 2);
+    assert.equal(list.cursor, 4);
+    assert.equal(list.state.title, 'server');
+    await list.close();
+  });
+
+  it('failed resync uses retry backoff instead of hot-looping', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 1 });
+    let resyncCalls = 0;
+    const fetch = async (url) => {
+      if (url.includes('/snapshot')) {
+        return { ok: true, json: async () => ({ snapshot: { title: 'old' }, seq: 1 }) };
+      }
+      resyncCalls++;
+      return { ok: false, status: 503, json: async () => ({}) };
+    };
+    const list = new LiveList({
+      entity: 'ticket', id: '1', channel, fetchImpl: fetch,
+      snapshotUrl, eventsSinceUrl,
+      resyncBackoffBase: 30,
+      maxResyncBackoff: 30,
+    });
+    await list.subscribe();
+    channel.emit({
+      type: 'event', entity: 'ticket', id: '1', seq: 3, seqSpan: [3, 3],
+      event: { type: 'ticket.updated', data: { title: 'gap' } },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(resyncCalls, 1);
+    await new Promise((resolve) => setTimeout(resolve, 35));
+    assert.equal(resyncCalls, 2);
+    await list.close();
   });
 
 });

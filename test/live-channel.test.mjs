@@ -293,8 +293,8 @@ test('onConnectionChange emits connected after socket opens', async () => {
   const openPromise = new Promise((r) => { resolveOpen = r; });
   channel._openSocket = async () => {
     channel._socket = { readyState: 1, send() {} };
+    channel._state = 'online';
     channel._reconnectAttempt = 0;
-    channel._flushOutbox();
     channel._emitConnectionStatus('connected');
     resolveOpen();
   };

@@ -131,7 +131,14 @@ const rejectedInvitation: Promise<void> = invitationApi.rejectInvitation(
 // @ts-expect-error only a human user principal can list invitations
 invitationApi.listInvitationsForUser(apiKeyActor);
 void [createdInvitation, rejectedInvitation];
-const channel = new LiveChannel('https://example.test');
+const channel = new LiveChannel('https://example.test', {
+  socketFactory: (url) => new WebSocket(url),
+});
+channel.subscribe('Project', 'project-1', {
+  fields: { cursor: true },
+  pace: { profile: '15fps' },
+  onCheckpoint: ({ currentSeq }) => { void currentSeq; },
+}, () => {});
 const list: LiveList<ProjectRow> = new LiveList({ id: 'project-1', snapshot: [], cursor: 0 } as never);
 const store: LiveStore<ProjectRow> = createLiveStore({
   baseUrl: 'https://example.test', name: 'Project', path: '/projects', channel,

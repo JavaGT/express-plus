@@ -32,17 +32,35 @@ export class LiveChannel {
 export interface LiveChannelOptions {
   maxBackoff?: number;
   backoffBase?: number;
+  socketFactory?: (url: string) => WebSocket;
+}
+
+export type FieldInterest = Record<string, true>;
+
+export type PaceSelection =
+  | { profile: string }
+  | { coalesce: { window: number; by: string } };
+
+export interface SubscriptionCheckpoint {
+  currentSeq: number;
 }
 
 export interface SubscribeOptions {
-  fields?: string[];
-  pace?: number;
+  fields?: FieldInterest;
+  pace?: PaceSelection;
+  onCheckpoint?: (checkpoint: SubscriptionCheckpoint) => void;
 }
 
 export interface ScopeSubscribeOptions {
-  interest?: { entity?: string; id?: string | number; fields?: string[]; pace?: number };
-  fields?: string[];
-  pace?: number;
+  interest?: {
+    entity?: string;
+    id?: string | number;
+    fields?: FieldInterest;
+    pace?: PaceSelection;
+  };
+  fields?: FieldInterest;
+  pace?: PaceSelection;
+  onCheckpoint?: (checkpoint: SubscriptionCheckpoint) => void;
 }
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'reconnecting';
@@ -112,8 +130,11 @@ export interface LiveListConfig {
   fetchImpl?: typeof globalThis.fetch;
   snapshotUrl: (entity: string, id: string | number) => string;
   eventsSinceUrl: (entity: string, id: string | number, cursor: number) => string;
-  fields?: string[];
-  pace?: number;
+  fields?: FieldInterest;
+  pace?: PaceSelection;
+  maxBufferedEvents?: number;
+  resyncBackoffBase?: number;
+  maxResyncBackoff?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -164,7 +185,7 @@ export interface LiveStoreConfig {
 
 export interface DispatchResult {
   ok: boolean;
-  status: 'committed' | 'failed-rolled-back';
+  status: 'committed' | 'failed-rolled-back' | 'outcome-unknown';
   opId: string;
   id?: string | number;
   row?: unknown;

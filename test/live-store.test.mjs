@@ -132,11 +132,12 @@ describe('LiveStore', () => {
     });
 
     await list.ready;
-    assert.deepEqual(channel.calls, [{
-      entity: 'Doc',
-      id: '1',
-      options: { fields: { cursor: true }, pace: { profile: '15fps' } },
-    }]);
+    assert.equal(channel.calls.length, 1);
+    assert.equal(channel.calls[0].entity, 'Doc');
+    assert.equal(channel.calls[0].id, '1');
+    assert.deepEqual(channel.calls[0].options.fields, { cursor: true });
+    assert.deepEqual(channel.calls[0].options.pace, { profile: '15fps' });
+    assert.equal(typeof channel.calls[0].options.onCheckpoint, 'function');
 
     store.close();
   });
@@ -310,7 +311,7 @@ describe('LiveStore', () => {
   });
 
   // --- 6. dispatch never throws even on fetch-rejects (network error) ---
-  it('dispatch returns failed Result on network error, never throws', async () => {
+  it('dispatch returns an outcome-unknown Result on network error, never throws', async () => {
     const channel = makeFakeChannel();
     let rejectCount = 0;
 
@@ -340,7 +341,7 @@ describe('LiveStore', () => {
 
     assert.equal(threw, false, 'dispatch must never throw');
     assert.ok(result.ok === false);
-    assert.equal(result.status, 'failed-rolled-back');
+    assert.equal(result.status, 'outcome-unknown');
     assert.ok(result.error);
 
     // Overlay rolled back
@@ -645,6 +646,7 @@ describe('LiveStore', () => {
   // --- 11. close() closes channel + clears caches ---
   it('close closes channel and clears caches', async () => {
     let channelClosed = false;
+    let listClosed = false;
 
     const channel = makeFakeChannel();
     channel.close = () => { channelClosed = true; };
@@ -658,11 +660,17 @@ describe('LiveStore', () => {
       channel, fetchImpl: fetch,
     });
 
-    store.subscribe('1');
+    const list = store.subscribe('1');
+    const originalListClose = list.close.bind(list);
+    list.close = () => {
+      listClosed = true;
+      return originalListClose();
+    };
     await tick();
 
     store.close();
 
+    assert.ok(listClosed, 'each cached LiveList is closed');
     assert.ok(channelClosed, 'channel.close() was called');
 
     // After close, subscribe should throw
@@ -676,6 +684,60 @@ describe('LiveStore', () => {
     assert.equal(threw, false, 'dispatch must not throw after close');
     assert.equal(result.ok, false, 'dispatch returns failed Result after close');
     assert.equal(result.status, 'failed-rolled-back');
+  });
+
+  it('close is idempotent and an in-flight dispatch settles without rendering again', async () => {
+    const response = deferred();
+    const channel = makeFakeChannel();
+    let channelCloseCount = 0;
+    channel.close = () => { channelCloseCount += 1; };
+
+    const store = createLiveStore({
+      baseUrl: 'http://test', name: 'Doc', path: '/docs', channel,
+      fetchImpl: async () => response.promise,
+    });
+    let renderCount = 0;
+    store.onRender(() => { renderCount += 1; });
+
+    const pending = store.create({ title: 'saved' });
+    assert.equal(renderCount, 1, 'optimistic state rendered before shutdown');
+
+    store.close();
+    store.close();
+    response.resolve({
+      ok: true,
+      status: 201,
+      headers: { get: () => null },
+      json: async () => ({ id: '1', title: 'saved' }),
+    });
+
+    const result = await pending;
+    assert.equal(result.status, 'committed', 'known HTTP success remains truthful');
+    assert.equal(renderCount, 1, 'settling an old operation cannot render a closed store');
+    assert.equal(channelCloseCount, 1, 'repeated close does not repeat teardown');
+  });
+
+  it('reports outcome-unknown when a transmitted write loses its response', async () => {
+    let requestStarted = false;
+    const store = createLiveStore({
+      baseUrl: 'http://test', name: 'Doc', path: '/docs', channel: makeFakeChannel(),
+      fetchImpl: async () => {
+        requestStarted = true;
+        throw new TypeError('connection reset after upload');
+      },
+    });
+
+    const result = await store.create({ title: 'possibly saved' });
+
+    assert.equal(requestStarted, true);
+    assert.deepEqual(result, {
+      ok: false,
+      status: 'outcome-unknown',
+      opId: result.opId,
+      error: 'connection reset after upload',
+    });
+    assert.deepEqual(store.pendingCreates(), [], 'uncertain optimistic state is not shown as truth');
+    store.close();
   });
 
   // --- 12. shared decodeResult handles 204 / !ok / json-body ---
@@ -754,4 +816,3 @@ describe('LiveStore', () => {
     assert.equal(status.error, null);
   });
 });
-

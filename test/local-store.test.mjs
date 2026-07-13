@@ -137,6 +137,28 @@ describe('normalizeEnvelope', () => {
   });
 });
 
+describe('local relay delivery isolation', () => {
+  it('a throwing subscriber does not leak an unhandled rejection', async () => {
+    const channel = makeFakeChannel();
+    const relay = await createLocalRelay({ name: freshDbName(), channel });
+    const unhandled = [];
+    const onUnhandled = (error) => { unhandled.push(error); };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      await relay.subscribe('Todo', 'id1', {}, () => {
+        throw new Error('consumer failed');
+      });
+      channel.emit('Todo', 'id1', todoEnvelope('id1', 'act-1', 'Todo.updated', { title: 'next' }));
+      await tickAsync();
+      assert.deepEqual(unhandled, []);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      relay.close();
+    }
+  });
+});
+
 describe('createLocalRelay', () => {
   it('subscribe + WS event writes to local log', async () => {
     const dbName = freshDbName();
@@ -249,6 +271,22 @@ describe('createLocalRelay', () => {
 
     assert.ok(channelClosed, 'underlying channel should be closed');
     // After close, the DB connection is released.
+  });
+
+  it('close during an in-flight log append suppresses late delivery', async () => {
+    const dbName = freshDbName();
+    const channel = makeFakeChannel();
+    const relay = await createLocalRelay({ name: dbName, channel });
+    let deliveries = 0;
+
+    await relay.subscribe('Todo', 'id1', {}, () => { deliveries += 1; });
+    channel.emit('Todo', 'id1', todoEnvelope(
+      'id1', 'act-close', 'Todo.updated', { id: 'id1', title: 'late' }, 1,
+    ));
+    relay.close();
+
+    await tickAsync();
+    assert.equal(deliveries, 0, 'an async callback cannot outlive relay.close()');
   });
 
   it('delivers multiple events in order', async () => {
@@ -475,7 +513,9 @@ describe('createLocalStore', () => {
     const list = store.subscribe('1', { fields: { cursor: true }, pace: { profile: '15fps' } });
     await list.ready;
 
-    assert.deepEqual(subscribeOptions, { fields: { cursor: true }, pace: { profile: '15fps' } });
+    assert.deepEqual(subscribeOptions.fields, { cursor: true });
+    assert.deepEqual(subscribeOptions.pace, { profile: '15fps' });
+    assert.equal(typeof subscribeOptions.onCheckpoint, 'function');
 
     store.close();
   });
@@ -507,7 +547,82 @@ function makeFakeLocks({ acquired }) {
   };
 }
 
+function makeLockCoordinator() {
+  let held = false;
+  const waiters = [];
+  return {
+    request(_name, callback) {
+      return new Promise((resolve, reject) => {
+        const acquire = () => {
+          held = true;
+          Promise.resolve(callback({ mode: 'exclusive' })).then(() => {
+            held = false;
+            resolve();
+            waiters.shift()?.();
+          }, reject);
+        };
+        if (held) waiters.push(acquire);
+        else acquire();
+      });
+    },
+  };
+}
+
 describe('leader election', () => {
+  it('promotes a follower and reconciles its desired subscriptions when the leader closes', async () => {
+    const dbName = freshDbName();
+    const locks = makeLockCoordinator();
+    const leaderChannel = makeFakeChannel();
+    const followerChannel = makeFakeChannel();
+    let followerSubscriptions = 0;
+    const originalFollowerSubscribe = followerChannel.subscribe;
+    followerChannel.subscribe = (...args) => {
+      followerSubscriptions += 1;
+      return originalFollowerSubscribe(...args);
+    };
+
+    const leader = await createLocalRelay({ name: dbName, channel: leaderChannel, locks });
+    const follower = await createLocalRelay({ name: dbName, channel: followerChannel, locks });
+    let received = null;
+    await follower.subscribe('Todo', 'id1', {}, (envelope) => { received = envelope; });
+    assert.equal(followerSubscriptions, 0, 'queued tab begins as a broadcast-only follower');
+
+    leader.close();
+    await tickAsync();
+    assert.equal(followerSubscriptions, 1, 'new leader opens its desired upstream subscription');
+
+    const envelope = todoEnvelope('id1', 'act-promote', 'Todo.updated', { id: 'id1', title: 'live' });
+    followerChannel.emit('Todo', 'id1', envelope);
+    await tickAsync();
+    assert.deepEqual(received, envelope);
+    follower.close();
+  });
+
+  it('createLocalStore forwards locks so a follower never opens a real subscription', async () => {
+    const dbName = freshDbName();
+    const channel = makeFakeChannel();
+    let realSubscriptions = 0;
+    const originalSubscribe = channel.subscribe;
+    channel.subscribe = (...args) => {
+      realSubscriptions += 1;
+      return originalSubscribe(...args);
+    };
+
+    const store = await createLocalStore({
+      baseUrl: 'http://test', name: 'Todo', path: '/todos',
+      local: { name: dbName }, channel,
+      locks: makeFakeLocks({ acquired: false }),
+      fetchImpl: makeFakeFetch([
+        { match: '/snapshot/Todo/id1', response: { snapshot: { id: 'id1' }, seq: 0 } },
+      ]),
+    });
+
+    const list = store.subscribe('id1');
+    await list.ready;
+    assert.equal(realSubscriptions, 0);
+    store.close();
+  });
+
   it('leader acquires lock and subscribes to real channel; follower skips', async () => {
     const dbName = freshDbName();
     const leaderCh = makeFakeChannel();

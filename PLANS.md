@@ -543,3 +543,13 @@ REMAINING-P1-NOTES resolved/deferred: spec #6 (handler txn signature) RESOLVED b
 - The compiler rejects effect keys that are not declared legal transitions. Durable state-transition effects are rejected because the old-value preimage is intentionally transaction-local and is not present in the committed event log; pretending they were replayable would make recovery behavior differ from live behavior.
 - Focused state/effect/auth gate: 57/57 green.
 - Next: complete schedule/tick lifecycle guards, then harden client resync/outbox/close races.
+
+## 2026-07-13 — rewrite Wave 2: live client lifecycle is explicit
+
+- Replaced callback-by-callback reconnect behavior with one private live-session state machine. Desired subscriptions are now the source of truth, concurrent subscribers share one connection attempt, retired sockets cannot deliver late work, send failure retires the broken connection, and reconnect acknowledgements carry an authoritative checkpoint back to each live list.
+- Live lists now invalidate deferred snapshot/resync work on close, bound their event buffer, recover overflow from an authoritative snapshot, and retry failed recovery with backoff instead of a hot loop.
+- Store shutdown is idempotent and closes every live list before its channel. The local relay likewise suppresses late async delivery, forwards injected lock coordination, releases leadership on close, and reconciles existing subscriptions when a follower is promoted.
+- Dispatch results now distinguish a known rollback from a response lost after transmission (`outcome-unknown`), and uncertain optimistic state is removed. Re-subscribing the same key is blocked until its unsubscribe acknowledgement settles, preventing an old acknowledgement from consuming the new lifecycle.
+- Public client declarations now match the runtime for field masks, pacing, socket injection, checkpoints, and recovery tuning. Tests use the public socket seam instead of relying on the previous private connection timing.
+- Gate: focused live/local/type suites green; full suite 1,786/1,786 and ESLint green.
+- Next: harden HTTP request-body ownership and abort behavior, then redesign undo around compensating mutations and typed preimages.

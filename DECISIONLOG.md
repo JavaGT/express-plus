@@ -625,3 +625,12 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Default target:** Omitting `mutate` means `self`. This makes the compact field-local declaration useful while preserving explicit cross-entity targets.
 - **Durability boundary:** Transition metadata is not committed to `_Log`, so transition effects cannot declare durable delivery. Load-time rejection is safer than live/recovery disagreement.
 - **Authority:** Lowering does not create a privileged path. Generated mutations pass the same source admission, target row grant, effect-depth, and atomic rollback rules as entity-level effects.
+
+## 2026-07-13 — live synchronization has one lifecycle owner
+
+- **Decision:** `LiveChannel` is backed by one private session state machine with a single connection state, monotonically increasing socket generation, shared connection promise, and desired-subscription registry. Raw wire messages are not queued for replay.
+- **Reason:** Reconnect, unsubscribe, send failure, and close previously mutated overlapping maps and callbacks independently. That allowed stale sockets, contradictory replay, hanging promises, and missed offline changes. One lifecycle owner makes those states mutually consistent.
+- **Checkpoint rule:** Every subscription acknowledgement, including a reconnect acknowledgement, is an authoritative checkpoint. `LiveList` reconciles its cursor from that checkpoint and uses a bounded buffer plus snapshot recovery when deltas cannot be trusted.
+- **Teardown rule:** Closing invalidates every deferred continuation, settles pending operations, closes lists before transport, releases local-relay leadership, and is idempotent. No async completion may render or broadcast after its owner closes.
+- **Mutation truthfulness:** A locally rejected write is `failed-rolled-back`; a confirmed success is `committed`; once transmission starts, losing the response is `outcome-unknown`. Uncertain optimistic data is removed because the client cannot honestly present it as committed or rolled back.
+- **Testing seam:** Socket construction and lock coordination are injected. Tests drive real lifecycle transitions through those seams instead of mutating connection internals or depending on ambient browser globals.
