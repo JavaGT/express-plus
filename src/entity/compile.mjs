@@ -251,7 +251,9 @@ export function entity(name, declaration = {}) {
     );
   }
   for (const key of RESERVED_DECLARATION_SLOTS) {
-    if (Object.hasOwn(declaration, key) && looksLikeFieldDescriptor(declaration[key])) {
+    const value = declaration[key];
+    const isDeclaredSimulation = key === 'simulation' && value?.kind === 'simulate';
+    if (Object.hasOwn(declaration, key) && looksLikeFieldDescriptor(value) && !isDeclaredSimulation) {
       throw new Error(
         `entity('${name}') field '${key}' collides with a reserved declaration slot. ` +
           `Rename the field.`,

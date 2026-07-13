@@ -592,3 +592,10 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Reason:** Without the bridge, W3 slice 2's "live job visibility" was durable-only — a board got events on resync, not live. Bridging at serve (where `app.live` and `app.jobs` are both in scope) keeps ONE fan-out path; the alternative — teaching the queue about live delivery — would couple the substrate to a consumer.
 - **Files:** `src/serve.mjs`, `test/job-live-visibility.test.mjs`, `SPEC.md` (§9.4), `docs/convergence/census/W3-jobs.md` (Section 4 closure + Section 5), `docs/convergence/LEDGER.md` (W3 → done).
 - **Gate:** `node --test` 1697/1697/0; eslint clean. Merged 8aa197b..05a5ee2. W3 packet: **done**.
+
+## 2026-07-13 — simulation lifecycle belongs to the application clock
+
+- **Decision:** A compiled `simulation` declaration is started by `buildAndStart`, using the app-bound entity registry, database, queued dispatch, and shared clock. It is not a separately managed timer service.
+- **Reason:** Declarations must become behavior through the one application lifecycle. Sharing the clock gives startup and shutdown one owner and prevents tests or callers from needing private simulation wiring.
+- **Rate rule:** The shared wake-up interval follows the fastest declared simulation; each simulation's own elapsed-time guard retains its requested cadence.
+- **Compiler rule:** The reserved `simulation` slot accepts only the public `simulate()` descriptor. It does not generally permit fields to occupy reserved declaration slots.

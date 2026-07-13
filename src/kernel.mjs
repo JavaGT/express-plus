@@ -11,6 +11,7 @@ import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './dur
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { reconcileProjectedRecovery } from './projected-async.mjs';
 import { reconcileDurableEffects } from './durable-effects.mjs';
+import { startSimulation } from './simulate.mjs';
 import { getLog, withLog } from './log.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
@@ -192,6 +193,12 @@ export async function buildAndStart(app) {
   // No-op when no triggers exist. Scheduled on the shared clock.
   if (app.db) {
     startClockTriggers({
+      db: app.db,
+      entities: app.entities,
+      dispatch: dispatchThroughWriteQueue,
+      clock: app.clock,
+    });
+    app.simulation = startSimulation({
       db: app.db,
       entities: app.entities,
       dispatch: dispatchThroughWriteQueue,

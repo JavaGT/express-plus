@@ -502,3 +502,11 @@ REMAINING-P1-NOTES resolved/deferred: spec #6 (handler txn signature) RESOLVED b
 - [2026-07-01] Implemented `projected.inline({ compute })` alongside `.async` — same `projected` kind, different atomicity boundary. The compute runs synchronously in the entity projection's apply handler; a failure rolls back the commit (fail closed). The value is materialized immediately — the create response includes it, no polling.
 - [2026-07-01] `src/field.mjs`: `projected.inline({ compute })` added. `src/entity.mjs`: `projectedInlineFields` collected on record; `buildProjectedComputeRow` helper deserializes stored values; inline compute runs in apply for created (INSERT includes computed column) and updated (fetches existing row, merges, recomputes).
 - [2026-07-01] Tests: `test/projected-async.test.mjs` +4 inline tests. Focused gate: 13/13/0. Full gate: 865/865/0.
+
+## 2026-07-13 — rewrite Wave 2: app-owned simulation lifecycle
+
+- Fixed a declaration/runtime split where `simulate()` was exported but its descriptor was rejected as a reserved-slot field collision. The compiler now recognizes only the exact `kind: 'simulate'` descriptor in the reserved `simulation` slot; other field-shaped collisions still fail closed.
+- `buildAndStart` now starts simulations with the application's bound database, entity registry, dispatch queue, and shared clock. Shutdown remains singular because the simulation registers with that shared clock owner.
+- Mixed-rate simulations now wake at the fastest declared rate (`max(hz)`), allowing slower simulations to retain their own per-entity cadence without starving faster ones.
+- Added compiler, mixed-rate, and real `listen`/`ready`/`shutdown` coverage. Focused schedule/entity gate: 97/97/0.
+- Next: effect principals must pass normal row grants; durable effect jobs and cursor advancement must be atomic; effect-depth ownership must be singular and exact.

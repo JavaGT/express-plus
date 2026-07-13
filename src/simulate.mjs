@@ -39,7 +39,7 @@ export function startSimulation({ db, entities, dispatch, clock }) {
   const ephemeral = new Map();
   const lastTick = new Map();
 
-  const fastestHz = Math.min(...sims.map((s) => s.simulation.hz));
+  const fastestHz = Math.max(...sims.map((s) => s.simulation.hz));
   const intervalMs = Math.round(1000 / fastestHz);
 
   async function tick(ms) {

@@ -1,4 +1,5 @@
 import { scope, everyone, grant, read, text, simulate, tick } from '../src/index.mjs';
+import workbench from '../src/app.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
@@ -160,6 +161,33 @@ test('entity with no simulation gets a no-op startSimulation', () => {
   engine.stop();
 });
 
+test('mixed-rate simulations wake at the fastest declared frequency', () => {
+  const Slow = entity('SlowSimulation', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    value: text(),
+    simulation: simulate({ hz: 1, step: () => ({ state: {}, events: [] }) }),
+  });
+  const Fast = entity('FastSimulation', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    value: text(),
+    simulation: simulate({ hz: 20, step: () => ({ state: {}, events: [] }) }),
+  });
+  const db = seededDb();
+  for (const sql of [...generateDDL(Slow), ...generateDDL(Fast)]) db.exec(sql);
+  let registeredIntervalMs;
+  const clock = {
+    add({ intervalMs }) {
+      registeredIntervalMs = intervalMs;
+      return { remove() {} };
+    },
+  };
+
+  const engine = startSimulation({ db, entities: new Map([[Slow.name, Slow], [Fast.name, Fast]]), clock });
+  assert.equal(registeredIntervalMs, 50);
+  engine.stop();
+  db.close();
+});
+
 test('simulation slot and tick can coexist on same entity', () => {
   const Hybrid = entity('Hybrid', {
     grant: scope(() => everyone()).can(() => grant(read)),
@@ -175,4 +203,36 @@ test('simulation slot and tick can coexist on same entity', () => {
   });
   assert.ok(Hybrid.schedule);
   assert.ok(Hybrid.simulation);
+});
+
+test('listen starts declared simulations and shutdown stops their clock owner', async (t) => {
+  const states = [];
+  const Counter = entity('ListenSimulationCounter', {
+    grant: scope(() => everyone()).can(() => grant(read)),
+    count: text({ default: '0' }),
+    simulation: simulate({
+      hz: 20,
+      step: ({ state }) => {
+        const n = (state.n ?? 0) + 1;
+        states.push(n);
+        return { state: { n }, events: [] };
+      },
+    }),
+  });
+  const db = seededDb();
+  for (const sql of generateDDL(Counter)) db.exec(sql);
+  db.prepare('INSERT INTO ListenSimulationCounter (id, count) VALUES (?, ?)').run('c1', '0');
+
+  const app = workbench({ db }).mount('/counters', Counter).listen(0);
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+  await app.ready;
+
+  await poll(() => assert.ok(states.length > 0, 'listen should start the declared simulation'));
+  await app.shutdown();
+  const stoppedAt = states.length;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(states.length, stoppedAt, 'shutdown stops the shared simulation clock');
 });
