@@ -4,6 +4,7 @@
 
 import { txn } from '../driver.mjs';
 import { admin } from '../grant.mjs';
+import { readScopedRow } from '../http-crud-dispatch.mjs';
 import { rowCapabilities } from '../row-grant.mjs';
 import { MEMBER_COLUMN, membershipOwnerCol, membershipTable } from '../scope-sql.mjs';
 
@@ -75,7 +76,7 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
     }
 
     const target = targetFor(targetEntity, role);
-    const row = target.entity.findById(targetId, principal);
+    const row = readScopedRow({ db }, target.entity, targetId, principal);
     if (!row) throw httpError(404, `${target.entity.name} ${targetId} not found`);
     const decision = await rowCapabilities(target.entity, row, principal);
     if (!decision.granted || !decision.capabilities.includes(admin)) {
@@ -97,6 +98,9 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
     if (!token || !user?.id) {
       throw httpError(400, 'acceptInvitation requires a token and a user with an id');
     }
+    if (user.type !== 'user') {
+      throw httpError(403, 'a user principal is required to accept an invitation');
+    }
 
     return txn(db, () => {
       const invitation = Invitation.findOne(Invitation.token.is(token));
@@ -116,28 +120,32 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
         throw httpError(404, `${target.entity.name} ${invitation.targetId} not found`);
       }
 
-      let existing;
+      let membershipChanged = false;
       try {
-        existing = db.prepare(
+        const existing = db.prepare(
           `SELECT role FROM ${target.table} WHERE ${target.ownerColumn} = :owner AND ${MEMBER_COLUMN} = :member`,
         ).get({ owner: invitation.targetId, member: user.id });
+        membershipChanged = !existing || existing.role !== invitation.role;
 
-        // A replay by an existing member is idempotent and does not exhaust a
-        // public link. The declared invitation role still wins if it changed.
+        if (
+          membershipChanged
+          && invitation.targetUser === null
+          && invitation.maxUses !== null
+          && invitation.useCount >= invitation.maxUses
+        ) {
+          throw httpError(400, 'invitation has reached its maximum uses');
+        }
+
+        // An exact-role replay is idempotent and does not exhaust a public link.
+        // Applying a different role is a new grant, so it consumes a use and
+        // cannot pass an exhausted invitation.
         if (existing) {
-          if (existing.role !== invitation.role) {
+          if (membershipChanged) {
             db.prepare(
               `UPDATE ${target.table} SET role = :role WHERE ${target.ownerColumn} = :owner AND ${MEMBER_COLUMN} = :member`,
             ).run({ owner: invitation.targetId, member: user.id, role: invitation.role });
           }
         } else {
-          if (
-            invitation.targetUser === null
-            && invitation.maxUses !== null
-            && invitation.useCount >= invitation.maxUses
-          ) {
-            throw httpError(400, 'invitation has reached its maximum uses');
-          }
           db.prepare(
             `INSERT INTO ${target.table} (${target.ownerColumn}, ${MEMBER_COLUMN}, role) VALUES (:owner, :member, :role)`,
           ).run({ owner: invitation.targetId, member: user.id, role: invitation.role });
@@ -148,7 +156,7 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
       }
 
       if (invitation.targetUser === null) {
-        if (!existing) {
+        if (membershipChanged) {
           db.prepare('UPDATE Invitation SET useCount = useCount + 1 WHERE id = :id')
             .run({ id: invitation.id });
         }
@@ -168,6 +176,9 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
     if (!token || !user?.id) {
       throw httpError(400, 'rejectInvitation requires a token and a user with an id');
     }
+    if (user.type !== 'user') {
+      throw httpError(403, 'a user principal is required to reject an invitation');
+    }
     const invitation = Invitation.findOne(Invitation.token.is(token));
     if (!invitation) throw httpError(404, 'invitation not found');
     if (invitation.targetUser === null) {
@@ -180,7 +191,12 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
   }
 
   function listInvitationsForUser(user) {
-    if (!user?.id) return [];
+    if (!user?.id) {
+      throw httpError(400, 'listInvitationsForUser requires a user with an id');
+    }
+    if (user.type !== 'user') {
+      throw httpError(403, 'a user principal is required to list invitations');
+    }
     const rows = db.prepare(`
       SELECT * FROM Invitation AS t0
       WHERE t0.targetUser = :userId
