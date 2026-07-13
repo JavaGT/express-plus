@@ -96,8 +96,9 @@ test('Doc.linkShare.token reached through the entity Proxy lowers to its column'
 });
 
 test('a struct write flattens to per-cell columns; a row read reconstructs the namespace', () => {
-  const Doc = makeDoc();
-  workbench({ db: seedDb() });
+  const declaration = makeDoc();
+  const app = workbench({ db: seedDb(), entities: [declaration] });
+  const Doc = app.entity(declaration);
   const created = Doc.create({ title: 'memo', linkShare: { token: 'share-xyz', tier: 'comment' } });
   // the row reconstructs linkShare as a namespace object, NOT raw __ columns
   assert.equal(created.title, 'memo');

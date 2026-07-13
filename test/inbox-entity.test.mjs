@@ -51,7 +51,6 @@ test('Inbox grant compiles to a recipient-scoped read filter (own rows only)', (
 });
 
 test('the bound recipient scope selects only the principal\'s own inbox rows', () => {
-  workbench({ db: seedDb() });
   const db = seedDb();
   for (const who of ['alice', 'bob']) {
     const bound = bindReadScope(Inbox.readScope, principal({ type: 'user', id: who }));
@@ -62,11 +61,11 @@ test('the bound recipient scope selects only the principal\'s own inbox rows', (
 });
 
 test('Inbox.create + findOne round-trips through the generic query API', () => {
-  workbench({ db: seedDb() });
-  const created = Inbox.create({ recipient: 'carol', doc: 'doc-9', kind: 'invite' });
+  const boundInbox = workbench({ db: seedDb(), entities: [Inbox] }).entity(Inbox);
+  const created = boundInbox.create({ recipient: 'carol', doc: 'doc-9', kind: 'invite' });
   assert.equal(created.recipient, 'carol');
   assert.equal(created.doc, 'doc-9');
   assert.equal(created.kind, 'invite');
-  const found = Inbox.findOne(Inbox.recipient.is('carol'));
+  const found = boundInbox.findOne(Inbox.recipient.is('carol'));
   assert.equal(found.doc, 'doc-9');
 });
