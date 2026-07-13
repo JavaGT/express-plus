@@ -5,11 +5,11 @@
 // external dependencies — uses Node's global WebSocket (Node 22+).
 //
 // Protocol (matches src/live.mjs verbatim):
-//   client → server: {type:'subscribe', entity, id, fields?, pace?} / {type:'subscribe', scope, interest?} / {type:'unsubscribe', entity, id} / {type:'unsubscribe', scope}
-//   server → client: {type:'subscribed', scope, entity, id, currentSeq}
+//   client → server: {type:'subscribe', requestId, entity, id, fields?, pace?} / {type:'subscribe', requestId, scope, interest?} / {type:'unsubscribe', entity, id} / {type:'unsubscribe', scope}
+//   server → client: {type:'subscribed', requestId, scope, entity, id, currentSeq}
 //                    {type:'unsubscribed', scope, entity, id}
 //                    {type:'event', entity, id, seq, seqSpan, event, delta?}
-//                    {type:'error', message}
+//                    {type:'error', requestId?, message}
 
 // --- BEGIN GENERATED from src/replay-decision.mjs (keep in sync; zero-import) ---
 function normalizeSeqSpan(seqOrSpan) {
@@ -80,6 +80,11 @@ class LiveSyncSession {
     this._subs = new Map();
     // Pending subscribe promises: key → { resolve, reject }
     this._pendingSubs = new Map();
+    // In-flight subscribe wire requests: requestId → desired-subscription key.
+    // A reconnect allocates a fresh request so an old denial cannot retire the
+    // current generation's desired subscription.
+    this._subRequests = new Map();
+    this._nextRequestId = 1;
     // Pending unsubscribe: key → { resolve, timeout }
     this._pendingUnsubs = new Map();
 
@@ -192,6 +197,8 @@ class LiveSyncSession {
 
   async _unsubscribe(key, envelope) {
     if (!this._subs.has(key)) return;
+    const requestId = this._subs.get(key)?.requestId;
+    if (requestId !== undefined) this._subRequests.delete(requestId);
     this._subs.delete(key);
     const pendingSub = this._pendingSubs.get(key);
     if (pendingSub) {
@@ -238,6 +245,7 @@ class LiveSyncSession {
       this._socket = null;
     }
     this._subs.clear();
+    this._subRequests.clear();
     for (const [, pending] of this._pendingSubs) {
       pending.reject(new ClientClosedError());
     }
@@ -388,7 +396,11 @@ class LiveSyncSession {
     if (this._watchdog) { clearInterval(this._watchdog); this._watchdog = null; }
     if (this._socket === ws) this._socket = null;
     this._generation++;
-    for (const sub of this._subs.values()) sub.sentGeneration = 0;
+    this._subRequests.clear();
+    for (const sub of this._subs.values()) {
+      sub.sentGeneration = 0;
+      sub.requestId = undefined;
+    }
     this._state = 'backoff';
     this._emitConnectionStatus('disconnected');
     try {
@@ -420,7 +432,12 @@ class LiveSyncSession {
   _sendSubscription(key) {
     const sub = this._subs.get(key);
     if (!sub || sub.sentGeneration === this._generation) return;
-    if (this._send(this._subscriptionEnvelope(key, sub))) {
+    const requestId = this._nextRequestId++;
+    const envelope = { ...this._subscriptionEnvelope(key, sub), requestId };
+    if (this._send(envelope)) {
+      if (sub.requestId !== undefined) this._subRequests.delete(sub.requestId);
+      sub.requestId = requestId;
+      this._subRequests.set(requestId, key);
       sub.sentGeneration = this._generation;
     }
   }
@@ -435,6 +452,8 @@ class LiveSyncSession {
 
     if (envelope.type === 'subscribed') {
       const sub = scopeKey ? this._subs.get(scopeKey) : null;
+      if (sub && envelope.requestId !== undefined && sub.requestId !== envelope.requestId) return;
+      if (sub?.requestId !== undefined) this._subRequests.delete(sub.requestId);
       if (sub && typeof sub.onCheckpoint === 'function') {
         try { sub.onCheckpoint({ currentSeq: envelope.currentSeq }); } catch { /* isolate consumer */ }
       }
@@ -453,8 +472,25 @@ class LiveSyncSession {
         }
       }
     } else if (envelope.type === 'error') {
+      if (envelope.requestId !== undefined) {
+        const key = this._subRequests.get(envelope.requestId);
+        if (!key) return;
+        this._subRequests.delete(envelope.requestId);
+        const sub = this._subs.get(key);
+        if (!sub || sub.requestId !== envelope.requestId) return;
+        this._subs.delete(key);
+        const pending = this._pendingSubs.get(key);
+        if (pending) {
+          this._pendingSubs.delete(key);
+          pending.reject(new Error(envelope.message));
+        }
+        return;
+      }
+      // Compatibility with older servers whose protocol errors were not
+      // correlated. Such an error cannot truthfully identify one request.
       for (const [key, pending] of this._pendingSubs) {
         this._pendingSubs.delete(key);
+        this._subs.delete(key);
         pending.reject(new Error(envelope.message));
       }
     } else if (envelope.type === 'event') {

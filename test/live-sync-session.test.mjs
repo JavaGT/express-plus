@@ -65,14 +65,72 @@ test('two concurrent subscriptions share one connection and send desired state o
   sockets[0].open();
   await tick();
   assert.deepEqual(sockets[0].sent, [
-    { type: 'subscribe', entity: 'Doc', id: 'a' },
-    { type: 'subscribe', entity: 'Doc', id: 'b' },
+    { type: 'subscribe', entity: 'Doc', id: 'a', requestId: 1 },
+    { type: 'subscribe', entity: 'Doc', id: 'b', requestId: 2 },
   ]);
 
   sockets[0].emit('message', { type: 'subscribed', entity: 'Doc', id: 'a', currentSeq: 1 });
   sockets[0].emit('message', { type: 'subscribed', entity: 'Doc', id: 'b', currentSeq: 2 });
   assert.deepEqual(await first, { currentSeq: 1 });
   assert.deepEqual(await second, { currentSeq: 2 });
+  channel.close();
+});
+
+test('a denied subscription rejects only its matching request and remains reusable', async () => {
+  const { channel, sockets } = harness();
+  const allowedEvents = [];
+  const allowed = channel.subscribe('Doc', 'allowed', (event) => allowedEvents.push(event));
+  const denied = channel.subscribe('Doc', 'denied', () => {});
+  const deniedResult = assert.rejects(denied, /forbidden/);
+
+  await tick();
+  sockets[0].open();
+  await tick();
+
+  const [allowedRequest, deniedRequest] = sockets[0].sent;
+  assert.equal(typeof allowedRequest.requestId, 'number');
+  assert.equal(typeof deniedRequest.requestId, 'number');
+  assert.notEqual(allowedRequest.requestId, deniedRequest.requestId);
+
+  sockets[0].emit('message', {
+    type: 'error',
+    requestId: deniedRequest.requestId,
+    message: 'forbidden',
+  });
+  sockets[0].emit('message', {
+    type: 'subscribed',
+    requestId: allowedRequest.requestId,
+    entity: 'Doc',
+    id: 'allowed',
+    currentSeq: 3,
+  });
+
+  await deniedResult;
+  assert.deepEqual(await allowed, { currentSeq: 3 });
+
+  sockets[0].emit('message', {
+    type: 'event',
+    entity: 'Doc',
+    id: 'allowed',
+    seq: 4,
+    event: { type: 'Doc.updated', data: { title: 'still live' } },
+  });
+  assert.equal(allowedEvents.length, 1);
+
+  const retry = channel.subscribe('Doc', 'denied', () => {});
+  await tick();
+  const retryRequest = sockets[0].sent.at(-1);
+  assert.equal(retryRequest.entity, 'Doc');
+  assert.equal(retryRequest.id, 'denied');
+  assert.notEqual(retryRequest.requestId, deniedRequest.requestId);
+  sockets[0].emit('message', {
+    type: 'subscribed',
+    requestId: retryRequest.requestId,
+    entity: 'Doc',
+    id: 'denied',
+    currentSeq: 4,
+  });
+  assert.deepEqual(await retry, { currentSeq: 4 });
   channel.close();
 });
 
@@ -178,7 +236,7 @@ test('send failure retires the generation and replays desired state exactly once
   assert.equal(sockets.length, 2);
   sockets[1].open();
   await tick();
-  assert.deepEqual(sockets[1].sent, [{ type: 'subscribe', entity: 'Doc', id: 'a' }]);
+  assert.deepEqual(sockets[1].sent, [{ type: 'subscribe', entity: 'Doc', id: 'a', requestId: 3 }]);
   sockets[1].emit('message', { type: 'subscribed', entity: 'Doc', id: 'a', currentSeq: 2 });
   assert.deepEqual(await pending, { currentSeq: 2 });
   channel.close();

@@ -157,11 +157,12 @@ test('H2: an ANONYMOUS subscribe is DENIED (no currentSeq leak)', async () => {
   let anon;
   try {
     anon = await openRawWS(port, null);
-    anon.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+    anon.send(JSON.stringify({ type: 'subscribe', requestId: 41, entity: 'Note', id: 'n1' }));
     const msg = await anon.nextMessage();
     // Denied: an error, never a 'subscribed' ack, and never the cursor.
     assert.ok(msg, 'server must respond to the subscribe');
     assert.notEqual(msg.type, 'subscribed', 'anonymous must not be admitted');
+    assert.equal(msg.requestId, 41, 'denial identifies only its subscribe request');
     assert.equal(msg.currentSeq, undefined, 'denied subscribe must not leak currentSeq');
     // And nothing arrives later.
     assert.equal(await anon.nextEvent(150), null);
@@ -205,9 +206,10 @@ test('H2: the OWNER subscribes and receives the live event (positive fan-out)', 
   let alice;
   try {
     alice = await openRawWS(port, '1');
-    alice.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+    alice.send(JSON.stringify({ type: 'subscribe', requestId: 42, entity: 'Note', id: 'n1' }));
     const ack = await alice.nextMessage();
     assert.equal(ack.type, 'subscribed', 'owner is admitted');
+    assert.equal(ack.requestId, 42, 'ack identifies its subscribe request');
     assert.ok(typeof ack.currentSeq === 'number', 'admitted subscribe returns the cursor');
 
     const r = await fetch(`${origin}/notes/n1`, {

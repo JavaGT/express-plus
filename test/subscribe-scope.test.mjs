@@ -120,6 +120,7 @@ test('LiveChannel.subscribeScope — sends {scope, interest} wire format', async
   assert.deepEqual(sent[0], {
     type: 'subscribe', scope: 'project:p1',
     interest: { entity: 'Segment', id: 's1', fields: { text: true } },
+    requestId: 1,
   });
 
   channel._handleEnvelope({ type: 'subscribed', scope: 'project:p1', currentSeq: 0 });

@@ -8,6 +8,13 @@
 import { FrameSender, FrameParser } from './websocket.mjs';
 import { authorizeSubscription, normalizeSubscribeMsg } from './live-admission.mjs';
 
+function requestIdOf(msg) {
+  const value = msg?.requestId;
+  if (Number.isSafeInteger(value) && value >= 0) return value;
+  if (typeof value === 'string' && value.length > 0 && value.length <= 128) return value;
+  return undefined;
+}
+
 export class LiveConnection {
   #socket;
   #sender;
@@ -62,8 +69,10 @@ export class LiveConnection {
     }
   }
 
-  error(message) {
-    this.send({ type: 'error', message });
+  error(message, requestId) {
+    const response = { type: 'error', message };
+    if (requestId !== undefined) response.requestId = requestId;
+    this.send(response);
   }
 
   #drain() {
@@ -97,7 +106,7 @@ export class LiveConnection {
     if (!msg || typeof msg !== 'object') return;
     switch (msg.type) {
       case 'subscribe':
-        this.#authorizeAndSubscribe(msg).catch(() => this.error('forbidden'));
+        this.#authorizeAndSubscribe(msg).catch(() => this.error('forbidden', requestIdOf(msg)));
         break;
       case 'unsubscribe':
         this.#handleUnsubscribe(msg);
@@ -119,6 +128,7 @@ export class LiveConnection {
   }
 
   async #authorizeAndSubscribe(msg) {
+    const requestId = requestIdOf(msg);
     const result = await authorizeSubscription(msg, this, {
       resolveEntity: this.#resolveEntity,
       mayVerb: this.#mayVerb,
@@ -126,7 +136,7 @@ export class LiveConnection {
       fanout: this.#fanout,
     });
     if (!result.admitted) {
-      this.error(result.reason);
+      this.error(result.reason, requestId);
       return;
     }
     this.#fanout.addSubscription(result.scope, this, result.fields, result.pace, result.interest);
@@ -135,6 +145,7 @@ export class LiveConnection {
       scope: result.scope,
       currentSeq: this.#currentSeq(result.scope),
     };
+    if (requestId !== undefined) response.requestId = requestId;
     if (result.entityName) response.entity = result.entityName;
     if (result.id !== undefined) response.id = result.id;
     this.send(response);

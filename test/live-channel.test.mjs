@@ -173,6 +173,7 @@ test('reconnect resubscribe preserves field interest and pace', async () => {
     type: 'subscribe', entity: 'Doc', id: 'd1',
     fields: { cursor: true },
     pace: { profile: '15fps' },
+    requestId: 1,
   }]);
   channel.close();
 });
