@@ -1,5 +1,5 @@
 import workbench, {
-  action, event, entity, text, ref, principal, read, write, grant,
+  action, event, entity, text, ref, projected, principal, read, write, grant,
   type ActionHandle, type CommittedEvent, type DispatchRequest,
   type DispatchResult, type EventHandle, type Principal,
   type WorkbenchApp, type WorkbenchEntity,
@@ -19,9 +19,15 @@ type ProjectRow = { id: string; name: string; ownerId: string };
 const Project: WorkbenchEntity<ProjectRow> = entity('Project', {
   name: text(),
   owner: ref('User'),
+  summary: projected.async({
+    from: ['Project.created'],
+    compute: async (row) => String(row.name ?? ''),
+  }),
   grant: grant(read, write),
   routes: (routes) => routes.resource(),
 });
+// @ts-expect-error projected is a namespace; asynchronous projections use projected.async(...)
+projected({ compute: async () => 'invalid' });
 
 const Rename: ActionHandle<{ id: string; name: string }> = action('Project.rename');
 const Renamed: EventHandle<ProjectRow, { name: string }> = event(

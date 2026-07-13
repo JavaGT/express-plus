@@ -2,6 +2,27 @@
 
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
+export interface WorkbenchStatement {
+  run(...params: unknown[]): { changes: number };
+  get(...params: unknown[]): unknown;
+  all(...params: unknown[]): unknown[];
+}
+
+export interface WorkbenchDatabase {
+  prepare(sql: string): WorkbenchStatement;
+  exec(sql: string): void;
+  txn?<T>(fn: () => Promise<T>): Promise<T>;
+  begin?(): void;
+  commit?(): void;
+  rollback?(): void;
+  upsert?(options: {
+    table: string;
+    keyColumns: string[];
+    columns?: string[];
+    values: Record<string, unknown>;
+  }): void;
+}
+
 export type PrincipalType = 'user' | 'link' | 'system' | 'apiKey' | 'anonymous';
 
 export interface Principal {
@@ -145,9 +166,16 @@ export function computed<Value = unknown>(
   compute: (row: Readonly<Record<string, unknown>>) => Value,
   options?: Readonly<Record<string, unknown>>,
 ): FieldDescriptor<Value>;
-export function projected<Value = unknown>(
-  options: Readonly<Record<string, unknown>>,
-): FieldDescriptor<Value>;
+export interface ProjectedFieldFactory {
+  async<Value = unknown>(options: {
+    compute: (
+      row: Readonly<Record<string, unknown>>,
+      context: { readonly db: WorkbenchDatabase },
+    ) => Value | Promise<Value>;
+    from?: string | readonly string[];
+  }): FieldDescriptor<Value>;
+}
+export const projected: ProjectedFieldFactory;
 export const raster: { crdt(options?: Readonly<Record<string, unknown>>): FieldDescriptor<unknown> };
 export const polyline: { crdt(options?: Readonly<Record<string, unknown>>): FieldDescriptor<unknown> };
 export function vector(dimensions: number, options?: FieldOptions<number[]>): FieldDescriptor<number[]>;
@@ -299,20 +327,20 @@ export const tick: {
 export function simulate(options: Readonly<Record<string, unknown>>): unknown;
 
 export interface WorkbenchOptions {
-  db?: string | unknown;
+  db?: string | WorkbenchDatabase;
   entities?: readonly WorkbenchEntity[];
   port?: number;
   env?: string;
   session?: { durationMs?: number };
   viewsDir?: string;
-  migrations?: readonly Readonly<{ version: number; up(db: unknown): void }>[];
+  migrations?: readonly Readonly<{ version: number; up(db: WorkbenchDatabase): void }>[];
   jobs?: Readonly<Record<string, unknown>>;
   blobs?: Readonly<Record<string, unknown>>;
   log?: Readonly<Record<string, unknown>>;
 }
 
 export interface WorkbenchApp extends RouteBuilder {
-  readonly db?: unknown;
+  readonly db?: WorkbenchDatabase;
   readonly routes: readonly unknown[];
   readonly config: Readonly<Record<string, unknown>>;
   readonly jobs?: unknown;

@@ -1,31 +1,14 @@
 /// <reference types="node" />
 
-import type { BoundWorkbenchEntity, CommittedEvent, Principal, Handler } from '../index.d.ts';
-
-// ---------------------------------------------------------------------------
-// WorkbenchDatabase — the minimum structural SQLite/driver interface
-// ---------------------------------------------------------------------------
-
-export interface WorkbenchStatement {
-  run(...params: unknown[]): { changes: number };
-  get(...params: unknown[]): unknown;
-  all(...params: unknown[]): unknown[];
-}
-
-export interface WorkbenchDatabase {
-  prepare(sql: string): WorkbenchStatement;
-  exec(sql: string): void;
-  txn?<T>(fn: () => Promise<T>): Promise<T>;
-  begin?(): void;
-  commit?(): void;
-  rollback?(): void;
-  upsert?(opts: {
-    table: string;
-    keyColumns: string[];
-    columns?: string[];
-    values: Record<string, unknown>;
-  }): void;
-}
+import type {
+  BoundWorkbenchEntity,
+  CommittedEvent,
+  Principal,
+  Handler,
+  WorkbenchDatabase,
+  WorkbenchStatement,
+} from '../index.d.ts';
+export type { WorkbenchDatabase, WorkbenchStatement } from '../index.d.ts';
 
 // ---------------------------------------------------------------------------
 // Job types — both raw rows and the parsed runtime shape
