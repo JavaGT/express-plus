@@ -641,3 +641,17 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Settlement rule:** Success, size refusal, stream error, client abort, and premature close all pass through one settle-once boundary that removes every listener it installed. Oversized bodies are drained without retaining further chunks so the 413 response can flush cleanly.
 - **Early refusal:** A trustworthy integer `Content-Length` above the configured cap is rejected before buffering. Chunked or missing lengths remain protected by the same byte counter.
 - **Reason:** Request streams are consumable once. Treating them as reusable allowed silent hangs, while leaving callbacks attached after settlement retained request state and performed work after the result was already known.
+
+## 2026-07-13 — subscription requests have correlated outcomes
+
+- **Decision:** Each subscribe wire request carries a client-generated `requestId`, and the server echoes it in both `subscribed` acknowledgements and subscription errors.
+- **Reason:** Scope alone is not a safe correlation key across reconnect generations, and an uncorrelated error forced the client to reject every pending subscription. Correlation makes one authorization denial local to one attempt.
+- **Lifecycle rule:** A denied desired subscription is removed before its promise rejects. A later subscription to the same scope is a new request; denied intent is not replayed on reconnect.
+- **Compatibility:** Uncorrelated server errors remain connection-level failures for older/custom servers and reject all pending attempts, but current Workbench peers always correlate subscription outcomes.
+
+## 2026-07-13 — undo is compensating mutation metadata, not a second write path
+
+- **Decision:** Wave 9 will build undo/redo on one transactional action executor. Actions own typed, versioned preimages and compensators; the framework persists private undo metadata and applies compensation through ordinary authorization, admission, projection, log, effect, and live-delivery machinery.
+- **Rejected:** Public `Entity.undo` verbs, direct SQL restoration, client-authoritative preimages, whole-row snapshot overwrite, and nested `history.undone` wrapper events.
+- **Conflict rule:** Compensation fails atomically when later work changed the same semantic state. Unrelated later edits may survive only where an action-specific compensator can prove that merge safe.
+- **Ordering:** This is a Wave 9 change because it first requires migrated action families and a unified in-transaction executor. It is not part of the Wave 2 client/HTTP closure.

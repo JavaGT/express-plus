@@ -560,3 +560,12 @@ REMAINING-P1-NOTES resolved/deferred: spec #6 (handler txn signature) RESOLVED b
 - All installed stream listeners are removed on every terminal path. Oversized bodies stop accumulating chunks but continue draining, and a declared length over the cap is refused before buffering begins.
 - Focused body gate: 25/25 green; full suite 1,791/1,791; ESLint and diff check green.
 - Next: complete the Wave 2 architecture/security closure, then build the Wave 3 parity harness before persistence cutover work.
+
+## 2026-07-13 — rewrite Wave 2: subscription outcomes are correlated — DONE
+
+- Every subscribe attempt now carries a connection-generation-local `requestId`; acknowledgement and denial envelopes echo it. A denied subscription rejects and retires only its matching desired subscription, while unrelated concurrent subscriptions continue normally.
+- Request bookkeeping is cleared on acknowledgement, unsubscribe, socket retirement, and close. Reusing a formerly denied scope creates a fresh request instead of replaying stale denied intent.
+- A real mixed authorized/denied WebSocket test proves the allowed stream remains live, and protocol tests pin correlated acknowledgement and denial envelopes.
+- Wave 2 closure gates: full suite 1,793/1,793; ESLint 0 errors (225 existing warnings); `npm audit` 0 vulnerabilities; public-export contract and package-boundary tests green; independent review found no P0/P1 release blocker.
+- Undo/preimage work is intentionally Wave 9. Its accepted direction is one transactional action executor, private typed/versioned undo metadata, and action-owned compensating mutations through the ordinary kernel—never client-owned snapshots, direct restoration SQL, nested wrapper events, or public entity undo verbs.
+- Next: Wave 3 starts with stable public outcomes and a no-HTTP `app.start()` lifecycle, then a real Theme parity canary. Broader action-family parity expands only as each custom action family migrates through the public consumer-action seam.
