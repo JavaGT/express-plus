@@ -376,15 +376,14 @@ test('maxEffectDepth 1 rejects a second effect hop and rolls back the whole chai
     }),
   });
 
-  await assert.rejects(
-    server.dispatch({
-      actionId: 'two-effect-hops',
-      type: 'TwoHopSource.create',
-      payload: { name: 'origin' },
-      principal: principal({ type: 'user', id: 'u1' }),
-    }),
-    /depth limit exceeded/i,
-  );
+  const result = await server.dispatch({
+    actionId: 'two-effect-hops',
+    type: 'TwoHopSource.create',
+    payload: { name: 'origin' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'internal');
 
   for (const table of ['TwoHopSource', 'TwoHopMiddle', 'TwoHopTarget', '_Log']) {
     assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n, 0);
@@ -612,24 +611,15 @@ test('depth cap: self-recursion bounded (Counter.updated → Counter.updated)', 
 
   // This should NOT hang - depth cap should fire. Default maxDepth=8, each
   // self-effect fires on :updated, creating a chain. After depth cap, throws.
-  // The test asserts it throws the depth-cap error rather than hanging.
-  let threw = false;
-  let errorMsg = '';
-  try {
-    await server.dispatch({
-      actionId: 'trigger-rec',
-      type: 'Counter.update',
-      payload: { id: originId, count: 0, phase: 'start' },
-      principal: principal({ type: 'user', id: 'u1' }),
-    });
-  } catch (err) {
-    threw = true;
-    errorMsg = err.message;
-  }
+  const result = await server.dispatch({
+    actionId: 'trigger-rec',
+    type: 'Counter.update',
+    payload: { id: originId, count: 0, phase: 'start' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
 
-  // The depth cap should fire before infinite recursion
-  assert.ok(threw, 'should throw depth-cap error, not hang');
-  assert.ok(/depth limit exceeded/i.test(errorMsg), `error should mention depth cap: ${errorMsg}`);
+  assert.equal(result.ok, false, 'depth-cap failure must not hang');
+  assert.equal(result.failure.category, 'internal');
 });
 
 test('db threaded through effects executor: RMW read uses in-txn db handle', async () => {
@@ -1128,20 +1118,14 @@ test('Self-recursion depth cap: anyOf effect with self-mutate bounded by maxDept
   const seeded = db.prepare('SELECT * FROM Counter').get();
 
   // Trigger the recursion - should hit depth cap, not hang
-  let threw = false;
-  let errorMsg = '';
-  try {
-    await server.dispatch({
-      actionId: 'trigger-rec',
-      type: 'Counter.update',
-      payload: { id: seeded.id, count: 0, phase: 'start' },
-      principal: principal({ type: 'user', id: 'u1' }),
-    });
-  } catch (err) {
-    threw = true;
-    errorMsg = err.message;
-  }
+  const result = await server.dispatch({
+    actionId: 'trigger-rec',
+    type: 'Counter.update',
+    payload: { id: seeded.id, count: 0, phase: 'start' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
 
-  assert.ok(threw, 'should throw depth-cap error, not hang');
-  assert.ok(/depth limit exceeded/i.test(errorMsg), `error should mention depth cap: ${errorMsg}`);
+  assert.equal(result.ok, false, 'depth-cap failure must not hang');
+  assert.equal(result.failure.category, 'internal');
+  assert.equal(result.failure.message, 'Internal error.');
 });

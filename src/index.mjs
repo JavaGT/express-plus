@@ -16,6 +16,7 @@ export {
   failureOutcome,
   isWorkbenchFailure,
   sanitizeUnexpectedFailure,
+  statusForFailure,
 } from './outcome.mjs';
 export { matchRoute } from './http-route-match.mjs';
 export { serveStatic } from './views.mjs';

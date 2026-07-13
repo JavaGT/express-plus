@@ -41,8 +41,10 @@ function mockRow(id) {
   return { id };
 }
 
-function fakeDispatch(granted = true, events = []) {
-  return async ({ type, payload }) => ({ granted, events, type, payload });
+function fakeDispatch(ok = true, events = []) {
+  return async ({ type, payload }) => ok
+    ? ({ ok: true, deduped: false, events, type, payload })
+    : ({ ok: false, failure: { category: 'denied', message: 'Forbidden.' } });
 }
 
 function runDDL(db, sql) {

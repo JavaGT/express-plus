@@ -58,7 +58,7 @@ test('batch commits multiple creates atomically under one actionId', async (t) =
     { type: 'BatchNote.create', payload: { body: 'second' } },
   ], { principal: alice });
 
-  assert.equal(result.granted, true, 'batch granted');
+  assert.equal(result.ok, true, 'batch granted');
   assert.equal(result.deduped, false, 'fresh batch');
   assert.equal(result.events.length, 2, 'two composed events');
   // ONE actionId across the whole batch (one composed commit).
@@ -92,9 +92,8 @@ test('a denied sub-action rolls back the ENTIRE batch (all-or-nothing)', async (
     { type: 'BatchDeny.create', payload: { body: 'should-be-denied' } },
   ], { principal: alice });
 
-  assert.equal(result.granted, false, 'batch denied by the second sub-action');
-  assert.equal(result.deduped, false, 'a denied batch is never a deduplicated success');
-  assert.equal(result.events.length, 0, 'no events on a denied batch');
+  assert.equal(result.ok, false, 'batch denied by the second sub-action');
+  assert.equal(result.failure.category, 'denied');
 
   const count = db.prepare('SELECT COUNT(*) AS c FROM BatchNote').get().c;
   assert.equal(count, 0, 'no row survived the rollback');
@@ -108,7 +107,7 @@ test('re-sending the same actionId is a dedupe (returns the committed events)', 
   ];
 
   const first = await app.batch(actions, { principal: alice });
-  assert.equal(first.granted, true);
+  assert.equal(first.ok, true);
   assert.equal(first.deduped, false);
   const firstActionId = first.events[0].actionId;
 
@@ -118,7 +117,7 @@ test('re-sending the same actionId is a dedupe (returns the committed events)', 
     actions,
     principal: alice,
   }));
-  assert.equal(retry.granted, true);
+  assert.equal(retry.ok, true);
   assert.equal(retry.deduped, true, 'second dispatch with the same actionId dedupes');
   assert.equal(retry.events.length, 1);
   assert.equal(retry.events[0].type, 'BatchNote.created');
@@ -139,7 +138,7 @@ test('batch spans multiple entity types in one composed commit', async (t) => {
     { type: 'BatchCounter.create', payload: { n: '1' } },
   ], { principal: alice });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   assert.equal(result.events.length, 2);
   const types = result.events.map((e) => e.type).sort();
   assert.deepEqual(types, ['BatchCounter.created', 'BatchNote.created']);
@@ -153,7 +152,7 @@ test('batch spans multiple entity types in one composed commit', async (t) => {
 test('empty batch is a no-op granted with no events', async (t) => {
   const { app } = await setup(t, ownedNote(), alice);
   const result = await app.batch([], { principal: alice });
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   assert.equal(result.events.length, 0);
 });
 
@@ -172,7 +171,7 @@ test('batch action factories run inside the write queue and feed the ordinary ba
   }, { principal: alice });
 
   assert.equal(factoryRan, true);
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   assert.equal(result.events[0].type, 'BatchNote.created');
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM BatchNote').get().c, 1);
 });
@@ -189,7 +188,7 @@ test('batch action factories must be synchronous and a failure releases the writ
     [{ type: 'BatchNote.create', payload: { body: 'queue-released' } }],
     { principal: alice },
   );
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
 	assert.deepEqual(
 		db.prepare('SELECT body FROM BatchNote').all().map((row) => row.body),
 		['queue-released']
@@ -229,9 +228,8 @@ test('a post-grant deny rolls back the first action mid-transaction (in-txn ROLL
     { type: 'PostGrantDeny.create', payload: { body: 'denied-in-txn' } },
   ], { principal: alice });
 
-  assert.equal(result.granted, false, 'denied by the in-txn post-grant');
-  assert.equal(result.deduped, false, 'an in-transaction denial is never a deduplicated success');
-  assert.equal(result.events.length, 0, 'no events escape a rolled-back batch');
+  assert.equal(result.ok, false, 'denied by the in-txn post-grant');
+  assert.equal(result.failure.category, 'denied');
 
   // The first action's row must NOT survive — proving the 403 was thrown INSIDE
   // the open transaction (ROLLBACK undid the projected BatchNote), not before it.

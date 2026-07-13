@@ -123,7 +123,7 @@ test('A: dispatch .append action emits :appended and writes the side-table row',
     principal: principal({ type: 'user', id: 'u1' }),
   });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   const appended = result.events.find((e) => e.type === 'DocLogB.chat.appended');
   assert.ok(appended, 'an :appended event was emitted');
   assert.equal(appended.data.owner, 'r1');
@@ -191,15 +191,15 @@ test('D: dispatch .append with an unknown entry sub-field is rejected (fail clos
   seedDoc(db, 'r1');
   const server = await makeServer(db, DocLogB);
 
-  await assert.rejects(
-    () => server.dispatch({
-      actionId: randomUUID(),
-      type: 'DocLogB.chat.append',
-      payload: { owner: 'r1', sender: 'u1', bogus: 'x' },
-      principal: principal({ type: 'user', id: 'u1' }),
-    }),
-    /unknown entry field/,
-  );
+  const result = await server.dispatch({
+    actionId: randomUUID(),
+    type: 'DocLogB.chat.append',
+    payload: { owner: 'r1', sender: 'u1', bogus: 'x' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.match(result.failure.message, /unknown entry field/);
   // nothing written
   assert.equal(db.prepare('SELECT COUNT(*) AS n FROM DocLogB_chat').get().n, 0);
 });

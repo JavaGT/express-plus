@@ -47,7 +47,7 @@ test('durable variant: pre-projection denial leaves zero footprint', async () =>
 
   const result = await server.dispatch({ actionId: 'pre-deny', type: 'Note.create', payload: { id: 'n1', body: 'x' } });
 
-  assert.equal(result.granted, false);
+  assert.equal(result.ok, false);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM _Log').get().c, 0, 'no log row before pre-projection denial');
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Note').get().c, 0, 'no projection row before pre-projection denial');
   db.close();
@@ -67,7 +67,7 @@ test('durable variant: post-projection denial rolls back log and projection', as
 
   const result = await server.dispatch({ actionId: 'post-deny', type: 'Note.create', payload: { id: 'n2', body: 'x' } });
 
-  assert.equal(result.granted, false);
+  assert.equal(result.ok, false);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM _Log').get().c, 0, 'rolled back log row after post-projection denial');
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Note').get().c, 0, 'rolled back projected row after post-projection denial');
   db.close();
@@ -130,7 +130,7 @@ test('durable variant: effects recurse through the same variant interface', asyn
     principal: { type: 'user', id: 'u1' },
   });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM TargetVariant').get().c, 1, 'effect target projected by recursive variant');
   assert.ok(admissionCalls.some((call) => call.entityName === 'TargetVariant' && call.principalType === 'system' && call.effect === 'SourceVariant'));
   db.close();

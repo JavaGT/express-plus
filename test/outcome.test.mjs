@@ -9,6 +9,7 @@ import {
   sanitizeUnexpectedFailure,
 } from '../src/index.mjs';
 import { failureFromError } from '../src/outcome.mjs';
+import { statusForFailure } from '../src/outcome.mjs';
 
 test('failure categories are the six stable public categories', () => {
   assert.deepEqual(FAILURE_CATEGORIES, [
@@ -80,4 +81,13 @@ test('failureFromError sanitizes unexpected errors', () => {
     category: 'internal',
     message: 'Internal error.',
   });
+});
+
+test('failure categories have one canonical HTTP status mapping', () => {
+  assert.equal(statusForFailure(failure('invalid-input', 'bad')), 400);
+  assert.equal(statusForFailure(failure('denied', 'no')), 403);
+  assert.equal(statusForFailure(failure('unknown-action', 'missing')), 404);
+  assert.equal(statusForFailure(failure('not-found', 'missing')), 404);
+  assert.equal(statusForFailure(failure('conflict', 'duplicate')), 409);
+  assert.equal(statusForFailure(failure('internal', 'safe')), 500);
 });

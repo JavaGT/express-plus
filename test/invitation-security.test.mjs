@@ -61,7 +61,7 @@ test('invitation creation requires admin capability on the target row', async ()
     api.createInvitation({
       targetEntity: 'InvitationSecurityProject', targetId: 'p1', role: 'member', principal: stranger,
     }),
-    (error) => error.status === 403,
+    (error) => error.failure?.category === 'denied',
   );
   assert.equal(db.prepare('SELECT count(*) AS n FROM Invitation').get().n, 0);
   db.close();
@@ -87,7 +87,7 @@ test('invitation creation cannot authorize an admin-capable row hidden by its sc
     api.createInvitation({
       targetEntity: ScopedProject.name, targetId: 'private-1', role: 'member', principal: stranger,
     }),
-    (error) => error.status === 404
+    (error) => error.failure?.category === 'not-found'
       && db.prepare('SELECT count(*) AS n FROM Invitation').get().n === 0,
   );
   app.httpServer.close();
@@ -98,11 +98,11 @@ test('target entity and role are resolved from declarations, never request SQL',
   const { db, api } = await fixture();
   await assert.rejects(
     api.createInvitation({ targetEntity: 'Invitation; DROP TABLE Invitation;--', targetId: 'p1', role: 'member', principal: owner }),
-    (error) => error.status === 400,
+    (error) => error.failure?.category === 'invalid-input',
   );
   await assert.rejects(
     api.createInvitation({ targetEntity: 'InvitationSecurityProject', targetId: 'p1', role: 'administrator', principal: owner }),
-    (error) => error.status === 400,
+    (error) => error.failure?.category === 'invalid-input',
   );
   assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE name = 'Invitation'").get());
   db.close();
@@ -229,11 +229,14 @@ test('acceptance reports a denied batch instead of returning false success', asy
   const invitation = await api.createInvitation({
     targetEntity: 'InvitationSecurityProject', targetId: 'p1', role: 'member', principal: owner,
   });
-  app.batch = async () => ({ granted: false, events: [], deduped: false });
+  app.batch = async () => ({
+    ok: false,
+    failure: { category: 'denied', message: 'Forbidden.' },
+  });
 
   await assert.rejects(
     api.acceptInvitation(invitation.token, member),
-    (error) => error.status === 403 && /denied/.test(error.message),
+    (error) => error.failure?.category === 'denied',
   );
   db.close();
 });
@@ -244,11 +247,14 @@ test('rejection reports a denied batch instead of returning false success', asyn
     targetEntity: 'InvitationSecurityProject', targetId: 'p1', role: 'member',
     targetUser: member.id, principal: owner,
   });
-  app.batch = async () => ({ granted: false, events: [], deduped: false });
+  app.batch = async () => ({
+    ok: false,
+    failure: { category: 'denied', message: 'Forbidden.' },
+  });
 
   await assert.rejects(
     api.rejectInvitation(invitation.token, member),
-    (error) => error.status === 403 && /denied/.test(error.message),
+    (error) => error.failure?.category === 'denied',
   );
   db.close();
 });
@@ -285,7 +291,7 @@ test('only maps whose members are User rows can be invitation roles', async () =
     api.createInvitation({
       targetEntity: Project.name, targetId: 'p1', role: 'member', principal: owner,
     }),
-    (error) => error.status === 400 && /User/.test(error.message),
+    (error) => error.failure?.category === 'invalid-input' && /User/.test(error.failure.message),
   );
   app.httpServer.close();
   db.close();

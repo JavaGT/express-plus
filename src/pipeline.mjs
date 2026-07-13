@@ -15,9 +15,11 @@ import { readSeq } from './committed-log.mjs';
 import { appendEvents, eventsFor, rowToEvent } from './committed-log.mjs';
 import { lifecycleVerb, parseEventType } from './event-handle.mjs';
 import { txn } from './driver.mjs';
-import { isPlainObject } from './field-strategy.mjs';
+import { isPlainObject, ValidationError } from './field-strategy.mjs';
 import { createRequire } from 'node:module';
 import { decideReplay } from './replay-decision.mjs';
+import { getLog } from './log.mjs';
+import { failure, failureFromError, failureOutcome } from './outcome.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -261,39 +263,65 @@ export function durableMutationVariant({
 // `authorize` is REQUIRED and fails closed: there is no default. A default
 // `() => true` would admit every action (fail OPEN), the opposite of the route
 
-function deniedResult() {
-  return { granted: false, deduped: false, events: [] };
+function successOutcome(events, deduped = false) {
+  return Object.freeze({ ok: true, deduped, events });
+}
+
+function deniedOutcome(details) {
+  return failureOutcome(failure('denied', 'Forbidden.', details));
+}
+
+function unknownActionOutcome(type, details) {
+  return failureOutcome(failure(
+    'unknown-action',
+    `No action named '${String(type)}' is registered.`,
+    details,
+  ));
+}
+
+function executionFailure(error, context = {}, details) {
+  const normalized = error instanceof ValidationError
+    ? failure('invalid-input', error.message)
+    : failureFromError(error);
+  if (normalized.category === 'internal') {
+    getLog().error('dispatch', 'dispatch failed', { err: error, ...context });
+  }
+  const withDetails = details
+    ? failure(normalized.category, normalized.message, { ...(normalized.details ?? {}), ...details })
+    : normalized;
+  return failureOutcome(withDetails);
 }
 
 // commitEvents — the durable transaction brace shared by `dispatch` and
 // `dispatchBatch`: BEGIN IMMEDIATE → durable variant applyInTxn → COMMIT →
-// post-commit fan-out, with ROLLBACK on error and a graceful 403. A denial from
-// the admission seam is deliberate and returned as `{granted:false}`, not thrown.
+// post-commit fan-out, with ROLLBACK on execution error. Expected failures are
+// returned through the stable outcome grammar rather than thrown.
 // The `payload` argument is the admission context each caller threads through:
 // `dispatch` passes its single action's `payload`, `dispatchBatch` passes the
 // `actions` array. The two genuinely differ there, so the brace is extracted but
 // the `payload` value stays per-caller. Throws non-403 errors after rolling back;
-// returns `{events}` on success or `{granted:false, events:[]}` on a 403 in-txn.
+// Post-commit delivery can no longer turn a committed mutation into a failure.
 async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline }) {
+  let committed;
   try {
     // The in-transaction work (applyInTxn) is wrapped by the driver's txn
     // helper: BEGIN IMMEDIATE / await fn() / COMMIT, ROLLBACK on throw. The
     // callback brackets ONLY applyInTxn — afterCommit is post-commit fan-out
     // (out-of-band effects that cannot join the DB txn) and runs AFTER commit,
     // naturally outside the txn (seam-review §2.1).
-    const committed = await txn(db, () => pipeline.applyInTxn(db, events, {
+    committed = await txn(db, () => pipeline.applyInTxn(db, events, {
       now, actionId, nextSeq, principal, payload,
     }));
-    await pipeline.afterCommit(committed, { db, actionId });
-    return { granted: true, events: committed };
   } catch (err) {
-    // A 403 from the in-txn admission seam is a deliberate denial (spec #5) —
-    // return denied gracefully rather than throwing. txn already rolled back.
-    if (err.status === 403) {
-      return deniedResult();
-    }
-    throw err;
+    return executionFailure(err, { actionId });
   }
+
+  try {
+    await pipeline.afterCommit(committed, { db, actionId });
+  } catch (err) {
+    getLog().error('dispatch', 'post-commit delivery failed', { err, actionId });
+  }
+  return successOutcome(committed);
 }
 
 // gate's default-on requireUser(). Authorization is always an explicit function
@@ -326,58 +354,88 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     }
 
     function dispatch({ actionId, type, payload, principal }) {
+      const handler = handlers[type];
+      if (typeof handler !== 'function') {
+        return unknownActionOutcome(type);
+      }
+
       // Fork C — AUTHORIZE FIRST. A retried action by a since-revoked principal
       // returns denied (403), even if the mutation already committed. This
       // reverses the old kernel which checked dedupe before authorize.
-      if (!authorize({ type, payload, principal })) {
-        return deniedResult();
+      let authorized;
+      try {
+        authorized = authorize({ type, payload, principal });
+      } catch (err) {
+        return executionFailure(err, { actionId, type });
+      }
+      if (!authorized) {
+        return deniedOutcome();
       }
 
       // Idempotent dedupe: a re-sent action returns its stored events without
       // re-running the handler — no duplicate state change (SPEC §7).
       if (dispatched.has(actionId)) {
-        return { granted: true, deduped: true, events: dispatched.get(actionId) };
-      }
-
-      const handler = handlers[type];
-      if (typeof handler !== 'function') {
-        throw new Error(`no handler registered for action type '${type}'.`);
+        return successOutcome(dispatched.get(actionId), true);
       }
 
       // Run the handler, then assign each emitted event a per-scope monotonic
       // sequence number and append to the log.
-      const emitted = handler({ payload, principal });
-      const events = emitted.map((e) =>
-        Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
+      let events;
+      try {
+        const emitted = handler({ payload, principal });
+        events = emitted.map((e) =>
+          Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
+      } catch (err) {
+        return executionFailure(err, { actionId, type });
+      }
       for (const e of events) log.push(e);
 
       dispatched.set(actionId, events);
-      return { granted: true, deduped: false, events };
+      return successOutcome(events);
     }
 
     function dispatchBatch({ actionId, actions = [], principal }) {
-      if (actions.length === 0) return { granted: true, deduped: false, events: [] };
-      for (const a of actions) {
-        if (!authorize({ type: a.type, payload: a.payload, principal })) {
-          return deniedResult();
+      if (actions.length === 0) return successOutcome([]);
+      for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+        const action = actions[actionIndex];
+        if (typeof handlers[action.type] !== 'function') {
+          return unknownActionOutcome(action.type, { actionIndex });
+        }
+      }
+      for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+        const action = actions[actionIndex];
+        let authorized;
+        try {
+          authorized = authorize({ type: action.type, payload: action.payload, principal });
+        } catch (err) {
+          return executionFailure(err, { actionId, type: action.type }, { actionIndex });
+        }
+        if (!authorized) {
+          return deniedOutcome({ actionIndex });
         }
       }
       if (dispatched.has(actionId)) {
-        return { granted: true, deduped: true, events: dispatched.get(actionId) };
+        return successOutcome(dispatched.get(actionId), true);
       }
       const allEmitted = [];
-      for (const a of actions) {
-        const handler = handlers[a.type];
-        if (typeof handler !== 'function') {
-          throw new Error(`no handler registered for action type '${a.type}'.`);
+      for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+        const action = actions[actionIndex];
+        try {
+          allEmitted.push(...handlers[action.type]({ payload: action.payload, principal }));
+        } catch (err) {
+          return executionFailure(err, { actionId, type: action.type }, { actionIndex });
         }
-        allEmitted.push(...handler({ payload: a.payload, principal }));
       }
-      const events = allEmitted.map((e) =>
-        Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
+      let events;
+      try {
+        events = allEmitted.map((e) =>
+          Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
+      } catch (err) {
+        return executionFailure(err, { actionId });
+      }
       for (const e of events) log.push(e);
       dispatched.set(actionId, events);
-      return { granted: true, deduped: false, events };
+      return successOutcome(events);
     }
 
     return { dispatch, dispatchBatch, log };
@@ -396,28 +454,38 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   // The durable dispatch: authorize (outside txn) → dedupe by actionId →
   // run handler → commit events inside a write transaction.
   async function dispatch({ actionId, type, payload, principal }) {
+    const handler = handlers[type];
+    if (typeof handler !== 'function') {
+      return unknownActionOutcome(type);
+    }
+
     // Fork C — AUTHORIZE FIRST (outside the transaction). A retried action by a
     // since-revoked principal returns denied (403).
-    const authResult = await authorize({ type, payload, principal });
+    let authResult;
+    try {
+      authResult = await authorize({ type, payload, principal });
+    } catch (err) {
+      return executionFailure(err, { actionId, type });
+    }
     if (!authResult) {
-      return deniedResult();
+      return deniedOutcome();
     }
 
     // Dedupe by actionId: a re-sent action returns its committed events without
     // re-running the handler (SPEC §7).
     const existing = eventsFor(db, actionId);
     if (existing.length > 0) {
-      return { granted: true, deduped: true, events: existing.map((r) => rowToEvent(r, parseEventType)) };
-    }
-
-    const handler = handlers[type];
-    if (typeof handler !== 'function') {
-      throw new Error(`no handler registered for action type '${type}'.`);
+      return successOutcome(existing.map((r) => rowToEvent(r, parseEventType)), true);
     }
 
     // Run the handler — events only, no DB writes (Fork A: entity-as-projection).
     // The handler may be sync or async.
-    const emitted = await handler({ payload, principal });
+    let emitted;
+    try {
+      emitted = await handler({ payload, principal });
+    } catch (err) {
+      return executionFailure(err, { actionId, type });
+    }
 
     // Apply events inside a write transaction using the shared brace.
     // node:sqlite's DatabaseSync is single-writer; BEGIN/COMMIT serialize writes.
@@ -425,8 +493,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const committed = await commitEvents(db, emitted, {
       now, actionId, nextSeq, principal, payload, pipeline,
     });
-    if (!committed.granted) return committed;
-    return { granted: true, deduped: false, events: committed.events };
+    return committed;
   }
 
   // dispatchBatch({ actionId, actions, principal }) — the batched mutation
@@ -440,42 +507,55 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   // a second pipeline (AGENTS.md). Effects fire in-txn exactly as in `dispatch`.
   async function dispatchBatch({ actionId, actions = [], principal }) {
     if (actions.length === 0) {
-      return { granted: true, deduped: false, events: [] };
+      return successOutcome([]);
+    }
+
+    for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+      const action = actions[actionIndex];
+      if (typeof handlers[action.type] !== 'function') {
+        return unknownActionOutcome(action.type, { actionIndex });
+      }
     }
 
     // Authorize EVERY action FIRST (outside the txn). Fail fast before any
     // write: a denied sub-action never opens the transaction, so a revoked
     // principal cannot poison a partial batch.
-    for (const a of actions) {
-      const authResult = await authorize({ type: a.type, payload: a.payload, principal });
-      if (!authResult) return deniedResult();
+    for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+      const action = actions[actionIndex];
+      let authResult;
+      try {
+        authResult = await authorize({ type: action.type, payload: action.payload, principal });
+      } catch (err) {
+        return executionFailure(err, { actionId, type: action.type }, { actionIndex });
+      }
+      if (!authResult) return deniedOutcome({ actionIndex });
     }
 
     // Dedupe the whole batch by its single actionId.
     const existing = eventsFor(db, actionId);
     if (existing.length > 0) {
-      return { granted: true, deduped: true, events: existing.map((r) => rowToEvent(r, parseEventType)) };
+      return successOutcome(existing.map((r) => rowToEvent(r, parseEventType)), true);
     }
 
     // Run every handler, concatenating their emitted events. Handlers are pure
     // (events only, no DB writes — Fork A), so the batch runs them in order and
     // folds all events into one commitEvents pass below.
     const allEmitted = [];
-    for (const a of actions) {
-      const handler = handlers[a.type];
-      if (typeof handler !== 'function') {
-        throw new Error(`no handler registered for action type '${a.type}'.`);
+    for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+      const action = actions[actionIndex];
+      try {
+        const emitted = await handlers[action.type]({ payload: action.payload, principal });
+        allEmitted.push(...emitted);
+      } catch (err) {
+        return executionFailure(err, { actionId, type: action.type }, { actionIndex });
       }
-      const emitted = await handler({ payload: a.payload, principal });
-      allEmitted.push(...emitted);
     }
 
     const now = new Date().toISOString();
     const committed = await commitEvents(db, allEmitted, {
       now, actionId, nextSeq, principal, payload: actions, pipeline,
     });
-    if (!committed.granted) return committed;
-    return { granted: true, deduped: false, events: committed.events };
+    return committed;
   }
 
   return { dispatch, dispatchBatch, db, log: [] };  // log is the durable _Log table; empty array for compat

@@ -8,14 +8,15 @@ import { readScopedRow } from '../http-crud-dispatch.mjs';
 import { rowCapabilities } from '../row-grant.mjs';
 import { MEMBER_COLUMN, membershipOwnerCol, membershipTable } from '../scope-sql.mjs';
 import { mapMutationAction } from '../side-table-strategy.mjs';
+import { failure } from '../outcome.mjs';
 
 function httpError(status, message) {
   return Object.assign(new Error(message), { status });
 }
 
-function requireGranted(result, operation) {
-  if (!result?.granted) {
-    throw httpError(403, `invitation ${operation} was denied`);
+function requireSuccess(result, operation) {
+  if (!result?.ok) {
+    throw { failure: result?.failure ?? failure('internal', `Invitation ${operation} failed.`) };
   }
 }
 
@@ -133,7 +134,7 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
         createdAt: new Date(),
       },
     }], { principal: authority });
-    requireGranted(result, 'creation');
+    requireSuccess(result, 'creation');
 
     const created = result.events.find((event) => event.type === `${Invitation.name}.created`);
     const invitation = created?.data?.id == null
@@ -223,7 +224,7 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
       };
       return actions;
     }, { principal: user });
-    requireGranted(result, 'acceptance');
+    requireSuccess(result, 'acceptance');
     return accepted;
   }
 
@@ -245,7 +246,7 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
       }
       return [{ type: 'Invitation.remove', payload: { id: invitation.id } }];
     }, { principal: user });
-    requireGranted(result, 'rejection');
+    requireSuccess(result, 'rejection');
   }
 
   function listInvitationsForUser(user) {

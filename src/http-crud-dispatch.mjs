@@ -11,12 +11,13 @@ import { readProjectedCursors } from './projected-async.mjs';
 import { projectedCursorHeaders } from './http-response.mjs';
 import { mayRow } from './row-grant.mjs';
 import { scopeOf } from './scope-handle.mjs';
+import { statusForFailure } from './outcome.mjs';
 
 // One kernel mutation through the write queue, translating the failure modes
 // shared by create/update/remove: queue starvation → 503, validation → 400
 // (remove opts out — its {id} payload has nothing to validate, so a
 // ValidationError there is a real bug and propagates), grant deny → 403.
-// Responds and returns null on failure; returns the granted result otherwise.
+// Responds and returns null on failure; returns the successful result otherwise.
 async function runKernelMutation(app, kernel, res, sendJson, action, { validation400 = true } = {}) {
   let result;
   try {
@@ -32,8 +33,8 @@ async function runKernelMutation(app, kernel, res, sendJson, action, { validatio
     }
     throw err;
   }
-  if (!result.granted) {
-    sendJson(res, 403, { error: 'forbidden' });
+  if (!result.ok) {
+    sendJson(res, statusForFailure(result.failure), { error: result.failure.message });
     return null;
   }
   return result;

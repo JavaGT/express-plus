@@ -229,13 +229,13 @@ test('create with valid state value persists the row', async (t) => {
     payload: { title: 'test doc', status: 'draft' },
     principal: { id: 'u1' },
   });
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   const row = Doc_b.findById(result.events[0].data.id);
   assert.ok(row);
   assert.equal(row.status, 'draft');
 });
 
-test('create with invalid state value throws ValidationError', async (t) => {
+test('create with invalid state value returns an invalid-input failure', async (t) => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   const Doc = setupDoc();
@@ -254,18 +254,14 @@ test('create with invalid state value throws ValidationError', async (t) => {
   });
   t.after(() => db.close());
 
-  await assert.rejects(
-    () => server.dispatch({
-      actionId: 'c-invalid-1',
-      type: 'DocState.create',
-      payload: { title: 'test doc', status: 'nonsense' },
-      principal: { id: 'u1' },
-    }),
-    (err) => {
-      assert.ok(err instanceof ValidationError || err.status === 400);
-      return true;
-    },
-  );
+  const result = await server.dispatch({
+    actionId: 'c-invalid-1',
+    type: 'DocState.create',
+    payload: { title: 'test doc', status: 'nonsense' },
+    principal: { id: 'u1' },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
 });
 
 test('update legal transition (draft -> shared) persists', async (t) => {
@@ -303,7 +299,7 @@ test('update legal transition (draft -> shared) persists', async (t) => {
     payload: { id: docId, status: 'shared' },
     principal: { id: 'u1' },
   });
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   const row = Doc_b.findById(docId);
   assert.equal(row.status, 'shared');
 });
@@ -378,7 +374,7 @@ test('state.effects runs only for its declared transition and defaults to the sa
   assert.equal(archivedRow.status, 'archived');
 });
 
-test('update illegal transition (draft -> archived) throws 400 with zero footprint', async (t) => {
+test('update illegal transition returns invalid-input with zero footprint', async (t) => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   const Doc = setupDoc();
@@ -410,18 +406,15 @@ test('update illegal transition (draft -> archived) throws 400 with zero footpri
   const logBefore = db.prepare('SELECT COUNT(*) AS cnt FROM _Log').get();
 
   // Attempt illegal transition: draft -> archived
-  await assert.rejects(
-    () => server.dispatch({
-      actionId: 'u-illegal-1',
-      type: 'DocState.update',
-      payload: { id: docId, status: 'archived' },
-      principal: { id: 'u1' },
-    }),
-    (err) => {
-      assert.ok(err.status === 400 || err.message.includes('illegal transition'));
-      return true;
-    },
-  );
+  const result = await server.dispatch({
+    actionId: 'u-illegal-1',
+    type: 'DocState.update',
+    payload: { id: docId, status: 'archived' },
+    principal: { id: 'u1' },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.match(result.failure.message, /illegal transition/);
 
   // Zero footprint: no _Log rows added
   const logAfter = db.prepare('SELECT COUNT(*) AS cnt FROM _Log').get();
@@ -466,12 +459,12 @@ test('update state to current value is a no-op (skips transition check)', async 
     payload: { id: docId, status: 'draft' },
     principal: { id: 'u1' },
   });
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   const row = Doc_b.findById(docId);
   assert.equal(row.status, 'draft');
 });
 
-test('update nonexistent row with state change throws 400 (no current state)', async (t) => {
+test('update nonexistent row with state change returns invalid-input', async (t) => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   const Doc = setupDoc();
@@ -490,16 +483,13 @@ test('update nonexistent row with state change throws 400 (no current state)', a
   });
   t.after(() => db.close());
 
-  await assert.rejects(
-    () => server.dispatch({
-      actionId: 'u-missing-1',
-      type: 'DocState.update',
-      payload: { id: 'nonexistent-id', status: 'shared' },
-      principal: { id: 'u1' },
-    }),
-    (err) => {
-      assert.ok(err.status === 400 || err.message.includes('no current state'));
-      return true;
-    },
-  );
+  const result = await server.dispatch({
+    actionId: 'u-missing-1',
+    type: 'DocState.update',
+    payload: { id: 'nonexistent-id', status: 'shared' },
+    principal: { id: 'u1' },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.match(result.failure.message, /no current state/);
 });

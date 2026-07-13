@@ -84,8 +84,8 @@ test('a denied action appends nothing to the log and reports the denial', () => 
     actionId: 'a1', type: 'post.publish',
     payload: { postId: 'p1', at: 1 }, principal: { id: 'banned' },
   });
-  assert.equal(result.granted, false);
-  assert.equal(result.deduped, false, 'a denial is never a deduplicated success');
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'denied');
   assert.equal(server.log.length, 0, 'authorization runs before the log is touched');
 });
 
@@ -102,10 +102,11 @@ test('createServer with no authorize is a load-time error (fail-closed, no defau
   );
 });
 
-test('dispatching an unknown action type is a runtime error (no handler)', () => {
+test('dispatching an unknown action type returns a stable failure', () => {
   const server = blogServer();
-  assert.throws(
-    () => server.dispatch({ actionId: 'a1', type: 'nope', payload: {}, principal: { id: 'u1' } }),
-    /handler/i,
-  );
+  const result = server.dispatch({
+    actionId: 'a1', type: 'nope', payload: {}, principal: { id: 'u1' },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'unknown-action');
 });

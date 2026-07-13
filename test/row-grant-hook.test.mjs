@@ -68,7 +68,7 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
     payload: { id: row.id, body: 'updated' },
     principal: { id: 'u1' },
   });
-  assert.equal(r1.granted, true);
+  assert.equal(r1.ok, true);
   let updated = Note_b.findById(row.id);
   assert.equal(updated.body, 'updated');
 
@@ -79,7 +79,7 @@ test('in-txn row-grant hook: deny after projections roll back the txn', async ()
     payload: { id: row.id, body: 'hacked' },
     principal: { id: 'u2' },
   });
-  assert.equal(r2.granted, false, 'non-owner denied by in-txn row-grant hook');
+  assert.equal(r2.ok, false, 'non-owner denied by in-txn row-grant hook');
 
   // The row is unchanged — txn rolled back
   updated = Note_b.findById(row.id);
@@ -136,7 +136,7 @@ test('in-txn row-grant hook: create — runs on the newly projected row', async 
     payload: { body: 'hi' },
     principal: { id: 'u1' },
   });
-  assert.equal(r1.granted, true);
+  assert.equal(r1.ok, true);
 
   // u2 tries to create — afterProjection admission denies
   const r2 = await server.dispatch({
@@ -145,7 +145,7 @@ test('in-txn row-grant hook: create — runs on the newly projected row', async 
     payload: { body: 'hacked' },
     principal: { id: 'u2' },
   });
-  assert.equal(r2.granted, false);
+  assert.equal(r2.ok, false);
 
   // Only u1's row exists
   const rows = db.prepare('SELECT * FROM Note').all();

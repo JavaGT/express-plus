@@ -88,7 +88,7 @@ test('a registered post-commit consumer receives committed events after dispatch
     principal: { id: 'u1' },
   });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   assert.equal(seen.length, 1);
   assert.equal(seen[0].type, 'Note.created');
   assert.equal(seen[0].seq, 1);
@@ -152,7 +152,7 @@ test('a throwing post-commit consumer does not roll back the commit or block lat
     principal: { id: 'u1' },
   });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   // The commit stood: the projected row exists despite the consumer throwing.
   const row = db.prepare('SELECT * FROM Note WHERE id = ?').get(result.events[0].data.id);
   assert.ok(row, 'the projected row survives a post-commit consumer failure');

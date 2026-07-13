@@ -85,14 +85,14 @@ test('a denied dispatch rolls its blob adopt back — the blob stays pending', a
     payload: { id: 'n1', photo: blobId },
   });
 
-  assert.equal(res.granted, false);
+  assert.equal(res.ok, false);
   // Atomicity boundary: the in-txn adopt was rolled back with the denial.
   assert.equal(store.stat(blobId).status, 'pending');
   assert.ok(fs.existsSync(store.pathFor(blobId, { pending: true })), '.pending file still present');
   assert.ok(!fs.existsSync(store.pathFor(blobId)), 'no final file — finalize skipped on rollback');
 });
 
-test('a granted dispatch adopts + finalizes the blob in the same commit', async (t) => {
+test('a successful dispatch adopts + finalizes the blob in the same commit', async (t) => {
   const { db, store } = setup(t);
   const { id: blobId } = store.upload({ bytes: Buffer.from('photo-bytes'), mime: 'image/png' });
   assert.equal(store.stat(blobId).status, 'pending');
@@ -115,7 +115,7 @@ test('a granted dispatch adopts + finalizes the blob in the same commit', async 
     payload: { id: 'n2', photo: blobId },
   });
 
-  assert.equal(res.granted, true);
+  assert.equal(res.ok, true);
   assert.equal(store.stat(blobId).status, 'adopted');
   assert.ok(!fs.existsSync(store.pathFor(blobId, { pending: true })), '.pending renamed away post-commit');
   assert.ok(fs.existsSync(store.pathFor(blobId)), 'final file exists post-commit');

@@ -143,7 +143,7 @@ test('#2 target row-grant deny of effect principal rolls back origin (in-txn ato
     principal: principal({ type: 'user', id: 'u1' }),
   });
 
-  assert.equal(result.granted, false, 'origin denied because effect was denied');
+  assert.equal(result.ok, false, 'origin denied because effect was denied');
   assert.equal(db.prepare('SELECT count(*) AS c FROM Source').get().c, 0, 'origin rolled back');
   assert.equal(db.prepare('SELECT count(*) AS c FROM Target').get().c, 0, 'no target created');
   app.httpServer?.close?.();
@@ -189,7 +189,7 @@ test('#2 real app row grant denies an admitted effect and rolls back both rows',
     principal: principal({ type: 'user', id: 'u1' }),
   });
 
-  assert.equal(result.granted, false, 'the canonical target row grant denies the effect');
+  assert.equal(result.ok, false, 'the canonical target row grant denies the effect');
   assert.equal(db.prepare('SELECT count(*) AS count FROM EffectGrantSource').get().count, 0);
   assert.equal(db.prepare('SELECT count(*) AS count FROM EffectGrantTarget').get().count, 0);
 });
@@ -226,7 +226,7 @@ test('#2 real app row grant denies a self-effect update before projection', asyn
     principal: principal({ type: 'user', id: 'u1' }),
   });
 
-  assert.equal(result.granted, false, 'the pre-projection row grant denies the self update');
+  assert.equal(result.ok, false, 'the pre-projection row grant denies the self update');
   assert.equal(db.prepare('SELECT count(*) AS count FROM DeniedSelfEffectCounter').get().count, 0);
 });
 
@@ -274,7 +274,7 @@ test('#3 admitsEffects deny rolls back origin', async () => {
     principal: principal({ type: 'user', id: 'u1' }),
   });
 
-  assert.equal(result.granted, false, 'admit deny → origin denied');
+  assert.equal(result.ok, false, 'admit deny → origin denied');
   assert.equal(db.prepare('SELECT count(*) AS c FROM Source').get().c, 0, 'origin rolled back');
   assert.equal(db.prepare('SELECT count(*) AS c FROM Target').get().c, 0, 'no target');
   app.httpServer?.close?.();
@@ -415,7 +415,7 @@ test('#4 boot: valid effects resolve app.ready + fire through the wired kernel',
     payload: { title: 't' },
     principal: principal({ type: 'user', id: 'u1' }),
   });
-  assert.ok(result.granted, `origin committed (got granted=${result.granted})`);
+  assert.ok(result.ok, `origin committed (got ok=)`);
 
   const targets = db.prepare('SELECT * FROM Target').all();
   assert.equal(targets.length, 1, 'wired registry fired the in-txn effect');

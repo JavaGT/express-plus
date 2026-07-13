@@ -30,7 +30,7 @@ function requireFieldDispatch(entityName, fieldName, dispatch) {
 async function dispatchFieldMutation({ entityName, fieldName, dispatch, type, payload, principal }) {
   requireFieldDispatch(entityName, fieldName, dispatch);
   const result = await dispatch({ actionId: randomUUID(), type, payload, principal });
-  if (!result.granted) throw { status: 403, message: 'forbidden' };
+  if (!result.ok) throw { failure: result.failure };
   return result;
 }
 

@@ -48,7 +48,7 @@ test('app.start boots schema and dispatch without opening an HTTP socket', async
     payload: { body: 'headless' },
     principal: user,
   });
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   assert.equal(db.prepare('SELECT body FROM StartNote').get().body, 'headless');
   assert.equal(app.start(), first, 'a completed start keeps the same readiness promise');
 });

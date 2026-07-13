@@ -55,7 +55,7 @@ test('entity-projection: create — handler emits event — entity.projection wr
     principal: { id: 'u1' },
   });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   assert.equal(result.deduped, false);
   assert.equal(result.events.length, 1);
   assert.equal(result.events[0].type, 'Note.created');
@@ -166,7 +166,7 @@ test('entity-projection: update — projection updates row', async () => {
     principal: { id: 'u1' },
   });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   const updated = Note_b.findById(row.id);
   assert.equal(updated.body, 'updated body');
 
@@ -227,7 +227,7 @@ test('entity-projection: update — struct (link) cells persist to the row', asy
     principal: { id: 'u1' },
   });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
 
   // The row (bootstrap read) must reflect the struct-cell change.
   const updated = Doc_b.findById(row.id);
@@ -278,7 +278,7 @@ test('entity-projection: remove — projection deletes row', async () => {
     principal: { id: 'u1' },
   });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   const deleted = Note_b.findById(row.id);
   assert.equal(deleted, null, 'row deleted by projection consumer');
 
@@ -318,10 +318,13 @@ test('entity-projection: projection failure rolls back the whole txn', async () 
     }),
   });
 
-  await assert.rejects(
-    () => server.dispatch({ actionId: 'x', type: 'Note.create', payload: {}, principal: { id: 'u1' } }),
-    /projection failure/,
-  );
+  const result = await server.dispatch({
+    actionId: 'x', type: 'Note.create', payload: {}, principal: { id: 'u1' },
+  });
+  assert.deepEqual(result, {
+    ok: false,
+    failure: { category: 'internal', message: 'Internal error.' },
+  });
 
   // Nothing persisted
   const logRows = db.prepare('SELECT * FROM _Log').all();

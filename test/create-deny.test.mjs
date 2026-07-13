@@ -3,7 +3,7 @@
 // Before this fix `buildKernel` wired `createServer({ authorize: () => true })`
 // and NEVER passed the in-txn post-projection admission seam (spec #5) that is
 // the INTENDED create-authorizer (create has no pre-existing
-// row to pre-check, unlike update/remove). So `result.granted` could only be
+// row to pre-check, unlike update/remove). So a denied result could only be
 // true and a create never 403'd — the route gate alone admitted the principal,
 // the row grant never ran. Latent for the exemplars because their `.can` grants
 // `write` to owner=creator, so every create happened to be authorized; but any

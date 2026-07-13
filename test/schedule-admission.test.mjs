@@ -457,7 +457,7 @@ test('the canonical app kernel rearms updates and clears removals in-transaction
     payload: { id: 'lifecycle', dueAt: future + 1000 },
     principal: user,
   });
-  assert.equal(updated.granted, true);
+  assert.equal(updated.ok, true);
   assert.equal(
     db.prepare('SELECT COUNT(*) AS count FROM _ScheduleReceipt WHERE rowId = ?').get('lifecycle').count,
     0,
@@ -472,7 +472,7 @@ test('the canonical app kernel rearms updates and clears removals in-transaction
     payload: { id: 'lifecycle' },
     principal: user,
   });
-  assert.equal(removed.granted, true);
+  assert.equal(removed.ok, true);
   assert.equal(
     db.prepare('SELECT COUNT(*) AS count FROM _ScheduleReceipt WHERE rowId = ?').get('lifecycle').count,
     0,
@@ -533,7 +533,7 @@ test('e2e: a bound scheduler dispatch is ADMITTED through the wired dispatch hoo
     payload: { id: 'b1', status: 'published' },
     principal: makePrincipal({ type: 'system', attributes: { source: 'BlogE2E.update.publishedAt' } }),
   });
-  assert.equal(res.granted, true, 'scheduler principal dispatched the declared payload on a due+while-holding row');
+  assert.equal(res.ok, true, 'scheduler principal dispatched the declared payload on a due+while-holding row');
   assert.ok(res.events?.length >= 1, 'the update event was committed');
   // The row was mutated by the projection:
   const row = db.prepare('SELECT * FROM BlogE2E WHERE id = ?').get('b1');
@@ -551,7 +551,7 @@ test('e2e: a scheduler principal sending an UNDECLARED payload is DENIED (write-
     payload: { id: 'b2', status: 'hijacked' }, // wrong value: schedule declared { status: 'published' }
     principal: makePrincipal({ type: 'system', attributes: { source: 'BlogE2E.update.publishedAt' } }),
   });
-  assert.equal(res.granted, false, 'undeclared payload → deny; the scheduler principal cannot write-anything');
+  assert.equal(res.ok, false, 'undeclared payload → deny; the scheduler principal cannot write-anything');
 });
 
 test('e2e: a scheduler principal with the WRONG source is DENIED', async () => {
@@ -565,7 +565,7 @@ test('e2e: a scheduler principal with the WRONG source is DENIED', async () => {
     payload: { id: 'b3', status: 'published' },
     principal: makePrincipal({ type: 'system', attributes: { source: 'Other.update.publishedAt' } }),
   });
-  assert.equal(res.granted, false, 'wrong source → deny; principal must bind to the declared schedule');
+  assert.equal(res.ok, false, 'wrong source → deny; principal must bind to the declared schedule');
 });
 
 test('e2e: production ISO transaction time still denies a future deadline', async () => {
@@ -582,7 +582,7 @@ test('e2e: production ISO transaction time still denies a future deadline', asyn
       attributes: { source: 'BlogE2E.update.publishedAt' },
     }),
   });
-  assert.equal(res.granted, false, 'a future deadline is never admitted through the production pipeline');
+  assert.equal(res.ok, false, 'a future deadline is never admitted through the production pipeline');
   assert.equal(
     db.prepare('SELECT status FROM BlogE2E WHERE id = ?').get('future').status,
     'draft',
@@ -600,5 +600,5 @@ test('e2e: a scheduler dispatch on a NON-draft row (while-fails) is DENIED', asy
     payload: { id: 'b4', status: 'published' },
     principal: makePrincipal({ type: 'system', attributes: { source: 'BlogE2E.update.publishedAt' } }),
   });
-  assert.equal(res.granted, false, 'while no longer holds → deny (the declared will still governs)');
+  assert.equal(res.ok, false, 'while no longer holds → deny (the declared will still governs)');
 });

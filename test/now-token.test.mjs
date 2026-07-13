@@ -35,14 +35,14 @@ test('now-token: a handler-emitted NOW resolves to the commit-time ISO in event 
     },
   });
 
-  const { granted, events } = await server.dispatch({
+  const { ok, events } = await server.dispatch({
     actionId: 'a1',
     type: 'Stamped.create',
     payload: { id: 1 },
     principal: principal({ type: 'user', id: 'u1' }),
   });
 
-  assert.equal(granted, true);
+  assert.equal(ok, true);
   const ev = events[0];
   assert.match(ev.data.createdAt, ISO, 'createdAt resolved to an ISO timestamp at commit');
   assert.equal(typeof ev.data.createdAt, 'string', 'the NOW symbol was replaced, not stored verbatim');

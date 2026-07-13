@@ -62,7 +62,7 @@ test('an app opts into the pipeline: action → event → reducer fold', async (
     actionId: 'a1', type: Publish.type,
     payload: { postId: 1, at: 12345 }, principal: { id: 'u1' },
   });
-  assert.equal(r1.granted, true);
+  assert.equal(r1.ok, true);
   assert.equal(r1.events.length, 1);
   assert.equal(r1.events[0].seq, 1);
   assert.equal(server.log.length, 1);
@@ -76,7 +76,7 @@ test('an app opts into the pipeline: action → event → reducer fold', async (
     actionId: 'a2', type: Publish.type,
     payload: { postId: 1, at: 999 }, principal: { id: 'u2' },
   });
-  assert.equal(r2.granted, false);
+  assert.equal(r2.ok, false);
   assert.equal(server.log.length, 1, 'denied action appends nothing');
 
   // A replayed action (same actionId) is deduped — no duplicate state change.
@@ -132,7 +132,7 @@ test('pipeline and direct CRUD coexist — one does not subsume the other', asyn
   });
 
   const r = server.dispatch({ actionId: 'd1', type: Draft.type, payload: { body: 'via pipeline' }, principal: { id: 'u1' } });
-  assert.equal(r.granted, true);
+  assert.equal(r.ok, true);
   assert.equal(r.events[0].type, 'note.drafted');
 
   // Both notes exist in the same db — one table, two paths, no conflict.

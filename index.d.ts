@@ -67,6 +67,7 @@ export function failure(
 export function failureOutcome(workbenchFailure: WorkbenchFailure): FailureOutcome;
 export function isWorkbenchFailure(value: unknown): value is WorkbenchFailure;
 export function sanitizeUnexpectedFailure(value?: unknown): WorkbenchFailure;
+export function statusForFailure(failure: WorkbenchFailure): 400 | 403 | 404 | 409 | 500;
 
 export interface UserPrincipal extends Principal {
   readonly type: 'user';
@@ -313,11 +314,13 @@ export interface DispatchRequest<Payload = Record<string, unknown>> {
   principal: Principal;
   scope?: string;
 }
-export interface DispatchResult<Event extends CommittedEvent = CommittedEvent> {
-  granted: boolean;
-  events: Event[];
-  deduped: boolean;
-}
+export type DispatchResult<Event extends CommittedEvent = CommittedEvent> =
+  | {
+      readonly ok: true;
+      readonly events: readonly Event[];
+      readonly deduped: boolean;
+    }
+  | FailureOutcome;
 
 export interface BatchAction<Payload = Record<string, unknown>> {
   readonly type: string;

@@ -33,7 +33,7 @@ test('durable dispatch appends events to the _Log table with per-scope seq', asy
     principal: { id: 'u1' },
   });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   assert.equal(result.deduped, false);
   assert.equal(result.events.length, 1);
   assert.equal(result.events[0].seq, 1);
@@ -115,7 +115,7 @@ test('dedupe by actionId — re-dispatch returns stored events without re-runnin
   const r1 = await server.dispatch({
     actionId: 'a1', type: Publish.type, payload: { postId: 1 }, principal: { id: 'u1' },
   });
-  assert.equal(r1.granted, true);
+  assert.equal(r1.ok, true);
   assert.equal(r1.deduped, false);
   assert.equal(handlerCalls, 1);
 
@@ -123,7 +123,7 @@ test('dedupe by actionId — re-dispatch returns stored events without re-runnin
   const r2 = await server.dispatch({
     actionId: 'a1', type: Publish.type, payload: { postId: 1 }, principal: { id: 'u1' },
   });
-  assert.equal(r2.granted, true);
+  assert.equal(r2.ok, true);
   assert.equal(r2.deduped, true);
   assert.equal(handlerCalls, 1, 'handler NOT re-run on dedupe');
 
@@ -158,8 +158,8 @@ test('authorize-first — a denied action never opens a transaction', async () =
     actionId: 'a1', type: Publish.type, payload: { postId: 1 }, principal: { id: 'u2' },
   });
 
-  assert.equal(result.granted, false);
-  assert.equal(result.deduped, false, 'a denial is never a deduplicated success');
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'denied');
   assert.equal(handlerCalls, 0);
 
   // Nothing in Log
@@ -169,7 +169,7 @@ test('authorize-first — a denied action never opens a transaction', async () =
 
 test('authorize-first vs dedupe — a retry after revoke returns 403', async () => {
   // Fork C: authorize BEFORE dedupe. A retried action by a since-revoked principal
-  // returns 403 (granted:false) — the mutation already happened but the retry is refused.
+  // returns 403 (ok:false) — the mutation already happened but the retry is refused.
   const db = new DatabaseSync(':memory:');
   for (const sql of generateFrameworkDDL()) db.exec(sql);
 
@@ -190,7 +190,7 @@ test('authorize-first vs dedupe — a retry after revoke returns 403', async () 
   const r1 = await server.dispatch({
     actionId: 'a1', type: Publish.type, payload: { postId: 1 }, principal: { id: 'u1' },
   });
-  assert.equal(r1.granted, true);
+  assert.equal(r1.ok, true);
   assert.equal(r1.deduped, false);
 
   // Revoke the principal
@@ -200,7 +200,7 @@ test('authorize-first vs dedupe — a retry after revoke returns 403', async () 
   const r2 = await server.dispatch({
     actionId: 'a1', type: Publish.type, payload: { postId: 1 }, principal: { id: 'u1' },
   });
-  assert.equal(r2.granted, false, 'authorize-first: retry by revoked principal is denied');
+  assert.equal(r2.ok, false, 'authorize-first: retry by revoked principal is denied');
 });
 
 test('Cursor survives restart — close and reopen db, lastSeq persists', async () => {
@@ -248,7 +248,7 @@ test('createServer without db stays ephemeral (in-memory log)', async () => {
     actionId: 'a1', type: Publish.type, payload: { postId: 1 }, principal: { id: 'u1' },
   });
 
-  assert.equal(result.granted, true);
+  assert.equal(result.ok, true);
   assert.equal(result.deduped, false);
   assert.equal(result.events.length, 1);
   assert.equal(result.events[0].seq, 1);
