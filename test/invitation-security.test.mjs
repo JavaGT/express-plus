@@ -31,6 +31,17 @@ async function fixture() {
   const app = workbench({ db, entities: [Project] });
   await app.prepareSchema();
   app.entity(Project).insert({ id: 'p1', title: 'Private', owner: 'owner-1' });
+  app.listen(0);
+  await app.ready;
+  app.httpServer.unref();
+  const closeDatabase = db.close.bind(db);
+  Object.defineProperty(db, 'close', {
+    configurable: true,
+    value() {
+      app.httpServer.close();
+      closeDatabase();
+    },
+  });
   const api = createInvitationApi({ Invitation: app.entity(Invitation) });
   return { app, db, Project: app.entity(Project), Invitation: app.entity(Invitation), api };
 }
@@ -68,6 +79,9 @@ test('invitation creation cannot authorize an admin-capable row hidden by its sc
   await app.prepareSchema();
   app.entity(ScopedProject).insert({ id: 'private-1', title: 'Private', owner: owner.id });
   const api = createInvitationApi({ Invitation: app.entity(Invitation) });
+  app.listen(0);
+  await app.ready;
+  app.httpServer.unref();
 
   await assert.rejects(
     api.createInvitation({
@@ -76,6 +90,7 @@ test('invitation creation cannot authorize an admin-capable row hidden by its sc
     (error) => error.status === 404
       && db.prepare('SELECT count(*) AS n FROM Invitation').get().n === 0,
   );
+  app.httpServer.close();
   db.close();
 });
 
@@ -116,6 +131,34 @@ test('acceptance is atomic and a repeated member does not consume another use', 
   db.close();
 });
 
+test('concurrent final-use acceptance grants exactly one new membership', async () => {
+  const { db, api, Invitation } = await fixture();
+  const invitation = await api.createInvitation({
+    targetEntity: 'InvitationSecurityProject', targetId: 'p1', role: 'member',
+    maxUses: 1, principal: owner,
+  });
+
+  const users = [
+    principal({ type: 'user', id: 'racer-1' }),
+    principal({ type: 'user', id: 'racer-2' }),
+  ];
+  const results = await Promise.allSettled(
+    users.map((user) => api.acceptInvitation(invitation.token, user)),
+  );
+  const stored = Invitation.findOne(Invitation.token.is(invitation.token));
+  const memberships = db.prepare(`
+    SELECT member_id FROM InvitationSecurityProject_members
+    WHERE InvitationSecurityProject_id = 'p1'
+    ORDER BY member_id
+  `).all();
+
+  assert.equal(results.filter((result) => result.status === 'fulfilled').length, 1);
+  assert.equal(results.filter((result) => result.status === 'rejected').length, 1);
+  assert.equal(stored.useCount, 1);
+  assert.equal(memberships.length, 1);
+  db.close();
+});
+
 test('an exhausted invitation cannot upgrade an existing lower-role membership', async () => {
   const TieredProject = entity('InvitationTieredProject', {
     title: text(),
@@ -130,6 +173,17 @@ test('an exhausted invitation cannot upgrade an existing lower-role membership',
   const app = workbench({ db, entities: [TieredProject] });
   await app.prepareSchema();
   app.entity(TieredProject).insert({ id: 'tiered-1', title: 'Private', owner: owner.id });
+  app.listen(0);
+  await app.ready;
+  app.httpServer.unref();
+  const closeDatabase = db.close.bind(db);
+  Object.defineProperty(db, 'close', {
+    configurable: true,
+    value() {
+      app.httpServer.close();
+      closeDatabase();
+    },
+  });
   const InvitationEntity = app.entity(Invitation);
   const api = createInvitationApi({ Invitation: InvitationEntity });
   const invitation = await api.createInvitation({
@@ -170,6 +224,35 @@ test('failed membership insertion rolls back invitation consumption', async () =
   db.close();
 });
 
+test('acceptance reports a denied batch instead of returning false success', async () => {
+  const { app, db, api } = await fixture();
+  const invitation = await api.createInvitation({
+    targetEntity: 'InvitationSecurityProject', targetId: 'p1', role: 'member', principal: owner,
+  });
+  app.batch = async () => ({ granted: false, events: [], deduped: false });
+
+  await assert.rejects(
+    api.acceptInvitation(invitation.token, member),
+    (error) => error.status === 403 && /denied/.test(error.message),
+  );
+  db.close();
+});
+
+test('rejection reports a denied batch instead of returning false success', async () => {
+  const { app, db, api } = await fixture();
+  const invitation = await api.createInvitation({
+    targetEntity: 'InvitationSecurityProject', targetId: 'p1', role: 'member',
+    targetUser: member.id, principal: owner,
+  });
+  app.batch = async () => ({ granted: false, events: [], deduped: false });
+
+  await assert.rejects(
+    api.rejectInvitation(invitation.token, member),
+    (error) => error.status === 403 && /denied/.test(error.message),
+  );
+  db.close();
+});
+
 test('invitation API rejects a database from another application runtime', async () => {
   const { db, Invitation } = await fixture();
   const other = new DatabaseSync(':memory:');
@@ -194,6 +277,9 @@ test('only maps whose members are User rows can be invitation roles', async () =
   await app.prepareSchema();
   app.entity(Project).insert({ id: 'p1', title: 'Private', owner: owner.id });
   const api = createInvitationApi({ Invitation: app.entity(Invitation) });
+  app.listen(0);
+  await app.ready;
+  app.httpServer.unref();
 
   await assert.rejects(
     api.createInvitation({
@@ -201,6 +287,7 @@ test('only maps whose members are User rows can be invitation roles', async () =
     }),
     (error) => error.status === 400 && /User/.test(error.message),
   );
+  app.httpServer.close();
   db.close();
 });
 
@@ -265,8 +352,8 @@ test('only a human user principal can reject an invitation', async () => {
     targetUser: member.id, principal: owner,
   });
 
-  assert.throws(
-    () => api.rejectInvitation(
+  await assert.rejects(
+    api.rejectInvitation(
       invitation.token,
       principal({ type: 'apiKey', id: member.id }),
     ),
@@ -299,14 +386,14 @@ test('an API-key bearer cannot accept an invitation or consume its use', async (
   app.entity(Project).insert({ id: 'bearer-project', title: 'Private', owner: owner.id });
   const InvitationEntity = app.entity(Invitation);
   const api = createInvitationApi({ Invitation: InvitationEntity });
+  app.listen(0);
+  await app.ready;
   const invitation = await api.createInvitation({
     targetEntity: Project.name, targetId: 'bearer-project', role: 'member',
     maxUses: 1, principal: owner,
   });
   const key = app.entity(ApiKey).create({ name: 'invitation-key', createdBy: owner.id });
 
-  app.listen(0);
-  await app.ready;
   t.after(() => {
     app.httpServer.close();
     db.close();

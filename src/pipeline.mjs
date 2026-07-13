@@ -253,6 +253,10 @@ export function durableMutationVariant({
 // `authorize` is REQUIRED and fails closed: there is no default. A default
 // `() => true` would admit every action (fail OPEN), the opposite of the route
 
+function deniedResult() {
+  return { granted: false, deduped: false, events: [] };
+}
+
 // commitEvents — the durable transaction brace shared by `dispatch` and
 // `dispatchBatch`: BEGIN IMMEDIATE → durable variant applyInTxn → COMMIT →
 // post-commit fan-out, with ROLLBACK on error and a graceful 403. A denial from
@@ -278,7 +282,7 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
     // A 403 from the in-txn admission seam is a deliberate denial (spec #5) —
     // return denied gracefully rather than throwing. txn already rolled back.
     if (err.status === 403) {
-      return { granted: false, events: [] };
+      return deniedResult();
     }
     throw err;
   }
@@ -318,7 +322,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       // returns denied (403), even if the mutation already committed. This
       // reverses the old kernel which checked dedupe before authorize.
       if (!authorize({ type, payload, principal })) {
-        return { granted: false, events: [] };
+        return deniedResult();
       }
 
       // Idempotent dedupe: a re-sent action returns its stored events without
@@ -347,7 +351,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       if (actions.length === 0) return { granted: true, deduped: false, events: [] };
       for (const a of actions) {
         if (!authorize({ type: a.type, payload: a.payload, principal })) {
-          return { granted: false, events: [] };
+          return deniedResult();
         }
       }
       if (dispatched.has(actionId)) {
@@ -388,7 +392,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // since-revoked principal returns denied (403).
     const authResult = await authorize({ type, payload, principal });
     if (!authResult) {
-      return { granted: false, events: [] };
+      return deniedResult();
     }
 
     // Dedupe by actionId: a re-sent action returns its committed events without
@@ -436,7 +440,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // principal cannot poison a partial batch.
     for (const a of actions) {
       const authResult = await authorize({ type: a.type, payload: a.payload, principal });
-      if (!authResult) return { granted: false, events: [] };
+      if (!authResult) return deniedResult();
     }
 
     // Dedupe the whole batch by its single actionId.

@@ -358,10 +358,10 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // POST /auth/invitation/:token/reject — reject a direct invitation.
   // requireUser: an anonymous caller cannot reject. Removes the direct
   // invitation row if the rejecting user matches the target.
-  s.post('/invitation/:token/reject', requireUser(), (req, res, next) => {
+  s.post('/invitation/:token/reject', requireUser(), async (req, res, next) => {
     const { token } = req.params;
     try {
-      rejectInvitation(token, req.principal);
+      await rejectInvitation(token, req.principal);
       res.sendStatus(204);
     } catch (err) {
       return next({ status: err.status ?? 500, message: err.message });

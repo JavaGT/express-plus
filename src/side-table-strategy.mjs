@@ -34,6 +34,18 @@ async function dispatchFieldMutation({ entityName, fieldName, dispatch, type, pa
   return result;
 }
 
+export function mapMutationAction({ entityName, fieldName, operation, owner, member, role }) {
+  if (!['add', 'setRole', 'remove'].includes(operation)) {
+    throw new Error(`unknown map mutation operation '${String(operation)}'`);
+  }
+  const payload = { owner: String(owner), member: String(member) };
+  if (operation !== 'remove') payload.role = role;
+  return Object.freeze({
+    type: `${entityName}.${fieldName}.${operation}`,
+    payload: Object.freeze(payload),
+  });
+}
+
 function mapHandle({ record, entityName, fieldName, descriptor, row, principal, dispatch, db, entityOf }) {
   const table = membershipTable(entityName, fieldName);
   const ownerCol = membershipOwnerCol(entityName);
@@ -59,25 +71,29 @@ function mapHandle({ record, entityName, fieldName, descriptor, row, principal, 
       await authorizeFieldOp(record, fieldName, write, row, principal);
       const mid = String(memberId);
       const existing = probeRow(memberId);
-      const actionType =
-        !existing ? `${entityName}.${fieldName}.add`
-        : hasRole && existing.role !== (role ?? null) ? `${entityName}.${fieldName}.setRole`
+      const operation =
+        !existing ? 'add'
+        : hasRole && existing.role !== (role ?? null) ? 'setRole'
         : null;
-      if (actionType === null) return;
+      if (operation === null) return;
+      const action = mapMutationAction({
+        entityName, fieldName, operation, owner: oid, member: mid, role,
+      });
       await dispatchFieldMutation({
         entityName, fieldName, dispatch, principal,
-        type: actionType,
-        payload: { owner: oid, member: mid, role },
+        ...action,
       });
     },
     remove: async (memberId) => {
       await authorizeFieldOp(record, fieldName, write, row, principal);
       const mid = String(memberId);
       if (!probe(memberId)) return;
+      const action = mapMutationAction({
+        entityName, fieldName, operation: 'remove', owner: oid, member: mid,
+      });
       await dispatchFieldMutation({
         entityName, fieldName, dispatch, principal,
-        type: `${entityName}.${fieldName}.remove`,
-        payload: { owner: oid, member: mid },
+        ...action,
       });
     },
     has: (memberId) => probe(memberId) !== undefined,

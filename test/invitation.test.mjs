@@ -34,6 +34,17 @@ async function setupDb() {
     db.prepare('INSERT INTO Project (id, title, owner) VALUES (?, ?, ?)')
       .run(id, `Project ${id}`, owner.id);
   }
+  app.listen(0);
+  await app.ready;
+  app.httpServer.unref();
+  const closeDatabase = db.close.bind(db);
+  Object.defineProperty(db, 'close', {
+    configurable: true,
+    value() {
+      app.httpServer.close();
+      closeDatabase();
+    },
+  });
   const Invitation_b = app.entity(Invitation);
   return {
     db,
@@ -122,6 +133,14 @@ test('create invitation with auto-generated token', async () => {
     const found = Invitation.findOne(Invitation.token.is(inv.token));
     assert.ok(found, 'can find invitation by token');
     assert.equal(found.id, inv.id);
+
+    const logRows = db.prepare(`
+      SELECT actionId, eventType
+      FROM _Log
+      ORDER BY seq
+    `).all();
+    assert.deepEqual(logRows.map((row) => row.eventType), ['Invitation.created']);
+    assert.equal(logRows[0].actionId.length > 0, true, 'creation has a durable action id');
   } finally {
     db.close();
   }
@@ -190,6 +209,37 @@ test('accept link invitation → increments useCount, grants membership', async 
       .get('p1', 'member-1');
     assert.ok(memberRow, 'membership row exists');
     assert.equal(memberRow.role, 'member');
+  } finally {
+    db.close();
+  }
+});
+
+test('acceptance records membership and invitation lifecycle events in one composed commit', async () => {
+  const { db, Invitation, createInvitation, acceptInvitation } = await setupDb();
+  try {
+    const inv = await createInvitation({
+      targetEntity: 'Project',
+      targetId: 'p1',
+      role: 'member',
+      maxUses: 2,
+      principal: owner,
+    });
+
+    const before = db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count;
+    await acceptInvitation(inv.token, member);
+    const rows = db.prepare(`
+      SELECT actionId, eventType
+      FROM _Log
+      ORDER BY rowid
+      LIMIT -1 OFFSET :before
+    `).all({ before });
+
+    assert.deepEqual(rows.map((row) => row.eventType), [
+      'Project.members.added',
+      'Invitation.updated',
+    ]);
+    assert.equal(new Set(rows.map((row) => row.actionId)).size, 1);
+    assert.equal(Invitation.findOne(Invitation.token.is(inv.token)).useCount, 1);
   } finally {
     db.close();
   }
@@ -302,10 +352,18 @@ test('reject direct invitation → removes row', async () => {
       principal: owner,
     });
 
-    rejectInvitation(inv.token, member);
+    const before = db.prepare('SELECT COALESCE(MAX(seq), 0) AS seq FROM _Log').get().seq;
+    await rejectInvitation(inv.token, member);
 
     const gone = Invitation.findOne(Invitation.token.is(inv.token));
     assert.equal(gone, null, 'invitation removed on reject');
+    const rows = db.prepare(`
+      SELECT eventType
+      FROM _Log
+      WHERE seq > :before
+      ORDER BY seq
+    `).all({ before });
+    assert.deepEqual(rows.map((row) => row.eventType), ['Invitation.removed']);
   } finally {
     db.close();
   }
@@ -322,8 +380,8 @@ test('reject direct invitation → wrong user fails with 403', async () => {
       principal: owner,
     });
 
-    assert.throws(
-      () => rejectInvitation(inv.token, otherUser),
+    await assert.rejects(
+      rejectInvitation(inv.token, otherUser),
       (err) => err.message.includes('different user') && err.status === 403,
     );
 
@@ -345,8 +403,8 @@ test('cannot reject open link invitation', async () => {
       principal: owner,
     });
 
-    assert.throws(
-      () => rejectInvitation(inv.token, member),
+    await assert.rejects(
+      rejectInvitation(inv.token, member),
       (err) => err.message.includes('cannot reject an open link invitation') && err.status === 400,
     );
   } finally {

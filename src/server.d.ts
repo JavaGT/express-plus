@@ -4,11 +4,12 @@ import type {
   BoundWorkbenchEntity,
   CommittedEvent,
   Principal,
+  UserPrincipal,
   Handler,
   WorkbenchDatabase,
   WorkbenchStatement,
 } from '../index.d.ts';
-export type { WorkbenchDatabase, WorkbenchStatement } from '../index.d.ts';
+export type { WorkbenchDatabase, WorkbenchStatement, UserPrincipal } from '../index.d.ts';
 
 // ---------------------------------------------------------------------------
 // Job types — both raw rows and the parsed runtime shape
@@ -173,18 +174,18 @@ export interface InvitationApi {
     targetEntity: string;
     targetId: string;
     role: string;
-    principal: Principal;
+    principal: UserPrincipal;
     targetUser?: string;
     maxUses?: number;
     expiresAt?: number;
   }): Promise<Invitation>;
-  acceptInvitation(token: string, user: { id: string }): Promise<{
+  acceptInvitation(token: string, user: UserPrincipal): Promise<{
     targetEntity: string;
     targetId: string;
     role: string;
   }>;
-  rejectInvitation(token: string, user: { id: string }): void;
-  listInvitationsForUser(user: { id: string }): Invitation[];
+  rejectInvitation(token: string, user: UserPrincipal): Promise<void>;
+  listInvitationsForUser(user: UserPrincipal): Invitation[];
 }
 
 export function createInvitationApi(options: {

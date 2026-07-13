@@ -93,6 +93,7 @@ test('a denied sub-action rolls back the ENTIRE batch (all-or-nothing)', async (
   ], { principal: alice });
 
   assert.equal(result.granted, false, 'batch denied by the second sub-action');
+  assert.equal(result.deduped, false, 'a denied batch is never a deduplicated success');
   assert.equal(result.events.length, 0, 'no events on a denied batch');
 
   const count = db.prepare('SELECT COUNT(*) AS c FROM BatchNote').get().c;
@@ -156,6 +157,45 @@ test('empty batch is a no-op granted with no events', async (t) => {
   assert.equal(result.events.length, 0);
 });
 
+test('batch action factories run inside the write queue and feed the ordinary batch pipeline', async (t) => {
+  const { app, db } = await setup(t, ownedNote(), alice);
+  let factoryRan = false;
+
+  const result = await app.batch(() => {
+    factoryRan = true;
+    assert.equal(
+      db.prepare('SELECT COUNT(*) AS c FROM BatchNote').get().c,
+      0,
+      'the factory observes state immediately before its composed mutation',
+    );
+    return [{ type: 'BatchNote.create', payload: { body: 'planned-in-queue' } }];
+  }, { principal: alice });
+
+  assert.equal(factoryRan, true);
+  assert.equal(result.granted, true);
+  assert.equal(result.events[0].type, 'BatchNote.created');
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM BatchNote').get().c, 1);
+});
+
+test('batch action factories must be synchronous and a failure releases the write queue', async (t) => {
+  const { app, db } = await setup(t, ownedNote(), alice);
+
+  await assert.rejects(
+    app.batch(async () => [{ type: 'BatchNote.create', payload: { body: 'never' } }], { principal: alice }),
+    /synchronous action array/,
+  );
+
+  const result = await app.batch(
+    [{ type: 'BatchNote.create', payload: { body: 'queue-released' } }],
+    { principal: alice },
+  );
+  assert.equal(result.granted, true);
+	assert.deepEqual(
+		db.prepare('SELECT body FROM BatchNote').all().map((row) => row.body),
+		['queue-released']
+	);
+});
+
 // The deny in `a denied sub-action rolls back…` could come from either the
 // first-layer `authorize` OR the durable variant's in-txn afterProjection seam.
 // The kernel's `authorize` is `() => true` (serve.mjs), so a create deny reaches
@@ -190,6 +230,7 @@ test('a post-grant deny rolls back the first action mid-transaction (in-txn ROLL
   ], { principal: alice });
 
   assert.equal(result.granted, false, 'denied by the in-txn post-grant');
+  assert.equal(result.deduped, false, 'an in-transaction denial is never a deduplicated success');
   assert.equal(result.events.length, 0, 'no events escape a rolled-back batch');
 
   // The first action's row must NOT survive — proving the 403 was thrown INSIDE

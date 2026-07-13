@@ -2,7 +2,7 @@
 .worktrees/
 node_modules/
 *.log
-.DS_Storetodo.db*
+.DS_Store
 todo.db*
 .council/
 examples/*.db

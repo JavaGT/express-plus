@@ -4,6 +4,7 @@ import { admitSystemMutation, startClockTriggers } from './schedule.mjs';
 import { createServer, durableMutationVariant } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects, executeEffectsForEvent } from './effect-compiler.mjs';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
+import { admitInvitationCreation, isInvitationCreationAuthority } from './auth/invitation.mjs';
 import { createWriteQueue } from './write-queue.mjs';
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
@@ -44,6 +45,17 @@ function buildEffects(entities) {
 function buildDurableAdmission(app) {
   return {
     async beforeProjection({ entityName, verb, principal, event, payload, db: hookDb, now }) {
+      if (
+        entityName === Invitation.name
+        && verb === 'create'
+        && isInvitationCreationAuthority(principal)
+      ) {
+        return admitInvitationCreation({
+          Invitation: app.entities?.get(Invitation.name),
+          event,
+          principal,
+        });
+      }
       if (principal?.type !== 'system' || !principal.attributes?.source) return true;
       const entity = app.entities?.get(entityName);
       if (!entity) return false;
@@ -59,6 +71,11 @@ function buildDurableAdmission(app) {
     },
     async afterProjection({ entityName, verb, principal, event }) {
       if (event?._effectPrincipal) return true;
+      if (
+        entityName === Invitation.name
+        && verb === 'create'
+        && isInvitationCreationAuthority(principal)
+      ) return true;
       if (verb !== 'create') return true;
       const entity = app.entities?.get(entityName);
       if (!entity) return false;
@@ -158,10 +175,19 @@ export async function buildAndStart(app) {
   // kernel path (authorize→handler→durable variant) wrapped once in the
   // writeQueue — not a second pipeline. Exposed for server code that needs
   // an atomic multi-entity write outside the per-route HTTP handlers.
-  app.batch = (actions, { principal } = {}) =>
-    withLog(app.log, () =>
-      app.writeQueue.run(() => app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal })),
-    );
+  app.batch = async (actionsOrFactory, { principal } = {}) =>
+    withLog(app.log, () => app.writeQueue.run(() => {
+      const actions = typeof actionsOrFactory === 'function'
+        ? actionsOrFactory()
+        : actionsOrFactory;
+      if (actions && typeof actions.then === 'function') {
+        throw new TypeError('app.batch action factory must return a synchronous action array');
+      }
+      if (!Array.isArray(actions)) {
+        throw new TypeError('app.batch requires an action array or synchronous action-array factory');
+      }
+      return app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal });
+    }));
   // Singular Schedule clock-dispatch: deadline + tick share one starter.
   // No-op when no triggers exist. Scheduled on the shared clock.
   if (app.db) {

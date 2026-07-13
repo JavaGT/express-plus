@@ -85,6 +85,7 @@ test('a denied action appends nothing to the log and reports the denial', () => 
     payload: { postId: 'p1', at: 1 }, principal: { id: 'banned' },
   });
   assert.equal(result.granted, false);
+  assert.equal(result.deduped, false, 'a denial is never a deduplicated success');
   assert.equal(server.log.length, 0, 'authorization runs before the log is touched');
 });
 

@@ -376,6 +376,9 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
   let registryLocked = false;
   const runtime = {
     db,
+    batch(...args) {
+      return app.batch(...args);
+    },
     entityOf(value) {
       if (ownedBindings.has(value)) return value;
       if (value?.runtime) {
@@ -406,6 +409,9 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
   const app = makeMountable({ entityOf: runtime.entityOf });
   app.dispatch = async () => {
     throw new Error('application is not started; call listen() and await app.ready before dispatching');
+  };
+  app.batch = async () => {
+    throw new Error('application is not started; call listen() and await app.ready before batching');
   };
   app.entity = runtime.entityOf;
   app.register = (...declared) => {

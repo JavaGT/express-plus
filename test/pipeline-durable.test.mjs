@@ -159,6 +159,7 @@ test('authorize-first — a denied action never opens a transaction', async () =
   });
 
   assert.equal(result.granted, false);
+  assert.equal(result.deduped, false, 'a denial is never a deduplicated success');
   assert.equal(handlerCalls, 0);
 
   // Nothing in Log

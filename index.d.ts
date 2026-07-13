@@ -1,6 +1,6 @@
 /// <reference types="node" />
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage, Server, ServerResponse } from 'node:http';
 
 export interface WorkbenchStatement {
   run(...params: unknown[]): { changes: number };
@@ -31,6 +31,16 @@ export interface Principal {
   readonly attributes: Readonly<Record<string, unknown>>;
 }
 
+export interface UserPrincipal extends Principal {
+  readonly type: 'user';
+  readonly id: string;
+}
+
+export function principal(options: {
+  type: 'user';
+  id: string;
+  attributes?: Record<string, unknown>;
+}): UserPrincipal;
 export function principal(options?: {
   type?: PrincipalType;
   id?: string | null;
@@ -84,6 +94,9 @@ export interface RouteBuilder {
   delete(path: string, ...handlers: Array<Gate | Handler>): this;
   mount(path: string, target: EntityTarget | RouteBuilder | Handler): this;
   use(path: string, target: EntityTarget | RouteBuilder | Handler): this;
+}
+
+export interface EntityRouteBuilder extends RouteBuilder {
   resource(): this;
 }
 
@@ -137,7 +150,7 @@ export function date(options?: FieldOptions<Date | number | string>): FieldDescr
 export function number(options?: FieldOptions<number>): FieldDescriptor<number>;
 export function json<Value = unknown>(shape?: unknown, options?: FieldOptions<Value>): FieldDescriptor<Value>;
 export function ref(
-  target: string | WorkbenchEntity,
+  target: string | WorkbenchEntity<any>,
   options?: FieldOptions<string> & { role?: string | readonly string[] },
 ): FieldDescriptor<string>;
 export function hash(options?: FieldOptions<string>): FieldDescriptor<string>;
@@ -151,21 +164,35 @@ export function list<Value = unknown>(
   value: FieldDescriptor<Value>,
   options?: FieldOptions<Value[]>,
 ): FieldDescriptor<Value[]>;
-export function log<Value = unknown>(
-  value: FieldDescriptor<Value>,
-  options?: FieldOptions<Value[]>,
-): FieldDescriptor<Value[]>;
-export function ephemeral<Value = unknown>(
-  value: FieldDescriptor<Value>,
-  options?: FieldOptions<Value>,
-): FieldDescriptor<Value>;
-export function state<Value extends string = string>(
-  options: Readonly<Record<string, unknown>>,
-): FieldDescriptor<Value>;
-export function computed<Value = unknown>(
-  compute: (row: Readonly<Record<string, unknown>>) => Value,
-  options?: Readonly<Record<string, unknown>>,
-): FieldDescriptor<Value>;
+export function log<Entry extends Record<string, FieldDescriptor> = Record<string, never>>(
+  entry?: Entry,
+): FieldDescriptor<unknown[]>;
+export function ephemeral<Cells extends Record<string, FieldDescriptor> = Record<string, never>>(
+  cells?: Cells,
+): FieldDescriptor<unknown>;
+export interface StateFieldFactory {
+  (options?: Readonly<Record<string, unknown>>): FieldDescriptor<string>;
+  transition<From extends string, To extends string>(
+    from: From,
+    to: To,
+  ): Readonly<{
+    brand: 'state-transition-handle';
+    from: From;
+    to: To;
+    readonly type: `transition:${From}->${To}`;
+    toString(): string;
+  }>;
+}
+export const state: StateFieldFactory;
+export interface ComputedFieldFactory {
+  <Value = unknown>(
+    options: { compute: (row: Readonly<Record<string, unknown>>) => Value },
+  ): FieldDescriptor<Value>;
+  stored<Value = unknown>(
+    options: { compute: (row: Readonly<Record<string, unknown>>) => Value },
+  ): FieldDescriptor<Value>;
+}
+export const computed: ComputedFieldFactory;
 export interface ProjectedFieldFactory {
   async<Value = unknown>(options: {
     compute: (
@@ -209,10 +236,14 @@ export function scope(predicate: ScopePredicate): ScopeClause;
 export const everyone: ScopePredicate;
 export const never: ScopePredicate;
 export function anyOf(...clauses: ScopePredicate[]): ScopePredicate;
+export interface InheritDirective {
+  readonly inherit: WorkbenchEntity<any>;
+  readonly via: string;
+}
 export function inherit(
-  parent: WorkbenchEntity,
+  parent: WorkbenchEntity<any>,
   options: { via: string },
-): ScopePredicate;
+): InheritDirective;
 
 export interface ActionHandle<Payload = Record<string, unknown>> {
   readonly brand: 'action';
@@ -248,15 +279,24 @@ export interface DispatchRequest<Payload = Record<string, unknown>> {
 export interface DispatchResult<Event extends CommittedEvent = CommittedEvent> {
   granted: boolean;
   events: Event[];
-  replayed?: boolean;
+  deduped: boolean;
 }
+
+export interface BatchAction<Payload = Record<string, unknown>> {
+  readonly type: string;
+  readonly payload: Payload;
+  readonly scope?: string;
+}
+
+export type BatchActionFactory<Action extends BatchAction = BatchAction> =
+  () => readonly Action[];
 
 export interface WorkbenchEntity<Row extends object = Record<string, unknown>> {
   readonly name: string;
   readonly fields: Readonly<Record<string, FieldDescriptor>>;
   readonly field: EntityFields<Row>;
   readonly verbs: Readonly<Record<string, ActionHandle | EventHandle>>;
-  readonly routes?: (routes: RouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
+  readonly routes?: (routes: EntityRouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
   readonly [member: string]: unknown;
 }
 
@@ -290,18 +330,22 @@ export interface BoundWorkbenchEntity<Row extends object = Record<string, unknow
 }
 
 export type EntityDeclaration<Row extends object> = Readonly<Record<string, unknown>> & {
-  routes?: (routes: RouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
-  grant?: ScopeClause | ScopePredicate | GrantDecision | ((context: unknown) => GrantDecision);
+  routes?: (routes: EntityRouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
+  grant?: ScopeClause | ScopePredicate | InheritDirective | GrantDecision | ((context: unknown) => GrantDecision);
 };
 export function entity<Row extends object = Record<string, unknown>>(
   name: string,
   declaration?: EntityDeclaration<Row>,
 ): WorkbenchEntity<Row>;
 
-export function membership(
-  entity: WorkbenchEntity | BoundWorkbenchEntity,
+export function membership<Row extends object>(
+  entity: BoundWorkbenchEntity<Row>,
   roles: Readonly<Record<string, unknown>>,
-): WorkbenchEntity;
+): BoundWorkbenchEntity<Row>;
+export function membership<Row extends object>(
+  entity: WorkbenchEntity<Row>,
+  roles: Readonly<Record<string, unknown>>,
+): WorkbenchEntity<Row>;
 
 export function inc(value: number): Readonly<{ kind: 'inc'; value: number }>;
 export function dec(value: number): Readonly<{ kind: 'dec'; value: number }>;
@@ -326,11 +370,53 @@ export const tick: {
 };
 export function simulate(options: Readonly<Record<string, unknown>>): unknown;
 
+export interface WorkbenchLog {
+  readonly level: number;
+  readonly channels: Readonly<Record<string, string>>;
+  readonly format: string;
+  trace(channel: string, message: string, context?: Record<string, unknown>): void;
+  debug(channel: string, message: string, context?: Record<string, unknown>): void;
+  info(channel: string, message: string, context?: Record<string, unknown>): void;
+  warn(channel: string, message: string, context?: Record<string, unknown>): void;
+  error(channel: string, message: string, context?: Record<string, unknown>): void;
+}
+
+export interface WorkbenchClock {
+  add(options: {
+    name: string;
+    intervalMs: number;
+    fn: () => void | Promise<void>;
+    delayMs?: number;
+  }): { remove(): void };
+  stop(): void;
+}
+
+export interface RateLimitWindow {
+  windowMs: number;
+  max: number;
+}
+
+export interface ListenOptions {
+  principalOf?: (request: IncomingMessage) => Principal;
+  onListening?: () => void;
+  env?: string;
+  rateLimit?: { ip: RateLimitWindow; session?: RateLimitWindow };
+  csp?: string;
+  hsts?: boolean;
+  cors?: { origins: readonly string[] };
+  requestLog?: boolean;
+  blobReapIntervalMs?: number;
+  blobReapTtlMs?: number;
+  logRetentionDays?: number;
+  logRetentionIntervalMs?: number;
+}
+
 export interface WorkbenchOptions {
   db?: string | WorkbenchDatabase;
-  entities?: readonly WorkbenchEntity[];
+  entities?: readonly WorkbenchEntity<any>[];
   port?: number;
   env?: string;
+  requireEnv?: readonly string[];
   session?: { durationMs?: number };
   viewsDir?: string;
   migrations?: readonly Readonly<{ version: number; up(db: WorkbenchDatabase): void }>[];
@@ -343,6 +429,11 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly db?: WorkbenchDatabase;
   readonly routes: readonly unknown[];
   readonly config: Readonly<Record<string, unknown>>;
+  readonly entities: ReadonlyMap<string, BoundWorkbenchEntity<any>>;
+  readonly log: WorkbenchLog;
+  readonly clock: WorkbenchClock;
+  readonly port?: number;
+  readonly httpServer?: Server;
   readonly jobs?: unknown;
   readonly blobs?: unknown;
   readonly ready?: Promise<WorkbenchApp>;
@@ -358,7 +449,15 @@ export interface WorkbenchApp extends RouteBuilder {
   dispatch<Payload = Record<string, unknown>>(
     request: DispatchRequest<Payload>,
   ): Promise<DispatchResult>;
-  listen(port?: number, options?: unknown): this;
+  batch<Action extends BatchAction>(
+    actions: readonly Action[] | BatchActionFactory<Action>,
+    options?: { principal?: Principal },
+  ): Promise<DispatchResult>;
+  listen(): this;
+  listen(callback: () => void): this;
+  listen(options: ListenOptions): this;
+  listen(port: number, callback?: () => void): this;
+  listen(port: number, options: ListenOptions): this;
 }
 
 export function router(options?: { mergeParams?: boolean }): RouteBuilder;
@@ -370,5 +469,29 @@ export const Credential: WorkbenchEntity;
 export const Invitation: WorkbenchEntity;
 export const ApiKey: WorkbenchEntity;
 export const TwoFactor: WorkbenchEntity;
+
+// These helpers are runtime exports of the root module as well as the
+// `workbench/server` entry point. Re-export their declarations so both import
+// paths describe the same public API.
+export {
+  SESSION_COOKIE,
+  apiKeyPrincipalOf,
+  createInvitationApi,
+  emailSeam,
+  matchRoute,
+  noopTransport,
+  parseCookies,
+  serveStatic,
+  sessionCookie,
+  sessionPrincipalOf,
+  sessionTokenOf,
+} from './src/server.js';
+export type {
+  EmailMessage,
+  EmailSeam,
+  EmailTransport,
+  InvitationApi,
+  Invitation as InvitationRecord,
+} from './src/server.js';
 
 export default function workbench(options?: WorkbenchOptions): WorkbenchApp;

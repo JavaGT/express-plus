@@ -2,19 +2,97 @@
 // the authority for both the database and the entity registry, which prevents
 // a caller from pairing an entity from one application with another database.
 
-import { txn } from '../driver.mjs';
+import { randomBytes } from 'node:crypto';
 import { admin } from '../grant.mjs';
 import { readScopedRow } from '../http-crud-dispatch.mjs';
 import { rowCapabilities } from '../row-grant.mjs';
 import { MEMBER_COLUMN, membershipOwnerCol, membershipTable } from '../scope-sql.mjs';
+import { mapMutationAction } from '../side-table-strategy.mjs';
 
 function httpError(status, message) {
   return Object.assign(new Error(message), { status });
 }
 
+function requireGranted(result, operation) {
+  if (!result?.granted) {
+    throw httpError(403, `invitation ${operation} was denied`);
+  }
+}
+
+const invitationCreationAuthorities = new WeakSet();
+
+function invitationCreationPrincipal(user) {
+  const authority = Object.freeze({
+    type: 'user',
+    id: user.id,
+    attributes: Object.freeze({ ...(user.attributes ?? {}) }),
+  });
+  invitationCreationAuthorities.add(authority);
+  return authority;
+}
+
+export function isInvitationCreationAuthority(principal) {
+  return principal != null && invitationCreationAuthorities.has(principal);
+}
+
+function invitationTargetFor(runtime, name, role) {
+  let target;
+  try {
+    target = runtime.entityOf(name);
+  } catch {
+    throw httpError(400, `unknown invitation target entity '${name}'`);
+  }
+
+  const roleCandidates = Object.entries(target.fields).filter(([, descriptor]) =>
+    descriptor?.kind === 'store'
+    && descriptor.type === 'map'
+    && descriptor.of?.type === 'ref'
+    && Array.isArray(descriptor.roles)
+    && descriptor.roles.includes(role));
+  const candidates = roleCandidates.filter(([, descriptor]) => {
+    try {
+      return runtime.entityOf(descriptor.of.target).name === 'User';
+    } catch {
+      return false;
+    }
+  });
+  if (candidates.length !== 1) {
+    throw httpError(
+      400,
+      candidates.length === 0 && roleCandidates.length > 0
+        ? `invitation role '${role}' on ${target.name} must be a map of User references`
+        : candidates.length === 0
+        ? `role '${role}' is not an invitation role on ${target.name}`
+        : `role '${role}' is ambiguous on ${target.name}`,
+    );
+  }
+  const [fieldName] = candidates[0];
+  return {
+    entity: target,
+    fieldName,
+    table: membershipTable(target.name, fieldName),
+    ownerColumn: membershipOwnerCol(target.name),
+  };
+}
+
+export async function admitInvitationCreation({ Invitation, event, principal }) {
+  if (!isInvitationCreationAuthority(principal)) return false;
+  const runtime = Invitation?.runtime;
+  const invitation = event?.data;
+  if (!runtime?.db || !invitation || String(invitation.createdBy) !== String(principal.id)) {
+    return false;
+  }
+
+  const target = invitationTargetFor(runtime, invitation.targetEntity, invitation.role);
+  const row = readScopedRow({ db: runtime.db }, target.entity, invitation.targetId, principal);
+  if (!row) throw httpError(404, `${target.entity.name} ${invitation.targetId} not found`);
+  const decision = await rowCapabilities(target.entity, row, principal);
+  return decision.granted && decision.capabilities.includes(admin);
+}
+
 export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
   const runtime = Invitation?.runtime;
-  if (!Invitation || !runtime?.db || typeof runtime.entityOf !== 'function') {
+  if (!Invitation || !runtime?.db || typeof runtime.entityOf !== 'function' || typeof runtime.batch !== 'function') {
     throw new Error('createInvitationApi requires an application-bound Invitation entity');
   }
   if (suppliedDb && suppliedDb !== runtime.db) {
@@ -23,43 +101,7 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
   const db = runtime.db;
 
   function targetFor(name, role) {
-    let target;
-    try {
-      target = runtime.entityOf(name);
-    } catch {
-      throw httpError(400, `unknown invitation target entity '${name}'`);
-    }
-
-    const roleCandidates = Object.entries(target.fields).filter(([, descriptor]) =>
-      descriptor?.kind === 'store'
-      && descriptor.type === 'map'
-      && descriptor.of?.type === 'ref'
-      && Array.isArray(descriptor.roles)
-      && descriptor.roles.includes(role));
-    const candidates = roleCandidates.filter(([, descriptor]) => {
-      try {
-        return runtime.entityOf(descriptor.of.target).name === 'User';
-      } catch {
-        return false;
-      }
-    });
-    if (candidates.length !== 1) {
-      throw httpError(
-        400,
-        candidates.length === 0 && roleCandidates.length > 0
-          ? `invitation role '${role}' on ${target.name} must be a map of User references`
-          : candidates.length === 0
-          ? `role '${role}' is not an invitation role on ${target.name}`
-          : `role '${role}' is ambiguous on ${target.name}`,
-      );
-    }
-    const [fieldName] = candidates[0];
-    return {
-      entity: target,
-      fieldName,
-      table: membershipTable(target.name, fieldName),
-      ownerColumn: membershipOwnerCol(target.name),
-    };
+    return invitationTargetFor(runtime, name, role);
   }
 
   async function createInvitation({
@@ -75,23 +117,30 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
       throw httpError(400, 'maxUses must be a positive integer');
     }
 
-    const target = targetFor(targetEntity, role);
-    const row = readScopedRow({ db }, target.entity, targetId, principal);
-    if (!row) throw httpError(404, `${target.entity.name} ${targetId} not found`);
-    const decision = await rowCapabilities(target.entity, row, principal);
-    if (!decision.granted || !decision.capabilities.includes(admin)) {
-      throw httpError(403, 'admin capability is required to create an invitation');
-    }
+    const authority = invitationCreationPrincipal(principal);
+    const result = await runtime.batch(() => [{
+      type: `${Invitation.name}.create`,
+      payload: {
+        token: randomBytes(32).toString('base64url'),
+        targetEntity,
+        targetId,
+        role,
+        ...(targetUser == null ? {} : { targetUser }),
+        ...(maxUses == null ? {} : { maxUses }),
+        useCount: 0,
+        ...(expiresAt == null ? {} : { expiresAt }),
+        createdBy: principal.id,
+        createdAt: new Date(),
+      },
+    }], { principal: authority });
+    requireGranted(result, 'creation');
 
-    return Invitation.create({
-      targetEntity: target.entity.name,
-      targetId,
-      role,
-      targetUser: targetUser ?? null,
-      maxUses: maxUses ?? null,
-      expiresAt: expiresAt ?? null,
-      createdBy: principal.id,
-    });
+    const created = result.events.find((event) => event.type === `${Invitation.name}.created`);
+    const invitation = created?.data?.id == null
+      ? null
+      : Invitation.findById(String(created.data.id));
+    if (!invitation) throw httpError(500, 'invitation creation did not produce a stored invitation');
+    return invitation;
   }
 
   async function acceptInvitation(token, user) {
@@ -102,10 +151,11 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
       throw httpError(403, 'a user principal is required to accept an invitation');
     }
 
-    return txn(db, () => {
+    let accepted;
+    const result = await runtime.batch(() => {
       const invitation = Invitation.findOne(Invitation.token.is(token));
       if (!invitation) throw httpError(404, 'invitation not found');
-      if (invitation.expiresAt !== null && Date.now() > invitation.expiresAt) {
+      if (invitation.expiresAt !== null && Date.now() >= invitation.expiresAt) {
         throw httpError(400, 'invitation has expired');
       }
       if (invitation.targetUser !== null && String(invitation.targetUser) !== String(user.id)) {
@@ -120,12 +170,12 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
         throw httpError(404, `${target.entity.name} ${invitation.targetId} not found`);
       }
 
-      let membershipChanged = false;
+      const actions = [];
       try {
         const existing = db.prepare(
           `SELECT role FROM ${target.table} WHERE ${target.ownerColumn} = :owner AND ${MEMBER_COLUMN} = :member`,
         ).get({ owner: invitation.targetId, member: user.id });
-        membershipChanged = !existing || existing.role !== invitation.role;
+        const membershipChanged = !existing || existing.role !== invitation.role;
 
         if (
           membershipChanged
@@ -139,55 +189,63 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
         // An exact-role replay is idempotent and does not exhaust a public link.
         // Applying a different role is a new grant, so it consumes a use and
         // cannot pass an exhausted invitation.
-        if (existing) {
-          if (membershipChanged) {
-            db.prepare(
-              `UPDATE ${target.table} SET role = :role WHERE ${target.ownerColumn} = :owner AND ${MEMBER_COLUMN} = :member`,
-            ).run({ owner: invitation.targetId, member: user.id, role: invitation.role });
+        if (membershipChanged) {
+          actions.push(mapMutationAction({
+            entityName: target.entity.name,
+            fieldName: target.fieldName,
+            operation: existing ? 'setRole' : 'add',
+            owner: invitation.targetId,
+            member: user.id,
+            role: invitation.role,
+          }));
+        }
+
+        if (membershipChanged) {
+          if (invitation.targetUser === null) {
+            actions.push({
+              type: 'Invitation.update',
+              payload: { id: invitation.id, useCount: invitation.useCount + 1 },
+            });
           }
-        } else {
-          db.prepare(
-            `INSERT INTO ${target.table} (${target.ownerColumn}, ${MEMBER_COLUMN}, role) VALUES (:owner, :member, :role)`,
-          ).run({ owner: invitation.targetId, member: user.id, role: invitation.role });
+        }
+        if (invitation.targetUser !== null) {
+          actions.push({ type: 'Invitation.remove', payload: { id: invitation.id } });
         }
       } catch (error) {
         if (error.status) throw error;
         throw httpError(500, `failed to grant membership on ${target.entity.name}: ${error.message}`);
       }
 
-      if (invitation.targetUser === null) {
-        if (membershipChanged) {
-          db.prepare('UPDATE Invitation SET useCount = useCount + 1 WHERE id = :id')
-            .run({ id: invitation.id });
-        }
-      } else {
-        Invitation.delete(invitation.id);
-      }
-
-      return {
+      accepted = {
         targetEntity: target.entity.name,
         targetId: invitation.targetId,
         role: invitation.role,
       };
-    });
+      return actions;
+    }, { principal: user });
+    requireGranted(result, 'acceptance');
+    return accepted;
   }
 
-  function rejectInvitation(token, user) {
+  async function rejectInvitation(token, user) {
     if (!token || !user?.id) {
       throw httpError(400, 'rejectInvitation requires a token and a user with an id');
     }
     if (user.type !== 'user') {
       throw httpError(403, 'a user principal is required to reject an invitation');
     }
-    const invitation = Invitation.findOne(Invitation.token.is(token));
-    if (!invitation) throw httpError(404, 'invitation not found');
-    if (invitation.targetUser === null) {
-      throw httpError(400, 'cannot reject an open link invitation');
-    }
-    if (String(invitation.targetUser) !== String(user.id)) {
-      throw httpError(403, 'this invitation is for a different user');
-    }
-    Invitation.delete(invitation.id);
+    const result = await runtime.batch(() => {
+      const invitation = Invitation.findOne(Invitation.token.is(token));
+      if (!invitation) throw httpError(404, 'invitation not found');
+      if (invitation.targetUser === null) {
+        throw httpError(400, 'cannot reject an open link invitation');
+      }
+      if (String(invitation.targetUser) !== String(user.id)) {
+        throw httpError(403, 'this invitation is for a different user');
+      }
+      return [{ type: 'Invitation.remove', payload: { id: invitation.id } }];
+    }, { principal: user });
+    requireGranted(result, 'rejection');
   }
 
   function listInvitationsForUser(user) {
