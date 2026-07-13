@@ -483,6 +483,16 @@ export interface WorkbenchOptions {
   requireEnv?: readonly string[];
   session?: { durationMs?: number };
   viewsDir?: string;
+  /** Map a coarse recovery scope to the entity row that owns its authorization. */
+  resolveScope?: (
+    scope: string,
+  ) => { entity: string; id: string | number } | null | Promise<{ entity: string; id: string | number } | null>;
+  /** Build a coarse snapshot after its resolved anchor row has been authorized. */
+  scopeSnapshot?: (
+    scope: string,
+    principal: Principal,
+    anchor: { entity: string; id: string; row: Record<string, unknown> },
+  ) => unknown | Promise<unknown>;
   migrations?: readonly Readonly<{ version: number; up(db: WorkbenchDatabase): void }>[];
   jobs?: Readonly<Record<string, unknown>>;
   blobs?: Readonly<Record<string, unknown>>;
@@ -508,6 +518,8 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly httpServer?: Server;
   readonly jobs?: unknown;
   readonly blobs?: unknown;
+  resolveScope?: WorkbenchOptions['resolveScope'];
+  scopeSnapshot?: WorkbenchOptions['scopeSnapshot'];
   readonly ready?: Promise<WorkbenchApp>;
   mount(path: string, target: EntityTarget | RouteBuilder | Handler): this;
   use(path: string, target: EntityTarget | RouteBuilder | Handler): this;

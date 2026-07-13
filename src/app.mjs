@@ -359,6 +359,8 @@ export default function workbench({
   env,
   session,
   viewsDir,
+  resolveScope,
+  scopeSnapshot,
   blobReapIntervalMs = maintenanceDefaults.blobReapIntervalMs,
   blobReapTtlMs = maintenanceDefaults.blobReapTtlMs,
   logRetentionDays = maintenanceDefaults.logRetentionDays,
@@ -446,6 +448,11 @@ export default function workbench({
     if (!declarationsByName.has(frameworkEntity.name)) runtime.entityOf(frameworkEntity);
   }
   app.entities = bindingsByName;
+  // Coarse recovery scopes (for example `project:p1`) must resolve to a normal
+  // entity row. Snapshot, replay, and later live admission can then share the
+  // existing row-scope + grant engine instead of trusting transport callbacks.
+  app.resolveScope = resolveScope;
+  app.scopeSnapshot = scopeSnapshot;
   // Per-app config — options override env fallbacks (SPEC §3). `app.config` is
   // the one place a mounted route / transport reads this app's port, env,
   // viewsDir, and session duration instead of the process-wide singleton. An

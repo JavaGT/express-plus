@@ -82,24 +82,23 @@ async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
 
 async function snapshotScopeRoute(app, scope, principal, res) {
   const lastSeq = readSeq(app.db, scope);
-  // Try to resolve the scope as an entity instance via Scope handle grammar
-  const handle = tryParseScopeKey(scope);
-  if (handle) {
-    const entity = app.entities.get(handle.entity);
-    if (entity) {
-      const row = readScopedRow(app, entity, handle.id, principal);
-      const auth = await authorizeRow(app, entity, 'read', handle.id, principal, row);
-      if (!auth.status) {
-        sendJson(res, 200, { snapshot: auth.row, cursors: { [scope]: lastSeq } });
-        return true;
-      }
-    }
+  const access = await authorizeScope(app, scope, principal);
+  if (access.status) {
+    reject(res, access.status, access.status === 404 ? 'not found' : 'forbidden');
+    return true;
   }
-  // Pure scope-level snapshot — app callback or bare cursor
+  if (access.direct) {
+    sendJson(res, 200, { snapshot: access.anchor.row, cursors: { [scope]: lastSeq } });
+    return true;
+  }
+  // A custom scope may aggregate several rows, but its resolver must first map
+  // it to one normal entity row that owns authorization. The callback receives
+  // that already-authorized anchor; it is a data projection hook, never a
+  // second authorization engine.
   const scopeSnapshot = typeof app.scopeSnapshot === 'function'
-    ? await app.scopeSnapshot(scope, principal)
+    ? await app.scopeSnapshot(scope, principal, access.anchor)
     : null;
-  if (scopeSnapshot) {
+  if (scopeSnapshot !== null && scopeSnapshot !== undefined) {
     sendJson(res, 200, { snapshot: scopeSnapshot, cursors: { [scope]: lastSeq } });
     return true;
   }
@@ -108,6 +107,11 @@ async function snapshotScopeRoute(app, scope, principal, res) {
 }
 
 async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
+  const access = await authorizeScope(app, scope, principal);
+  if (access.status) {
+    reject(res, access.status, access.status === 404 ? 'not found' : 'forbidden');
+    return true;
+  }
   const minSeq = minSeqForScope(app.db, scope);
   if (minSeq !== null && cursor + 1 < minSeq) {
     sendJson(res, 200, { resync: 'stale', reason: 'cursor-behind-retention' });
@@ -124,6 +128,32 @@ async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
   }));
   sendJson(res, 200, { scope, cursor, events });
   return true;
+}
+
+async function authorizeScope(app, scope, principal) {
+  const handle = tryParseScopeKey(scope);
+  const directEntity = handle ? app.entities.get(handle.entity) : null;
+  let anchor = directEntity ? { entity: handle.entity, id: handle.id } : null;
+  let direct = Boolean(directEntity);
+
+  if (!anchor) {
+    if (typeof app.resolveScope !== 'function') return { status: 404 };
+    anchor = await app.resolveScope(scope);
+    direct = false;
+  }
+  if (!anchor || typeof anchor.entity !== 'string' || anchor.id == null) {
+    return { status: 404 };
+  }
+  const entity = app.entities.get(anchor.entity);
+  if (!entity) return { status: 404 };
+
+  const row = readScopedRow(app, entity, String(anchor.id), principal);
+  const auth = await authorizeRow(app, entity, 'read', String(anchor.id), principal, row);
+  if (auth.status) return { status: auth.status };
+  return {
+    anchor: { entity: anchor.entity, id: String(anchor.id), row: auth.row },
+    direct,
+  };
 }
 
 async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
