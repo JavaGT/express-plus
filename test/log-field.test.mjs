@@ -22,9 +22,8 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 
-import {
+import workbench, {
   entity, createServer, durableMutationVariant, executeFrameworkDDL, generateDDL } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 test('log() returns a frozen store-kind descriptor of type log', () => {
   const descriptor = log({ sender: ref('User'), body: text() });
@@ -90,22 +89,22 @@ const DocLogB = entity('DocLogB', {
 
 function setupLog() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(DocLogB)) db.exec(sql);
-  return db;
+  const app = workbench({ db, entities: [DocLogB] });
+  return { db, DocLogB: app.entity(DocLogB) };
 }
 
 function seedDoc(db, id) {
   db.prepare(`INSERT INTO DocLogB (id) VALUES (?)`).run(id);
 }
 
-async function makeServer(db) {
+async function makeServer(db, boundEntity) {
   return createServer({
     db,
-    handlers: DocLogB.crudHandlers,
+    handlers: boundEntity.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [DocLogB.projection],
+      projectionConsumers: [boundEntity.projection],
       admission: { beforeProjection: () => true, afterProjection: async () => true },
     }),
     authorize: async () => true,
@@ -113,9 +112,9 @@ async function makeServer(db) {
 }
 
 test('A: dispatch .append action emits :appended and writes the side-table row', async () => {
-  const db = setupLog();
+  const { db, DocLogB } = setupLog();
   seedDoc(db, 'r1');
-  const server = await makeServer(db);
+  const server = await makeServer(db, DocLogB);
 
   const result = await server.dispatch({
     actionId: randomUUID(),
@@ -139,10 +138,10 @@ test('A: dispatch .append action emits :appended and writes the side-table row',
 });
 
 test('B: per-entry query returns ONLY the owning-entity entries', async () => {
-  const db = setupLog();
+  const { db, DocLogB } = setupLog();
   seedDoc(db, 'r1');
   seedDoc(db, 'r2');
-  const server = await makeServer(db);
+  const server = await makeServer(db, DocLogB);
 
   const append = (owner, sender, body) =>
     server.dispatch({
@@ -172,9 +171,9 @@ test('B: per-entry query returns ONLY the owning-entity entries', async () => {
 });
 
 test('C: handle .append(entry) via hydrate-with-dispatch routes to the action + writes the row', async () => {
-  const db = setupLog();
+  const { db, DocLogB } = setupLog();
   seedDoc(db, 'r1');
-  const server = await makeServer(db);
+  const server = await makeServer(db, DocLogB);
 
   // hydrate threading the dispatch ref (3rd arg); principal null = trusted query
   // API (mayFieldOp bypassed, same as map-handle.test).
@@ -188,9 +187,9 @@ test('C: handle .append(entry) via hydrate-with-dispatch routes to the action + 
 });
 
 test('D: dispatch .append with an unknown entry sub-field is rejected (fail closed)', async () => {
-  const db = setupLog();
+  const { db, DocLogB } = setupLog();
   seedDoc(db, 'r1');
-  const server = await makeServer(db);
+  const server = await makeServer(db, DocLogB);
 
   await assert.rejects(
     () => server.dispatch({
@@ -206,7 +205,7 @@ test('D: dispatch .append with an unknown entry sub-field is rejected (fail clos
 });
 
 test('E: handle .append() with no dispatch ref throws (cannot re-enter dispatch)', async () => {
-  const db = setupLog();
+  const { db, DocLogB } = setupLog();
   seedDoc(db, 'r1');
 
   // hydrate with NO dispatch ref (the trusted-query, pre-dispatch shape)
