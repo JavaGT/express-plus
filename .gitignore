@@ -7,3 +7,4 @@ todo.db*
 .council/
 examples/*.db
 examples/*.db-*
+gdoc.db*
