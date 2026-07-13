@@ -510,3 +510,12 @@ REMAINING-P1-NOTES resolved/deferred: spec #6 (handler txn signature) RESOLVED b
 - Mixed-rate simulations now wake at the fastest declared rate (`max(hz)`), allowing slower simulations to retain their own per-entity cadence without starving faster ones.
 - Added compiler, mixed-rate, and real `listen`/`ready`/`shutdown` coverage. Focused schedule/entity gate: 97/97/0.
 - Next: effect principals must pass normal row grants; durable effect jobs and cursor advancement must be atomic; effect-depth ownership must be singular and exact.
+
+## 2026-07-13 — rewrite Wave 2: effects obey target-row grants
+
+- Effect source admission and target-row authorization are now separate checks. A target may accept effects from a source entity and still deny the generated mutation for a particular row.
+- Generated update/remove mutations resolve the target row and run its ordinary row grant with the effect principal. Generated creates run the ordinary after-projection create grant. Invitation authority remains the one explicit framework-owned exception.
+- `effectSource(...)` now reads the effect provenance carried in `principal.attributes.effect`; scheduler provenance remains in `principal.attributes.source`. The two internal authority channels no longer overlap.
+- Real-kernel tests prove a denied self-effect rolls back both the originating create and its generated update, and that an admitted source cannot bypass a denied target-row write.
+- Gate: full `node --test` and focused ESLint are green.
+- Next: make durable effect job insertion and cursor advancement one database transaction, then make effect-depth ownership singular and exact.

@@ -599,3 +599,10 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Reason:** Declarations must become behavior through the one application lifecycle. Sharing the clock gives startup and shutdown one owner and prevents tests or callers from needing private simulation wiring.
 - **Rate rule:** The shared wake-up interval follows the fastest declared simulation; each simulation's own elapsed-time guard retains its requested cadence.
 - **Compiler rule:** The reserved `simulation` slot accepts only the public `simulate()` descriptor. It does not generally permit fields to occupy reserved declaration slots.
+
+## 2026-07-13 — effect provenance does not grant row authority
+
+- **Decision:** `admitsEffects` answers only whether a target entity accepts effects from a source. Every generated mutation must still pass the target entity's normal row grant using the internally minted effect principal.
+- **Reason:** Source admission and row authorization protect different boundaries. Treating source admission as write authority let an otherwise accepted source mutate target rows the effect principal was not allowed to change.
+- **Authority shape:** Effect provenance lives only at `principal.attributes.effect`; schedule/tick provenance lives only at `principal.attributes.source`. Helpers inspect their own channel, which prevents one internal subsystem from accidentally satisfying another subsystem's admission rule.
+- **Atomic failure:** A denied generated mutation aborts the enclosing pipeline transaction, so neither the origin event nor any earlier generated event is committed.

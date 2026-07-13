@@ -14,13 +14,13 @@
 //        global validateEffects pass at boot (cycle → app.ready rejects;
 //        missing admitsEffects → app.ready rejects; valid → resolves + fires).
 
-import { text, grant, read, write, subscribe, principal } from '../src/index.mjs';
+import { text, number, grant, deny, read, write, subscribe, principal, scope, everyone, self, inc } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, buildEffectsRegistry, validateEffects, generateDDL, generateFrameworkDDL, executeFrameworkDDL, created } from '../src/internal.mjs';
+  entity, effectSource, buildEffectsRegistry, validateEffects, generateDDL, generateFrameworkDDL, executeFrameworkDDL, created } from '../src/internal.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 
 function setupDb() {
@@ -147,6 +147,87 @@ test('#2 target row-grant deny of effect principal rolls back origin (in-txn ato
   assert.equal(db.prepare('SELECT count(*) AS c FROM Source').get().c, 0, 'origin rolled back');
   assert.equal(db.prepare('SELECT count(*) AS c FROM Target').get().c, 0, 'no target created');
   app.httpServer?.close?.();
+});
+
+test('#2 real app row grant denies an admitted effect and rolls back both rows', async (t) => {
+  const db = setupDb();
+  const Target = entity('EffectGrantTarget', {
+    name: text(),
+    checks: {
+      fromRejectedEffect: effectSource('EffectGrantSource'),
+    },
+    grant: () => [
+      scope(() => everyone()).can(async ({ is }) =>
+        (await is.fromRejectedEffect())
+          ? deny('effect principal cannot write this row')
+          : grant(read, write, subscribe)),
+    ],
+    admitsEffects: ({ effect }) => effect === 'EffectGrantSource',
+  });
+  const Source = entity('EffectGrantSource', {
+    title: text(),
+    grant: () => grant(read, write, subscribe),
+    effects: (EffectGrantSource) => [
+      [EffectGrantSource.created, { mutate: Target, with: { name: 'blocked' } }],
+    ],
+  });
+
+  const app = workbench({ db })
+    .mount('/effect-grant-targets', Target)
+    .mount('/effect-grant-sources', Source)
+    .listen(0);
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+  await app.ready;
+
+  const result = await app.dispatch({
+    actionId: 'real-effect-row-grant-deny',
+    type: 'EffectGrantSource.create',
+    payload: { title: 'origin' },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  assert.equal(result.granted, false, 'the canonical target row grant denies the effect');
+  assert.equal(db.prepare('SELECT count(*) AS count FROM EffectGrantSource').get().count, 0);
+  assert.equal(db.prepare('SELECT count(*) AS count FROM EffectGrantTarget').get().count, 0);
+});
+
+test('#2 real app row grant denies a self-effect update before projection', async (t) => {
+  const db = setupDb();
+  const Counter = entity('DeniedSelfEffectCounter', {
+    count: number({ default: 0 }),
+    checks: {
+      fromSelfEffect: effectSource('DeniedSelfEffectCounter'),
+    },
+    grant: () => [
+      scope(() => everyone()).can(async ({ is }) =>
+        (await is.fromSelfEffect())
+          ? deny('self-effect principal cannot update this row')
+          : grant(read, write, subscribe)),
+    ],
+    effects: (DeniedSelfEffectCounter) => [
+      [DeniedSelfEffectCounter.created, { mutate: self, with: { count: inc(1) } }],
+    ],
+  });
+
+  const app = workbench({ db }).mount('/denied-self-effect-counters', Counter).listen(0);
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+  await app.ready;
+
+  const result = await app.dispatch({
+    actionId: 'real-self-effect-row-grant-deny',
+    type: 'DeniedSelfEffectCounter.create',
+    payload: { count: 0 },
+    principal: principal({ type: 'user', id: 'u1' }),
+  });
+
+  assert.equal(result.granted, false, 'the pre-projection row grant denies the self update');
+  assert.equal(db.prepare('SELECT count(*) AS count FROM DeniedSelfEffectCounter').get().count, 0);
 });
 
 // ---- #3: admitsEffects DENY throws 403 → rolls back origin ----

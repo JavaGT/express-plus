@@ -87,16 +87,21 @@ test('effectSource rejects null at construction', () => {
 
 // ---- effectSource runtime admission ----
 
-test('effectSource admits principalFrom with matching source', () => {
+test('effectSource admits an effect principal with matching source entity', () => {
   const check = effectSource('Blog.publish');
-  const p = principalFrom('Blog.publish');
+  const p = principal({ type: 'system', attributes: { effect: 'Blog.publish' } });
   assert.equal(check({ principal: p }), true);
 });
 
-test('effectSource rejects principalFrom with mismatched source', () => {
+test('effectSource rejects an effect principal with a mismatched source entity', () => {
   const check = effectSource('Blog.publish');
-  const p = principalFrom('Blog.other');
+  const p = principal({ type: 'system', attributes: { effect: 'Blog.other' } });
   assert.equal(check({ principal: p }), false);
+});
+
+test('effectSource does not admit a scheduler principal with the same source string', () => {
+  const check = effectSource('Blog.publish');
+  assert.equal(check({ principal: principalFrom('Blog.publish') }), false);
 });
 
 test('effectSource rejects a user principal (non-system)', () => {
@@ -110,7 +115,7 @@ test('effectSource rejects nullish principal', () => {
   assert.equal(check({ principal: null }), false);
 });
 
-test('effectSource rejects system principal with no source attribute', () => {
+test('effectSource rejects system principal with no effect attribute', () => {
   const check = effectSource('Blog.publish');
   const p = principal({ type: 'system' });
   assert.equal(check({ principal: p }), false);
@@ -123,8 +128,8 @@ test('integration: fake target admits matching source, rejects mismatch', () => 
     admitsEffects: ({ principal }) => effectSource('Blog.publish')({ principal }),
   };
 
-  const matching = principalFrom('Blog.publish');
-  const mismatch = principalFrom('Blog.other');
+  const matching = principal({ type: 'system', attributes: { effect: 'Blog.publish' } });
+  const mismatch = principal({ type: 'system', attributes: { effect: 'Blog.other' } });
 
   assert.equal(target.admitsEffects({ principal: matching }), true, 'admits matching source');
   assert.equal(target.admitsEffects({ principal: mismatch }), false, 'rejects mismatched source');

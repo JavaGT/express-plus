@@ -44,6 +44,21 @@ function buildEffects(entities) {
 }
 
 function buildDurableAdmission(app) {
+  async function admitsExistingRow({ entityName, verb, principal, event }) {
+    const entity = app.entities?.get(entityName);
+    if (!entity) return false;
+    const id = event?.data?.id;
+    if (id == null) return false;
+    let row = null;
+    try {
+      row = entity.findById(String(id), principal);
+    } catch {
+      row = null;
+    }
+    if (!row) return false;
+    return mayRow(entity, verb, row, principal);
+  }
+
   return {
     async beforeProjection({ entityName, verb, principal, event, payload, db: hookDb, now }) {
       if (
@@ -57,39 +72,32 @@ function buildDurableAdmission(app) {
           principal,
         });
       }
-      if (principal?.type !== 'system' || !principal.attributes?.source) return true;
-      const entity = app.entities?.get(entityName);
-      if (!entity) return false;
-      return admitSystemMutation({
-        entity,
-        verb,
-        rowId: event?.data?.id,
-        payload,
-        principal,
-        db: hookDb ?? app.db,
-        now: now ?? Date.now(),
-      });
+      if (principal?.type === 'system' && principal.attributes?.source) {
+        const entity = app.entities?.get(entityName);
+        if (!entity) return false;
+        return admitSystemMutation({
+          entity,
+          verb,
+          rowId: event?.data?.id,
+          payload,
+          principal,
+          db: hookDb ?? app.db,
+          now: now ?? Date.now(),
+        });
+      }
+      if (principal?.type === 'system' && principal.attributes?.effect && verb !== 'create') {
+        return admitsExistingRow({ entityName, verb, principal, event });
+      }
+      return true;
     },
     async afterProjection({ entityName, verb, principal, event }) {
-      if (event?._effectPrincipal) return true;
       if (
         entityName === Invitation.name
         && verb === 'create'
         && isInvitationCreationAuthority(principal)
       ) return true;
       if (verb !== 'create') return true;
-      const entity = app.entities?.get(entityName);
-      if (!entity) return false;
-      const id = event?.data?.id;
-      if (id == null) return false;
-      let row = null;
-      try {
-        row = entity.findById(String(id), principal);
-      } catch {
-        row = null;
-      }
-      if (!row) return false;
-      return mayRow(entity, verb, row, principal);
+      return admitsExistingRow({ entityName, verb, principal, event });
     },
   };
 }

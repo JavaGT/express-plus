@@ -80,6 +80,6 @@ export function effectSource(source) {
   return ({ principal }) => {
     if (!principal || typeof principal !== 'object') return false;
     if (principal.type !== 'system') return false;
-    return principal.attributes?.source === source;
+    return principal.attributes?.effect === source;
   };
 }
