@@ -7,6 +7,7 @@ import type {
   Principal,
   UserPrincipal,
   Handler,
+  WorkbenchEntity,
   WorkbenchDatabase,
   WorkbenchStatement,
 } from '../index.d.ts';
@@ -266,7 +267,16 @@ export interface SqliteStorageIndexDescription {
   readonly unique: boolean;
   readonly origin: string;
   readonly partial: boolean;
+  readonly sql: string | null;
   readonly columns: readonly (string | null)[];
+  readonly terms: readonly {
+    readonly sequence: number;
+    readonly columnId: number;
+    readonly name: string | null;
+    readonly descending: boolean;
+    readonly collation: string | null;
+    readonly key: true;
+  }[];
 }
 
 export interface SqliteStorageForeignKeyDescription {
@@ -280,8 +290,10 @@ export interface SqliteStorageForeignKeyDescription {
 
 export interface SqliteStorageTableDescription {
   readonly name: string;
+  readonly sql: string;
   readonly virtual: boolean;
   readonly withoutRowid: boolean;
+  readonly strict: boolean;
   readonly columns: readonly SqliteStorageColumnDescription[];
   readonly primaryKey: readonly string[];
   readonly foreignKeys: readonly SqliteStorageForeignKeyDescription[];
@@ -299,7 +311,7 @@ export function describeSqliteStorage(
 ): SqliteStorageDescription;
 
 export function describeEntityStorage(
-  entity: EntityDeclaration<Record<string, unknown>>,
+  entity: Pick<WorkbenchEntity<Record<string, unknown>>, 'name' | 'fields'>,
 ): SqliteStorageDescription;
 
 // ---------------------------------------------------------------------------

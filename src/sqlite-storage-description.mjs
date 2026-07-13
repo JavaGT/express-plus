@@ -19,17 +19,33 @@ function deepFreeze(value) {
 function describeIndexes(db, tableName) {
   const rows = db.prepare(`PRAGMA index_list(${quoteIdent(tableName)})`).all();
   return rows
-    .map((row) => ({
-      name: row.name,
-      unique: row.unique === 1,
-      origin: row.origin,
-      partial: row.partial === 1,
-      columns: db
-        .prepare(`PRAGMA index_info(${quoteIdent(row.name)})`)
+    .map((row) => {
+      const terms = db
+        .prepare(`PRAGMA index_xinfo(${quoteIdent(row.name)})`)
         .all()
+        .filter((term) => term.key === 1)
         .sort((a, b) => a.seqno - b.seqno)
-        .map((column) => column.name),
-    }))
+        .map((term) => ({
+          sequence: term.seqno,
+          columnId: term.cid,
+          name: term.name,
+          descending: term.desc === 1,
+          collation: term.coll,
+          key: true,
+        }));
+      const schema = db
+        .prepare("SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?")
+        .get(row.name);
+      return {
+        name: row.name,
+        unique: row.unique === 1,
+        origin: row.origin,
+        partial: row.partial === 1,
+        sql: schema?.sql ?? null,
+        columns: terms.map((term) => term.name),
+        terms,
+      };
+    })
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
@@ -51,7 +67,11 @@ function describeForeignKeys(db, tableName) {
     group.columns[row.seq] = row.from;
     group.referencedColumns[row.seq] = row.to;
   }
-  return [...groups.values()];
+  return [...groups.values()].sort((a, b) => {
+    const aKey = JSON.stringify([a.table, a.columns, a.referencedColumns, a.onUpdate, a.onDelete, a.match]);
+    const bKey = JSON.stringify([b.table, b.columns, b.referencedColumns, b.onUpdate, b.onDelete, b.match]);
+    return aKey.localeCompare(bKey);
+  });
 }
 
 function describeTable(db, tableName) {
@@ -74,8 +94,10 @@ function describeTable(db, tableName) {
     }));
   return {
     name: tableName,
+    sql,
     virtual: /^CREATE\s+VIRTUAL\s+TABLE/i.test(sql),
     withoutRowid: /\bWITHOUT\s+ROWID\b/i.test(sql),
+    strict: /(?:,|\))\s*STRICT\s*$/i.test(sql),
     columns,
     primaryKey: columns
       .filter((column) => column.primaryKeyPosition > 0)
@@ -88,7 +110,10 @@ function describeTable(db, tableName) {
 
 export function describeSqliteStorage(db, tableNames) {
   if (!Array.isArray(tableNames)) throw new Error('tableNames must be an array');
-  const names = [...tableNames];
+  if (!tableNames.every((name) => typeof name === 'string' && name.length > 0)) {
+    throw new Error('tableNames must contain only non-empty strings');
+  }
+  const names = [...tableNames].sort((a, b) => a.localeCompare(b));
   if (new Set(names.map((name) => name.toLowerCase())).size !== names.length) {
     throw new Error('tableNames must not contain duplicates');
   }
