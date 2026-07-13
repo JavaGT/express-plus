@@ -12,9 +12,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import {
+import workbench, {
   entity, generateDDL, createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
-import { setActiveDb } from '../src/db.mjs';
 
 const Canvas = entity('Canvas', {
     title: text(),
@@ -25,19 +24,19 @@ const Canvas = entity('Canvas', {
 
 function setup() {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
   executeFrameworkDDL(db);
   for (const sql of generateDDL(Canvas)) db.exec(sql);
   db.prepare('INSERT INTO Canvas (id, title) VALUES (?, ?)').run('c1', 'Drawing 1');
-  return db;
+  const app = workbench({ db, entities: [Canvas] });
+  return { db, Canvas: app.entity(Canvas) };
 }
 
-async function makeServer(db) {
+async function makeServer(db, boundCanvas) {
   return createServer({
     db,
-    handlers: Canvas.crudHandlers,
+    handlers: boundCanvas.crudHandlers,
     pipeline: durableMutationVariant({
-      projectionConsumers: [Canvas.projection],
+      projectionConsumers: [boundCanvas.projection],
       admission: { beforeProjection: () => true, afterProjection: async () => true },
     }),
     authorize: async () => true,
@@ -53,17 +52,17 @@ test('ephemeral() still produces its descriptor (sanity, unchanged)', () => {
 });
 
 test('an ephemeral field compiles + hydrate gives a .set handle (not the dead descriptor)', async () => {
-  const db = setup();
-  const server = await makeServer(db);
-  const row = Canvas.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), server.dispatch);
+  const { db, Canvas: bound } = setup();
+  const server = await makeServer(db, bound);
+  const row = bound.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), server.dispatch);
   assert.equal(typeof row.activeStroke.set, 'function', 'hydrate attached a .set handle');
   assert.equal(typeof row.activeStroke.get, 'function');
 });
 
 test('.set(cells) under a write-granted principal is admitted + projects the per-connection row', async () => {
-  const db = setup();
-  const server = await makeServer(db);
-  const row = Canvas.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), server.dispatch);
+  const { db, Canvas: bound } = setup();
+  const server = await makeServer(db, bound);
+  const row = bound.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), server.dispatch);
   await row.activeStroke.set({ points: [{ x: 1, y: 2 }], color: 'red' });
 
   const stored = db
@@ -77,9 +76,9 @@ test('.set(cells) under a write-granted principal is admitted + projects the per
 });
 
 test('.set then .set again replaces (latest snapshot wins — one row, latest cells)', async () => {
-  const db = setup();
-  const server = await makeServer(db);
-  const row = Canvas.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), server.dispatch);
+  const { db, Canvas: bound } = setup();
+  const server = await makeServer(db, bound);
+  const row = bound.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), server.dispatch);
   await row.activeStroke.set({ points: [{ x: 1 }], color: 'red' });
   await row.activeStroke.set({ points: [{ x: 1 }, { x: 2 }], color: 'blue' });
 
@@ -91,10 +90,10 @@ test('.set then .set again replaces (latest snapshot wins — one row, latest ce
 });
 
 test('two principals write to distinct per-connection rows (client_id isolation)', async () => {
-  const db = setup();
-  const server = await makeServer(db);
-  const aliceRow = Canvas.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), server.dispatch);
-  const bobRow = Canvas.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'bob' }), server.dispatch);
+  const { db, Canvas: bound } = setup();
+  const server = await makeServer(db, bound);
+  const aliceRow = bound.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), server.dispatch);
+  const bobRow = bound.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'bob' }), server.dispatch);
   await aliceRow.activeStroke.set({ color: 'red' });
   await bobRow.activeStroke.set({ color: 'blue' });
 
@@ -109,9 +108,9 @@ test('two principals write to distinct per-connection rows (client_id isolation)
 });
 
 test('the committed event appends to _Log (the verbatim fan-out pathway fires)', async () => {
-  const db = setup();
-  const server = await makeServer(db);
-  const row = Canvas.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), server.dispatch);
+  const { db, Canvas: bound } = setup();
+  const server = await makeServer(db, bound);
+  const row = bound.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), server.dispatch);
   await row.activeStroke.set({ color: 'red' });
 
   const logs = db
@@ -123,9 +122,9 @@ test('the committed event appends to _Log (the verbatim fan-out pathway fires)',
 });
 
 test('a handle hydrated without dispatch throws on .set (fail-closed, no direct-SQL fallback)', async () => {
-  const db = setup();
+  const { db, Canvas: bound } = setup();
   // dispatch = null (the trusted query API path)
-  const row = Canvas.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), null);
+  const row = bound.hydrate({ id: 'c1' }, makePrincipal({ type: 'user', id: 'alice' }), null);
   await assert.rejects(
     () => row.activeStroke.set({ color: 'red' }),
     /cannot mutate Canvas\.activeStroke without a dispatch ref/,
