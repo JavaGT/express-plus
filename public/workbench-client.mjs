@@ -9,7 +9,7 @@
 //   server → client: {type:'subscribed', requestId, scope, entity, id, currentSeq}
 //                    {type:'unsubscribed', scope, entity, id}
 //                    {type:'event', entity, id, seq, seqSpan, event, delta?}
-//                    {type:'error', requestId?, message}
+//                    {type:'error', requestId?, failure}
 
 // --- BEGIN GENERATED from src/replay-decision.mjs (keep in sync; zero-import) ---
 function normalizeSeqSpan(seqOrSpan) {
@@ -58,6 +58,17 @@ class ClientClosedError extends Error {
   }
 }
 
+export class WorkbenchFailureError extends Error {
+  constructor(workbenchFailure) {
+    if (!isWorkbenchFailure(workbenchFailure)) {
+      throw new TypeError('WorkbenchFailureError requires a canonical WorkbenchFailure');
+    }
+    super(workbenchFailure.message);
+    this.name = 'WorkbenchFailureError';
+    this.failure = workbenchFailure;
+  }
+}
+
 class LiveSyncSession {
   // `baseUrl` is e.g. 'http://127.0.0.1:5432'. Derives ws:// URL by swapping
   // scheme and appending '/events'. If already ws:// or wss://, uses as-is.
@@ -103,8 +114,8 @@ class LiveSyncSession {
 
   // Subscribe to an (entity, id). Opens the WebSocket lazily on first call.
   // Returns a handle `{ currentSeq }` from the server's `subscribed` ack.
-  // Rejects with `new Error(message)` if the server sends an `error` envelope
-  // before the `subscribed` ack.
+  // Rejects with WorkbenchFailureError when the server sends a canonical
+  // `error` envelope before the `subscribed` ack; inspect its stable `.failure`.
   subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
     const { options, onEvent } = normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent);
     const key = `${entity}:${String(id)}`;
@@ -472,6 +483,7 @@ class LiveSyncSession {
         }
       }
     } else if (envelope.type === 'error') {
+      if (!isWorkbenchFailure(envelope.failure)) return;
       if (envelope.requestId !== undefined) {
         const key = this._subRequests.get(envelope.requestId);
         if (!key) return;
@@ -482,17 +494,12 @@ class LiveSyncSession {
         const pending = this._pendingSubs.get(key);
         if (pending) {
           this._pendingSubs.delete(key);
-          pending.reject(new Error(envelope.message));
+          pending.reject(new WorkbenchFailureError(envelope.failure));
         }
         return;
       }
-      // Compatibility with older servers whose protocol errors were not
-      // correlated. Such an error cannot truthfully identify one request.
-      for (const [key, pending] of this._pendingSubs) {
-        this._pendingSubs.delete(key);
-        this._subs.delete(key);
-        pending.reject(new Error(envelope.message));
-      }
+      // A connection-level error cannot truthfully identify one pending
+      // subscription, so it must not reject any of them as a known denial.
     } else if (envelope.type === 'event') {
       const key = scopeKey ?? `${envelope.entity}:${String(envelope.id)}`;
       const sub = this._subs.get(key);

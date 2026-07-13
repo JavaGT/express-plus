@@ -471,6 +471,7 @@ export function listen(app, port, optionsOrCallback = {}) {
     db: app.db,
     resolveEntity: (name) => app.entities?.get(name),
     ready: () => app.ready,
+    log: app.log,
   });
   app._transportAttached = true;
 

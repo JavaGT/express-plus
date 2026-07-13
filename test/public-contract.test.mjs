@@ -39,7 +39,7 @@ export const PUBLIC_API = Object.freeze({
   'workbench/client': Object.freeze({
     default: false,
     named: Object.freeze([
-      'LiveChannel', 'LiveList', 'decodeResult', 'createLiveStore',
+      'LiveChannel', 'LiveList', 'WorkbenchFailureError', 'decodeResult', 'createLiveStore',
       'createAuthClient',
     ]),
   }),

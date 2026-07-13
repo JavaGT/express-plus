@@ -235,7 +235,8 @@ test('B1: subscribe with fields:{activeStroke:{range:[1,2]}} rejects with "coord
     const msg = await ws.nextMessage();
     assert.ok(msg, 'server must respond');
     assert.equal(msg.type, 'error');
-    assert.match(msg.message, /coordinate narrowing not yet supported/i);
+    assert.equal(msg.failure.category, 'invalid-input');
+    assert.match(msg.failure.message, /coordinate narrowing.*not supported/i);
   } finally {
     ws?.close();
     app.live.close();
@@ -260,7 +261,8 @@ test('B1: subscribe with fields:{bogus:true} rejects with "unknown field"', asyn
     const msg = await ws.nextMessage();
     assert.ok(msg, 'server must respond');
     assert.equal(msg.type, 'error');
-    assert.match(msg.message, /unknown field/i);
+    assert.equal(msg.failure.category, 'invalid-input');
+    assert.match(msg.failure.message, /unknown field/i);
   } finally {
     ws?.close();
     app.live.close();
@@ -287,7 +289,8 @@ test('B1: subscribe with closure in fields rejects "data, not a closure"', async
     const msg = await ws.nextMessage();
     assert.ok(msg, 'server must respond');
     assert.equal(msg.type, 'error');
-    assert.match(msg.message, /invalid fields interest/i);
+    assert.equal(msg.failure.category, 'invalid-input');
+    assert.match(msg.failure.message, /invalid fields interest/i);
   } finally {
     ws?.close();
     app.live.close();
@@ -310,7 +313,8 @@ test('B1: subscribe with array fields rejects "invalid fields interest"', async 
     const msg = await ws.nextMessage();
     assert.ok(msg, 'server must respond');
     assert.equal(msg.type, 'error');
-    assert.match(msg.message, /invalid fields interest/i);
+    assert.equal(msg.failure.category, 'invalid-input');
+    assert.match(msg.failure.message, /invalid fields interest/i);
   } finally {
     ws?.close();
     app.live.close();

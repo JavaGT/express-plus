@@ -28,6 +28,7 @@ import { tryParseScopeKey } from './scope-handle.mjs';
  * @param {object|null} [options.db]
  * @param {Function|null} [options.resolveEntity] — name → entity record
  * @param {Function} [options.ready] — resolves when protocol admission is safe
+ * @param {object|null} [options.log] — application-owned structured logger
  * @returns {{ emit: Function, count: Function, close: Function, createConsumer: Function }}
  */
 export function createLiveDelivery(httpServer, {
@@ -37,6 +38,7 @@ export function createLiveDelivery(httpServer, {
   db = null,
   resolveEntity = null,
   ready = () => Promise.resolve(),
+  log = null,
 } = {}) {
   const fanout = createLiveFanout({ mayVerb });
   const connections = new Set();
@@ -105,6 +107,7 @@ export function createLiveDelivery(httpServer, {
           mayVerb,
           db,
           currentSeq,
+          log,
           onClose: () => connections.delete(conn),
         });
         conn.setPrincipal(principalOf(req));

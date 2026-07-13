@@ -18,7 +18,7 @@ import {
   type WorkbenchDatabase,
 } from 'workbench/server';
 import {
-  LiveChannel, LiveList, createAuthClient, createLiveStore, decodeResult,
+  LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore, decodeResult,
   type EventsSinceResponse, type LiveStore, type SnapshotResponse,
   type StaleResponse, type WsEnvelope,
 } from 'workbench/client';
@@ -151,6 +151,8 @@ void [createdInvitation, rejectedInvitation];
 const channel = new LiveChannel('https://example.test', {
   socketFactory: (url) => new WebSocket(url),
 });
+const liveFailureError = new WorkbenchFailureError(expectedFailure);
+const liveFailure: WorkbenchFailure = liveFailureError.failure;
 channel.subscribe('Project', 'project-1', {
   fields: { cursor: true },
   pace: { profile: '15fps' },
@@ -167,7 +169,7 @@ declare const envelope: WsEnvelope;
 declare const snapshot: SnapshotResponse<ProjectRow>;
 declare const eventsSince: EventsSinceResponse;
 declare const stale: StaleResponse<ProjectRow>;
-void [envelope, snapshot, eventsSince, stale, Renamed];
+void [envelope, snapshot, eventsSince, stale, Renamed, liveFailure];
 
 const boundWithMembership = membership(app.entity(Project), {
   member: { can: [read] },

@@ -7,6 +7,7 @@
 
 import { FrameSender, FrameParser } from './websocket.mjs';
 import { authorizeSubscription, normalizeSubscribeMsg } from './live-admission.mjs';
+import { failure, isWorkbenchFailure, sanitizeUnexpectedFailure } from './outcome.mjs';
 
 function requestIdOf(msg) {
   const value = msg?.requestId;
@@ -28,8 +29,9 @@ export class LiveConnection {
   #db;
   #currentSeq;
   #onClose;
+  #log;
 
-  constructor(socket, id, { fanout, resolveEntity, mayVerb, db, currentSeq, onClose } = {}) {
+  constructor(socket, id, { fanout, resolveEntity, mayVerb, db, currentSeq, onClose, log = null } = {}) {
     this.#socket = socket;
     this.#sender = new FrameSender();
     this.#parser = new FrameParser();
@@ -41,6 +43,7 @@ export class LiveConnection {
     this.#db = db;
     this.#currentSeq = currentSeq;
     this.#onClose = onClose;
+    this.#log = log;
 
     socket.on('data', (chunk) => {
       this.#parser.feed(chunk);
@@ -69,8 +72,13 @@ export class LiveConnection {
     }
   }
 
-  error(message, requestId) {
-    const response = { type: 'error', message };
+  error(workbenchFailure, requestId) {
+    const response = {
+      type: 'error',
+      failure: isWorkbenchFailure(workbenchFailure)
+        ? workbenchFailure
+        : sanitizeUnexpectedFailure(),
+    };
     if (requestId !== undefined) response.requestId = requestId;
     this.send(response);
   }
@@ -88,11 +96,11 @@ export class LiveConnection {
           const parsed = JSON.parse(msg.payload.toString('utf-8'));
           this.#handleMessage(parsed);
         } catch {
-          this.error('invalid JSON');
+          this.error(failure('invalid-input', 'Invalid JSON.'));
         }
       }
       if (msg.opcode === -1) {
-        this.error(msg.error);
+        this.error(failure('invalid-input', String(msg.error || 'Invalid WebSocket frame.')));
       }
     }
 
@@ -103,16 +111,30 @@ export class LiveConnection {
   }
 
   #handleMessage(msg) {
-    if (!msg || typeof msg !== 'object') return;
+    if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
+      this.error(failure('invalid-input', 'Message must be an object.'));
+      return;
+    }
     switch (msg.type) {
       case 'subscribe':
-        this.#authorizeAndSubscribe(msg).catch(() => this.error('forbidden', requestIdOf(msg)));
+        this.#authorizeAndSubscribe(msg).catch((err) => {
+          const requestId = requestIdOf(msg);
+          this.#log?.error('live', 'subscription admission failed', {
+            err,
+            connectionId: this.#id,
+            ...(requestId === undefined ? {} : { requestId }),
+          });
+          this.error(sanitizeUnexpectedFailure(), requestId);
+        });
         break;
       case 'unsubscribe':
         this.#handleUnsubscribe(msg);
         break;
       default:
-        this.error(`unknown message type: ${msg.type}`);
+        this.error(
+          failure('unknown-action', `Unknown message type: ${String(msg.type)}.`),
+          requestIdOf(msg),
+        );
     }
   }
 
@@ -136,7 +158,7 @@ export class LiveConnection {
       fanout: this.#fanout,
     });
     if (!result.admitted) {
-      this.error(result.reason, requestId);
+      this.error(result.failure, requestId);
       return;
     }
     this.#fanout.addSubscription(result.scope, this, result.fields, result.pace, result.interest);

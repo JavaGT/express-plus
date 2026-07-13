@@ -312,7 +312,8 @@ test('B2: subscribe with pace:{profile:"bogus"} rejects with unknown profile', a
     const msg = await ws.nextMessage();
     assert.ok(msg, 'server must respond');
     assert.equal(msg.type, 'error');
-    assert.match(msg.message, /unknown pace profile/i);
+    assert.equal(msg.failure.category, 'invalid-input');
+    assert.match(msg.failure.message, /unknown pace profile/i);
   } finally {
     ws?.close();
     app.live.close();
@@ -336,7 +337,8 @@ test('B2: subscribe with pace:{coalesce:{window:-5,by:"latest-wins"}} rejects', 
     const msg = await ws.nextMessage();
     assert.ok(msg, 'server must respond');
     assert.equal(msg.type, 'error');
-    assert.match(msg.message, /pace window|exceeds bounds/i);
+    assert.equal(msg.failure.category, 'invalid-input');
+    assert.match(msg.failure.message, /pace window|exceeds bounds/i);
   } finally {
     ws?.close();
     app.live.close();

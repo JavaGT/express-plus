@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { LiveChannel } from '../public/workbench-client.mjs';
+import * as clientModule from '../public/workbench-client.mjs';
 
 const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -81,7 +82,7 @@ test('a denied subscription rejects only its matching request and remains reusab
   const allowedEvents = [];
   const allowed = channel.subscribe('Doc', 'allowed', (event) => allowedEvents.push(event));
   const denied = channel.subscribe('Doc', 'denied', () => {});
-  const deniedResult = assert.rejects(denied, /forbidden/);
+  const deniedResult = assert.rejects(denied, /forbidden/i);
 
   await tick();
   sockets[0].open();
@@ -95,7 +96,7 @@ test('a denied subscription rejects only its matching request and remains reusab
   sockets[0].emit('message', {
     type: 'error',
     requestId: deniedRequest.requestId,
-    message: 'forbidden',
+    failure: { category: 'denied', message: 'Forbidden.' },
   });
   sockets[0].emit('message', {
     type: 'subscribed',
@@ -131,6 +132,88 @@ test('a denied subscription rejects only its matching request and remains reusab
     currentSeq: 4,
   });
   assert.deepEqual(await retry, { currentSeq: 4 });
+  channel.close();
+});
+
+test('a correlated failure rejects only its request with WorkbenchFailureError', async () => {
+  const { channel, sockets } = harness();
+  const allowed = channel.subscribe('Doc', 'allowed', () => {});
+  const denied = channel.subscribe('Doc', 'denied', () => {});
+  await tick();
+  sockets[0].open();
+  await tick();
+  const [allowedRequest, deniedRequest] = sockets[0].sent;
+
+  sockets[0].emit('message', {
+    type: 'error',
+    requestId: deniedRequest.requestId,
+    failure: { category: 'denied', message: 'Forbidden.' },
+  });
+  await assert.rejects(denied, (error) => {
+    assert.equal(error instanceof clientModule.WorkbenchFailureError, true);
+    assert.deepEqual(error.failure, { category: 'denied', message: 'Forbidden.' });
+    return true;
+  });
+
+  sockets[0].emit('message', {
+    type: 'subscribed',
+    requestId: allowedRequest.requestId,
+    entity: 'Doc',
+    id: 'allowed',
+    currentSeq: 4,
+  });
+  assert.deepEqual(await allowed, { currentSeq: 4 });
+  channel.close();
+});
+
+test('WorkbenchFailureError rejects a non-canonical failure', () => {
+  assert.throws(
+    () => new clientModule.WorkbenchFailureError({ message: 'not categorized' }),
+    /WorkbenchFailure/,
+  );
+});
+
+test('an uncorrelated error cannot reject unrelated pending subscriptions', async () => {
+  const { channel, sockets } = harness();
+  const first = channel.subscribe('Doc', 'a', () => {});
+  const second = channel.subscribe('Doc', 'b', () => {});
+  await tick();
+  sockets[0].open();
+  await tick();
+  sockets[0].emit('message', {
+    type: 'error',
+    failure: { category: 'invalid-input', message: 'Malformed frame.' },
+  });
+
+  const [firstRequest, secondRequest] = sockets[0].sent;
+  sockets[0].emit('message', {
+    type: 'subscribed', requestId: firstRequest.requestId,
+    entity: 'Doc', id: 'a', currentSeq: 1,
+  });
+  sockets[0].emit('message', {
+    type: 'subscribed', requestId: secondRequest.requestId,
+    entity: 'Doc', id: 'b', currentSeq: 2,
+  });
+  assert.deepEqual(await first, { currentSeq: 1 });
+  assert.deepEqual(await second, { currentSeq: 2 });
+  channel.close();
+});
+
+test('a malformed correlated error is ignored without leaking its text', async () => {
+  const { channel, sockets } = harness();
+  const pending = channel.subscribe('Doc', 'a', () => {});
+  await tick();
+  sockets[0].open();
+  await tick();
+  const request = sockets[0].sent[0];
+  sockets[0].emit('message', {
+    type: 'error', requestId: request.requestId, message: 'database password leaked',
+  });
+  sockets[0].emit('message', {
+    type: 'subscribed', requestId: request.requestId,
+    entity: 'Doc', id: 'a', currentSeq: 3,
+  });
+  assert.deepEqual(await pending, { currentSeq: 3 });
   channel.close();
 });
 

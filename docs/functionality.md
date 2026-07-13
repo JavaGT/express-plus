@@ -340,6 +340,7 @@ import {
 | Export | Purpose |
 | --- | --- |
 | `LiveChannel` | One WebSocket to `/events`; subscribe/unsubscribe; reconnect |
+| `WorkbenchFailureError` | A correlated live-subscription rejection with a stable `.failure` category and message |
 | `LiveList` | One document: snapshot bootstrap → stream; span-aware cursor |
 | `createLiveStore` | Factory: CRUD dispatch + optimistic overlay + live lists |
 | `createAuthClient` | Login/logout helpers against `/auth` |

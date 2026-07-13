@@ -79,6 +79,7 @@ export type WsEnvelope =
 
 export interface WsSubscribedEnvelope {
   type: 'subscribed';
+  requestId?: number | string;
   scope?: string;
   entity?: string;
   id?: string | number;
@@ -94,7 +95,13 @@ export interface WsUnsubscribedEnvelope {
 
 export interface WsErrorEnvelope {
   type: 'error';
-  message: string;
+  requestId?: number | string;
+  failure: WorkbenchFailure;
+}
+
+export class WorkbenchFailureError extends Error {
+  readonly failure: WorkbenchFailure;
+  constructor(failure: WorkbenchFailure);
 }
 
 export interface WsEventEnvelope {

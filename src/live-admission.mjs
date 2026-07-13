@@ -10,6 +10,7 @@ import { anonymous } from './principal.mjs';
 import { mayRow } from './row-grant.mjs';
 import { validatePaceSelection } from './field-pace.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
+import { failure } from './outcome.mjs';
 
 const MAX_SUBS_PER_CONN = 256;
 const MAX_ID_LEN = 256;
@@ -62,7 +63,7 @@ export async function authorizeSubscription(msg, conn, {
 }) {
   const normalized = normalizeSubscribeMsg(msg);
   if (!normalized) {
-    return { admitted: false, reason: 'subscribe requires entity+id or scope' };
+    return { admitted: false, failure: failure('invalid-input', 'Subscribe requires entity and id, or a scope.') };
   }
 
   const { scope, interest } = normalized;
@@ -70,41 +71,58 @@ export async function authorizeSubscription(msg, conn, {
   const id = interest.id;
 
   if (typeof entityName !== 'string' || id === undefined) {
-    return { admitted: false, reason: 'scope-level subscriptions not yet configured (use entity+id)' };
+    return { admitted: false, failure: failure('invalid-input', 'Scope-level subscriptions are not configured; use entity and id.') };
   }
 
   const idStr = String(id);
   if (idStr.length > MAX_ID_LEN) {
-    return { admitted: false, reason: 'subscribe id too long' };
+    return { admitted: false, failure: failure('invalid-input', 'Subscribe id is too long.') };
   }
   if (fanout.subscriptionCount(conn) >= MAX_SUBS_PER_CONN && !fanout.hasSubscription(conn, entityName, idStr)) {
-    return { admitted: false, reason: 'too many subscriptions' };
+    return { admitted: false, failure: failure('conflict', 'Too many subscriptions are active.') };
   }
   if (!resolveEntity || !mayVerb || !db) {
-    return { admitted: false, reason: 'forbidden' };
+    throw new Error('Live subscription admission dependencies are unavailable.');
   }
   const entity = resolveEntity(entityName);
   if (!entity) {
-    return { admitted: false, reason: 'forbidden' };
+    return { admitted: false, failure: failure('denied', 'Forbidden.') };
   }
 
+  const principal = conn.principal ?? anonymous;
+  const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
+  const row = db
+    .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
+    .get({ ...scopeParams, id: idStr });
+  if (!row) {
+    return { admitted: false, failure: failure('denied', 'Forbidden.') };
+  }
+  {
+    const hydrated = entity.hydrate ? entity.hydrate(row, principal) : row;
+    if (!(await mayRow(entity, 'subscribe', hydrated, principal, mayVerb))) {
+      return { admitted: false, failure: failure('denied', 'Forbidden.') };
+    }
+  }
+
+  // Entity-specific validation happens only after row authorization. Otherwise
+  // different validation errors reveal which entity names and fields exist.
   let fields = null;
   if (interest.fields !== undefined && interest.fields !== null) {
     if (typeof interest.fields !== 'object' || interest.fields === null || Array.isArray(interest.fields)) {
-      return { admitted: false, reason: 'invalid fields interest' };
+      return { admitted: false, failure: failure('invalid-input', 'Invalid fields interest.') };
     }
     if (typeof interest.fields === 'function') {
-      return { admitted: false, reason: 'fields interest must be data, not a closure' };
+      return { admitted: false, failure: failure('invalid-input', 'Fields interest must be data, not a closure.') };
     }
     for (const [key, value] of Object.entries(interest.fields)) {
       if (typeof value === 'function') {
-        return { admitted: false, reason: 'fields interest must be data, not a closure' };
+        return { admitted: false, failure: failure('invalid-input', 'Fields interest must be data, not a closure.') };
       }
       if (!entity.fields || !(key in entity.fields)) {
-        return { admitted: false, reason: `unknown field ${key} in interest` };
+        return { admitted: false, failure: failure('invalid-input', `Unknown field ${key} in interest.`) };
       }
       if (value !== true) {
-        return { admitted: false, reason: 'coordinate narrowing not yet supported' };
+        return { admitted: false, failure: failure('invalid-input', 'Coordinate narrowing is not supported.') };
       }
     }
     fields = interest.fields;
@@ -115,27 +133,7 @@ export async function authorizeSubscription(msg, conn, {
     try {
       pace = validatePaceSelection('ephemeral', interest.pace);
     } catch (err) {
-      return { admitted: false, reason: err.message };
-    }
-  }
-
-  const principal = conn.principal ?? anonymous;
-  const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
-  let row;
-  try {
-    row = db
-      .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
-      .get({ ...scopeParams, id: idStr });
-  } catch {
-    return { admitted: false, reason: 'forbidden' };
-  }
-  if (!row) {
-    return { admitted: false, reason: 'forbidden' };
-  }
-  {
-    const hydrated = entity.hydrate ? entity.hydrate(row, principal) : row;
-    if (!(await mayRow(entity, 'subscribe', hydrated, principal, mayVerb))) {
-      return { admitted: false, reason: 'forbidden' };
+      return { admitted: false, failure: failure('invalid-input', String(err?.message || 'Invalid pace selection.')) };
     }
   }
 
