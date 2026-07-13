@@ -17,10 +17,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-// We import these from the production modules. buildCheckRegistry will be
-// created in the next step — for now the import fails (RED).
 import { buildCheckRegistry } from '../src/registry.mjs';
-import { setActiveDb } from '../src/db.mjs';
+import workbench from '../src/app.mjs';
 import {
   entity, mayVerb, NonCompilableError } from '../src/internal.mjs';
 import { principal, anonymous } from '../src/principal.mjs';
@@ -77,7 +75,6 @@ test('owner check run face tests principal identity against the FK column', () =
 
 test('declared check with membership runs against the real DB', () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   // Create the membership side-table that the runtime face will query.
   db.exec(`
@@ -113,19 +110,19 @@ test('declared check with membership runs against the real DB', () => {
 
   // Principal 'u1' IS a member → true.
   assert.equal(
-    reg.collaborator.run({ entity: { id: 'L1' }, principal: { id: 'u1' } }),
+    reg.collaborator.run({ entity: { id: 'L1' }, principal: { id: 'u1' }, runtime: { db } }),
     true,
   );
 
   // Principal 'u2' is NOT a member → false.
   assert.equal(
-    reg.collaborator.run({ entity: { id: 'L1' }, principal: { id: 'u2' } }),
+    reg.collaborator.run({ entity: { id: 'L1' }, principal: { id: 'u2' }, runtime: { db } }),
     false,
   );
 
   // Wrong entity (different row id) → false.
   assert.equal(
-    reg.collaborator.run({ entity: { id: 'L2' }, principal: { id: 'u1' } }),
+    reg.collaborator.run({ entity: { id: 'L2' }, principal: { id: 'u1' }, runtime: { db } }),
     false,
   );
 });
@@ -136,7 +133,6 @@ test('declared check with membership runs against the real DB', () => {
 
 test('map-role names have a run face only; harvest is undefined', () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS Doc_collaborators (
@@ -170,13 +166,13 @@ test('map-role names have a run face only; harvest is undefined', () => {
 
   // The principal 'u1' IS an editor → editor.run → true.
   assert.equal(
-    reg.editor.run({ entity: { id: 'D1' }, principal: { id: 'u1' } }),
+    reg.editor.run({ entity: { id: 'D1' }, principal: { id: 'u1' }, runtime: { db } }),
     true,
   );
 
   // The principal 'u1' is NOT a viewer → viewer.run → false.
   assert.equal(
-    reg.viewer.run({ entity: { id: 'D1' }, principal: { id: 'u1' } }),
+    reg.viewer.run({ entity: { id: 'D1' }, principal: { id: 'u1' }, runtime: { db } }),
     false,
   );
 });
@@ -237,7 +233,6 @@ test('unknown check name in scope throws at entity load', () => {
 
 test('ref handle thenable resolves to target scalar fields and map handles', async () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   db.exec(`
     CREATE TABLE IF NOT EXISTS Canvas (
@@ -300,16 +295,20 @@ test('ref handle thenable resolves to target scalar fields and map handles', asy
     })],
   });
 
-  const row = RasterLayer.getOrFail('L1');
+  const app = workbench({ db, entities: [Canvas, RasterLayer] });
+  const CanvasBound = app.entity(Canvas);
+  const RasterLayerBound = app.entity(RasterLayer);
+
+  const row = RasterLayerBound.getOrFail('L1');
 
   const ownerP = principal({ type: 'user', id: 'owner-1' });
   const editorP = principal({ type: 'user', id: 'editor-1' });
   const strangerP = principal({ type: 'user', id: 'stranger-1' });
 
-  assert.equal(await mayVerb(RasterLayer, 'read', row, ownerP), true);
-  assert.equal(await mayVerb(RasterLayer, 'update', row, editorP), true);
-  assert.equal(await mayVerb(RasterLayer, 'read', row, editorP), true);
-  assert.equal(await mayVerb(RasterLayer, 'read', row, strangerP), false);
+  assert.equal(await mayVerb(RasterLayerBound, 'read', row, ownerP), true);
+  assert.equal(await mayVerb(RasterLayerBound, 'update', row, editorP), true);
+  assert.equal(await mayVerb(RasterLayerBound, 'read', row, editorP), true);
+  assert.equal(await mayVerb(RasterLayerBound, 'read', row, strangerP), false);
 });
 
 // ---- Test 8: entity key is present in declared check context ----
@@ -319,7 +318,6 @@ test('ref handle thenable resolves to target scalar fields and map handles', asy
 
 test('entity key is available alongside entity-name key in check context', () => {
   const db = new DatabaseSync(':memory:');
-  setActiveDb(db, { replace: true });
 
   db.exec(`CREATE TABLE IF NOT EXISTS Target (id TEXT PRIMARY KEY, label TEXT)`);
   db.exec(`CREATE TABLE IF NOT EXISTS Doc (id TEXT PRIMARY KEY, target TEXT)`);
@@ -331,7 +329,7 @@ test('entity key is available alongside entity-name key in check context', () =>
     id: 'd1', target: 't1',
   });
 
-  entity('Target', {
+  const Target = entity('Target', {
         label: text(),
 
     grant: () => [scope(() => never()).can(() => grant(read))],
@@ -349,9 +347,13 @@ test('entity key is available alongside entity-name key in check context', () =>
     })],
   });
 
-  const row = Doc.getOrFail('d1');
-  assert.equal(Doc.registry.labelIsHello.run({
-    entity: row, principal: principal({ type: 'user', id: 'u1' }),
+  const app = workbench({ db, entities: [Doc, Target] });
+  const DocBound = app.entity(Doc);
+  const TargetBound = app.entity(Target);
+
+  const row = DocBound.getOrFail('d1');
+  assert.equal(DocBound.registry.labelIsHello.run({
+    entity: row, principal: principal({ type: 'user', id: 'u1' }), runtime: DocBound.runtime,
   }), true);
 });
 
