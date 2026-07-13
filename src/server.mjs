@@ -21,6 +21,7 @@ export { serveStatic } from './views.mjs';
 export { createJobQueue } from './job-queue.mjs';
 export { createBlobStore } from './blob-store.mjs';
 export { runMigrations } from './migrations.mjs';
+export { defineSqliteSchema } from './sqlite-schema.mjs';
 export { readSeq as readCommittedCursor } from './committed-log.mjs';
 import { readSince } from './committed-log.mjs';
 

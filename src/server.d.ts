@@ -205,6 +205,53 @@ export function createInvitationApi(options: {
 }): InvitationApi;
 
 // ---------------------------------------------------------------------------
+// SQLite schema declaration
+// ---------------------------------------------------------------------------
+
+export interface ColumnDeclaration {
+  name: string;
+  type: 'text' | 'integer' | 'real' | 'blob';
+  primaryKey?: boolean;
+  notNull?: boolean;
+  default?: string | number;
+  defaultExpression?: 'CURRENT_DATE' | 'CURRENT_TIME' | 'CURRENT_TIMESTAMP';
+}
+
+export interface ForeignKeyDeclaration {
+  columns: readonly string[];
+  references: { table: string; columns: readonly string[] };
+  onDelete?: 'cascade' | 'set null' | 'set default' | 'restrict' | 'no action';
+  onUpdate?: 'cascade' | 'set null' | 'set default' | 'restrict' | 'no action';
+}
+
+export interface IndexDeclaration {
+  name: string;
+  columns: readonly string[];
+  unique?: boolean;
+}
+
+export interface TableDeclaration {
+  name: string;
+  columns: readonly ColumnDeclaration[];
+  foreignKeys?: readonly ForeignKeyDeclaration[];
+  indexes?: readonly IndexDeclaration[];
+  primaryKey?: readonly string[];
+}
+
+export interface SqliteSchemaResult {
+  readonly name: string;
+  readonly tableNames: readonly string[];
+  readonly ddl: readonly string[];
+  prepare(db: WorkbenchDatabase, options?: { now?: () => string }): void;
+}
+
+export function defineSqliteSchema(spec: {
+  name: string;
+  tables: readonly TableDeclaration[];
+  migrations?: readonly Migration[];
+}): SqliteSchemaResult;
+
+// ---------------------------------------------------------------------------
 // Route / static helpers
 // ---------------------------------------------------------------------------
 
