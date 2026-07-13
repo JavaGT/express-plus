@@ -26,6 +26,17 @@ function materializeDefault(defaultValue) {
   return value !== null && typeof value === 'object' ? structuredClone(value) : value;
 }
 
+export function materializeCreateDefaults(record, payload) {
+  const data = { ...payload };
+  for (const [fieldName, descriptor] of Object.entries(record.fields)) {
+    if (!(fieldName in data) && descriptor.default !== undefined) {
+      data[fieldName] = materializeDefault(descriptor.default);
+      validateMaterializedField(record, fieldName, data[fieldName]);
+    }
+  }
+  return data;
+}
+
 export function createCrudHandlers({ record, sideTableStrategyEntries }) {
   const { name, fields, verbs } = record;
   const ownerField = ownerFieldOf({ name, fields });
@@ -38,13 +49,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         throw new ValidationError(`${name}.id: expected a non-empty text id`);
       }
       const id = requestedId ?? randomUUID();
-      const data = { ...fieldsPayload, id };
-      for (const [fieldName, descriptor] of Object.entries(fields)) {
-        if (!(fieldName in data) && descriptor.default !== undefined) {
-          data[fieldName] = materializeDefault(descriptor.default);
-          validateMaterializedField(record, fieldName, data[fieldName]);
-        }
-      }
+      const data = materializeCreateDefaults(record, { ...fieldsPayload, id });
       if (ownerField) data[ownerField] = principal?.id;
       return [{
         handle: verbs.created.handle,

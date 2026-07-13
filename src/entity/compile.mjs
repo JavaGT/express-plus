@@ -40,7 +40,7 @@ import { schedule as scheduleConstructors, triggerList } from '../schedule.mjs';
 import { compileMembershipAuthz } from '../auth/membership.mjs';
 import { collectSideTableStrategies } from '../side-table-strategy.mjs';
 import { createEntityProjection } from './projection.mjs';
-import { createCrudHandlers } from './crud.mjs';
+import { createCrudHandlers, materializeCreateDefaults } from './crud.mjs';
 import { installEntityQueries } from './query.mjs';
 
 // mintToken — a cryptographically random opaque session token. Handed to a
@@ -736,7 +736,7 @@ export function entity(name, declaration = {}) {
           return createPolicy(payload, { insert, mintToken });
         }
         validateMutation(bound, payload);
-        return insert(payload);
+        return insert(materializeCreateDefaults(bound, payload));
       };
       boundRecord.insert = insert;
       boundRecord.delete = (id) => {

@@ -99,6 +99,24 @@ test('Entity.create(payload) inserts and returns the new row with its id', () =>
   assert.equal(found.id, created.id);
 });
 
+test('Entity.create(payload) materializes server-owned defaults', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE AuditEntry (id TEXT PRIMARY KEY, body TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL)');
+  const instant = new Date('2026-07-14T00:00:00.000Z');
+  const AuditEntryDecl = entity('AuditEntry', {
+    body: text(),
+    createdAt: date({ readonly: true, default: () => instant }),
+    updatedAt: date({ touch: true, default: () => instant }),
+    grant: () => [scope(() => everyone()).can(() => grant(read))],
+  });
+  const AuditEntry = workbench({ db, entities: [AuditEntryDecl] }).entity(AuditEntryDecl);
+
+  const created = AuditEntry.create({ body: 'owned by the server' });
+
+  assert.equal(created.createdAt, instant.getTime());
+  assert.equal(created.updatedAt, instant.getTime());
+});
+
 test('Entity.delete(id) removes the row', () => {
   const User = bindUser(seedDb());
   const target = User.findOne(User.username.is('bob'));
