@@ -10,6 +10,13 @@ export { everyone, never, anyOf, inherit } from './scope-sql.mjs';
 export { principal, anonymous } from './principal.mjs';
 export { requireUser, allowAnonymous } from './route-gate.mjs';
 export { router } from './app.mjs';
+export {
+  FAILURE_CATEGORIES,
+  failure,
+  failureOutcome,
+  isWorkbenchFailure,
+  sanitizeUnexpectedFailure,
+} from './outcome.mjs';
 export { matchRoute } from './http-route-match.mjs';
 export { serveStatic } from './views.mjs';
 // Session cookie helpers — promoted to the public surface so an app hand-rolling

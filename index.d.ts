@@ -31,6 +31,43 @@ export interface Principal {
   readonly attributes: Readonly<Record<string, unknown>>;
 }
 
+export type FailureCategory =
+  | 'invalid-input'
+  | 'denied'
+  | 'unknown-action'
+  | 'not-found'
+  | 'conflict'
+  | 'internal';
+
+export const FAILURE_CATEGORIES: readonly [
+  'invalid-input',
+  'denied',
+  'unknown-action',
+  'not-found',
+  'conflict',
+  'internal',
+];
+
+export interface WorkbenchFailure {
+  readonly category: FailureCategory;
+  readonly message: string;
+  readonly details?: Readonly<Record<string, unknown>>;
+}
+
+export interface FailureOutcome {
+  readonly ok: false;
+  readonly failure: WorkbenchFailure;
+}
+
+export function failure(
+  category: FailureCategory,
+  message: string,
+  details?: Readonly<Record<string, unknown>>,
+): WorkbenchFailure;
+export function failureOutcome(workbenchFailure: WorkbenchFailure): FailureOutcome;
+export function isWorkbenchFailure(value: unknown): value is WorkbenchFailure;
+export function sanitizeUnexpectedFailure(value?: unknown): WorkbenchFailure;
+
 export interface UserPrincipal extends Principal {
   readonly type: 'user';
   readonly id: string;

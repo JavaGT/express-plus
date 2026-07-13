@@ -3,10 +3,12 @@ import workbench, {
   schedule, tick,
   principal, read, write, grant, membership, parseCookies, SESSION_COOKIE,
   apiKeyPrincipalOf, createInvitationApi as createRootInvitationApi, emailSeam,
+  FAILURE_CATEGORIES, failure, failureOutcome, isWorkbenchFailure, sanitizeUnexpectedFailure,
   matchRoute, noopTransport, serveStatic, sessionCookie, sessionPrincipalOf,
   sessionTokenOf,
   type ActionHandle, type BatchAction, type CommittedEvent, type DispatchRequest,
-  type DispatchResult, type EventHandle, type InheritDirective, type Principal,
+  type DispatchResult, type EventHandle, type FailureCategory, type FailureOutcome,
+  type InheritDirective, type Principal, type WorkbenchFailure,
   type WorkbenchApp, type WorkbenchEntity,
 } from 'workbench';
 import {
@@ -23,6 +25,12 @@ import {
 import { DatabaseSync } from 'node:sqlite';
 
 type ProjectRow = { id: string; name: string; ownerId: string };
+const category: FailureCategory = FAILURE_CATEGORIES[0];
+const expectedFailure: WorkbenchFailure = failure(category, 'Invalid project.', { field: 'name' });
+const expectedOutcome: FailureOutcome = failureOutcome(expectedFailure);
+const unexpectedFailure: WorkbenchFailure = sanitizeUnexpectedFailure(new Error('secret'));
+const recognizedFailure: boolean = isWorkbenchFailure(expectedFailure);
+void [expectedOutcome, unexpectedFailure, recognizedFailure];
 const Project: WorkbenchEntity<ProjectRow> = entity('Project', {
   name: text(),
   owner: ref('User'),
