@@ -1,23 +1,8 @@
-// Type definitions for workbench — the stable public handler contract.
-//
-// The .mjs source remains the sole source of truth; this is a projection for
-// TypeScript app authors. JS app authors see nothing change. `req.raw` and
-// `res.raw` expose node's real IncomingMessage / ServerResponse so SSE/stream
-// casts compile away (ServerResponse already provides writeHead/write/end) —
-// no custom RawRes alias to maintain in lockstep with node.
-//
-// Requires @types/node available in the consuming project (peer expectation,
-// not bundled).
-
 /// <reference types="node" />
 
-import type { IncomingMessage, ServerResponse } from "node:http";
+import type { IncomingMessage, ServerResponse } from 'node:http';
 
-// ---------------------------------------------------------------------------
-// Principal — the closed union (user | link | system | anonymous).
-// ---------------------------------------------------------------------------
-
-export type PrincipalType = "user" | "link" | "system" | "anonymous";
+export type PrincipalType = 'user' | 'link' | 'system' | 'apiKey' | 'anonymous';
 
 export interface Principal {
   readonly type: PrincipalType;
@@ -25,166 +10,291 @@ export interface Principal {
   readonly attributes: Readonly<Record<string, unknown>>;
 }
 
+export function principal(options?: {
+  type?: PrincipalType;
+  id?: string | null;
+  attributes?: Record<string, unknown>;
+}): Principal;
 export const anonymous: Principal;
 
-// ---------------------------------------------------------------------------
-// Handler contract — the (req, res, next) chain run for imperative routes.
-// ---------------------------------------------------------------------------
-
 export interface HandlerReq {
-  /** Already-parsed JSON/form body ({} when empty). */
   body: Record<string, unknown>;
-  /** Matched `:param` path segments. */
   params: Record<string, string>;
-  /** Parsed query string (Object.fromEntries of url.searchParams). */
   query: Record<string, string>;
-  /** The already-admitted principal (the route gate ran before the chain). */
   principal: Principal;
-  /** The raw node IncomingMessage (headers, streaming reads). */
   raw: IncomingMessage;
-  headers: IncomingMessage["headers"];
+  headers: IncomingMessage['headers'];
   method: string;
   url: string;
-  /** Entity auto-load: `req.<entityName>` for a route under an entity's `:<entity>Id` subtree. */
   [key: string]: unknown;
 }
 
 export interface HandlerRes {
-  /** Record a pending status code; chains to json/send/stream. */
   status(code: number): this;
-  /** Send a JSON body with the pending (default 200) status. */
   json(value: unknown): this;
-  /** Send a text body with the pending status. */
-  send(value: unknown): this;
-  /** End with a status code and no body. */
+  send(value?: unknown): this;
   sendStatus(code: number): this;
-  /** Render a server-side template (views dir). */
   render(name: string, data?: Record<string, unknown>): this;
-  /** Stream a Web Response or ReadableStream — owns header write + reader pump. */
   stream(
-    webResponse: Response | ReadableStream<Uint8Array>,
+    response: Response | ReadableStream<Uint8Array>,
     options?: { buffering?: boolean },
   ): Promise<this>;
-  /** The raw node ServerResponse (writeHead/write/end — typed, no cast needed). */
   raw: ServerResponse;
 }
 
-/** A request handler in an imperative route chain. */
 export type Handler = (
   req: HandlerReq,
   res: HandlerRes,
-  next?: (err?: unknown) => void,
+  next?: (error?: unknown) => void,
 ) => void | Promise<void>;
 
-/** A route gate — an authorization function `(principal) => boolean`. */
 export type Gate = (principal: Principal) => boolean;
-
-// ---------------------------------------------------------------------------
-// Route builder — the `r` handed to `app.mount(path, r)` / entity `routes` thunks.
-// ---------------------------------------------------------------------------
-
-export interface RouteBuilder {
-  get(path: string, ...rest: Array<Gate | Handler>): this;
-  post(path: string, ...rest: Array<Gate | Handler>): this;
-  patch(path: string, ...rest: Array<Gate | Handler>): this;
-  delete(path: string, ...rest: Array<Gate | Handler>): this;
-  mount(path: string, target: unknown): this;
-}
-
-export interface ResourceGateConfig {
-  gate?: Partial<
-    Record<"list" | "read" | "create" | "update" | "remove", Gate>
-  >;
-}
-
-// ---------------------------------------------------------------------------
-// Gates — the named factories (route-gate.mjs).
-// ---------------------------------------------------------------------------
-
 export function requireUser(): Gate;
 export function allowAnonymous(): Gate;
-export function isGate(value: unknown): value is Gate;
 
-// ---------------------------------------------------------------------------
-// Route matching — a pure helper for apps that want their own sub-routing
-// inside a `use()` handler. Takes an array of {method, path, handler} records
-// and returns the highest-specificity match (or null).
-// ---------------------------------------------------------------------------
-
-export interface RouteRecord {
-  method: string;
-  path: string;
-  handler: Handler;
+export interface EntityTarget {
+  readonly name: string;
 }
 
-export interface RouteMatch {
-  route: RouteRecord;
-  params: Record<string, string>;
+export interface RouteBuilder {
+  get(path: string, ...handlers: Array<Gate | Handler>): this;
+  post(path: string, ...handlers: Array<Gate | Handler>): this;
+  patch(path: string, ...handlers: Array<Gate | Handler>): this;
+  delete(path: string, ...handlers: Array<Gate | Handler>): this;
+  mount(path: string, target: EntityTarget | RouteBuilder | Handler): this;
+  use(path: string, target: EntityTarget | RouteBuilder | Handler): this;
+  resource(): this;
 }
 
-export function matchRoute(
-  routes: RouteRecord[],
-  method: string,
-  pathname: string,
-): RouteMatch | null;
-
-// ---------------------------------------------------------------------------
-// Job queue — the substrate for app-authored worker routes. The framework owns
-// /jobs/claim, /jobs/:id/heartbeat, /jobs/:id/result (already safe). An app
-// building its OWN worker routes composes these primitives — submitResult and
-// heartbeat carry the ownership check (job.workerId === workerId), so the safe
-// path is the obvious one.
-// ---------------------------------------------------------------------------
-
-export interface Job {
-  id: string;
-  kind: string;
-  payload: unknown;
-  status: "queued" | "claimed" | "running" | "completed" | "failed";
-  enqueuedAt: number;
-  workerId: string | null;
-  claimedAt: number | null;
-  leaseUntil: number | null;
+export interface FieldDescriptor<Value = unknown> {
+  readonly kind: string;
+  readonly type?: string;
+  readonly target?: string | WorkbenchEntity;
+  readonly access?: (context: unknown) => unknown;
+  can(check: (context: unknown) => unknown): FieldDescriptor<Value>;
+  readonly __value?: Value;
+  readonly [property: string]: unknown;
 }
 
-export interface JobQueueOptions {
-  db: unknown;
-  sharedSecret: string;
-  leaseMs?: number;
-  heartbeatGraceMs?: number;
-  reapIntervalMs?: number;
-  now?: () => number;
+export type FieldOptions<Value = unknown> = Readonly<{
+  optional?: boolean;
+  readonly?: boolean;
+  default?: Value | (() => Value);
+  validate?: (value: Value) => true | string;
+  oneOf?: readonly Value[];
+  indexed?: string;
+  role?: string | readonly string[];
+}> & Readonly<Record<string, unknown>>;
+
+export interface TextFieldFactory {
+  (options?: FieldOptions<string>): FieldDescriptor<string>;
+  crdt(options?: FieldOptions<string>): FieldDescriptor<string>;
 }
 
-export interface JobQueue {
-  /** Shared secret → per-worker bearer token (constant-time). null on mismatch. */
-  registerWorker(
-    presentedSecret: string,
-  ): { workerId: string; token: string } | null;
-  /** Bearer `<workerId>.<token>` → workerId, or null (unknown/revoked/bad token). */
-  authenticate(bearer: string): string | null;
-  enqueue(job: { kind: string; payload?: unknown; id?: string }): Job;
-  /** Claim the oldest queued job for a worker (atomic). null if none queued. */
-  claim(workerId: string): Job | null;
-  /** Extend the lease; flips claimed→running. Non-owner/terminal → false. `now` is a testing seam. */
-  heartbeat(
-    jobId: string,
-    workerId: string,
-    options?: { now?: () => number },
-  ): boolean;
-  /** Submit a result. Idempotent by job id. Non-owner/not-found → { accepted: false }. */
-  submitResult(
-    jobId: string,
-    workerId: string,
-    result: { status: "completed" | "failed"; output?: unknown },
-  ): { accepted: boolean; noop?: boolean };
-  /** Reaper sweep: reassign expired leases + revoke stale workers. `now` is a testing seam. */
-  reap(options?: { now?: () => number }): {
-    reassigned: number;
-    revoked: number;
-  };
-  startReaper(): void;
-  stop(): void;
+export const text: TextFieldFactory;
+export function boolean(options?: FieldOptions<boolean>): FieldDescriptor<boolean>;
+export function date(options?: FieldOptions<Date | number | string>): FieldDescriptor<Date>;
+export function number(options?: FieldOptions<number>): FieldDescriptor<number>;
+export function json<Value = unknown>(shape?: unknown, options?: FieldOptions<Value>): FieldDescriptor<Value>;
+export function ref(
+  target: string | WorkbenchEntity,
+  options?: FieldOptions<string> & { role?: string | readonly string[] },
+): FieldDescriptor<string>;
+export function hash(options?: FieldOptions<string>): FieldDescriptor<string>;
+export function blob(options?: FieldOptions<string>): FieldDescriptor<string>;
+export function link(options?: Readonly<Record<string, unknown>>): FieldDescriptor<Record<string, unknown>>;
+export function map<Value = unknown>(
+  value: FieldDescriptor<Value>,
+  options?: FieldOptions<Record<string, Value>>,
+): FieldDescriptor<Record<string, Value>>;
+export function list<Value = unknown>(
+  value: FieldDescriptor<Value>,
+  options?: FieldOptions<Value[]>,
+): FieldDescriptor<Value[]>;
+export function log<Value = unknown>(
+  value: FieldDescriptor<Value>,
+  options?: FieldOptions<Value[]>,
+): FieldDescriptor<Value[]>;
+export function ephemeral<Value = unknown>(
+  value: FieldDescriptor<Value>,
+  options?: FieldOptions<Value>,
+): FieldDescriptor<Value>;
+export function state<Value extends string = string>(
+  options: Readonly<Record<string, unknown>>,
+): FieldDescriptor<Value>;
+export function computed<Value = unknown>(
+  compute: (row: Readonly<Record<string, unknown>>) => Value,
+  options?: Readonly<Record<string, unknown>>,
+): FieldDescriptor<Value>;
+export function projected<Value = unknown>(
+  options: Readonly<Record<string, unknown>>,
+): FieldDescriptor<Value>;
+export const raster: { crdt(options?: Readonly<Record<string, unknown>>): FieldDescriptor<unknown> };
+export const polyline: { crdt(options?: Readonly<Record<string, unknown>>): FieldDescriptor<unknown> };
+export function vector(dimensions: number, options?: FieldOptions<number[]>): FieldDescriptor<number[]>;
+
+export interface Capability {
+  readonly capability: string;
+}
+export const read: Capability;
+export const write: Capability;
+export const subscribe: Capability;
+export const admin: Capability;
+export interface OwnerFieldFactory {
+  (): FieldDescriptor<string>;
+  only(): readonly ScopeClause[];
+}
+export const owner: OwnerFieldFactory;
+
+export type GrantDecision =
+  | { readonly granted: true; readonly capabilities: readonly Capability[] }
+  | { readonly granted: false; readonly reason: unknown };
+export function grant(...capabilities: Capability[]): GrantDecision;
+export function deny(reason?: unknown): GrantDecision;
+
+export interface ScopeClause {
+  readonly predicate?: (context: unknown) => boolean;
+  can(check: (context: unknown) => GrantDecision): ScopeClause;
+  readonly [property: string]: unknown;
+}
+export type ScopePredicate = (context: unknown) => unknown;
+export function scope(predicate: ScopePredicate): ScopeClause;
+export const everyone: ScopePredicate;
+export const never: ScopePredicate;
+export function anyOf(...clauses: ScopePredicate[]): ScopePredicate;
+export function inherit(
+  parent: WorkbenchEntity,
+  options: { via: string },
+): ScopePredicate;
+
+export interface ActionHandle<Payload = Record<string, unknown>> {
+  readonly brand: 'action';
+  readonly type: string;
+  readonly __payload?: Payload;
+}
+export interface EventHandle<State = unknown, Payload = Record<string, unknown>> {
+  readonly brand: 'event';
+  readonly type: string;
+  readonly reduce: (state: State, payload: Payload) => State;
+}
+export function action<Payload = Record<string, unknown>>(type: string): ActionHandle<Payload>;
+export function event<State = unknown, Payload = Record<string, unknown>>(
+  type: string | Readonly<Record<string, unknown>>,
+  reduce: (state: State, payload: Payload) => State,
+): EventHandle<State, Payload>;
+
+export interface CommittedEvent<Data = unknown> {
+  readonly type: string;
+  readonly scope: string;
+  readonly seq: number;
+  readonly actionId: string;
+  readonly committedAt: string;
+  readonly data: Data;
+}
+export interface DispatchRequest<Payload = Record<string, unknown>> {
+  actionId: string;
+  type: string;
+  payload: Payload;
+  principal: Principal;
+  scope?: string;
+}
+export interface DispatchResult<Event extends CommittedEvent = CommittedEvent> {
+  granted: boolean;
+  events: Event[];
+  replayed?: boolean;
 }
 
-export function createJobQueue(options: JobQueueOptions): JobQueue;
+export interface WorkbenchEntity<Row extends object = Record<string, unknown>> {
+  readonly name: string;
+  readonly fields: Readonly<Record<string, FieldDescriptor>>;
+  readonly verbs: Readonly<Record<string, ActionHandle | EventHandle>>;
+  readonly routes?: (routes: RouteBuilder, entity: WorkbenchEntity<Row>) => unknown | Promise<unknown>;
+  create(payload: Partial<Row> & Record<string, unknown>): Row;
+  insert(payload: Partial<Row> & Record<string, unknown>): Row;
+  delete(id: string): void;
+  findById(id: string, principal?: Principal): Row | null;
+  findOne(where?: Partial<Row>, principal?: Principal): Row | null;
+  findAll(where?: Partial<Row>, principal?: Principal): Row[];
+  getOrFail(id: string, principal?: Principal): Row;
+  readonly [member: string]: unknown;
+}
+
+export type EntityDeclaration<Row extends object> = Readonly<Record<string, unknown>> & {
+  routes?: (routes: RouteBuilder, entity: WorkbenchEntity<Row>) => unknown | Promise<unknown>;
+  grant?: ScopeClause | ScopePredicate | GrantDecision | ((context: unknown) => GrantDecision);
+};
+export function entity<Row extends object = Record<string, unknown>>(
+  name: string,
+  declaration?: EntityDeclaration<Row>,
+): WorkbenchEntity<Row>;
+
+export function membership(
+  entity: WorkbenchEntity,
+  roles: Readonly<Record<string, unknown>>,
+): void;
+
+export function inc(value: number): Readonly<{ kind: 'inc'; value: number }>;
+export function dec(value: number): Readonly<{ kind: 'dec'; value: number }>;
+export const self: Readonly<Record<string, unknown>>;
+export function many(
+  target: WorkbenchEntity,
+  options: { over: FieldDescriptor },
+): Readonly<Record<string, unknown>>;
+export const effect: {
+  anyOf(...triggers: readonly unknown[]): symbol;
+};
+export const now: Readonly<{ kind: 'deferred'; resolve: 'commit-instant' }>;
+
+export interface ScheduleTrigger { readonly kind: string; readonly [key: string]: unknown }
+export const schedule: {
+  at(field: FieldDescriptor, options?: Readonly<Record<string, unknown>>): ScheduleTrigger;
+  after(field: FieldDescriptor, delay: number | string, options?: Readonly<Record<string, unknown>>): ScheduleTrigger;
+};
+export const tick: {
+  hz(value: number, options?: Readonly<Record<string, unknown>>): ScheduleTrigger;
+  every(delay: number | string, options?: Readonly<Record<string, unknown>>): ScheduleTrigger;
+};
+export function simulate(options: Readonly<Record<string, unknown>>): unknown;
+
+export interface WorkbenchOptions {
+  db?: string | unknown;
+  port?: number;
+  env?: string;
+  session?: { durationMs?: number };
+  viewsDir?: string;
+  migrations?: readonly Readonly<{ version: number; up(db: unknown): void }>[];
+  jobs?: Readonly<Record<string, unknown>>;
+  blobs?: Readonly<Record<string, unknown>>;
+  log?: Readonly<Record<string, unknown>>;
+}
+
+export interface WorkbenchApp extends RouteBuilder {
+  readonly db?: unknown;
+  readonly routes: readonly unknown[];
+  readonly config: Readonly<Record<string, unknown>>;
+  readonly jobs?: unknown;
+  readonly blobs?: unknown;
+  readonly ready?: Promise<WorkbenchApp>;
+  mount(path: string, target: EntityTarget | RouteBuilder | Handler): this;
+  use(path: string, target: EntityTarget | RouteBuilder | Handler): this;
+  auth(options?: { identifyBy?: readonly string[] }): this;
+  static(prefix: string, directory: string): this;
+  prepareSchema(): Promise<this>;
+  ddl(): Promise<this>;
+  dispatch<Payload = Record<string, unknown>>(
+    request: DispatchRequest<Payload>,
+  ): Promise<DispatchResult>;
+  listen(port?: number, options?: unknown): this;
+}
+
+export function router(options?: { mergeParams?: boolean }): RouteBuilder;
+
+export const User: WorkbenchEntity;
+export const Session: WorkbenchEntity;
+export const Inbox: WorkbenchEntity;
+export const Credential: WorkbenchEntity;
+export const Invitation: WorkbenchEntity;
+export const ApiKey: WorkbenchEntity;
+export const TwoFactor: WorkbenchEntity;
+
+export default function workbench(options?: WorkbenchOptions): WorkbenchApp;

@@ -14,9 +14,11 @@
 			"default": "./src/internal.mjs"
 		},
 		"./client": {
+			"types": "./client.d.ts",
 			"default": "./public/workbench-client.mjs"
 		},
 		"./server": {
+			"types": "./src/server.d.ts",
 			"default": "./src/server.mjs"
 		},
 		"./scope-entities": {
@@ -31,11 +33,13 @@
 		"test:coverage": "node --experimental-test-coverage --test"
 	},
 	"devDependencies": {
+		"@types/node": "^26.1.1",
 		"eslint": "^9.39.5",
 		"fake-indexeddb": "^6.2.5",
 		"globals": "^17.7.0",
 		"jsdom": "^29.1.1",
-		"svelte": "^5.56.4"
+		"svelte": "^5.56.4",
+		"typescript": "^7.0.2"
 	},
 	"engines": {
 		"node": ">=22"
