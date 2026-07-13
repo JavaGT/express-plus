@@ -8,6 +8,7 @@
 import { text, hash, scope, grant, read, everyone } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { scryptSync } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   entity } from '../src/internal.mjs';
@@ -26,6 +27,16 @@ function seedDb() {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   return db;
+}
+
+function legacyBetterAuthDigest(password, saltHex = '00112233445566778899aabbccddeeff') {
+  const digest = scryptSync(password.normalize('NFKC'), saltHex, 64, {
+    N: 16384,
+    r: 16,
+    p: 1,
+    maxmem: 128 * 16384 * 16 * 2,
+  });
+  return `${saltHex}:${digest.toString('hex')}`;
 }
 
 test('hash() produces a `hash`-kind descriptor (not a value field)', () => {
@@ -65,6 +76,18 @@ test('verify survives a round-trip through findOne (the stored digest hydrates o
   const found = User.findOne(User.username.is('bob'));
   assert.equal(found.password.verify('s3cret'), true);
   assert.equal(found.password.verify('nope'), false);
+});
+
+test('a migrated better-auth scrypt digest remains verifiable', () => {
+  const declaration = makeUser();
+  const db = seedDb();
+  db.prepare('INSERT INTO User (id, username, password) VALUES (?, ?, ?)')
+    .run('legacy-user', 'legacy@example.com', legacyBetterAuthDigest('old password'));
+  const User = workbench({ db, entities: [declaration] }).entity(declaration);
+
+  const found = User.findOne(User.username.is('legacy@example.com'));
+  assert.equal(found.password.verify('old password'), true);
+  assert.equal(found.password.verify('wrong'), false);
 });
 
 test('a hash field is NOT scope-comparable — building a predicate from it fails closed', () => {
