@@ -268,8 +268,18 @@ class LiveSyncSession {
 
     this._state = 'connecting';
     const generation = ++this._generation;
-    const ws = this._socketFactory(this._wsUrl);
     const connecting = new Promise((resolve, reject) => {
+      let ws;
+      try {
+        ws = this._socketFactory(this._wsUrl);
+      } catch (err) {
+        if (generation === this._generation) {
+          this._socket = null;
+          this._state = 'idle';
+        }
+        reject(err);
+        return;
+      }
       let settled = false;
       let pollTimer = null;
       let connectTimeout = null;

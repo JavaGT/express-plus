@@ -76,6 +76,32 @@ test('two concurrent subscriptions share one connection and send desired state o
   channel.close();
 });
 
+test('a synchronously throwing socket factory rejects cleanly and leaves the subscription reusable', async () => {
+  const sockets = [];
+  let attempts = 0;
+  const channel = new LiveChannel('ws://example.test', {
+    socketFactory: () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('socket factory failed');
+      const socket = new FakeSocket();
+      sockets.push(socket);
+      return socket;
+    },
+    backoffBase: 1,
+    maxBackoff: 1,
+  });
+
+  const first = channel.subscribe('Doc', 'a', () => {});
+  await assert.rejects(first, /socket factory failed/);
+
+  const retry = channel.subscribe('Doc', 'a', () => {});
+  await tick();
+  sockets[0].open();
+  sockets[0].emit('message', { type: 'subscribed', entity: 'Doc', id: 'a', currentSeq: 1 });
+  assert.deepEqual(await retry, { currentSeq: 1 });
+  channel.close();
+});
+
 test('late messages and closes from a retired socket generation are ignored', async () => {
   const { channel, sockets } = harness();
   const events = [];
