@@ -15,6 +15,7 @@ export {
   createInvitationApi,
 } from './auth/invitation.mjs';
 export { emailSeam, noopTransport } from './email-seam.mjs';
+export { frameworkTableNames } from './schema-table-census.mjs';
 export { matchRoute } from './http-route-match.mjs';
 export { serveStatic } from './views.mjs';
 export { createJobQueue } from './job-queue.mjs';

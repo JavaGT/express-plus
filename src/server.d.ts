@@ -12,6 +12,12 @@ import type {
 export type { WorkbenchDatabase, WorkbenchStatement, UserPrincipal } from '../index.d.ts';
 
 // ---------------------------------------------------------------------------
+// Framework table names (derived from DDL generators)
+// ---------------------------------------------------------------------------
+
+export const frameworkTableNames: readonly string[];
+
+// ---------------------------------------------------------------------------
 // Job types — both raw rows and the parsed runtime shape
 // ---------------------------------------------------------------------------
 

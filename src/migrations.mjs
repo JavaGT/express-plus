@@ -21,7 +21,7 @@
 
 import { begin, commit, rollback } from './driver.mjs';
 
-const MIGRATION_DDL = `CREATE TABLE IF NOT EXISTS _Migration (
+export const MIGRATION_DDL = `CREATE TABLE IF NOT EXISTS _Migration (
   version INTEGER PRIMARY KEY,
   appliedAt TEXT NOT NULL
 )`;
