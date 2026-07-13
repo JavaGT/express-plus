@@ -10,9 +10,6 @@
 			"types": "./index.d.ts",
 			"default": "./src/index.mjs"
 		},
-		"./internal": {
-			"default": "./src/internal.mjs"
-		},
 		"./client": {
 			"types": "./client.d.ts",
 			"default": "./public/workbench-client.mjs"
@@ -20,11 +17,6 @@
 		"./server": {
 			"types": "./src/server.d.ts",
 			"default": "./src/server.mjs"
-		},
-		"./scope-entities": {
-			"default": "./projects/scope-entities.mjs",
-			"import": "./projects/scope-entities.mjs",
-			"node": "./projects/scope-entities.mjs"
 		}
 	},
 	"scripts": {

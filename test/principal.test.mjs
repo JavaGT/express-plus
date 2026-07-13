@@ -16,8 +16,8 @@ import assert from 'node:assert/strict';
 import { anonymous, entity, text, ref, scope, grant, deny, read, write, subscribe } from 'workbench';
 import { DatabaseSync } from 'node:sqlite';
 
-import {
-  principal, UnknownPrincipalTypeError } from 'workbench/internal';
+import { principal } from 'workbench';
+import { UnknownPrincipalTypeError } from '../src/principal.mjs';
 import { bindReadScope } from '../src/scope-sql.mjs';
 
 const ownerCan = async ({ is }) =>

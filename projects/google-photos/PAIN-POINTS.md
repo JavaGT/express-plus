@@ -91,7 +91,7 @@ thumbnailSm: storedDerived({
 
 // WORKAROUND — external job queue entirely outside the framework:
 //   **SETTLED (job queue shipped):** `createJobQueue` is now exported from
-//   `workbench/internal` (`src/job-queue.mjs`) — durable background work no
+//   `workbench/server` (`src/job-queue.mjs`) — durable background work no
 //   longer needs an external pg-boss/bull. The narrower `storedDerived`
 //   (eager async compute+persist) primitive below remains open.
 thumbnailSmUrl: text({ optional: true }),
@@ -404,7 +404,7 @@ Without it, the upload pipeline is 100% external to the framework.
 |---|---------------|--------|-----|
 | 1 | No blob/binary field type | **SETTLED** | `blob` now exported from `workbench` (`src/field.mjs`); `import { blob } from 'workbench'` resolves. The field type shipped. (Historical: was STILL-OPEN / Phase 2 step 12.) |
 | 2 | No full-text search predicate | **STILL-OPEN** | Listed as "Deferred / plugin territory." No `.match()`/`.search()` predicate exists. |
-| 3 | No background-job or async-pipeline | **PARTIALLY-SETTLED** | `effects` solves in-transaction cross-entity mutation (ADR #5). A background job queue has since shipped (`createJobQueue` from `workbench/internal`, `src/job-queue.mjs`) — durable out-of-band work now has a primitive. The broader `storedDerived` (async compute+persist, eager-on-write) design for thumbnails remains deferred to Phase 3. The external-job-queue gap narrowed further but the eager async-pipeline didn't close. |
+| 3 | No background-job or async-pipeline | **PARTIALLY-SETTLED** | `effects` solves in-transaction cross-entity mutation (ADR #5). A background job queue has since shipped (`createJobQueue` from `workbench/server`, `src/job-queue.mjs`) — durable out-of-band work now has a primitive. The broader `storedDerived` (async compute+persist, eager-on-write) design for thumbnails remains deferred to Phase 3. The external-job-queue gap narrowed further but the eager async-pipeline didn't close. |
 | 4 | No geo-point field type | **STILL-OPEN** | Listed as "Deferred / plugin territory." No `point` constructor, no `.near()` predicate. |
 | 5 | No link-sharing primitive | **RESOLVED** | The `link` field type + link principal in doc.mjs fully addresses the basic case. Per-member link tiers is a new gap (SHOULD-FIX #2) but the primitive EXISTS. |
 | 6 | No date-range or comparison predicates | **STILL-OPEN** | Planned (Phase 3 step 13 — `.gte`/`.lte`/`.lt`) but not yet in exemplars. Has a roadmap commitment. |

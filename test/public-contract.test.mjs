@@ -45,6 +45,11 @@ export const PUBLIC_API = Object.freeze({
   }),
 });
 
+const PRIVATE_ENTRYPOINTS = Object.freeze([
+  'workbench/internal',
+  'workbench/scope-entities',
+]);
+
 const root = fileURLToPath(new URL('..', import.meta.url));
 
 test('the packed package exposes the supported runtime contract', () => {
@@ -74,6 +79,15 @@ test('the packed package exposes the supported runtime contract', () => {
         + `  for (const symbol of contract.named) {\n`
         + `    if (!(symbol in module)) throw new Error(entrypoint + ' is missing ' + symbol);\n`
         + `  }\n`
+        + `}\n`
+        + `for (const entrypoint of ${JSON.stringify(PRIVATE_ENTRYPOINTS)}) {\n`
+        + `  try {\n`
+        + `    await import(entrypoint);\n`
+        + `  } catch (error) {\n`
+        + `    if (error?.code === 'ERR_PACKAGE_PATH_NOT_EXPORTED') continue;\n`
+        + `    throw error;\n`
+        + `  }\n`
+        + `  throw new Error(entrypoint + ' must not be exported');\n`
         + `}\n`,
     );
 

@@ -50,6 +50,6 @@ export default [
 		},
 	},
 	{
-		ignores: ['node_modules/**', 'coverage/**', 'projects/scope-entities.mjs'],
+		ignores: ['node_modules/**', 'coverage/**'],
 	},
 ];

@@ -5,7 +5,7 @@
 //   W4 UI kit — bindAction/bindField/bindList/bindConnection adapters
 //   W5 client engine — createLiveStore boot → CRUD dispatch → overlay surface
 //
-// This file is a declaration-only module (like scope-entities.mjs). It defines
+// This file is a declaration-only exemplar. It defines
 // entities and assertions but does NOT start a server — `test/convergence-
 // integration.test.mjs` boots the app for end-to-end acceptance.
 //

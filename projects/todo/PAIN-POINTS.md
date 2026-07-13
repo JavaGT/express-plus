@@ -250,7 +250,7 @@ and auto-sorts `.children()` by position.
 ### SHARP EDGE #3 — Due-date reminders: `state.auto` uses relative durations, not absolute field values — no "fire at 3pm Tuesday"
 
 > **SETTLED (background jobs shipped):** A durable job-queue primitive has
-> landed — `createJobQueue` is exported from `workbench/internal`
+> landed — `createJobQueue` is exported from `workbench/server`
 > (`src/job-queue.mjs`). Out-of-band background work (the "polling cron in
 > framework clothing" workaround (a) below) now has a first-class primitive
 > instead of an external scheduler. The narrower ask — a *declarative*
@@ -404,7 +404,7 @@ ALWAYS includes the owner + invitees uniformly.
 > - **`blob` field** — exported from `workbench` (`src/field.mjs`). A todo
 >   attachment (`attachment: blob(...)`) is now expressible; the binary-field
 >   gap recorded in sibling docs (photo-editor, google-photos) is closed.
-> - **Background jobs** — `createJobQueue` exported from `workbench/internal`
+> - **Background jobs** — `createJobQueue` exported from `workbench/server`
 >   (`src/job-queue.mjs`); durable out-of-band work no longer needs an external
 >   cron. See the SETTLED note on SHARP EDGE #3.
 > The gaps below remain open as written; these two primitives are no longer

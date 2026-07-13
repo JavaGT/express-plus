@@ -736,7 +736,7 @@ status: state({
 
 > **SETTLED (background jobs shipped):** The "external cron job" workaround no
 > longer requires a scheduler outside the framework — `createJobQueue` is now
-> exported from `workbench/internal` (`src/job-queue.mjs`), giving a durable
+> exported from `workbench/server` (`src/job-queue.mjs`), giving a durable
 > in-framework job primitive for the polling/transition scan. The narrower ask
 > — a *declarative* conditional-by-field-value `auto` deadline inside `state` —
 > remains the open part of this blocker. Historical text kept above.
@@ -908,7 +908,7 @@ Each prior (pre-grill) finding re-evaluated against the grilled API:
 | 4 | No structured-child-entity field type (owned comments) | **STILL-OPEN** | `map` IS structured (payload fields), but the key must be a ref. StaffNotes aren't keyed by a ref, so they must be a standalone entity. Should-Fix #4. |
 | 5 | `is.*` entity-relative; cross-entity role checks are boilerplate | **STILL-OPEN** | Still boilerplate across entities. The grilled design intentionally keeps checks per-entity (no universalization), but role checks are a pragmatic exception. Sharp edge #7. |
 | 6 | `.not()` / `.lt()` / `.and()` / `.count()` not confirmed in API | **PARTIALLY RESOLVED** | The IMPLEMENTATION-PLAN Phase 1 step 6 lists `.and`/`.not`/`.is`/`.in` as predicate operators. `.lt()` is Phase 3 (item 13). `.count()` is referenced in the space-invaders match.mjs but not shown in doc.mjs. The plan confirms these exist; the API surface just hasn't caught up. |
-| 7 | No scheduler primitive for time-based transitions (overdue) | **PARTIALLY-SETTLED** | `state.auto` exists (RESOLVED the existence question) but only supports fixed duration from state-entry. A background job queue has since shipped (`createJobQueue` from `workbench/internal`, `src/job-queue.mjs`) — the external-cron workaround now has an in-framework primitive. Conditional-by-field-value `auto` deadlines (Blocked #2) and entity `tick` (Phase 2 step 9) remain not-shown. |
+| 7 | No scheduler primitive for time-based transitions (overdue) | **PARTIALLY-SETTLED** | `state.auto` exists (RESOLVED the existence question) but only supports fixed duration from state-entry. A background job queue has since shipped (`createJobQueue` from `workbench/server`, `src/job-queue.mjs`) — the external-cron workaround now has an in-framework primitive. Conditional-by-field-value `auto` deadlines (Blocked #2) and entity `tick` (Phase 2 step 9) remain not-shown. |
 | 8 | No compound uniqueness (duplicate-hold prevention) | **PARTIALLY RESOLVED** | `map(ref('Patron'), ...)` gives uniqueness-by-construction (key uniqueness) — dissolves the need for compound uniqueness in the holds case. For other cases (e.g., Checkout: one active checkout per item+patron), standalone compound uniqueness is Phase 3 (item 16). |
 
 ---

@@ -7,7 +7,7 @@ when constructing the app (`workbench({ … })`, `.auth()`, jobs, blobs).
 - Domain nouns: **[CONTEXT.md](../CONTEXT.md)**  
 - Design rules: **[AGENTS.md](../AGENTS.md)**  
 - Module map: **[architecture-map.md](architecture-map.md)**  
-- Unstable internals: `import … from 'workbench/internal'` — not documented here as app API  
+- Server-only helpers: `import … from 'workbench/server'`
 
 Status: **implemented** (green `node --test` suite). Prefer this guide and running
 samples over historical roadmap wording in older SPEC sections.
@@ -333,13 +333,13 @@ store; props catalogue is out of scope here — see components under `public/`.
 
 | Surface | Status |
 | --- | --- |
-| `workbench/internal` | Unstable — compiler, pipeline, live internals |
+| Unexported `src/*` modules | Framework implementation details |
 | `src/kernel.mjs`, `pipeline.mjs`, raw DDL helpers | Framework assembly |
 | PLANS / DECISIONLOG history | Execution history, not API |
-| Sample apps under `projects/*` | Examples, not package exports (except `./scope-entities`) |
+| Sample apps under `projects/*` | Examples, not package exports |
 
-If you need an internal helper from an app, prefer promoting a **stable** public
-export rather than depending on `workbench/internal` long-term.
+If an app needs an implementation detail, first promote a deliberately supported
+export through `workbench` or `workbench/server`.
 
 ---
 

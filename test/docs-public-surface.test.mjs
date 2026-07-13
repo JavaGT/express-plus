@@ -29,7 +29,7 @@ test('functionality.md documents major public export groups from src/index.mjs',
   const mustAppear = [
     'entity', 'text', 'grant', 'scope', 'router', 'schedule', 'tick',
     'membership', 'emailSeam', 'User', 'Session', 'LiveChannel', 'createLiveStore',
-    'workbench/client', 'workbench/internal',
+    'workbench/client', 'workbench/server',
   ];
   for (const name of mustAppear) {
     assert.ok(func.includes(name), `functionality.md should mention ${name}`);

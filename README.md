@@ -65,7 +65,7 @@ schedule/tick, email).
 | --- | --- |
 | `workbench` | Server public API (`src/index.mjs`) |
 | `workbench/client` | Browser SDK (`public/workbench-client.mjs`) |
-| `workbench/internal` | Unstable internals — not app API |
+| `workbench/server` | Server-only helpers for sessions, jobs, blobs, and migrations |
 
 ## Examples
 

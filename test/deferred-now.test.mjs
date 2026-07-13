@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { now } from 'workbench/internal';
+import { now } from 'workbench';
 
 test('now is an exported frozen deferred-value token', () => {
   assert.ok(now, 'now should be exported');

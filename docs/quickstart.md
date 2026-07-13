@@ -99,7 +99,7 @@ What this shows beyond Option A:
 | --- | --- |
 | `workbench` | Server app API (`src/index.mjs`) |
 | `workbench/client` | Browser SDK (`public/workbench-client.mjs`) — also served as `/workbench.mjs` when listening |
-| `workbench/internal` | Unstable compiler/transport helpers — **not** app API |
+| `workbench/server` | Server-only helpers for sessions, jobs, blobs, and migrations |
 
 ## Tests
 
