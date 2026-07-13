@@ -51,7 +51,14 @@ const app: WorkbenchApp = workbench({
   db,
   migrations: [migration],
   requireEnv: ['SESSION_SECRET'],
+  blobReapIntervalMs: 60_000,
+  blobReapTtlMs: 3_600_000,
+  logRetentionDays: 30,
+  logRetentionIntervalMs: 60_000,
 }).mount('/projects', Project);
+const startedApp: Promise<WorkbenchApp> = app.start();
+app.onShutdown('typed cleanup', () => undefined, { timeoutMs: 1000 });
+const stoppedApp: Promise<void> = app.shutdown();
 void app.prepareSchema();
 const Projects = app.entity(Project);
 const namedProjects: PromiseLike<ProjectRow[]> = Projects
@@ -88,11 +95,13 @@ app.batch(async () => batchActions, { principal: request.principal });
 app.listen(() => undefined);
 app.listen({ principalOf: () => request.principal, requestLog: true });
 app.listen(0, { onListening: () => undefined, hsts: true });
+// @ts-expect-error maintenance belongs to the application runtime, not one HTTP transport
+app.listen({ blobReapTtlMs: 1000 });
 // @ts-expect-error resource expansion belongs only to an entity routes callback
 app.resource();
 const maybeServer: import('node:http').Server | undefined = app.httpServer;
 const registeredEntities: ReadonlyMap<string, import('workbench').BoundWorkbenchEntity> = app.entities;
-void [dispatchResult, batchResult, plannedBatchResult, maybeServer, registeredEntities];
+void [startedApp, stoppedApp, dispatchResult, batchResult, plannedBatchResult, maybeServer, registeredEntities];
 
 const inherited: InheritDirective = inherit(Project, { via: 'projectId' });
 const Child = entity('Child', { projectId: ref(Project), grant: inherited });

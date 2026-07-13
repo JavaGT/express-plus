@@ -29,14 +29,19 @@ const app = workbench({
   // blobs: { root: '.blobs' },
   // migrations: […],
   // requireEnv: ['MY_KEY'],
+  // logRetentionDays: 30,   // optional; disabled by default
 });
 
 app.mount('/notes', Note)
   .auth()                    // optional: /auth/* login surface
   .listen(3000);             // or .listen() → config.port (default 3000)
 
-await app.ready;             // schema + kernel ready
+await app.ready;             // the same promise returned by app.start()
 ```
+
+For a worker, test harness, or command-line program that needs the application
+without HTTP, assemble it and call `await app.start()`. Starting headless is a
+final transport choice: create a fresh app if HTTP is needed later.
 
 | Option | Purpose |
 | --- | --- |
@@ -45,6 +50,8 @@ await app.ready;             // schema + kernel ready
 | `blobs` | Blob store root for binary fields / `POST /blobs` |
 | `migrations` | Versioned schema migrations at startup |
 | `requireEnv` | Fail closed at construction if env vars missing |
+| `blobReapIntervalMs`, `blobReapTtlMs` | Pending-blob cleanup cadence (> 0) and age (≥ 0) |
+| `logRetentionDays`, `logRetentionIntervalMs` | Durable-log age (≥ 0; `0` disables) and cadence (> 0) |
 
 ### Chain methods (common)
 
@@ -54,8 +61,14 @@ await app.ready;             // schema + kernel ready
 | `.auth(opts?)` | Mount framework `/auth` routes (login, logout, passkey/TOTP when used) |
 | `.static(urlPath, dir)` | Serve static files |
 | `.use(prefix, handler)` | Imperative middleware/handler mount |
+| `.start()` | Start schema, kernel, recovery, maintenance, and clocks without opening HTTP |
 | `.listen(port?, opts?)` | Open HTTP + live `/events`; opts include `principalOf`, rate limits, CORS |
-| `.ready` | Promise: routes resolved, schema prepared, kernel started |
+| `.onShutdown(name, fn, { timeoutMs }?)` | Register ordered cleanup with a deadline |
+| `.shutdown()` | Stop ingress, run cleanup, and drain accepted writes; process signals call it automatically |
+| `.ready` | `undefined` before start; then the singular promise identical to `.start()` |
+
+HTTP requests and live `/events` subscriptions both wait for this readiness
+promise, so neither can observe a partly prepared schema or authorization engine.
 
 ### `router()`
 

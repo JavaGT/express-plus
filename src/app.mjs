@@ -28,12 +28,19 @@
 
 import { requireUser, isGate } from './route-gate.mjs';
 import { listen as serveListen } from './serve.mjs';
+import {
+  maintenanceDefaults,
+  startApplication,
+  validateMaintenanceOptions,
+} from './application-runtime.mjs';
 import { wrapDriver } from './driver.mjs';
 import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { createClock } from './clock.mjs';
+import { createWriteQueue } from './write-queue.mjs';
+import { prepareGracefulShutdown } from './lifecycle.mjs';
 import { createLog, withLog } from './log.mjs';
 import { serveStatic } from './views.mjs';
 import { authRoutes } from './auth/routes.mjs';
@@ -340,7 +347,23 @@ export function router(options = {}) {
 // (chainable). The server is exposed on `app.httpServer`. `options.principalOf`
 // overrides the request→principal source (default: anonymous, fail-closed). Both
 // chain.
-export default function workbench({ db, entities = [], blobs: blobOpts, requireEnv = [], migrations = [], jobs: jobOpts, log: logOpts, port, env, session, viewsDir } = {}) {
+export default function workbench({
+  db,
+  entities = [],
+  blobs: blobOpts,
+  requireEnv = [],
+  migrations = [],
+  jobs: jobOpts,
+  log: logOpts,
+  port,
+  env,
+  session,
+  viewsDir,
+  blobReapIntervalMs = maintenanceDefaults.blobReapIntervalMs,
+  blobReapTtlMs = maintenanceDefaults.blobReapTtlMs,
+  logRetentionDays = maintenanceDefaults.logRetentionDays,
+  logRetentionIntervalMs = maintenanceDefaults.logRetentionIntervalMs,
+} = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
     const val = process.env[v];
@@ -408,10 +431,10 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
   };
   const app = makeMountable({ entityOf: runtime.entityOf });
   app.dispatch = async () => {
-    throw new Error('application is not started; call listen() and await app.ready before dispatching');
+    throw new Error('application is not started; call start() before dispatching');
   };
   app.batch = async () => {
-    throw new Error('application is not started; call listen() and await app.ready before batching');
+    throw new Error('application is not started; call start() before batching');
   };
   app.entity = runtime.entityOf;
   app.register = (...declared) => {
@@ -441,6 +464,12 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
   // dispatch seam, not this field). An app with no db simply cannot serve
   // DB-backed entity CRUD — fail closed at dispatch.
   app.db = db;
+  app._maintenance = validateMaintenanceOptions({
+    blobReapIntervalMs,
+    blobReapTtlMs,
+    logRetentionDays,
+    logRetentionIntervalMs,
+  });
   // The blob store is an app-level resource, constructed when a db is engaged
   // (blobs are adopted by dispatch commits — no db, no durable kernel, no
   // blobs). The root defaults to a `.blobs` dir under cwd, durable across
@@ -475,11 +504,14 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
   // at app construction so the job queue and later serve.mjs share it.
   const clock = createClock();
   app.clock = clock;
+  app.writeQueue = createWriteQueue();
+  prepareGracefulShutdown(app);
   if (db && jobOpts) {
     app.jobs = createJobQueue({ db, clock, ...jobOpts });
   }
   app.port = undefined;
   app.httpServer = undefined;
+  app._transportReady = Promise.resolve();
 
   // Versioned schema migrations (eng-review spec #9, #17). Declared at
   // construction; run at startup pre-traffic during schema preparation AFTER the
@@ -522,6 +554,8 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
   });
   app.ddl = () => app.prepareSchema();
 
+  app.start = () => startApplication(app);
+
   app.listen = (portOrOptionsOrCallback, optionsOrCallback) => {
     // One listen path, Express-compatible overload:
     //   listen()                         → config.port
@@ -545,6 +579,12 @@ export default function workbench({ db, entities = [], blobs: blobOpts, requireE
       options = portOrOptionsOrCallback;
     } else {
       port = portOrOptionsOrCallback ?? app.config.port;
+    }
+    if (app.httpServer) {
+      throw new Error('application is already listening');
+    }
+    if (app._startupMode === 'headless' || (app._startPromise && !app._transportAttached)) {
+      throw new Error('application already started without HTTP; create a new app and call listen() before start()');
     }
     app.port = port;
     return withLog(app.log, () => serveListen(app, port, options));

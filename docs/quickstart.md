@@ -55,6 +55,10 @@ What you just used:
 2. **`workbench({ db })`** — open SQLite; schema is prepared on `app.ready`  
 3. **`.mount('/notes', Note).listen(port)`** — REST CRUD + framework defaults  
 
+For a process that does not need HTTP, replace `.listen(port)` with
+`await app.start()`. It starts the same schema, mutation, recovery, maintenance,
+and clock runtime while leaving `app.httpServer` absent.
+
 Authorization is real: the demo forces a fixed principal so curl is easy. Real
 apps call `.auth()` and use session cookies (Option B).
 

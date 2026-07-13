@@ -1,0 +1,341 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { DatabaseSync } from 'node:sqlite';
+
+import workbench, {
+  entity,
+  grant,
+  principal,
+  read,
+  subscribe,
+  text,
+  write,
+} from '../src/index.mjs';
+import { LiveChannel } from '../public/workbench-client.mjs';
+import { executeDDL, executeFrameworkDDL } from '../src/ddl.mjs';
+
+function startNote() {
+  return entity('StartNote', {
+    body: text(),
+    grant: () => grant(read, write, subscribe),
+  });
+}
+
+const user = principal({ type: 'user', id: 'start-user' });
+
+test('app.start boots schema and dispatch without opening an HTTP socket', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/start-notes', startNote());
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+
+  const first = app.start();
+  const second = app.start();
+
+  assert.equal(first, second, 'concurrent starts share one boot promise');
+  assert.equal(app.ready, first, 'headless readiness is the start promise');
+  await first;
+
+  assert.equal(app.httpServer, undefined, 'start does not bind HTTP');
+  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE name = 'StartNote'").get());
+
+  const result = await app.dispatch({
+    actionId: 'headless-create',
+    type: 'StartNote.create',
+    payload: { body: 'headless' },
+    principal: user,
+  });
+  assert.equal(result.granted, true);
+  assert.equal(db.prepare('SELECT body FROM StartNote').get().body, 'headless');
+  assert.equal(app.start(), first, 'a completed start keeps the same readiness promise');
+});
+
+test('headless start without a database still assembles the application kernel', async () => {
+  const app = workbench().mount('/start-notes', startNote());
+  await app.start();
+
+  assert.ok(app.kernel);
+  assert.equal(app.httpServer, undefined);
+  await app.shutdown();
+});
+
+test('a headless start makes the transport choice final', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/start-notes', startNote());
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+
+  await app.start();
+  assert.throws(
+    () => app.listen(0),
+    /already started without HTTP/i,
+    'live delivery must be engaged before the kernel snapshots its consumers',
+  );
+  assert.equal(app.httpServer, undefined);
+});
+
+test('listen engages live delivery before the singular application start', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/start-notes', startNote());
+  let channel;
+  t.after(async () => {
+    channel?.close();
+    await app.shutdown();
+    db.close();
+  });
+
+  app.listen(0, { principalOf: () => user });
+  const started = app.start();
+  assert.equal(started, app.ready, 'HTTP and headless callers observe one boot promise');
+  await app.ready;
+  const created = await app.dispatch({
+    actionId: 'after-listen-create',
+    type: 'StartNote.create',
+    payload: { body: 'after listen' },
+    principal: user,
+  });
+  const id = created.events[0].data.id;
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  channel = new LiveChannel(origin);
+
+  let resolveEvent;
+  const delivered = new Promise((resolve) => { resolveEvent = resolve; });
+  await channel.subscribe('StartNote', id, (envelope) => resolveEvent(envelope));
+  await app.dispatch({
+    actionId: 'after-listen-update',
+    type: 'StartNote.update',
+    payload: { id, body: 'live now' },
+    principal: user,
+  });
+
+  const envelope = await Promise.race([
+    delivered,
+    new Promise((_, reject) => setTimeout(() => reject(new Error('live delivery timed out')), 1000)),
+  ]);
+  assert.equal(envelope.event.type, 'StartNote.updated');
+  assert.equal(envelope.event.data.body, 'live now');
+});
+
+test('live subscriptions wait for the same application readiness barrier as HTTP requests', async (t) => {
+  let releaseRoutes;
+  let markRoutesStarted;
+  const routesReleased = new Promise((resolve) => { releaseRoutes = resolve; });
+  const routesStarted = new Promise((resolve) => { markRoutesStarted = resolve; });
+  const SlowLiveNote = entity('SlowLiveStartNote', {
+    body: text(),
+    grant: () => grant(read, write, subscribe),
+    routes: async (router) => {
+      markRoutesStarted();
+      await routesReleased;
+      router.resource();
+    },
+  });
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/slow-live-notes', SlowLiveNote);
+  executeFrameworkDDL(db);
+  executeDDL(app.entities.get('SlowLiveStartNote'), db);
+  db.prepare('INSERT INTO SlowLiveStartNote (id, body) VALUES (?, ?)').run('n1', 'ready later');
+
+  let channel;
+  t.after(async () => {
+    channel?.close();
+    releaseRoutes?.();
+    await app.shutdown();
+    db.close();
+  });
+
+  app.listen(0, { principalOf: () => user });
+  await routesStarted;
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  channel = new LiveChannel(origin);
+  const subscription = channel.subscribe('SlowLiveStartNote', 'n1', () => {});
+
+  const early = await Promise.race([
+    subscription.then(() => 'settled', () => 'settled'),
+    new Promise((resolve) => setTimeout(() => resolve('pending'), 50)),
+  ]);
+  assert.equal(early, 'pending', 'the live protocol must not enter before startup completes');
+
+  releaseRoutes();
+  await app.ready;
+  const acknowledged = await subscription;
+  assert.equal(typeof acknowledged.currentSeq, 'number');
+});
+
+test('headless shutdown is safe and start remains unavailable after shutdown', async () => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/start-notes', startNote());
+  await app.start();
+  await app.shutdown();
+
+  await assert.rejects(app.start(), /shut down/i);
+  db.close();
+});
+
+test('shutdown is available before start and permanently closes the application', async () => {
+  const app = workbench().mount('/start-notes', startNote());
+
+  assert.equal(typeof app.shutdown, 'function');
+  await app.shutdown();
+
+  await assert.rejects(app.start(), /shut down/i);
+});
+
+test('listen rejects a second transport instead of leaking another server', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/start-notes', startNote()).listen(0);
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+  await app.ready;
+
+  assert.throws(() => app.listen(0), /already listening/i);
+});
+
+test('shutdown is concurrent-safe, closes live delivery, and drains accepted writes', async () => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/start-notes', startNote());
+  await app.start();
+
+  let releaseWrite;
+  const heldWrite = app.writeQueue.run(() => new Promise((resolve) => { releaseWrite = resolve; }));
+  let liveCloseCount = 0;
+  app.live = { close() { liveCloseCount += 1; } };
+  let hookCount = 0;
+  app.onShutdown('count-once', () => { hookCount += 1; });
+
+  const first = app.shutdown();
+  const second = app.shutdown();
+  assert.equal(first, second, 'concurrent shutdown calls share one promise');
+
+  let settled = false;
+  first.then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, 'shutdown waits for an accepted write');
+  await assert.rejects(app.writeQueue.run(() => undefined), /closed/i);
+
+  releaseWrite();
+  await heldWrite;
+  await first;
+  assert.equal(liveCloseCount, 1);
+  assert.equal(hookCount, 1);
+  db.close();
+});
+
+test('an HTTP bind failure rejects the singular ready promise and closes acquired owners', async (t) => {
+  const occupied = createServer();
+  await new Promise((resolve, reject) => {
+    occupied.once('error', reject);
+    occupied.listen(0, resolve);
+  });
+  t.after(() => new Promise((resolve) => occupied.close(resolve)));
+
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/start-notes', startNote());
+  let clockStops = 0;
+  const stopClock = app.clock.stop;
+  app.clock.stop = () => {
+    clockStops += 1;
+    stopClock();
+  };
+  app.listen(occupied.address().port);
+  const ready = app.ready;
+  assert.equal(ready, app.start());
+  await assert.rejects(ready, (err) => err?.code === 'EADDRINUSE');
+  assert.equal(app.httpServer.listening, false);
+  assert.equal(app.writeQueue.closed, true, 'failed startup closes mutation admission');
+  assert.equal(clockStops, 1, 'failed startup releases the application clock');
+  await assert.rejects(app.start(), /EADDRINUSE|shut down/i);
+  db.close();
+});
+
+test('a synchronous listen argument failure still exposes failed readiness and cleans up', async () => {
+  const app = workbench().mount('/start-notes', startNote());
+
+  assert.throws(() => app.listen(-1), (err) => err?.code === 'ERR_SOCKET_BAD_PORT');
+  assert.ok(app.ready, 'readiness exists before Node begins binding the socket');
+  await assert.rejects(app.ready, (err) => err?.code === 'ERR_SOCKET_BAD_PORT');
+  assert.equal(app.writeQueue.closed, true);
+});
+
+test('a route-resolution failure cleans up a headless application', async () => {
+  const BrokenNote = entity('BrokenStartNote', {
+    body: text(),
+    grant: () => grant(read, write),
+    routes: () => {
+      throw new Error('broken route declaration');
+    },
+  });
+  const app = workbench().mount('/broken-notes', BrokenNote);
+  let clockStops = 0;
+  const stopClock = app.clock.stop;
+  app.clock.stop = () => {
+    clockStops += 1;
+    stopClock();
+  };
+
+  const started = app.start();
+  await assert.rejects(started, /broken route declaration/);
+
+  assert.equal(app.writeQueue.closed, true);
+  assert.equal(clockStops, 1);
+  assert.equal(app.start(), started, 'the original failed readiness remains observable');
+});
+
+test('shutdown requested during asynchronous boot waits for its safe stop point', async () => {
+  let releaseRoutes;
+  let markRoutesStarted;
+  const routesReleased = new Promise((resolve) => { releaseRoutes = resolve; });
+  const routesStarted = new Promise((resolve) => { markRoutesStarted = resolve; });
+  const SlowNote = entity('SlowStartNote', {
+    body: text(),
+    grant: () => grant(read, write, subscribe),
+    routes: async (router) => {
+      markRoutesStarted();
+      await routesReleased;
+      router.resource();
+    },
+  });
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/slow-notes', SlowNote).listen(0);
+  await routesStarted;
+
+  const stopped = app.shutdown();
+  let settled = false;
+  stopped.then(() => { settled = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false, 'shutdown waits for route resolution already in progress');
+
+  releaseRoutes();
+  await app.ready;
+  await stopped;
+  assert.equal(app.httpServer.listening, false);
+  await assert.rejects(app.start(), /shut down/i);
+  db.close();
+});
+
+test('shutdown immediately after listen settles startup even before the listening event', async () => {
+  const app = workbench().mount('/start-notes', startNote()).listen(0);
+
+  const stopped = app.shutdown();
+  await Promise.all([app.ready, stopped]);
+
+  assert.equal(app.httpServer.listening, false);
+});
+
+test('closing the raw HTTP server before its listening event cancels startup cleanly', async () => {
+  const app = workbench().mount('/start-notes', startNote()).listen(0);
+
+  app.httpServer.close();
+  await app.ready;
+
+  assert.equal(app.httpServer.listening, false);
+  assert.equal(app.writeQueue.closed, true);
+  await assert.rejects(app.start(), /shut down/i);
+});

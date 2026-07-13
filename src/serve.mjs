@@ -27,9 +27,7 @@ import { applySecurityHeaders, renderError, isSameOriginRequest } from './middle
 import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/session.mjs';
 import { createLiveDelivery } from './live-delivery.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
-import { retentionPrune } from './committed-log.mjs';
 import { getLog, withLog } from './log.mjs';
-import { buildKernel, buildAndStart } from './kernel.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
 import { BodyError, readRequestBody } from './http-body.mjs';
 import { runChain } from './http-handler-chain.mjs';
@@ -38,7 +36,6 @@ import { committedEventHeaders, responseHasStarted, warnLateResponse, sendJson }
 import { createResponseFacade } from './http-response-factory.mjs';
 import { dispatchCrud } from './http-crud-dispatch.mjs';
 import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute, handleClientSdkRoute } from './http-framework-routes.mjs';
-import { installGracefulShutdown } from './lifecycle.mjs';
 
 // Framework-owned snapshot + resync endpoints (spec #1, D6/D7). NOT mounted
 // `makeHandlerRes(nodeRes, onEnd)` wraps a node response in the Express-style
@@ -78,15 +75,6 @@ function makeHandlerRes(nodeRes, onEnd) {
 
 // Framework-owned routes — handleResyncRoute, handleBlobUploadRoute, handleJobRoute
 // — live in http-framework-routes.mjs and are imported above.
-// Blob reaper cadence + stale threshold (eng-review spec #10, consult #17). A
-// pending upload whose adopt dispatch never came (client crash / abandonment) is
-// orphaned; once it is older than the TTL the reaper sweeps the .pending file +
-// row. Defaults baked into the framework — no app config (AGENTS.md: sensible
-// defaults are framework-owned). Interval chosen so a sweep lands well inside the
-// TTL window (6×/hour) so orphans don't linger far past the threshold.
-const BLOB_REAP_INTERVAL_MS = 10 * 60_000; // sweep every 10 minutes.
-const BLOB_REAP_TTL_MS = 60 * 60_000;       // a pending blob is stale after 1 hour.
-
 // The standard stateless CSRF guard (eng-review §8 Tier-2 ops bundle, #13). A
 // state-MUTATING request (anything but a safe method) carrying a FOREIGN Origin
 // or Referer is rejected; the browser always sends a foreign Origin on a
@@ -359,6 +347,9 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
 // server, and an unhandledRejection/uncaughtException is trapped. The app mounts
 // none of this — `app.shutdown()` is the close the traps call (and tests use).
 export function listen(app, port, optionsOrCallback = {}) {
+  if (app.httpServer) {
+    throw new Error('application is already listening');
+  }
   // Portless `app.listen()` — `port` was already optional to `app.listen`, but
   // here it is the value actually bound. An absent port falls back to
   // `app.config.port` (the env-or-option value resolved at construction) and
@@ -415,56 +406,6 @@ export function listen(app, port, optionsOrCallback = {}) {
 
   const httpServer = createHttpServer(resolved);
   app.httpServer = httpServer;
-  installGracefulShutdown(app);
-  // Register the shared clock shutdown handler once (one timer, not five).
-  // All framework reapers (schedule, tick, job-queue lease, blob, log-retention,
-  // job-worker polls) register as watchers on `app.clock`. The clock is stopped
-  // once on graceful exit.
-  app.onShutdown('clock', () => app.clock?.stop(), { timeoutMs: 1000 });
-  // The job-queue reaper — re-assigns lease-expired jobs + revokes stale-
-  // heartbeat workers. Scheduled on the shared clock. Only when the app engaged
-  // the job-queue substrate.
-  if (app.jobs) {
-    app.jobs.startReaper();
-  }
-  // The blob reaper (eng-review spec #10, consult #17). `app.blobs` is built
-  // whenever a db is engaged (not opt-in), and POST /blobs is always live, so an
-  // abandoned upload leaks a .pending file + row forever with no operator lever
-  // — a fail-open default the framework must own (AGENTS.md: Defaults + Fail
-  // closed). The sweep runs UNDER the writeQueue mutex: reap() deletes DB rows
-  // AND unlinks files (a transaction does not serialize FS unlinks), and a
-  // dispatch txn spans an await, so an unsync'd reaper could delete a blob a
-  // concurrent dispatch just referenced / is mid-adopting. serialize it as one
-  // critical section against dispatch via writeQueue.run. app.blobColumns is set
-  // in buildKernel (app.ready); the sweep reads it lazily so it is always current
-  // even for apps whose blob fields register after listen() (buildKernel runs in
-  // app.ready, which tests await). Scheduled on the shared clock.
-  const blobReapIntervalMs = options.blobReapIntervalMs ?? BLOB_REAP_INTERVAL_MS;
-  const blobReapTtlMs = options.blobReapTtlMs ?? BLOB_REAP_TTL_MS;
-  if (app.blobs) {
-    app.sweepBlobs = () => app.writeQueue.run(() =>
-      app.blobs.reap({ ttl: blobReapTtlMs, blobColumns: app.blobColumns ?? [] })
-    );
-    app.clock.add({ name: 'blob-reaper', intervalMs: blobReapIntervalMs,
-      fn: () => { app.sweepBlobs().catch((err) => log.warn('system', 'blob reap failed', { err })); } });
-  }
-  // _Log retention reaper (eng-review #42). The event log grows forever; when a
-  // logRetentionDays option is set, the reaper prunes entries older than the
-  // configured horizon. Runs at the same cadence as the blob reaper by default,
-  // under the writeQueue mutex so concurrent dispatches don't race. The log is
-  // eviction-safe: events-since delivers a gap → recover bundle (SPEC §D6); a
-  // pruned entry that arrived after the subscriber's cursor is a legitimate gap.
-  // Scheduled on the shared clock.
-  const logRetentionDays = options.logRetentionDays;
-  if (logRetentionDays > 0) {
-    app.sweepLog = () => app.writeQueue.run(() => {
-      const cutoff = new Date(Date.now() - logRetentionDays * 86_400_000).toISOString();
-      retentionPrune(app.db, cutoff);
-      app.db.prepare('DELETE FROM _ProjectedCursor WHERE lastSeq = 0').run();
-    });
-    app.clock.add({ name: 'log-reaper', intervalMs: options.logRetentionIntervalMs ?? BLOB_REAP_INTERVAL_MS,
-      fn: () => { app.sweepLog().catch((err) => log.warn('system', 'log retention sweep failed', { err })); } });
-  }
   // Start the tick engine if any entity declares a tick trigger. DEFERRED into
   // `app.ready` below — `app.kernel` (and thus `dispatch`) is not built until
   // `buildKernel(app)` runs; starting earlier would hand the engine an undefined
@@ -472,8 +413,39 @@ export function listen(app, port, optionsOrCallback = {}) {
   // only starts if at least one exists (avoids a no-op timer). ONE reconciliation
   // path — the engine dispatches under a system principal through `kernel.dispatch`,
   // admitted in-txn by the durable variant's `admission.beforeProjection` seam.
+  let failTransport;
+  app._transportReady = new Promise((resolve, reject) => {
+    const cleanup = () => {
+      httpServer.off('listening', onReady);
+      httpServer.off('error', onError);
+      httpServer.off('close', onClose);
+    };
+    const onReady = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = (err) => {
+      cleanup();
+      reject(err);
+    };
+    failTransport = onError;
+    const onClose = () => {
+      cleanup();
+      if (app._shutdownStarted) {
+        resolve();
+      } else {
+        // `httpServer.close()` is a long-standing public escape hatch used by
+        // callers that only own the transport. If it wins the race with the
+        // listening event, treat that as cancellation and release the rest of
+        // the application rather than creating an unobserved rejected `ready`.
+        app._shutdownFromStartFailure().then(resolve, reject);
+      }
+    };
+    httpServer.once('listening', onReady);
+    httpServer.once('error', onError);
+    httpServer.once('close', onClose);
+  });
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
-  httpServer.listen(port);
 
   // Live Delivery (singular Deliver-loop seam): WS upgrade + fan-out + consumer.
   // Same mayVerb / principalOf as HTTP — no second auth path. createConsumer is
@@ -484,7 +456,9 @@ export function listen(app, port, optionsOrCallback = {}) {
     principalOf,
     db: app.db,
     resolveEntity: (name) => app.entities?.get(name),
+    ready: () => app.ready,
   });
+  app._transportAttached = true;
 
   // Job lifecycle events (W3 slice 2): the queue appends its _Job.* events to
   // _Log itself, not through the durable pipeline, so the post-commit consumer
@@ -496,7 +470,7 @@ export function listen(app, port, optionsOrCallback = {}) {
   // live (a foreign event must never ride the removed-row path, which skips
   // re-auth); the event stays durable in _Log for cursor catch-up either way.
   if (app.jobs) {
-    app.jobs.onEvent((ev) => {
+    app._detachJobLive = app.jobs.onEvent((ev) => {
       const handle = tryParseScopeKey(ev.scope);
       if (!handle) return;
       const entity = app.entities?.get(handle.entity);
@@ -513,16 +487,20 @@ export function listen(app, port, optionsOrCallback = {}) {
     });
   }
 
-  // Resolution runs in the background; `app.ready` completes once routes,
-  // schema, kernel, background consumers, and the socket are ready, so a caller
-  // may await it before traffic or shutdown.
-  app.ready = (async () => {
-    await app.resolveRoutes();
-    if (app.db && typeof app.db.exec === 'function') await app.prepareSchema();
-    app.kernel = buildKernel(app);
-    await buildAndStart(app);
-    return app;
-  })();
+  // Live and every other transport-owned consumer are selected before Kernel
+  // assembly. Establish readiness before asking Node to bind, so even a request
+  // accepted at the first possible instant observes the boot barrier.
+  app.start();
+  try {
+    httpServer.listen(port);
+  } catch (err) {
+    failTransport(err);
+    // `listen()` retains Node's synchronous argument-error contract. Attach an
+    // observer to the same rejected readiness promise so callers that catch the
+    // synchronous error are not also handed an unhandled rejection.
+    app.ready.catch(() => {});
+    throw err;
+  }
 
   return app;
 }

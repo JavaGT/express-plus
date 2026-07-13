@@ -51,7 +51,7 @@ async function serve(t, app, options = {}) {
     if (app.httpServer.listening) resolve();
     else app.httpServer.once('listening', resolve);
   });
-  t.after(() => new Promise((r) => app.httpServer.close(r)));
+  t.after(() => app.shutdown());
   const { port } = app.httpServer.address();
   return { origin: `http://127.0.0.1:${port}` };
 }
@@ -171,6 +171,6 @@ test('app.listen(port, callback) fires the listening callback', async (t) => {
   await new Promise((resolve) => {
     app.listen(0, () => resolve());
   });
-  t.after(() => new Promise((r) => app.httpServer.close(r)));
+  t.after(() => app.shutdown());
   assert.equal(app.httpServer.listening, true, 'callback fired after listening');
 });

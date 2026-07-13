@@ -1,24 +1,16 @@
-import { randomUUID } from 'node:crypto';
 import { mayRow } from './row-grant.mjs';
 import {
   admitSystemMutation,
   clearRemovedScheduleReceipts,
-  pruneInactiveScheduleReceipts,
   rearmChangedScheduleReceipts,
-  startClockTriggers,
 } from './schedule.mjs';
 import { createServer, durableMutationVariant } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects, executeEffectsForEvent } from './effect-compiler.mjs';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
 import { admitInvitationCreation, isInvitationCreationAuthority } from './auth/invitation.mjs';
-import { createWriteQueue } from './write-queue.mjs';
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
-import { reconcileProjectedRecovery } from './projected-async.mjs';
-import { reconcileDurableEffects } from './durable-effects.mjs';
-import { startSimulation } from './simulate.mjs';
-import { getLog, withLog } from './log.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -138,7 +130,7 @@ function buildDurableAdmission(app) {
 function engagedPostCommitConsumers(app, entities, { blobFinalizeConsumer, durableEffectsRegistry }) {
   return [
     blobFinalizeConsumer,
-    typeof app.live?.createConsumer === 'function' ? app.live.createConsumer(app) : null,
+    app.live?.createConsumer?.(app),
     createProjectedAsyncConsumer({ entities }),
     createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }),
     app._emailConsumer,
@@ -177,8 +169,6 @@ export function buildKernel(app) {
   app.blobColumns = blobColumns;
   app.durableEffectsRegistry = durableEffectsRegistry;
 
-  app.writeQueue = createWriteQueue();
-
   // Kernel public seam: durable mutation server (handlers, admission, write
   // queue). authorize:()=>true is intentional — route gate + in-txn admission
   // own Grants (no second auth path at the outer hook).
@@ -198,92 +188,4 @@ export function buildKernel(app) {
       }),
     }),
   });
-}
-
-// Boot orchestration — starts all subsystems after the kernel is built.
-// Called from serve.mjs inside app.ready, after resolveRoutes + prepareSchema
-// and after app.kernel = buildKernel(app).
-export async function buildAndStart(app) {
-  const log = app.log ?? getLog();
-  const dispatchThroughWriteQueue = (args) =>
-    withLog(app.log, () => app.writeQueue.run(() => app.kernel.dispatch(args)));
-  app.dispatch = dispatchThroughWriteQueue;
-  // app.batch(actions, { principal }) — a server-side composed mutation
-  // (SPEC §11, ADR #13). N actions run as ONE transaction = ONE composed
-  // commit (one actionId, one `now`), all-or-nothing. This reuses the SAME
-  // kernel path (authorize→handler→durable variant) wrapped once in the
-  // writeQueue — not a second pipeline. Exposed for server code that needs
-  // an atomic multi-entity write outside the per-route HTTP handlers.
-  app.batch = async (actionsOrFactory, { principal } = {}) =>
-    withLog(app.log, () => app.writeQueue.run(() => {
-      const actions = typeof actionsOrFactory === 'function'
-        ? actionsOrFactory()
-        : actionsOrFactory;
-      if (actions && typeof actions.then === 'function') {
-        throw new TypeError('app.batch action factory must return a synchronous action array');
-      }
-      if (!Array.isArray(actions)) {
-        throw new TypeError('app.batch requires an action array or synchronous action-array factory');
-      }
-      return app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal });
-    }));
-  // Singular Schedule clock-dispatch: deadline + tick share one starter.
-  // No-op when no triggers exist. Scheduled on the shared clock.
-  if (app.db) {
-    // Receipt pruning assumes the framework schema exists. `serve` prepares
-    // that schema only for database adapters exposing `exec`; lightweight
-    // request-test adapters intentionally omit it and must remain lazy until a
-    // handler actually touches the database.
-    if (typeof app.db.exec === 'function') {
-      pruneInactiveScheduleReceipts({ db: app.db, entities: app.entities });
-    }
-    startClockTriggers({
-      db: app.db,
-      entities: app.entities,
-      dispatch: dispatchThroughWriteQueue,
-      clock: app.clock,
-    });
-    app.simulation = startSimulation({
-      db: app.db,
-      entities: app.entities,
-      dispatch: dispatchThroughWriteQueue,
-      clock: app.clock,
-    });
-  }
-  // Projected.async boot catch-up. If the process died between committing an
-  // event and the post-commit consumer applying its projection, the projected
-  // field is stale and nothing reconciles it. One sweep at startup, under the
-  // writeQueue mutex (same critical section dispatch uses), recomputes lagging
-  // scopes from current row state and cleans cursors for removed rows. Run
-  // after buildKernel (app.entities is set) and before serving traffic.
-  try {
-    await app.writeQueue.run(() => reconcileProjectedRecovery(app.db, app.entities));
-  } catch (err) {
-    log.warn('system', 'projected recovery sweep failed', { err });
-  }
-  // Durable-effects boot catch-up. Same crash gap as projected recovery: a
-  // committed _Log row whose post-commit enqueue was lost (process died
-  // between COMMIT and the durable consumer) would never be retried. One
-  // sweep at startup, under the same writeQueue mutex, re-enqueues missed
-  // jobs and advances the per-scope consumer cursor. No-op when no durable
-  // effects are declared or the job-queue substrate is not engaged.
-  if (app.jobs && app.durableEffectsRegistry) {
-    try {
-      await app.writeQueue.run(() =>
-        reconcileDurableEffects(app.db, { durableEffectsRegistry: app.durableEffectsRegistry, jobs: app.jobs }),
-      );
-    } catch (err) {
-      log.warn('system', 'durable effects recovery sweep failed', { err });
-    }
-  }
-  // Start the unified clock — a single setTimeout loop that wakes only at the
-  // nearest deadline. All framework reapers (schedule, tick, job-queue lease,
-  // blob, log-retention, job-worker polls) register as watchers above; this
-  // activates real timer scheduling. Called AFTER the sweeps finish so catch-up
-  // doesn't race the first interval fire.
-  app.clock._schedule();
-  if (!app.httpServer.listening) {
-    await new Promise((resolve) => app.httpServer.once('listening', resolve));
-  }
-  log.info('system', `server listening on port ${app.httpServer.address()?.port}`);
 }

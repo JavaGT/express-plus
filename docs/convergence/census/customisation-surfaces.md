@@ -75,12 +75,14 @@ proven in the test suite.
 
 ---
 
-## Gaps (owner-accepted — cosmetic, post-gate polish)
+## Closed gaps
 
-Three seams are either unexercised or proven only with defaults. All are owner-accepted as non-blocking for §8 completion:
+`createAuthClient({ fetchImpl })` is explicitly exercised by the logout test in
+`test/auth-routes.test.mjs`; the earlier census entry saying otherwise was stale.
 
-1. **`listen({ blobReapIntervalMs, blobReapTtlMs })`** — framework constants exercised but explicit override values not tested. Post-gate polish: add explicit override test in `test/blob-reaper.test.mjs`.
-2. **`listen({ logRetentionDays, logRetentionIntervalMs })`** — no test exercises the log retention reaper. Low risk: retention is off by default (0 days). Post-gate polish: add explicit override test.
-3. **`createAuthClient({ fetchImpl })`** — tested with default only (globalThis.fetch). An explicit override is not tested but the shape is identical to `createLiveStore`'s `fetchImpl` which IS tested. Post-gate polish: add override test in `test/auth-routes.test.mjs`.
+The runtime maintenance overrides now belong to `workbench({ ... })`, because
+they govern the whole application rather than one HTTP listener. Explicit blob
+TTL and log-retention behavior is covered by `test/blob-reaper.test.mjs` and
+`test/log-retention.test.mjs`.
 
-**Verdict:** The customisation surface is proven at the seam — every configurable option either has an explicit override test or rests on a shape tested elsewhere. The three gaps are owner-accepted as cosmetic (council c04). No production foot-gun.
+**Verdict:** The customisation surface is proven at the seam — every configurable option has an explicit override test. No open gap remains.

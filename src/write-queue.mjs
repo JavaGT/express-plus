@@ -3,9 +3,15 @@
 export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.now } = {}) {
   let waiters = 0;
   let running = false;
+  let closed = false;
   let lock = Promise.resolve();
   
   function run(fn) {
+    if (closed) {
+      const err = new Error('write queue is closed');
+      err.status = 503;
+      return Promise.reject(err);
+    }
     if (waiters + 1 >= maxDepth) {
       const err = new Error('write queue: depth limit exceeded');
       err.status = 503;
@@ -59,8 +65,9 @@ export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.n
       });
     });
     
+    let timeoutId;
     const timeout = new Promise((_, reject) => {
-      setTimeout(() => {
+      timeoutId = setTimeout(() => {
         if (!acquired) {
           // Set cancelled and reject fast (client gets 503 immediately). Do NOT
           // decrement `waiters` or releaseNext here — the lock-chain's
@@ -76,7 +83,9 @@ export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.n
       }, maxWaitMs);
     });
     
-    return Promise.race([waitForLock, timeout]).then(
+    return Promise.race([waitForLock, timeout]).finally(() => {
+      clearTimeout(timeoutId);
+    }).then(
       () => {
         return Promise.resolve(fn()).finally(() => {
           running = false;
@@ -88,14 +97,26 @@ export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.n
       },
     );
   }
+
+  // Stop admitting new writes and resolve once every already-admitted write has
+  // released the mutex. Shutdown uses this to avoid closing durable resources
+  // under an in-flight transaction.
+  function close() {
+    closed = true;
+    return Promise.resolve(lock);
+  }
   
   return {
     run,
+    close,
     get depth() {
       return waiters;
     },
     get running() {
       return running;
+    },
+    get closed() {
+      return closed;
     },
   };
 }

@@ -27,6 +27,7 @@ import { tryParseScopeKey } from './scope-handle.mjs';
  * @param {Function} [options.principalOf] — same principal resolver HTTP uses
  * @param {object|null} [options.db]
  * @param {Function|null} [options.resolveEntity] — name → entity record
+ * @param {Function} [options.ready] — resolves when protocol admission is safe
  * @returns {{ emit: Function, count: Function, close: Function, createConsumer: Function }}
  */
 export function createLiveDelivery(httpServer, {
@@ -35,9 +36,12 @@ export function createLiveDelivery(httpServer, {
   principalOf = () => ({ type: 'anonymous', id: null }),
   db = null,
   resolveEntity = null,
+  ready = () => Promise.resolve(),
 } = {}) {
   const fanout = createLiveFanout({ mayVerb });
   const connections = new Set();
+  const pendingUpgrades = new Set();
+  let closed = false;
 
   const currentSeq = (scope) => readSeq(db, scope);
 
@@ -46,6 +50,9 @@ export function createLiveDelivery(httpServer, {
   }
 
   function close() {
+    closed = true;
+    for (const socket of pendingUpgrades) socket.destroy();
+    pendingUpgrades.clear();
     for (const conn of connections) {
       try { conn.close?.(); } catch { /* ignore */ }
     }
@@ -66,23 +73,47 @@ export function createLiveDelivery(httpServer, {
       return;
     }
 
-    const result = upgradeWebSocket(req, socket);
-    if (!result) {
+    if (closed) {
       socket.destroy();
       return;
     }
 
-    const id = `ws:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
-    const conn = new LiveConnection(socket, id, {
-      fanout,
-      resolveEntity,
-      mayVerb,
-      db,
-      currentSeq,
-      onClose: () => connections.delete(conn),
-    });
-    conn.setPrincipal(principalOf(req));
-    connections.add(conn);
+    // HTTP requests and WebSocket subscriptions share one application-start
+    // barrier. Keep the raw socket outside the connection registry until the
+    // schema, Kernel, recovery, and admission engine are ready. A failed start
+    // fails closed; shutdown destroys sockets waiting at this barrier.
+    pendingUpgrades.add(socket);
+    Promise.resolve()
+      .then(() => ready())
+      .then(() => {
+        pendingUpgrades.delete(socket);
+        if (closed || socket.destroyed) {
+          socket.destroy();
+          return;
+        }
+
+        const result = upgradeWebSocket(req, socket);
+        if (!result) {
+          socket.destroy();
+          return;
+        }
+
+        const id = `ws:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+        const conn = new LiveConnection(socket, id, {
+          fanout,
+          resolveEntity,
+          mayVerb,
+          db,
+          currentSeq,
+          onClose: () => connections.delete(conn),
+        });
+        conn.setPrincipal(principalOf(req));
+        connections.add(conn);
+      })
+      .catch(() => {
+        pendingUpgrades.delete(socket);
+        socket.destroy();
+      });
   });
 
   /**

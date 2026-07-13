@@ -33,16 +33,17 @@ function photoNote() {
   });
 }
 
-async function harness(t) {
+async function harness(t, options = {}, beforeStart = () => {}) {
   const db = new DatabaseSync(':memory:');
   const root = mkdtempSync(path.join(tmpdir(), 'express-blobreap-'));
-  const app = workbench({ db, blobs: { root } });
+  const app = workbench({ db, blobs: { root }, ...options });
   app.mount('/notes', photoNote());
   await app.ddl();
+  beforeStart(app);
   app.listen(0, { principalOf: () => ({ id: 'u1' }) });
   await app.ready;
-  t.after(() => {
-    app.httpServer.close();
+  t.after(async () => {
+    await app.shutdown();
     db.close();
     rmSync(root, { recursive: true, force: true });
   });
@@ -67,6 +68,35 @@ test('blob reaper sweeps stale orphan .pending blobs', async (t) => {
 
   assert.ok(!existsSync(path.join(root, 'orph1.pending')), 'the .pending file was reaped');
   assert.ok(!app.blobs.stat('orph1'), 'the BlobStore row was reaped');
+});
+
+test('blob reaper TTL is configured when the application is constructed', async (t) => {
+  const { app, db, root } = await harness(t, { blobReapTtlMs: 10 });
+  app.blobs.upload({ bytes: Buffer.from('short-lived orphan'), id: 'orph-override' });
+  backdate(db, 'orph-override', 20);
+
+  await app.sweepBlobs();
+
+  assert.ok(!existsSync(path.join(root, 'orph-override.pending')));
+  assert.ok(!app.blobs.stat('orph-override'));
+});
+
+test('application runtime registers the construction-level blob reaper interval', async (t) => {
+  const registrations = [];
+  const { app } = await harness(
+    t,
+    { blobReapIntervalMs: 1234 },
+    (runtime) => {
+      const add = runtime.clock.add;
+      runtime.clock.add = (watcher) => {
+        registrations.push(watcher);
+        return add(watcher);
+      };
+    },
+  );
+
+  assert.equal(registrations.find((watcher) => watcher.name === 'blob-reaper')?.intervalMs, 1234);
+  assert.equal(app.ready, app.start());
 });
 
 test('blob reaper runs under the writeQueue mutex — waits for an in-flight dispatch', async (t) => {

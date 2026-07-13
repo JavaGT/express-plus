@@ -9,16 +9,37 @@ import { getLog } from './log.mjs';
 // The set of live apps to close on a shutdown signal.
 const liveApps = new Set();
 let processTrapsInstalled = false;
+const PROCESS_SHUTDOWN_DEADLINE_MS = 10_000;
 
 export function installProcessTraps() {
   if (processTrapsInstalled) return;
   processTrapsInstalled = true;
 
+  let draining = false;
   const onSignal = () => {
-    Promise.all([...liveApps].map((a) => a.shutdown())).then(() => process.exit(0));
+    // A second signal is an explicit operator request to stop waiting. This
+    // remains available while the first signal drains application owners.
+    if (draining) {
+      process.exit(1);
+      return;
+    }
+    draining = true;
+    const deadline = setTimeout(() => process.exit(1), PROCESS_SHUTDOWN_DEADLINE_MS);
+    Promise.allSettled(
+      [...liveApps].map((app) => Promise.resolve().then(() => app.shutdown())),
+    ).then((results) => {
+      for (const result of results) {
+        if (result.status !== 'rejected') continue;
+        getLog().error('system', 'application shutdown failed', { err: result.reason });
+        process.stderr.write(`application shutdown failed: ${result.reason?.stack ?? result.reason}\n`);
+      }
+    }).finally(() => {
+      clearTimeout(deadline);
+      process.exit(0);
+    });
   };
-  process.once('SIGTERM', onSignal);
-  process.once('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+  process.on('SIGINT', onSignal);
   process.on('unhandledRejection', (reason) => {
     const log = getLog();
     log.error('system', 'unhandledRejection', { reason });
@@ -41,7 +62,7 @@ export function installProcessTraps() {
 // Hooks run in registration order on shutdown; each bounded by its timeoutMs.
 // A hook exceeding its deadline is force-abandoned (resolve with timeout error, log,
 // continue to next).
-export function installGracefulShutdown(app) {
+export function prepareGracefulShutdown(app) {
   if (!app._shutdownHooks) {
     app._shutdownHooks = [];
   }
@@ -51,42 +72,64 @@ export function installGracefulShutdown(app) {
     };
   }
   if (!app.shutdown) {
-    app.shutdown = () =>
-      new Promise((resolve) => {
-        // Run registered hooks first, each bounded by its deadline
-        const runHooks = async () => {
-          for (const hook of app._shutdownHooks) {
-            const timer = new Promise((_, reject) => {
-              const t = setTimeout(() => {
-                clearTimeout(t);
-                reject(new Error(`onShutdown hook '${hook.name}' exceeded ${hook.timeoutMs}ms deadline`));
-              }, hook.timeoutMs);
-            });
-            try {
-              await Promise.race([hook.fn(), timer]);
-            } catch (err) {
-              getLog().warn('system', `onShutdown hook '${hook.name}' failed`, { err, hook: hook.name });
-              process.stderr.write(`onShutdown hook '${hook.name}' failed: ${err.message}\n`);
-              // Continue to next hook (force-abandon on timeout)
-            }
-          }
-        };
-        // Close http server and live server, then resolve
-        const closeServer = () => new Promise((resolveClose) => {
-          if (app.httpServer && app.httpServer.listening) {
-            app.httpServer.close(() => {
-              liveApps.delete(app);
-              resolveClose();
-            });
-          } else {
-            liveApps.delete(app);
-            resolveClose();
-          }
+    let shutdownPromise;
+    const beginShutdown = ({ waitForStart }) => {
+      if (shutdownPromise) return shutdownPromise;
+      app._shutdownStarted = true;
+      shutdownPromise = (async () => {
+        // Stop transport ingress first. Live owns its connections and paced
+        // timers; the HTTP close promise resolves after accepted requests end.
+        try { app.live?.close?.(); } catch { /* best-effort transport close */ }
+        try { app._detachJobLive?.(); } catch { /* best-effort listener detach */ }
+        const serverClosed = new Promise((resolve) => {
+          if (!app.httpServer?.listening) return resolve();
+          app.httpServer.close(() => resolve());
         });
-        // Run hooks then close
-        runHooks().then(closeServer).then(resolve);
-      });
+
+        // A user may shut down immediately after listen() while asynchronous
+        // route/schema boot is still running. Let that singular boot promise
+        // reach a safe stop point before releasing its application owners. A
+        // boot failure uses the private no-wait path below to avoid awaiting
+        // itself from inside its own rejection handler.
+        if (waitForStart) {
+          await app._startPromise?.catch(() => {});
+        }
+
+        // Stop application-owned background producers before closing the write
+        // queue. Each hook has a real, cleared deadline timer and cannot prevent
+        // later owners from being released.
+        for (const hook of app._shutdownHooks) {
+          let timeoutId;
+          const deadline = new Promise((_, reject) => {
+            timeoutId = setTimeout(
+              () => reject(new Error(`onShutdown hook '${hook.name}' exceeded ${hook.timeoutMs}ms deadline`)),
+              hook.timeoutMs,
+            );
+          });
+          try {
+            await Promise.race([Promise.resolve().then(() => hook.fn()), deadline]);
+          } catch (err) {
+            getLog().warn('system', `onShutdown hook '${hook.name}' failed`, { err, hook: hook.name });
+            process.stderr.write(`onShutdown hook '${hook.name}' failed: ${err.message}\n`);
+          } finally {
+            clearTimeout(timeoutId);
+          }
+        }
+
+        await app.writeQueue?.close?.();
+        await serverClosed;
+        liveApps.delete(app);
+      })();
+      return shutdownPromise;
+    };
+    app.shutdown = () => beginShutdown({ waitForStart: true });
+    app._shutdownFromStartFailure = () => beginShutdown({ waitForStart: false });
   }
+  return app;
+}
+
+export function installGracefulShutdown(app) {
+  prepareGracefulShutdown(app);
   liveApps.add(app);
   installProcessTraps();
 }

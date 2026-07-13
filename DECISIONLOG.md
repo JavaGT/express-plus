@@ -649,6 +649,27 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Lifecycle rule:** A denied desired subscription is removed before its promise rejects. A later subscription to the same scope is a new request; denied intent is not replayed on reconnect.
 - **Compatibility:** Uncorrelated server errors remain connection-level failures for older/custom servers and reject all pending attempts, but current Workbench peers always correlate subscription outcomes.
 
+## 2026-07-13 — application startup is independent of HTTP
+
+- **Decision:** `app.start()` is the singular application boot path. It owns route
+  finalization, schema preparation, Kernel assembly, recovery, maintenance,
+  simulations, job reaping, the shared clock, and graceful-shutdown hooks.
+  `listen()` attaches HTTP and Live Delivery before calling that same start path;
+  headless processes call it directly.
+- **Transport rule:** Starting without HTTP makes the headless choice final for
+  that application. A caller that needs HTTP later constructs a fresh app, so the
+  Kernel never has to mutate its post-commit consumer set after assembly.
+- **Ownership rule:** Maintenance cadence belongs to `workbench({...})`, not to
+  one `listen({...})` call. The write queue is created with the application and
+  closes admission before shutdown drains already-accepted writes.
+- **Failure rule:** Startup and shutdown are singular, idempotent promises. Bind
+  errors, route failures, raw pre-listen transport closure, hook failures, and
+  process signals release acquired owners without self-await deadlocks. A second
+  termination signal force-exits a stuck graceful drain.
+- **Compatibility:** `app.ready` is the exact `app.start()` promise once startup
+  begins. Existing synchronous `listen()` chaining and Node's synchronous bad-port
+  error remain intact.
+
 ## 2026-07-13 — undo is compensating mutation metadata, not a second write path
 
 - **Decision:** Wave 9 will build undo/redo on one transactional action executor. Actions own typed, versioned preimages and compensators; the framework persists private undo metadata and applies compensation through ordinary authorization, admission, projection, log, effect, and live-delivery machinery.

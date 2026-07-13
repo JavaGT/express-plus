@@ -430,10 +430,6 @@ export interface ListenOptions {
   hsts?: boolean;
   cors?: { origins: readonly string[] };
   requestLog?: boolean;
-  blobReapIntervalMs?: number;
-  blobReapTtlMs?: number;
-  logRetentionDays?: number;
-  logRetentionIntervalMs?: number;
 }
 
 export interface WorkbenchOptions {
@@ -448,6 +444,14 @@ export interface WorkbenchOptions {
   jobs?: Readonly<Record<string, unknown>>;
   blobs?: Readonly<Record<string, unknown>>;
   log?: Readonly<Record<string, unknown>>;
+  /** Pending-blob sweep cadence in milliseconds; must be finite and > 0. */
+  blobReapIntervalMs?: number;
+  /** Pending-blob minimum age in milliseconds; must be finite and >= 0. */
+  blobReapTtlMs?: number;
+  /** Durable-log retention in days; finite and >= 0, with 0 disabling retention. */
+  logRetentionDays?: number;
+  /** Durable-log sweep cadence in milliseconds; must be finite and > 0. */
+  logRetentionIntervalMs?: number;
 }
 
 export interface WorkbenchApp extends RouteBuilder {
@@ -471,6 +475,13 @@ export interface WorkbenchApp extends RouteBuilder {
   static(prefix: string, directory: string): this;
   prepareSchema(): Promise<this>;
   ddl(): Promise<this>;
+  start(): Promise<this>;
+  onShutdown(
+    name: string,
+    hook: () => void | Promise<void>,
+    options?: { timeoutMs?: number },
+  ): void;
+  shutdown(): Promise<void>;
   dispatch<Payload = Record<string, unknown>>(
     request: DispatchRequest<Payload>,
   ): Promise<DispatchResult>;

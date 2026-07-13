@@ -40,7 +40,8 @@ Action → authorize → handler → `_Log` append → projection (+ in-txn effe
 | Module | Role |
 | --- | --- |
 | `pipeline.mjs` | `createServer`, durable variant, `createClient` |
-| `kernel.mjs` | Thin assembly + write queue + engaged consumers |
+| `kernel.mjs` | Thin Compile/Commit assembly + engaged consumers |
+| `application-runtime.mjs` | Singular headless/HTTP start, recovery, maintenance, clocks |
 | `committed-log.mjs` / `cursor.mjs` | Log + seq storage |
 | `scope-handle.mjs` | Scope key grammar |
 | `write-queue.mjs` | Single-writer serialization |
@@ -70,12 +71,12 @@ Not a fourth loop — transport over the machine.
 
 | Module | Role |
 | --- | --- |
-| `app.mjs` | Two-phase mount / listen |
-| `serve.mjs` | HTTP server, CSRF, boot |
+| `app.mjs` | Two-phase declaration plus singular `start()` / transport selection |
+| `serve.mjs` | HTTP server, CSRF, live transport attachment |
 | `http-crud-dispatch.mjs` | CRUD → kernel.dispatch |
 | `http-framework-routes.mjs` | snapshot / events-since / blobs / jobs / SDK |
 | `http-body.mjs` / `http-response*.mjs` / `http-route-match.mjs` / `http-handler-chain.mjs` | Leaf HTTP utilities |
-| `middleware.mjs` / `rate-limit.mjs` / `lifecycle.mjs` / `config.mjs` | Ops defaults |
+| `middleware.mjs` / `rate-limit.mjs` / `lifecycle.mjs` / `config.mjs` | HTTP policy and process shutdown |
 
 ## Coat (known-app seams on the machine)
 
