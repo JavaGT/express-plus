@@ -3,7 +3,12 @@ import { runMigrations } from './migrations.mjs';
 
 const ALLOWED_TYPES = new Set(['text', 'integer', 'real', 'blob']);
 const ALLOWED_FK_ACTIONS = new Set(['cascade', 'set null', 'set default', 'restrict', 'no action']);
-const ALLOWED_DEFAULT_EXPRESSIONS = new Set(['CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP']);
+const ALLOWED_DEFAULT_EXPRESSIONS = new Set([
+  'CURRENT_DATE',
+  'CURRENT_TIME',
+  'CURRENT_TIMESTAMP',
+  "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))",
+]);
 
 function requireName(value, label) {
   if (typeof value !== 'string' || value.length === 0 || value.includes('\0')) {

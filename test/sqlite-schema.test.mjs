@@ -97,6 +97,29 @@ test('compiled DDL executes and exposes the declared constraints to SQLite', () 
   }
 });
 
+test('schema columns can default to an ISO-8601 UTC timestamp', () => {
+  const schema = taskSchema({
+    tables: [
+      {
+        name: 'Receipt',
+        columns: [
+          { name: 'id', type: 'text', primaryKey: true },
+          { name: 'createdAt', type: 'text', notNull: true, defaultExpression: "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))" },
+        ],
+      },
+    ],
+  });
+  const db = new DatabaseSync(':memory:');
+  try {
+    schema.prepare(db);
+    db.prepare('INSERT INTO Receipt (id) VALUES (?)').run('r1');
+    const row = db.prepare('SELECT createdAt FROM Receipt WHERE id = ?').get('r1');
+    assert.match(row.createdAt, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+  } finally {
+    db.close();
+  }
+});
+
 test('schema preparation runs explicit migrations once and rolls failures back', () => {
   let calls = 0;
   const schema = taskSchema({

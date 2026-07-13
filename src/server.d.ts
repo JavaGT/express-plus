@@ -215,7 +215,7 @@ export interface ColumnDeclaration {
   primaryKey?: boolean;
   notNull?: boolean;
   default?: string | number;
-  defaultExpression?: 'CURRENT_DATE' | 'CURRENT_TIME' | 'CURRENT_TIMESTAMP';
+  defaultExpression?: 'CURRENT_DATE' | 'CURRENT_TIME' | 'CURRENT_TIMESTAMP' | "(strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))";
 }
 
 export interface ForeignKeyDeclaration {
