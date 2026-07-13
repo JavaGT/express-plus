@@ -12,50 +12,43 @@ import { MIGRATION_DDL } from './migrations.mjs';
 
 const AUTH_ENTITIES = [User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor];
 
-const RE_TABLE_NAME = /^CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(\S+)\s*\(/m;
+const RE_CREATE_TABLE = /^\s*CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(.+)/im;
 
-function extractTableName(sql) {
-  const match = sql.match(RE_TABLE_NAME);
-  if (!match) {
-    throw new Error(
-      `malformed framework CREATE TABLE — cannot extract table name: ` +
-      `${JSON.stringify(sql.length > 80 ? sql.slice(0, 80) + '…' : sql)}`,
-    );
-  }
-  return match[1];
+function unquoteIdentifier(name) {
+  if (name.startsWith('"') && name.endsWith('"')) return name.slice(1, -1);
+  if (name.startsWith('`') && name.endsWith('`')) return name.slice(1, -1);
+  if (name.startsWith('[') && name.endsWith(']')) return name.slice(1, -1);
+  return name;
 }
 
-function collectFrameworkTableNames() {
-  const names = new Set();
+function firstToken(s) {
+  const m = s.match(/^\s*(\S+)/);
+  return m ? m[1] : '';
+}
 
-  function claim(sql, source) {
-    const name = extractTableName(sql);
-    if (names.has(name)) {
-      throw new Error(`duplicate framework table declaration: ${name} (${source})`);
+export function collectTableNamesFromDdl(entries) {
+  const seen = new Map();
+  const names = [];
+
+  for (const { source, sql } of entries) {
+    const match = sql.match(RE_CREATE_TABLE);
+    if (!match) continue;
+
+    const raw = firstToken(match[1]);
+    const name = unquoteIdentifier(raw);
+
+    const lower = name.toLowerCase();
+    if (seen.has(lower)) {
+      throw new Error(
+        `duplicate framework table declaration: ${name} (from ${seen.get(lower)} and ${source})`,
+      );
     }
-    names.add(name);
-  }
-
-  for (const sql of generateFrameworkDDL()) {
-    if (sql.startsWith('CREATE TABLE')) {
-      claim(sql, 'framework DDL');
-    }
-  }
-
-  if (MIGRATION_DDL.startsWith('CREATE TABLE')) {
-    claim(MIGRATION_DDL, 'migration DDL');
-  }
-
-  for (const entity of AUTH_ENTITIES) {
-    for (const sql of generateDDL(entity)) {
-      if (sql.startsWith('CREATE TABLE')) {
-        claim(sql, `auth entity ${entity.name}`);
-      }
-    }
+    seen.set(lower, source);
+    names.push(name);
   }
 
   return Object.freeze(
-    [...names].sort((a, b) => {
+    names.sort((a, b) => {
       const ga = a.startsWith('_') ? 0 : 1;
       const gb = b.startsWith('_') ? 0 : 1;
       if (ga !== gb) return ga - gb;
@@ -64,6 +57,22 @@ function collectFrameworkTableNames() {
       return 0;
     }),
   );
+}
+
+function collectFrameworkTableNames() {
+  const entries = [];
+
+  for (const sql of generateFrameworkDDL()) {
+    entries.push({ source: 'framework DDL', sql });
+  }
+  entries.push({ source: 'migration DDL', sql: MIGRATION_DDL });
+  for (const entity of AUTH_ENTITIES) {
+    for (const sql of generateDDL(entity)) {
+      entries.push({ source: `auth entity ${entity.name}`, sql });
+    }
+  }
+
+  return collectTableNamesFromDdl(entries);
 }
 
 export const frameworkTableNames = collectFrameworkTableNames();
