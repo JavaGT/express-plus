@@ -27,9 +27,13 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
 
   const handlers = {
     [`${name}.create`]: ({ payload, principal }) => {
-      validateMutation(record, payload);
-      const id = randomUUID();
-      const data = { ...payload, id };
+      const { id: requestedId, ...fieldsPayload } = payload;
+      validateMutation(record, fieldsPayload);
+      if (requestedId !== undefined && (typeof requestedId !== 'string' || requestedId.length === 0)) {
+        throw new ValidationError(`${name}.id: expected a non-empty text id`);
+      }
+      const id = requestedId ?? randomUUID();
+      const data = { ...fieldsPayload, id };
       if (ownerField) data[ownerField] = principal?.id;
       return [{
         handle: verbs.created.handle,

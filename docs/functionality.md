@@ -67,6 +67,11 @@ final transport choice: create a fresh app if HTTP is needed later.
 | `.shutdown()` | Stop ingress, run cleanup, and drain accepted writes; process signals call it automatically |
 | `.ready` | `undefined` before start; then the singular promise identical to `.start()` |
 
+Generated `Entity.create` actions accept an optional non-empty text `id`. When
+present, that caller-owned id is preserved in the committed event and projected
+row; when absent, Workbench generates a UUID. This lets optimistic clients keep
+one stable identity without giving them control of readonly ownership fields.
+
 HTTP requests and live `/events` subscriptions both wait for this readiness
 promise, so neither can observe a partly prepared schema or authorization engine.
 

@@ -53,6 +53,29 @@ test('app.start boots schema and dispatch without opening an HTTP socket', async
   assert.equal(app.start(), first, 'a completed start keeps the same readiness promise');
 });
 
+test('generated create preserves a caller-owned id through commit and projection', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/start-notes', startNote());
+  t.after(async () => {
+    await app.shutdown();
+    db.close();
+  });
+
+  await app.start();
+  const result = await app.dispatch({
+    actionId: 'caller-owned-create',
+    type: 'StartNote.create',
+    payload: { id: 'theme-client-1', body: 'stable identity' },
+    principal: user,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.events[0].data.id, 'theme-client-1');
+  const row = db.prepare('SELECT id, body FROM StartNote WHERE id = ?').get('theme-client-1');
+  assert.equal(row.id, 'theme-client-1');
+  assert.equal(row.body, 'stable identity');
+});
+
 test('headless start without a database still assembles the application kernel', async () => {
   const app = workbench().mount('/start-notes', startNote());
   await app.start();
