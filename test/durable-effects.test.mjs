@@ -40,6 +40,17 @@ function testSourceEntity() {
   });
 }
 
+function testMultiDurableSourceEntity() {
+  return entity('SourceMultiDurableEffect', {
+    title: text(),
+    grant: () => grant(read, write, subscribe),
+    effects: (Source) => [
+      [Source.created, { durable: 'send-title', with: ({ delta }) => ({ title: delta.title }) }],
+      [Source.created, { durable: 'index-title', with: ({ delta }) => ({ title: delta.title }) }],
+    ],
+  });
+}
+
 test('durable effect enqueues a job after commit and advances the consumer cursor', async (t) => {
   const db = setupDb();
   const app = workbench({ db, entities: [testSourceEntity()] });
@@ -114,6 +125,58 @@ test('reconcileDurableEffects enqueues missed jobs from _Log and is idempotent',
   assert.equal(cursor.consumer, 'effect.durable');
   assert.equal(cursor.scope, scope);
   assert.equal(cursor.lastSeq, 1);
+  db.close();
+});
+
+test('durable effect jobs and cursor advance atomically, then recovery enqueues each job once', async () => {
+  const db = setupDb();
+  const Source = testMultiDurableSourceEntity();
+  const jobs = createJobQueue({ db, sharedSecret: SECRET, now: () => 2500 });
+  const durableEffectsRegistry = buildDurableEffectsRegistry([Source]);
+  const scope = 'SourceMultiDurableEffect:s1';
+  const event = {
+    type: 'SourceMultiDurableEffect.created',
+    scope,
+    seq: 1,
+    actionId: 'create-source-multi',
+    committedAt: '2026-01-01T00:00:00.000Z',
+    data: { id: 's1', title: 'Atomic' },
+  };
+  db.prepare(
+    'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(scope, 1, event.type, JSON.stringify(event.data), event.actionId, event.committedAt);
+  db.exec(`
+    CREATE TRIGGER fail_durable_cursor
+    BEFORE INSERT ON _ConsumerCursor
+    BEGIN
+      SELECT RAISE(ABORT, 'cursor blocked');
+    END
+  `);
+
+  const consume = createDurableEffectsConsumer({ durableEffectsRegistry, jobs });
+  await consume([event], { db });
+
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM _Job').get().n, 0);
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS n FROM _ConsumerCursor WHERE consumer = ?').get('effect.durable').n,
+    0,
+  );
+
+  assert.deepEqual(await reconcileDurableEffects(db, { durableEffectsRegistry, jobs }), { enqueued: 0 });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM _Job').get().n, 0);
+  assert.equal(
+    db.prepare('SELECT COUNT(*) AS n FROM _ConsumerCursor WHERE consumer = ?').get('effect.durable').n,
+    0,
+  );
+
+  db.exec('DROP TRIGGER fail_durable_cursor');
+  assert.deepEqual(await reconcileDurableEffects(db, { durableEffectsRegistry, jobs }), { enqueued: 2 });
+  assert.deepEqual(await reconcileDurableEffects(db, { durableEffectsRegistry, jobs }), { enqueued: 0 });
+  assert.equal(db.prepare('SELECT COUNT(*) AS n FROM _Job').get().n, 2);
+  assert.equal(
+    db.prepare('SELECT lastSeq FROM _ConsumerCursor WHERE consumer = ? AND scope = ?').get('effect.durable', scope).lastSeq,
+    1,
+  );
   db.close();
 });
 

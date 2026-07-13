@@ -606,3 +606,9 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Reason:** Source admission and row authorization protect different boundaries. Treating source admission as write authority let an otherwise accepted source mutate target rows the effect principal was not allowed to change.
 - **Authority shape:** Effect provenance lives only at `principal.attributes.effect`; schedule/tick provenance lives only at `principal.attributes.source`. Helpers inspect their own channel, which prevents one internal subsystem from accidentally satisfying another subsystem's admission rule.
 - **Atomic failure:** A denied generated mutation aborts the enclosing pipeline transaction, so neither the origin event nor any earlier generated event is committed.
+
+## 2026-07-13 — durable-effect progress is one atomic unit
+
+- **Decision:** For a committed event, durable job insertion and `effect.durable` cursor advancement share one database transaction in live consumption and recovery.
+- **Reason:** A cursor written without all jobs loses work; jobs written without the cursor make recovery repeat partial work. The only safe unit is all derived jobs plus cursor, or none.
+- **Recovery rule:** A failed transaction does not update the in-memory recovery cursor or enqueue count. A later sweep retries the same log event from durable truth.

@@ -519,3 +519,11 @@ REMAINING-P1-NOTES resolved/deferred: spec #6 (handler txn signature) RESOLVED b
 - Real-kernel tests prove a denied self-effect rolls back both the originating create and its generated update, and that an admitted source cannot bypass a denied target-row write.
 - Gate: full `node --test` and focused ESLint are green.
 - Next: make durable effect job insertion and cursor advancement one database transaction, then make effect-depth ownership singular and exact.
+
+## 2026-07-13 — rewrite Wave 2: durable effects advance atomically
+
+- Enqueuing every durable-effect job for one committed event and advancing the `effect.durable` consumer cursor now happen inside one driver transaction in both live post-commit delivery and startup recovery.
+- A forced cursor-write failure proves neither of two generated jobs remains. Recovery under the same failure also leaves no partial jobs or cursor; after the fault is removed, both jobs are enqueued once and a second recovery pass is a no-op.
+- The transaction uses the public embedded-driver `txn` seam, so raw SQLite handles and conforming Workbench drivers retain the same behavior.
+- Focused gate: durable-effects, consumer-cursor, and job-queue tests 17/17; focused ESLint and diff check green.
+- Next: make the pipeline the single owner of the effect-depth budget and prove one allowed hop succeeds while an attempted second hop rolls back.

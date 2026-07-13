@@ -1,6 +1,7 @@
 import { effectEntries } from './effect-compiler.mjs';
 import { parseEventType } from './event-handle.mjs';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
+import { txn } from './driver.mjs';
 import { getLog } from './log.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 
@@ -63,6 +64,13 @@ function enqueueDurableEffectsForEvent(ev, effects, jobs) {
   }
 }
 
+async function enqueueDurableEffectsAndAdvance(db, ev, effects, jobs) {
+  await txn(db, () => {
+    enqueueDurableEffectsForEvent(ev, effects, jobs);
+    upsertConsumerCursor(db, { consumer: CONSUMER, scope: ev.scope, lastSeq: ev.seq });
+  });
+}
+
 export function createDurableEffectsConsumer({ durableEffectsRegistry, jobs }) {
   if (!jobs || !durableEffectsRegistry || durableEffectsRegistry.size === 0) return null;
   return async (events, { db }) => {
@@ -71,8 +79,7 @@ export function createDurableEffectsConsumer({ durableEffectsRegistry, jobs }) {
       const effects = durableEffectsRegistry.get(ev.type);
       if (!effects || effects.length === 0) continue;
       try {
-        enqueueDurableEffectsForEvent(ev, effects, jobs);
-        upsertConsumerCursor(db, { consumer: CONSUMER, scope: ev.scope, lastSeq: ev.seq });
+        await enqueueDurableEffectsAndAdvance(db, ev, effects, jobs);
       } catch (err) {
         getLog().warn('system', 'durable effect enqueue failed', { err, scope: ev.scope, seq: ev.seq });
       }
@@ -114,8 +121,7 @@ export async function reconcileDurableEffects(db, { durableEffectsRegistry, jobs
       continue;
     }
     try {
-      enqueueDurableEffectsForEvent(ev, effects, jobs);
-      upsertConsumerCursor(db, { consumer: CONSUMER, scope: ev.scope, lastSeq: ev.seq });
+      await enqueueDurableEffectsAndAdvance(db, ev, effects, jobs);
       recoveryByScope.set(ev.scope, ev.seq);
       enqueued += effects.length;
     } catch (err) {
