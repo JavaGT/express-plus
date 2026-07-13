@@ -7,7 +7,7 @@
 // lookup is inherently pre-principal and the handler already passed its gate.
 // It is not a request path, so it is not a second auth path (DECISIONLOG #41).
 //
-// The db handle is ambient: workbench({ db }) binds it via setActiveDb so a
+// The db handle is application-scoped: workbench({ db }) binds it to this app so a
 // standalone entity (declared before any app) can run queries with no db arg.
 
 import { text, date, scope, grant, read, everyone } from '../src/index.mjs';
