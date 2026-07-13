@@ -23,7 +23,7 @@ import { entity } from '../entity/compile.mjs';
 import { text, hash, ref, date, number } from '../field.mjs';
 import { scope } from '../scope.mjs';
 import { never } from '../scope-sql.mjs';
-import { grant, deny, read, subscribe } from '../grant.mjs';
+import { grant, deny, read, write, subscribe } from '../grant.mjs';
 import { schedule } from '../schedule.mjs';
 import { config } from '../config.mjs';
 import { generateSecret, generateBackupCodes } from './totp.mjs';
@@ -127,7 +127,16 @@ export const Inbox = entity('Inbox', {
   doc: ref('Doc'),
   kind: text(),
 
-  grant: () => [scope(({ is }) => is.recipient()).can(() => grant(read, subscribe))],
+  checks: {
+    // Effect principals are minted only by the effect compiler after the target's
+    // admitsEffects handshake succeeds. Inbox is itself an effect sink, so its
+    // row grant must confer the write capability required by the canonical
+    // create admission pass; ordinary recipients remain read/subscribe-only.
+    effectMutation: ({ principal }) =>
+      principal?.type === 'system' && typeof principal.attributes?.effect === 'string',
+  },
+  grant: () => [scope(({ is }) => is.recipient()).can(async ({ is }) =>
+    (await is.effectMutation()) ? grant(write) : grant(read, subscribe))],
   // Inbox EXISTS to receive projected notifications from other entities' effects
   // (e.g. Doc's collaboratorAdded → Inbox invite row). It admits effect
   // principals — the effect is already bounded to its declared `with` template,
