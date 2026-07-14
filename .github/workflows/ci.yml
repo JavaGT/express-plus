@@ -15,7 +15,8 @@ jobs:
           node-version: '22'
           cache: npm
       - run: npm ci
-      - run: node --test
+      - run: node --experimental-test-coverage --test
+      - run: node scripts/check-coverage.mjs 85
 
   lint:
     runs-on: ubuntu-latest
@@ -27,3 +28,14 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run lint
+
+  typecheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck

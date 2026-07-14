@@ -148,3 +148,5 @@ export async function authorizeSubscription(msg, conn, {
 
   return { admitted: true, scope, entityName, id, idStr, fields, pace, interest };
 }
+
+export const normalizeSubscribeMsg = parseSubscribeMsg;

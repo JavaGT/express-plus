@@ -22,7 +22,8 @@
 	"scripts": {
 		"lint": "eslint .",
 		"test": "node --test",
-		"test:coverage": "node --experimental-test-coverage --test"
+		"test:coverage": "node --experimental-test-coverage --test",
+		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
 		"@types/node": "^26.1.1",
