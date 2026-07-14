@@ -8,7 +8,7 @@
 // Start:  node projects/chat/server.mjs
 
 import workbench, {
-  entity, text, date, ref, map,
+  entity, text, date, ref, map, owner,
   grant, read, write, subscribe,
   scope, anyOf, inherit,
 } from 'workbench';
@@ -20,7 +20,7 @@ import workbench, {
 // side-table) — no second auth path.
 const Chat = entity('Chat', {
   title:   text(),
-  owner:   ref('User', { role: 'owner', readonly: true }),  // auto-derives checks.owner
+  owner:   owner(),
   members: map(ref('User'), { default: {} }),
   checks:  { member: ({ Chat, principal }) => Chat.members.has(principal.id) },
   grant: () => [

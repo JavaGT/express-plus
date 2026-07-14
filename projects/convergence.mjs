@@ -13,7 +13,7 @@
 // enqueue/claim/complete, client store CRUD surface, bindAction/bindField
 // handles, and canUndoField vocabulary — all four wave layers in one run.
 
-import { entity, text, date, ref, grant, deny, read, write, subscribe, scope } from 'workbench';
+import { entity, text, date, owner, ref, grant, deny, read, write, subscribe, scope } from 'workbench';
 
 // ---------------------------------------------------------------------------
 // ProjectTask — a Scope-style project task entity.
@@ -26,7 +26,7 @@ export const ProjectTask = entity('ProjectTask', {
   status: text({ default: 'todo' }),
   createdAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
+  owner: owner(),
   grant: () => [
     scope(({ is }) => is.owner())
       .can(async ({ is }) => (await is.owner())

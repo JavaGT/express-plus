@@ -11,18 +11,12 @@
 //
 // Stop with Ctrl-C. Uses PORT env or 3456. DB file: examples/minimal-note.db
 
-import workbench, {
-  entity, text, owner,
-  grant, read, write, subscribe,
-  scope,
-} from 'workbench';
+import workbench, { entity, text, owner } from 'workbench';
 
 const Note = entity('Note', {
   title: text({ required: true }),
-  owner: owner(), // ref('User', { role: 'owner', readonly: true })
-  grant: () => [
-    scope(({ is }) => is.owner()).can(() => grant(read, write, subscribe)),
-  ],
+  owner: owner(),
+  grant: owner.only,
 });
 
 const port = Number(process.env.PORT) || 3456;

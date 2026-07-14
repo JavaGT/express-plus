@@ -20,7 +20,7 @@
 //   - Effects = `{ mutate, with }`; in-transaction effect-principal reentrancy.
 //   - NO DEFAULT GRANT: entity with no grant = LOAD-TIME ERROR.
 
-import { entity, text, number, date, ref, map, boolean, blob, raster, projected, ephemeral, grant, deny, read, write, subscribe, admin, anyOf, scope, never, inherit, router } from 'workbench';
+import { entity, text, number, date, ref, owner, map, boolean, blob, raster, projected, ephemeral, grant, deny, read, write, subscribe, admin, anyOf, scope, never, inherit, router } from 'workbench';
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // CAPABILITY BUNDLES — typed, imported, never strings.
@@ -42,7 +42,7 @@ export const Canvas = entity('Canvas', {
   width:  number({ default: 1920, min: 1, max: 8192 }),
   height: number({ default: 1080, min: 1, max: 8192 }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
+  owner: owner(),
 
   collaborators: map(ref('User'), {
     role: ['viewer', 'editor'],

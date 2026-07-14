@@ -2,7 +2,7 @@
 // with per-member collaborator roles and link-share for non-users.
 // Exercises the `map` plugin for valued-set membership and the `link`
 // field type for non-user principals.
-import { entity, text, date, ref, map, link, grant, deny, read, write, subscribe, admin, anyOf, never, scope, router, User, Inbox } from 'workbench';
+import { entity, text, date, ref, owner, map, link, grant, deny, read, write, subscribe, admin, anyOf, never, scope, router, User, Inbox } from 'workbench';
 // Photo is NOT imported at top level: Photo's grant harvests Album.collaborators
 // at compile time, so Album must register first. Routes that need Photo load it
 // lazily (dynamic import) after both entities exist.
@@ -18,7 +18,7 @@ export const Album = entity('Album', {
   coverPhoto:  ref('Photo', { optional: true }),
 
   // Owner — auto-derives checks.owner from `role: 'owner'`
-  owner: ref('User', { role: 'owner', readonly: true }),
+  owner: owner(),
 
   // ===================================================================
   // Per-album collaborator roles — EXPRESSIBLE with the `map` plugin

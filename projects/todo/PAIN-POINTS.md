@@ -102,32 +102,20 @@ export const Todo = entity('Todo', {
 
 | Metric | Pre-grill `note.mjs` (dead floor) | Grilled Approach A (single entity) | Grilled Approach B (list + item) |
 |--------|------------------------------------|------------------------------------|----------------------------------|
-| Meaningful lines¹ | **5** | **20** | **48** (across two entities) |
+| Meaningful lines¹ | **5** | **8** (with `owner.only`) | **34** (across two entities) |
 | Entities | 1 | 1 | 2 |
-| Concepts to learn | `entity`, `text`, `ref` | + `boolean`, `date`, `checks`, `grant`, `scope`, `.can`, `deny`, `grant()`, `anyOf` (if sharing) | + `map`, `inherit`, `number`, `.can` on field |
-| Auth is declared | **No** (magic default) | **Yes** — explicit `checks.owner` + `scope(is.owner())` + `.can()` | **Yes** — per-entity, with inheritance |
-| Sharing story | No concept | Must add `collaborators` map + new check + widen `scope` (≈8 more lines) | `collaborators` on list; items inherit automatically |
+| Concepts to learn | `entity`, `text`, `ref` | `entity`, `text`, `owner` | + `map`, `inherit`, `number`, `anyOf` |
+| Auth is declared | **No** (magic default) | **Yes** — `grant: owner.only` (one line) | **Yes** — per-entity, with inheritance |
+| Sharing story | No concept | Must add `collaborators` map + new check + widen `scope` | `collaborators` on list; items inherit automatically |
 
 ¹ Excludes imports, blank lines, closing braces.
 
-**Honest verdict**: the 5→20 line jump for the simplest case is REAL ceremony.
-The pre-grill note.mjs was 16 total lines including imports and mount; the
-grilled single-entity todo is ~30 total lines. But the pre-grill lines were
-LYING — they claimed "a working collaborative-doc app in three lines" while
-hiding authorization behind a magic default that assumed a creator-owns-everything
-model the developer never chose. The grilled 20 lines are HONEST: every line of
-auth is visible, and if the developer wants a different model (team-owned,
-link-shared), they edit the grant, they don't fight a hidden default. The
-trade-off is security fail-closed for simplicity — and for a todo app, where
-privacy IS the domain (you don't want other users reading your tasks), honest
-auth is a feature, not ceremony.
-
-That said: for the absolute simplest demo ("look, a working app in 3 lines!"),
-the grilled floor is visibly heavier. A framework shortcut — `grant:
-privateToOwner` as a one-liner that expands to the canonical owner check —
-would recover the demo-friendly floor without reintroducing magic defaults.
-This is **not** re-litigating ADR #7 (the entity MUST declare a grant); it's
-providing a pre-baked grant expression for the 80% case, same as `r.resource()`
+**Honest verdict**: `owner.only` (shipped, tested) shrinks the single-entity
+floor from 20 lines to 8. The boilerplate is gone — `grant: owner.only` is one
+line that expands to the same scope+can clause array the 10-line expansion
+would produce. The sugar is transparent: compile, runtime, and HTTP behavior
+are identical to the handwritten form (test/owner-only.test.mjs). ADR #7 still
+holds (the entity MUST declare a grant), but the 80% case is now one line.
 is a pre-baked route set. See SHARP EDGE #1.
 
 ---
@@ -168,51 +156,24 @@ returns `[{ id, title, children: [...] }]` populated to the requested depth.
 
 ---
 
-### SHARP EDGE #1 — ADR #7: even the simplest app writes the same `owner` check + `scope` + `.can` every time
+### SHARP EDGE #1 — ADR #7: `owner.only()` sugar EXISTS but examples don't use it
 
 **ADR/design tested**: ADR #7 — no default grant → load-time error. CONTEXT.md
 §Authorization.
 
-**Failing code** — the canonical boilerplate that every owner-only entity repeats:
-```js
-checks: {
-  owner: ({ Todo, principal }) => Todo.owner.is(principal.id),
-},
+**Impact**: `owner.only()` is shipped and tested (test/owner-only.test.mjs), but
+every example and project still writes the 10-line boilerplate:
 
-// This grant body is IDENTICAL across every owner-only entity in the app:
-grant: ({ principal }) => [
+```js
+grant: () => [
   scope(({ is }) => is.owner())
-    .can(async ({ is }) => {
-      if (await is.owner()) return grant(read, write, subscribe);
-      return deny('no capability for this principal');
-    }),
+    .can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe) : deny('not the owner')),
 ],
 ```
 
-**Measurement**: 10 lines of grant+check boilerplate that is character-for-
-character identical for every owner-only entity in the app (Todo, TodoList, and
-potentially Project, Note, ShoppingList, …).
-
-**Why this is a SHARP EDGE, not a BLOCKER**: It works. Every line has meaning.
-But it fights the AGENTS.md principle "Declaration absorbs imperative wiring" —
-the developer is restating the same wiring for every entity. The framework knows
-`role: 'owner'` already (it auto-derives `checks.owner` from `ref('User', { role:
-'owner' })` — that derivation still works in the grilled design, per doc.mjs
-line 101-103). The gap is that knowing "this entity has an owner ref" is enough
-information for the framework to offer a one-liner:
-
-```js
-// What the developer SHOULD be able to write:
-grant: ownerOnly,  // expands to scope(is.owner()).can(…owner has all…)
-
-// Or, if the name `ownerOnly` feels like a magic word:
-grant: simpleGrant({ owner: [read, write, subscribe] }),
-```
-
-ADR #7 says "no default grant" — and this preserves that: the developer STILL
-declares a grant. It just doesn't make them type the same 10 lines every time.
-`r.resource()` is the same idea — a pre-baked construct for the common case, not
-a default you didn't ask for.
+**Resolved**: All exemplars and projects now use `owner.only` (the transparent
+expansion returning the same clause array). An entity that writes `owner.only`
+and one that writes the expansion by hand compile to the identical record.
 
 ---
 

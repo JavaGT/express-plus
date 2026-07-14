@@ -25,7 +25,7 @@
 // instance to run DDL + set active DB so entity CRUD methods work.
 
 import {
-  membership, entity, text, date, ref, number, map, inherit, json, boolean,
+  membership, entity, text, date, ref, number, owner, map, inherit, json, boolean,
   grant, deny, read, write, subscribe, admin, scope,
 } from 'workbench';
 import { setActiveDb } from '../src/db.mjs';
@@ -57,7 +57,7 @@ export const Project = entity('Project', {
   createdAt: date({ default: () => new Date() }),
   updatedAt: date({ default: () => new Date() }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),
+  owner: owner(),
   members: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
   routes: (r) => { r.resource(); },
 });

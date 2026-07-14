@@ -19,7 +19,7 @@
 //   - a denied read REMOVES the row from the result set (no separate visibility
 //     axis); there is no `hide()`.
 
-import workbench, { entity, text, number, boolean, date, ref, map, grant, deny, read, write, subscribe, scope, anyOf, inherit } from 'workbench';
+import workbench, { entity, text, number, boolean, date, ref, map, owner, grant, deny, read, write, subscribe, scope, anyOf, inherit } from 'workbench';
 import { pathToFileURL } from 'node:url';
 
 // ---------------------------------------------------------------------------
@@ -32,19 +32,12 @@ export const Todo = entity('Todo', {
     title:     text({ validate: (v) => (v?.length > 0) || 'title required' }),
   completed: boolean({ default: false }),
   dueDate:   date({ optional: true }),
-  owner:     ref('User', { role: 'owner', readonly: true }),  // auto-derives checks.owner
+  owner:     owner(),
   createdAt: date({ default: () => new Date() }),
 
-  // `scope` is read admission (compiled to SQL: WHERE owner = principal.id).
-  // `.can` decides write/subscribe per row. The owner gets everything; any
-  // principal who somehow reaches `.can` without being the owner is denied.
-  grant: () => [
-    scope(({ is }) => is.owner())
-      .can(async ({ is }) =>
-        (await is.owner()) ? grant(read, write, subscribe) : deny('not the owner')),
-  ],
+  grant: owner.only,
 
-  routes: (r) => { r.resource(); },   // CRUD through the grant; nothing hand-rolled
+  routes: (r) => { r.resource(); },
 });
 
 // ---------------------------------------------------------------------------
@@ -55,7 +48,7 @@ export const Todo = entity('Todo', {
 
 export const TodoList = entity('TodoList', {
     title: text({ validate: (v) => (v?.length > 0) || 'title required' }),
-  owner: ref('User', { role: 'owner', readonly: true }),
+  owner: owner(),
   // A valued set keyed by User: membership is unique by construction (a user
   // can't appear twice), and each member carries a role. The field owns its
   // own capability rule — only the owner may manage the roster.

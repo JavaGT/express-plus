@@ -51,7 +51,7 @@ Override the port with `PORT=4000 node examples/minimal-note.mjs`.
 
 What you just used:
 
-1. **`entity('Note', { fields…, grant })`** — declare data + authorization  
+1. **`entity('Note', { title: text(), owner: owner(), grant: owner.only })`** — four lines of declaration  
 2. **`workbench({ db })`** — open SQLite; schema is prepared on `app.ready`  
 3. **`.mount('/notes', Note).listen(port)`** — REST CRUD + framework defaults  
 

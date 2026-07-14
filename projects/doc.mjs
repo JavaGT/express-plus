@@ -8,7 +8,7 @@
 // `effects`, and batched mutation. Comment (see comment.mjs) is a child entity
 // whose grant INHERITS this entity's — the typed-FK-traversal compilation
 // (abstraction #5).
-import { entity, text, computed, date, ref, map, ephemeral, log, state, link, grant, deny, read, write, subscribe, admin, anyOf, scope, router, User as UserEntity, Inbox, now } from 'workbench';
+import { entity, text, computed, date, ref, map, owner, ephemeral, log, state, link, grant, deny, read, write, subscribe, admin, anyOf, scope, router, User as UserEntity, Inbox, now } from 'workbench';
 // comment.mjs is imported LAZILY inside the routes thunk (below), not here:
 // comment.mjs reads `Doc` at module-eval (`inherit(Doc, ...)`), so an eager
 // top-level import here would form a cycle and hit `Doc` in its temporal dead
@@ -40,7 +40,7 @@ export const Doc = entity('Doc', {
   body:       text.crdt(),                                       // CRDT; emits :changed + :delta
   wordCount:  computed({ compute: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0 }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),       // auto-derives checks.owner
+  owner: owner(),
   // Valued set: membership keyed by User, each member carries a role.
   // Uniqueness-by-construction (a User can't appear twice as a key) — the
   // `map` plugin dissolves the separate-join-entity + compound-unique pattern.

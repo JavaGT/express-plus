@@ -11,7 +11,7 @@
 //
 // REVIEW EXEMPLAR: imports from the (not-yet-built) `workbench` package.
 
-import workbench, { entity, text, computed, date, ref, map, grant, deny, read, write, subscribe, admin, scope, anyOf } from 'workbench';
+import workbench, { entity, text, computed, date, ref, map, owner, grant, deny, read, write, subscribe, admin, scope, anyOf } from 'workbench';
 
 // Capability tiers, named once. `subscribe` is a peer of `read` (sustained live
 // push vs one-shot fetch); `admin` is reserved for the owner (manage sharing).
@@ -33,7 +33,7 @@ export const Doc = entity('Doc', {
     compute: (d) => d.body ? d.body.trim().split(/\s+/).filter(Boolean).length : 0,
   }),
 
-  owner: ref('User', { role: 'owner', readonly: true }),  // auto-derives checks.owner
+  owner: owner(),
 
   // Sharing: a valued set keyed by User (unique by construction), each member
   // carrying a role. The field owns its capability rule — only the owner may

@@ -129,7 +129,7 @@ An entity **without a grant is a load-time error** (fail closed).
 | `projected` / `projected.async` | Projection / async recompute fields |
 | `raster`, `polyline` | Geometry-ish CRDT **replace stubs** (last-write-wins; not text-merge) |
 | `vector(dim)` | Embedding vectors + nearest queries |
-| `owner()` / `owner.only` | Owner ref sugar / owner-only grant sugar |
+| `owner()` / `owner.only` | `ref('User', { role: 'owner', readonly: true })` / grant sugar — owner gets [read, write, subscribe, admin] |
 | `now` | Deferred “commit-time now” token for schedules/handlers |
 
 Options commonly include `required`, `default`, `readonly`, `validate`, `indexed: 'fts'`.
@@ -377,17 +377,12 @@ export through `workbench` or `workbench/server`.
 ## 9. Minimal end-to-end shape
 
 ```js
-import workbench, {
-  entity, text, owner,
-  grant, read, write, subscribe, scope,
-} from 'workbench';
+import workbench, { entity, text, owner } from 'workbench';
 
 const Note = entity('Note', {
   title: text({ required: true }),
   owner: owner(),
-  grant: () => [
-    scope(({ is }) => is.owner()).can(() => grant(read, write, subscribe)),
-  ],
+  grant: owner.only,
 });
 
 workbench({ db: ':memory:' })

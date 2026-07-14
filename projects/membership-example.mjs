@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
-  entity, map, ref, text, read, write, subscribe, inherit, membership,
+  entity, map, ref, owner, text, read, write, subscribe, inherit, membership,
 } from '../src/index.mjs';
 import workbench, { executeDDL } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
@@ -20,7 +20,7 @@ const projectMembership = { member: { can: [read, subscribe] } };
 
 const Project = entity('Project', {
   title: text(),
-  owner: ref('User', { role: 'owner', readonly: true }),
+  owner: owner(),
   members: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
 });
 membership(Project, projectMembership);
