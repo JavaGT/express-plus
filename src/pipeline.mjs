@@ -245,10 +245,12 @@ export function durableMutationVariant({
 }
 
 // createServer({ handlers, authorize, db, effects }) — the server-side mutation handler
-// (SPEC §7). It runs one pipeline for every action: authorize (outside the
-// transaction, Fork C — authorize BEFORE dedupe) → dedupe by action id → run the
-// handler → assign each emitted event a per-scope monotonic sequence number →
-// append to the durable log → fan out.
+// (SPEC §7). It runs one pipeline for every action: dedupe by action id → run the
+// handler → authorize + assign each emitted event a per-scope monotonic sequence
+// number → append to the durable log → fan out. Authorize runs INSIDE the write
+// transaction (Wave 4.4), atomic with log, cursor, projection, and receipt —
+// not before it. The in-memory (no-db) path retains the original authorize-then-
+// handler ordering since there is no transaction to join.
 //
 // Persistence is OPT-IN by engaged seam (AGENTS.md): pass a node:sqlite
 // DatabaseSync as `db` and events are appended to the `_Log` table with per-scope
@@ -301,15 +303,42 @@ function executionFailure(error, context = {}, details) {
 // `actions` array. The two genuinely differ there, so the brace is extracted but
 // the `payload` value stays per-caller. Throws non-403 errors after rolling back;
 // Post-commit delivery can no longer turn a committed mutation into a failure.
-async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline, scope }) {
+async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize }) {
   let committed;
   try {
-    // The in-transaction work (applyInTxn) is wrapped by the driver's txn
-    // helper: BEGIN IMMEDIATE / await fn() / COMMIT, ROLLBACK on throw. The
-    // callback brackets ONLY applyInTxn — afterCommit is post-commit fan-out
-    // (out-of-band effects that cannot join the DB txn) and runs AFTER commit,
-    // naturally outside the txn (seam-review §2.1).
+    // Wave 4.4 — Authorize INSIDE the transaction, atomic with log append,
+    // cursor update, projection writes, and receipt insert. Both dispatch
+    // (single action) and dispatchBatch (array of actions) thread their
+    // authorize function through here:
+    //
+    //   Single dispatch: payload is the action payload ({ ...fields }),
+    //     type is threaded separately via the closure.
+    //   Batch dispatch: payload is the actions array, and each action's
+    //     type/payload is authorized in sequence inside the txn.
+    //
+    // A denied action rolls back the entire transaction — no partial state.
+    // Post-commit consumers (afterCommit) remain outside the txn as before.
     committed = await txn(db, async () => {
+      if (authorize) {
+        if (Array.isArray(payload)) {
+          for (const action of payload) {
+            const result = await authorize({ type: action.type, payload: action.payload, principal });
+            if (!result) {
+              const err = new Error('forbidden');
+              err.status = 403;
+              throw err;
+            }
+          }
+        } else {
+          const result = await authorize({ type, payload, principal });
+          if (!result) {
+            const err = new Error('forbidden');
+            err.status = 403;
+            throw err;
+          }
+        }
+      }
+
       const result = await pipeline.applyInTxn(db, events, {
         now, actionId, nextSeq, principal, payload,
       });
@@ -458,8 +487,10 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     return seq;
   }
 
-  // The durable dispatch: authorize (outside txn) → dedupe by actionId →
-  // run handler → commit events inside a write transaction.
+  // The durable dispatch: authorize (Fork C, outside txn — revoked-principal
+  // detection before dedupe) → dedupe by actionId → run handler → commit
+  // events inside a write transaction. Authorize ALSO runs INSIDE the
+  // transaction (Wave 4.4), atomic with log, cursor, projection, and receipt.
   async function dispatch({ actionId, type, payload, principal, scope = '' }) {
     const handler = handlers[type];
     if (typeof handler !== 'function') {
@@ -467,7 +498,9 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     }
 
     // Fork C — AUTHORIZE FIRST (outside the transaction). A retried action by a
-    // since-revoked principal returns denied (403).
+    // since-revoked principal returns denied (403), even if the mutation already
+    // committed. The same authorize runs again inside commitEvents's txn (Wave 4.4)
+    // for crash atomicity; the outer check is the Fork C semantic gate.
     let authResult;
     try {
       authResult = await authorize({ type, payload, principal });
@@ -499,11 +532,13 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       return executionFailure(err, { actionId, type });
     }
 
-    // Apply events inside a write transaction using the shared brace.
-    // node:sqlite's DatabaseSync is single-writer; BEGIN/COMMIT serialize writes.
+    // Apply events and authorize inside a write transaction using the shared brace.
+    // Wave 4.4: authorize is the first operation inside the txn, so auth failure
+    // rolls back cleanly with no partial state. node:sqlite's DatabaseSync is
+    // single-writer; BEGIN/COMMIT serialize writes.
     const now = new Date().toISOString();
     const committed = await commitEvents(db, emitted, {
-      now, actionId, nextSeq, principal, payload, pipeline, scope,
+      now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize,
     });
     return committed;
   }
@@ -514,9 +549,13 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   // all-or-nothing: any authorize/handler/post-grant denial rolls back the
   // ENTIRE batch (a half-applied multi-entity mutation is exactly the split the
   // one-transaction guarantee forbids). This is the singular-system extension
-  // of `dispatch`: the same authorize→handler→durable variant path, looped over
-  // N actions but with ONE BEGIN/COMMIT bracketing the concatenated events — not
-  // a second pipeline (AGENTS.md). Effects fire in-txn exactly as in `dispatch`.
+  // of `dispatch`: the same handler→durable variant path, looped over N actions
+  // but with ONE BEGIN/COMMIT bracketing the concatenated events — not a second
+  // pipeline (AGENTS.md). Effects fire in-txn exactly as in `dispatch`.
+  //
+  // Authorization runs at TWO points: Fork C outside the txn (revoked-principal
+  // detection before dedupe/write) AND inside commitEvents's txn (Wave 4.4)
+  // for crash atomicity with log, cursor, projection, and receipt writes.
   async function dispatchBatch({ actionId, actions = [], principal, scope = '' }) {
     if (actions.length === 0) {
       return successOutcome([]);
@@ -529,9 +568,10 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       }
     }
 
-    // Authorize EVERY action FIRST (outside the txn). Fail fast before any
-    // write: a denied sub-action never opens the transaction, so a revoked
-    // principal cannot poison a partial batch.
+    // Fork C — AUTHORIZE EVERY action FIRST (outside the txn). A retried
+    // batch by a since-revoked principal returns denied (403). The same
+    // authorize runs again inside commitEvents's txn (Wave 4.4) for crash
+    // atomicity; the outer check is the Fork C semantic gate.
     for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
       const action = actions[actionIndex];
       let authResult;
@@ -552,7 +592,8 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
     // Run every handler, concatenating their emitted events. Handlers are pure
     // (events only, no DB writes — Fork A), so the batch runs them in order and
-    // folds all events into one commitEvents pass below.
+    // folds all events into one commitEvents pass below. Authorization runs
+    // INSIDE commitEvents's txn (Wave 4.4), before applyInTxn.
     const allEmitted = [];
     for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
       const action = actions[actionIndex];
@@ -566,7 +607,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
     const now = new Date().toISOString();
     const committed = await commitEvents(db, allEmitted, {
-      now, actionId, nextSeq, principal, payload: actions, pipeline, scope,
+      now, actionId, nextSeq, principal, payload: actions, pipeline, scope, authorize,
     });
     return committed;
   }
