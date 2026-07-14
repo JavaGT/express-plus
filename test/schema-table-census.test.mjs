@@ -10,6 +10,7 @@ test('frameworkTableNames is a frozen, sorted, duplicate-free array of persisten
     '_ActionReceipt',
     '_ConsumerCursor',
     '_Cursor',
+    '_DeletedRowAnchor',
     '_Job',
     '_Log',
     '_Migration',

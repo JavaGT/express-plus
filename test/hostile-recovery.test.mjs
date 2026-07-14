@@ -155,7 +155,7 @@ test('Contract 4 — custom-scope snapshot returns the projection with a cursor'
 // Contract 4 (detail) — todo, runs last
 // ===========================================================================
 
-test.todo('Contract 4 (detail) — custom-scope snapshot atomicity: cursor read before async scopeSnapshot', async (t) => {
+test('Contract 4 (detail) — custom-scope snapshot atomicity: cursor read before async scopeSnapshot', async (t) => {
   let releaseSnapshot;
   let parkOnce = true;
   let projectedName = 'before';
@@ -212,7 +212,7 @@ test.todo('Contract 4 (detail) — custom-scope snapshot atomicity: cursor read 
 // Contract 1 — owner can resync after entity deletion
 // ===========================================================================
 
-test.todo('Contract 1 — owner events-since after deletion succeeds', async (t) => {
+test('Contract 1 — owner events-since after deletion succeeds', async (t) => {
   const { db, base } = await harness(t, 'u1');
 
   const created = await json(await fetch(`${base}/notes`, {
@@ -245,7 +245,7 @@ test.todo('Contract 1 — owner events-since after deletion succeeds', async (t)
 // Contract 2 — LiveList resync internal hole
 // ===========================================================================
 
-test.todo('Contract 2 — LiveList resync with internal hole rejects the batch', async (t) => {
+test('Contract 2 — LiveList resync with internal hole rejects the batch', async (t) => {
   const channel = makeFakeChannel();
   channel._setAck({ currentSeq: 3 });
 
@@ -286,7 +286,7 @@ test.todo('Contract 2 — LiveList resync with internal hole rejects the batch',
 // Contract 3 — unknown/missing/malformed historical events
 // ===========================================================================
 
-test.todo('Contract 3 — unknown/missing/malformed historical events do not advance state or cursor', async (t) => {
+test('Contract 3 — unknown/missing/malformed historical events do not advance state or cursor', async (t) => {
   const channel = makeFakeChannel();
   channel._setAck({ currentSeq: 1 });
 

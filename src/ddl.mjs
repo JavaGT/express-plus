@@ -22,6 +22,7 @@ import { structCellColumn } from './field-strategy.mjs';
 import { sideTableDDL } from './side-table-strategy.mjs';
 import { frameworkLogDDL } from './committed-log.mjs';
 import { defineSqliteSchema } from './sqlite-schema.mjs';
+import { deletedRowAnchorTableDDL } from './deleted-row-anchor.mjs';
 
 const SUPPORTED_FIELD_TYPES = Object.freeze({
   value: new Set(['text', 'boolean', 'date', 'number', 'json', 'vector', 'ref']),
@@ -277,6 +278,7 @@ export function generateFrameworkDDL() {
   revoked INTEGER NOT NULL DEFAULT 0,
   registeredAt INTEGER NOT NULL
 );`,
+    deletedRowAnchorTableDDL(),
   ];
 }
 

@@ -1,6 +1,7 @@
 import { getLog } from '../log.mjs';
 import { serializeField, flattenStruct, resolveStrategy } from '../field-strategy.mjs';
 import * as eventHandle from '../event-handle.mjs';
+import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
 
 function buildProjectedComputeRow(storedRow, fields) {
   const row = { ...storedRow };
@@ -107,8 +108,14 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
           getLog().debug('dispatch', `${name}.updated`, { id: params.id });
         }
       } else if (handle.kind === eventHandle.EventKind.removed) {
-        db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(event.data?.id);
-        getLog().debug('dispatch', `${name}.removed`, { id: event.data?.id });
+        const id = event.data?.id;
+        // Capture the deleted-row history anchor BEFORE the delete, in the
+        // same projection-consumer call (same transaction as the DELETE) —
+        // atomic, so a committed removal can never leave the anchor missing.
+        const existingRow = id ? db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) : undefined;
+        if (existingRow) captureDeletedRowAnchor(db, name, id, existingRow, event.committedAt);
+        db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
+        getLog().debug('dispatch', `${name}.removed`, { id });
       }
     },
   });

@@ -13,6 +13,7 @@ import { mayRow } from './row-grant.mjs';
 import { scopeOf } from './scope-handle.mjs';
 import { failure } from './outcome.mjs';
 import { sendFailure } from './http-failure.mjs';
+import { readDeletedRowAnchor } from './deleted-row-anchor.mjs';
 
 // One kernel mutation through the write queue, translating the failure modes
 // shared by create/update/remove: queue starvation → 503, validation → 400
@@ -49,11 +50,29 @@ export function readScopedRow(app, entity, id, principal) {
   return entity.deserializeRow(row);
 }
 
-export async function authorizeRow(app, entity, verb, id, principal, preRow = null) {
+// `allowDeletedAnchor` is a narrow, explicit opt-in (default off — every
+// existing caller is unaffected). When set and the live row is gone, it falls
+// back to the row's captured deleted-row history anchor (Wave 3.7 Contract 1)
+// and runs the SAME mayRow grant check against that historical snapshot. This
+// is not a second auth engine and not a second "current row" source: it never
+// resurrects CRUD or list visibility, only lets a principal who held a grant
+// AT THE TIME OF DELETION continue past the row-gate for a historical read
+// (events-since). A denial on the historical path returns 404, matching a
+// genuinely-nonexistent row — indistinguishable from the outside, so a
+// non-owner cannot use the response to learn the row ever existed.
+export async function authorizeRow(app, entity, verb, id, principal, preRow = null, { allowDeletedAnchor = false } = {}) {
   const row = preRow ?? readScopedRow(app, entity, id, principal);
-  if (!row) return { status: 404 };
-  if (!(await mayRow(entity, verb, row, principal))) return { status: 403 };
-  return { row };
+  if (row) {
+    if (!(await mayRow(entity, verb, row, principal))) return { status: 403 };
+    return { row };
+  }
+  if (allowDeletedAnchor) {
+    const anchorRow = entity.deserializeRow(readDeletedRowAnchor(app.db, entity.name, id));
+    if (anchorRow && (await mayRow(entity, verb, anchorRow, principal))) {
+      return { row: anchorRow, historical: true };
+    }
+  }
+  return { status: 404 };
 }
 
 // DB-backed dispatch for one admitted verb.

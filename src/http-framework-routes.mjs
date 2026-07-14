@@ -81,13 +81,21 @@ async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
 }
 
 async function snapshotScopeRoute(app, scope, principal, res) {
-  const lastSeq = readSeq(app.db, scope);
+  // The cursor is read as the LAST synchronous step before responding — after
+  // every await that can yield to a concurrent dispatch commit (authorizeScope,
+  // and the app-supplied async scopeSnapshot aggregation) — never before. A
+  // custom scopeSnapshot callback may read fresh state at its own resolution
+  // time (it is not required to derive purely from the pre-authorized anchor
+  // row), so the cursor paired with it must be captured at that same moment;
+  // reading it any earlier risks returning a snapshot from one epoch next to a
+  // cursor from an older one (Wave 3.7 Contract 4 detail).
   const access = await authorizeScope(app, scope, principal);
   if (access.status) {
     reject(res, access.status, access.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
   if (access.direct) {
+    const lastSeq = readSeq(app.db, scope);
     sendJson(res, 200, { snapshot: access.anchor.row, cursors: { [scope]: lastSeq } });
     return true;
   }
@@ -99,6 +107,7 @@ async function snapshotScopeRoute(app, scope, principal, res) {
     ? await app.scopeSnapshot(scope, principal, access.anchor)
     : null;
   if (scopeSnapshot !== null && scopeSnapshot !== undefined) {
+    const lastSeq = readSeq(app.db, scope);
     sendJson(res, 200, { snapshot: scopeSnapshot, cursors: { [scope]: lastSeq } });
     return true;
   }
@@ -157,10 +166,14 @@ async function authorizeScope(app, scope, principal) {
 }
 
 async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
-  // events-since authorizes against the CURRENT row (fail closed: a deleted or
-  // out-of-scope row yields 404). The log is replayed for an admitted viewer.
+  // events-since authorizes against the CURRENT row, falling back to the
+  // deleted-row history anchor when the row is gone (Wave 3.7 Contract 1): an
+  // owner who held read+subscribe at the moment of deletion can still resync
+  // the tail of that scope's history (its own `Note.removed` event included).
+  // Fail closed either way: an out-of-scope or genuinely-nonexistent row, or
+  // a deleted row the principal never held a grant on, yields 404.
   const id = tryParseScopeKey(scopeKey)?.id;
-  const auth = await authorizeRow(app, entity, 'read', id, principal);
+  const auth = await authorizeRow(app, entity, 'read', id, principal, null, { allowDeletedAnchor: true });
   if (auth.status) {
     reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;

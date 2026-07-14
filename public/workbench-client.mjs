@@ -859,8 +859,17 @@ export class LiveList {
       } else if (body?.events) {
         // Fold events-since rows in order. Events-since is authoritative
         // ordered fill — apply seq>cursor rows directly without span checks.
-        for (const row of body.events) {
-          if (row.seq > this._cursor) {
+        // All-or-nothing (Wave 3.7 Contracts 2+3): validate the WHOLE batch —
+        // contiguous from cursor+1 with no internal hole, every type known —
+        // before applying any of it. A historical batch is server/network
+        // data reaching the client outside the live span/dup-gap machinery;
+        // a single bad row must not leave state and cursor split between
+        // "partially applied" and "not applied" for the rest of the batch.
+        const rows = body.events.filter((row) => row.seq > this._cursor);
+        if (!this._isValidHistoricalBatch(rows)) {
+          failed = true;
+        } else {
+          for (const row of rows) {
             const normalized = {
               seq: row.seq,
               seqSpan: [row.seq, row.seq],
@@ -906,6 +915,29 @@ export class LiveList {
       if (!this._closed) this._resync(this._bufferOverflow).catch(() => {});
     }, delay);
     if (typeof this._resyncRetryTimer.unref === 'function') this._resyncRetryTimer.unref();
+  }
+
+  /**
+   * All-or-nothing pre-check for an events-since batch (Wave 3.7 Contracts
+   * 2+3): every row's seq must form a contiguous run starting at cursor+1
+   * (no internal hole, no gap at the front), and every row's type must be one
+   * _applyEvent actually knows how to fold. An empty batch is trivially valid.
+   */
+  _isValidHistoricalBatch(rows) {
+    let expected = this._cursor + 1;
+    for (const row of rows) {
+      if (row.seq !== expected) return false;
+      if (!this._isKnownEventType(row.type)) return false;
+      expected += 1;
+    }
+    return true;
+  }
+
+  _isKnownEventType(type) {
+    if (typeof type !== 'string' || type.length === 0) return false;
+    const parts = type.split('.');
+    if (parts.length === 2) return parts[1] === 'created' || parts[1] === 'updated' || parts[1] === 'removed';
+    return parts.length === 3 && parts.every((part) => part.length > 0);
   }
 
   /**
