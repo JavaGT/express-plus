@@ -1,18 +1,5 @@
-import { lowerToSql, cosineSimilarity } from '../scope-sql.mjs';
-
-function applyNearest(rows, nearest, hydrate) {
-  const { field, query, k } = nearest;
-  const scored = rows.map((row) => {
-    let vec = row[field];
-    if (typeof vec === 'string') {
-      try { vec = JSON.parse(vec); } catch { vec = null; }
-    }
-    const similarity = cosineSimilarity(query, vec);
-    return { row, similarity };
-  });
-  scored.sort((a, b) => b.similarity - a.similarity);
-  return scored.slice(0, k).map(({ row }) => row);
-}
+import { lowerToSql } from '../scope-sql.mjs';
+import { cosineSimilarity, applyNearest } from '../vector.mjs';
 
 export function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null, db }) {
   const where = lowerToSql(predicate);

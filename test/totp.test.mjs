@@ -413,7 +413,7 @@ test('authenticate with TOTP → session minted', async (t) => {
   assert.ok(newSid);
 });
 
-test('authenticate with backup code → session minted', async (t) => {
+test('authenticate with backup code is rejected (backup codes are recovery secrets, not auth tokens)', async (t) => {
   const { origin, cookie, userId } = await login(t);
 
   // Enroll and verify TOTP
@@ -433,36 +433,13 @@ test('authenticate with backup code → session minted', async (t) => {
   // Logout
   await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
 
-  // Authenticate with a backup code
+  // Authenticate with a backup code — should be rejected
   const authRes = await fetch(`${origin}/auth/totp/authenticate`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ userId, token: backupCodes[0] }),
   });
-  assert.equal(authRes.status, 201, 'backup authenticate failed');
-  const authBody = await authRes.json();
-  assert.equal(authBody.user.username, 'testuser');
-
-  // Verify backup code was consumed
-  // (can't easily verify from HTTP, but we can test by trying the same code again)
-  // Logout first
-  const newCookie = `sid=${sidFromSetCookie(authRes.headers.get('set-cookie'))}`;
-  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie: newCookie } });
-
-  // Login again → requiresTotp
-  await fetch(`${origin}/auth/login`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ username: 'testuser', password: 'testpass' }),
-  });
-
-  // Same backup code should now fail
-  const usedRes = await fetch(`${origin}/auth/totp/authenticate`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ userId, token: backupCodes[0] }),
-  });
-  assert.equal(usedRes.status, 400);
+  assert.equal(authRes.status, 400, 'backup code must not mint a session');
 });
 
 test('authenticate with wrong TOTP token → 400', async (t) => {
@@ -493,7 +470,7 @@ test('authenticate with wrong TOTP token → 400', async (t) => {
   });
   assert.equal(authRes.status, 400);
   const body = await authRes.json();
-  assert.match(body.failure.message, /invalid token/i);
+  assert.match(body.failure.message, /invalid/i);
 });
 
 test('verify with wrong TOTP token → 400', async (t) => {

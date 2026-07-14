@@ -6,7 +6,7 @@
 // (WebSocket upgrade, CSWSH check, principalOf) stays in live.mjs.
 
 import { FrameSender, FrameParser } from './websocket.mjs';
-import { authorizeSubscription, normalizeSubscribeMsg } from './live-admission.mjs';
+import { authorizeSubscription, parseSubscribeMsg } from './live-admission.mjs';
 import { failure, isWorkbenchFailure, sanitizeUnexpectedFailure } from './outcome.mjs';
 
 function requestIdOf(msg) {
@@ -139,7 +139,7 @@ export class LiveConnection {
   }
 
   #handleUnsubscribe(msg) {
-    const normalized = normalizeSubscribeMsg(msg);
+    const normalized = parseSubscribeMsg(msg);
     if (normalized) {
       this.#fanout.removeSubscription(normalized.scope, this);
       const response = { type: 'unsubscribed', scope: normalized.scope };

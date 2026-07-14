@@ -56,13 +56,6 @@ function sha256hex(s) {
   return createHash('sha256').update(s).digest('hex');
 }
 
-// Quote a string as a SQL string literal (escape embedded quotes). Used for the
-// optional kind filter in claim(), where a bound parameter cannot ride inside
-// the sub-select's WHERE without restructuring the statement.
-function sqlLit(s) {
-  return `'${String(s).replace(/'/g, "''")}'`;
-}
-
 // Constant-time comparison of two hex digest strings. Hashes are fixed-width, but
 // we guard length regardless so a mismatched-length input never reaches
 // timingSafeEqual (which throws on unequal lengths).
@@ -201,14 +194,17 @@ export function createJobQueue({
   // or null.
   function claim(workerId, { kind, scope } = {}) {
     const t = now();
-    const kindClause = kind ? `AND kind = ${sqlLit(kind)} ` : '';
-    const scopeClause = scope ? `AND scope = ${sqlLit(scope)} ` : '';
+    const clauses = ['status = ?', '(availableAt IS NULL OR availableAt <= ?)'];
+    const params = [STATES.QUEUED, t];
+    if (kind != null) { clauses.push('kind = ?'); params.push(kind); }
+    if (scope != null) { clauses.push('scope = ?'); params.push(scope); }
+    const where = clauses.join(' AND ');
     const row = db.prepare(
       `UPDATE _Job
          SET status = ?, workerId = ?, claimedAt = ?, leaseUntil = ?
-       WHERE id = (SELECT id FROM _Job WHERE status = ? AND (availableAt IS NULL OR availableAt <= ?) ${kindClause}${scopeClause}ORDER BY enqueuedAt LIMIT 1)
+       WHERE id = (SELECT id FROM _Job WHERE ${where} ORDER BY enqueuedAt LIMIT 1)
        RETURNING *`,
-    ).get(STATES.CLAIMED, workerId, t, t + leaseMs, STATES.QUEUED, t);
+    ).get(STATES.CLAIMED, workerId, t, t + leaseMs, ...params);
     const job = parseJob(row) ?? null;
     if (job && job.scope != null) {
       emit(buildEvent(job, 'claimed', t));

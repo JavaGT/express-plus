@@ -8,9 +8,8 @@ export function createRateLimiter({ ip: { windowMs: ipWindowMs, max: ipMax }, se
   const sessionMax = session?.max;
   
   function pruneBuckets(buckets, windowMs, currentWindow) {
-    const staleWindow = currentWindow - 1;
     for (const [key, bucket] of buckets) {
-      if (bucket.window === staleWindow) {
+      if (bucket.window < currentWindow) {
         buckets.delete(key);
       }
     }

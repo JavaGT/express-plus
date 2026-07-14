@@ -291,6 +291,7 @@ export function executeFrameworkDDL(db) {
   // guard checks PRAGMA table_info so it is a no-op on a fresh db and a safe
   // one-time ALTER on an older one.
   ensureJobColumns(db);
+  ensureAuthEntityColumns(db);
 }
 
 function ensureJobColumns(db) {
@@ -310,4 +311,28 @@ function ensureJobColumns(db) {
   if (!cols.has('scope')) {
     db.exec('ALTER TABLE _Job ADD COLUMN scope TEXT');
   }
+}
+
+function ensureAuthEntityColumns(db) {
+  // Entity tables (User, TwoFactor) are created by executeDDL AFTER
+  // executeFrameworkDDL runs, so the tables may not exist yet on first boot.
+  // Catch and skip — the entity DDL already includes the new columns.
+  try {
+    const userCols = new Set(db.prepare('PRAGMA table_info(User)').all().map((r) => r.name));
+    if (!userCols.has('failedLoginAttempts')) {
+      db.exec('ALTER TABLE User ADD COLUMN failedLoginAttempts INTEGER DEFAULT 0');
+    }
+    if (!userCols.has('lockedUntil')) {
+      db.exec('ALTER TABLE User ADD COLUMN lockedUntil INTEGER');
+    }
+  } catch { /* table may not exist yet — entity DDL handles first creation */ }
+  try {
+    const tfCols = new Set(db.prepare('PRAGMA table_info(TwoFactor)').all().map((r) => r.name));
+    if (!tfCols.has('totpFailedAttempts')) {
+      db.exec('ALTER TABLE TwoFactor ADD COLUMN totpFailedAttempts INTEGER DEFAULT 0');
+    }
+    if (!tfCols.has('totpLockedUntil')) {
+      db.exec('ALTER TABLE TwoFactor ADD COLUMN totpLockedUntil INTEGER');
+    }
+  } catch { /* table may not exist yet — entity DDL handles first creation */ }
 }

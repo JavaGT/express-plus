@@ -3,7 +3,7 @@ import {
   admitSystemMutation,
   clearRemovedScheduleReceipts,
   rearmChangedScheduleReceipts,
-} from './schedule.mjs';
+} from './schedule-runtime.mjs';
 import { createServer, durableMutationVariant } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects, executeEffectsForEvent } from './effect-compiler.mjs';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';

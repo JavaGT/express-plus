@@ -9,7 +9,7 @@ import { installGracefulShutdown } from './lifecycle.mjs';
 import {
   pruneInactiveScheduleReceipts,
   startClockTriggers,
-} from './schedule.mjs';
+} from './schedule-runtime.mjs';
 import { reconcileProjectedRecovery } from './projected-async.mjs';
 import { reconcileDurableEffects } from './durable-effects.mjs';
 import { startSimulation } from './simulate.mjs';

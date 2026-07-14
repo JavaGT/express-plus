@@ -30,6 +30,7 @@ import { createInvitationApi } from './invitation.mjs';
 import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.mjs';
 import { config } from '../config.mjs';
 import { verifyTotp, verifyBackupCode } from './totp.mjs';
+import { checkLockout, loginLockoutDecision, totpLockoutDecision } from './lockout.mjs';
 import { serializeField } from '../field-strategy.mjs';
 import {
   generateChallenge,
@@ -61,6 +62,20 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   const s = router();
   const identityFields = Array.isArray(identifyBy) && identifyBy.length > 0 ? identifyBy : ['username'];
 
+  // Invitation response builder — shared by create and list routes.
+  const INVITATION_FIELDS = ['token', 'targetEntity', 'targetId', 'role', 'targetUser', 'maxUses', 'useCount', 'expiresAt', 'createdBy', 'createdAt'];
+  function invitationResponse(inv) {
+    return Object.fromEntries(INVITATION_FIELDS.map(f => [f, inv[f]]));
+  }
+
+  // TOTP backup-code verification helper — shared by disable and authenticate routes.
+  function verifyTotpOrBackupCode(twoFactor, token) {
+    const backupCodes = JSON.parse(twoFactor.backupCodes || '[]');
+    const isTotpValid = verifyTotp(twoFactor.secret, token);
+    const isBackupValid = verifyBackupCode(backupCodes, token);
+    return { isValid: isTotpValid || isBackupValid, usedBackup: isBackupValid, backupCodes };
+  }
+
   // login: find-or-create user (create on first login, else verify the password
   // against the `hash()` field's `.verify()`), mint a Session, and SET THE
   // COOKIE — the piece the exemplar omits. `allowAnonymous` opts out of the
@@ -91,9 +106,29 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
       // where a subsequent login will find it.
       const primary = User[identityFields[0]];
       user = primary ? User.create({ [identityFields[0]]: username, password }) : User.create({ username, password });
-    } else if (!user.password.verify(password)) {
-      // wrong password → 401 and NO cookie (fail closed: no session minted).
-      return next({ status: 401, message: 'bad credentials' });
+    } else {
+      // Lockout check — before password verification so scrypt is skipped
+      // when the account is locked. A non-existent user has no lockout state.
+      const lockout = checkLockout(user.lockedUntil);
+      if (lockout) {
+        return next({ status: 403, message: 'account locked', retryAfterMs: lockout.retryAfterMs });
+      }
+      if (!user.password.verify(password)) {
+        // Failed attempt: increment counter and optionally lock the account.
+        const attempts = (user.failedLoginAttempts ?? 0) + 1;
+        const decision = loginLockoutDecision({ attempts });
+        if (decision) {
+          db.prepare('UPDATE User SET failedLoginAttempts = ?, lockedUntil = ? WHERE id = ?')
+            .run(attempts, decision.lockedUntil, user.id);
+        } else {
+          db.prepare('UPDATE User SET failedLoginAttempts = ? WHERE id = ?')
+            .run(attempts, user.id);
+        }
+        return next({ status: 401, message: 'bad credentials' });
+      }
+      // Successful login: reset lockout counter.
+      db.prepare('UPDATE User SET failedLoginAttempts = 0, lockedUntil = NULL WHERE id = ?')
+        .run(user.id);
     }
     // Two-factor check: if the user has an enabled TOTP enrollment, do NOT mint a
     // session yet — return the userId so the client can prompt for the TOTP token
@@ -325,18 +360,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
         expiresAt,
         principal: req.principal,
       });
-      res.status(201).json({
-        token: invitation.token,
-        targetEntity: invitation.targetEntity,
-        targetId: invitation.targetId,
-        role: invitation.role,
-        targetUser: invitation.targetUser,
-        maxUses: invitation.maxUses,
-        useCount: invitation.useCount,
-        expiresAt: invitation.expiresAt,
-        createdBy: invitation.createdBy,
-        createdAt: invitation.createdAt,
-      });
+      res.status(201).json(invitationResponse(invitation));
     } catch (err) {
       return next({ status: err.status ?? 500, message: err.message });
     }
@@ -373,18 +397,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   s.get('/invitation', requireUser(), (req, res, next) => {
     try {
       const invitations = listInvitationsForUser(req.principal);
-      res.json(invitations.map((inv) => ({
-        token: inv.token,
-        targetEntity: inv.targetEntity,
-        targetId: inv.targetId,
-        role: inv.role,
-        targetUser: inv.targetUser,
-        maxUses: inv.maxUses,
-        useCount: inv.useCount,
-        expiresAt: inv.expiresAt,
-        createdBy: inv.createdBy,
-        createdAt: inv.createdAt,
-      })));
+      res.json(invitations.map((inv) => invitationResponse(inv)));
     } catch (err) {
       return next({ status: err.status ?? 500, message: err.message });
     }
@@ -503,9 +516,27 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     if (!twoFactor) {
       return next({ status: 400, message: 'TOTP not enrolled' });
     }
+    // TOTP lockout check — before token verification.
+    const totpLock = checkLockout(twoFactor.totpLockedUntil);
+    if (totpLock) {
+      return next({ status: 429, message: 'TOTP temporarily locked', retryAfterMs: totpLock.retryAfterMs });
+    }
     if (!verifyTotp(twoFactor.secret, token)) {
+      // Failed TOTP attempt: increment counter and optionally lock.
+      const attempts = (twoFactor.totpFailedAttempts ?? 0) + 1;
+      const decision = totpLockoutDecision({ attempts });
+      if (decision) {
+        db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE id = ?')
+          .run(attempts, decision.lockedUntil, twoFactor.id);
+      } else {
+        db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ? WHERE id = ?')
+          .run(attempts, twoFactor.id);
+      }
       return next({ status: 400, message: 'invalid TOTP token' });
     }
+    // Successful TOTP verification: reset counter.
+    db.prepare('UPDATE TwoFactor SET totpFailedAttempts = 0, totpLockedUntil = NULL WHERE id = ?')
+      .run(twoFactor.id);
     // First successful verification: flip enabled to 1 and set verifiedAt.
     if (twoFactor.enabled === 0) {
       db.prepare('UPDATE TwoFactor SET enabled = 1, verifiedAt = ? WHERE id = ?')
@@ -538,14 +569,36 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     if (!twoFactor) {
       return next({ status: 400, message: 'TOTP not enrolled' });
     }
-    const backupCodes = JSON.parse(twoFactor.backupCodes || '[]');
-    const isTotpValid = verifyTotp(twoFactor.secret, token);
-    const isBackupValid = verifyBackupCode(backupCodes, token);
-    if (!isTotpValid && !isBackupValid) {
+    // Check lockout for TOTP tokens, but backup codes always bypass lockout
+    // (they are the recovery escape hatch when the authenticator is lost).
+    const totpLock = checkLockout(twoFactor.totpLockedUntil);
+    const { isValid, usedBackup, backupCodes } = verifyTotpOrBackupCode(twoFactor, token);
+    if (!isValid) {
+      // If lockout is active and the token wasn't a valid backup code, enforce
+      // the TOTP lockout. If lockout is inactive, count failed TOTP attempts.
+      if (!usedBackup) {
+        if (totpLock) {
+          return next({ status: 429, message: 'TOTP temporarily locked', retryAfterMs: totpLock.retryAfterMs });
+        }
+        const attempts = (twoFactor.totpFailedAttempts ?? 0) + 1;
+        const decision = totpLockoutDecision({ attempts });
+        if (decision) {
+          db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE id = ?')
+            .run(attempts, decision.lockedUntil, twoFactor.id);
+        } else {
+          db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ? WHERE id = ?')
+            .run(attempts, twoFactor.id);
+        }
+      }
       return next({ status: 400, message: 'invalid token or backup code' });
     }
+    // Successful TOTP verification resets the lockout counter.
+    if (!usedBackup) {
+      db.prepare('UPDATE TwoFactor SET totpFailedAttempts = 0, totpLockedUntil = NULL WHERE id = ?')
+        .run(twoFactor.id);
+    }
     // If it was a backup code, persist the consumed code before deleting.
-    if (isBackupValid) {
+    if (usedBackup) {
       db.prepare('UPDATE TwoFactor SET backupCodes = ? WHERE id = ?')
         .run(JSON.stringify(backupCodes), twoFactor.id);
     }
@@ -567,17 +620,29 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     if (!twoFactor || twoFactor.enabled !== 1) {
       return next({ status: 400, message: 'TOTP not enabled for this user' });
     }
-    const backupCodes = JSON.parse(twoFactor.backupCodes || '[]');
-    const isTotpValid = verifyTotp(twoFactor.secret, token);
-    const isBackupValid = verifyBackupCode(backupCodes, token);
-    if (!isTotpValid && !isBackupValid) {
-      return next({ status: 400, message: 'invalid token or backup code' });
+    // TOTP lockout check — before token verification.
+    const totpLock = checkLockout(twoFactor.totpLockedUntil);
+    if (totpLock) {
+      return next({ status: 429, message: 'TOTP temporarily locked', retryAfterMs: totpLock.retryAfterMs });
     }
-    // If it was a backup code, persist the consumed code.
-    if (isBackupValid) {
-      db.prepare('UPDATE TwoFactor SET backupCodes = ? WHERE id = ?')
-        .run(JSON.stringify(backupCodes), twoFactor.id);
+    // Only TOTP tokens are accepted here — backup codes are recovery secrets,
+    // not authentication tokens. See auth/totp/disable for backup code usage.
+    if (!verifyTotp(twoFactor.secret, token)) {
+      // Failed TOTP attempt: increment counter and optionally lock.
+      const attempts = (twoFactor.totpFailedAttempts ?? 0) + 1;
+      const decision = totpLockoutDecision({ attempts });
+      if (decision) {
+        db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE id = ?')
+          .run(attempts, decision.lockedUntil, twoFactor.id);
+      } else {
+        db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ? WHERE id = ?')
+          .run(attempts, twoFactor.id);
+      }
+      return next({ status: 400, message: 'invalid TOTP token' });
     }
+    // Successful TOTP verification: reset counter.
+    db.prepare('UPDATE TwoFactor SET totpFailedAttempts = 0, totpLockedUntil = NULL WHERE id = ?')
+      .run(twoFactor.id);
     const user = User.getOrFail(userId);
     const session = Session.create({ userId: user.id });
     res.setHeader('set-cookie', sessionCookie(session.token, { secure }));

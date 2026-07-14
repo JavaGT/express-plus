@@ -15,7 +15,7 @@ import { failure } from './outcome.mjs';
 const MAX_SUBS_PER_CONN = 256;
 const MAX_ID_LEN = 256;
 
-export function normalizeSubscribeMsg(msg) {
+export function parseSubscribeMsg(msg) {
   if (typeof msg !== 'object' || msg === null) return null;
 
   if (typeof msg.scope === 'string' && msg.scope.length > 0) {
@@ -55,13 +55,46 @@ export function normalizeSubscribeMsg(msg) {
   return null;
 }
 
+// Validate interest fields and pace against the resolved entity schema.
+// Returns { fields, pace } or throws on invalid input.
+function buildInterest(interest, entity) {
+  let fields = null;
+  if (interest.fields !== undefined && interest.fields !== null) {
+    if (typeof interest.fields !== 'object' || interest.fields === null || Array.isArray(interest.fields)) {
+      throw new Error('Invalid fields interest.');
+    }
+    if (typeof interest.fields === 'function') {
+      throw new Error('Fields interest must be data, not a closure.');
+    }
+    for (const [key, value] of Object.entries(interest.fields)) {
+      if (typeof value === 'function') {
+        throw new Error('Fields interest must be data, not a closure.');
+      }
+      if (!entity.fields || !(key in entity.fields)) {
+        throw new Error(`Unknown field ${key} in interest.`);
+      }
+      if (value !== true) {
+        throw new Error('Coordinate narrowing is not supported.');
+      }
+    }
+    fields = interest.fields;
+  }
+
+  let pace = null;
+  if (interest.pace !== undefined && interest.pace !== null) {
+    pace = validatePaceSelection('ephemeral', interest.pace);
+  }
+
+  return { fields, pace };
+}
+
 export async function authorizeSubscription(msg, conn, {
   resolveEntity,
   mayVerb,
   db,
   fanout,
 }) {
-  const normalized = normalizeSubscribeMsg(msg);
+  const normalized = parseSubscribeMsg(msg);
   if (!normalized) {
     return { admitted: false, failure: failure('invalid-input', 'Subscribe requires entity and id, or a scope.') };
   }
@@ -106,35 +139,11 @@ export async function authorizeSubscription(msg, conn, {
 
   // Entity-specific validation happens only after row authorization. Otherwise
   // different validation errors reveal which entity names and fields exist.
-  let fields = null;
-  if (interest.fields !== undefined && interest.fields !== null) {
-    if (typeof interest.fields !== 'object' || interest.fields === null || Array.isArray(interest.fields)) {
-      return { admitted: false, failure: failure('invalid-input', 'Invalid fields interest.') };
-    }
-    if (typeof interest.fields === 'function') {
-      return { admitted: false, failure: failure('invalid-input', 'Fields interest must be data, not a closure.') };
-    }
-    for (const [key, value] of Object.entries(interest.fields)) {
-      if (typeof value === 'function') {
-        return { admitted: false, failure: failure('invalid-input', 'Fields interest must be data, not a closure.') };
-      }
-      if (!entity.fields || !(key in entity.fields)) {
-        return { admitted: false, failure: failure('invalid-input', `Unknown field ${key} in interest.`) };
-      }
-      if (value !== true) {
-        return { admitted: false, failure: failure('invalid-input', 'Coordinate narrowing is not supported.') };
-      }
-    }
-    fields = interest.fields;
-  }
-
-  let pace = null;
-  if (interest.pace !== undefined && interest.pace !== null) {
-    try {
-      pace = validatePaceSelection('ephemeral', interest.pace);
-    } catch (err) {
-      return { admitted: false, failure: failure('invalid-input', String(err?.message || 'Invalid pace selection.')) };
-    }
+  let fields, pace;
+  try {
+    ({ fields, pace } = buildInterest(interest, entity));
+  } catch (err) {
+    return { admitted: false, failure: failure('invalid-input', err.message || 'Invalid fields or pace selection.') };
   }
 
   return { admitted: true, scope, entityName, id, idStr, fields, pace, interest };

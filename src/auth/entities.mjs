@@ -55,6 +55,14 @@ export const User = entity('User', {
   phone: text({ optional: true }),
   bio: text({ optional: true }),
 
+  // Account lockout: `failedLoginAttempts` and `lockedUntil` (epoch ms, null when
+  // not locked) are a framework-maintained rate-limit fence on the login route.
+  // They are NOT request-visible and never exposed through the entity query API.
+  // The login handler checks and updates them; the lockout logic is a pure
+  // function in auth/lockout.mjs for testability without standing up HTTP.
+  failedLoginAttempts: number({ optional: true }),
+           lockedUntil: number({ optional: true }),
+
   grant: () => [notRequestReadable('User')],
 });
 
@@ -320,6 +328,13 @@ export const TwoFactor = entity('TwoFactor', {
    backupCodes: text({ readonly: true }),
        enabled: number(),
     verifiedAt: date(),
+  // TOTP attempt lockout: `totpFailedAttempts` and `totpLockedUntil` (epoch ms,
+  // null when not locked) gate the TOTP verification routes. The lockout is
+  // per-user, applies to TOTP tokens only (not backup codes), and resets on
+  // successful TOTP verification. The lockout logic is a pure function in
+  // auth/lockout.mjs for testability without standing up HTTP.
+  totpFailedAttempts: number({ optional: true }),
+     totpLockedUntil: number({ optional: true }),
 
   grant: () => [notRequestReadable('TwoFactor')],
   create: enrollTotp,

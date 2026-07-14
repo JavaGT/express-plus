@@ -111,6 +111,60 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
   const shouldLogRequest = requestLog;
   const log = (isApp && source.log) ? source.log : getLog();
   const requestCount = { count: 0 };
+
+  // Handles the default route matching + dispatch after the handler chain.
+  async function handleRouteMatch(req, res, routes, url) {
+    const { route, params, pathMatched } = matchRoute(routes, req.method, url.pathname);
+
+    // no path match → 404; path matched but method did not → 405.
+    if (!route) {
+      if (pathMatched) {
+        sendFailure(sendJson, res, failure('invalid-input', 'method not allowed'), { status: 405 });
+      } else {
+        sendFailure(sendJson, res, failure('not-found', 'not found'));
+      }
+      return;
+    }
+
+    // the first default-on auth layer: the route gate decides admission.
+    const principal = principalOf(req);
+    if (!route.gate(principal)) {
+      sendFailure(sendJson, res, failure('denied', 'unauthorized'), { status: 401 });
+      return;
+    }
+
+    // read a body for mutating entity verbs and every imperative route. Entity
+    // CRUD stays JSON-only; handlers may accept browser form posts.
+    let body = {};
+    if (route.handlers || route.verb === 'create' || route.verb === 'update') {
+      try {
+        body = await readRequestBody(req, { jsonOnly: !route.handlers });
+      } catch (err) {
+        // a refused body carries its own status (413 oversized, 400 malformed).
+        if (err instanceof BodyError) {
+          return void sendFailure(
+            sendJson,
+            res,
+            failure('invalid-input', err.message),
+            { status: err.status },
+          );
+        }
+        throw err;
+      }
+    }
+
+    // admitted. One spine, one legitimate fork at the tail: a route carrying a
+    // handler chain runs the chain; an entity route runs DB-backed CRUD (where
+    // the second default-on auth layer, the row grant, applies). This is NOT a
+    // second auth path — the chain inherits the already-admitted principal and
+    // never re-gates.
+    if (route.handlers) {
+      await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
+    } else {
+      await dispatchCrud({ entity: route.entity, verb: route.verb, db, principal, params, body, app: isApp ? source : null, res, sendJson, committedEventHeaders, mayRow });
+    }
+  }
+
   async function handle(req, res) {
     const startTime = Date.now();
     if (isApp) requestCount.count += 1;
@@ -181,158 +235,123 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       }
 
       const url = new URL(req.url, 'http://localhost');
-      // Framework-owned /health endpoint (piece 1) — PUBLIC, anonymous, no auth.
-      // Intercepts BEFORE matchRoute (like /snapshot, /blobs, /events).
-      if (isApp && req.method === 'GET') {
-        if (url.pathname === '/health') {
-          sendJson(res, 200, { status: 'ok', env });
-          return;
-        }
-        if (url.pathname === '/health/stats') {
-          sendJson(res, 200, {
-            status: 'ok',
-            env,
-            uptimeMs: Math.round(process.uptime() * 1000),
-            rssBytes: process.memoryUsage().rss,
-            requestCount: requestCount.count,
-          });
-          return;
-        }
-      }
-      // CORS preflight (piece 4 — opt-in): OPTIONS with allowed origin/method → 204
-      if (isApp && req.method === 'OPTIONS' && cors && cors.origins && Array.isArray(cors.origins)) {
-        const origin = req.headers.origin;
-        if (origin && cors.origins.includes(origin)) {
-          res.setHeader('access-control-allow-origin', origin);
-          res.setHeader('vary', 'Origin');
-          res.setHeader('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS');
-          res.setHeader('access-control-allow-headers', 'content-type');
-          res.writeHead(204);
-          res.end();
-          return;
-        }
-      }
 
-      // Static file serving — intercepts before route matching. The app declares
-      // `app.static('/public', dir)`; every GET request under the prefix is served
-      // from the filesystem with a content-type derived from the file extension.
-      // Missing files → 404; path-traversal attempts → 404 (fail closed).
-      // Framework-owned browser SDK: `GET /workbench.mjs` serves the client
-      // side of the /events live protocol. Intercepts BEFORE matchRoute like
-      // other framework defaults.
-      if (isApp && req.method === 'GET') {
-        const handled = await handleClientSdkRoute(source, req, res);
-        if (handled || responseHasStarted(res)) return;
-      }
-      // Framework-owned default endpoints — snapshot + resync (spec #1, D6/D7).
-      // Like the /events WS transport, these are framework defaults (not mounted
-      // routes): `/snapshot/:entity/:id` and `/events-since/:entity/:id` resolve
-      // the entity at request time from the path. Authorized through the SAME
-      // mayVerb ('read') as REST `read` — one auth engine, no second path.
-      if (isApp && req.method === 'GET') {
-        const handled = await handleResyncRoute(source, req, res, principalOf(req));
-        if (handled || responseHasStarted(res)) return;
-      }
-      // Framework-owned blob upload (spec #2): `POST /blobs` is a framework
-      // default, not a mounted route — intercepted before route matching, like
-      // the snapshot/resync endpoints and the /events WS transport.
-      if (isApp && req.method === 'POST') {
-        const handled = await handleBlobUploadRoute(source, req, res, principalOf(req));
-        if (handled || responseHasStarted(res)) return;
-      }
-      // Framework-owned job-queue endpoints (spec #5): /workers/register,
-      // /jobs/claim, /jobs/:id/heartbeat, /jobs/:id/result. Bearer-auth'd (not
-      // route-gate auth) — intercepted before matchRoute, like /blobs.
-      if (isApp && req.method === 'POST' && source.jobs) {
-        const handled = await handleJobRoute(source, req, res);
-        if (handled || responseHasStarted(res)) return;
-      }
-      // App-declared prefix-intercept handlers — `app.use(prefix, fn)` (and its
-      // `app.static` sugar). Each fn is a catch-all under its prefix; the first
-      // matching prefix wins, in declaration order. The fn receives an
-      // Express-style { req, res } with `req.params.path` holding the prefix
-      // tail (so a manual sub-router can split it). A fn that does NOT write
-      // falls through to the next handler (and then to matchRoute); a fn that
-      // throws is rendered as an error. Runs AFTER framework defaults (/blobs,
-      // /jobs, /snapshot, /events-since) and BEFORE matchRoute — one interceptor
-      // mechanism, no special-cases.
-      if (isApp && source._handlers?.length) {
-        for (const { prefix, fn } of source._handlers) {
-          if (!url.pathname.startsWith(prefix)) continue;
-          const rest = url.pathname.slice(prefix.length) || '/';
-          const ctxReq = {
-            body: undefined,
-            params: { path: rest.replace(/^\//, '') },
-            query: Object.fromEntries(url.searchParams),
-            principal: principalOf(req),
-            raw: req,
-            headers: req.headers,
-            method: req.method,
-            url: req.url,
-          };
-          let handled = false;
-          const ctxRes = makeHandlerRes(res, () => {
-            handled = true;
-          });
-          try {
-            await fn(ctxReq, ctxRes, () => {});
-          } catch (err) {
-            renderError(res, err, { env });
-            return;
-          }
+      // Ordered request handler chain: the first entry whose match() returns
+      // true gets to handle(). If handle() returns true (or the response has
+      // started), processing stops. If handle() returns false, the next
+      // matching entry is tried. At the end, the default route matching +
+      // dispatch runs.
+      const handlers = [
+        // /health — PUBLIC, anonymous, no auth (piece 1)
+        {
+          match: () => isApp && req.method === 'GET' && url.pathname === '/health',
+          handle: () => { sendJson(res, 200, { status: 'ok', env }); return true; },
+        },
+        // /health/stats — includes uptime, RSS, request count
+        {
+          match: () => isApp && req.method === 'GET' && url.pathname === '/health/stats',
+          handle: () => {
+            sendJson(res, 200, {
+              status: 'ok',
+              env,
+              uptimeMs: Math.round(process.uptime() * 1000),
+              rssBytes: process.memoryUsage().rss,
+              requestCount: requestCount.count,
+            });
+            return true;
+          },
+        },
+        // CORS preflight (piece 4 — opt-in): OPTIONS with allowed origin → 204
+        {
+          match: () => isApp && req.method === 'OPTIONS' && cors && cors.origins && Array.isArray(cors.origins),
+          handle: () => {
+            const origin = req.headers.origin;
+            if (origin && cors.origins.includes(origin)) {
+              res.setHeader('access-control-allow-origin', origin);
+              res.setHeader('vary', 'Origin');
+              res.setHeader('access-control-allow-methods', 'GET, POST, PATCH, DELETE, OPTIONS');
+              res.setHeader('access-control-allow-headers', 'content-type');
+              res.writeHead(204);
+              res.end();
+              return true;
+            }
+            return false;
+          },
+        },
+        // Browser SDK: GET /workbench.mjs (intercepts before matchRoute)
+        {
+          match: () => isApp && req.method === 'GET',
+          handle: async () => {
+            const handled = await handleClientSdkRoute(source, req, res);
+            return handled || responseHasStarted(res);
+          },
+        },
+        // Snapshot + resync: /snapshot/:entity/:id, /events-since/:entity/:id (spec #1, D6/D7)
+        {
+          match: () => isApp && req.method === 'GET',
+          handle: async () => {
+            const handled = await handleResyncRoute(source, req, res, principalOf(req));
+            return handled || responseHasStarted(res);
+          },
+        },
+        // Blob upload: POST /blobs (spec #2)
+        {
+          match: () => isApp && req.method === 'POST',
+          handle: async () => {
+            const handled = await handleBlobUploadRoute(source, req, res, principalOf(req));
+            return handled || responseHasStarted(res);
+          },
+        },
+        // Job-queue endpoints: /workers/register, /jobs/* (spec #5)
+        {
+          match: () => isApp && req.method === 'POST' && source.jobs,
+          handle: async () => {
+            const handled = await handleJobRoute(source, req, res);
+            return handled || responseHasStarted(res);
+          },
+        },
+        // App-declared prefix-intercept handlers — app.use(prefix, fn)
+        {
+          match: () => isApp && source._handlers?.length,
+          handle: async () => {
+            for (const { prefix, fn } of source._handlers) {
+              if (!url.pathname.startsWith(prefix)) continue;
+              const rest = url.pathname.slice(prefix.length) || '/';
+              const ctxReq = {
+                body: undefined,
+                params: { path: rest.replace(/^\//, '') },
+                query: Object.fromEntries(url.searchParams),
+                principal: principalOf(req),
+                raw: req,
+                headers: req.headers,
+                method: req.method,
+                url: req.url,
+              };
+              let handled = false;
+              const ctxRes = makeHandlerRes(res, () => { handled = true; });
+              try {
+                await fn(ctxReq, ctxRes, () => {});
+              } catch (err) {
+                renderError(res, err, { env });
+                return true;
+              }
+              if (handled || responseHasStarted(res)) return true;
+            }
+            return false;
+          },
+        },
+      ];
+
+      // Run the handler chain
+      for (const h of handlers) {
+        if (h.match()) {
+          const handled = await h.handle();
           if (handled || responseHasStarted(res)) return;
         }
       }
 
-      const { route, params, pathMatched } = matchRoute(routes, req.method, url.pathname);
-
-      // no path match → 404; path matched but method did not → 405.
-      if (!route) {
-        if (pathMatched) {
-          sendFailure(sendJson, res, failure('invalid-input', 'method not allowed'), { status: 405 });
-        } else {
-          sendFailure(sendJson, res, failure('not-found', 'not found'));
-        }
-        return;
-      }
-
-      // the first default-on auth layer: the route gate decides admission.
-      const principal = principalOf(req);
-      if (!route.gate(principal)) {
-        sendFailure(sendJson, res, failure('denied', 'unauthorized'), { status: 401 });
-        return;
-      }
-
-      // read a body for mutating entity verbs and every imperative route. Entity
-      // CRUD stays JSON-only; handlers may accept browser form posts.
-      let body = {};
-      if (route.handlers || route.verb === 'create' || route.verb === 'update') {
-        try {
-          body = await readRequestBody(req, { jsonOnly: !route.handlers });
-        } catch (err) {
-          // a refused body carries its own status (413 oversized, 400 malformed).
-          if (err instanceof BodyError) {
-            return void sendFailure(
-              sendJson,
-              res,
-              failure('invalid-input', err.message),
-              { status: err.status },
-            );
-          }
-          throw err;
-        }
-      }
-
-      // admitted. One spine, one legitimate fork at the tail: a route carrying a
-      // handler chain runs the chain; an entity route runs DB-backed CRUD (where
-      // the second default-on auth layer, the row grant, applies). This is NOT a
-      // second auth path — the chain inherits the already-admitted principal and
-      // never re-gates.
-      if (route.handlers) {
-        await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
-      } else {
-        await dispatchCrud({ entity: route.entity, verb: route.verb, db, principal, params, body, app: isApp ? source : null, res, sendJson, committedEventHeaders, mayRow });
-      }
+      // Default: route matching + dispatch
+      await handleRouteMatch(req, res, routes, url);
     } catch (err) {
       if (responseHasStarted(res)) {
         warnLateResponse(res, 'makeRequestHandler.catch', err);

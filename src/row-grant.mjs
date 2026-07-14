@@ -53,7 +53,7 @@ export async function rowCapabilities(entityRecord, row, principal) {
   const inherited = inheritedGrant(entityRecord);
   if (inherited) {
     const parentRow = inheritedParentRow(entityRecord, row, principal);
-    if (!parentRow) return { granted: false, capabilities: [] };
+    if (!parentRow) return { granted: false, capabilities: [], is: makeIs(entityRecord, row, principal) };
     const parentRecord = resolveInheritedParent(entityRecord, inherited);
     return await rowCapabilities(parentRecord, parentRow, principal);
   }
@@ -68,7 +68,7 @@ export async function rowCapabilities(entityRecord, row, principal) {
   const clause = Array.isArray(clauses)
     ? clauses.find((c) => isRuntimeGrantClause(c))
     : null;
-  if (!clause) return { granted: false, capabilities: [] };
+  if (!clause) return { granted: false, capabilities: [], is: makeIs(entityRecord, row, principal) };
 
   const is = makeIs(entityRecord, row, principal);
   // resolveDecision awaits the body once and rejects an escaped (un-awaited)
@@ -85,9 +85,10 @@ export async function rowCapabilities(entityRecord, row, principal) {
     [],
     { where: `the .can grant body on entity('${entityRecord.name}')` },
   );
-  return decision.granted
+  const result = decision.granted
     ? { granted: true, capabilities: decision.capabilities ?? [] }
     : { granted: false, capabilities: [] };
+  return { ...result, is };
 }
 
 // The capability each CRUD verb requires. Reads (list/read) need `read`;
@@ -203,8 +204,7 @@ export async function mayRow(entityRecord, verb, row, principal, authz = mayVerb
 // (DECISIONLOG #41). A null principal means "not a request path — skip field
 // authz"; the caller is trusted server code (or the trusted query API).
 export async function fieldCapabilities(entityRecord, fieldName, row, principal) {
-  const is = makeIs(entityRecord, row, principal);
-  const defaults = await rowCapabilities(entityRecord, row, principal);
+  const { is, ...defaults } = await rowCapabilities(entityRecord, row, principal);
   const access = entityRecord.fields?.[fieldName]?.access;
   if (!access) return defaults;                       // strong-inherit row grant
   let decision;

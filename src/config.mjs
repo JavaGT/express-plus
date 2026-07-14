@@ -23,7 +23,7 @@ function readPort(raw) {
 export function resolveConfig(options = {}) {
   return Object.freeze({
     port: readPort(options.port ?? process.env.PORT),
-    env: options.env ?? process.env.NODE_ENV ?? 'development',
+    env: options.env ?? process.env.NODE_ENV ?? 'production',
     viewsDir: options.viewsDir ?? process.env.VIEWS_DIR ?? null, // null → framework default (cwd/views)
     sessionDurationMs: options.session?.durationMs ?? 7 * 86_400_000, // 7 days — Session schedule.after expiry
   });

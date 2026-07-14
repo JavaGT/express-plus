@@ -294,6 +294,51 @@ function executionFailure(error, context = {}, details) {
   return failureOutcome(withDetails);
 }
 
+// ── Shared dispatch-pipeline helpers ──
+//
+// The four dispatch paths (in-memory/durable × single/batch) each follow the
+// same 4-step sequence — check handler → Fork C authorize → dedupe → run
+// handler — but implementations differ between sync (in-memory) and async
+// (durable). These helpers extract what IS pixel-identical across paths.
+// The Fork C authorize try/catch is NOT shared because sync vs async wrapping
+// differs; only the post-catch boolean guard is extracted here.
+
+// Returns the handler function, or null if no handler is registered for `type`.
+function checkHandler(handlers, type) {
+  const handler = handlers[type];
+  if (typeof handler !== 'function') return null;
+  return handler;
+}
+
+// Returns the index of the first action without a handler, or -1 if all exist.
+function checkHandlers(handlers, actions) {
+  for (let i = 0; i < actions.length; i++) {
+    if (typeof handlers[actions[i].type] !== 'function') return i;
+  }
+  return -1;
+}
+
+// Returns deniedOutcome(details) when `result` is falsy, or null when authorized.
+function authorizedOrDenied(result, details) {
+  if (!result) return deniedOutcome(details);
+  return null;
+}
+
+// In-memory dedupe: returns successOutcome when the actionId was already
+// dispatched, or null for a fresh action.
+function checkInMemoryDedupe(dispatched, actionId) {
+  if (!dispatched.has(actionId)) return null;
+  return successOutcome(dispatched.get(actionId), true);
+}
+
+// Durable dedupe: returns successOutcome when the actionId receipt exists,
+// or null for a fresh action.
+function checkDurableDedupe(db, scope, actionId) {
+  const receipt = receiptFor(db, scope, actionId);
+  if (!receipt) return null;
+  return successOutcome(eventsFromReceipt(db, receipt, parseEventType), true);
+}
+
 // commitEvents — the durable transaction brace shared by `dispatch` and
 // `dispatchBatch`: BEGIN IMMEDIATE → durable variant applyInTxn → COMMIT →
 // post-commit fan-out, with ROLLBACK on execution error. Expected failures are
@@ -390,10 +435,8 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     }
 
     function dispatch({ actionId, type, payload, principal }) {
-      const handler = handlers[type];
-      if (typeof handler !== 'function') {
-        return unknownActionOutcome(type);
-      }
+      const handler = checkHandler(handlers, type);
+      if (!handler) return unknownActionOutcome(type);
 
       // Fork C — AUTHORIZE FIRST. A retried action by a since-revoked principal
       // returns denied (403), even if the mutation already committed. This
@@ -404,15 +447,13 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       } catch (err) {
         return executionFailure(err, { actionId, type });
       }
-      if (!authorized) {
-        return deniedOutcome();
-      }
+      const denied = authorizedOrDenied(authorized);
+      if (denied) return denied;
 
       // Idempotent dedupe: a re-sent action returns its stored events without
       // re-running the handler — no duplicate state change (SPEC §7).
-      if (dispatched.has(actionId)) {
-        return successOutcome(dispatched.get(actionId), true);
-      }
+      const dedupe = checkInMemoryDedupe(dispatched, actionId);
+      if (dedupe) return dedupe;
 
       // Run the handler, then assign each emitted event a per-scope monotonic
       // sequence number and append to the log.
@@ -432,11 +473,9 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
     function dispatchBatch({ actionId, actions = [], principal }) {
       if (actions.length === 0) return successOutcome([]);
-      for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
-        const action = actions[actionIndex];
-        if (typeof handlers[action.type] !== 'function') {
-          return unknownActionOutcome(action.type, { actionIndex });
-        }
+      const missingIdx = checkHandlers(handlers, actions);
+      if (missingIdx !== -1) {
+        return unknownActionOutcome(actions[missingIdx].type, { actionIndex: missingIdx });
       }
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
         const action = actions[actionIndex];
@@ -446,13 +485,11 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
         } catch (err) {
           return executionFailure(err, { actionId, type: action.type }, { actionIndex });
         }
-        if (!authorized) {
-          return deniedOutcome({ actionIndex });
-        }
+        const denied = authorizedOrDenied(authorized, { actionIndex });
+        if (denied) return denied;
       }
-      if (dispatched.has(actionId)) {
-        return successOutcome(dispatched.get(actionId), true);
-      }
+      const dedupe = checkInMemoryDedupe(dispatched, actionId);
+      if (dedupe) return dedupe;
       const allEmitted = [];
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
         const action = actions[actionIndex];
@@ -492,10 +529,8 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   // events inside a write transaction. Authorize ALSO runs INSIDE the
   // transaction (Wave 4.4), atomic with log, cursor, projection, and receipt.
   async function dispatch({ actionId, type, payload, principal, scope = '' }) {
-    const handler = handlers[type];
-    if (typeof handler !== 'function') {
-      return unknownActionOutcome(type);
-    }
+    const handler = checkHandler(handlers, type);
+    if (!handler) return unknownActionOutcome(type);
 
     // Fork C — AUTHORIZE FIRST (outside the transaction). A retried action by a
     // since-revoked principal returns denied (403), even if the mutation already
@@ -507,9 +542,8 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     } catch (err) {
       return executionFailure(err, { actionId, type });
     }
-    if (!authResult) {
-      return deniedOutcome();
-    }
+    const denied = authorizedOrDenied(authResult);
+    if (denied) return denied;
 
     // Dedupe by the owning-stream action receipt (scope, actionId) — Wave 4.9.
     // A re-sent action returns its committed events, in original emission
@@ -518,10 +552,8 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // under a different owning scope is independent action identity, and a
     // zero-event action is durably deduped via its receipt even though it left
     // no _Log row to key on.
-    const receipt = receiptFor(db, scope, actionId);
-    if (receipt) {
-      return successOutcome(eventsFromReceipt(db, receipt, parseEventType), true);
-    }
+    const dedupe = checkDurableDedupe(db, scope, actionId);
+    if (dedupe) return dedupe;
 
     // Run the handler — events only, no DB writes (Fork A: entity-as-projection).
     // The handler may be sync or async.
@@ -561,11 +593,9 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       return successOutcome([]);
     }
 
-    for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
-      const action = actions[actionIndex];
-      if (typeof handlers[action.type] !== 'function') {
-        return unknownActionOutcome(action.type, { actionIndex });
-      }
+    const missingIdx = checkHandlers(handlers, actions);
+    if (missingIdx !== -1) {
+      return unknownActionOutcome(actions[missingIdx].type, { actionIndex: missingIdx });
     }
 
     // Fork C — AUTHORIZE EVERY action FIRST (outside the txn). A retried
@@ -580,15 +610,14 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       } catch (err) {
         return executionFailure(err, { actionId, type: action.type }, { actionIndex });
       }
-      if (!authResult) return deniedOutcome({ actionIndex });
+      const denied = authorizedOrDenied(authResult, { actionIndex });
+      if (denied) return denied;
     }
 
     // Dedupe the whole batch by its owning-stream action receipt (Wave 4.9) —
     // same (scope, actionId) identity as `dispatch`, one grammar for both.
-    const receipt = receiptFor(db, scope, actionId);
-    if (receipt) {
-      return successOutcome(eventsFromReceipt(db, receipt, parseEventType), true);
-    }
+    const dedupe = checkDurableDedupe(db, scope, actionId);
+    if (dedupe) return dedupe;
 
     // Run every handler, concatenating their emitted events. Handlers are pure
     // (events only, no DB writes — Fork A), so the batch runs them in order and

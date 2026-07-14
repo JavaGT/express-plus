@@ -78,7 +78,7 @@ test('sessionCookie emits a fail-closed Set-Cookie (HttpOnly, SameSite=Lax, Secu
 });
 
 test('sessionCookie can drop Secure for a non-TLS context', () => {
-  const header = sessionCookie('tok123', { secure: false });
+  const header = sessionCookie('tok123', { secure: false, env: 'development' });
   assert.doesNotMatch(header, /Secure/);
   assert.match(header, /HttpOnly/); // HttpOnly is never dropped
 });

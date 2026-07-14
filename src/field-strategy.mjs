@@ -15,6 +15,7 @@
 // whose diff produces element-level deltas (consult #18/#20).
 
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { tryBetterAuthHash } from './hash-compat.mjs';
 
 // A typed failure for the validate stage. Stage 1 throws this and NOTHING
 // downstream runs (no apply, no persist, no emit) — a bad payload never proceeds
@@ -517,19 +518,7 @@ export function verifyHash(candidate, stored) {
   const actual = scryptSync(candidate, salt, expected.length);
   if (timingSafeEqual(actual, expected)) return true;
 
-  // better-auth uses the same salt:digest envelope but its historical scrypt
-  // profile sets r=16 and normalises the password with NFKC. Accept that
-  // profile on reads so applications can cut over without knowing plaintext
-  // passwords. Every subsequent password write still uses Workbench's native
-  // profile, making this a narrow compatibility reader rather than a second
-  // storage format.
-  const legacy = scryptSync(candidate.normalize('NFKC'), stored.slice(0, sep), expected.length, {
-    N: 16384,
-    r: 16,
-    p: 1,
-    maxmem: 128 * 16384 * 16 * 2,
-  });
-  return timingSafeEqual(legacy, expected);
+  return tryBetterAuthHash(candidate, stored, expected);
 }
 
 // Pipeline stage 1 — validate. Runs each payload key against the field-option
