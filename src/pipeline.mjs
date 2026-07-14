@@ -12,7 +12,7 @@
 
 // Lazy import of effect compiler (avoids circular dependency at module load time).
 import { readSeq } from './committed-log.mjs';
-import { appendEvents, eventsFor, rowToEvent } from './committed-log.mjs';
+import { appendEvents, receiptFor, eventsFromReceipt, insertReceipt } from './committed-log.mjs';
 import { lifecycleVerb, parseEventType } from './event-handle.mjs';
 import { txn } from './driver.mjs';
 import { isPlainObject, ValidationError } from './field-strategy.mjs';
@@ -301,7 +301,7 @@ function executionFailure(error, context = {}, details) {
 // `actions` array. The two genuinely differ there, so the brace is extracted but
 // the `payload` value stays per-caller. Throws non-403 errors after rolling back;
 // Post-commit delivery can no longer turn a committed mutation into a failure.
-async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline }) {
+async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline, scope }) {
   let committed;
   try {
     // The in-transaction work (applyInTxn) is wrapped by the driver's txn
@@ -309,9 +309,16 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
     // callback brackets ONLY applyInTxn — afterCommit is post-commit fan-out
     // (out-of-band effects that cannot join the DB txn) and runs AFTER commit,
     // naturally outside the txn (seam-review §2.1).
-    committed = await txn(db, () => pipeline.applyInTxn(db, events, {
-      now, actionId, nextSeq, principal, payload,
-    }));
+    committed = await txn(db, async () => {
+      const result = await pipeline.applyInTxn(db, events, {
+        now, actionId, nextSeq, principal, payload,
+      });
+      // The owning-stream action receipt (Wave 4.9): written atomically with
+      // the events it references, so a retry's dedupe check and a crash
+      // recovery always see either both or neither.
+      insertReceipt(db, scope, actionId, now, result);
+      return result;
+    });
   } catch (err) {
     return executionFailure(err, { actionId });
   }
@@ -453,7 +460,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
   // The durable dispatch: authorize (outside txn) → dedupe by actionId →
   // run handler → commit events inside a write transaction.
-  async function dispatch({ actionId, type, payload, principal }) {
+  async function dispatch({ actionId, type, payload, principal, scope = '' }) {
     const handler = handlers[type];
     if (typeof handler !== 'function') {
       return unknownActionOutcome(type);
@@ -471,11 +478,16 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       return deniedOutcome();
     }
 
-    // Dedupe by actionId: a re-sent action returns its committed events without
-    // re-running the handler (SPEC §7).
-    const existing = eventsFor(db, actionId);
-    if (existing.length > 0) {
-      return successOutcome(existing.map((r) => rowToEvent(r, parseEventType)), true);
+    // Dedupe by the owning-stream action receipt (scope, actionId) — Wave 4.9.
+    // A re-sent action returns its committed events, in original emission
+    // order, without re-running the handler (SPEC §7). Keying on the action's
+    // own owning scope (not just actionId) means the same actionId reused
+    // under a different owning scope is independent action identity, and a
+    // zero-event action is durably deduped via its receipt even though it left
+    // no _Log row to key on.
+    const receipt = receiptFor(db, scope, actionId);
+    if (receipt) {
+      return successOutcome(eventsFromReceipt(db, receipt, parseEventType), true);
     }
 
     // Run the handler — events only, no DB writes (Fork A: entity-as-projection).
@@ -491,7 +503,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // node:sqlite's DatabaseSync is single-writer; BEGIN/COMMIT serialize writes.
     const now = new Date().toISOString();
     const committed = await commitEvents(db, emitted, {
-      now, actionId, nextSeq, principal, payload, pipeline,
+      now, actionId, nextSeq, principal, payload, pipeline, scope,
     });
     return committed;
   }
@@ -505,7 +517,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   // of `dispatch`: the same authorize→handler→durable variant path, looped over
   // N actions but with ONE BEGIN/COMMIT bracketing the concatenated events — not
   // a second pipeline (AGENTS.md). Effects fire in-txn exactly as in `dispatch`.
-  async function dispatchBatch({ actionId, actions = [], principal }) {
+  async function dispatchBatch({ actionId, actions = [], principal, scope = '' }) {
     if (actions.length === 0) {
       return successOutcome([]);
     }
@@ -531,10 +543,11 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       if (!authResult) return deniedOutcome({ actionIndex });
     }
 
-    // Dedupe the whole batch by its single actionId.
-    const existing = eventsFor(db, actionId);
-    if (existing.length > 0) {
-      return successOutcome(existing.map((r) => rowToEvent(r, parseEventType)), true);
+    // Dedupe the whole batch by its owning-stream action receipt (Wave 4.9) —
+    // same (scope, actionId) identity as `dispatch`, one grammar for both.
+    const receipt = receiptFor(db, scope, actionId);
+    if (receipt) {
+      return successOutcome(eventsFromReceipt(db, receipt, parseEventType), true);
     }
 
     // Run every handler, concatenating their emitted events. Handlers are pure
@@ -553,7 +566,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
     const now = new Date().toISOString();
     const committed = await commitEvents(db, allEmitted, {
-      now, actionId, nextSeq, principal, payload: actions, pipeline,
+      now, actionId, nextSeq, principal, payload: actions, pipeline, scope,
     });
     return committed;
   }

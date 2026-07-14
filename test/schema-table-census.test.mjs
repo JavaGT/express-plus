@@ -7,6 +7,7 @@ test('frameworkTableNames is a frozen, sorted, duplicate-free array of persisten
   assert.ok(Array.isArray(frameworkTableNames), 'frameworkTableNames must be an array');
 
   const expected = [
+    '_ActionReceipt',
     '_ConsumerCursor',
     '_Cursor',
     '_Job',

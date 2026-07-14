@@ -35,8 +35,31 @@ export function logIndexDDL() {
   return 'CREATE INDEX IF NOT EXISTS idx__Log_actionId ON _Log (actionId);';
 }
 
+// The owning-stream action receipt (Wave 4.9). Durable dispatch dedupe keys on
+// (scope, actionId) — the action's OWNING scope (the dispatch request's own
+// `scope`, distinct from any individual emitted event's scope) — so the same
+// actionId reused across two owning scopes is independent action identity, not
+// a collision. `eventRefs` is the stored result: a JSON array of `{scope, seq}`
+// _Log row references in exact original emission order (the stable emission
+// ordinal), so a replayed dedupe reconstructs `events` in the order the handler
+// returned them even when the action spans multiple event scopes. The receipt
+// row is written even for a zero-event action, so a no-op action is durably
+// idempotent across a retry (and a process restart) without a handler re-run.
+// A dispatch that omits the optional public `scope` field keys on the empty
+// string — every scope-less dispatch shares that one bucket, reproducing the
+// pre-Wave-4.9 global-by-actionId dedupe exactly for callers that don't opt in.
+export function actionReceiptTableDDL() {
+  return `CREATE TABLE IF NOT EXISTS _ActionReceipt (
+  scope TEXT NOT NULL,
+  actionId TEXT NOT NULL,
+  committedAt TEXT NOT NULL,
+  eventRefs TEXT NOT NULL,
+  PRIMARY KEY (scope, actionId)
+);`;
+}
+
 export function frameworkLogDDL() {
-  return [logTableDDL(), logIndexDDL(), cursorTableDDL()];
+  return [logTableDDL(), logIndexDDL(), cursorTableDDL(), actionReceiptTableDDL()];
 }
 
 // ---- read ----
@@ -57,6 +80,50 @@ export function eventsFor(db, actionId) {
     ...r,
     data: JSON.parse(r.eventData),
   }));
+}
+
+// receiptFor — read the owning-stream action receipt for (scope, actionId), or
+// undefined when the action was never committed under that owning scope. The
+// dedupe check for durable dispatch/dispatchBatch (Wave 4.9): unlike eventsFor,
+// this is scoped by the action's own owning scope, so the same actionId reused
+// under a different owning scope is a distinct, independent action.
+export function receiptFor(db, scope, actionId) {
+  const row = db.prepare(
+    'SELECT * FROM _ActionReceipt WHERE scope = :scope AND actionId = :actionId',
+  ).get({ scope, actionId });
+  if (!row) return undefined;
+  return { ...row, eventRefs: JSON.parse(row.eventRefs) };
+}
+
+// eventsFromReceipt — resolve a receipt's stored `eventRefs` back into full
+// events, in the exact order the refs were recorded (the stable emission
+// ordinal). A ref pointing at a row that no longer exists (retention pruning
+// having outrun the receipt) is skipped rather than thrown — the receipt still
+// proves the action committed; a pruned event is gone from every path, not
+// just replay.
+export function eventsFromReceipt(db, receipt, parseEventType) {
+  const stmt = db.prepare('SELECT * FROM _Log WHERE scope = :scope AND seq = :seq');
+  const events = [];
+  for (const ref of receipt.eventRefs) {
+    const row = stmt.get({ scope: ref.scope, seq: ref.seq });
+    if (row) events.push(rowToEvent(row, parseEventType));
+  }
+  return events;
+}
+
+// insertReceipt — record the owning-stream action receipt inside the caller's
+// open transaction, immediately after the same action's events (if any) are
+// appended to _Log. Atomic with the append: both land in the same commit, or
+// neither does.
+export function insertReceipt(db, scope, actionId, committedAt, events) {
+  db.prepare(
+    'INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs) VALUES (:scope, :actionId, :committedAt, :eventRefs)',
+  ).run({
+    scope,
+    actionId,
+    committedAt,
+    eventRefs: JSON.stringify(events.map((e) => ({ scope: e.scope, seq: e.seq }))),
+  });
 }
 
 // readSince — read events for a scope with seq > cursor, ordered by seq.

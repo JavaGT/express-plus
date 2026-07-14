@@ -30,7 +30,7 @@ function request(actionId, id) {
   };
 }
 
-test.todo('Wave 4.9: the same action ID remains independent in two owning scopes', async () => {
+test('Wave 4.9: the same action ID remains independent in two owning scopes', async () => {
   const db = openDb();
   const server = createServer({
     db,
@@ -54,7 +54,7 @@ test.todo('Wave 4.9: the same action ID remains independent in two owning scopes
   db.close();
 });
 
-test.todo('Wave 4.9: a retry preserves exact interleaved multi-scope emission order', async () => {
+test('Wave 4.9: a retry preserves exact interleaved multi-scope emission order', async () => {
   const db = openDb();
   const emitted = [
     { type: 'fixture.first', scope: 'Project:beta', data: { n: 1 } },
@@ -85,7 +85,7 @@ test.todo('Wave 4.9: a retry preserves exact interleaved multi-scope emission or
   db.close();
 });
 
-test.todo('Wave 4.9: a committed zero-event action dedupes without handler re-entry', async () => {
+test('Wave 4.9: a committed zero-event action dedupes without handler re-entry', async () => {
   const db = openDb();
   let handlerCalls = 0;
   const server = createServer({
@@ -111,7 +111,7 @@ test.todo('Wave 4.9: a committed zero-event action dedupes without handler re-en
   db.close();
 });
 
-test.todo('Wave 4.9: a zero-event action receipt survives database reopen', async () => {
+test('Wave 4.9: a zero-event action receipt survives database reopen', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'workbench-action-receipt-'));
   const path = join(directory, 'fixture.sqlite');
   let handlerCalls = 0;
@@ -144,7 +144,7 @@ test.todo('Wave 4.9: a zero-event action receipt survives database reopen', asyn
   }
 });
 
-test.todo('Wave 4.9: a non-empty zero-event batch has the same durable receipt', async () => {
+test('Wave 4.9: a non-empty zero-event batch has the same durable receipt', async () => {
   const db = openDb();
   let handlerCalls = 0;
   const server = createServer({
