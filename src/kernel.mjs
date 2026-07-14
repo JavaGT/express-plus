@@ -125,16 +125,46 @@ function buildDurableAdmission(app) {
 }
 
 // Post-commit consumers are contributed by the module that owns each seam.
-// Kernel only assembles engaged seams — it does not implement fanout/latch.
-// Live: app.live.createConsumer (singular Live Delivery seam) when engaged.
-function engagedPostCommitConsumers(app, entities, { blobFinalizeConsumer, durableEffectsRegistry }) {
+// Kernel only assembles engaged seams — it does not implement fanout/latch,
+// and it does not branch on kind: recovery mechanics live inside each
+// consumer's own module (blob-lifecycle.mjs, projected-async.mjs,
+// durable-effects.mjs, email-seam.mjs), never here. The `kind` tag below is
+// documentation-as-data — it makes the three genuinely different recovery
+// contracts a consumer can have visible at the one place they're assembled,
+// instead of leaving a reader to infer it per-module:
+//
+//   - 'durable-projection-consumer' — advances a per-scope _ConsumerCursor
+//     atomically with its work; a boot-time reconcile sweep (wired in
+//     application-runtime.mjs) replays any scope whose _Log outran its
+//     cursor. blob.finalize, projected.async, effect.durable.
+//   - 'live-delivery-consumer' — re-authorizes at delivery time; the CLIENT
+//     (not a server-side cursor) owns the reconnect/replay decision. Folding
+//     this into the cursor contract above would be a second recovery model
+//     for the same problem (AGENTS.md's no-second-path rule) — it stays
+//     separate on purpose. app.live.createConsumer.
+//   - 'best-effort-external-consumer' — no cursor, no reconcile sweep: a
+//     crash between COMMIT and this consumer running silently drops the
+//     work with no replay. Honestly at-least-once is a claim this kind
+//     CANNOT make; it is unknown-handoff. email-seam.mjs's consumer today.
+//
+// A fourth kind named by the Wave 5/6 design council but not represented in
+// this array — 'clock-driven maintenance starter' (the blob and log-retention
+// reapers) — is registered on app.clock directly (application-runtime.mjs),
+// not as a post-commit consumer: it runs on a timer, not per committed batch.
+export const POST_COMMIT_CONSUMER_KINDS = Object.freeze([
+  'durable-projection-consumer',
+  'live-delivery-consumer',
+  'best-effort-external-consumer',
+]);
+
+function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsumer, durableEffectsRegistry }) {
   return [
-    blobFinalizeConsumer,
-    app.live?.createConsumer?.(app),
-    createProjectedAsyncConsumer({ entities }),
-    createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }),
-    app._emailConsumer,
-  ].filter(Boolean);
+    { name: 'blob.finalize', kind: 'durable-projection-consumer', consumer: blobFinalizeConsumer },
+    { name: 'live', kind: 'live-delivery-consumer', consumer: app.live?.createConsumer?.(app) },
+    { name: 'projected.async', kind: 'durable-projection-consumer', consumer: createProjectedAsyncConsumer({ entities }) },
+    { name: 'effect.durable', kind: 'durable-projection-consumer', consumer: createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }) },
+    { name: 'email', kind: 'best-effort-external-consumer', consumer: app._emailConsumer },
+  ].filter((d) => Boolean(d.consumer));
 }
 
 export function buildKernel(app) {
@@ -170,6 +200,12 @@ export function buildKernel(app) {
   app.durableEffectsRegistry = durableEffectsRegistry;
   app.reconcileBlobFinalize = reconcileBlobFinalize;
 
+  const postCommitConsumerDescriptors = engagedPostCommitConsumerDescriptors(app, entities, {
+    blobFinalizeConsumer,
+    durableEffectsRegistry,
+  });
+  app.postCommitConsumerDescriptors = postCommitConsumerDescriptors;
+
   // Kernel public seam: durable mutation server (handlers, admission, write
   // queue). authorize:()=>true is intentional — route gate + in-txn admission
   // own Grants (no second auth path at the outer hook).
@@ -183,10 +219,7 @@ export function buildKernel(app) {
       blobAdapter,
       effectsRegistry: effectsRegistry.size > 0 ? effectsRegistry : null,
       executeEffectsForEvent,
-      postCommitConsumers: engagedPostCommitConsumers(app, entities, {
-        blobFinalizeConsumer,
-        durableEffectsRegistry,
-      }),
+      postCommitConsumers: postCommitConsumerDescriptors.map((d) => d.consumer),
     }),
   });
 }

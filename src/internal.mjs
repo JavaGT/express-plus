@@ -14,7 +14,7 @@ export { everyone, never, anyOf, inherit, NonCompilableError, bindReadScope, cos
 export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectSource } from './principal.mjs';
 export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient, durableMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.mjs';
-export { buildKernel } from './kernel.mjs';
+export { buildKernel, POST_COMMIT_CONSUMER_KINDS } from './kernel.mjs';
 export { createClock } from './clock.mjs';
 export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from './projected-async.mjs';
 export { buildDurableEffectsRegistry, createDurableEffectsConsumer, reconcileDurableEffects } from './durable-effects.mjs';

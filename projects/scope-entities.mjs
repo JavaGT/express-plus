@@ -25,7 +25,7 @@
 // instance to run DDL + set active DB so entity CRUD methods work.
 
 import {
-  membership, entity, text, date, ref, number, map, inherit,
+  membership, entity, text, date, ref, number, map, inherit, json, boolean,
   grant, deny, read, write, subscribe, admin, scope,
 } from 'workbench';
 import { setActiveDb } from '../src/db.mjs';
@@ -68,11 +68,12 @@ membership(Project, projectMembership);
 // Mirrors Scope's SourceDto: id, name, url, notes, createdAt.
 // ---------------------------------------------------------------------------
 export const Source = entity('Source', {
-  projectId: text(),
-  name: text(),
+  projectId: text({ immutable: true }),
+  name: text({ validate: (value) => (value.length >= 1 && value.length <= 500) || 'expected between 1 and 500 characters' }),
   url: text({ optional: true }),
   notes: text({ optional: true }),
-  createdAt: date({ default: () => new Date() }),
+  createdAt: date({ readonly: true, default: () => new Date() }),
+  updatedAt: date({ touch: true, default: () => new Date() }),
 
   grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
@@ -83,12 +84,12 @@ export const Source = entity('Source', {
 // Mirrors Scope's NoteDto: id, projectId, title, content, sortOrder, createdAt, updatedAt.
 // ---------------------------------------------------------------------------
 export const Note = entity('Note', {
-  projectId: text(),
-  title: text(),
-  content: text({ optional: true, default: '' }),
+  projectId: text({ immutable: true }),
+  title: text({ validate: (value) => (value.length >= 1 && value.length <= 500) || 'expected between 1 and 500 characters' }),
+  content: text({ optional: true, default: '', validate: (value) => value.length <= 100_000 || 'expected at most 100000 characters' }),
   sortOrder: number({ default: 0 }),
-  createdAt: date({ default: () => new Date() }),
-  updatedAt: date({ default: () => new Date() }),
+  createdAt: date({ readonly: true, default: () => new Date() }),
+  updatedAt: date({ touch: true, default: () => new Date() }),
 
   grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
@@ -98,14 +99,23 @@ export const Note = entity('Note', {
 // Theme — a colour-coded label set (codebook category) within a project.
 // Mirrors Scope's Theme DTO: id, projectId, label, colour, note, codeIds, createdAt, updatedAt.
 // ---------------------------------------------------------------------------
+function validateThemeCodeIds(value) {
+  if (!Array.isArray(value)) return 'expected an array of code ids';
+  if (value.length > 500) return 'expected at most 500 code ids';
+  if (value.some((id) => typeof id !== 'string' || id.length === 0 || id.length > 200)) {
+    return 'expected every code id to be non-empty text of at most 200 characters';
+  }
+  return true;
+}
+
 export const Theme = entity('Theme', {
-  projectId: text(),
-  label: text(),
-  colour: text({ optional: true }),
-  note: text({ optional: true }),
-  codeIds: text({ optional: true }), // JSON array in Scope; text in workbench
-  createdAt: date({ default: () => new Date() }),
-  updatedAt: date({ default: () => new Date() }),
+  projectId: text({ immutable: true }),
+  label: text({ validate: (value) => (value.length >= 1 && value.length <= 500) || 'expected between 1 and 500 characters' }),
+  colour: text({ optional: true, nullable: true, validate: (value) => value.length <= 64 || 'expected at most 64 characters' }),
+  note: text({ optional: true, nullable: true, validate: (value) => value.length <= 10_000 || 'expected at most 10000 characters' }),
+  codeIds: json(null, { optional: true, default: [], validate: validateThemeCodeIds }),
+  createdAt: date({ readonly: true, default: () => new Date() }),
+  updatedAt: date({ touch: true, default: () => new Date() }),
 
   grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
@@ -142,7 +152,8 @@ export const ExternalRef = entity('ExternalRef', {
 export const Codebook = entity('Codebook', {
   projectId: text(),
   name: text(),
-  createdAt: date({ default: () => new Date() }),
+  createdAt: date({ readonly: true, default: () => new Date() }),
+  updatedAt: date({ touch: true, default: () => new Date() }),
 
   grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
@@ -188,10 +199,11 @@ export const Speaker = entity('Speaker', {
 // Collection — a named grouping of artefacts within a project.
 // ---------------------------------------------------------------------------
 export const Collection = entity('Collection', {
-  projectId: text(),
-  name: text(),
-  description: text({ optional: true }),
-  createdAt: date({ default: () => new Date() }),
+  projectId: text({ immutable: true }),
+  name: text({ validate: (value) => (value.trim().length >= 1 && value.length <= 500) || 'expected a non-empty value of at most 500 characters' }),
+  description: text({ optional: true, nullable: true }),
+  createdAt: date({ readonly: true, default: () => new Date() }),
+  updatedAt: date({ touch: true, default: () => new Date() }),
 
   grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
@@ -236,8 +248,11 @@ export const Comment = entity('Comment', {
   segmentId: text(),
   parentId: text({ optional: true }),
   userId: text(),
-  createdAt: date({ default: () => new Date() }),
-  updatedAt: date({ default: () => new Date() }),
+  resolved: boolean({ default: false }),
+  resolvedAt: text({ optional: true }),
+  resolvedBy: text({ optional: true }),
+  createdAt: text({ default: () => new Date().toISOString() }),
+  updatedAt: text({ default: () => new Date().toISOString() }),
 
   grant: inherit(Project, { via: 'projectId' }),
   routes: (r) => { r.resource(); },
