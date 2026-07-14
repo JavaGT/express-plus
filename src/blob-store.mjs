@@ -2,14 +2,18 @@
 //
 // Upload writes atomically to a pending slot with computed hashes, then records
 // a 'pending' row. Caller adopts in their txn (status → 'adopted'), then
-// finalizes out-of-band (promote pending → final). Reaper reconciles crashes
-// and sweeps orphans/danglers.
+// finalizes out-of-band (promote pending → final) via the cursor-backed
+// blob-finalize consumer (blob-lifecycle.mjs) — crash recovery for a missed
+// finalize replays from committed events, not from a reaper scan. The reaper
+// here sweeps orphans/danglers only: bytes with no committed-event trail to
+// replay from (an abandoned upload, or bytes a removed row no longer
+// references).
 //
 // This module fuses METADATA (the BlobStore table) + LIFECYCLE (the
-// pending→adopt→finalize state machine, the reaper's reconcile/sweep). The BYTE
-// storage — where the bytes physically live — is delegated to an injected
-// byte store (`bytes`), defaulting to fsBlobs({ root }) (seam-review §2.2).
-// Only the byte half is swappable; lifecycle + metadata are framework
+// pending→adopt→finalize state machine, the reaper's orphan/dangler sweep).
+// The BYTE storage — where the bytes physically live — is delegated to an
+// injected byte store (`bytes`), defaulting to fsBlobs({ root }) (seam-review
+// §2.2). Only the byte half is swappable; lifecycle + metadata are framework
 // invariants. `workbench({ blobs: { root } })` constructs fsBlobs internally
 // (back-compat); `workbench({ blobs: byteStore })` accepts any conforming
 // byte-store object (the deployment reality for a photos app is S3-compatible
@@ -33,7 +37,7 @@ export function createBlobStore({ root, db, bytes }) {
   // byte store is injected, fsBlobs({ root }) is the default. `bytes` may also
   // be passed directly as `root`'s replacement once a caller hands a store in.
   const store = bytes ?? fsBlobs({ root });
-  const { writePending, finalizePending, readRange, remove, exists, pathFor } = store;
+  const { writePending, finalizePending, readRange, remove, pathFor } = store;
 
   function upload({ bytes: uploadBytes, mime, id } = {}) {
     id = id ?? randomUUID();
@@ -74,7 +78,7 @@ export function createBlobStore({ root, db, bytes }) {
 
   // finalize promotes the pending slot to the final slot via the byte store,
   // post-commit. Idempotent (the byte store swallows a missing pending slot) so
-  // the post-commit finalize consumer and the reaper's reconcile step can both
+  // the post-commit finalize consumer and its boot-time recovery sweep can both
   // call it without racing each other.
   function finalize(id) {
     safeId(id);
@@ -88,20 +92,11 @@ export function createBlobStore({ root, db, bytes }) {
 
   function reap({ ttl, blobColumns }) {
     const now = Date.now();
-    let reconciled = 0;
     let orphans = 0;
     let danglers = 0;
 
-    // 1. Reconcile: adopted blobs with a pending slot → finalize
-    const adoptedRows = db.prepare('SELECT id FROM BlobStore WHERE status = ?').all('adopted');
-    for (const row of adoptedRows) {
-      if (exists(row.id, { pending: true })) {
-        finalize(row.id);
-        reconciled++;
-      }
-    }
-
-    // 2. Orphan sweep: stale pending blobs
+    // 1. Orphan sweep: stale pending blobs (uploaded, never adopted by any
+    // committed dispatch — no committed event exists to recover them from).
     const staleDate = new Date(now - ttl).toISOString();
     const pendingRows = db.prepare(
       'SELECT id, createdAt FROM BlobStore WHERE status = ? AND createdAt < ?',
@@ -112,7 +107,7 @@ export function createBlobStore({ root, db, bytes }) {
       orphans++;
     }
 
-    // 3. Refcount sweep: adopted blobs with no references
+    // 2. Refcount sweep: adopted blobs with no references
     const adoptedForRefcount = db.prepare('SELECT id FROM BlobStore WHERE status = ?').all('adopted');
     for (const row of adoptedForRefcount) {
       let referenced = false;
@@ -130,7 +125,7 @@ export function createBlobStore({ root, db, bytes }) {
       }
     }
 
-    return { orphans, danglers, reconciled };
+    return { orphans, danglers };
   }
 
   function stat(id) {

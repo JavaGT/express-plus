@@ -162,12 +162,13 @@ export function buildKernel(app) {
 
   const effectsRegistry = buildEffects(entities);
   const durableEffectsRegistry = buildDurableEffectsRegistry([...entities.values()]);
-  const { blobAdapter, blobFinalizeConsumer, blobColumns } = createBlobLifecycle({
+  const { blobAdapter, blobFinalizeConsumer, blobColumns, reconcileBlobFinalize } = createBlobLifecycle({
     blobs: app.blobs,
     entities,
   });
   app.blobColumns = blobColumns;
   app.durableEffectsRegistry = durableEffectsRegistry;
+  app.reconcileBlobFinalize = reconcileBlobFinalize;
 
   // Kernel public seam: durable mutation server (handlers, admission, write
   // queue). authorize:()=>true is intentional — route gate + in-txn admission

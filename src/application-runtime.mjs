@@ -106,6 +106,14 @@ async function bootApplication(app) {
     log.warn('system', 'projected recovery sweep failed', { err });
   }
   if (app._shutdownStarted) return app;
+  if (app.db && app.reconcileBlobFinalize) {
+    try {
+      await app.writeQueue.run(() => app.reconcileBlobFinalize(app.db));
+    } catch (err) {
+      log.warn('system', 'blob finalize recovery sweep failed', { err });
+    }
+  }
+  if (app._shutdownStarted) return app;
   if (app.jobs && app.durableEffectsRegistry) {
     try {
       await app.writeQueue.run(() =>
