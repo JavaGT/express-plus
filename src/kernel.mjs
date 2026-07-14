@@ -129,23 +129,36 @@ function buildDurableAdmission(app) {
 // and it does not branch on kind: recovery mechanics live inside each
 // consumer's own module (blob-lifecycle.mjs, projected-async.mjs,
 // durable-effects.mjs, email-seam.mjs), never here. The `kind` tag below is
-// documentation-as-data — it makes the three genuinely different recovery
-// contracts a consumer can have visible at the one place they're assembled,
-// instead of leaving a reader to infer it per-module:
+// documentation-as-data — it makes the recovery contracts a consumer can have
+// visible at the one place they're assembled, instead of leaving a reader to
+// infer it per-module:
 //
 //   - 'durable-projection-consumer' — advances a per-scope _ConsumerCursor
 //     atomically with its work; a boot-time reconcile sweep (wired in
 //     application-runtime.mjs) replays any scope whose _Log outran its
-//     cursor. blob.finalize, projected.async, effect.durable.
+//     cursor. blob.finalize, projected.async, effect.durable, email all share
+//     this MECHANISM — but not the same idempotency property: blob.finalize's
+//     underlying work (a filesystem rename) is provably safe to replay
+//     (blob-store.mjs), so its replay is exactly-once in effect even though
+//     the mechanism is at-least-once. email's underlying work (an external
+//     transport call) is NOT provably idempotent — a replay after a crash
+//     between a successful send and its cursor write can duplicate the send.
+//     This is documented, honest, at-least-once (email-seam.mjs), not
+//     exactly-once — the taxonomy names the recovery MECHANISM, not a promise
+//     that every consumer's side effect is safe to repeat.
 //   - 'live-delivery-consumer' — re-authorizes at delivery time; the CLIENT
 //     (not a server-side cursor) owns the reconnect/replay decision. Folding
 //     this into the cursor contract above would be a second recovery model
 //     for the same problem (AGENTS.md's no-second-path rule) — it stays
 //     separate on purpose. app.live.createConsumer.
-//   - 'best-effort-external-consumer' — no cursor, no reconcile sweep: a
-//     crash between COMMIT and this consumer running silently drops the
+//   - 'best-effort-external-consumer' — no cursor, no reconcile sweep at all:
+//     a crash between COMMIT and this consumer running silently drops the
 //     work with no replay. Honestly at-least-once is a claim this kind
-//     CANNOT make; it is unknown-handoff. email-seam.mjs's consumer today.
+//     CANNOT make; it is unknown-handoff. No shipped consumer is this kind
+//     today (email moved to 'durable-projection-consumer' once it gained a
+//     cursor) — kept in the closed set for a future seam that genuinely has
+//     no recovery path, so classifying one honestly doesn't require growing
+//     the enum under pressure.
 //
 // A fourth kind named by the Wave 5/6 design council but not represented in
 // this array — 'clock-driven maintenance starter' (the blob and log-retention
@@ -163,7 +176,7 @@ function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsu
     { name: 'live', kind: 'live-delivery-consumer', consumer: app.live?.createConsumer?.(app) },
     { name: 'projected.async', kind: 'durable-projection-consumer', consumer: createProjectedAsyncConsumer({ entities }) },
     { name: 'effect.durable', kind: 'durable-projection-consumer', consumer: createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }) },
-    { name: 'email', kind: 'best-effort-external-consumer', consumer: app._emailConsumer },
+    { name: 'email', kind: 'durable-projection-consumer', consumer: app._emailConsumer },
   ].filter((d) => Boolean(d.consumer));
 }
 
@@ -199,6 +212,11 @@ export function buildKernel(app) {
   app.blobColumns = blobColumns;
   app.durableEffectsRegistry = durableEffectsRegistry;
   app.reconcileBlobFinalize = reconcileBlobFinalize;
+  // emailSeam(...).install(app) (called by the app author before .listen(),
+  // per email-seam.mjs's contract) stashes its reconcile sweep on app._... —
+  // pick it up here alongside the other reconcile sweeps kernel already owns.
+  // No-op default when the email seam was never installed.
+  app.reconcileEmailDelivery = app._reconcileEmailDelivery ?? (async () => ({ delivered: 0 }));
 
   const postCommitConsumerDescriptors = engagedPostCommitConsumerDescriptors(app, entities, {
     blobFinalizeConsumer,

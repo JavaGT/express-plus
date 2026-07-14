@@ -187,6 +187,70 @@ test('a blocked cursor write leaves the checkpoint behind, but the idempotent fi
   db.close();
 });
 
+// Regression: a scope's cursor must not be advanced past an earlier failed
+// event by a LATER same-scope event that succeeds in the same batch — that
+// would permanently hide the earlier miss from every future reconcile sweep
+// (lastSeq only ever advances). Selectively blocks only the FIRST event's
+// cursor write (via a WHEN clause on the trigger) so the second, later event
+// in the same scope would otherwise succeed and mask the first.
+test('a same-scope event that fails does not get silently covered by a later same-scope success', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const root = tmpRoot();
+  const store = createBlobStore({ root, db });
+  const Note = photoNote();
+  for (const sql of generateDDL(Note)) db.exec(sql);
+
+  const { id: blobA } = store.upload({ bytes: Buffer.from('photo-a'), mime: 'image/png' });
+  const { id: blobB } = store.upload({ bytes: Buffer.from('photo-b'), mime: 'image/png' });
+  db.exec('BEGIN IMMEDIATE');
+  store.adopt(db, blobA);
+  store.adopt(db, blobB);
+  db.exec('COMMIT');
+
+  db.exec(`
+    CREATE TRIGGER block_first_cursor_write
+    BEFORE INSERT ON _ConsumerCursor
+    WHEN NEW.lastSeq = 1
+    BEGIN
+      SELECT RAISE(ABORT, 'first cursor write blocked');
+    END
+  `);
+
+  const { blobFinalizeConsumer } = createBlobLifecycle({ blobs: store, entities: new Map([[Note.name, Note]]) });
+  const events = [
+    { type: 'Note.created', scope: 'Note:n-mono', seq: 1, data: { id: 'n-mono', body: 'x', photo: blobA } },
+    { type: 'Note.updated', scope: 'Note:n-mono', seq: 2, data: { id: 'n-mono', body: 'y', photo: blobB } },
+  ];
+  await blobFinalizeConsumer(events, { db });
+
+  assert.equal(
+    db.prepare('SELECT lastSeq FROM _ConsumerCursor WHERE consumer = ? AND scope = ?').get('blob.finalize', 'Note:n-mono'),
+    undefined,
+    'the scope must still read as behind at seq 1, not skip ahead to the seq-2 event that would have succeeded',
+  );
+  assert.ok(!existsSync(store.pathFor(blobB)), 'the second event must not be processed once its scope is blocked — reconcile owns the replay, in order');
+
+  db.exec('DROP TRIGGER block_first_cursor_write');
+  db.prepare('INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)').run(
+    'Note:n-mono', 1, 'Note.created', JSON.stringify(events[0].data), 'create-note-mono', '2026-01-01T00:00:00.000Z',
+  );
+  db.prepare('INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)').run(
+    'Note:n-mono', 2, 'Note.updated', JSON.stringify(events[1].data), 'update-note-mono', '2026-01-01T00:00:01.000Z',
+  );
+  const { reconcileBlobFinalize } = createBlobLifecycle({ blobs: store, entities: new Map([[Note.name, Note]]) });
+  await reconcileBlobFinalize(db);
+
+  assert.ok(existsSync(store.pathFor(blobA)), 'reconcile finalizes the earlier missed event');
+  assert.ok(existsSync(store.pathFor(blobB)), 'reconcile finalizes the later event too, in order');
+  assert.equal(
+    db.prepare('SELECT lastSeq FROM _ConsumerCursor WHERE consumer = ? AND scope = ?').get('blob.finalize', 'Note:n-mono').lastSeq,
+    2,
+  );
+  rmSync(root, { recursive: true, force: true });
+  db.close();
+});
+
 test('app.ready runs blob finalize recovery sweep before serving', async (t) => {
   const db = new DatabaseSync(':memory:');
   const root = tmpRoot();

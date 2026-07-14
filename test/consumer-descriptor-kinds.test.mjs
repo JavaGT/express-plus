@@ -1,7 +1,10 @@
 // Pin the taxonomy of post-commit consumer kind contracts (kernel.mjs's
 // POST_COMMIT_CONSUMER_KINDS). Three recovery contracts:
 //   durable-projection-consumer, live-delivery-consumer, best-effort-external-consumer.
-// Also pins that email is honestly undurable today (no cursor, no replay).
+// Also pins the basic shape of email's cursor-backed delivery (a successful
+// send advances its scope's cursor; a failed one does not) — the deeper
+// reconcile/atomicity proofs live in test/email-delivery-durable.test.mjs,
+// mirroring test/blob-finalize-durable.test.mjs's shape for the same pattern.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -79,8 +82,10 @@ test('postCommitConsumerDescriptors: every kind is a known value, expected consu
   assert.equal(byName['blob.finalize'].kind, 'durable-projection-consumer');
 
   // email — engaged because emailSeam.install() was called before listen().
+  // Cursor-backed since Wave 5.3 (email-seam.mjs); see
+  // test/email-delivery-durable.test.mjs for the durability proof.
   assert.ok(byName.email, 'email descriptor should be present');
-  assert.equal(byName.email.kind, 'best-effort-external-consumer');
+  assert.equal(byName.email.kind, 'durable-projection-consumer');
 
   // live — engaged because listen() creates app.live before buildKernel runs.
   assert.ok(byName.live, 'live descriptor should be present');
@@ -148,14 +153,15 @@ test('engagedPostCommitConsumerDescriptors does not branch on kind field', () =>
   }
 });
 
-test('email consumer is honestly undurable — transport errors swallowed, no cursor row', async (t) => {
+test('email consumer: cursor advances on a successful send, stays put on a failed one', async (t) => {
   const db = new DatabaseSync(':memory:');
-  let transportCalled = false;
+  let shouldFail = true;
+  let transportCalls = 0;
 
   const seam = emailSeam({
     transport: async (_msg) => {
-      transportCalled = true;
-      throw new Error('smtp down');
+      transportCalls++;
+      if (shouldFail) throw new Error('smtp down');
     },
   });
 
@@ -173,20 +179,27 @@ test('email consumer is honestly undurable — transport errors swallowed, no cu
   const emailDesc = app.postCommitConsumerDescriptors.find((d) => d.name === 'email');
   assert.ok(emailDesc, 'email descriptor should be present');
 
-  // (a) The try/catch in email-seam.mjs swallows transport errors — calling the
-  // consumer with a throwing transport must not propagate the throw.
+  const cursorRow = (scopeKey) => db.prepare(
+    'SELECT lastSeq FROM _ConsumerCursor WHERE consumer = ? AND scope = ?',
+  ).get('email', scopeKey);
+
+  // (a) A failing transport call — swallowed (post-commit failures must not
+  // propagate), and the scope's cursor does not advance: the deeper
+  // reconcile/replay proof lives in test/email-delivery-durable.test.mjs.
   await emailDesc.consumer(
-    [{ type: 'email.send', data: { to: 'a@b.c', subject: 's', body: 'body text' } }],
+    [{ type: 'email.send', scope: 'App:1', seq: 1, data: { to: 'a@b.c', subject: 's', body: 'body text' } }],
     { db },
   );
-  assert.ok(transportCalled, 'transport should have been called');
+  assert.equal(transportCalls, 1, 'transport should have been called');
+  assert.equal(cursorRow('App:1'), undefined, 'a failed send must not advance its scope cursor');
 
-  // (b) There is no _ConsumerCursor row for consumer = 'email'. The email
-  // consumer never calls upsertConsumerCursor — structural proof that a
-  // crash between COMMIT and this consumer running silently drops the work
-  // with no replay.
-  const cursorCount = db.prepare(
-    'SELECT COUNT(*) AS n FROM _ConsumerCursor WHERE consumer = ?',
-  ).get('email').n;
-  assert.equal(cursorCount, 0, 'email consumer must not write a _ConsumerCursor row');
+  // (b) A successful transport call DOES advance the cursor — email is
+  // cursor-backed (durable-projection-consumer) since Wave 5.3, unlike the
+  // prior best-effort-only behavior.
+  shouldFail = false;
+  await emailDesc.consumer(
+    [{ type: 'email.send', scope: 'App:1', seq: 1, data: { to: 'a@b.c', subject: 's', body: 'body text' } }],
+    { db },
+  );
+  assert.equal(cursorRow('App:1')?.lastSeq, 1, 'a successful send advances its scope cursor');
 });

@@ -90,7 +90,17 @@ export function createBlobLifecycle({ blobs, entities }) {
     // afterCommit call (e.g. created + updated referencing the same blob)
     // must finalize that id once, matching the pre-cursor behavior.
     const finalizedInBatch = new Set();
+    // Once a scope's cursor advance fails, stop advancing THAT scope's
+    // cursor for the rest of this batch — even if a later same-scope event
+    // would otherwise succeed. Events for one scope arrive in ascending seq
+    // order; if a later event's cursor write "wins" after an earlier one
+    // failed, the earlier failure is silently marked done (lastSeq only ever
+    // goes up) and a boot-time reconcile would never retry it. Deferring the
+    // rest of the scope to reconcile is simple and safe — a re-attempted
+    // later finalize is a harmless no-op (finalize() is idempotent).
+    const blockedScopes = new Set();
     for (const event of events) {
+      if (event.scope != null && blockedScopes.has(event.scope)) continue;
       const ids = resolveBlobIds(event);
       if (ids.length === 0) continue;
       const toFinalize = ids.filter((id) => !finalizedInBatch.has(id));
@@ -108,6 +118,7 @@ export function createBlobLifecycle({ blobs, entities }) {
         // cursor insert) leaves this scope behind, so the next reconcile
         // sweep retries it. The committed action/projection are unaffected:
         // this consumer runs strictly post-commit.
+        if (event.scope != null) blockedScopes.add(event.scope);
         getLog().warn('system', 'blob finalize consumer failed', { err, scope: event.scope, seq: event.seq });
       }
     }
@@ -116,8 +127,15 @@ export function createBlobLifecycle({ blobs, entities }) {
   async function reconcileBlobFinalize(db) {
     const recoveryByScope = consumerCursorMap(db, CONSUMER);
     const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
+    // Same per-scope blocking as the consumer above, for the same reason:
+    // rows are ordered scope-then-seq, so a later same-scope row succeeding
+    // after an earlier one failed must not advance the cursor past the
+    // failure — that would permanently hide the earlier miss from every
+    // future reconcile run, not just this one.
+    const blockedScopes = new Set();
     let finalized = 0;
     for (const row of rows) {
+      if (blockedScopes.has(row.scope)) continue;
       const applied = recoveryByScope.get(row.scope) ?? 0;
       if (applied >= row.seq) continue;
       let data;
@@ -133,6 +151,7 @@ export function createBlobLifecycle({ blobs, entities }) {
         recoveryByScope.set(row.scope, row.seq);
         finalized += ids.length;
       } catch (err) {
+        blockedScopes.add(row.scope);
         getLog().warn('system', 'blob finalize recovery failed', { err, scope: row.scope, seq: row.seq });
       }
     }

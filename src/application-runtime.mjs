@@ -114,6 +114,14 @@ async function bootApplication(app) {
     }
   }
   if (app._shutdownStarted) return app;
+  if (app.db && app.reconcileEmailDelivery) {
+    try {
+      await app.writeQueue.run(() => app.reconcileEmailDelivery(app.db));
+    } catch (err) {
+      log.warn('system', 'email delivery recovery sweep failed', { err });
+    }
+  }
+  if (app._shutdownStarted) return app;
   if (app.jobs && app.durableEffectsRegistry) {
     try {
       await app.writeQueue.run(() =>
