@@ -4,6 +4,10 @@ Generic rules governing design decisions in this project. Apply to every change.
 These are preferences expressed by the author; treat them as binding direction for
 naming, architecture, authorization, data, and live behavior.
 
+Accumulated agent memory: [`.agents/memory/MEMORY.md`](./.agents/memory/MEMORY.md) —
+shared across all agents; check before rediscovering incidents, rulings, or standing
+permissions.
+
 ## Naming
 
 - **Be specific.** A name should say what a thing IS, not a generic category it
