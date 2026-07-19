@@ -40,6 +40,7 @@ export const PUBLIC_API = Object.freeze({
     default: false,
     named: Object.freeze([
       'LiveChannel', 'LiveList', 'WorkbenchFailureError', 'decodeResult', 'createLiveStore',
+      'createScopeLiveStore',
       'createAuthClient',
     ]),
   }),

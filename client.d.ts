@@ -263,6 +263,78 @@ export function createLiveStore<Row extends Record<string, unknown> = Record<str
 ): LiveStore<Row>;
 
 // ---------------------------------------------------------------------------
+// createScopeLiveStore — composite scope projection
+// ---------------------------------------------------------------------------
+
+export interface ScopeEvent {
+  scope: string;
+  seq: number;
+  seqSpan: [number, number];
+  type: string;
+  data?: unknown;
+  actionId?: string;
+  committedAt?: string;
+  delta?: Record<string, unknown>;
+}
+
+export interface ScopeAction<Payload = unknown> {
+  actionId: string;
+  scope: string;
+  type: string;
+  payload: Payload;
+}
+
+export type ScopeDispatchReceipt =
+  | { ok: true; cursor?: number; seq?: number; value?: unknown }
+  | { ok: false; failure?: unknown; error?: unknown };
+
+export interface ScopeOperation<Payload = unknown> {
+  opId: string;
+  actionId: string;
+  action: ScopeAction<Payload>;
+  status: 'pending' | 'failed';
+  error: unknown;
+  delivered: boolean;
+  confirmedCursor: number | null;
+  echoCursor: number | null;
+}
+
+export type ScopeDispatchResult =
+  | { ok: true; status: 'committed'; opId: string; value?: unknown }
+  | { ok: false; status: 'failed-rolled-back'; opId: string; failure: unknown };
+
+export interface ScopeLiveStoreConfig<Snapshot> {
+  baseUrl: string;
+  scope: string;
+  validateSnapshot: (snapshot: unknown) => Snapshot;
+  fold: (snapshot: Snapshot, event: ScopeEvent) => Snapshot;
+  optimistic?: (snapshot: Snapshot, action: ScopeAction) => Snapshot;
+  sendAction: (action: ScopeAction) => Promise<ScopeDispatchReceipt | void>;
+  channel?: LiveChannel;
+  fetchImpl?: typeof globalThis.fetch;
+  snapshotUrl?: string;
+  eventsSinceUrl?: (cursor: number) => string;
+  createActionId?: () => string;
+  resyncBackoffBase?: number;
+  maxResyncBackoff?: number;
+}
+
+export interface ScopeLiveStore<Snapshot> {
+  readonly snapshot: Snapshot | null;
+  readonly cursor: number;
+  readonly ready: Promise<void>;
+  dispatch(type: string, payload: unknown): Promise<ScopeDispatchResult>;
+  operations(): ScopeOperation[];
+  pendingCount(): number;
+  failedCount(): number;
+  discardFailed(opId: string): void;
+  subscribe(listener: (snapshot: Snapshot) => void): () => void;
+  close(): void;
+}
+
+export function createScopeLiveStore<Snapshot>(config: ScopeLiveStoreConfig<Snapshot>): ScopeLiveStore<Snapshot>;
+
+// ---------------------------------------------------------------------------
 // createAuthClient — login/logout
 // ---------------------------------------------------------------------------
 

@@ -1660,6 +1660,282 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
 }
 
 // ---------------------------------------------------------------------------
+// createScopeLiveStore — one validated composite snapshot + one scope cursor.
+// ---------------------------------------------------------------------------
+
+/**
+ * Create a live store for an application-defined scope projection. The
+ * framework owns bootstrap, replay, optimistic operation status, and transport;
+ * the application supplies the snapshot validator and its one pure event fold.
+ */
+export function createScopeLiveStore({
+  baseUrl,
+  scope,
+  validateSnapshot,
+  fold,
+  optimistic = (snapshot) => snapshot,
+  sendAction,
+  channel,
+  fetchImpl,
+  snapshotUrl,
+  eventsSinceUrl,
+  createActionId,
+  resyncBackoffBase = 200,
+  maxResyncBackoff = 5000,
+}) {
+  if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
+  if (typeof validateSnapshot !== 'function') throw new TypeError('validateSnapshot is required');
+  if (typeof fold !== 'function') throw new TypeError('fold is required');
+  if (typeof sendAction !== 'function') throw new TypeError('sendAction is required');
+
+  const resolvedChannel = channel ?? new LiveChannel(baseUrl);
+  const resolvedFetch = fetchImpl ?? globalThis.fetch;
+  const snapshotEndpoint = snapshotUrl ?? `${baseUrl}/snapshot?scope=${encodeURIComponent(scope)}`;
+  const replayEndpoint = (cursor) => eventsSinceUrl
+    ? eventsSinceUrl(cursor)
+    : `${baseUrl}/events-since?scope=${encodeURIComponent(scope)}&cursor=${cursor}`;
+
+  let baseSnapshot = null;
+  let visibleSnapshot = null;
+  let cursor = 0;
+  let ready = false;
+  let closed = false;
+  let actionCounter = 0;
+  let resyncPromise = null;
+  let resyncAttempt = 0;
+  let resyncRetryTimer = null;
+  const queued = [];
+  const listeners = new Set();
+  const operations = new Map();
+
+  function nextActionId() {
+    if (createActionId) return createActionId();
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `scope_op_${++actionCounter}`;
+  }
+
+  function publish() {
+    if (closed || baseSnapshot === null) return;
+    let projected = baseSnapshot;
+    for (const operation of operations.values()) {
+      if (operation.status === 'pending') projected = optimistic(projected, operation.action);
+    }
+    visibleSnapshot = projected;
+    for (const listener of listeners) {
+      try { listener(visibleSnapshot); } catch { /* isolate consumers */ }
+    }
+  }
+
+  async function decodeJson(response) {
+    if (!response?.ok) throw new Error(`http ${response?.status ?? 'unknown'}`);
+    return response.json();
+  }
+
+  async function loadSnapshot() {
+    const response = await resolvedFetch(snapshotEndpoint, { credentials: 'include' });
+    const body = await decodeJson(response);
+    const nextSnapshot = validateSnapshot(body.snapshot);
+    const nextCursor = body.cursors?.[scope] ?? body.seq;
+    if (!Number.isFinite(nextCursor)) throw new Error(`snapshot is missing cursor for ${scope}`);
+    baseSnapshot = nextSnapshot;
+    cursor = nextCursor;
+    publish();
+  }
+
+  function normalizeLive(envelope) {
+    return {
+      scope,
+      seq: envelope.seq,
+      seqSpan: envelope.seqSpan ?? [envelope.seq, envelope.seq],
+      type: envelope.event?.type,
+      data: envelope.event?.data,
+      actionId: envelope.event?.actionId,
+      delta: envelope.delta,
+    };
+  }
+
+  function normalizeReplay(row) {
+    return {
+      scope,
+      seq: row.seq,
+      seqSpan: [row.seq, row.seq],
+      type: row.type,
+      data: row.data,
+      actionId: row.actionId,
+      committedAt: row.committedAt,
+    };
+  }
+
+  // The only committed-event path. Live frames, own echoes, foreign events,
+  // and historical replay all enter here after transport normalization.
+  function ingest(event) {
+    if (closed) return { status: 'closed' };
+    const decision = decideReplay(cursor, event.seqSpan ?? event.seq);
+    if (decision.kind === 'duplicate') return { status: 'duplicate' };
+    if (decision.kind === 'gap') {
+      queued.push(event);
+      resync().catch(() => {});
+      return { status: 'gap', expectedSeq: cursor + 1, receivedSeq: event.seqSpan?.[0] ?? event.seq };
+    }
+
+    baseSnapshot = fold(baseSnapshot, event);
+    cursor = decision.cursor;
+    const ownOperation = event.actionId ? operations.get(event.actionId) : null;
+    if (ownOperation) {
+      ownOperation.echoCursor = cursor;
+      if (ownOperation.delivered && (ownOperation.confirmedCursor == null || cursor >= ownOperation.confirmedCursor)) {
+        operations.delete(event.actionId);
+      }
+    }
+    publish();
+    return { status: ownOperation ? 'confirmed' : 'applied', cursor };
+  }
+
+  function queueOrIngest(event) {
+    if (!ready || resyncPromise) queued.push(event);
+    else ingest(event);
+  }
+
+  async function resync() {
+    if (closed) return;
+    if (resyncPromise) return resyncPromise;
+    resyncPromise = (async () => {
+      const response = await resolvedFetch(replayEndpoint(cursor), { credentials: 'include' });
+      const body = await decodeJson(response);
+      if (body.resync === 'stale') {
+        await loadSnapshot();
+      } else {
+        const rows = (body.events ?? []).filter((row) => row.seq > cursor);
+        let expected = cursor + 1;
+        for (const row of rows) {
+          if (row.scope !== undefined && row.scope !== scope) throw new Error('replay event belongs to another scope');
+          if (row.seq !== expected) throw new Error('replay batch is not contiguous');
+          expected += 1;
+        }
+        for (const row of rows) ingest(normalizeReplay(row));
+      }
+    })();
+    let succeeded = false;
+    try {
+      await resyncPromise;
+      succeeded = true;
+      resyncAttempt = 0;
+    } catch {
+      scheduleResync();
+    } finally {
+      resyncPromise = null;
+    }
+    if (!succeeded) return;
+    const held = queued.splice(0);
+    for (const event of held) ingest(event);
+  }
+
+  function scheduleResync() {
+    if (closed || resyncRetryTimer) return;
+    const delay = Math.min(resyncBackoffBase * Math.pow(2, resyncAttempt), maxResyncBackoff);
+    resyncAttempt += 1;
+    resyncRetryTimer = setTimeout(() => {
+      resyncRetryTimer = null;
+      if (!closed) resync().catch(() => {});
+    }, delay);
+    if (typeof resyncRetryTimer.unref === 'function') resyncRetryTimer.unref();
+  }
+
+  function onLive(envelope) {
+    if (closed || envelope?.type !== 'event') return;
+    queueOrIngest(normalizeLive(envelope));
+  }
+
+  async function start() {
+    await loadSnapshot();
+    if (closed) throw new ClientClosedError('Scope live store is closed');
+    const ack = await resolvedChannel.subscribeScope(scope, {
+      onCheckpoint({ currentSeq }) {
+        if (ready && currentSeq > cursor) resync().catch(() => {});
+      },
+    }, onLive);
+    if (ack.currentSeq > cursor) await resync();
+    ready = true;
+    const held = queued.splice(0);
+    for (const event of held) ingest(event);
+    publish();
+  }
+
+  async function dispatch(type, payload) {
+    const actionId = nextActionId();
+    const action = { actionId, scope, type, payload };
+    const operation = {
+      opId: actionId,
+      actionId,
+      action,
+      status: 'pending',
+      error: null,
+      delivered: false,
+      confirmedCursor: null,
+      echoCursor: null,
+    };
+    operations.set(actionId, operation);
+    publish();
+    try {
+      const receipt = await sendAction(action);
+      if (receipt?.ok === false) {
+        operation.status = 'failed';
+        operation.error = receipt.failure ?? receipt.error ?? receipt;
+        publish();
+        return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: operation.error };
+      }
+      const confirmedCursor = receipt?.cursor ?? receipt?.seq;
+      operation.delivered = true;
+      if (Number.isFinite(confirmedCursor)) operation.confirmedCursor = confirmedCursor;
+      if (operation.echoCursor != null
+        && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
+        operations.delete(actionId);
+      }
+      publish();
+      return { ok: true, status: 'committed', opId: actionId, value: receipt?.value };
+    } catch (error) {
+      operation.status = 'failed';
+      operation.error = error;
+      publish();
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: error };
+    }
+  }
+
+  const readyPromise = start();
+  readyPromise.catch(() => {});
+
+  return {
+    get snapshot() { return visibleSnapshot; },
+    get cursor() { return cursor; },
+    get ready() { return readyPromise; },
+    dispatch,
+    operations() { return [...operations.values()]; },
+    pendingCount() { return [...operations.values()].filter((operation) => operation.status === 'pending').length; },
+    failedCount() { return [...operations.values()].filter((operation) => operation.status === 'failed').length; },
+    discardFailed(opId) {
+      if (operations.get(opId)?.status === 'failed') {
+        operations.delete(opId);
+        publish();
+      }
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      if (visibleSnapshot !== null) listener(visibleSnapshot);
+      return () => listeners.delete(listener);
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      if (resyncRetryTimer) clearTimeout(resyncRetryTimer);
+      void resolvedChannel.unsubscribeScope(scope);
+      resolvedChannel.close();
+      listeners.clear();
+      queued.length = 0;
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // createAuthClient — login/logout against the framework's `/auth` battery.
 // ---------------------------------------------------------------------------
 //

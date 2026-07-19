@@ -20,8 +20,9 @@ import {
   type WorkbenchDatabase,
 } from 'workbench/server';
 import {
-  LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore, decodeResult,
-  type EventsSinceResponse, type LiveStore, type SnapshotResponse,
+  LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore,
+  createScopeLiveStore, decodeResult,
+  type EventsSinceResponse, type LiveStore, type ScopeLiveStore, type SnapshotResponse,
   type StaleResponse, type WsEnvelope,
 } from 'workbench/client';
 import { DatabaseSync } from 'node:sqlite';
@@ -187,8 +188,17 @@ const list: LiveList<ProjectRow> = new LiveList({ id: 'project-1', snapshot: [],
 const store: LiveStore<ProjectRow> = createLiveStore({
   baseUrl: 'https://example.test', name: 'Project', path: '/projects', channel,
 });
+const scopeStore: ScopeLiveStore<{ projects: ProjectRow[] }> = createScopeLiveStore({
+  baseUrl: 'https://example.test',
+  scope: 'workspace:one',
+  channel,
+  validateSnapshot: (value) => value as { projects: ProjectRow[] },
+  fold: (current) => current,
+  optimistic: (current) => current,
+  sendAction: async () => ({ ok: true }),
+});
 const auth = createAuthClient({ baseUrl: 'https://example.test' });
-void [list, store, auth.login('researcher', 'password'), decodeResult(new Response(null, { status: 204 }))];
+void [list, store, scopeStore, auth.login('researcher', 'password'), decodeResult(new Response(null, { status: 204 }))];
 
 declare const envelope: WsEnvelope;
 declare const snapshot: SnapshotResponse<ProjectRow>;

@@ -336,6 +336,7 @@ import {
   LiveChannel,
   LiveList,
   createLiveStore,
+  createScopeLiveStore,
   createAuthClient,
   decodeResult,
 } from 'workbench/client';
@@ -348,6 +349,7 @@ import {
 | `WorkbenchFailureError` | A correlated live-subscription rejection with a stable `.failure` category and message |
 | `LiveList` | One document: snapshot bootstrap → stream; span-aware cursor |
 | `createLiveStore` | Factory: CRUD dispatch + optimistic overlay + live lists |
+| `createScopeLiveStore` | One validated composite scope snapshot, cursor, optimistic actions, and replay recovery |
 | `createAuthClient` | Login/logout helpers against `/auth` |
 | `decodeResult` | Shared HTTP result decode |
 
