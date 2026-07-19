@@ -291,7 +291,29 @@ export function executeFrameworkDDL(db) {
   // guard checks PRAGMA table_info so it is a no-op on a fresh db and a safe
   // one-time ALTER on an older one.
   ensureJobColumns(db);
+  ensureActionReceiptColumns(db);
   ensureAuthEntityColumns(db);
+}
+
+function ensureActionReceiptColumns(db) {
+  const cols = new Set(db.prepare('PRAGMA table_info(_ActionReceipt)').all().map((r) => r.name));
+  const additions = [
+    ['historyOrder', 'INTEGER'],
+    ['actionType', 'TEXT'],
+    ['actionData', 'TEXT'],
+    ['principalKey', 'TEXT'],
+    ['sessionId', 'TEXT'],
+    ['operation', "TEXT NOT NULL DEFAULT 'action'"],
+  ];
+  for (const [name, sqlType] of additions) {
+    if (!cols.has(name)) db.exec(`ALTER TABLE _ActionReceipt ADD COLUMN ${name} ${sqlType}`);
+  }
+  db.exec(`UPDATE _ActionReceipt SET historyOrder = (
+    SELECT COUNT(*) FROM _ActionReceipt AS earlier
+    WHERE earlier.scope = _ActionReceipt.scope
+      AND (earlier.committedAt < _ActionReceipt.committedAt
+        OR (earlier.committedAt = _ActionReceipt.committedAt AND earlier.actionId <= _ActionReceipt.actionId))
+  ) WHERE historyOrder IS NULL`);
 }
 
 function ensureJobColumns(db) {

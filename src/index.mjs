@@ -5,6 +5,7 @@ export { read, write, subscribe, admin, grant, deny } from './grant.mjs';
 export { scope } from './scope.mjs';
 export { entity } from './entity/compile.mjs';
 export { action, event } from './pipeline.mjs';
+export { durableHistory } from './durable-history.mjs';
 export { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
 export { everyone, never, anyOf, inherit } from './scope-sql.mjs';
 export { principal, anonymous } from './principal.mjs';

@@ -31,6 +31,13 @@ function wireMutationSurface(app) {
   const dispatch = (args) =>
     withLog(app.log, () => app.writeQueue.run(() => app.kernel.dispatch(args)));
   app.dispatch = dispatch;
+  app.history = app.kernel.history && Object.freeze({
+    actions: app.kernel.history.actions,
+    events: app.kernel.history.events,
+    cursor: app.kernel.history.cursor,
+    undo: (args) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.history.undo(args))),
+    redo: (args) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.history.redo(args))),
+  });
   app.batch = async (actionsOrFactory, { principal } = {}) =>
     withLog(app.log, () => app.writeQueue.run(() => {
       const actions = typeof actionsOrFactory === 'function'

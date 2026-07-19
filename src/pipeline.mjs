@@ -17,6 +17,7 @@ import { lifecycleVerb, parseEventType } from './event-handle.mjs';
 import { txn } from './driver.mjs';
 import { isPlainObject, ValidationError } from './field-strategy.mjs';
 import { createRequire } from 'node:module';
+import { createDurableHistoryRuntime } from './durable-history.mjs';
 import { decideReplay } from './replay-decision.mjs';
 import { getLog } from './log.mjs';
 import { failure, failureFromError, failureOutcome } from './outcome.mjs';
@@ -348,7 +349,7 @@ function checkDurableDedupe(db, scope, actionId) {
 // `actions` array. The two genuinely differ there, so the brace is extracted but
 // the `payload` value stays per-caller. Throws non-403 errors after rolling back;
 // Post-commit delivery can no longer turn a committed mutation into a failure.
-async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize }) {
+async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit }) {
   let committed;
   try {
     // Wave 4.4 — Authorize INSIDE the transaction, atomic with log append,
@@ -390,7 +391,8 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
       // The owning-stream action receipt (Wave 4.9): written atomically with
       // the events it references, so a retry's dedupe check and a crash
       // recovery always see either both or neither.
-      insertReceipt(db, scope, actionId, now, result);
+      await historyCommit?.apply?.(db);
+      insertReceipt(db, scope, actionId, now, result, historyCommit?.metadata);
       return result;
     });
   } catch (err) {
@@ -409,7 +411,7 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
 // gate + grant engine compose — it is not a second, looser auth path.
-export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant() } = {}) {
+export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), history } = {}) {
   if (typeof authorize !== 'function') {
     throw new Error(
       `createServer requires an authorize function. There is no default — a ` +
@@ -421,6 +423,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   if (db && pipeline?.name !== 'durable.mutation') {
     throw new Error(`durable createServer requires the 'durable.mutation' pipeline variant.`);
   }
+  if (history && !db) throw new Error('durable history requires a durable database');
 
   // ---- ephemeral path (no db) — synchronous, in-memory ----
   if (!db) {
@@ -528,7 +531,8 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   // detection before dedupe) → dedupe by actionId → run handler → commit
   // events inside a write transaction. Authorize ALSO runs INSIDE the
   // transaction (Wave 4.4), atomic with log, cursor, projection, and receipt.
-  async function dispatch({ actionId, type, payload, principal, scope = '' }) {
+  async function dispatch(request) {
+    const { actionId, type, payload, principal, scope = '' } = request;
     const handler = checkHandler(handlers, type);
     if (!handler) return unknownActionOutcome(type);
 
@@ -569,8 +573,9 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // rolls back cleanly with no partial state. node:sqlite's DatabaseSync is
     // single-writer; BEGIN/COMMIT serialize writes.
     const now = new Date().toISOString();
+    const historyCommit = request._historyCommit ?? historyRuntime?.normalCommit(request);
     const committed = await commitEvents(db, emitted, {
-      now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize,
+      now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit,
     });
     return committed;
   }
@@ -588,7 +593,8 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   // Authorization runs at TWO points: Fork C outside the txn (revoked-principal
   // detection before dedupe/write) AND inside commitEvents's txn (Wave 4.4)
   // for crash atomicity with log, cursor, projection, and receipt writes.
-  async function dispatchBatch({ actionId, actions = [], principal, scope = '' }) {
+  async function dispatchBatch(request) {
+    const { actionId, actions = [], principal, scope = '' } = request;
     if (actions.length === 0) {
       return successOutcome([]);
     }
@@ -635,13 +641,17 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     }
 
     const now = new Date().toISOString();
+    const historyCommit = request._historyCommit ?? historyRuntime?.normalCommit(request);
     const committed = await commitEvents(db, allEmitted, {
-      now, actionId, nextSeq, principal, payload: actions, pipeline, scope, authorize,
+      now, actionId, nextSeq, principal, payload: actions, pipeline, scope, authorize, historyCommit,
     });
     return committed;
   }
 
-  return { dispatch, dispatchBatch, db, log: [] };  // log is the durable _Log table; empty array for compat
+  const historyRuntime = history
+    ? createDurableHistoryRuntime({ db, descriptor: history, dispatch })
+    : undefined;
+  return { dispatch, dispatchBatch, history: historyRuntime, db, log: [] };  // log is the durable _Log table; empty array for compat
 }
 
 // createClient({ events }) — the client-side reconciliation path (SPEC §7 stage

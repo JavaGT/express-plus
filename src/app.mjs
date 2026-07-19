@@ -89,6 +89,7 @@ export default function workbench({
   viewsDir,
   resolveScope,
   scopeSnapshot,
+  history,
   blobReapIntervalMs = maintenanceDefaults.blobReapIntervalMs,
   blobReapTtlMs = maintenanceDefaults.blobReapTtlMs,
   logRetentionDays = maintenanceDefaults.logRetentionDays,
@@ -181,6 +182,7 @@ export default function workbench({
   // existing row-scope + grant engine instead of trusting transport callbacks.
   app.resolveScope = resolveScope;
   app.scopeSnapshot = scopeSnapshot;
+  app._history = history;
   // Per-app config — options override env fallbacks (SPEC §3). `app.config` is
   // the one place a mounted route / transport reads this app's port, env,
   // viewsDir, and session duration instead of the process-wide singleton. An

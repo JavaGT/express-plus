@@ -54,12 +54,29 @@ export function actionReceiptTableDDL() {
   actionId TEXT NOT NULL,
   committedAt TEXT NOT NULL,
   eventRefs TEXT NOT NULL,
+  historyOrder INTEGER,
+  actionType TEXT,
+  actionData TEXT,
+  principalKey TEXT,
+  sessionId TEXT,
+  operation TEXT NOT NULL DEFAULT 'action',
   PRIMARY KEY (scope, actionId)
 );`;
 }
 
+export function historyCursorTableDDL() {
+  return `CREATE TABLE IF NOT EXISTS _HistoryCursor (
+  principalKey TEXT NOT NULL,
+  sessionId TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  past TEXT NOT NULL,
+  future TEXT NOT NULL,
+  PRIMARY KEY (principalKey, sessionId, scope)
+);`;
+}
+
 export function frameworkLogDDL() {
-  return [logTableDDL(), logIndexDDL(), cursorTableDDL(), actionReceiptTableDDL()];
+  return [logTableDDL(), logIndexDDL(), cursorTableDDL(), actionReceiptTableDDL(), historyCursorTableDDL()];
 }
 
 // ---- read ----
@@ -115,15 +132,28 @@ export function eventsFromReceipt(db, receipt, parseEventType) {
 // open transaction, immediately after the same action's events (if any) are
 // appended to _Log. Atomic with the append: both land in the same commit, or
 // neither does.
-export function insertReceipt(db, scope, actionId, committedAt, events) {
+export function insertReceipt(db, scope, actionId, committedAt, events, metadata = {}) {
+  const historyOrder = db.prepare(
+    'SELECT COALESCE(MAX(historyOrder), 0) + 1 AS next FROM _ActionReceipt WHERE scope = :scope',
+  ).get({ scope }).next;
   db.prepare(
-    'INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs) VALUES (:scope, :actionId, :committedAt, :eventRefs)',
+    `INSERT INTO _ActionReceipt
+      (scope, actionId, committedAt, eventRefs, historyOrder, actionType, actionData, principalKey, sessionId, operation)
+     VALUES
+      (:scope, :actionId, :committedAt, :eventRefs, :historyOrder, :actionType, :actionData, :principalKey, :sessionId, :operation)`,
   ).run({
     scope,
     actionId,
     committedAt,
     eventRefs: JSON.stringify(events.map((e) => ({ scope: e.scope, seq: e.seq }))),
+    historyOrder,
+    actionType: metadata.actionType ?? null,
+    actionData: JSON.stringify(metadata.actionData ?? null),
+    principalKey: metadata.principalKey ?? null,
+    sessionId: metadata.sessionId ?? null,
+    operation: metadata.operation ?? 'action',
   });
+  return historyOrder;
 }
 
 // readSince — read events for a scope with seq > cursor, ordered by seq.

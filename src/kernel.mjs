@@ -231,6 +231,7 @@ export function buildKernel(app) {
     handlers,
     authorize: () => true,
     db: app.db,
+    history: app._history,
     pipeline: durableMutationVariant({
       projectionConsumers: projections,
       admission: buildDurableAdmission(app),

@@ -316,6 +316,7 @@ export interface DispatchRequest<Payload = Record<string, unknown>> {
   payload: Payload;
   principal: Principal;
   scope?: string;
+  history?: { session: string };
 }
 export type DispatchResult<Event extends CommittedEvent = CommittedEvent> =
   | {
@@ -493,6 +494,7 @@ export interface WorkbenchOptions {
     principal: Principal,
     anchor: { entity: string; id: string; row: Record<string, unknown> },
   ) => unknown | Promise<unknown>;
+  history?: DurableHistoryDescriptor;
   migrations?: readonly Readonly<{ version: number; up(db: WorkbenchDatabase): void }>[];
   jobs?: Readonly<Record<string, unknown>>;
   blobs?: Readonly<Record<string, unknown>>;
@@ -518,6 +520,7 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly httpServer?: Server;
   readonly jobs?: unknown;
   readonly blobs?: unknown;
+  readonly history?: DurableHistoryRuntime;
   resolveScope?: WorkbenchOptions['resolveScope'];
   scopeSnapshot?: WorkbenchOptions['scopeSnapshot'];
   readonly ready?: Promise<WorkbenchApp>;
@@ -552,6 +555,73 @@ export interface WorkbenchApp extends RouteBuilder {
 }
 
 export function router(options?: { mergeParams?: boolean }): RouteBuilder;
+
+export type HistoryOperation = 'read' | 'undo' | 'redo';
+
+export interface HistoryAction {
+  readonly scope: string;
+  readonly order: number;
+  readonly actionId: string;
+  readonly type: string | null;
+  readonly payload: unknown;
+  readonly principal: string | null;
+  readonly session: string | null;
+  readonly operation: 'action' | 'undo' | 'redo';
+  readonly committedAt: string;
+  readonly events: readonly CommittedEvent[];
+}
+
+export interface HistoryAccess {
+  readonly operation: HistoryOperation;
+  readonly scope: string;
+  readonly principal: Principal;
+  readonly session?: string;
+  readonly action?: HistoryAction;
+}
+
+export interface HistoryActionRequest<Payload = Record<string, unknown>> {
+  readonly type: string;
+  readonly payload?: Payload;
+  readonly scope?: string;
+}
+
+export interface DurableHistoryDescriptor {
+  readonly authorize: (access: HistoryAccess) => boolean | Promise<boolean>;
+  readonly inverse: (context: {
+    readonly action: HistoryAction;
+    readonly principal: Principal;
+    readonly session: string;
+  }) => HistoryActionRequest | Promise<HistoryActionRequest>;
+  readonly redo?: (context: {
+    readonly action: HistoryAction;
+    readonly principal: Principal;
+    readonly session: string;
+  }) => HistoryActionRequest | Promise<HistoryActionRequest>;
+}
+
+export function durableHistory(options: DurableHistoryDescriptor): DurableHistoryDescriptor;
+
+export interface HistoryReadOptions {
+  readonly scope: string;
+  readonly principal: Principal;
+  readonly after?: number;
+  readonly limit?: number;
+}
+
+export interface HistorySessionOptions {
+  readonly scope: string;
+  readonly session: string;
+  readonly principal: Principal;
+  readonly actionId?: string;
+}
+
+export interface DurableHistoryRuntime {
+  actions(options: HistoryReadOptions): Promise<readonly HistoryAction[]>;
+  events(options: HistoryReadOptions): Promise<readonly CommittedEvent[]>;
+  cursor(options: HistorySessionOptions): Promise<Readonly<{ undo: number; redo: number }>>;
+  undo(options: HistorySessionOptions): Promise<DispatchResult & { readonly empty?: boolean }>;
+  redo(options: HistorySessionOptions): Promise<DispatchResult & { readonly empty?: boolean }>;
+}
 
 export const User: WorkbenchEntity;
 export const Session: WorkbenchEntity;

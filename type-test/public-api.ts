@@ -6,6 +6,7 @@ import workbench, {
   FAILURE_CATEGORIES, failure, failureOutcome, isWorkbenchFailure, sanitizeUnexpectedFailure,
   matchRoute, noopTransport, serveStatic, sessionCookie, sessionPrincipalOf,
   sessionTokenOf,
+  durableHistory,
   type ActionHandle, type BatchAction, type CommittedEvent, type DispatchRequest,
   type DispatchResult, type EventHandle, type FailureCategory, type FailureOutcome,
   type InheritDirective, type Principal, type WorkbenchFailure,
@@ -93,6 +94,17 @@ const request: DispatchRequest = {
   principal: principal({ type: 'user', id: 'user-1' }),
 };
 const dispatchResult: Promise<DispatchResult> = app.dispatch(request);
+
+const configuredHistory = durableHistory({
+  authorize: ({ operation, scope: historyScope, principal: historyPrincipal }) =>
+    operation === 'read' && historyScope.length > 0 && historyPrincipal.id !== null,
+  inverse: ({ action: committedAction }) => ({
+    type: committedAction.type ?? 'note.restore',
+    payload: committedAction.payload as Record<string, unknown>,
+    scope: committedAction.scope,
+  }),
+});
+void configuredHistory;
 const batchActions: readonly BatchAction[] = [
   { type: Rename.type, payload: { id: 'project-1', name: 'Research' } },
 ];

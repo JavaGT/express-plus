@@ -42,7 +42,7 @@ Action → authorize → handler → `_Log` append → projection (+ in-txn effe
 | `pipeline.mjs` | `createServer`, durable variant, `createClient` |
 | `kernel.mjs` | Thin Compile/Commit assembly + engaged consumers |
 | `application-runtime.mjs` | Singular headless/HTTP start, recovery, maintenance, clocks |
-| `committed-log.mjs` / `cursor.mjs` | Log + seq storage |
+| `committed-log.mjs` / `cursor.mjs` / `durable-history.mjs` | Log, seq storage, authorized history reads + session undo cursors |
 | `scope-handle.mjs` | Scope key grammar |
 | `write-queue.mjs` | Single-writer serialization |
 | `driver.mjs` / `db.mjs` / `migrations.mjs` | SQLite engagement |
