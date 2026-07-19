@@ -479,6 +479,7 @@ export interface ListenOptions {
 export interface WorkbenchOptions {
   db?: string | WorkbenchDatabase;
   entities?: readonly WorkbenchEntity<any>[];
+  actions?: readonly RegisteredAction[];
   port?: number;
   env?: string;
   requireEnv?: readonly string[];
@@ -509,11 +510,34 @@ export interface WorkbenchOptions {
   logRetentionIntervalMs?: number;
 }
 
+export interface RegisteredProjection {
+  readonly eventTypes: readonly string[];
+  apply(event: CommittedEvent, db: WorkbenchDatabase): void;
+}
+
+export interface RegisteredAction<Payload = Record<string, unknown>> {
+  readonly type: string;
+  authorize(context: {
+    type: string;
+    payload: Payload;
+    principal: Principal;
+    db: WorkbenchDatabase;
+  }): boolean | Promise<boolean>;
+  handler(context: {
+    payload: Payload;
+    principal: Principal;
+    db: WorkbenchDatabase;
+    now: string;
+  }): readonly Readonly<{ type: string; scope: string; data: unknown }>[] | Promise<readonly Readonly<{ type: string; scope: string; data: unknown }>[] >;
+  readonly projections?: readonly RegisteredProjection[];
+}
+
 export interface WorkbenchApp extends RouteBuilder {
   readonly db?: WorkbenchDatabase;
   readonly routes: readonly unknown[];
   readonly config: Readonly<Record<string, unknown>>;
   readonly entities: ReadonlyMap<string, BoundWorkbenchEntity<any>>;
+  readonly actions: readonly RegisteredAction[];
   readonly log: WorkbenchLog;
   readonly clock: WorkbenchClock;
   readonly port?: number;

@@ -349,7 +349,7 @@ function checkDurableDedupe(db, scope, actionId) {
 // `actions` array. The two genuinely differ there, so the brace is extracted but
 // the `payload` value stays per-caller. Throws non-403 errors after rolling back;
 // Post-commit delivery can no longer turn a committed mutation into a failure.
-async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit }) {
+async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit, handler }) {
   let committed;
   try {
     // Wave 4.4 — Authorize INSIDE the transaction, atomic with log append,
@@ -383,6 +383,11 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
             throw err;
           }
         }
+      }
+
+      if (handler) events = await handler({ payload, principal, db, now });
+      if (!Array.isArray(events)) {
+        throw new TypeError(`action '${type}' handler must return an event array`);
       }
 
       const result = await pipeline.applyInTxn(db, events, {
@@ -561,11 +566,13 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
     // Run the handler — events only, no DB writes (Fork A: entity-as-projection).
     // The handler may be sync or async.
-    let emitted;
-    try {
-      emitted = await handler({ payload, principal });
-    } catch (err) {
-      return executionFailure(err, { actionId, type });
+    let emitted = null;
+    if (!handler.inTransaction) {
+      try {
+        emitted = await handler({ payload, principal });
+      } catch (err) {
+        return executionFailure(err, { actionId, type });
+      }
     }
 
     // Apply events and authorize inside a write transaction using the shared brace.
@@ -576,6 +583,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const historyCommit = request._historyCommit ?? historyRuntime?.normalCommit(request);
     const committed = await commitEvents(db, emitted, {
       now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit,
+      handler: handler.inTransaction ? handler : null,
     });
     return committed;
   }

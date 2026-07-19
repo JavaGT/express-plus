@@ -26,6 +26,27 @@ function collectAppEntities(app) {
     Object.assign(handlers, entity.crudHandlers);
     projections.push(entity.projection);
   }
+  for (const declaration of app.actions ?? []) {
+    if (!declaration || typeof declaration.type !== 'string' || declaration.type.length === 0) {
+      throw new Error('registered action requires a non-empty type');
+    }
+    if (typeof declaration.authorize !== 'function') {
+      throw new Error(`registered action '${declaration.type}' requires an authorize function`);
+    }
+    if (typeof declaration.handler !== 'function') {
+      throw new Error(`registered action '${declaration.type}' requires a handler function`);
+    }
+    if (handlers[declaration.type]) throw new Error(`action '${declaration.type}' is already registered`);
+    const handler = (context) => declaration.handler(context);
+    Object.defineProperty(handler, 'inTransaction', { value: true });
+    handlers[declaration.type] = handler;
+    for (const projection of declaration.projections ?? []) {
+      if (!Array.isArray(projection?.eventTypes) || typeof projection.apply !== 'function') {
+        throw new Error(`registered action '${declaration.type}' has an invalid projection`);
+      }
+      projections.push(projection);
+    }
+  }
   return { handlers, projections, entities };
 }
 
@@ -42,6 +63,10 @@ function buildEffects(entities) {
 }
 
 function buildDurableAdmission(app) {
+  const registeredEventTypes = new Set(
+    (app.actions ?? []).flatMap((action) =>
+      (action.projections ?? []).flatMap((projection) => projection.eventTypes ?? [])),
+  );
   async function admitsExistingRow({ entityName, verb, principal, event }) {
     const entity = app.entities?.get(entityName);
     if (!entity) return false;
@@ -59,6 +84,7 @@ function buildDurableAdmission(app) {
 
   return {
     async beforeProjection({ entityName, verb, principal, event, payload, db: hookDb, now }) {
+      if (registeredEventTypes.has(event?.type)) return true;
       if (
         entityName === Invitation.name
         && verb === 'create'
@@ -106,6 +132,7 @@ function buildDurableAdmission(app) {
       return true;
     },
     async afterProjection({ entityName, verb, principal, event, db: hookDb }) {
+      if (registeredEventTypes.has(event?.type)) return true;
       if (
         entityName === Invitation.name
         && verb === 'create'
@@ -224,12 +251,13 @@ export function buildKernel(app) {
   });
   app.postCommitConsumerDescriptors = postCommitConsumerDescriptors;
 
-  // Kernel public seam: durable mutation server (handlers, admission, write
-  // queue). authorize:()=>true is intentional — route gate + in-txn admission
-  // own Grants (no second auth path at the outer hook).
+  const registeredActions = new Map((app.actions ?? []).map((action) => [action.type, action]));
+
+  // Generated CRUD is authorized by row admission. Registered actions own an
+  // explicit authorization function which runs at both durable auth gates.
   return createServer({
     handlers,
-    authorize: () => true,
+    authorize: (context) => registeredActions.get(context.type)?.authorize({ ...context, db: app.db }) ?? true,
     db: app.db,
     history: app._history,
     pipeline: durableMutationVariant({

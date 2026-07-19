@@ -49,6 +49,7 @@ final transport choice: create a fresh app if HTTP is needed later.
 | `jobs` | Engage job-queue substrate (`sharedSecret` required) |
 | `blobs` | Blob store root for binary fields / `POST /blobs` |
 | `migrations` | Versioned schema migrations at startup |
+| `actions` | Explicitly authorized custom actions with in-transaction handlers and projections |
 | `requireEnv` | Fail closed at construction if env vars missing |
 | `blobReapIntervalMs`, `blobReapTtlMs` | Pending-blob cleanup cadence (> 0) and age (≥ 0) |
 | `logRetentionDays`, `logRetentionIntervalMs` | Durable-log age (≥ 0; `0` disables) and cadence (> 0) |
@@ -66,6 +67,12 @@ final transport choice: create a fresh app if HTTP is needed later.
 | `.onShutdown(name, fn, { timeoutMs }?)` | Register ordered cleanup with a deadline |
 | `.shutdown()` | Stop ingress, run cleanup, and drain accepted writes; process signals call it automatically |
 | `.ready` | `undefined` before start; then the singular promise identical to `.start()` |
+
+Registered actions are for domain verbs that do not fit generated entity CRUD.
+Each declaration requires `authorize`, runs its event-producing `handler` inside
+the durable transaction, and may provide synchronous `projections` that commit
+atomically with the log, cursor, and action receipt. Handlers return events only;
+direct row writes belong in projection consumers.
 
 Generated `Entity.create` actions accept an optional non-empty text `id`. When
 present, that caller-owned id is preserved in the committed event and projected

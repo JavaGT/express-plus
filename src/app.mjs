@@ -78,6 +78,7 @@ export function router(options = {}) {
 export default function workbench({
   db,
   entities = [],
+  actions = [],
   blobs: blobOpts,
   requireEnv = [],
   migrations = [],
@@ -161,6 +162,7 @@ export default function workbench({
     },
   };
   const app = makeMountable({ entityOf: runtime.entityOf });
+  app.actions = Object.freeze([...actions]);
   app.dispatch = async () => {
     throw new Error('application is not started; call start() before dispatching');
   };
