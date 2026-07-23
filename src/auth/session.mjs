@@ -82,7 +82,9 @@ function sessionCreatedAtMs(value) {
     return Number.isFinite(timestamp) ? timestamp : null;
   }
   const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  // Date.parse normalizes impossible dates (for example February 30). Stored
+  // ISO dates must round-trip exactly so corrupt values cannot gain admission.
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value ? parsed : null;
 }
 
 // Build the `principalOf(req)` function for a given db. It reads the session
@@ -109,6 +111,7 @@ export function sessionPrincipalOf(db, { durationMs = config.sessionDurationMs, 
       const checkedAt = now();
       const createdAt = sessionCreatedAtMs(row.createdAt);
       if (
+        !Number.isFinite(checkedAt) ||
         !Number.isFinite(durationMs) ||
         durationMs < 0 ||
         createdAt === null ||

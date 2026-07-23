@@ -660,6 +660,28 @@ test('session principal takes priority over Bearer token when both are present',
   assert.ok(body.length >= 1);
 });
 
+test('an expired session falls back to a valid Bearer token', async (t) => {
+  const { app, origin } = await bootHttp(t);
+  const loginRes = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  const cookie = `sid=${sidFromSetCookie(loginRes.headers.get('set-cookie'))}`;
+  const keyRes = await fetch(`${origin}/auth/api-key/create`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ name: 'fallback-key' }),
+  });
+  const { token: apiToken } = await keyRes.json();
+  app.db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run(Date.now() - 7 * 86_400_000, cookie.slice('sid='.length));
+
+  const res = await fetch(`${origin}/notes`, {
+    headers: { cookie, authorization: `Bearer ${apiToken}` },
+  });
+  assert.equal(res.status, 200);
+});
+
 // ---- legacy principal resolution still works ----------------------------------
 
 test('sessionPrincipalOf still resolves user sessions correctly', () => {

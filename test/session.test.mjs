@@ -126,15 +126,29 @@ test('sessionPrincipalOf accepts a session before its configured expiry boundary
   db.close();
 });
 
-test('sessionPrincipalOf accepts canonical ISO dates and fails closed for malformed or future timestamps', () => {
+test('sessionPrincipalOf accepts canonical timestamp encodings and fails closed for malformed or future timestamps', () => {
   const db = seed();
   const principalOf = sessionPrincipalOf(db, { durationMs: 7000, now: () => 8000 });
   db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run(new Date(1001).toISOString(), 'alice-token');
   assert.equal(principalOf({ headers: { cookie: `${SESSION_COOKIE}=alice-token` } }).id, 'alice');
+  db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run('1001.0', 'alice-token');
+  assert.equal(principalOf({ headers: { cookie: `${SESSION_COOKIE}=alice-token` } }).id, 'alice');
   db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run('not-a-timestamp', 'alice-token');
+  assert.equal(principalOf({ headers: { cookie: `${SESSION_COOKIE}=alice-token` } }), anonymous);
+  db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run('2026-02-30T00:00:00.000Z', 'alice-token');
   assert.equal(principalOf({ headers: { cookie: `${SESSION_COOKIE}=alice-token` } }), anonymous);
   db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run(8001, 'alice-token');
   assert.equal(principalOf({ headers: { cookie: `${SESSION_COOKIE}=alice-token` } }), anonymous);
+  db.close();
+});
+
+test('sessionPrincipalOf fails closed for invalid clock or duration configuration', () => {
+  const db = seed();
+  const req = { headers: { cookie: `${SESSION_COOKIE}=alice-token` } };
+  for (const durationMs of [0, -1, NaN, Infinity, '7000']) {
+    assert.equal(sessionPrincipalOf(db, { durationMs, now: () => Date.now() })(req), anonymous);
+  }
+  assert.equal(sessionPrincipalOf(db, { durationMs: 7000, now: () => NaN })(req), anonymous);
   db.close();
 });
 

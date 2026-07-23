@@ -742,7 +742,7 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Context / problem:** relying on scheduled cleanup left expired session rows authorized until a reaper ran, splitting the stated duration contract from the actual HTTP authorization boundary.
 - **Options considered:** scheduled cleanup alone; Scope-specific expiry policy; generic request-time validation.
 - **Chosen approach + why:** generic request-time validation. It serves all Workbench auth routes and consumers from one policy and uses each app's configured `session.durationMs`.
-- **Consequences / trade-offs:** expired or malformed persisted rows are denied immediately and users must authenticate again. The resolver remains read-only; cleanup owns physical deletion.
+- **Consequences / trade-offs:** expired or malformed persisted rows are denied immediately and users must authenticate again. The resolver accepts only finite numeric, numeric-string, or exact canonical ISO timestamp encodings, and invalid clocks/configuration fail closed. The resolver remains read-only; cleanup owns physical deletion.
 
 ## 2026-07-14 — Wave 5.3: email delivery cursor-backed; blob-finalize cursor-monotonicity bug fixed
 
