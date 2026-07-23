@@ -157,6 +157,7 @@ export function sessionTokenOf(req: {
 
 export function sessionPrincipalOf(
   db: WorkbenchDatabase,
+  options?: { durationMs?: number; now?: () => number },
 ): (req: { headers?: { cookie?: string } }) => Principal;
 
 export function apiKeyPrincipalOf(
