@@ -736,6 +736,14 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Chosen approach + why:** remove it. Synchronization preserves duplicate authority and Scope-specific vocabulary in the generic repository. A generated temporary fixture is reserved only if a named migration rehearsal cannot be proven by Scope's real runtime tests.
 - **Consequences / trade-offs:** a Scope composition regression now appears in Scope's candidate-adoption gate rather than Workbench's isolated suite. This is the correct ownership direction; Workbench still proves generic declaration, DDL, authorization, and package contracts independently.
 
+## 2026-07-23 — Session expiry is a request-time authorization check
+
+- **Decision:** `sessionPrincipalOf` invalidates a session at the configured duration on every request. The Session removal schedule only reclaims expired row storage.
+- **Context / problem:** relying on scheduled cleanup left expired session rows authorized until a reaper ran, splitting the stated duration contract from the actual HTTP authorization boundary.
+- **Options considered:** scheduled cleanup alone; Scope-specific expiry policy; generic request-time validation.
+- **Chosen approach + why:** generic request-time validation. It serves all Workbench auth routes and consumers from one policy and uses each app's configured `session.durationMs`.
+- **Consequences / trade-offs:** expired or malformed persisted rows are denied immediately and users must authenticate again. The resolver remains read-only; cleanup owns physical deletion.
+
 ## 2026-07-14 — Wave 5.3: email delivery cursor-backed; blob-finalize cursor-monotonicity bug fixed
 
 - **Decision:** `email-seam.mjs`'s post-commit consumer now uses the same `_ConsumerCursor` pattern as blob.finalize/projected.async/effect.durable — a per-scope cursor advances only after a successful `transport()` call, and a new `reconcileEmailDelivery(db)` boot sweep replays scopes whose `_Log` outran their cursor. Reclassified in `kernel.mjs` from `'best-effort-external-consumer'` to `'durable-projection-consumer'`.

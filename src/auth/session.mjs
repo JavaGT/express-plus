@@ -70,11 +70,26 @@ export function sessionTokenOf(req) {
   return parseCookies(req.headers?.cookie)[SESSION_COOKIE] || undefined;
 }
 
+function sessionCreatedAtMs(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (value instanceof Date) {
+    const timestamp = value.getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  if (typeof value !== 'string') return null;
+  if (/^-?\d+(?:\.\d+)?$/.test(value)) {
+    const timestamp = Number(value);
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 // Build the `principalOf(req)` function for a given db. It reads the session
 // cookie, looks the token up in the Session table, and constructs the principal
 // SERVER-SIDE from the stored identity. Any failure — no cookie, no token, no
 // matching row, or a malformed stored type — yields `anonymous` (fail closed).
-export function sessionPrincipalOf(db) {
+export function sessionPrincipalOf(db, { durationMs = config.sessionDurationMs, now = Date.now } = {}) {
   return (req) => {
     const token = sessionTokenOf(req);
     if (!token) return anonymous;
@@ -85,9 +100,23 @@ export function sessionPrincipalOf(db) {
       // row; the client supplied only the token. principal() re-validates the
       // closed type union, so a corrupt stored type is anonymous too.
       const row = db
-        .prepare('SELECT principalType AS type, principalId AS id FROM Session WHERE token = ?')
+        .prepare('SELECT principalType AS type, principalId AS id, createdAt FROM Session WHERE token = ?')
         .get(token);
       if (!row) return anonymous;
+      // Session cleanup reclaims expired rows eventually; authorization must not
+      // wait for that scheduler. Validate timestamps in JavaScript because SQLite
+      // affinity can compare corrupt text values as greater than numeric bounds.
+      const checkedAt = now();
+      const createdAt = sessionCreatedAtMs(row.createdAt);
+      if (
+        !Number.isFinite(durationMs) ||
+        durationMs < 0 ||
+        createdAt === null ||
+        createdAt > checkedAt ||
+        checkedAt - createdAt >= durationMs
+      ) {
+        return anonymous;
+      }
       // A link session's principalId IS the share token (auth-entities.mjs). The
       // linkHolder check reads `principal.attributes.token`, so a link principal
       // must carry it here — otherwise scope binds the token param to NULL and

@@ -406,7 +406,9 @@ export function listen(app, port, optionsOrCallback = {}) {
   // This is the SAME authorization engine as session principals — no second auth
   // path. The session takes priority: a request with BOTH a valid cookie and a
   // Bearer header resolves to the user principal.
-  const sessionResolver = app.db ? sessionPrincipalOf(app.db) : null;
+  const sessionResolver = app.db
+    ? sessionPrincipalOf(app.db, { durationMs: app.config.sessionDurationMs })
+    : null;
   const apiKeyResolver = app.db ? apiKeyPrincipalOf(app.db) : null;
   const defaultPrincipalOf = sessionResolver
     ? (req) => {

@@ -106,6 +106,8 @@ export const Session = entity('Session', {
 
   grant: () => [notRequestReadable('Session')],
   create: mintSession,
+  // Request-time sessionPrincipalOf invalidates expired rows; this schedule
+  // only reclaims their storage.
   schedule: {
     remove: schedule.after(SessionCreatedAt, config.sessionDurationMs),
   },

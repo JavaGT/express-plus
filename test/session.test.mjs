@@ -110,6 +110,34 @@ test('sessionPrincipalOf yields anonymous for an UNKNOWN token (fail closed)', (
   db.close();
 });
 
+test('sessionPrincipalOf rejects a session exactly at its configured expiry boundary', () => {
+  const db = seed();
+  db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run(1000, 'alice-token');
+  const principalOf = sessionPrincipalOf(db, { durationMs: 7000, now: () => 8000 });
+  assert.equal(principalOf({ headers: { cookie: `${SESSION_COOKIE}=alice-token` } }), anonymous);
+  db.close();
+});
+
+test('sessionPrincipalOf accepts a session before its configured expiry boundary', () => {
+  const db = seed();
+  db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run(1000, 'alice-token');
+  const principalOf = sessionPrincipalOf(db, { durationMs: 7000, now: () => 7999 });
+  assert.equal(principalOf({ headers: { cookie: `${SESSION_COOKIE}=alice-token` } }).id, 'alice');
+  db.close();
+});
+
+test('sessionPrincipalOf accepts canonical ISO dates and fails closed for malformed or future timestamps', () => {
+  const db = seed();
+  const principalOf = sessionPrincipalOf(db, { durationMs: 7000, now: () => 8000 });
+  db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run(new Date(1001).toISOString(), 'alice-token');
+  assert.equal(principalOf({ headers: { cookie: `${SESSION_COOKIE}=alice-token` } }).id, 'alice');
+  db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run('not-a-timestamp', 'alice-token');
+  assert.equal(principalOf({ headers: { cookie: `${SESSION_COOKIE}=alice-token` } }), anonymous);
+  db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run(8001, 'alice-token');
+  assert.equal(principalOf({ headers: { cookie: `${SESSION_COOKIE}=alice-token` } }), anonymous);
+  db.close();
+});
+
 test('a client cannot inject its own identity — only the opaque token is honored', () => {
   const db = seed();
   const principalOf = sessionPrincipalOf(db);
@@ -164,6 +192,35 @@ test('a forged token → anonymous → 401 (fail closed end-to-end)', async (t) 
   const { origin } = await serve(t, db);
   const res = await fetch(`${origin}/notes`, {
     headers: { cookie: `${SESSION_COOKIE}=forged` },
+  });
+  assert.equal(res.status, 401);
+});
+
+test('an expired session row is denied over HTTP before scheduled cleanup', async (t) => {
+  const db = seed();
+  db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run(Date.now() - 7 * 86_400_000, 'alice-token');
+  const { origin } = await serve(t, db);
+  const res = await fetch(`${origin}/notes`, {
+    headers: { cookie: `${SESSION_COOKIE}=alice-token` },
+  });
+  assert.equal(res.status, 401);
+});
+
+test('the HTTP resolver uses the app-specific session duration', async (t) => {
+  const db = seed();
+  db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run(Date.now() - 1000, 'alice-token');
+  const app = workbench({ db, session: { durationMs: 1000 } });
+  app.mount('/notes', ownedNote());
+  app.listen(0);
+  await new Promise((resolve) => app.httpServer.once('listening', resolve));
+  t.after(() => {
+    app.httpServer.close();
+    db.close();
+  });
+  const { port } = app.httpServer.address();
+
+  const res = await fetch(`http://127.0.0.1:${port}/notes`, {
+    headers: { cookie: `${SESSION_COOKIE}=alice-token` },
   });
   assert.equal(res.status, 401);
 });

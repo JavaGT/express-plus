@@ -232,6 +232,20 @@ test('/auth/me returns 401 without a valid session', async (t) => {
   assert.equal(res.status, 401);
 });
 
+test('/auth/me denies an expired session row before scheduled cleanup', async (t) => {
+  const { origin, app } = await boot(t);
+  const loginRes = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  const cookie = `sid=${sidFromSetCookie(loginRes.headers.get('set-cookie'))}`;
+  app.db.prepare('UPDATE Session SET createdAt = ? WHERE token = ?').run(Date.now() - 7 * 86_400_000, cookie.slice('sid='.length));
+
+  const res = await fetch(`${origin}/auth/me`, { headers: { cookie } });
+  assert.equal(res.status, 401);
+});
+
 test('/auth/me with email identity returns the email field', async (t) => {
   const { origin } = await bootWithEmail(t);
   const loginRes = await fetch(`${origin}/auth/login`, {
