@@ -8,3 +8,5 @@ todo.db*
 examples/*.db
 examples/*.db-*
 gdoc.db*
+projects/chat/*.db*
+.agents/

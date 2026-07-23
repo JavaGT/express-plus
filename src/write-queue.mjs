@@ -23,24 +23,13 @@ export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.n
       let releaseNext;
       const completion = new Promise((r) => { releaseNext = r; });
       
-      try {
-        const result = fn();
-        if (result instanceof Promise) {
-          const wrapped = result.finally(() => {
-            running = false;
-            releaseNext();
-          });
-          lock = completion;
-          return wrapped;
-        }
+      const result = Promise.resolve().then(fn);
+      const wrapped = result.finally(() => {
         running = false;
         releaseNext();
-        return result;
-      } catch (err) {
-        running = false;
-        releaseNext();
-        throw err;
-      }
+      });
+      lock = completion;
+      return wrapped;
     }
     
     waiters++;

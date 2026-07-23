@@ -13,6 +13,17 @@ test('createWriteQueue returns expected API', () => {
   assert.strictEqual(q.running, false);
 });
 
+test('immediate runs always return promises', async () => {
+  const q = createWriteQueue();
+
+  const value = q.run(() => 7);
+  const failure = q.run(() => { throw new Error('failed synchronously'); });
+
+  assert.ok(value instanceof Promise);
+  assert.equal(await value, 7);
+  await assert.rejects(failure, /failed synchronously/);
+});
+
 test('serialized runs return their own value in order', async () => {
   const q = createWriteQueue();
   const results = [];
@@ -288,7 +299,7 @@ test('sync fn works correctly', async () => {
     return 20;
   });
 
-  assert.strictEqual(r1, 10);
+  assert.strictEqual(await r1, 10);
   const r2Val = await r2;
   assert.strictEqual(r2Val, 20);
   assert.deepStrictEqual(results, ['sync1', 'sync2']);
