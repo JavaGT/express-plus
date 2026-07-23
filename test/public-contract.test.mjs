@@ -48,7 +48,6 @@ export const PUBLIC_API = Object.freeze({
 
 const PRIVATE_ENTRYPOINTS = Object.freeze([
   'workbench/internal',
-  'workbench/scope-entities',
 ]);
 
 const root = fileURLToPath(new URL('..', import.meta.url));

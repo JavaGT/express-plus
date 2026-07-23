@@ -10,7 +10,7 @@ import workbench, {
   type ActionHandle, type BatchAction, type CommittedEvent, type DispatchRequest,
   type DispatchResult, type EventHandle, type FailureCategory, type FailureOutcome,
   type InheritDirective, type Principal, type WorkbenchFailure,
-  type WorkbenchApp, type WorkbenchEntity,
+  type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
 import {
   createBlobStore, createInvitationApi, createJobQueue, readCommittedCursor,
@@ -56,12 +56,14 @@ const Renamed: EventHandle<ProjectRow, { name: string }> = event(
 declare const db: WorkbenchDatabase;
 const nativeDb = new DatabaseSync(':memory:');
 const nativeApp: WorkbenchApp = workbench({ db: nativeDb });
+const writeQueue: WriteQueue = nativeApp.writeQueue;
+const queuedValue: Promise<number> = writeQueue.run(() => 1);
 const declaredStorage: SqliteStorageDescription = describeEntityStorage(Project);
 const liveStorage: SqliteStorageDescription = describeSqliteStorage(nativeDb, []);
 // @ts-expect-error raw declarations are not compiled entities and have no storage name/fields
 describeEntityStorage({ grant: grant(read) });
 void [declaredStorage, liveStorage];
-void nativeApp;
+void [nativeApp, queuedValue];
 const migration: Migration = { version: 1, up: (database) => database.exec('SELECT 1') };
 const app: WorkbenchApp = workbench({
   db,

@@ -728,6 +728,14 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Files:** `projects/scope-entities.mjs` (field fixes), `test/scope-entities-parity.test.mjs` (new, 3 tests — inline-fixture parser tests + the live real-file comparison), `test/scope-entities-parity-parser.test.mjs` (new, 3 tests — a second, independently-tested narrow TS-as-text extractor, same "descriptive evidence, not a general parser" framing as `sqlite-storage-description.mjs`; accepted as a second small parser rather than forcing a shared module for ~40 lines of regex).
 - **Gate:** `node --test` 1969/1969/0 (0 `test.todo`); ESLint 0 errors (244 pre-existing warnings, 0 new).
 
+## 2026-07-23 — Scope owns Scope declarations; Workbench owns generic conformance
+
+- **Decision:** Remove `projects/scope-entities.mjs` and its cross-repository parity parsers from Workbench. Scope's `src/lib/wb-scope/entities.ts` is the sole owner of Scope domain declarations. Workbench release tests remain app-neutral; Scope runs its runtime binding, schema, table-ownership, and compatibility tests against each candidate Workbench revision.
+- **Context / problem:** the mirror was a useful early migration canary, but it duplicated Scope-owned nouns and read an unversioned absolute path in a sibling checkout. It had drifted by 27 fields across five entities, making otherwise generic Workbench releases depend on unrelated Scope edits.
+- **Options considered:** synchronize the hand-maintained mirror; add a generated, version-stamped fixture; remove the duplicate declaration authority.
+- **Chosen approach + why:** remove it. Synchronization preserves duplicate authority and Scope-specific vocabulary in the generic repository. A generated temporary fixture is reserved only if a named migration rehearsal cannot be proven by Scope's real runtime tests.
+- **Consequences / trade-offs:** a Scope composition regression now appears in Scope's candidate-adoption gate rather than Workbench's isolated suite. This is the correct ownership direction; Workbench still proves generic declaration, DDL, authorization, and package contracts independently.
+
 ## 2026-07-14 — Wave 5.3: email delivery cursor-backed; blob-finalize cursor-monotonicity bug fixed
 
 - **Decision:** `email-seam.mjs`'s post-commit consumer now uses the same `_ConsumerCursor` pattern as blob.finalize/projected.async/effect.durable — a per-scope cursor advances only after a successful `transport()` call, and a new `reconcileEmailDelivery(db)` boot sweep replays scopes whose `_Log` outran their cursor. Reclassified in `kernel.mjs` from `'best-effort-external-consumer'` to `'durable-projection-consumer'`.

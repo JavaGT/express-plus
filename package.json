@@ -1,6 +1,6 @@
 {
 	"name": "workbench",
-	"version": "0.0.0",
+	"version": "0.1.0",
 	"description": "Workbench for collaborative, persisted, realtime data.",
 	"type": "module",
 	"main": "src/index.mjs",

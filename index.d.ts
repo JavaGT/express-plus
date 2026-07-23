@@ -532,6 +532,15 @@ export interface RegisteredAction<Payload = Record<string, unknown>> {
   readonly projections?: readonly RegisteredProjection[];
 }
 
+/** Serializes all application writes and drains them during shutdown. */
+export interface WriteQueue {
+  run<T>(fn: () => Promise<T> | T): Promise<T>;
+  close(): Promise<void>;
+  readonly depth: number;
+  readonly running: boolean;
+  readonly closed: boolean;
+}
+
 export interface WorkbenchApp extends RouteBuilder {
   readonly db?: WorkbenchDatabase;
   readonly routes: readonly unknown[];
@@ -540,6 +549,7 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly actions: readonly RegisteredAction[];
   readonly log: WorkbenchLog;
   readonly clock: WorkbenchClock;
+  readonly writeQueue: WriteQueue;
   readonly port?: number;
   readonly httpServer?: Server;
   readonly jobs?: unknown;
