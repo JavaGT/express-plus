@@ -2,8 +2,8 @@ import { getLog } from '../log.mjs';
 import { serializeField, flattenStruct, resolveStrategy } from '../field-strategy.mjs';
 import * as eventHandle from '../event-handle.mjs';
 import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
-import { applyTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
-import { createTextFamily, textFamilyCheckpoint } from '../annotated-text-family.mjs';
+import { applyTextOp, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
+import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from '../annotated-text-family.mjs';
 
 const INITIAL_BLOCK_POSITION = 'a0';
 
@@ -72,6 +72,62 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
   }
 }
 
+function applyAnnotatedTextOperation({ name, fields, handle, event, db }) {
+  if (handle.kind !== eventHandle.EventKind.native || handle.nativeName !== 'operated') return false;
+  const descriptor = fields[handle.field];
+  if (descriptor?.kind !== 'annotatedText') return false;
+  const data = event.data;
+  const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
+  const operation = data?.operation;
+  if (!data || typeof data !== 'object' || Object.keys(data).length !== 6 || data.version !== 1 ||
+      typeof data.id !== 'string' || data.id.length === 0 || !isVersion(data.before) || !isVersion(data.after) ||
+      !operation || typeof operation !== 'object' || Object.keys(operation).length !== 3 ||
+      operation.kind !== 'text.apply' || typeof operation.blockId !== 'string' || operation.blockId.length === 0 ||
+      !Object.hasOwn(operation, 'operation') || !data.family) {
+    throw new Error(`${name}.${handle.field}.operated event has invalid composite data`);
+  }
+  let canonicalOperation;
+  try {
+    canonicalOperation = canonicalTextOp(operation.operation);
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated event has invalid text operation`);
+  }
+  if (JSON.stringify(canonicalOperation) !== JSON.stringify(operation.operation)) {
+    throw new Error(`${name}.${handle.field}.operated event text operation is not canonical`);
+  }
+  const prefix = `${name}_${handle.field}`;
+  const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
+  if (!state) throw new Error(`${name}.${handle.field}.operated document does not exist`);
+  const current = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+  if (state.structure_version !== data.before.structuralRevision ||
+      JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated event conflicts with projection state`);
+  }
+  const next = restoreTextFamilyCheckpoint(data.family);
+  if (next.id !== data.id || JSON.stringify(textFamilyCheckpoint(next)) !== JSON.stringify(data.family)) {
+    throw new Error(`${name}.${handle.field}.operated event family is not canonical`);
+  }
+  if (data.after.structuralRevision !== data.before.structuralRevision ||
+      data.after.structuralRevision !== state.structure_version ||
+      JSON.stringify(data.after.frontier) !== JSON.stringify(next.checkpoint.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated event has inconsistent post-state version`);
+  }
+  let reduced;
+  try {
+    reduced = applyTextOperationToBlock(current, operation.blockId, canonicalOperation);
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated event text operation is not applicable to prior state`);
+  }
+  if (JSON.stringify(textFamilyCheckpoint(reduced)) !== JSON.stringify(data.family)) {
+    throw new Error(`${name}.${handle.field}.operated event family does not match its text operation`);
+  }
+  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`)
+    .run(data.after.structuralRevision, JSON.stringify(textFamilyCheckpoint(reduced)), data.id);
+  getLog().debug('dispatch', `${name}.${handle.field}.operated`, { id: data.id });
+  return true;
+}
+
 function buildProjectedComputeRow(storedRow, fields) {
   const row = { ...storedRow };
   for (const [fName, desc] of Object.entries(fields)) {
@@ -93,6 +149,9 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
       ...Object.entries(fields)
         .filter(([, descriptor]) => descriptor.kind === 'crdt' && descriptor.type === 'text')
         .map(([fieldName]) => eventHandle.native(name, fieldName, 'applied').type),
+      ...Object.entries(fields)
+        .filter(([, descriptor]) => descriptor.kind === 'annotatedText')
+        .map(([fieldName]) => eventHandle.native(name, fieldName, 'operated').type),
       ...sideTableStrategyEntries.flatMap(({ strategy, fields: strategyFields }) =>
         strategy.eventTypes(name, strategyFields)),
     ],
@@ -103,6 +162,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
       for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
         if (strategy.projectionApply({ entityName: name, fieldEntries: strategyFields, handle, event, db })) return;
       }
+      if (applyAnnotatedTextOperation({ name, fields, handle, event, db })) return;
       if (handle.kind === eventHandle.EventKind.native && handle.nativeName === 'applied') {
         const descriptor = fields[handle.field];
         if (descriptor?.kind !== 'crdt' || descriptor.type !== 'text') return;

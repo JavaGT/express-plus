@@ -385,7 +385,7 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
         }
       }
 
-      if (handler) events = await handler({ payload, principal, db, now });
+      if (handler) events = await handler({ payload, principal, db, now, scope });
       if (!Array.isArray(events)) {
         throw new TypeError(`action '${type}' handler must return an event array`);
       }
@@ -442,7 +442,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       return seq;
     }
 
-    function dispatch({ actionId, type, payload, principal }) {
+    function dispatch({ actionId, type, payload, principal, scope = '' }) {
       const handler = checkHandler(handlers, type);
       if (!handler) return unknownActionOutcome(type);
 
@@ -458,6 +458,12 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       const denied = authorizedOrDenied(authorized);
       if (denied) return denied;
 
+      try {
+        handler.preDedupe?.({ payload, principal, scope });
+      } catch (err) {
+        return executionFailure(err, { actionId, type });
+      }
+
       // Idempotent dedupe: a re-sent action returns its stored events without
       // re-running the handler — no duplicate state change (SPEC §7).
       const dedupe = checkInMemoryDedupe(dispatched, actionId);
@@ -467,7 +473,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       // sequence number and append to the log.
       let events;
       try {
-        const emitted = handler({ payload, principal });
+        const emitted = handler({ payload, principal, scope });
         events = emitted.map((e) =>
           Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
       } catch (err) {
@@ -484,6 +490,14 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       const missingIdx = checkHandlers(handlers, actions);
       if (missingIdx !== -1) {
         return unknownActionOutcome(actions[missingIdx].type, { actionIndex: missingIdx });
+      }
+      const batchForbiddenIdx = actions.findIndex((action) => handlers[action.type].batchForbidden);
+      if (batchForbiddenIdx !== -1) {
+        return executionFailure(
+          new ValidationError(`action '${actions[batchForbiddenIdx].type}' requires single dispatch`),
+          { actionId, type: actions[batchForbiddenIdx].type },
+          { actionIndex: batchForbiddenIdx },
+        );
       }
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
         const action = actions[actionIndex];
@@ -554,6 +568,12 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const denied = authorizedOrDenied(authResult);
     if (denied) return denied;
 
+    try {
+      handler.preDedupe?.({ payload, principal, scope });
+    } catch (err) {
+      return executionFailure(err, { actionId, type });
+    }
+
     // Dedupe by the owning-stream action receipt (scope, actionId) — Wave 4.9.
     // A re-sent action returns its committed events, in original emission
     // order, without re-running the handler (SPEC §7). Keying on the action's
@@ -569,7 +589,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     let emitted = null;
     if (!handler.inTransaction) {
       try {
-        emitted = await handler({ payload, principal });
+        emitted = await handler({ payload, principal, scope });
       } catch (err) {
         return executionFailure(err, { actionId, type });
       }
@@ -610,6 +630,14 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const missingIdx = checkHandlers(handlers, actions);
     if (missingIdx !== -1) {
       return unknownActionOutcome(actions[missingIdx].type, { actionIndex: missingIdx });
+    }
+    const batchForbiddenIdx = actions.findIndex((action) => handlers[action.type].batchForbidden);
+    if (batchForbiddenIdx !== -1) {
+      return executionFailure(
+        new ValidationError(`action '${actions[batchForbiddenIdx].type}' requires single dispatch`),
+        { actionId, type: actions[batchForbiddenIdx].type },
+        { actionIndex: batchForbiddenIdx },
+      );
     }
 
     // Fork C — AUTHORIZE EVERY action FIRST (outside the txn). A retried

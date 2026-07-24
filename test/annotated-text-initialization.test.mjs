@@ -4,10 +4,14 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   annotatedText, annotation, boolean, entity, everyone, executeDDL, executeFrameworkDDL, measurement,
-  grant, read, ref, scope, text, write,
+  createServer, grant, read, ref, scope, text, write,
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension,
 } from '../src/internal.mjs';
-import { restoreTextFamilyCheckpoint } from '../src/annotated-text-family.mjs';
+import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from '../src/annotated-text-family.mjs';
+import { native } from '../src/event-handle.mjs';
+
+const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const INSERT_HELLO = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello']];
 
 // Register semantic contract and structural adapter for the init measurement
 registerAnnotatedTextContract('sourceInit', Object.freeze({ kind: 'measurement' }));
@@ -110,4 +114,213 @@ test('create retry retains its event-carried initial block identity without dupl
   );
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_state').get().count, 1);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_block').get().count, 1);
+});
+
+test('annotated-text operation commits one canonical family fact and rejects a stale structural revision', async () => {
+  const { app, db } = await appFor();
+  const created = await app.dispatch({
+    actionId: 'create', type: 'InitDoc.create',
+    payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
+  });
+  assert.equal(created.ok, true);
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  const result = await app.dispatch({
+    actionId: 'operation', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: {
+      version: 1,
+      id: 'd1',
+      expected: { structuralRevision: 1, frontier: [] },
+      operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO },
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].type, 'InitDoc.body.operated');
+  assert.equal(result.events[0].data.version, 1);
+  assert.equal(result.events[0].data.id, 'd1');
+  assert.equal(result.events[0].data.operation.kind, 'text.apply');
+  assert.deepEqual(result.events[0].data.before, { structuralRevision: 1, frontier: [] });
+  assert.deepEqual(result.events[0].data.after, { structuralRevision: 1, frontier: [[A, 1]] });
+  const state = db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1');
+  const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+  assert.equal(family.checkpoint.elements[`${A}:1:0`].scalar, 'h');
+  assert.deepEqual(result.events[0].data.family, JSON.parse(state.family_checkpoint));
+  assert.equal(state.structure_version, 1);
+  assert.equal(db.prepare('SELECT structure_version FROM InitDoc_body_block WHERE id = ?').get(blockId).structure_version, 1);
+  const second = await app.dispatch({
+    actionId: 'operation-two', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: {
+      version: 1,
+      id: 'd1',
+      expected: { structuralRevision: 1, frontier: [[A, 1]] },
+      operation: { kind: 'text.apply', blockId, operation: ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['insert', ['root'], '!']] },
+    },
+  });
+  assert.equal(second.ok, true);
+  assert.deepEqual(second.events[0].data.before, { structuralRevision: 1, frontier: [[A, 1]] });
+  assert.deepEqual(second.events[0].data.after, { structuralRevision: 1, frontier: [[A, 2]] });
+  const retry = await app.dispatch({
+    actionId: 'operation', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: {
+      version: 1,
+      id: 'd1',
+      expected: { structuralRevision: 1, frontier: [] },
+      operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO },
+    },
+  });
+  assert.equal(retry.ok, true);
+  assert.equal(retry.deduped, true);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE eventType = 'InitDoc.body.operated'").get().count, 2);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = ?').get('operation').count, 1);
+  const stale = await app.dispatch({
+    actionId: 'stale', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: {
+      version: 1,
+      id: 'd1',
+      expected: { structuralRevision: 2, frontier: [] },
+      operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO },
+    },
+  });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.failure.category, 'invalid-input');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE actionId = ?').get('stale').count, 0);
+  await app.close?.();
+});
+
+test('annotated-text operation rejects malformed and causally unready commands without a composite event', async () => {
+  const { app, db } = await appFor();
+  const created = await app.dispatch({
+    actionId: 'create', type: 'InitDoc.create',
+    payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
+  });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  for (const [actionId, payload] of [
+    ['malformed', { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO }, extra: true }],
+    ['unready', { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['insert', ['root'], 'x']] } }],
+  ]) {
+    const result = await app.dispatch({ actionId, type: 'InitDoc.body.operation', scope: 'InitDoc:d1', payload, principal: { id: 'u1' } });
+    assert.equal(result.ok, false);
+    assert.equal(result.failure.category, 'invalid-input');
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE actionId = ?').get(actionId).count, 0);
+  }
+  await app.close?.();
+});
+
+test('annotated-text operation is rejected from generic batches before aggregate reduction', async () => {
+  const { app, db } = await appFor();
+  const created = await app.dispatch({
+    actionId: 'create', type: 'InitDoc.create',
+    payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
+  });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  const result = await app.batch([{
+    type: 'InitDoc.body.operation',
+    payload: {
+      version: 1,
+      id: 'd1',
+      expected: { structuralRevision: 1, frontier: [] },
+      operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO },
+    },
+  }], { principal: { id: 'u1' } });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE eventType = 'InitDoc.body.operated'").get().count, 0);
+  await app.close?.();
+});
+
+test('annotated-text projection rejects a canonical family fact that does not match its text operation', async () => {
+  const { app, db } = await appFor();
+  const created = await app.dispatch({
+    actionId: 'create', type: 'InitDoc.create',
+    payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
+  });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  const current = restoreTextFamilyCheckpoint(JSON.parse(
+    db.prepare('SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint,
+  ));
+  const substituted = textFamilyCheckpoint(applyTextOperationToBlock(current, blockId,
+    ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'bye']],
+  ));
+  const handle = native('InitDoc', 'body', 'operated');
+  assert.throws(() => app.entities.get('InitDoc').projection.apply({
+    handle,
+    data: {
+      version: 1,
+      id: 'd1',
+      before: { structuralRevision: 1, frontier: [] },
+      operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO },
+      after: { structuralRevision: 1, frontier: [[A, 1]] },
+      family: substituted,
+    },
+  }, db), /does not match its text operation/);
+  const persisted = restoreTextFamilyCheckpoint(JSON.parse(
+    db.prepare('SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint,
+  ));
+  assert.deepEqual(persisted, current);
+  await app.close?.();
+});
+
+test('annotated-text operation requires its document scope for receipt ownership', async () => {
+  const { app, db } = await appFor();
+  const created = await app.dispatch({
+    actionId: 'create', type: 'InitDoc.create',
+    payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
+  });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  const result = await app.dispatch({
+    actionId: 'wrong-scope', type: 'InitDoc.body.operation', scope: 'InitDoc:other', principal: { id: 'u1' },
+    payload: {
+      version: 1,
+      id: 'd1',
+      expected: { structuralRevision: 1, frontier: [] },
+      operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO },
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = ?').get('wrong-scope').count, 0);
+  await app.close?.();
+});
+
+test('annotated-text operation validates document scope before returning a colliding receipt', async () => {
+  const { app, db } = await appFor();
+  const created = await app.dispatch({
+    actionId: 'create', type: 'InitDoc.create',
+    payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
+  });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  const unrelated = await app.dispatch({
+    actionId: 'collides', type: 'InitDoc.create', scope: 'InitDoc:other', principal: { id: 'u1' },
+    payload: { id: 'd2', project: 'p1', owner: 'u1' },
+  });
+  assert.equal(unrelated.ok, true);
+  const result = await app.dispatch({
+    actionId: 'collides', type: 'InitDoc.body.operation', scope: 'InitDoc:other', principal: { id: 'u1' },
+    payload: {
+      version: 1,
+      id: 'd1',
+      expected: { structuralRevision: 1, frontier: [] },
+      operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO },
+    },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE actionId = ?').get('collides').count, 1);
+  await app.close?.();
+});
+
+test('in-memory batches reject explicitly single-dispatch actions before handler invocation', () => {
+  const handler = () => {
+    throw new Error('must not run');
+  };
+  Object.defineProperty(handler, 'batchForbidden', { value: true });
+  const server = createServer({
+    handlers: { 'aggregate.operation': handler },
+    authorize: () => true,
+  });
+  const result = server.dispatchBatch({
+    actionId: 'batch', principal: { id: 'u1' }, actions: [{ type: 'aggregate.operation', payload: {} }],
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.equal(server.log.length, 0);
 });

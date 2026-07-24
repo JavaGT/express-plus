@@ -13,8 +13,39 @@ import { validateMaterializedField, validateMutation, ValidationError } from '..
 import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { canonicalTextOp } from '../annotated-text.mjs';
+import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from '../annotated-text-family.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
+
+function assertAnnotatedTextOperationPayload(name, fieldName, payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+      Object.keys(payload).length !== 4 ||
+      !Object.hasOwn(payload, 'version') || !Object.hasOwn(payload, 'id') ||
+      !Object.hasOwn(payload, 'expected') || !Object.hasOwn(payload, 'operation')) {
+    throw new ValidationError(`${name}.${fieldName}.operation requires exactly { version, id, expected, operation }`);
+  }
+  if (payload.version !== 1 || typeof payload.id !== 'string' || payload.id.length === 0) {
+    throw new ValidationError(`${name}.${fieldName}.operation requires version 1 and a non-empty id`);
+  }
+  const expected = payload.expected;
+  if (!expected || typeof expected !== 'object' || Array.isArray(expected) ||
+      Object.keys(expected).length !== 2 || !Object.hasOwn(expected, 'structuralRevision') || !Object.hasOwn(expected, 'frontier') ||
+      !Number.isSafeInteger(expected.structuralRevision) || expected.structuralRevision < 1 || !Array.isArray(expected.frontier)) {
+    throw new ValidationError(`${name}.${fieldName}.operation expected requires structuralRevision and frontier`);
+  }
+  const operation = payload.operation;
+  if (!operation || typeof operation !== 'object' || Array.isArray(operation) ||
+      Object.keys(operation).length !== 3 || operation.kind !== 'text.apply' ||
+      typeof operation.blockId !== 'string' || operation.blockId.length === 0 || !Object.hasOwn(operation, 'operation')) {
+    throw new ValidationError(`${name}.${fieldName}.operation supports exactly a text.apply block operation`);
+  }
+  return Object.freeze({
+    version: 1,
+    id: payload.id,
+    expected: Object.freeze({ structuralRevision: expected.structuralRevision, frontier: expected.frontier }),
+    operation: Object.freeze({ kind: 'text.apply', blockId: operation.blockId, operation: canonicalTextOp(operation.operation) }),
+  });
+}
 
 function ownerFieldOf(entity) {
   for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
@@ -174,6 +205,56 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       return [{ handle, type: handle.type, scope: scopeOf(name, payload.id).key, data: { id: payload.id, operation } }];
     };
     cursorPolicy[`${name}.${fieldName}.apply`] = 'excluded';
+  }
+
+  for (const [fieldName, descriptor] of Object.entries(fields)) {
+    if (descriptor.kind !== 'annotatedText') continue;
+    const operationType = `${name}.${fieldName}.operation`;
+    const assertDocumentScope = ({ payload, scope }) => {
+      const command = assertAnnotatedTextOperationPayload(name, fieldName, payload);
+      const documentScope = scopeOf(name, command.id).key;
+      if (scope !== documentScope) {
+        throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
+      }
+      return command;
+    };
+    const handler = ({ payload, db, scope }) => {
+      const command = assertDocumentScope({ payload, scope });
+      const documentScope = scopeOf(name, command.id).key;
+      const prefix = `${name}_${fieldName}`;
+      const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
+      if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+      const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+      if (state.structure_version !== command.expected.structuralRevision ||
+          JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(command.expected.frontier)) {
+        throw new ValidationError(`${name}.${fieldName}.operation conflicts with the current structural revision or frontier`);
+      }
+      let nextFamily;
+      try {
+        nextFamily = applyTextOperationToBlock(family, command.operation.blockId, command.operation.operation);
+      } catch (error) {
+        throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+      }
+      const handle = eventHandles.native(name, fieldName, 'operated');
+      return [{
+        handle,
+        type: handle.type,
+        scope: documentScope,
+        data: Object.freeze({
+          version: 1,
+          id: command.id,
+          before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
+          operation: command.operation,
+          after: Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier }),
+          family: textFamilyCheckpoint(nextFamily),
+        }),
+      }];
+    };
+    Object.defineProperty(handler, 'inTransaction', { value: true });
+    Object.defineProperty(handler, 'batchForbidden', { value: true });
+    Object.defineProperty(handler, 'preDedupe', { value: assertDocumentScope });
+    handlers[operationType] = handler;
+    cursorPolicy[operationType] = 'excluded';
   }
 
   // Side-table mutation handlers (map.add/setRole/remove, ordered.insert/move/
