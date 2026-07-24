@@ -14,6 +14,8 @@ import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { canonicalTextOp } from '../annotated-text.mjs';
 
+export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
+
 function ownerFieldOf(entity) {
   for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
     if (descriptor.type === 'ref' && descriptor.role && descriptor.readonly) {
@@ -45,8 +47,14 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
 
   const handlers = {
     [`${name}.create`]: ({ payload, principal }) => {
+      if (Object.hasOwn(payload, '__workbench')) {
+        throw new ValidationError(`${name}.__workbench is reserved for framework event metadata`);
+      }
       const { id: requestedId, ...fieldsPayload } = payload;
       for (const [fieldName, descriptor] of Object.entries(fields)) {
+        if (descriptor.kind === 'annotatedText' && Object.hasOwn(fieldsPayload, fieldName)) {
+          throw new ValidationError(`${name}.${fieldName} is an annotated-text field and cannot be set through create payloads`);
+        }
         if (descriptor.kind === 'crdt' && descriptor.type === 'text' && fieldName in fieldsPayload) {
           throw new ValidationError(`${name}.${fieldName} accepts native operations only; create the row then dispatch ${name}.${fieldName}.apply`);
         }
@@ -58,6 +66,14 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       const id = requestedId ?? randomUUID();
       const data = materializeCreateDefaults(record, { ...fieldsPayload, id });
       if (ownerField) data[ownerField] = principal?.id;
+      const annotatedText = Object.fromEntries(
+        Object.entries(fields)
+          .filter(([, descriptor]) => descriptor.kind === 'annotatedText')
+          .map(([fieldName]) => [fieldName, Object.freeze({ initialBlockId: randomUUID() })]),
+      );
+      if (Object.keys(annotatedText).length > 0) {
+        data.__workbench = Object.freeze({ annotatedText: Object.freeze(annotatedText) });
+      }
       return [{
         handle: verbs.created.handle,
         type: verbs.created.type,
@@ -72,6 +88,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         throw new ValidationError(`${name}.update requires at least one field to change`);
       }
       for (const fieldName of Object.keys(rest)) {
+        if (fields[fieldName]?.kind === 'annotatedText') {
+          throw new ValidationError(`${name}.${fieldName} is an annotated-text field and cannot be set through update payloads`);
+        }
         if (fields[fieldName]?.immutable === true) {
           throw new ValidationError(`${name}.${fieldName} is immutable: a client may set it on create but may not change it.`);
         }
