@@ -45,19 +45,32 @@ function actionFromRow(db, row) {
   });
 }
 
-function cursorRow(db, key) {
+function cursorRow(db, key, receiptIsEligible = () => true) {
   const row = db.prepare(
     `SELECT past, future FROM _HistoryCursor
      WHERE principalKey = :principalKey AND sessionId = :sessionId AND scope = :scope`,
   ).get(key);
   if (row) return { past: parseJson(row.past, []), future: parseJson(row.future, []) };
-  const past = db.prepare(
-    `SELECT actionId FROM _ActionReceipt
+  const receipts = db.prepare(
+    `SELECT actionId, actionType, actionData, operation FROM _ActionReceipt
      WHERE scope = :scope AND principalKey = :principalKey AND sessionId = :sessionId
-       AND operation = 'action'
      ORDER BY historyOrder`,
-  ).all(key).map((entry) => entry.actionId);
-  return { past, future: [] };
+  ).all(key);
+  const cursor = { past: [], future: [] };
+  for (const receipt of receipts) {
+    if (receipt.operation === 'action') {
+      if (!receiptIsEligible(receipt)) continue;
+      cursor.past.push(receipt.actionId);
+      cursor.future = [];
+    } else if (receipt.operation === 'undo') {
+      const actionId = cursor.past.pop();
+      if (actionId !== undefined) cursor.future.push(actionId);
+    } else if (receipt.operation === 'redo') {
+      const actionId = cursor.future.pop();
+      if (actionId !== undefined) cursor.past.push(actionId);
+    }
+  }
+  return cursor;
 }
 
 function sameCursor(left, right) {
@@ -90,10 +103,35 @@ export function durableHistory({ authorize, inverse, redo } = {}) {
   return Object.freeze({ [HISTORY_DESCRIPTOR]: true, authorize, inverse, redo });
 }
 
-export function createDurableHistoryRuntime({ db, descriptor, dispatch }) {
+export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPolicy }) {
   if (!db) throw new Error('durable history requires a durable database');
   if (!descriptor?.[HISTORY_DESCRIPTOR]) {
     throw new TypeError('history must be created with durableHistory(...)');
+  }
+  if (cursorPolicy !== undefined) {
+    if (!(cursorPolicy instanceof Map)) {
+      throw new TypeError('cursorPolicy must be a Map if provided');
+    }
+    for (const [type, policy] of cursorPolicy) {
+      if (typeof type !== 'string' || (policy !== 'eligible' && policy !== 'excluded')) {
+        throw new TypeError(`cursorPolicy: invalid policy '${String(policy)}' for action '${type}'`);
+      }
+    }
+  }
+  const resolvedPolicy = cursorPolicy ?? new Map();
+
+  function cursorPolicyFor(type) {
+    return resolvedPolicy.get(type) ?? 'eligible';
+  }
+
+  function receiptIsEligible(receipt) {
+    if (receipt.operation !== 'action') return false;
+    if (receipt.actionType === '$batch') {
+      const actions = parseJson(receipt.actionData, null);
+      return Array.isArray(actions) && actions.every((action) =>
+        action && typeof action.type === 'string' && cursorPolicyFor(action.type) === 'eligible');
+    }
+    return typeof receipt.actionType === 'string' && cursorPolicyFor(receipt.actionType) === 'eligible';
   }
 
   function identity({ scope, session, principal }) {
@@ -116,17 +154,25 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch }) {
   }
 
   function normalCommit(request) {
-    if (!request.history?.session) return null;
-    // A CRDT operation has no generic inverse: replaying the same immutable
-    // operation is idempotent, not redo, and a compensating edit needs fresh
-    // identities plus the current observed frontier.
-    if (typeof request.type === 'string' && request.type.endsWith('.apply')) return null;
+    const metadata = receiptMetadata(request);
+    if (!request.history?.session) {
+      return { metadata, apply: undefined };
+    }
+    // Batch: if any action is excluded, exclude cursor entry
+    if (request.actions) {
+      const allEligible = request.actions.every(
+        (action) => cursorPolicyFor(action.type) !== 'excluded',
+      );
+      if (!allEligible) return { metadata, apply: undefined };
+    } else if (cursorPolicyFor(request.type) === 'excluded') {
+      return { metadata, apply: undefined };
+    }
     const key = identity({ scope: request.scope, session: request.history.session, principal: request.principal });
-    const expected = cursorRow(db, key);
+    const expected = cursorRow(db, key, receiptIsEligible);
     return {
-      metadata: receiptMetadata(request),
+      metadata,
       apply(dbInTxn) {
-        const current = cursorRow(dbInTxn, key);
+        const current = cursorRow(dbInTxn, key, receiptIsEligible);
         if (!sameCursor(current, expected)) throw new Error('history cursor changed during dispatch');
         writeCursor(dbInTxn, key, { past: [...current.past, request.actionId], future: [] });
       },
@@ -157,14 +203,14 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch }) {
   async function cursor(args = {}) {
     const key = identity(args);
     await admitted(descriptor, { operation: 'read', scope: key.scope, session: args.session, principal: args.principal });
-    const value = cursorRow(db, key);
+    const value = cursorRow(db, key, receiptIsEligible);
     return Object.freeze({ undo: value.past.length, redo: value.future.length });
   }
 
   async function move(operation, args = {}) {
     const key = identity(args);
     await admitted(descriptor, { operation, scope: key.scope, session: args.session, principal: args.principal });
-    const expected = cursorRow(db, key);
+    const expected = cursorRow(db, key, receiptIsEligible);
     const source = operation === 'undo' ? expected.past : expected.future;
     const targetId = source[source.length - 1];
     if (!targetId) return Object.freeze({ ok: true, deduped: false, events: [], empty: true });
@@ -178,6 +224,9 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch }) {
     if (!translated || typeof translated.type !== 'string') {
       throw new TypeError(`durableHistory ${operation === 'undo' ? 'inverse' : 'redo'} must return an action`);
     }
+    if (translated.scope !== undefined && translated.scope !== key.scope) {
+      throw new TypeError(`durableHistory ${operation === 'undo' ? 'inverse' : 'redo'} must keep the original history scope`);
+    }
     const transition = {
       metadata: {
         actionType: translated.type,
@@ -188,7 +237,7 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch }) {
       },
       async apply(dbInTxn) {
         await admitted(descriptor, { operation, scope: key.scope, session: args.session, principal: args.principal, action });
-        const current = cursorRow(dbInTxn, key);
+        const current = cursorRow(dbInTxn, key, receiptIsEligible);
         if (!sameCursor(current, expected)) throw new Error('history cursor changed during dispatch');
         const past = [...current.past];
         const future = [...current.future];
@@ -202,7 +251,7 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch }) {
       type: translated.type,
       payload: translated.payload ?? {},
       principal: args.principal,
-      scope: translated.scope ?? key.scope,
+      scope: key.scope,
       _historyCommit: transition,
     });
   }

@@ -22,10 +22,11 @@ function historyDescriptor(authorize = () => true) {
   });
 }
 
-function makeServer(db, history = historyDescriptor()) {
+function makeServer(db, history = historyDescriptor(), cursorPolicy) {
   return createServer({
     db,
     history,
+    cursorPolicy,
     authorize: () => true,
     handlers: {
       'document.set': ({ payload }) => [{
@@ -35,6 +36,16 @@ function makeServer(db, history = historyDescriptor()) {
       }],
       'Document.body.apply': ({ payload }) => [{
         type: 'Document.body.applied',
+        scope,
+        data: payload,
+      }],
+      'explicit.eligible': ({ payload }) => [{
+        type: 'explicit.changed',
+        scope,
+        data: payload,
+      }],
+      'explicit.excluded': ({ payload }) => [{
+        type: 'explicit.changed',
         scope,
         data: payload,
       }],
@@ -129,7 +140,7 @@ test('a new action after undo truncates that session redo stack', async () => {
   assert.equal(redo.empty, true);
 });
 
-test('text CRDT apply actions are excluded from generic undo history', async () => {
+test('registered .apply action defaults eligible when no cursorPolicy excludes it', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   const server = makeServer(db);
@@ -142,7 +153,264 @@ test('text CRDT apply actions are excluded from generic undo history', async () 
     history: { session: 'tab-a' },
   });
   assert.equal(result.ok, true);
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
+});
+
+test('generated CRDT .apply is excluded via cursorPolicy', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const cursorPolicy = new Map([['Document.body.apply', 'excluded']]);
+  const server = makeServer(db, undefined, cursorPolicy);
+  const result = await server.dispatch({
+    actionId: 'text-a1',
+    type: 'Document.body.apply',
+    payload: { id: '1', operation: ['workbench.text'] },
+    principal,
+    scope,
+    history: { session: 'tab-a' },
+  });
+  assert.equal(result.ok, true);
   assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 0, redo: 0 });
+});
+
+test('non-.apply action explicitly excluded via cursorPolicy', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const cursorPolicy = new Map([['explicit.excluded', 'excluded']]);
+  const server = makeServer(db, undefined, cursorPolicy);
+  const result = await server.dispatch({
+    actionId: 'excl-a1',
+    type: 'explicit.excluded',
+    payload: { value: 1 },
+    principal,
+    scope,
+    history: { session: 'tab-a' },
+  });
+  assert.equal(result.ok, true);
+  const cursor = await server.history.cursor({ scope, principal, session: 'tab-a' });
+  assert.deepEqual(cursor, { undo: 0, redo: 0 });
+});
+
+test('explicitly eligible action via cursorPolicy', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const cursorPolicy = new Map([['explicit.eligible', 'eligible']]);
+  const server = makeServer(db, undefined, cursorPolicy);
+  const result = await server.dispatch({
+    actionId: 'elig-a1',
+    type: 'explicit.eligible',
+    payload: { value: 1 },
+    principal,
+    scope,
+    history: { session: 'tab-a' },
+  });
+  assert.equal(result.ok, true);
+  const cursor = await server.history.cursor({ scope, principal, session: 'tab-a' });
+  assert.deepEqual(cursor, { undo: 1, redo: 0 });
+});
+
+test('invalid cursorPolicy value throws at startup', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const cursorPolicy = new Map([['document.set', 'invalid']]);
+  assert.throws(
+    () => makeServer(db, undefined, cursorPolicy),
+    /cursorPolicy: invalid policy 'invalid'/,
+  );
+});
+
+test('cursorPolicy must be a Map if provided', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  assert.throws(
+    () => makeServer(db, undefined, {}),
+    /cursorPolicy must be a Map/,
+  );
+});
+
+test('request history cannot override cursorPolicy', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const cursorPolicy = new Map([['Document.body.apply', 'excluded']]);
+  const server = makeServer(db, undefined, cursorPolicy);
+  const result = await server.dispatch({
+    actionId: 'no-override',
+    type: 'Document.body.apply',
+    payload: { id: '1', operation: ['workbench.text'] },
+    principal,
+    scope,
+    history: { session: 'tab-a' },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 0, redo: 0 });
+});
+
+test('excluded action receipt has action metadata', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const cursorPolicy = new Map([['explicit.excluded', 'excluded']]);
+  const server = makeServer(db, undefined, cursorPolicy);
+  await server.dispatch({
+    actionId: 'excl-meta',
+    type: 'explicit.excluded',
+    payload: { value: 42 },
+    principal,
+    scope,
+    history: { session: 'tab-a' },
+  });
+  const row = db.prepare(
+    'SELECT actionType, actionData, principalKey, sessionId FROM _ActionReceipt WHERE actionId = ?',
+  ).get('excl-meta');
+  assert.equal(row.actionType, 'explicit.excluded');
+  assert.ok(row.actionData);
+  assert.equal(row.principalKey, 'user:u1');
+  assert.equal(row.sessionId, 'tab-a');
+});
+
+test('sessionless action receipt has metadata without principalKey or sessionId', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const server = makeServer(db);
+  await server.dispatch({
+    actionId: 'sessionless-a1',
+    type: 'document.set',
+    payload: { value: 1 },
+    principal,
+    scope,
+  });
+  const row = db.prepare(
+    'SELECT actionType, actionData, principalKey, sessionId FROM _ActionReceipt WHERE actionId = ?',
+  ).get('sessionless-a1');
+  assert.equal(row.actionType, 'document.set');
+  assert.ok(row.actionData);
+  assert.equal(row.principalKey, null);
+  assert.equal(row.sessionId, null);
+});
+
+test('sessionless excluded action receipt has metadata', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const cursorPolicy = new Map([['explicit.excluded', 'excluded']]);
+  const server = makeServer(db, undefined, cursorPolicy);
+  await server.dispatch({
+    actionId: 'sessless-excl',
+    type: 'explicit.excluded',
+    payload: { value: 99 },
+    principal,
+    scope,
+  });
+  const row = db.prepare(
+    'SELECT actionType, actionData, principalKey, sessionId, operation FROM _ActionReceipt WHERE actionId = ?',
+  ).get('sessless-excl');
+  assert.equal(row.actionType, 'explicit.excluded');
+  assert.ok(JSON.parse(row.actionData));
+  assert.equal(row.principalKey, null);
+  assert.equal(row.sessionId, null);
+  assert.equal(row.operation, 'action');
+});
+
+test('mixed batch: excluded action excludes cursor entry for whole batch', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const cursorPolicy = new Map([
+    ['explicit.excluded', 'excluded'],
+    ['document.set', 'eligible'],
+  ]);
+  const server = makeServer(db, undefined, cursorPolicy);
+  const result = await server.dispatchBatch({
+    actionId: 'batch-mixed',
+    actions: [
+      { type: 'document.set', payload: { value: 1, before: 0 } },
+      { type: 'explicit.excluded', payload: { value: 99 } },
+    ],
+    principal,
+    scope,
+    history: { session: 'tab-a' },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 0, redo: 0 });
+});
+
+test('multi-event cursor shows one cursor entry per eligible action', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const cursorPolicy = new Map([
+    ['document.set', 'eligible'],
+    ['explicit.excluded', 'excluded'],
+  ]);
+  const server = makeServer(db, undefined, cursorPolicy);
+  await set(server, { actionId: 'a1', value: 1, before: 0, session: 'tab-a' });
+  await server.dispatch({
+    actionId: 'excl1',
+    type: 'explicit.excluded',
+    payload: { value: 99 },
+    principal,
+    scope,
+    history: { session: 'tab-a' },
+  });
+  await set(server, { actionId: 'a2', value: 2, before: 1, session: 'tab-a' });
+  await server.dispatch({
+    actionId: 'excl2',
+    type: 'explicit.excluded',
+    payload: { value: 100 },
+    principal,
+    scope,
+    history: { session: 'tab-a' },
+  });
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 2, redo: 0 });
+});
+
+test('missing cursor reconstructs only eligible receipts and undo targets the latest', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const cursorPolicy = new Map([['explicit.excluded', 'excluded']]);
+  const server = makeServer(db, undefined, cursorPolicy);
+  await set(server, { actionId: 'eligible-a1', value: 1, before: 0, session: 'tab-a' });
+  await server.dispatch({
+    actionId: 'excluded-a1', type: 'explicit.excluded', payload: { value: 99 },
+    principal, scope, history: { session: 'tab-a' },
+  });
+  await set(server, { actionId: 'eligible-a2', value: 2, before: 1, session: 'tab-a' });
+  db.prepare('DELETE FROM _HistoryCursor').run();
+
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 2, redo: 0 });
+  const undone = await server.history.undo({ scope, principal, session: 'tab-a', actionId: 'undo-rebuilt' });
+  assert.equal(undone.ok, true);
+  assert.equal(undone.events[0].data.value, 1);
+});
+
+test('missing cursor reconstructs undo and redo transitions', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const server = makeServer(db);
+  await set(server, { actionId: 'a1', value: 1, before: 0, session: 'tab-a' });
+  await set(server, { actionId: 'a2', value: 2, before: 1, session: 'tab-a' });
+  await server.history.undo({ scope, principal, session: 'tab-a', actionId: 'undo-a2' });
+  db.prepare('DELETE FROM _HistoryCursor').run();
+
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 1 });
+  const redone = await server.history.redo({ scope, principal, session: 'tab-a', actionId: 'redo-a2' });
+  assert.equal(redone.ok, true);
+  db.prepare('DELETE FROM _HistoryCursor').run();
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 2, redo: 0 });
+});
+
+test('history inverse rejects a translated action in another scope', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const history = durableHistory({
+    authorize: () => true,
+    inverse: () => ({ type: 'document.set', scope: 'Document:other', payload: { value: 0 } }),
+  });
+  const server = makeServer(db, history);
+  await set(server, { actionId: 'a1', value: 1, before: 0, session: 'tab-a' });
+
+  await assert.rejects(
+    server.history.undo({ scope, principal, session: 'tab-a', actionId: 'undo-cross-scope' }),
+    /must keep the original history scope/,
+  );
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt').get().count, 1);
 });
 
 test('history authorization fails closed', async () => {

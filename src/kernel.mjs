@@ -11,6 +11,7 @@ import { admitInvitationCreation, isInvitationCreationAuthority } from './auth/i
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
+import { CRUD_CURSOR_POLICY } from './entity/crud.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -21,10 +22,15 @@ const FRAMEWORK_ENTITIES = [User, Session, Inbox, Credential, Invitation, ApiKey
 function collectAppEntities(app) {
   const handlers = {};
   const projections = [];
+  const cursorPolicy = new Map();
   const entities = new Map(app.entities ?? []);
   for (const entity of entities.values()) {
     Object.assign(handlers, entity.crudHandlers);
     projections.push(entity.projection);
+    // Generated handler policy is explicit metadata, never inferred from names.
+    for (const [actionType, policy] of Object.entries(entity.crudHandlers?.[CRUD_CURSOR_POLICY] ?? {})) {
+      cursorPolicy.set(actionType, policy);
+    }
   }
   for (const declaration of app.actions ?? []) {
     if (!declaration || typeof declaration.type !== 'string' || declaration.type.length === 0) {
@@ -46,8 +52,27 @@ function collectAppEntities(app) {
       }
       projections.push(projection);
     }
+    // Registered action cursor policy from declaration metadata
+    // Closed keys: only 'cursor' is valid on the history object
+    const historyMeta = declaration.history;
+    if (historyMeta !== undefined) {
+      if (typeof historyMeta !== 'object' || historyMeta === null) {
+        throw new Error(`registered action '${declaration.type}' history must be an object`);
+      }
+      const unknownKeys = Object.keys(historyMeta).filter((k) => k !== 'cursor');
+      if (unknownKeys.length > 0) {
+        throw new Error(`registered action '${declaration.type}' history has unknown keys '${unknownKeys.join(', ')}'`);
+      }
+      const policy = historyMeta.cursor;
+      if (policy !== undefined) {
+        if (policy !== 'eligible' && policy !== 'excluded') {
+          throw new Error(`registered action '${declaration.type}' has invalid history.cursor '${policy}'`);
+        }
+        cursorPolicy.set(declaration.type, policy);
+      }
+    }
   }
-  return { handlers, projections, entities };
+  return { handlers, projections, entities, cursorPolicy };
 }
 
 function buildEffects(entities) {
@@ -208,7 +233,7 @@ function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsu
 }
 
 export function buildKernel(app) {
-  const { handlers, projections, entities } = collectAppEntities(app);
+  const { handlers, projections, entities, cursorPolicy } = collectAppEntities(app);
   const sessionEntity = entities.get(Session.name);
   if (sessionEntity && app._sessionSchedule) {
     Object.defineProperty(sessionEntity, 'schedule', {
@@ -260,6 +285,7 @@ export function buildKernel(app) {
     authorize: (context) => registeredActions.get(context.type)?.authorize({ ...context, db: app.db }) ?? true,
     db: app.db,
     history: app._history,
+    cursorPolicy,
     pipeline: durableMutationVariant({
       projectionConsumers: projections,
       admission: buildDurableAdmission(app),
