@@ -55,6 +55,22 @@ test('db-backed app: GET /workbench.mjs → 200 + text/javascript + SDK body', a
   assert.match(body, /createAuthClient/);
 });
 
+test('db-backed app serves the same pure annotated-text reducer module used by the browser client', async (t) => {
+  const origin = await bootDb(t);
+  const res = await fetch(`${origin}/workbench-annotated-text.mjs`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'text/javascript; charset=utf-8');
+  assert.match(await res.text(), /export function applyTextOp/);
+});
+
+test('db-backed app serves every relative module imported by the browser SDK', async (t) => {
+  const origin = await bootDb(t);
+  const body = await (await fetch(`${origin}/workbench.mjs`)).text();
+  for (const dependency of body.matchAll(/from '(\.\/[^']+)'/g)) {
+    assert.equal((await fetch(`${origin}/${dependency[1].slice(2)}`)).status, 200, dependency[1]);
+  }
+});
+
 test('db-backed app: an app route is not shadowed by the SDK endpoint', async (t) => {
   // a mounted route at /notes still works alongside the framework SDK endpoint.
   const origin = await bootDb(t);
@@ -68,4 +84,5 @@ test('db-less app: GET /workbench.mjs falls through (no live kernel → not serv
   // no db engaged → the framework endpoint returns false → matchRoute finds no
   // app route at /workbench.mjs → 404 (fail closed, never a phantom file).
   assert.equal(res.status, 404);
+  assert.equal((await fetch(`${origin}/workbench-annotated-text.mjs`)).status, 404);
 });

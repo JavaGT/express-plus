@@ -1,6 +1,6 @@
 // S2 — golden fold fixtures: createClient and LiveList must agree on final
-// state + cursor for shared-semantics sequences (lifecycle, value set, crdt
-// insert, replay edges). Folds remain separate; this locks the contract.
+// state + cursor for shared-semantics sequences (lifecycle, value set, replay
+// edges). Text CRDT operations use their dedicated shared reducer instead.
 
 import { test, describe } from 'node:test';
 import assert from 'node:assert/strict';
@@ -11,7 +11,6 @@ import {
   LIFECYCLE,
   LIFECYCLE_THEN_REMOVE,
   VALUE_SET,
-  CRDT_INSERT,
   REPLAY_EDGES,
   noteLifecycleEvents,
 } from './fixtures/fold-golden.mjs';
@@ -128,16 +127,6 @@ describe('S2 golden fold fixtures — createClient vs LiveList', () => {
     assertStateEqual(client.state(VALUE_SET.scope), VALUE_SET.expectedState, 'createClient');
     assertStateEqual(list.state, VALUE_SET.expectedState, 'LiveList');
     assert.equal(client.cursor(VALUE_SET.scope), 2);
-    assert.equal(list.cursor, 2);
-    await list.close();
-  });
-
-  test('CRDT_INSERT: whole body vs insert delta converge', async () => {
-    const client = runCreateClient(CRDT_INSERT);
-    const list = await runLiveList(CRDT_INSERT);
-    assertStateEqual(client.state(CRDT_INSERT.scope), CRDT_INSERT.expectedState, 'createClient');
-    assertStateEqual(list.state, CRDT_INSERT.expectedState, 'LiveList');
-    assert.equal(client.cursor(CRDT_INSERT.scope), 2);
     assert.equal(list.cursor, 2);
     await list.close();
   });

@@ -57,33 +57,6 @@ function isJsonValue(value, seen = new WeakSet()) {
   return false;
 }
 
-// crdt text diff — common-prefix + common-suffix detection yields the minimal
-// per-element delta. A pure insert → {insert:{at,text}}; a replace →
-// {delete:{at,length}, insert:{at,text}}. Never a whole-value `{ set }` (consult
-// #18: real per-element merge, not the deferred concurrent toolkit #33).
-function crdtTextDiff(previous, next) {
-  if (Object.is(previous, next)) return null;
-  const p = previous == null ? '' : String(previous);
-  const n = next == null ? '' : String(next);
-  const minLen = Math.min(p.length, n.length);
-  let pre = 0;
-  while (pre < minLen && p[pre] === n[pre]) pre++;
-  const maxSuf = minLen - pre;
-  let suf = 0;
-  while (suf < maxSuf && p[p.length - 1 - suf] === n[n.length - 1 - suf]) suf++;
-  const delStart = pre;
-  const delEnd = p.length - suf;
-  const insStart = pre;
-  const insEnd = n.length - suf;
-  const deleted = delEnd > delStart ? p.slice(delStart, delEnd) : null;
-  const inserted = insEnd > insStart ? n.slice(insStart, insEnd) : null;
-  if (!deleted && !inserted) return null;
-  const delta = {};
-  if (deleted) delta.delete = { at: delStart, length: delEnd - delStart };
-  if (inserted) delta.insert = { at: insStart, text: inserted };
-  return delta;
-}
-
 // store (map) membership diff over { member: role } materializations. A member
 // add → added; a member gone → removed; a same-member role change → changed
 // (NOT added — only a NEW member fires native added, DECISIONLOG #57).
@@ -249,12 +222,12 @@ const STRATEGIES = Object.freeze({
     },
   }),
 
-  // `crdt` — a custom merge contract. Text emits per-element insert/delete deltas;
-  // raster/polyline are explicitly whole-value replace stubs until their merge
-  // toolkit lands. Single-writer dispatch stores `next` (apply = replace); the
-  // delta is the broadcast artifact. The concurrent-merge toolkit is deferred.
+  // `crdt` — text operations use annotated-text.mjs directly. Raster/polyline
+  // remain explicit whole-value replacement stubs until their merge toolkit lands.
   crdt: Object.freeze({
-    laws: Object.freeze({ invertible: true, coalescible: true, idempotent: false, commutativeMerge: true }),
+    // Text operations need authored compensating operations; generic history
+    // cannot derive an inverse from a checkpoint or a string preimage.
+    laws: Object.freeze({ invertible: false, coalescible: true, idempotent: false, commutativeMerge: true }),
     validate(value, descriptor) {
       if (descriptor?.type === 'raster') {
         if (value === null || value === undefined) return true;
@@ -267,8 +240,7 @@ const STRATEGIES = Object.freeze({
         if (Array.isArray(value)) return true;
         return 'expected a polyline value (array or null)';
       }
-      if (!isTextValue(value)) return 'expected a crdt text value';
-      return true;
+      return 'text.crdt accepts native operations only';
     },
     apply(_previous, next) {
       return next;
@@ -277,7 +249,7 @@ const STRATEGIES = Object.freeze({
       if (descriptor?.type === 'raster' || descriptor?.type === 'polyline') {
         return Object.is(previous, next) ? null : { set: next };
       }
-      return crdtTextDiff(previous, next);
+      throw new Error('text.crdt has no whole-value diff; dispatch Entity.field.apply instead');
     },
   }),
 

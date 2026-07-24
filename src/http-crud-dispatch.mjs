@@ -76,13 +76,13 @@ export async function authorizeRow(app, entity, verb, id, principal, preRow = nu
 }
 
 // DB-backed dispatch for one admitted verb.
-export async function dispatchCrud({ entity, verb, db, principal, params, body, app, res,
+export async function dispatchCrud({ entity, verb, fieldName, db, principal, params, body, actionId: requestedActionId, app, res,
   sendJson, committedEventHeaders, mayRow }) {
   if (!db) {
     sendFailure(sendJson, res, failure('internal', 'Internal error.'));
     return;
   }
-  const actionId = randomUUID();
+  const actionId = typeof requestedActionId === 'string' && requestedActionId.length > 0 ? requestedActionId : randomUUID();
   const table = entity.name;
   const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
 
@@ -126,8 +126,7 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
     const created = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE t0.id = :id`)
       .get({ id });
-    entity.deserializeRow(created);
-    sendJson(res, 201, created, committedEventHeaders(result, actionId, scopeOf(table, id).key));
+    sendJson(res, 201, entity.deserializeRow(created), committedEventHeaders(result, actionId, scopeOf(table, id).key));
     return;
   }
 
@@ -149,8 +148,30 @@ export async function dispatchCrud({ entity, verb, db, principal, params, body, 
     });
     if (!result) return;
     const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
-    entity.deserializeRow(updated);
-    sendJson(res, 200, updated, committedEventHeaders(result, actionId, scopeOf(table, params.id).key));
+    sendJson(res, 200, entity.deserializeRow(updated), committedEventHeaders(result, actionId, scopeOf(table, params.id).key));
+    return;
+  }
+
+  if (verb === 'fieldApply') {
+    const kernel = app?.kernel;
+    if (!kernel) return void sendFailure(sendJson, res, failure('internal', 'Internal error.'));
+    const descriptor = entity.fields[fieldName];
+    if (descriptor?.kind !== 'crdt' || descriptor.type !== 'text') {
+      return void sendFailure(sendJson, res, failure('not-found', 'not found'));
+    }
+    const auth = await authorizeRow(app, entity, 'update', params.id, principal);
+    if (auth.status) {
+      return void sendFailure(sendJson, res, failure(auth.status === 404 ? 'not-found' : 'denied', auth.status === 404 ? 'not found' : 'forbidden'));
+    }
+    const result = await runKernelMutation(app, kernel, res, sendJson, {
+      actionId,
+      type: `${table}.${fieldName}.apply`,
+      payload: { id: params.id, operation: body?.operation },
+      principal,
+    });
+    if (!result) return;
+    const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
+    sendJson(res, 200, entity.deserializeRow(updated), committedEventHeaders(result, actionId, scopeOf(table, params.id).key));
     return;
   }
 

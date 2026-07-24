@@ -4,7 +4,7 @@ import { config } from './config.mjs';
 import { getLog } from './log.mjs';
 import { scopeOf } from './scope-handle.mjs';
 
-const DIFF_ELIGIBLE = new Set(['value', 'state', 'crdt', 'struct']);
+const DIFF_ELIGIBLE = new Set(['value', 'state', 'struct']);
 const DEFAULT_MAX_SCOPES = 10_000;
 
 function isReplaceStubCrdt(descriptor) {
@@ -84,6 +84,9 @@ export function createDeltaProjector({ maxScopes = DEFAULT_MAX_SCOPES, diagnosti
     }
 
     if (handle.kind === EventKind.native) {
+      if (entityRecord.fields?.[handle.field]?.kind === 'crdt' && entityRecord.fields[handle.field].type === 'text') {
+        return undefined;
+      }
       return { [handle.field]: committedEvent.data };
     }
 

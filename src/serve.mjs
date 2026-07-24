@@ -136,7 +136,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
     // read a body for mutating entity verbs and every imperative route. Entity
     // CRUD stays JSON-only; handlers may accept browser form posts.
     let body = {};
-    if (route.handlers || route.verb === 'create' || route.verb === 'update') {
+    if (route.handlers || route.verb === 'create' || route.verb === 'update' || route.verb === 'fieldApply') {
       try {
         body = await readRequestBody(req, { jsonOnly: !route.handlers });
       } catch (err) {
@@ -161,7 +161,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
     if (route.handlers) {
       await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
     } else {
-      await dispatchCrud({ entity: route.entity, verb: route.verb, db, principal, params, body, app: isApp ? source : null, res, sendJson, committedEventHeaders, mayRow });
+      await dispatchCrud({ entity: route.entity, verb: route.verb, fieldName: route.fieldName, db, principal, params, body, actionId: req.headers['x-workbench-action-id'], app: isApp ? source : null, res, sendJson, committedEventHeaders, mayRow });
     }
   }
 

@@ -82,5 +82,9 @@ export function parseEventType(type) {
 
 export function lifecycleVerb(handle) {
   if (!handle || handle.brand !== 'event-handle') return undefined;
+  // Native field mutations change an existing entity row just like an update.
+  // Routing them through the lifecycle admission keeps field actions on the
+  // same row-grant authorization path as PATCH.
+  if (handle.kind === EventKind.native) return 'update';
   return LIFECYCLE_VERBS[handle.kind];
 }

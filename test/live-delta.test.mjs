@@ -150,7 +150,7 @@ function bootServer() {
 function insertRow(db, id, overrides = {}) {
   const title = overrides.title ?? 'Original';
   const status = overrides.status ?? 'draft';
-  const body = overrides.body ?? '';
+  const body = overrides.body ?? JSON.stringify({ version: 1, operations: {}, elements: {}, applied: [], pending: [], frontier: [] });
   db.prepare('INSERT INTO Canvas (id, title, status, body) VALUES (?, ?, ?, ?)').run(id, title, status, body);
 }
 
@@ -236,41 +236,54 @@ test('P6e-2 B1: value field .updated delta (cold shadow → set-from-empty)', as
 // Test 2: crdt field `.updated` delta — per-element diff (insert-op object)
 // ============================================================
 
-test('P6e-2 B1: crdt field .updated delta (per-element insert-op, NOT whole-state)', async () => {
+test('text.crdt native events carry their exact operation instead of a whole-value delta', async () => {
   const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test2';
 
   try {
-    insertRow(db, cid, { body: 'hello' });
+    insertRow(db, cid);
     const entityRecord = (() => Canvas)();
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
 
-    // Emit .created to seed the prev-shadow with body='hello' (mirrors production:
-    // .create dispatches a .created event through the post-commit consumer).
-    await emitCreated(live, entityRecord, db, cid, 1, { body: 'hello' });
-    const evSeed = await ws.nextEvent(400);
-    assert.ok(evSeed, 'created event received');
-
-    // Update body from 'hello' to 'hello world'
-    db.prepare('UPDATE Canvas SET body = ? WHERE id = ?').run('hello world', cid);
-    await emitUpdated(live, entityRecord, db, cid, 2, { body: 'hello world' });
+    const operation = ['workbench.text', 1, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1], 1, [], ['insert', ['root'], 'hello']];
+    await live.emit(entityRecord, cid, reRead(db, cid), {
+      type: 'Canvas.body.applied', seq: 1, data: { id: cid, operation },
+    });
     const ev = await ws.nextEvent(400);
     assert.ok(ev, 'event received');
-    assert.equal(ev.event.type, 'Canvas.updated');
-    assert.ok(ev.delta, 'delta present');
+    assert.equal(ev.event.type, 'Canvas.body.applied');
+    assert.deepEqual(ev.event.data, { id: cid, operation });
+    assert.equal(ev.delta, undefined);
+  } finally {
+    ws?.close();
+    live.close();
+    httpServer.close();
+  }
+});
 
-    // crtd text diff: 'hello' → 'hello world' should produce {insert:{at:5,text:' world'}}
-    assert.ok(ev.delta.body, 'delta has body field');
-    assert.ok(ev.delta.body.insert, 'crdt delta has insert op (not set)');
-    assert.equal(ev.delta.body.insert.at, 5);
-    assert.equal(ev.delta.body.insert.text, ' world');
-    // Verify it's NOT a whole-state set
-    assert.equal(ev.delta.body.set, undefined, 'crdt delta is NOT whole-value {set}');
-    assert.equal(ev.event.data.body, 'hello world', 'whole state preserved');
+test('text.crdt created live envelopes seed empty reducer sidecars', async () => {
+  const { db, httpServer, live } = bootServer();
+  const port = httpServer.address().port;
+  let ws;
+  const cid = 'c-text-created';
+
+  try {
+    insertRow(db, cid);
+    ws = await openRawWS(port, 'alice');
+    assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
+    await live.emit(Canvas, cid, reRead(db, cid), {
+      type: 'Canvas.created', seq: 1, data: { id: cid, title: 'new', body: '' },
+    });
+    const ev = await ws.nextEvent(400);
+    assert.equal(ev.event.type, 'Canvas.created');
+    assert.equal(ev.reducers.length, 1);
+    assert.deepEqual(Object.keys(ev.reducers[0]).sort(), ['checkpoint', 'entity', 'field', 'id', 'reducer', 'version']);
+    assert.equal(ev.reducers[0].reducer, 'workbench.text');
+    assert.deepEqual(ev.reducers[0].checkpoint.operations, {});
   } finally {
     ws?.close();
     live.close();

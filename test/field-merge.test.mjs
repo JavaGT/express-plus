@@ -1,9 +1,9 @@
 // Priority 6 — field merge strategies (eng-review test plan 728-735, consult #18/#20).
 //
 // The four named-whole kinds (crdt/store/ordered/struct) validate structurally in
-// Phase 1 but their apply/diff FAIL CLOSED with a loud Phase-2 throw. P6 retires
-// the throw with real per-element diffs: a change is described as an ELEMENT-level
-// delta (insert / added / moved / per-sub-cell), NOT a whole-value `{ set }`.
+// Phase 1 but their apply/diff FAIL CLOSED with a loud Phase-2 throw. Text CRDT
+// now reduces native annotated-text operations; store/struct retain their own
+// field strategy contracts.
 //
 // These are STRATEGY-unit tests: they call resolveStrategy(kind).diff directly
 // over value representations. They do NOT exercise handles, side-tables, or the
@@ -30,19 +30,8 @@ const struct = resolveStrategy('struct');
 // A struct descriptor's `cells` map mirrors the link field shape (field.mjs struct).
 const structDescriptor = { cells: { token: { kind: 'value', type: 'text' }, tier: { kind: 'value', type: 'text' } } };
 
-test('crdt diff: a pure append yields an {insert} delta, not a whole-value {set}', () => {
-  const delta = crdt.diff('hello', 'hello!');
-  assert.deepEqual(delta, { insert: { at: 5, text: '!' } });
-  assert.ok(!delta || !('set' in delta), 'crdt diff is per-element, not a whole-value set');
-});
-
-test('crdt diff: an interior insert yields the inserted span only', () => {
-  const delta = crdt.diff('hello world', 'hello big world');
-  assert.deepEqual(delta, { insert: { at: 6, text: 'big ' } });
-});
-
-test('crdt diff: unchanged text yields null', () => {
-  assert.equal(crdt.diff('same', 'same'), null);
+test('text crdt rejects the retired whole-string diff path', () => {
+  assert.throws(() => crdt.diff('hello', 'hello!'), /field\.apply/);
 });
 
 test('crdt apply: stores the resolved next value (single-writer dispatch)', () => {

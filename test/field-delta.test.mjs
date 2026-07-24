@@ -44,14 +44,10 @@ test('state field: changed status produces { status: { from, to } }', () => {
   assert.deepEqual(result, { status: { from: 'draft', to: 'published' } });
 });
 
-test('crdt field: changed body produces an insert delta (NOT a {set})', () => {
+test('text.crdt is excluded from whole-value deltas', () => {
   const Doc = makeDoc();
   const result = computeDelta(Doc, { body: 'hello' }, { body: 'hello world' });
-  assert.ok(result.body, 'body should have a delta');
-  assert.ok(result.body.insert, 'delta should have an insert op');
-  assert.equal(result.body.insert.at, 5);
-  assert.equal(result.body.insert.text, ' world');
-  assert.equal(result.body.set, undefined, 'crdt delta must NOT be a { set }');
+  assert.equal(result.body, undefined);
 });
 
 test('raster/polyline crdt stubs produce replace deltas and dev diagnostics', { skip: 'CRDT merge toolkit is deferred Phase 2; diagnostics gate on NODE_ENV≠production' }, () => {
@@ -170,13 +166,10 @@ test('struct field COLD prev: all sub-cells set from empty', () => {
   });
 });
 
-test('crdt field COLD prev: insert-from-empty delta', () => {
+test('text.crdt COLD prev still produces no whole-value delta', () => {
   const Doc = makeDoc();
   const result = computeDelta(Doc, {}, { body: 'hello' });
-  assert.ok(result.body, 'body should have a delta');
-  assert.ok(result.body.insert, 'cold crdt delta should have an insert op');
-  assert.equal(result.body.insert.at, 0);
-  assert.equal(result.body.insert.text, 'hello');
+  assert.equal(result.body, undefined);
 });
 
 test('multiple field changes produce a multi-key result', () => {
@@ -188,10 +181,9 @@ test('multiple field changes produce a multi-key result', () => {
   );
   assert.ok(result.title);
   assert.ok(result.status);
-  assert.ok(result.body);
   assert.equal(result.title.set, 'b');
   assert.deepEqual(result.status, { from: 'draft', to: 'published' });
-  assert.ok(result.body.insert, 'crdt body should have an insert op');
+  assert.equal(result.body, undefined);
 });
 
 test('createDeltaProjector: created seeds shadow and returns undefined', () => {

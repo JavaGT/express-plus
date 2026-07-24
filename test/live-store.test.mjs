@@ -86,6 +86,22 @@ function tickAsync() {
 
 describe('LiveStore', () => {
 
+  it('apply dispatches a text operation to the native POST route, never PATCH', async () => {
+    const channel = makeFakeChannel();
+    const calls = [];
+    const fetch = async (url, options = {}) => {
+      calls.push({ url, options });
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({ id: '1', body: 'hello' }) };
+    };
+    const store = createLiveStore({ baseUrl: 'http://test', name: 'Doc', path: '/docs', channel, fetchImpl: fetch });
+    const operation = ['workbench.text', 1, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1], 1, [], ['insert', ['root'], 'hello']];
+    const result = await store.apply('1', 'body', operation);
+    assert.equal(result.ok, true);
+    assert.equal(calls[0].url, 'http://test/docs/1/body/apply');
+    assert.equal(calls[0].options.method, 'POST');
+    assert.deepEqual(JSON.parse(calls[0].options.body), { operation });
+  });
+
   // --- 1. subscribe(id) returns LiveList, caches by id ---
   it('subscribe returns LiveList, caches by id (same id returns same instance)', async () => {
     const channel = makeFakeChannel();

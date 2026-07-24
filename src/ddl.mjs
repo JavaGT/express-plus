@@ -135,7 +135,9 @@ function mainTableDDL(entity) {
   for (const [name, descriptor] of Object.entries(fields)) {
     // Pull computed fields have no stored column (computed on read).
     if (descriptor.kind === 'computed' && descriptor.mode === 'pull') continue;
-    // Fields that are stored in the main table (value, crdt, hash, struct)
+    // Fields that are stored in the main table (value, crdt, hash, struct).
+    // A text CRDT's declared cell is its canonical JSON checkpoint, not a
+    // materialized string plus a hidden second authority.
     if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash' || descriptor.kind === 'state' || descriptor.kind === 'projected' || (descriptor.kind === 'computed' && descriptor.mode === 'stored')) {
       cols.push(`${name} ${sqlType(descriptor)}`);
     } else if (descriptor.kind === 'struct') {

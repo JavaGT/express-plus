@@ -5,7 +5,7 @@ import { canUndoField, undoableFieldKinds } from '../src/field-laws.mjs';
 
 test('canUndoField returns true for invertible kinds', () => {
   assert.equal(canUndoField('value'), true);
-  assert.equal(canUndoField('crdt'), true);
+  assert.equal(canUndoField('crdt'), false, 'text CRDT compensation needs a newly authored operation');
   assert.equal(canUndoField('store'), true);
   assert.equal(canUndoField('ordered'), true);
   assert.equal(canUndoField('struct'), true);
@@ -14,6 +14,7 @@ test('canUndoField returns true for invertible kinds', () => {
 
 test('canUndoField returns false for non-invertible kinds', () => {
   assert.equal(canUndoField('hash'), false, 'hash cannot be inverted back to plaintext');
+  assert.equal(canUndoField('crdt'), false, 'generic history cannot invert immutable text operations');
   assert.equal(canUndoField('computed'), false, 'derived field has no undo');
   assert.equal(canUndoField('projected'), false, 'derived field has no undo');
 });

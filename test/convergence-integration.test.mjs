@@ -279,7 +279,7 @@ test('W5: createLiveStore surfaces CRUD methods', () => {
 
 test('W5: canUndoField surfaces the undo vocabulary', () => {
   assert.equal(canUndoField('value'), true);
-  assert.equal(canUndoField('crdt'), true);
+  assert.equal(canUndoField('crdt'), false);
   assert.equal(canUndoField('store'), true);
   assert.equal(canUndoField('state'), true);
   assert.equal(canUndoField('computed'), false);

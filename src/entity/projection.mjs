@@ -2,6 +2,7 @@ import { getLog } from '../log.mjs';
 import { serializeField, flattenStruct, resolveStrategy } from '../field-strategy.mjs';
 import * as eventHandle from '../event-handle.mjs';
 import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
+import { applyTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
 
 function buildProjectedComputeRow(storedRow, fields) {
   const row = { ...storedRow };
@@ -21,6 +22,9 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
       verbs.created.type,
       verbs.updated.type,
       verbs.removed.type,
+      ...Object.entries(fields)
+        .filter(([, descriptor]) => descriptor.kind === 'crdt' && descriptor.type === 'text')
+        .map(([fieldName]) => eventHandle.native(name, fieldName, 'applied').type),
       ...sideTableStrategyEntries.flatMap(({ strategy, fields: strategyFields }) =>
         strategy.eventTypes(name, strategyFields)),
     ],
@@ -30,6 +34,20 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
       if (handle?.brand !== 'event-handle' || handle.entity !== name) return;
       for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
         if (strategy.projectionApply({ entityName: name, fieldEntries: strategyFields, handle, event, db })) return;
+      }
+      if (handle.kind === eventHandle.EventKind.native && handle.nativeName === 'applied') {
+        const descriptor = fields[handle.field];
+        if (descriptor?.kind !== 'crdt' || descriptor.type !== 'text') return;
+        const id = event.data?.id;
+        if (!id) return;
+        const current = db.prepare(`SELECT ${handle.field} FROM ${table} WHERE id = ?`).get(id);
+        if (!current) return;
+        const state = restoreTextCheckpoint(JSON.parse(current[handle.field]));
+        const next = applyTextOp(state, event.data.operation);
+        db.prepare(`UPDATE ${table} SET ${handle.field} = ? WHERE id = ?`)
+          .run(JSON.stringify(textCheckpoint(next)), id);
+        getLog().debug('dispatch', `${name}.${handle.field}.applied`, { id });
+        return;
       }
       if (handle.kind === eventHandle.EventKind.created) {
         const row = {};
@@ -44,6 +62,11 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
             row[key] = serializeField(descriptor, value);
           } else {
             row[key] = value;
+          }
+        }
+        for (const [fieldName, descriptor] of Object.entries(fields)) {
+          if (descriptor.kind === 'crdt' && descriptor.type === 'text') {
+            row[fieldName] = JSON.stringify(textCheckpoint(createTextState()));
           }
         }
         for (const [fieldName, { compute }] of storedComputedFields) {

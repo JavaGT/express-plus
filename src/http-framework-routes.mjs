@@ -18,6 +18,7 @@ import { readScopedRow, authorizeRow } from './http-crud-dispatch.mjs';
 import { readSeq, readSince, minSeqForScope } from './committed-log.mjs';
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
+import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.mjs';
 
 function reject(res, status, message, details) {
   const workbenchFailure = failureForHttpError({ status, message, details });
@@ -70,13 +71,16 @@ async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
   // (eng-review Tier-1 #2): the cursor is captured alongside the row, before the
   // async mayVerb yields. The pair we authorize is the pair we return.
   const row = readScopedRow(app, entity, id, principal);
+  const { sql: where, params } = entity.scopeFilter(principal);
+  const storedRow = app.db.prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
+    .get({ ...params, id });
   const lastSeq = readSeq(app.db, scopeKey);
   const auth = await authorizeRow(app, entity, 'read', id, principal, row);
   if (auth.status) {
     reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
-  sendJson(res, 200, { snapshot: auth.row, seq: lastSeq });
+  sendJson(res, 200, { snapshot: auth.row, seq: lastSeq, reducers: textReducerCheckpoints(entity, storedRow) });
   return true;
 }
 
@@ -96,7 +100,9 @@ async function snapshotScopeRoute(app, scope, principal, res) {
   }
   if (access.direct) {
     const lastSeq = readSeq(app.db, scope);
-    sendJson(res, 200, { snapshot: access.anchor.row, cursors: { [scope]: lastSeq } });
+    const storedRow = app.db.prepare(`SELECT * FROM ${access.anchor.entity} WHERE id = ?`).get(access.anchor.id);
+    const entity = app.entities.get(access.anchor.entity);
+    sendJson(res, 200, { snapshot: access.anchor.row, cursors: { [scope]: lastSeq }, reducers: textReducerCheckpoints(entity, storedRow) });
     return true;
   }
   // A custom scope may aggregate several rows, but its resolver must first map
@@ -108,7 +114,13 @@ async function snapshotScopeRoute(app, scope, principal, res) {
     : null;
   if (scopeSnapshot !== null && scopeSnapshot !== undefined) {
     const lastSeq = readSeq(app.db, scope);
-    sendJson(res, 200, { snapshot: scopeSnapshot, cursors: { [scope]: lastSeq } });
+    const entity = app.entities.get(access.anchor.entity);
+    const storedAnchor = app.db.prepare(`SELECT * FROM ${access.anchor.entity} WHERE id = ?`).get(access.anchor.id);
+    sendJson(res, 200, {
+      snapshot: scopeSnapshot,
+      cursors: { [scope]: lastSeq },
+      reducers: textReducerCheckpoints(entity, storedAnchor),
+    });
     return true;
   }
   reject(res, 404, 'not found');
@@ -127,14 +139,11 @@ async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
     return true;
   }
   const rows = readSince(app.db, scope, cursor);
-  const events = rows.map((r) => ({
-    scope: r.scope,
-    seq: r.seq,
-    type: r.eventType,
-    data: JSON.parse(r.eventData),
-    actionId: r.actionId,
-    committedAt: r.committedAt,
-  }));
+  const events = rows.map((r) => {
+    const data = JSON.parse(r.eventData);
+    const reducers = createdTextReducerSeeds(app.entities.get(tryParseScopeKey(r.scope)?.entity), { type: r.eventType, data });
+    return { scope: r.scope, seq: r.seq, type: r.eventType, data, actionId: r.actionId, committedAt: r.committedAt, ...(reducers ? { reducers } : {}) };
+  });
   sendJson(res, 200, { scope, cursor, events });
   return true;
 }
@@ -187,14 +196,11 @@ async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
     return true;
   }
   const rows = readSince(app.db, scopeKey, cursor);
-  const events = rows.map((r) => ({
-    type: r.eventType,
-    scope: r.scope,
-    seq: r.seq,
-    data: r.data ?? null,
-    actionId: r.actionId,
-    committedAt: r.committedAt,
-  }));
+  const events = rows.map((r) => {
+    const data = r.data ?? null;
+    const reducers = createdTextReducerSeeds(entity, { type: r.eventType, data });
+    return { type: r.eventType, scope: r.scope, seq: r.seq, data, actionId: r.actionId, committedAt: r.committedAt, ...(reducers ? { reducers } : {}) };
+  });
   sendJson(res, 200, { events });
   return true;
 }
@@ -336,10 +342,26 @@ export async function handleJobRoute(app, req, res) {
 // live kernel is running); a db-less app has no live protocol and falls through.
 // Returns true when handled; false to fall through.
 const CLIENT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-client.mjs';
+const ANNOTATED_TEXT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/src') + '/annotated-text.mjs';
+const TEXT_EDIT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-text-edit.mjs';
 
 export function handleClientSdkRoute(app, req, res) {
   if (req.method !== 'GET') return false;
   const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/workbench-annotated-text.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(ANNOTATED_TEXT_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-text-edit.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(TEXT_EDIT_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
   if (url.pathname !== '/workbench.mjs') return false;
   if (!app || !app.db) return false;
   let body;

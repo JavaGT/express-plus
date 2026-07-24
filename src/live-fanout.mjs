@@ -17,6 +17,7 @@ import { PACE_STRATEGIES } from './field-pace.mjs';
 import { createDeltaProjector } from './field-delta.mjs';
 import { EventKind, parseEventType } from './event-handle.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
+import { createdTextReducerSeeds } from './text-reducer-transport.mjs';
 
 export function createLiveFanout({ mayVerb = null } = {}) {
   const byScope = new Map();   // Map<scopeKey, Map<conn, SubSpec>>
@@ -216,6 +217,8 @@ export function createLiveFanout({ mayVerb = null } = {}) {
           event: committed,
         };
         if (delta !== undefined) envelope.delta = delta;
+        const reducers = createdTextReducerSeeds(entityRecord, committed);
+        if (reducers) envelope.reducers = reducers;
         conn.send(envelope);
       } else {
         const bufKey = `${conn.id}|${eventScope}|${ephemeralField}`;

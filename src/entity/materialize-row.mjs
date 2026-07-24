@@ -1,4 +1,5 @@
 import { deserializeField, structCellColumn, verifyHash } from '../field-strategy.mjs';
+import { materializeText, restoreTextCheckpoint } from '../annotated-text.mjs';
 
 // Convert one SQLite result into the field values an application declared.
 // This is deliberately pure: it installs no database-backed collection handles,
@@ -8,6 +9,12 @@ export function materializeStoredRow(storedRow, fields, { freeze = false } = {})
   const row = { ...storedRow };
 
   for (const [fieldName, descriptor] of Object.entries(fields)) {
+    if (descriptor.kind === 'crdt' && descriptor.type === 'text') {
+      const checkpoint = JSON.parse(row[fieldName]);
+      const state = restoreTextCheckpoint(checkpoint);
+      row[fieldName] = materializeText(state);
+      continue;
+    }
     if (descriptor.kind === 'struct') {
       const value = {};
       let present = false;

@@ -250,7 +250,7 @@ async function resolveMount(path, target, entityOf) {
 // system). A path needing bespoke admission is a bespoke imperative route.
 function resolveResource(entity, base) {
   const resolvedGate = entity.gate;
-  return RESOURCE_VERBS.map(({ verb, method, suffix }) =>
+  const routes = RESOURCE_VERBS.map(({ verb, method, suffix }) =>
     Object.freeze({
       method,
       path: joinPath(base, suffix),
@@ -259,6 +259,19 @@ function resolveResource(entity, base) {
       gate: resolvedGate[verb],
     }),
   );
+  for (const [fieldName, descriptor] of Object.entries(entity.fields ?? {})) {
+    if (descriptor.kind === 'crdt' && descriptor.type === 'text') {
+      routes.push(Object.freeze({
+        method: 'POST',
+        path: joinPath(base, `/:id/${fieldName}/apply`),
+        verb: 'fieldApply',
+        fieldName,
+        entity,
+        gate: resolvedGate.update,
+      }));
+    }
+  }
+  return routes;
 }
 
 // Wire one compiled entity at `base` into its route records. The entity's

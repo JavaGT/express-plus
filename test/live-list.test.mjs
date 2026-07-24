@@ -2,6 +2,10 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { LiveList } from '../public/workbench-client.mjs';
+import { applyTextOp, createTextState, textCheckpoint } from '../src/annotated-text.mjs';
+
+const TEXT_ACTOR = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+const textInsert = ['workbench.text', 1, [TEXT_ACTOR, 1], 1, [], ['insert', ['root'], 'hello']];
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -313,8 +317,8 @@ describe('LiveList', () => {
     await list.close();
   });
 
-  // --- 6. CRDT delta ---
-  it('crdt delta: insert then delete then replace on a string field', async () => {
+  // --- 6. Retired text delta protocol ---
+  it('ignores retired text prefix/suffix deltas', async () => {
     const channel = makeFakeChannel();
     channel._setAck({ currentSeq: 1 });
     const fetch = makeFakeFetch([
@@ -327,41 +331,94 @@ describe('LiveList', () => {
     });
     await list.subscribe();
 
-    // Insert " beautiful" at position 5 (after "Hello", before " World")
     channel.emit({
       type: 'event', entity: 'ticket', id: '1',
       seq: 2, seqSpan: [2, 2],
       event: { type: 'ticket.updated', data: {} },
       delta: { text: { insert: { at: 5, text: ' beautiful' } } },
     });
-    assert.equal(list.state.text, 'Hello beautiful World');
-
-    // Delete length 9 at position 6 — removes "beautiful"
-    // "Hello beautiful World" → pos 6 is 'b', del 9 chars → removes 'beautiful'
-    channel.emit({
-      type: 'event', entity: 'ticket', id: '1',
-      seq: 3, seqSpan: [3, 3],
-      event: { type: 'ticket.updated', data: {} },
-      delta: { text: { delete: { at: 6, length: 9 } } },
-    });
-    assert.equal(list.state.text, 'Hello  World');
-
-    // Delete+insert at same offset: replace " World" with " Bob"
-    // "Hello  World" → delete at 6 length 6 → removes " World", insert at 6 " Bob"
-    channel.emit({
-      type: 'event', entity: 'ticket', id: '1',
-      seq: 4, seqSpan: [4, 4],
-      event: { type: 'ticket.updated', data: {} },
-      delta: {
-        text: {
-          delete: { at: 6, length: 6 },
-          insert: { at: 6, text: ' Bob' },
-        },
-      },
-    });
-    assert.equal(list.state.text, 'Hello  Bob');
+    assert.equal(list.state.text, 'Hello World');
 
     await list.close();
+  });
+
+  it('text.crdt snapshot sidecar bootstraps and native operations fold through the shared reducer', async () => {
+    const channel = makeFakeChannel();
+    const checkpoint = textCheckpoint(applyTextOp(createTextState(), textInsert));
+    const reducers = [{ entity: 'Doc', id: '1', field: 'body', reducer: 'workbench.text', version: 1, checkpoint }];
+    const fetchImpl = async () => ({ ok: true, json: async () => ({ snapshot: { id: '1', body: 'hello' }, reducers, seq: 1 }) });
+    const list = new LiveList({ entity: 'Doc', id: '1', channel, fetchImpl, snapshotUrl: () => '/snapshot', eventsSinceUrl: () => '/events' });
+    await list.subscribe();
+    assert.equal(list.state.body, 'hello');
+    const second = ['workbench.text', 1, [TEXT_ACTOR, 2], 2, [[TEXT_ACTOR, 1]], ['insert', ['element', [[TEXT_ACTOR, 1], 4]], '!']];
+    channel.emit({ type: 'event', entity: 'Doc', id: '1', seq: 2, seqSpan: [2, 2], event: { type: 'Doc.body.applied', data: { id: '1', operation: second } } });
+    assert.equal(list.state.body, 'hello!');
+    // Duplicate reducer operations are idempotent even when transport sequence differs.
+    channel.emit({ type: 'event', entity: 'Doc', id: '1', seq: 3, seqSpan: [3, 3], event: { type: 'Doc.body.applied', data: { id: '1', operation: second } } });
+    assert.equal(list.state.body, 'hello!');
+  });
+
+  it('readiness waits for queued native-operation replica observation', async () => {
+    const channel = makeFakeChannel();
+    const ack = deferred();
+    channel.subscribe = (entity, id, options, onEvent) => {
+      const key = `${entity}\0${String(id)}`;
+      channel._setAck({ currentSeq: 1 });
+      // Register before holding the acknowledgement so the operation queues.
+      const original = makeFakeChannel();
+      void original;
+      channel.emit = (envelope) => onEvent(envelope);
+      return ack.promise;
+    };
+    const observed = deferred();
+    const list = new LiveList({
+      entity: 'Doc', id: '1', channel,
+      fetchImpl: async () => ({ ok: true, json: async () => ({ snapshot: { id: '1', body: '' }, seq: 0 }) }),
+      snapshotUrl: () => '/snapshot', eventsSinceUrl: () => '/events',
+      onTextReducer: () => observed.promise,
+    });
+    const subscribing = list.subscribe();
+    await new Promise((resolve) => setImmediate(resolve));
+    channel.emit({ type: 'event', entity: 'Doc', id: '1', seq: 1, seqSpan: [1, 1], event: { type: 'Doc.body.applied', data: { id: '1', operation: textInsert } } });
+    ack.resolve({ currentSeq: 1 });
+    await new Promise((resolve) => setImmediate(resolve));
+    let ready = false;
+    subscribing.then(() => { ready = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ready, false);
+    observed.resolve();
+    await subscribing;
+    assert.equal(list.state.body, 'hello');
+  });
+
+  it('installs created text reducer seeds before a following applied event', async () => {
+    const channel = makeFakeChannel();
+    const fetchImpl = async () => ({ ok: true, json: async () => ({ snapshot: { id: '1', body: '' }, seq: 0 }) });
+    const list = new LiveList({ entity: 'Doc', id: '1', channel, fetchImpl, snapshotUrl: () => '/snapshot', eventsSinceUrl: () => '/events' });
+    await list.subscribe();
+    const reducers = [{ entity: 'Doc', id: '1', field: 'body', reducer: 'workbench.text', version: 1, checkpoint: textCheckpoint(createTextState()) }];
+    channel.emit({ type: 'event', entity: 'Doc', id: '1', seq: 1, seqSpan: [1, 1], event: { type: 'Doc.created', data: { id: '1', body: '' } }, reducers });
+    channel.emit({ type: 'event', entity: 'Doc', id: '1', seq: 2, seqSpan: [2, 2], event: { type: 'Doc.body.applied', data: { id: '1', operation: textInsert } } });
+    assert.equal(list.state.body, 'hello');
+  });
+
+  it('replays created reducer seeds before applied events from events-since', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 2 });
+    const reducers = [{ entity: 'Doc', id: '1', field: 'body', reducer: 'workbench.text', version: 1, checkpoint: textCheckpoint(createTextState()) }];
+    const fetchImpl = async (url) => ({
+      ok: true,
+      json: async () => String(url).includes('/events')
+        ? { events: [
+          { seq: 1, type: 'Doc.created', data: { id: '1', body: '' }, reducers },
+          { seq: 2, type: 'Doc.body.applied', data: { id: '1', operation: textInsert } },
+        ] }
+        : { snapshot: { id: '1', body: '' }, seq: 0 },
+    });
+    const list = new LiveList({ entity: 'Doc', id: '1', channel, fetchImpl, snapshotUrl: () => '/snapshot', eventsSinceUrl: () => '/events' });
+    await list.subscribe();
+    assert.equal(list.cursor, 2);
+    assert.equal(list.state.body, 'hello');
   });
 
   // --- 6b. Value-XOR-delta: a field present in delta must NOT ALSO be
@@ -370,7 +427,7 @@ describe('LiveList', () => {
   // Applying both double-applies: 'hello' + whole 'hello world' + insert
   // ' world' → 'hello world world'. delta is authoritative for delta fields;
   // event.data whole-value assignment covers only fields NOT in delta.
-  it('value-XOR-delta: crdt field in delta is not double-applied from event.data', async () => {
+  it('retired crdt delta does not apply a whole-string text update', async () => {
     const channel = makeFakeChannel();
     channel._setAck({ currentSeq: 1 });
     const fetch = makeFakeFetch([
@@ -394,8 +451,7 @@ describe('LiveList', () => {
       event: { type: 'ticket.updated', data: { body: 'hello world' } },
       delta: { body: { insert: { at: 5, text: ' world' } } },
     });
-    assert.equal(list.state.body, 'hello world',
-      'crdt field applied ONCE via delta, not doubled by event.data whole value');
+    assert.equal(list.state.body, 'hello');
 
     await list.close();
   });
@@ -404,7 +460,7 @@ describe('LiveList', () => {
   // event.data (the createClient app-reducer contract — whole values remain
   // authoritative for non-delta fields). Mixed envelope: one delta field, one
   // plain event.data field.
-  it('value-XOR-delta: scalar field absent from delta still applies from event.data', async () => {
+  it('scalar fields remain whole-value updates when a retired crdt delta is present', async () => {
     const channel = makeFakeChannel();
     channel._setAck({ currentSeq: 1 });
     const fetch = makeFakeFetch([
@@ -424,7 +480,7 @@ describe('LiveList', () => {
       event: { type: 'ticket.updated', data: { body: 'hello world', label: 'B' } },
       delta: { body: { insert: { at: 5, text: ' world' } } },
     });
-    assert.equal(list.state.body, 'hello world', 'delta field applied once');
+    assert.equal(list.state.body, 'hello');
     assert.equal(list.state.label, 'B', 'non-delta scalar still applied from event.data');
 
     await list.close();

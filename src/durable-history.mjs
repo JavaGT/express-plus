@@ -117,6 +117,10 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch }) {
 
   function normalCommit(request) {
     if (!request.history?.session) return null;
+    // A CRDT operation has no generic inverse: replaying the same immutable
+    // operation is idempotent, not redo, and a compensating edit needs fresh
+    // identities plus the current observed frontier.
+    if (typeof request.type === 'string' && request.type.endsWith('.apply')) return null;
     const key = identity({ scope: request.scope, session: request.history.session, principal: request.principal });
     const expected = cursorRow(db, key);
     return {

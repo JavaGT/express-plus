@@ -27,6 +27,17 @@ function ownedNote() {
   });
 }
 
+function ownedTextNote() {
+  return entity('TextNote', {
+    body: text.crdt(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    grant: () => [
+      scope(({ is }) => is.owner()).can(async ({ is }) =>
+        (await is.owner()) ? grant(read, write, subscribe) : grant(read)),
+    ],
+  });
+}
+
 async function harness(t, principalId = 'u1') {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db });
@@ -111,6 +122,45 @@ test('events-since returns committed events after the cursor, in seq order', asy
   // cursor at/over the head → empty, no events.
   const atHead = await json(await fetch(`${base}/events-since/Note/${id}?cursor=3`));
   assert.equal(atHead.events.length, 0);
+});
+
+test('text snapshots and created replay carry reducer sidecars while ordinary rows stay visible', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db });
+  app.mount('/text-notes', ownedTextNote());
+  await app.ddl();
+  app.listen(0, { principalOf: () => ({ id: 'u1' }) });
+  await app.ready;
+  const base = `http://127.0.0.1:${app.httpServer.address().port}`;
+  t.after(() => { app.httpServer.close(); db.close(); });
+
+  const created = await json(await fetch(`${base}/text-notes`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({}),
+  }));
+  assert.equal(created.body, '');
+  assert.equal(created.__textCheckpoints, undefined);
+  const id = created.id;
+  const operation = ['workbench.text', 1, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1], 1, [], ['insert', ['root'], 'hello']];
+  const applied = await json(await fetch(`${base}/text-notes/${id}/body/apply`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ operation }),
+  }));
+  assert.equal(applied.body, 'hello');
+  assert.equal(applied.__textCheckpoints, undefined);
+
+  const snapshot = await json(await fetch(`${base}/snapshot/TextNote/${id}`));
+  assert.equal(snapshot.snapshot.body, 'hello');
+  assert.equal(snapshot.snapshot.__textCheckpoints, undefined);
+  assert.equal(snapshot.reducers.length, 1);
+  assert.deepEqual(Object.keys(snapshot.reducers[0]).sort(), ['checkpoint', 'entity', 'field', 'id', 'reducer', 'version']);
+  assert.equal(snapshot.reducers[0].reducer, 'workbench.text');
+  assert.ok(snapshot.reducers[0].checkpoint.operations['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1']);
+
+  const history = await json(await fetch(`${base}/events-since/TextNote/${id}?cursor=0`));
+  assert.equal(history.events[0].type, 'TextNote.created');
+  assert.equal(history.events[0].reducers.length, 1);
+  assert.equal(history.events[0].reducers[0].checkpoint.operations['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:1'], undefined);
+  assert.equal(history.events[1].type, 'TextNote.body.applied');
+  assert.equal(history.events[1].reducers, undefined);
 });
 
 test('hard-fail on a stale cursor — the log was trimmed past the client cursor', async (t) => {

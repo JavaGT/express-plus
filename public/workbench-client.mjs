@@ -11,6 +11,9 @@
 //                    {type:'event', entity, id, seq, seqSpan, event, delta?}
 //                    {type:'error', requestId?, failure}
 
+import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } from './workbench-annotated-text.mjs';
+import { deleteText, insertText } from './workbench-text-edit.mjs';
+
 // --- BEGIN GENERATED from src/replay-decision.mjs (keep in sync; zero-import) ---
 function normalizeSeqSpan(seqOrSpan) {
   if (Array.isArray(seqOrSpan) && seqOrSpan.length >= 2) {
@@ -596,6 +599,7 @@ export class LiveList {
     maxBufferedEvents = 1000,
     resyncBackoffBase = 200,
     maxResyncBackoff = 5000,
+    onTextReducer,
   }) {
     this._entity = entity;
     this._id = id;
@@ -605,6 +609,7 @@ export class LiveList {
     this._eventsSinceUrl = eventsSinceUrl;
     this._fields = fields;
     this._pace = pace;
+    this._onTextReducer = onTextReducer;
 
     this._state = null;
     this._cursor = 0;
@@ -623,6 +628,8 @@ export class LiveList {
     this._resyncRetryTimer = null;
     this._renderCallbacks = new Set();
     this._ordered = {};             // { [field]: [{id, key, item}] } — internal ordered tracking
+    this._textStates = {};          // durable annotated-text reducer state by field
+    this._textReducerReady = Promise.resolve();
     this._removed = false;
 
     // Promise that resolves when bootstrap completes — accessible via .ready
@@ -648,6 +655,10 @@ export class LiveList {
   /** Promise that resolves when bootstrap completes (same as subscribe()). */
   get ready() { return this._readyPromise; }
 
+  textState(field) { return this._textStates[field] ?? null; }
+
+  get textReducerReady() { return this._textReducerReady; }
+
   /**
    * Bootstrap: snapshot → subscribe → (resync if gap) → drain queue → render.
    * Resolves only after the full bootstrap sequence completes. Throws if called twice.
@@ -663,9 +674,10 @@ export class LiveList {
         this._snapshotUrl(this._entity, this._id),
         { signal: this._abortController.signal },
       );
-      const { snapshot, seq } = await this._decode(snapRes);
+      const { snapshot, seq, reducers } = await this._decode(snapRes);
       this._assertActive(epoch);
       this._state = snapshot;
+      await this._installTextReducers(reducers);
       this._cursor = seq;
       this._removed = false;
 
@@ -698,6 +710,8 @@ export class LiveList {
       for (const envelope of queue) {
         this._ingest(this._normalizeLive(envelope));
       }
+      await this._textReducerReady;
+      this._assertActive(epoch);
 
       // 5. Render initial state, then resolve.
       this._render();
@@ -781,6 +795,7 @@ export class LiveList {
       seqSpan: envelope.seqSpan,
       event: envelope.event,
       delta: envelope.delta,
+      reducers: envelope.reducers,
     };
   }
 
@@ -796,7 +811,7 @@ export class LiveList {
    */
   _ingest(normalized) {
     if (this._closed) return;
-    const { seqSpan, event, delta } = normalized;
+    const { seqSpan, event, delta, reducers } = normalized;
     const decision = decideReplay(this._cursor, seqSpan);
 
     if (decision.kind === 'duplicate') {
@@ -806,11 +821,12 @@ export class LiveList {
       // Gap — missing events. Queue this envelope then trigger a resync;
       // after the resync fills the gap, the queue drain will re-process it
       // through _ingest when the cursor is caught up.
-      this._bufferEnvelope({ seq: normalized.seq, seqSpan, event, delta });
+      this._bufferEnvelope({ seq: normalized.seq, seqSpan, event, delta, reducers });
       this._resync().catch(() => {});
       return;
     }
     // next — apply and advance cursor to span hi (shared Replay decision)
+    this._installTextReducers(reducers);
     this._applyEvent(event, delta);
     this._cursor = decision.cursor;
     this._render();
@@ -848,9 +864,10 @@ export class LiveList {
           this._snapshotUrl(this._entity, this._id),
           { signal: this._abortController.signal },
         );
-        const { snapshot, seq } = await this._decode(snapRes);
+        const { snapshot, seq, reducers } = await this._decode(snapRes);
         this._assertActive(epoch);
         this._state = snapshot;
+        await this._installTextReducers(reducers);
         this._cursor = seq;
         this._removed = false;
         this._ordered = {};
@@ -875,7 +892,9 @@ export class LiveList {
               seqSpan: [row.seq, row.seq],
               event: { type: row.type, data: row.data, actionId: row.actionId },
               delta: undefined,
+              reducers: row.reducers,
             };
+            await this._installTextReducers(normalized.reducers);
             this._applyEvent(normalized.event, normalized.delta);
             this._cursor = row.seq;
           }
@@ -899,6 +918,7 @@ export class LiveList {
     for (const envelope of queue) {
       this._ingest(this._normalizeLive(envelope));
     }
+    await this._textReducerReady;
 
     this._render();
   }
@@ -1000,10 +1020,7 @@ export class LiveList {
     }
   }
 
-  /**
-   * Apply per-kind delta objects: value, state, crdt, struct, or map.
-   * delta is { [field]: deltaObj, ... }.
-   */
+  /** Apply value, state, struct, or map deltas. Text CRDTs fold native ops. */
   _applyDelta(delta) {
     for (const [field, d] of Object.entries(delta)) {
       if (d == null) continue;
@@ -1014,18 +1031,6 @@ export class LiveList {
         } else if ('from' in d && 'to' in d) {
           // State delta: {from, to}
           this._state[field] = d.to;
-        } else if ('delete' in d || 'insert' in d) {
-          // CRDT delta: {delete?:{at,length}, insert?:{at,text}}
-          // DELETE FIRST, THEN INSERT — both offsets are relative to the
-          // post-delete string at the same `at`.
-          let s = this._state[field] ?? '';
-          if (d.delete) {
-            s = s.slice(0, d.delete.at) + s.slice(d.delete.at + d.delete.length);
-          }
-          if (d.insert) {
-            s = s.slice(0, d.insert.at) + d.insert.text + s.slice(d.insert.at);
-          }
-          this._state[field] = s;
         } else if ('cells' in d) {
           // Struct delta: {cells: {[name]: {set: v}}}
           this._state[field] = { ...(this._state[field] ?? {}) };
@@ -1071,6 +1076,19 @@ export class LiveList {
     if (!data) return;
 
     switch (op) {
+      case 'applied': {
+        const operation = data.operation;
+        if (!operation) return;
+        const state = this._textStates[field] ?? createTextState();
+        const next = applyTextOp(state, operation);
+        this._textStates[field] = next;
+        this._state[field] = materializeText(next);
+        this._observeTextReducer({
+          entity: this._entity, id: this._id, field,
+          state: next, operation,
+        }).catch(() => {});
+        break;
+      }
       case 'inserted':
       case 'moved':
       case 'reordered':
@@ -1164,6 +1182,27 @@ export class LiveList {
     this._state[field] = this._ordered[field].map(e => e.item);
   }
 
+  _installTextReducers(reducers) {
+    for (const reducer of reducers ?? []) {
+      if (reducer?.entity !== this._entity || String(reducer.id) !== String(this._id)
+        || reducer.reducer !== 'workbench.text' || reducer.version !== 1) continue;
+      this._textStates[reducer.field] = restoreTextCheckpoint(reducer.checkpoint);
+      this._observeTextReducer({
+        entity: this._entity, id: this._id, field: reducer.field,
+        epoch: JSON.stringify(reducer.checkpoint), state: this._textStates[reducer.field],
+      });
+    }
+    return this._textReducerReady;
+  }
+
+  _observeTextReducer(observation) {
+    if (!this._onTextReducer) return this._textReducerReady;
+    // Persistence determines safe next counters, so observations must run in
+    // delivery order and hold readiness until their durable transaction commits.
+    this._textReducerReady = this._textReducerReady.then(() => this._onTextReducer(observation));
+    return this._textReducerReady;
+  }
+
   /** Call every registered onRender callback with the current state. */
   _render() {
     for (const cb of this._renderCallbacks) {
@@ -1244,6 +1283,120 @@ export async function decodeResult(res) {
   return { ok: true, httpStatus: res.status, value: await res.json() };
 }
 
+function replicaUnavailable() {
+  return {
+    reserve: async () => { throw new Error('durable replica storage is unavailable'); },
+    reconcile: async () => { throw new Error('durable replica storage is unavailable'); },
+  };
+}
+
+function randomReplicaActor() {
+  const bytes = new Uint8Array(16);
+  if (!globalThis.crypto?.getRandomValues) throw new Error('secure random replica identity is unavailable');
+  globalThis.crypto.getRandomValues(bytes);
+  return [...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function replicaActionId(document, actor, counter) {
+  // Server receipts are scoped to a row, while counters are scoped to a field.
+  // Encode the document identity so first edits to sibling text fields cannot dedupe.
+  return `text:${encodeURIComponent(document)}:${actor}:${counter}`;
+}
+
+// Browser default. A reservation atomically writes both its clock high-water
+// and the exact request that owns that counter, so a retry cannot invent a
+// causally different operation after an interrupted delivery.
+export function createIndexedDbReplicaState({ indexedDB = globalThis.indexedDB, database = 'workbench-text-replicas' } = {}) {
+  if (!indexedDB) return replicaUnavailable();
+  let opened;
+  const open = () => {
+    if (opened) return opened;
+    opened = new Promise((resolve, reject) => {
+      const request = indexedDB.open(database, 1);
+      request.onupgradeneeded = () => request.result.createObjectStore('state');
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error ?? new Error('unable to open durable replica storage'));
+    });
+    return opened;
+  };
+  const transaction = async (mode, keys, change) => new Promise(async (resolve, reject) => {
+    let tx;
+    try { tx = (await open()).transaction('state', mode); } catch (error) { reject(error); return; }
+    const store = tx.objectStore('state');
+    const requests = (Array.isArray(keys) ? keys : [keys]).map((key) => store.get(key));
+    for (const read of requests) read.onerror = () => reject(read.error);
+    let remaining = requests.length;
+    const results = [];
+    for (const [index, read] of requests.entries()) read.onsuccess = () => {
+      results[index] = read.result;
+      if (--remaining !== 0) return;
+      try { change(results, store); } catch (error) { tx.abort(); reject(error); }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error ?? new Error('durable replica transaction failed'));
+    tx.onabort = () => reject(tx.error ?? new Error('durable replica transaction aborted'));
+  });
+  return {
+    async reserve(document, generate) {
+      let record;
+      await transaction('readwrite', [document, '@identity'], ([stored, identity], store) => {
+        const actor = identity?.actor ?? randomReplicaActor();
+        const state = stored ?? { actor, counter: 0, lamport: 0, frontier: [], epoch: null, outbox: [] };
+        const counter = state.counter + 1;
+        const lamport = Math.max(state.lamport, ...state.frontier.map(([, value]) => value), 0) + 1;
+        // Generate before any durable mutation so known-invalid edits consume no counter.
+        const operation = generate({ actor: state.actor, counter, lamport, frontier: state.frontier, epoch: state.epoch });
+        record = { operation, actionId: replicaActionId(document, state.actor, counter), counter, replica: state.actor,
+          body: JSON.stringify({ operation }), status: 'pending', failure: null };
+        store.put({ actor }, '@identity');
+        store.put({ ...state, counter, lamport, outbox: [...(state.outbox ?? []), record] }, document);
+      });
+      return { ...record };
+    },
+    async head(document) {
+      let head = null;
+      await transaction('readonly', document, ([state]) => { head = state?.outbox?.[0] ?? null; });
+      return head;
+    },
+    async commit(document, counter) {
+      await transaction('readwrite', document, ([state], store) => {
+        if (!state?.outbox?.length || state.outbox[0].counter !== counter) throw new Error('text outbox head changed');
+        store.put({ ...state, outbox: state.outbox.slice(1) }, document);
+      });
+    },
+    async block(document, counter, failure) {
+      await transaction('readwrite', document, ([state], store) => {
+        if (!state?.outbox?.length || state.outbox[0].counter !== counter) throw new Error('text outbox head changed');
+        const [head, ...tail] = state.outbox;
+        store.put({ ...state, outbox: [{ ...head, status: 'blocked', failure }, ...tail] }, document);
+      });
+    },
+    async reconcile(document, observation) {
+      let outbox = [];
+      await transaction('readwrite', [document, '@identity'], ([stored, identity], store) => {
+        const actor = identity?.actor ?? randomReplicaActor();
+        const state = stored ?? { actor, counter: 0, lamport: 0, frontier: [], epoch: null, outbox: [] };
+        // A changed checkpoint is a conservative document epoch boundary.
+        const epochChanged = observation.epoch !== undefined && state.epoch !== null && state.epoch !== observation.epoch;
+        const frontier = epochChanged ? observation.frontier : mergeReplicaFrontiers(state.frontier, observation.frontier);
+        const ownObservedCounter = frontier.find(([actor]) => actor === state.actor)?.[1] ?? 0;
+        store.put({ actor }, '@identity');
+        store.put({ ...state, counter: Math.max(state.counter, ownObservedCounter), frontier,
+          epoch: observation.epoch === undefined ? state.epoch : observation.epoch,
+          lamport: Math.max(state.lamport, observation.lamport ?? 0) }, document);
+        outbox = [...(state.outbox ?? [])];
+      });
+      return outbox;
+    },
+  };
+}
+
+function mergeReplicaFrontiers(left, right) {
+  const values = new Map(left);
+  for (const [actor, counter] of right ?? []) values.set(actor, Math.max(values.get(actor) ?? 0, counter));
+  return [...values].sort(([leftActor], [rightActor]) => leftActor.localeCompare(rightActor));
+}
+
 /**
  * Create a live store for one entity type.
  *
@@ -1257,9 +1410,10 @@ export async function decodeResult(res) {
  * Returns a store object with: subscribe, dispatch, create, update, remove,
  * action, close, overlayFor, overlayStatusFor, pendingCreates, onRender.
  */
-export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
+export function createLiveStore({ baseUrl, name, path, channel, fetchImpl, replicaState }) {
   const resolvedChannel = channel ?? new LiveChannel(baseUrl);
   const resolvedFetch = fetchImpl ?? globalThis.fetch;
+  const resolvedReplicaState = replicaState ?? createIndexedDbReplicaState();
 
   let _opIdCounter = 0;
   const _listCache = new Map();     // id → LiveList
@@ -1268,7 +1422,67 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
   const _renderCallbacks = new Set();
   const _listUnsubs = new Map();    // id → LiveList.onRender unsub
   const _actionRoutes = new Map();  // actionType → { method, path }
+  const _textSendChains = new Map(); // document → serialized head delivery
+  const _textAllocationChains = new Map(); // document → serialized durable reservation and draft update
+  const _textDraftStates = new Map(); // document → checkpoint plus locally reserved operations
   let _closed = false;
+
+  async function _reserveTextOperation(id, field, generate) {
+    const document = `${name}\0${id}\0${field}`;
+    const reservation = await resolvedReplicaState.reserve(document, generate);
+    if (!reservation?.operation || !reservation.actionId || !Number.isSafeInteger(reservation.counter)) {
+      throw new Error('durable replica state must persist text operation outbox records');
+    }
+    return { document, record: reservation };
+  }
+
+  function _serializeTextAllocation(document, work) {
+    const previous = _textAllocationChains.get(document) ?? Promise.resolve();
+    const current = previous.catch(() => {}).then(work);
+    _textAllocationChains.set(document, current);
+    current.finally(() => {
+      if (_textAllocationChains.get(document) === current) _textAllocationChains.delete(document);
+    }).catch(() => {});
+    return current;
+  }
+
+  function _textResult(status, record, extra = {}) {
+    return { ok: status === 'committed', status, opId: record.actionId, actionId: record.actionId, ...extra };
+  }
+
+  async function _sendTextHead(document, id, field, expectedCounter) {
+    const record = await resolvedReplicaState.head(document);
+    if (!record) return { ok: false, status: 'failed-rolled-back', opId: null, failure: clientFailure('not-found', 'text outbox is empty') };
+    if (record.status === 'blocked') return _textResult('blocked', record, { failure: record.failure });
+    if (record.counter !== expectedCounter) return _textResult('queued', record, { waitingFor: record.actionId });
+    try {
+      const res = await resolvedFetch(`${baseUrl}${path}/${id}/${field}/apply`, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json', 'x-workbench-action-id': record.actionId },
+        // `body` is persisted alongside the operation; retries send these exact bytes.
+        body: record.body,
+      });
+      const decoded = await decodeResult(res);
+      if (!decoded.ok) {
+        if (decoded.failure) {
+          await resolvedReplicaState.block(document, record.counter, decoded.failure);
+          return _textResult('blocked', record, { failure: decoded.failure });
+        }
+        return _textResult('outcome-unknown', record, { deliveryError: { message: decoded.error } });
+      }
+      await resolvedReplicaState.commit(document, record.counter);
+      return _textResult('committed', record, { row: decoded.value });
+    } catch (error) {
+      return _textResult('outcome-unknown', record, { deliveryError: { message: error?.message ?? String(error) } });
+    }
+  }
+
+  function _serializeTextSend(document, send) {
+    const prior = _textSendChains.get(document) ?? Promise.resolve();
+    const next = prior.catch(() => {}).then(send);
+    _textSendChains.set(document, next);
+    return next.finally(() => { if (_textSendChains.get(document) === next) _textSendChains.delete(document); });
+  }
 
   function _nextOpId() {
     return 'op_' + (++_opIdCounter);
@@ -1335,6 +1549,18 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
       eventsSinceUrl: _eventsSinceUrl,
       fields: options.fields,
       pace: options.pace,
+      onTextReducer: ({ entity, id: reducerId, field, epoch, state }) => {
+        const document = `${entity}\0${reducerId}\0${field}`;
+        const lamport = Math.max(0, ...Object.values(state.elements).map((element) => element.lamport));
+        return _serializeTextAllocation(document, async () => {
+          const outbox = await resolvedReplicaState.reconcile(document, { epoch, frontier: state.frontier, lamport });
+          let draft = state;
+          for (const record of outbox.sort((left, right) => left.counter - right.counter)) {
+            draft = applyTextOp(draft, record.operation);
+          }
+          _textDraftStates.set(document, draft);
+        });
+      },
     });
 
     _listCache.set(id, list);
@@ -1410,7 +1636,29 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
     }
 
     let kind, id;
-    if (type === `${name}.create`) {
+    if (type.endsWith('.apply') && type.startsWith(`${name}.`)) {
+      const fieldName = type.slice(name.length + 1, -'.apply'.length);
+      if (!fieldName || typeof payload?.id !== 'string' || !Object.hasOwn(payload, 'operation')) {
+        return { ok: false, status: 'failed-rolled-back', opId, failure: clientFailure('invalid-input', 'text operation requires { id, operation }') };
+      }
+      let requestAttempted = false;
+      try {
+        requestAttempted = true;
+        const res = await resolvedFetch(`${baseUrl}${path}/${payload.id}/${fieldName}/apply`, {
+          method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ operation: payload.operation }),
+        });
+        const decoded = await decodeResult(res);
+        if (!decoded.ok) return decoded.failure
+          ? { ok: false, status: 'failed-rolled-back', opId, failure: decoded.failure }
+          : { ok: false, status: 'outcome-unknown', opId, deliveryError: { message: decoded.error } };
+        return { ok: true, status: 'committed', opId, row: decoded.value };
+      } catch (err) {
+        return requestAttempted
+          ? { ok: false, status: 'outcome-unknown', opId, deliveryError: { message: err.message ?? String(err) } }
+          : { ok: false, status: 'failed-rolled-back', opId, failure: clientFailure('invalid-input', err.message ?? String(err)) };
+      }
+    } else if (type === `${name}.create`) {
       kind = 'create';
     } else if (type === `${name}.update`) {
       kind = 'update';
@@ -1543,6 +1791,40 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
     }
   }
 
+  function text(id, field) {
+    const generate = async (build) => {
+      if (_closed) throw new Error('store is closed');
+      const list = _listCache.get(id);
+      if (!list) throw new Error('text field is not ready; subscribe and await list.ready first');
+      await list.textReducerReady;
+      const checkpoint = list.textState(field);
+      if (!checkpoint) throw new Error('text field is not ready; subscribe and await list.ready first');
+      const document = `${name}\0${id}\0${field}`;
+      const { record } = await _serializeTextAllocation(document, async () => {
+        const state = _textDraftStates.get(document) ?? checkpoint;
+        const reservation = await _reserveTextOperation(id, field, (identity) => build({ state, ...identity }));
+        // Preserve causal generation while an earlier durable operation awaits delivery.
+        _textDraftStates.set(document, applyTextOp(state, reservation.record.operation));
+        return reservation;
+      });
+      return _serializeTextSend(document, () => _sendTextHead(document, id, field, record.counter));
+    };
+    return {
+      insert: ({ at, text: inserted }) => generate(({ state, ...identity }) => insertText(state, identity, at, inserted)),
+      delete: ({ start, end }) => generate(({ state, ...identity }) => deleteText(state, identity, start, end)),
+    };
+  }
+
+  async function retryText(id, field) {
+    const document = `${name}\0${id}\0${field}`;
+    return _serializeTextSend(document, async () => {
+      const head = await resolvedReplicaState.head(document);
+      if (!head) return { ok: false, status: 'failed-rolled-back', opId: null, failure: clientFailure('not-found', 'text outbox is empty') };
+      if (head.status === 'blocked') return _textResult('blocked', head, { failure: head.failure });
+      return _sendTextHead(document, id, field, head.counter);
+    });
+  }
+
   // --- Action route registry ---
 
   function action(actionType, { method, path: actionPath }) {
@@ -1645,6 +1927,9 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl }) {
     create(payload) { return dispatch(`${name}.create`, payload); },
     update(id, payload) { return dispatch(`${name}.update`, { id, ...payload }); },
     remove(id) { return dispatch(`${name}.remove`, { id }); },
+    apply(id, field, operation) { return dispatch(`${name}.${field}.apply`, { id, operation }); },
+    text,
+    retryText,
     action,
     close,
     overlayFor,

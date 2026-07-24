@@ -86,32 +86,6 @@ export const VALUE_SET = {
   expectedCursor: 2,
 };
 
-/**
- * CRDT insert delta: LiveList applies insert on body; createClient reducer
- * uses whole event.data.body (server always sends the full string too).
- */
-export const CRDT_INSERT = {
-  scope: 'Note:n1',
-  entity: 'Note',
-  id: 'n1',
-  bootstrap: {
-    snapshot: { id: 'n1', body: 'hello' },
-    seq: 1,
-  },
-  events: [
-    {
-      type: 'Note.updated',
-      scope: 'Note:n1',
-      seq: 2,
-      seqSpan: [2, 2],
-      data: { id: 'n1', body: 'hello world' },
-      delta: { body: { insert: { at: 5, text: ' world' } } },
-    },
-  ],
-  expectedState: { id: 'n1', body: 'hello world' },
-  expectedCursor: 2,
-};
-
 /** Replay: after cursor=2, redelivery of seq 2 is duplicate; seq 4 is gap. */
 export const REPLAY_EDGES = {
   scope: 'Note:n1',
@@ -175,12 +149,6 @@ export function noteLifecycleEvents() {
           for (const [field, d] of Object.entries(e.delta)) {
             if (d == null) continue;
             if ('set' in d) next[field] = d.set;
-            else if ('delete' in d || 'insert' in d) {
-              let s = next[field] ?? '';
-              if (d.delete) s = s.slice(0, d.delete.at) + s.slice(d.delete.at + d.delete.length);
-              if (d.insert) s = s.slice(0, d.insert.at) + d.insert.text + s.slice(d.insert.at);
-              next[field] = s;
-            }
           }
         }
         return next;

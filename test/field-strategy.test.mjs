@@ -61,13 +61,13 @@ test('value strategy diff is a whole-value set, null when unchanged', () => {
   assert.equal(diff('a', 'a'), null, 'an unchanged value produces no diff');
 });
 
-// --- crdt/store/ordered: known names, validate works, merge is per-element ---
+// --- crdt/store/ordered: known names and operation boundaries ---
 
-test('crdt strategy validates structurally and its merge is a per-element diff', () => {
+test('text crdt rejects whole values and whole-value diffs', () => {
   const crdt = resolveStrategy('crdt');
-  assert.doesNotThrow(() => crdt.validate('hello', text.crdt()));
+  assert.equal(crdt.validate('hello', text.crdt()), 'text.crdt accepts native operations only');
   assert.equal(crdt.apply('a', 'b'), 'b');
-  assert.deepEqual(crdt.diff('hello', 'hello!'), { insert: { at: 5, text: '!' } });
+  assert.throws(() => crdt.diff('hello', 'hello!'), /field\.apply/);
 });
 
 // --- validate-as-pipeline-stage over an entity's declared fields ---

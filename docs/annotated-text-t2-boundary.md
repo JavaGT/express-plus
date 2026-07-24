@@ -1,18 +1,23 @@
 # Annotated Text T2 Boundary
 
-## Existing seams
+## Delivery Cutover
 
 - `src/annotated-text.mjs` owns the closed `workbench.text` v1 grammar and is
   the only suitable shared pure reducer module for server and browser.
-- `src/entity/crud.mjs` currently accepts `Entity.update` whole-field values;
-  `src/entity/projection.mjs` persists those values from lifecycle events.
+- `Entity.<textField>.apply` is a native action accepting exactly `{id,
+  operation}`. It uses the ordinary update row admission and emits
+  `<Entity>.<field>.applied` with the canonical operation unchanged.
 - `src/pipeline.mjs` appends finalized events to `_Log` before projection;
   `src/committed-log.mjs`, `src/durable-history.mjs`, and
   `src/http-framework-routes.mjs` replay that committed stream.
-- `src/field-delta.mjs` currently derives `text.crdt` prefix/suffix deltas for
-  `src/live-fanout.mjs`.
-- `public/workbench-client.mjs` folds those deltas with UTF-16 string slicing;
-  `createLiveStore` sends the same whole-string `PATCH` route.
+- The declared `text.crdt` field cell is the sole durable JSON canonical
+  checkpoint. Projection folds `src/annotated-text.mjs` state from that cell and
+  atomically replaces it with the next checkpoint. Hydration derives the visible
+  string and snapshot transport separately supplies the checkpoint for browser
+  bootstrap. Log, history, and live delivery preserve the raw operation event.
+- `LiveList` restores the checkpoint and folds `.applied` operations with the
+  same reducer. `createLiveStore.apply(id, field, operation)` POSTs the native
+  field route and never PATCHes a text operation.
 
 ## Acceptance tests
 
@@ -27,8 +32,16 @@
   applied and pending registries retain a canonical operation digest.
 - A canonical checkpoint round-trips to the same normalized state and visible
   text, independent of arrival order.
-- The final cutover replaces `crdtTextDiff`, whole-string `text.crdt` PATCH,
-  and browser string-slice application with one native `text.crdt` operation
-  action that persists, replays, fans out, and folds through the same reducer.
+- `crdtTextDiff`, whole-string `text.crdt` PATCH, and browser string-slice
+  application are retired. `text.crdt` rejects whole-string create/update.
 - `raster.crdt` and `polyline.crdt` remain explicit whole-value replacement
   stubs and do not enter the text operation path.
+
+## Status
+
+[IMPLEMENTED - TERRA APPROVED 2026-07-24] Implemented and verified through the server,
+history, live, snapshot sidecar, browser bootstrap, generated browser
+operations, and focused tests. Browser editing reconciles each authoritative
+reducer state with its durable outbox before serially reserving operations;
+when durable storage is unavailable it fails closed rather than creating an
+ephemeral actor.

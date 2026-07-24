@@ -202,7 +202,28 @@ export interface LiveStoreConfig {
   path: string;
   channel?: LiveChannel;
   fetchImpl?: typeof globalThis.fetch;
+  replicaState?: TextReplicaState;
 }
+
+export interface TextReplicaState {
+  reserve(document: string, generate: (reservation: { actor: string; counter: number; lamport: number; frontier: Array<[string, number]>; epoch: string | null }) => unknown): Promise<TextOutboxRecord>;
+  head(document: string): Promise<TextOutboxRecord | null>;
+  commit(document: string, counter: number): Promise<void>;
+  block(document: string, counter: number, failure: WorkbenchFailure): Promise<void>;
+  reconcile(document: string, observation: { epoch?: string; frontier: Array<[string, number]>; lamport: number }): Promise<TextOutboxRecord[]>;
+}
+
+export interface TextOutboxRecord {
+  operation: unknown;
+  actionId: string;
+  counter: number;
+  replica: string;
+  body: string;
+  status: 'pending' | 'blocked';
+  failure: WorkbenchFailure | null;
+}
+
+export function createIndexedDbReplicaState(options?: { indexedDB?: IDBFactory; database?: string }): TextReplicaState;
 
 export type DispatchResult =
   | {
@@ -224,6 +245,26 @@ export type DispatchResult =
       status: 'outcome-unknown';
       opId: string;
       deliveryError: { message: string };
+    };
+
+export type TextDispatchResult = DispatchResult
+  | {
+      ok: false;
+      status: 'failed-rolled-back';
+      opId: null;
+      failure: WorkbenchFailure;
+    }
+  | {
+      ok: false;
+      status: 'queued';
+      opId: string;
+      waitingFor: string;
+    }
+  | {
+      ok: false;
+      status: 'blocked';
+      opId: string;
+      failure: WorkbenchFailure | null;
     };
 
 export interface OverlayStatus {
@@ -249,6 +290,12 @@ export interface LiveStore<Row extends Record<string, unknown> = Record<string, 
   create: (payload: Record<string, unknown>) => Promise<DispatchResult>;
   update: (id: string | number, payload: Record<string, unknown>) => Promise<DispatchResult>;
   remove: (id: string | number) => Promise<DispatchResult>;
+  apply: (id: string | number, field: string, operation: unknown) => Promise<DispatchResult>;
+  text: (id: string | number, field: string) => {
+    insert(input: { at: number; text: string }): Promise<TextDispatchResult>;
+    delete(input: { start: number; end: number }): Promise<TextDispatchResult>;
+  };
+  retryText: (id: string | number, field: string) => Promise<TextDispatchResult>;
   action: (actionType: string, config: { method: string; path: string }) => (body?: unknown) => Promise<DispatchResult>;
   close: () => void;
   overlayFor: (id: string | number) => Row | null;

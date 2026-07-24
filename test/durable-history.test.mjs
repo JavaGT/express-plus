@@ -33,6 +33,11 @@ function makeServer(db, history = historyDescriptor()) {
         scope,
         data: { before: payload.before ?? null, value: payload.value },
       }],
+      'Document.body.apply': ({ payload }) => [{
+        type: 'Document.body.applied',
+        scope,
+        data: payload,
+      }],
     },
   });
 }
@@ -122,6 +127,22 @@ test('a new action after undo truncates that session redo stack', async () => {
   assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 2, redo: 0 });
   const redo = await server.history.redo({ scope, principal, session: 'tab-a' });
   assert.equal(redo.empty, true);
+});
+
+test('text CRDT apply actions are excluded from generic undo history', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const server = makeServer(db);
+  const result = await server.dispatch({
+    actionId: 'text-a1',
+    type: 'Document.body.apply',
+    payload: { id: '1', operation: ['workbench.text'] },
+    principal,
+    scope,
+    history: { session: 'tab-a' },
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 0, redo: 0 });
 });
 
 test('history authorization fails closed', async () => {
