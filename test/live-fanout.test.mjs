@@ -78,6 +78,17 @@ test('live fanout re-authorizes delivery through the injected mayVerb engine', a
   assert.equal(fanout.hasSubscription(bob, 'Doc', 'd1'), true, 'denied subscriber remains registered');
 });
 
+test('live fanout strips framework-only event metadata', async () => {
+  const fanout = createLiveFanout({ mayVerb: async () => true });
+  const conn = makeConn('c1');
+  fanout.addSubscription('Doc', 'd1', conn);
+  await fanout.emit(makeEntity(), 'd1', { id: 'd1' }, {
+    type: 'Doc.created', seq: 1,
+    data: { id: 'd1', __workbench: { annotatedText: { body: { initialBlockId: 'secret' } } } },
+  });
+  assert.deepEqual(conn.drain()[0].event.data, { id: 'd1' });
+});
+
 test('live fanout delivers removed events without re-authorization', async () => {
   let calls = 0;
   const fanout = createLiveFanout({

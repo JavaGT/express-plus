@@ -3,6 +3,74 @@ import { serializeField, flattenStruct, resolveStrategy } from '../field-strateg
 import * as eventHandle from '../event-handle.mjs';
 import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
 import { applyTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
+import { createTextFamily, textFamilyCheckpoint } from '../annotated-text-family.mjs';
+
+const INITIAL_BLOCK_POSITION = 'a0';
+
+function defaultBlockCells(descriptor) {
+  const cells = {};
+  for (const [name, field] of Object.entries(descriptor.block ?? {})) {
+    if (field.default === undefined) {
+      if (field.nullable || field.optional) cells[name] = null;
+      else throw new Error(`annotated-text block field '${name}' requires a default for initialization`);
+    } else {
+      const value = typeof field.default === 'function' ? field.default() : field.default;
+      const materialized = value !== null && typeof value === 'object' ? structuredClone(value) : value;
+      const strategy = resolveStrategy(field.kind);
+      const structural = strategy.validate(materialized, field);
+      if (structural !== true) throw new Error(`annotated-text block field '${name}': ${structural}`);
+      if (typeof field.validate === 'function' && field.validate(materialized) !== true) {
+        throw new Error(`annotated-text block field '${name}' failed validation`);
+      }
+      cells[name] = serializeField(field, materialized);
+    }
+  }
+  return cells;
+}
+
+function initializeAnnotatedText({ name, fields, event, db, row }) {
+  const metadata = event.data?.__workbench?.annotatedText;
+  for (const [fieldName, descriptor] of Object.entries(fields)) {
+    if (descriptor.kind !== 'annotatedText') continue;
+    const initialBlockId = metadata?.[fieldName]?.initialBlockId;
+    if (typeof initialBlockId !== 'string' || initialBlockId.length === 0) {
+      throw new Error(`${name}.${fieldName} created event is missing initial block metadata`);
+    }
+    const prefix = `${name}_${fieldName}`;
+    const checkpoint = JSON.stringify(textFamilyCheckpoint(
+      createTextFamily(row.id, textCheckpoint(createTextState()), initialBlockId),
+    ));
+    const state = db.prepare(`SELECT * FROM ${prefix}_state WHERE document_id = ?`).get(row.id);
+    const blocks = db.prepare(`SELECT * FROM ${prefix}_block WHERE document_id = ?`).all(row.id);
+    if (state || blocks.length > 0) {
+      const expected = state
+        && state.structure_version === 1
+        && state.family_checkpoint === checkpoint
+        && blocks.length === 1
+        && blocks[0].id === initialBlockId
+        && blocks[0].position === INITIAL_BLOCK_POSITION
+        && blocks[0].epoch === 1
+        && blocks[0].structure_version === 1;
+      if (!expected) throw new Error(`${name}.${fieldName} created projection conflicts with existing initialization`);
+      continue;
+    }
+    db.prepare(`INSERT INTO ${prefix}_state (document_id, structure_version, family_checkpoint) VALUES (?, 1, ?)`)
+      .run(row.id, checkpoint);
+    const block = {
+      id: initialBlockId,
+      document_id: row.id,
+      project_id: row[descriptor.project],
+      owner_id: row[descriptor.owner],
+      position: INITIAL_BLOCK_POSITION,
+      epoch: 1,
+      structure_version: 1,
+      ...defaultBlockCells(descriptor),
+    };
+    const columns = Object.keys(block);
+    db.prepare(`INSERT INTO ${prefix}_block (${columns.join(', ')}) VALUES (${columns.map((column) => `:${column}`).join(', ')})`)
+      .run(block);
+  }
+}
 
 function buildProjectedComputeRow(storedRow, fields) {
   const row = { ...storedRow };
@@ -52,6 +120,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
       if (handle.kind === eventHandle.EventKind.created) {
         const row = {};
         for (const [key, value] of Object.entries(event.data ?? {})) {
+          if (key === '__workbench') continue;
           const descriptor = fields[key];
           if (descriptor && descriptor.kind === 'store') continue;
           if (descriptor && descriptor.kind === 'struct') {
@@ -83,6 +152,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
           db.prepare(
             `INSERT INTO ${table} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`,
           ).run(row);
+          initializeAnnotatedText({ name, fields, event, db, row });
           getLog().debug('dispatch', `${name}.created`, { id: row.id ?? event.data?.id });
         }
       } else if (handle.kind === eventHandle.EventKind.updated) {

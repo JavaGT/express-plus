@@ -18,6 +18,7 @@ import { createDeltaProjector } from './field-delta.mjs';
 import { EventKind, parseEventType } from './event-handle.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { createdTextReducerSeeds } from './text-reducer-transport.mjs';
+import { publicEvent } from './event-delivery.mjs';
 
 export function createLiveFanout({ mayVerb = null } = {}) {
   const byScope = new Map();   // Map<scopeKey, Map<conn, SubSpec>>
@@ -134,7 +135,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     const idStr = handle?.id ?? scope;
     conn.send({
       type: 'event', entity: entityName, id: idStr,
-      seq: span.seq, seqSpan: span.seqSpan, event: coalesced,
+      seq: span.seq, seqSpan: span.seqSpan, event: publicEvent(coalesced),
     });
   }
 
@@ -214,7 +215,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
         const envelope = {
           type: 'event', entity: name, id, seq: committed.seq,
           seqSpan: [committed.seq, committed.seq],
-          event: committed,
+          event: publicEvent(committed),
         };
         if (delta !== undefined) envelope.delta = delta;
         const reducers = createdTextReducerSeeds(entityRecord, committed);

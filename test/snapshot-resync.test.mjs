@@ -124,6 +124,23 @@ test('events-since returns committed events after the cursor, in seq order', asy
   assert.equal(atHead.events.length, 0);
 });
 
+test('entity events-since strips framework-only event metadata', async (t) => {
+  const { app, base } = await harness(t);
+  const Note = app.entities.get('Note');
+  const result = await app.dispatch({
+    actionId: 'private-event', type: 'Note.create', scope: 'Note:n1', principal: { id: 'u1' },
+    payload: { id: 'n1', body: 'visible' },
+  });
+  assert.equal(result.ok, true);
+  app.db.prepare('UPDATE _Log SET eventData = ? WHERE scope = ?').run(
+    JSON.stringify({ ...result.events[0].data, __workbench: { internal: true } }), 'Note:n1',
+  );
+  const replay = await json(await fetch(`${base}/events-since/Note/n1?cursor=0`));
+  assert.ok(!Object.hasOwn(replay.events[0].data, '__workbench'));
+  assert.equal(replay.events[0].data.body, 'visible');
+  assert.ok(Note);
+});
+
 test('text snapshots and created replay carry reducer sidecars while ordinary rows stay visible', async (t) => {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db });

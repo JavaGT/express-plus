@@ -19,6 +19,7 @@ import { readSeq, readSince, minSeqForScope } from './committed-log.mjs';
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.mjs';
+import { publicEvent } from './event-delivery.mjs';
 
 function reject(res, status, message, details) {
   const workbenchFailure = failureForHttpError({ status, message, details });
@@ -142,7 +143,7 @@ async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
   const events = rows.map((r) => {
     const data = JSON.parse(r.eventData);
     const reducers = createdTextReducerSeeds(app.entities.get(tryParseScopeKey(r.scope)?.entity), { type: r.eventType, data });
-    return { scope: r.scope, seq: r.seq, type: r.eventType, data, actionId: r.actionId, committedAt: r.committedAt, ...(reducers ? { reducers } : {}) };
+    return publicEvent({ scope: r.scope, seq: r.seq, type: r.eventType, data, actionId: r.actionId, committedAt: r.committedAt, ...(reducers ? { reducers } : {}) });
   });
   sendJson(res, 200, { scope, cursor, events });
   return true;
@@ -199,7 +200,7 @@ async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
   const events = rows.map((r) => {
     const data = r.data ?? null;
     const reducers = createdTextReducerSeeds(entity, { type: r.eventType, data });
-    return { type: r.eventType, scope: r.scope, seq: r.seq, data, actionId: r.actionId, committedAt: r.committedAt, ...(reducers ? { reducers } : {}) };
+    return publicEvent({ type: r.eventType, scope: r.scope, seq: r.seq, data, actionId: r.actionId, committedAt: r.committedAt, ...(reducers ? { reducers } : {}) });
   });
   sendJson(res, 200, { events });
   return true;
