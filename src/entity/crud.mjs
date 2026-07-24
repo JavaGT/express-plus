@@ -9,11 +9,14 @@
 // focused on the entity-row lifecycle.
 
 import { randomUUID } from 'node:crypto';
-import { validateMaterializedField, validateMutation, ValidationError } from '../field-strategy.mjs';
+import { validateMaterializedField, validateMutation, ValidationError, deserializeField } from '../field-strategy.mjs';
 import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { canonicalTextOp } from '../annotated-text.mjs';
-import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from '../annotated-text-family.mjs';
+import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, materializeBlock, textFamilyCheckpoint } from '../annotated-text-family.mjs';
+import { splitBlockMemberships } from '../annotated-text-membership.mjs';
+import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
+import { assertR2BlockSplitPayload, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 
@@ -210,18 +213,30 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind !== 'annotatedText') continue;
     const operationType = `${name}.${fieldName}.operation`;
+    const prefix = `${name}_${fieldName}`;
+    const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
+    const measurementConfigs = compiledMeta?.measurementConfigs ?? {};
+    const measurementFamilyList = compiledMeta?.measurementFamilyList ?? [];
+
     const assertDocumentScope = ({ payload, scope }) => {
-      const command = assertAnnotatedTextOperationPayload(name, fieldName, payload);
+      let command;
+      if (payload.version === 1) {
+        command = assertAnnotatedTextOperationPayload(name, fieldName, payload);
+      } else if (payload.version === 2) {
+        command = assertR2BlockSplitPayload(name, fieldName, payload);
+      } else {
+        throw new ValidationError(`${name}.${fieldName}.operation requires version 1 or 2`);
+      }
       const documentScope = scopeOf(name, command.id).key;
       if (scope !== documentScope) {
         throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
       }
       return command;
     };
-    const handler = ({ payload, db, scope }) => {
+
+    const r1Handler = ({ payload, db, scope }) => {
       const command = assertDocumentScope({ payload, scope });
       const documentScope = scopeOf(name, command.id).key;
-      const prefix = `${name}_${fieldName}`;
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
       if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
@@ -249,6 +264,230 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
           family: textFamilyCheckpoint(nextFamily),
         }),
       }];
+    };
+
+    const r2Handler = ({ payload, db, scope }) => {
+      const command = assertDocumentScope({ payload, scope });
+      const documentScope = scopeOf(name, command.id).key;
+      const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
+      if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+      const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+      if (state.structure_version !== command.expected.structuralRevision ||
+          JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(command.expected.frontier)) {
+        throw new ValidationError(`${name}.${fieldName}.operation conflicts with the current structural revision or frontier`);
+      }
+
+      const { blockId, utf16Offset } = command.operation;
+      let blockText;
+      try {
+        blockText = materializeBlock(family, blockId);
+      } catch (error) {
+        throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+      }
+
+      if (utf16Offset === 0 || utf16Offset === blockText.length) {
+        return [];
+      }
+
+      const newBlockId = randomUUID();
+      let splitResult;
+      try {
+        splitResult = splitBlock(family, blockId, newBlockId, utf16Offset);
+      } catch (error) {
+        throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+      }
+      if (splitResult.type === 'unchanged') {
+        return [];
+      }
+
+      const afterRevision = state.structure_version + 1;
+
+      const leftBlockStored = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(blockId);
+      if (!leftBlockStored) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
+
+      const blockFields = Object.keys(descriptor.block ?? {});
+      const leftBlockFields = {};
+      for (const bf of blockFields) {
+        const bd = descriptor.block[bf];
+        leftBlockFields[bf] = deserializeField(bd, leftBlockStored[bf]);
+      }
+
+      const leftBlockFact = Object.freeze({
+        id: blockId,
+        epoch: leftBlockStored.epoch,
+        fields: Object.freeze(leftBlockFields),
+      });
+
+      const rightBlockFields = {};
+      for (const bf of blockFields) {
+        const bd = descriptor.block[bf];
+        rightBlockFields[bf] = deserializeField(bd, leftBlockStored[bf]);
+      }
+
+      const rightBlockFact = Object.freeze({
+        id: newBlockId,
+        epoch: leftBlockStored.epoch,
+        fields: Object.freeze(rightBlockFields),
+      });
+
+      const cleanBlocks = Object.freeze([leftBlockFact, rightBlockFact]);
+
+      const memberships = db.prepare(
+        `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point
+           FROM ${prefix}_membership AS membership
+           JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
+          WHERE annotation.document_id = ?`,
+      ).all(command.id);
+      const pureMemberships = memberships.map(m => ({
+        annotationId: m.annotation_id,
+        blockId: m.block_id,
+        ordinal: m.ordinal,
+        start: JSON.parse(m.start_point),
+        end: JSON.parse(m.end_point),
+      }));
+
+      const annotations = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ?`).all(command.id);
+      const pureAnnotations = annotations.map(a => ({ id: a.id, family: a.family }));
+
+      const membershipResult = splitBlockMemberships(
+        splitResult.family, pureAnnotations, pureMemberships, blockId, newBlockId,
+      );
+      const affectedAnnotationIds = new Set(pureMemberships.filter(m => m.blockId === blockId).map(m => m.annotationId));
+
+      const measurementFacts = [];
+      if (measurementFamilyList.length > 0) {
+        const sourceMeasurements = db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id = ? ORDER BY family`).all(blockId);
+        const sourceBlockVisibleText = materializeBlock(family, blockId);
+        const leftVisibleText = materializeBlock(splitResult.family, blockId);
+        const rightVisibleText = materializeBlock(splitResult.family, newBlockId);
+
+        for (const row of sourceMeasurements) {
+          const measConfig = measurementConfigs[row.family];
+          if (!measConfig) throw new ValidationError(`${name}.${fieldName}.operation unknown measurement family '${row.family}'`);
+          const extSpec = resolveDeclarationMeasurementExtension(measConfig);
+          if (!extSpec) throw new ValidationError(`${name}.${fieldName}.operation no structural adapter for measurement '${row.family}'`);
+
+          let oldPayload;
+          try {
+            oldPayload = frozenJsonSnapshot(JSON.parse(row.payload));
+          } catch {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement payload is not valid JSON`);
+          }
+          const partitionInput = Object.freeze({
+            version: 1,
+            formatVersion: measConfig.formatVersion,
+            blockText: sourceBlockVisibleText,
+            utf16Offset,
+            payload: oldPayload,
+          });
+
+          const validatePayload = (payload, blockText) => {
+            try {
+              const result = extSpec.validate(Object.freeze({
+                version: 1,
+                formatVersion: measConfig.formatVersion,
+                blockText,
+                payload: frozenJsonSnapshot(payload),
+              }));
+              if (result !== undefined) throw new Error('returned a value');
+            } catch {
+              throw new ValidationError(`${name}.${fieldName}.operation measurement validation failed`);
+            }
+          };
+          validatePayload(oldPayload, sourceBlockVisibleText);
+
+          let leftResult;
+          let rightResult;
+          try {
+            leftResult = extSpec.partition(partitionInput);
+            rightResult = extSpec.partition(partitionInput);
+          } catch {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement partition failed`);
+          }
+
+          if (JSON.stringify(leftResult) !== JSON.stringify(rightResult)) {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement partition is not deterministic`);
+          }
+
+          if (!leftResult || typeof leftResult !== 'object' || Array.isArray(leftResult) ||
+              Object.keys(leftResult).length !== 3 || leftResult.version !== 1 ||
+              !Object.hasOwn(leftResult, 'leftPayload') || !Object.hasOwn(leftResult, 'rightPayload')) {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement partition result must have leftPayload and rightPayload`);
+          }
+
+          let leftJsonPayload;
+          let rightJsonPayload;
+          try {
+            leftJsonPayload = frozenJsonSnapshot(leftResult.leftPayload);
+            rightJsonPayload = frozenJsonSnapshot(leftResult.rightPayload);
+          } catch {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement partition payload is not JSON`);
+          }
+          validatePayload(leftJsonPayload, leftVisibleText);
+          validatePayload(rightJsonPayload, rightVisibleText);
+
+          let leftPayload;
+          let rightPayload;
+          try {
+            leftPayload = JSON.stringify(leftJsonPayload);
+            rightPayload = JSON.stringify(rightJsonPayload);
+          } catch {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement partition payload is not JSON`);
+          }
+          if (leftPayload === undefined || rightPayload === undefined) {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement partition payload is not JSON`);
+          }
+
+          measurementFacts.push(Object.freeze({
+            id: row.id,
+            blockId,
+            family: row.family,
+            formatVersion: row.format_version,
+            payload: frozenJsonSnapshot(JSON.parse(leftPayload)),
+          }));
+          measurementFacts.push(Object.freeze({
+            id: randomUUID(),
+            blockId: newBlockId,
+            family: row.family,
+            formatVersion: row.format_version,
+            payload: frozenJsonSnapshot(JSON.parse(rightPayload)),
+          }));
+        }
+      }
+
+      const handle = eventHandles.native(name, fieldName, 'operated');
+      return [{
+        handle,
+        type: handle.type,
+        scope: documentScope,
+        data: Object.freeze({
+          version: 2,
+          id: command.id,
+          before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
+          operation: Object.freeze({
+            kind: 'block.split',
+            leftBlockId: blockId,
+            rightBlockId: newBlockId,
+            utf16Offset,
+          }),
+          after: Object.freeze({ structuralRevision: afterRevision, frontier: family.checkpoint.frontier }),
+          family: textFamilyCheckpoint(splitResult.family),
+          blocks: cleanBlocks,
+          memberships: Object.freeze(membershipResult.memberships.filter(m => affectedAnnotationIds.has(m.annotationId)).map(m => ({
+            annotationId: m.annotationId,
+            blockId: m.blockId,
+            ordinal: m.ordinal,
+            start: m.start,
+            end: m.end,
+          }))),
+          measurements: Object.freeze(measurementFacts),
+        }),
+      }];
+    };
+
+    const handler = ({ payload, db, scope }) => {
+      if (payload.version === 1) return r1Handler({ payload, db, scope });
+      return r2Handler({ payload, db, scope });
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', { value: true });
