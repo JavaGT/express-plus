@@ -23,6 +23,7 @@ import { sideTableDDL } from './side-table-strategy.mjs';
 import { frameworkLogDDL } from './committed-log.mjs';
 import { defineSqliteSchema } from './sqlite-schema.mjs';
 import { deletedRowAnchorTableDDL } from './deleted-row-anchor.mjs';
+import { annotatedTextDDL } from './annotated-text-field.mjs';
 
 const SUPPORTED_FIELD_TYPES = Object.freeze({
   value: new Set(['text', 'boolean', 'date', 'number', 'json', 'vector', 'ref']),
@@ -33,6 +34,7 @@ const SUPPORTED_FIELD_TYPES = Object.freeze({
   ephemeral: new Set(['ephemeral']),
   state: new Set(['state']),
   struct: new Set(['link']),
+  annotatedText: new Set(['annotatedText']),
 });
 
 // Map a field's kind+type to its SQLite column type.
@@ -179,6 +181,8 @@ export function generateDDL(entity) {
     } else if (descriptor.indexed === 'fts') {
       const ftsDDL = sideTableDDL(entity, name, descriptor);
       if (ftsDDL) statements.push(ftsDDL);
+    } else if (descriptor.kind === 'annotatedText') {
+      statements.push(...annotatedTextDDL(entity.name, name, descriptor, fields));
     }
   }
 

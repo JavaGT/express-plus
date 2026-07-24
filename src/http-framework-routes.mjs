@@ -344,6 +344,7 @@ export async function handleJobRoute(app, req, res) {
 const CLIENT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-client.mjs';
 const ANNOTATED_TEXT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/src') + '/annotated-text.mjs';
 const TEXT_EDIT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-text-edit.mjs';
+const ANNOTATED_TEXT_SNAPSHOT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot.mjs';
 
 export function handleClientSdkRoute(app, req, res) {
   if (req.method !== 'GET') return false;
@@ -358,6 +359,13 @@ export function handleClientSdkRoute(app, req, res) {
   if (url.pathname === '/workbench-text-edit.mjs') {
     if (!app || !app.db) return false;
     const body = readFileSync(TEXT_EDIT_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-annotated-text-snapshot.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(ANNOTATED_TEXT_SNAPSHOT_SDK_PATH);
     res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
     res.end(body);
     return true;

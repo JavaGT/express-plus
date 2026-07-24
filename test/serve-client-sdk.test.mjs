@@ -63,6 +63,14 @@ test('db-backed app serves the same pure annotated-text reducer module used by t
   assert.match(await res.text(), /export function applyTextOp/);
 });
 
+test('db-backed app serves the annotated-text snapshot module', async (t) => {
+  const origin = await bootDb(t);
+  const res = await fetch(`${origin}/workbench-annotated-text-snapshot.mjs`);
+  assert.equal(res.status, 200);
+  assert.equal(res.headers.get('content-type'), 'text/javascript; charset=utf-8');
+  assert.match(await res.text(), /materializeAnnotatedTextSnapshot/);
+});
+
 test('db-backed app serves every relative module imported by the browser SDK', async (t) => {
   const origin = await bootDb(t);
   const body = await (await fetch(`${origin}/workbench.mjs`)).text();
@@ -85,4 +93,5 @@ test('db-less app: GET /workbench.mjs falls through (no live kernel → not serv
   // app route at /workbench.mjs → 404 (fail closed, never a phantom file).
   assert.equal(res.status, 404);
   assert.equal((await fetch(`${origin}/workbench-annotated-text.mjs`)).status, 404);
+  assert.equal((await fetch(`${origin}/workbench-annotated-text-snapshot.mjs`)).status, 404);
 });

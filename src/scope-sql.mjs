@@ -15,6 +15,7 @@
 
 import { serializeField, structCellColumn } from './field-strategy.mjs';
 import * as eventHandle from './event-handle.mjs';
+import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 
 // The logical name of the param a role check (`is.<role>()`) emits — the one
 // placeholder the query layer rebinds per request to the concrete principal id.
@@ -288,6 +289,31 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
     if (entityName) {
       handle.appended = eventHandle.native(entityName, name, 'appended');
     }
+    return handle;
+  }
+
+  // An annotatedText field exposes a frozen handle with typed annotations,
+  // measurements, and capabilities collections. Whole-value comparison is
+  // forbidden. The handle is compiled from the declaration metadata, never
+  // from physical tables or encoding internals.
+  if (descriptor.kind === 'annotatedText') {
+    const fail = () => {
+      throw new NonCompilableError(
+        `field '${String(name)}' is an annotatedText field and cannot be compared in scope`,
+      );
+    };
+    const meta = getAnnotatedTextCompiledMetadata(descriptor);
+    const handle = {
+      fieldName: name,
+      is: fail,
+      in: fail,
+      isNull: fail,
+      gte: fail,
+      lte: fail,
+      annotations: meta?.annotationHandles ?? Object.freeze({}),
+      measurements: meta?.measurementHandles ?? Object.freeze({}),
+      capabilities: meta?.capabilityHandles ?? null,
+    };
     return handle;
   }
 

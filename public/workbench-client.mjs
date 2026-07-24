@@ -13,6 +13,8 @@
 
 import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } from './workbench-annotated-text.mjs';
 import { deleteText, insertText } from './workbench-text-edit.mjs';
+import { materializeAnnotatedTextSnapshot } from './workbench-annotated-text-snapshot.mjs';
+export { materializeAnnotatedTextSnapshot };
 
 // --- BEGIN GENERATED from src/replay-decision.mjs (keep in sync; zero-import) ---
 function normalizeSeqSpan(seqOrSpan) {

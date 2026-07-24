@@ -400,3 +400,48 @@ export interface AuthClient {
 }
 
 export function createAuthClient(config?: AuthClientConfig): AuthClient;
+
+// ---------------------------------------------------------------------------
+// materializeAnnotatedTextSnapshot — browser snapshot materialization
+// ---------------------------------------------------------------------------
+
+export interface AnnotatedTextBlock {
+  readonly id: string;
+  readonly text: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly annotationIds: readonly string[];
+}
+
+export interface AnnotatedTextAnnotation {
+  readonly id: string;
+  readonly family: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+}
+
+export interface AnnotatedTextMembership {
+  readonly annotationId: string;
+  readonly blockId: string;
+  readonly ordinal: number;
+}
+
+export interface AnnotatedTextMeasurement {
+  readonly id: string;
+  readonly blockId: string;
+  readonly family: string;
+  readonly formatVersion: number;
+  readonly payload: unknown;
+}
+
+export interface AnnotatedTextDocument {
+  readonly version: 1;
+  readonly blocks: readonly AnnotatedTextBlock[];
+  readonly annotations: readonly AnnotatedTextAnnotation[];
+  readonly memberships: readonly AnnotatedTextMembership[];
+  readonly measurements: readonly AnnotatedTextMeasurement[];
+  readonly capabilities: readonly string[] | null;
+}
+
+export function materializeAnnotatedTextSnapshot(
+  snapshot: Record<string, unknown>,
+  declaration: Record<string, unknown>,
+): AnnotatedTextDocument;

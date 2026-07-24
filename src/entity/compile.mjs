@@ -43,6 +43,7 @@ import { createEntityProjection } from './projection.mjs';
 import { createCrudHandlers, materializeCreateDefaults } from './crud.mjs';
 import { installEntityQueries } from './query.mjs';
 import { validateScheduleTrigger, autoStateScheduleTrigger, stateEffectEntries, assertSqlIdentifier, mintToken } from './schedule-compile.mjs';
+import { validateAnnotatedTextDeclaration } from '../annotated-text-field.mjs';
 
 // Reserved top-level declaration slots. Every other key on the declaration is a
 // field descriptor. A field name that collides with a reserved slot is a
@@ -158,6 +159,9 @@ export function entity(name, declaration = {}) {
           );
         }
       }
+    }
+    if (descriptor.kind === 'annotatedText') {
+      validateAnnotatedTextDeclaration(name, fieldName, descriptor, fields);
     }
   }
 

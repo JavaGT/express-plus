@@ -1,4 +1,5 @@
-export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';
+export { text, annotatedText, annotation, protectingAnnotation, measurement, annotationAction, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';
+export { registerAnnotatedTextContract } from './annotated-text-field.mjs';
 export { owner } from './owner.mjs';
 export { now } from './deferred.mjs';
 export { read, write, subscribe, admin, grant, deny } from './grant.mjs';

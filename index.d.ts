@@ -186,6 +186,113 @@ export interface TextFieldFactory {
 }
 
 export const text: TextFieldFactory;
+export interface AnnotatedTextAnnotationDescriptor {
+  readonly kind: 'annotation';
+  readonly annotationName: string;
+  readonly fields: Readonly<Record<string, FieldDescriptor>>;
+  readonly actions: readonly AnnotatedTextActionDescriptor[];
+  readonly empty: unknown;
+}
+export interface AnnotatedTextProtectingAnnotationDescriptor {
+  readonly kind: 'protectingAnnotation';
+  readonly annotationName: string;
+  readonly fields: Readonly<Record<string, FieldDescriptor>>;
+  readonly protects: string | null;
+  readonly actions: readonly AnnotatedTextActionDescriptor[];
+  readonly empty: unknown;
+}
+export interface AnnotatedTextMeasurementDescriptor {
+  readonly kind: 'measurement';
+  readonly measurementName: string;
+  readonly extension: string | null;
+  readonly formatVersion: number;
+  readonly queries: readonly string[];
+}
+export interface AnnotatedTextActionDescriptor {
+  readonly kind: 'annotationAction';
+  readonly actionName: string;
+}
+export function annotation(name: string, options?: {
+  fields?: Record<string, FieldDescriptor>;
+  actions?: readonly AnnotatedTextActionDescriptor[];
+  empty?: unknown;
+}): AnnotatedTextAnnotationDescriptor;
+export function protectingAnnotation(name: string, options?: {
+  fields?: Record<string, FieldDescriptor>;
+  protects?: string | null;
+  actions?: readonly AnnotatedTextActionDescriptor[];
+  empty?: unknown;
+}): AnnotatedTextProtectingAnnotationDescriptor;
+export function measurement(name: string, options?: {
+  extension?: string | null;
+  formatVersion?: number;
+  queries?: readonly string[];
+}): AnnotatedTextMeasurementDescriptor;
+export function annotationAction(name: string): AnnotatedTextActionDescriptor;
+
+export interface AnnotatedTextOptions {
+  project: string;
+  owner: string;
+  block: Record<string, FieldDescriptor>;
+  annotations: readonly (AnnotatedTextAnnotationDescriptor | AnnotatedTextProtectingAnnotationDescriptor)[];
+  measurements: readonly AnnotatedTextMeasurementDescriptor[];
+  capabilities?: Readonly<Record<string, unknown>>;
+}
+
+export interface AnnotatedTextAnnotationHandle {
+  readonly family: string;
+  readonly annotationName: string;
+  readonly actions: readonly string[];
+}
+export interface AnnotatedTextMeasurementHandle {
+  readonly family: string;
+  readonly measurementName: string;
+  readonly [queryName: string]: string | (() => never);
+}
+export interface AnnotatedTextCapabilityHandle {
+  readonly name: string;
+}
+export interface AnnotatedTextFieldHandle {
+  readonly fieldName: string;
+  readonly annotations: Readonly<Record<string, AnnotatedTextAnnotationHandle>>;
+  readonly measurements: Readonly<Record<string, AnnotatedTextMeasurementHandle>>;
+  readonly capabilities: Readonly<Record<string, AnnotatedTextCapabilityHandle>> | null;
+}
+export function annotatedText(options: AnnotatedTextOptions): FieldDescriptor<AnnotatedTextFieldHandle>;
+
+export function registerAnnotatedTextContract(contractName: string, contract: { readonly kind: 'measurement' | 'measurement-query' | 'annotation-action' | 'event'; readonly [key: string]: unknown }): void;
+
+export interface AnnotatedTextBlock {
+  readonly id: string;
+  readonly text: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly annotationIds: readonly string[];
+}
+export interface AnnotatedTextAnnotation {
+  readonly id: string;
+  readonly family: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+}
+export interface AnnotatedTextMembership {
+  readonly annotationId: string;
+  readonly blockId: string;
+  readonly ordinal: number;
+}
+export interface AnnotatedTextMeasurement {
+  readonly id: string;
+  readonly blockId: string;
+  readonly family: string;
+  readonly formatVersion: number;
+  readonly payload: unknown;
+}
+export interface AnnotatedTextDocument {
+  readonly version: 1;
+  readonly blocks: readonly AnnotatedTextBlock[];
+  readonly annotations: readonly AnnotatedTextAnnotation[];
+  readonly memberships: readonly AnnotatedTextMembership[];
+  readonly measurements: readonly AnnotatedTextMeasurement[];
+  readonly capabilities: readonly string[] | null;
+}
 export function boolean(options?: FieldOptions<boolean>): FieldDescriptor<boolean>;
 export function date(options?: FieldOptions<Date | number | string>): FieldDescriptor<Date>;
 export function number(options?: FieldOptions<number>): FieldDescriptor<number>;
