@@ -1,5 +1,6 @@
 import {
   assertUtf16Offset, compareOpId, restoreTextCheckpoint, textCheckpoint,
+  canonicalTextOp, applyTextOp, frontierDominates,
 } from './annotated-text.mjs';
 
 const ROOT_ID = 'root';
@@ -203,4 +204,77 @@ export function mergeBlocks(family, leftBlockId, rightBlockId) {
 
 export function textFamilyCheckpoint(family) {
   return deepFreeze({ id: family.id, checkpoint: family.checkpoint, blocks: family.blocks });
+}
+
+function opKey(op) {
+  return `${op[0]}:${op[1]}`;
+}
+
+function elementKey(op, ordinal) {
+  return `${opKey(op)}:${ordinal}`;
+}
+
+export function applyTextOperationToBlock(family, blockId, operation) {
+  if (Object.keys(family.checkpoint.pending).length > 0) {
+    fail('cannot apply operation to family with pending entries');
+  }
+  if (family.checkpoint.rebootstrapRequired) {
+    fail('cannot apply operation to family requiring rebootstrap');
+  }
+  const blockIndex = family.blocks.findIndex((b) => b.id === blockId);
+  if (blockIndex === -1) fail(`block not found: ${blockId}`);
+  const targetBlock = family.blocks[blockIndex];
+  const op = canonicalTextOp(operation);
+  const frontier = family.checkpoint.frontier;
+  const elements = family.checkpoint.elements;
+  if (!frontierDominates(frontier, op[4])) {
+    fail('operation is not causally ready');
+  }
+  const body = op[5];
+  if (body[0] === 'insert' && body[1][0] === 'element') {
+    const anchorElementKey = elementKey(body[1][1][0], body[1][1][1]);
+    if (!Object.hasOwn(elements, anchorElementKey)) {
+      fail('insert anchor element not found');
+    }
+  }
+  if (body[0] === 'delete') {
+    const ownedSet = new Set(targetBlock.elementKeys);
+    for (const [target, first, count] of body[1]) {
+      for (let ordinal = first; ordinal < first + count; ordinal += 1) {
+        const key = elementKey(target, ordinal);
+        if (!ownedSet.has(key)) {
+          fail('cannot delete elements not owned by target block');
+        }
+      }
+    }
+  }
+  const state = restoreTextCheckpoint(family.checkpoint);
+  const newState = applyTextOp(state, op);
+  if (newState.rebootstrapRequired) {
+    fail('operation caused rebootstrap requirement');
+  }
+  if (Object.keys(newState.pending).length > 0) {
+    fail('operation would have been buffered as pending');
+  }
+  const newCheckpoint = textCheckpoint(newState);
+  const oldKeys = new Set(Object.keys(elements));
+  const newKeys = Object.keys(newCheckpoint.elements).filter((k) => !oldKeys.has(k));
+  let newBlocks;
+  if (body[0] === 'delete' || newKeys.length === 0) {
+    newBlocks = family.blocks;
+  } else {
+    newBlocks = family.blocks.map((b) => {
+      if (b.id === blockId) {
+        const merged = [...b.elementKeys, ...newKeys].sort();
+        return deepFreeze({ id: b.id, elementKeys: Object.freeze(merged) });
+      }
+      return b;
+    });
+    assertBlockOwnerships(newCheckpoint, newBlocks);
+  }
+  return deepFreeze({
+    id: family.id,
+    checkpoint: newCheckpoint,
+    blocks: newBlocks,
+  });
 }

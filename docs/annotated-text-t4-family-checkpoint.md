@@ -55,4 +55,45 @@ Family {
 node --test test/annotated-text-family.test.mjs test/annotated-text-laws.test.mjs
 ```
 
-[IMPLEMENTED — TERRA APPROVED 2026-07-24]
+## Block-targeted operations
+
+`applyTextOperationToBlock(family, blockId, operation)` applies a single
+canonical operation to a family, attributing newly inserted scalars to the
+target block while preserving all ownership invariants.
+
+### Admission policy
+
+- Rejects if `checkpoint.pending` has any entries or `rebootstrapRequired` is
+  true.
+- Rejects any operation that is not immediately causally ready (including one
+  that would otherwise buffer as pending).
+- No pending buffering/draining occurs — the operation must be ready to apply
+  immediately.
+
+### Validation
+
+- Target block must exist in the family.
+- Before application, the target block ownership is defined from the family.
+- A delete must name only scalars owned by the target block; cross-block delete
+  is rejected.
+- An element anchor insert is valid only if its final canonical RGA traversal
+  placement can be owned by the target block while every block remains a
+  contiguous traversal segment in existing block order. Root anchor insertion
+  obeys the same resulting projection rule.
+- Full insert run is assigned to the target block.
+
+### Application
+
+- Operation is applied via canonical `applyTextOp`, retaining its duplicate and
+  equivocation behavior.
+- Same-ID/same-content returns equivalent canonical family.
+- No ownership change for delete / duplicate.
+- New inserted scalar IDs all belong to target block.
+
+### Result
+
+- Final family passes current ownership assertions / restore round-trip.
+- No SQLite sequencing as order input.
+- Exact action-level structure-version belongs later in action admission.
+
+[IMPLEMENTED — TERRA APPROVED 2026-07-25]
