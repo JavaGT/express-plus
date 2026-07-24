@@ -161,6 +161,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       }];
     },
   };
+  const cursorPolicy = {};
 
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind !== 'crdt' || descriptor.type !== 'text') continue;
@@ -172,6 +173,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       const handle = eventHandles.native(name, fieldName, 'applied');
       return [{ handle, type: handle.type, scope: scopeOf(name, payload.id).key, data: { id: payload.id, operation } }];
     };
+    cursorPolicy[`${name}.${fieldName}.apply`] = 'excluded';
   }
 
   // Side-table mutation handlers (map.add/setRole/remove, ordered.insert/move/
@@ -183,5 +185,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       strategy.mutateHandlers(name, strategyFields)),
   );
 
-  return Object.freeze({ ...handlers, ...sideTableHandlers });
+  const result = { ...handlers, ...sideTableHandlers };
+  Object.defineProperty(result, CRUD_CURSOR_POLICY, {
+    value: Object.freeze(cursorPolicy),
+  });
+  return Object.freeze(result);
 }
