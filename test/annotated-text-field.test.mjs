@@ -71,8 +71,9 @@ test('DDL generates correct table count and names', () => {
   const tables = ddl.filter(s => s.startsWith('CREATE TABLE'));
   const indexes = ddl.filter(s => s.startsWith('CREATE INDEX') || s.startsWith('CREATE UNIQUE INDEX'));
 
-  assert.equal(tables.length, 7);
+  assert.equal(tables.length, 8);
   assert.ok(tables.some(s => s.includes('Doc_body_block')));
+  assert.ok(tables.some(s => s.includes('Doc_body_state')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_highlight')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_tag')));
@@ -93,7 +94,6 @@ test('block table has correct columns, constraints, and FKs', () => {
   assert.ok(block.includes('project_id TEXT NOT NULL'));
   assert.ok(block.includes('owner_id TEXT NOT NULL'));
   assert.ok(block.includes('position TEXT NOT NULL'));
-  assert.ok(block.includes('body_checkpoint TEXT NOT NULL CHECK (json_valid(body_checkpoint))'));
   assert.ok(block.includes('epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0)'));
   assert.ok(block.includes('structure_version INTEGER NOT NULL DEFAULT 1 CHECK (structure_version > 0)'));
   assert.ok(block.includes('source TEXT NOT NULL'));
@@ -101,6 +101,26 @@ test('block table has correct columns, constraints, and FKs', () => {
   assert.ok(block.includes('FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE'));
   assert.ok(block.includes('FOREIGN KEY (project_id) REFERENCES Project(id) ON DELETE CASCADE'));
   assert.ok(block.includes('FOREIGN KEY (owner_id) REFERENCES User(id) ON DELETE CASCADE'));
+  assert.ok(!block.includes('body_checkpoint'));
+});
+
+test('family state is the sole canonical checkpoint relation', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  for (const sql of annotatedTextDDL('Doc', 'body', fd(
+    {}, { highlight: { col1: { kind: 'value', type: 'text' } } },
+  ), makeFields())) db.exec(sql);
+  db.exec("INSERT INTO Doc (id) VALUES ('d1')");
+  db.exec("INSERT INTO Doc_body_state (document_id, structure_version, family_checkpoint) VALUES ('d1', 0, '{}')");
+
+  assert.throws(() => db.exec("INSERT INTO Doc_body_state (document_id, structure_version, family_checkpoint) VALUES ('d1', 0, '{}')"));
+  assert.throws(() => db.exec("INSERT INTO Doc_body_state (document_id, structure_version, family_checkpoint) VALUES ('d2', -1, '{}')"));
+  assert.throws(() => db.exec("INSERT INTO Doc_body_state (document_id, structure_version, family_checkpoint) VALUES ('d2', 0, 'not-json')"));
+  db.exec("DELETE FROM Doc WHERE id = 'd1'");
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_state').get().c, 0);
 });
 
 test('annotation table has correct columns, family CHECK, and FKs', () => {
@@ -259,9 +279,9 @@ test('structure version and measurement family uniqueness are enforced by SQLite
   db.exec("INSERT INTO Project VALUES ('p')");
   db.exec("INSERT INTO User VALUES ('u')");
   db.exec("INSERT INTO Doc VALUES ('d')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, body_checkpoint) VALUES ('b', 'd', 'p', 'u', '1', '{}')");
+  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position) VALUES ('b', 'd', 'p', 'u', '1')");
   assert.equal(db.prepare('SELECT structure_version FROM Doc_body_block WHERE id = ?').get('b').structure_version, 1);
-  assert.throws(() => db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, body_checkpoint, structure_version) VALUES ('bad', 'd', 'p', 'u', '2', '{}', 0)"));
+  assert.throws(() => db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, structure_version) VALUES ('bad', 'd', 'p', 'u', '2', 0)"));
   db.exec("INSERT INTO Doc_body_measurement VALUES ('m1', 'b', 'audio', 1, '{}')");
   assert.throws(() => db.exec("INSERT INTO Doc_body_measurement VALUES ('m2', 'b', 'audio', 1, '{}')"));
   db.exec("INSERT INTO Doc_body_measurement VALUES ('m3', 'b', 'words', 1, '{}')");
@@ -305,8 +325,8 @@ test('generated tables execute against real SQLite and accept inserts', () => {
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
 
   db.exec([
-    "INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, body_checkpoint, source, score)",
-    "VALUES ('b1', 'd1', 'p1', 'u1', '0001', '{}', 'src1', 0.5)",
+    "INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source, score)",
+    "VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src1', 0.5)",
   ].join(' '));
 
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
@@ -335,7 +355,7 @@ test('ON DELETE CASCADE removes child rows when parent document is deleted', () 
   db.exec("INSERT INTO Project (id) VALUES ('p1')");
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, body_checkpoint, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', '{}', 'src')");
+  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
   db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
@@ -344,6 +364,7 @@ test('ON DELETE CASCADE removes child rows when parent document is deleted', () 
   db.exec("DELETE FROM Doc WHERE id = 'd1'");
 
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_block').get().c, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_state').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_annotation').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_annotation_highlight').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_membership').get().c, 0);
@@ -365,7 +386,7 @@ test('ON DELETE CASCADE removes annotation family and membership when annotation
   db.exec("INSERT INTO Project (id) VALUES ('p1')");
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, body_checkpoint, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', '{}', 'src')");
+  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
   db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
@@ -391,7 +412,7 @@ test('ON DELETE CASCADE removes membership and measurement when block is deleted
   db.exec("INSERT INTO Project (id) VALUES ('p1')");
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, body_checkpoint, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', '{}', 'src')");
+  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
   db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
@@ -629,7 +650,7 @@ test('valid: empty block fields produce no extension columns', () => {
   const descriptor = fd({}, { hl: { col1: { kind: 'value', type: 'text' } } });
   const ddl = annotatedTextDDL('Doc', 'body', descriptor, makeFields());
   const block = ddl.find(s => s.includes('Doc_body_block'));
-  const standardCols = ['id', 'document_id', 'project_id', 'owner_id', 'position', 'body_checkpoint', 'epoch'];
+  const standardCols = ['id', 'document_id', 'project_id', 'owner_id', 'position', 'epoch'];
   for (const col of standardCols) {
     assert.ok(block.includes(col), `block should have standard column ${col}`);
   }
@@ -1147,7 +1168,7 @@ test('ON DELETE CASCADE removes block and annotation rows when project is delete
   db.exec("INSERT INTO Project (id) VALUES ('p1')");
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, body_checkpoint, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', '{}', 'src')");
+  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
   db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
@@ -1178,7 +1199,7 @@ test('ON DELETE CASCADE removes block and annotation rows when owner is deleted'
   db.exec("INSERT INTO Project (id) VALUES ('p1')");
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, body_checkpoint, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', '{}', 'src')");
+  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
   db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
