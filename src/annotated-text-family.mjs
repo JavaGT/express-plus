@@ -1,6 +1,7 @@
 import {
-  assertUtf16Offset, compareOpId, restoreTextCheckpoint, textCheckpoint,
-  canonicalTextOp, applyTextOp, frontierDominates,
+  assertFrontier, assertStructuralPoint, assertUtf16Offset,
+  compareOpId, frontierDominates, restoreTextCheckpoint,
+  textCheckpoint, canonicalTextOp, applyTextOp,
 } from './annotated-text.mjs';
 
 const ROOT_ID = 'root';
@@ -212,6 +213,284 @@ function opKey(op) {
 
 function elementKey(op, ordinal) {
   return `${opKey(op)}:${ordinal}`;
+}
+
+function anchorKeyStr(anchor) {
+  return anchor[0] === 'root' ? ROOT_ID : `${anchor[1][0][0]}:${anchor[1][0][1]}:${anchor[1][1]}`;
+}
+
+function isAncestor(checkpoint, ancestorKey, descendantKey) {
+  if (ancestorKey === ROOT_ID) return true;
+  if (ancestorKey === descendantKey) return false;
+  let current = descendantKey;
+  while (current !== ROOT_ID) {
+    current = checkpoint.elements[current].parent;
+    if (current === ancestorKey) return true;
+  }
+  return false;
+}
+
+function findLastOwnedKey(family, ownedSet) {
+  const order = rgaTraversal(family.checkpoint);
+  for (let i = order.length - 1; i >= 0; i--) {
+    const [key] = order[i];
+    if (ownedSet.has(key)) return key;
+  }
+  return null;
+}
+
+function isCanonicalBlockEnd(family, ownedSet, endpoint) {
+  if (endpoint.point[2] !== 'right') return false;
+  const lastKey = findLastOwnedKey(family, ownedSet);
+  if (lastKey === null) return false;
+  return anchorKeyStr(endpoint.point[1]) === lastKey;
+}
+
+function endpointVirtualPosition(family, endpoint) {
+  const checkpoint = family.checkpoint;
+  const order = rgaTraversal(checkpoint);
+  const anchor = endpoint.point[1];
+  const affinity = endpoint.point[2];
+  const anchorKey = anchorKeyStr(anchor);
+
+  if (anchorKey === ROOT_ID) {
+    if (affinity === 'left') return 0;
+    const basisFrontier = endpoint.basisFrontier;
+    for (let i = 0; i < order.length; i++) {
+      const [, element] = order[i];
+      if (element.parent === ROOT_ID && frontierDominates(basisFrontier, [[...element.op]])) {
+        return i;
+      }
+    }
+    return order.length;
+  }
+
+  const anchorIdx = order.findIndex(([k]) => k === anchorKey);
+  if (anchorIdx === -1) fail('anchor element not found in checkpoint');
+
+  if (affinity === 'left') {
+    return anchorIdx + 1;
+  }
+
+  const basisFrontier = endpoint.basisFrontier;
+  for (let i = anchorIdx + 1; i < order.length; i++) {
+    const [key, element] = order[i];
+    if (element.parent === anchorKey && frontierDominates(basisFrontier, [[...element.op]])) {
+      return i;
+    }
+    if (!isAncestor(checkpoint, anchorKey, key)) return i;
+  }
+  return order.length;
+}
+
+export function assertStructuralEndpoint(endpoint) {
+  if (!endpoint || typeof endpoint !== 'object' || Array.isArray(endpoint)) {
+    fail('endpoint must be a non-array object');
+  }
+  const allowedKeys = ['point', 'basisFrontier'];
+  for (const key of Object.keys(endpoint)) {
+    if (!allowedKeys.includes(key)) fail(`unknown endpoint key: ${key}`);
+  }
+  assertStructuralPoint(endpoint.point);
+  assertFrontier(endpoint.basisFrontier);
+  return deepFreeze({ point: endpoint.point, basisFrontier: endpoint.basisFrontier });
+}
+
+export function compareStructuralEndpoints(family, left, right) {
+  if (JSON.stringify(left.basisFrontier) !== JSON.stringify(right.basisFrontier)) {
+    fail('endpoint basis mismatch: compareStructuralEndpoints requires identical basisFrontier');
+  }
+  if (JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(left.basisFrontier)) {
+    fail('endpoint basis mismatch: compareStructuralEndpoints requires basisFrontier equal to family checkpoint frontier');
+  }
+
+  const leftAnchor = left.point[1];
+  const rightAnchor = right.point[1];
+  const leftAffinity = left.point[2];
+  const rightAffinity = right.point[2];
+  const leftKey = anchorKeyStr(leftAnchor);
+  const rightKey = anchorKeyStr(rightAnchor);
+
+  if (leftKey === rightKey) {
+    if (leftAffinity === rightAffinity) return 0;
+    return leftAffinity === 'left' ? -1 : 1;
+  }
+
+  const leftPos = endpointVirtualPosition(family, left);
+  const rightPos = endpointVirtualPosition(family, right);
+  if (leftPos !== rightPos) return leftPos - rightPos;
+
+  return leftKey < rightKey ? -1 : 1;
+}
+
+export function projectEndpointToBlockOffset(family, blockId, endpoint) {
+  const block = family.blocks.find((b) => b.id === blockId);
+  if (!block) fail(`block not found: ${blockId}`);
+  if (JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(endpoint.basisFrontier)) {
+    fail('projectEndpointToBlockOffset requires basisFrontier equal to family checkpoint frontier');
+  }
+
+  const ownedSet = new Set(block.elementKeys);
+  const anchorKey = anchorKeyStr(endpoint.point[1]);
+  const blockIndex = family.blocks.findIndex((b) => b.id === blockId);
+
+  if (anchorKey === ROOT_ID) {
+    if (blockIndex !== 0) fail('projectEndpointToBlockOffset: root anchor only valid for first block');
+  } else if (!ownedSet.has(anchorKey)) {
+    if (blockIndex === 0) fail('projectEndpointToBlockOffset: foreign anchor not valid for first block');
+    const priorBlock = family.blocks[blockIndex - 1];
+    const priorOwned = new Set(priorBlock.elementKeys);
+    if (!priorOwned.has(anchorKey)) fail('projectEndpointToBlockOffset: anchor must be in named block or adjacent prior block');
+    const lastPriorKey = findLastOwnedKey(family, priorOwned);
+    if (anchorKey !== lastPriorKey) fail('projectEndpointToBlockOffset: prior block anchor must be its final owned element');
+    if (endpoint.point[2] !== 'right') fail('projectEndpointToBlockOffset: prior block anchor must have right affinity');
+  }
+
+  const pos = endpointVirtualPosition(family, endpoint);
+  const order = rgaTraversal(family.checkpoint);
+
+  let offset = 0;
+  for (let i = 0; i < pos; i++) {
+    const [key, element] = order[i];
+    if (ownedSet.has(key) && element.deletedBy.length === 0) offset += element.scalar.length;
+  }
+  return offset;
+}
+
+export function resolvePositionToEndpoint(family, blockId, utf16Offset, basisFrontier) {
+  assertBlockId(blockId);
+  const blockIndex = family.blocks.findIndex((b) => b.id === blockId);
+  if (blockIndex === -1) fail(`block not found: ${blockId}`);
+  const block = family.blocks[blockIndex];
+  const ownedSet = new Set(block.elementKeys);
+  const checkpoint = family.checkpoint;
+  const order = rgaTraversal(checkpoint);
+
+  if (JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(basisFrontier)) {
+    fail('resolvePositionToEndpoint requires basisFrontier equal to family checkpoint frontier');
+  }
+
+  const blockText = materializeBlock(family, blockId);
+  assertUtf16Offset(blockText, utf16Offset);
+
+  const hasVisibleScalar = [...ownedSet].some((k) => checkpoint.elements[k].deletedBy.length === 0);
+
+  if (utf16Offset === 0) {
+    if (!hasVisibleScalar) {
+      fail('fully tombstoned block offset 0 is ambiguous; provide explicit affinity');
+    }
+    if (blockIndex === 0) {
+      return assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier });
+    }
+    for (let i = order.length - 1; i >= 0; i--) {
+      const [key, element] = order[i];
+      if (new Set(family.blocks[blockIndex - 1].elementKeys).has(key)) {
+        return assertStructuralEndpoint({
+          point: ['point', ['element', [[...element.op], element.ordinal]], 'right'],
+          basisFrontier,
+        });
+      }
+    }
+    fail('cannot find predecessor block final element');
+  }
+
+  const totalVisible = blockText.length;
+  if (utf16Offset === totalVisible) {
+    let lastOwnedKey = null;
+    for (let i = order.length - 1; i >= 0; i--) {
+      const [key] = order[i];
+      if (ownedSet.has(key)) { lastOwnedKey = key; break; }
+    }
+    if (lastOwnedKey === null) fail('block has no elements');
+    const element = checkpoint.elements[lastOwnedKey];
+    return assertStructuralEndpoint({
+      point: ['point', ['element', [[...element.op], element.ordinal]], 'right'],
+      basisFrontier,
+    });
+  }
+
+  let accumulated = 0;
+  for (const [key, element] of order) {
+    const visible = ownedSet.has(key) && element.deletedBy.length === 0;
+    const width = visible ? element.scalar.length : 0;
+    const postScalar = accumulated + width;
+    if (visible && accumulated < utf16Offset && utf16Offset <= postScalar) {
+      if (utf16Offset === postScalar) {
+        return assertStructuralEndpoint({
+          point: ['point', ['element', [[...element.op], element.ordinal]], 'right'],
+          basisFrontier,
+        });
+      }
+      return assertStructuralEndpoint({
+        point: ['point', ['element', [[...element.op], element.ordinal]], 'left'],
+        basisFrontier,
+      });
+    }
+    accumulated = postScalar;
+  }
+  fail('failed to resolve position to endpoint');
+}
+
+export function assertMembershipRange(family, blockId, startEndpoint, endEndpoint) {
+  assertBlockId(blockId);
+  const block = family.blocks.find((b) => b.id === blockId);
+  if (!block) fail(`block not found: ${blockId}`);
+
+  if (JSON.stringify(startEndpoint.basisFrontier) !== JSON.stringify(endEndpoint.basisFrontier)) {
+    fail('membership range endpoints must have the same basisFrontier');
+  }
+  if (JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(startEndpoint.basisFrontier)) {
+    fail('membership range requires basisFrontier equal to family checkpoint frontier');
+  }
+
+  const ownedSet = new Set(block.elementKeys);
+  const endKey = anchorKeyStr(endEndpoint.point[1]);
+  const startKey = anchorKeyStr(startEndpoint.point[1]);
+
+  if (endKey === ROOT_ID) fail('membership range end must not be a root anchor');
+  if (!ownedSet.has(endKey)) fail('end anchor must be owned by named block');
+  if (!isCanonicalBlockEnd(family, ownedSet, endEndpoint)) {
+    fail('end must be canonical block end: final owned element with right affinity');
+  }
+
+  const blockIndex = family.blocks.findIndex((b) => b.id === blockId);
+
+  if (startKey === ROOT_ID) {
+    if (startEndpoint.point[2] !== 'left') fail('membership range root start must have left affinity');
+    if (blockIndex !== 0) fail('root start only valid for first block');
+  } else if (ownedSet.has(startKey)) {
+    fail('start anchor owned by named block is not the canonical lower boundary');
+  } else {
+    if (blockIndex === 0) fail('non-root start anchor must be in named block for first block');
+    const priorBlock = family.blocks[blockIndex - 1];
+    const priorOwned = new Set(priorBlock.elementKeys);
+    if (!priorOwned.has(startKey)) fail('start anchor must be in adjacent prior block');
+    if (startEndpoint.point[2] !== 'right') fail('start from prior block must have right affinity');
+    const lastPriorKey = findLastOwnedKey(family, priorOwned);
+    if (startKey !== lastPriorKey) fail('start from prior block must be its final owned element');
+  }
+
+  if (compareStructuralEndpoints(family, startEndpoint, endEndpoint) >= 0) {
+    fail('membership range start must be structurally before end');
+  }
+
+  const checkpoint = family.checkpoint;
+  const order = rgaTraversal(checkpoint);
+  const startPos = endpointVirtualPosition(family, startEndpoint);
+  const endPos = endpointVirtualPosition(family, endEndpoint);
+
+  let visibleWidth = 0;
+  for (let i = startPos; i < endPos; i++) {
+    const [key, element] = order[i];
+    if (!ownedSet.has(key)) fail('range covers element not owned by named block');
+    if (element.deletedBy.length === 0) visibleWidth += element.scalar.length;
+  }
+
+  if (visibleWidth <= 0) {
+    fail('membership range must include positive visible UTF-16 width');
+  }
+
+  return deepFreeze({ start: startEndpoint, end: endEndpoint, blockId });
 }
 
 export function applyTextOperationToBlock(family, blockId, operation) {

@@ -49,6 +49,12 @@ Family {
   missing ownership is rejected. Non-adjacent merge is rejected. Same new block
   ID in split is rejected.
 
+## Membership Points
+
+Membership points (structural endpoints, comparison, projection, and range
+validation) are defined in a separate prerequisite module. See
+[membership-points](./annotated-text-t4-membership-points.md).
+
 ## Verification
 
 ```bash
