@@ -1,11 +1,12 @@
-// T3 owns declaration validation and physical schema only. Structural actions
-// are deliberately deferred to T4 so a descriptor cannot imply a partial write
-// path.
+// T3 owns declarations and schema. T4 adds structural prerequisites here, but
+// action handlers remain separate so a descriptor cannot imply a partial write.
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const SCALAR_TYPES = new Set(['text', 'boolean', 'date', 'number', 'json', 'vector', 'ref']);
-const RESERVED_BLOCK_COLUMNS = new Set(['id', 'document_id', 'project_id', 'owner_id', 'position', 'body_checkpoint', 'epoch']);
+const RESERVED_BLOCK_COLUMNS = new Set(['id', 'document_id', 'project_id', 'owner_id', 'position', 'body_checkpoint', 'epoch', 'structure_version']);
 const RESERVED_ANNOTATION_COLUMNS = new Set(['annotation_id', 'id', 'document_id', 'project_id', 'owner_id', 'family']);
+const ORPHAN_TABLE_SUFFIX = '_annotation_orphan_state';
+const RESERVED_ANNOTATION_FAMILIES = new Set(['orphan_state']);
 
 // -- Compiled metadata storage (WeakMap keyed on descriptor) --
 const compiledMeta = new WeakMap();
@@ -109,9 +110,12 @@ function assertScalarFields(entity, field, path, entries, reserved) {
 
 // -- Declarative annotation / measurement descriptor constructors --
 
-export function annotation(name, { fields = {}, actions = [], empty = null } = {}) {
+export function annotation(name, { fields = {}, actions = [], empty = 'delete' } = {}) {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`annotation name '${name}' is not a valid identifier`);
+  }
+  if (empty !== 'delete' && empty !== 'orphan') {
+    throw new Error(`annotation '${name}' empty policy must be 'delete' or 'orphan'`);
   }
   const frozenFields = {};
   for (const [k, v] of Object.entries(fields)) {
@@ -123,13 +127,16 @@ export function annotation(name, { fields = {}, actions = [], empty = null } = {
     annotationName: name,
     fields: Object.freeze(frozenFields),
     actions: frozenActions,
-    empty: empty ?? null,
+    empty,
   });
 }
 
-export function protectingAnnotation(name, { fields = {}, protects = null, actions = [], empty = null } = {}) {
+export function protectingAnnotation(name, { fields = {}, protects = null, actions = [], empty = 'delete' } = {}) {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`protectingAnnotation name '${name}' is not a valid identifier`);
+  }
+  if (empty !== 'delete' && empty !== 'orphan') {
+    throw new Error(`protectingAnnotation '${name}' empty policy must be 'delete' or 'orphan'`);
   }
   if (protects !== null) {
     if (typeof protects !== 'string' || !IDENTIFIER.test(protects)) {
@@ -147,7 +154,7 @@ export function protectingAnnotation(name, { fields = {}, protects = null, actio
     fields: Object.freeze(frozenFields),
     protects,
     actions: frozenActions,
-    empty: empty ?? null,
+    empty,
   });
 }
 
@@ -218,6 +225,12 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
       fail(entity, field, 'annotations', `expected annotation or protectingAnnotation descriptor, got '${ann.kind}'`);
     }
     const name = ann.annotationName;
+    if (RESERVED_ANNOTATION_FAMILIES.has(name)) {
+      fail(entity, field, `annotations.${name}`, 'uses a reserved internal annotation family name');
+    }
+    if (ann.empty !== 'delete' && ann.empty !== 'orphan') {
+      fail(entity, field, `annotations.${name}.empty`, "must be 'delete' or 'orphan'");
+    }
     if (annotationNames.has(name)) {
       fail(entity, field, `annotations.${name}`, 'duplicate annotation name');
     }
@@ -401,10 +414,12 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     // Create frozen typed runtime static handles
     annotationHandles: Object.freeze(
       Object.fromEntries([...annotationNames].map(n => {
+        const annConfig = descriptor.annotations.find(a => a.annotationName === n);
         return [n, Object.freeze({
           family: n,
           annotationName: n,
           actions: annotationActionIds[n] || Object.freeze([]),
+          empty: (annConfig && annConfig.empty) || 'delete',
         })];
       }))
     ),
@@ -448,13 +463,15 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
   const ownerTarget = targetName(fields[descriptor.owner]);
   const block = `${prefix}_block`;
   const annotation = `${prefix}_annotation`;
+  const orphan = `${prefix}${ORPHAN_TABLE_SUFFIX}`;
   const membership = `${prefix}_membership`;
   const measurement = `${prefix}_measurement`;
   const statements = [
-    `CREATE TABLE IF NOT EXISTS ${block} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  owner_id TEXT NOT NULL,\n  position TEXT NOT NULL,\n  body_checkpoint TEXT NOT NULL CHECK (json_valid(body_checkpoint)),\n  epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0)${blockFields.length ? `,\n  ${extensionColumns(descriptor.block, blockFields).join(',\n  ')}` : ''},\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE,\n  FOREIGN KEY (project_id) REFERENCES ${projectTarget}(id) ON DELETE CASCADE,\n  FOREIGN KEY (owner_id) REFERENCES ${ownerTarget}(id) ON DELETE CASCADE\n);`,
+    `CREATE TABLE IF NOT EXISTS ${block} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  owner_id TEXT NOT NULL,\n  position TEXT NOT NULL,\n  body_checkpoint TEXT NOT NULL CHECK (json_valid(body_checkpoint)),\n  epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0),\n  structure_version INTEGER NOT NULL DEFAULT 1 CHECK (structure_version > 0)${blockFields.length ? `,\n  ${extensionColumns(descriptor.block, blockFields).join(',\n  ')}` : ''},\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE,\n  FOREIGN KEY (project_id) REFERENCES ${projectTarget}(id) ON DELETE CASCADE,\n  FOREIGN KEY (owner_id) REFERENCES ${ownerTarget}(id) ON DELETE CASCADE\n);`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_block_order ON ${block} (document_id, position);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_block_project ON ${block} (project_id, document_id, position, id);`,
     `CREATE TABLE IF NOT EXISTS ${annotation} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  owner_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${families.map((name) => `'${name}'`).join(', ')})),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE,\n  FOREIGN KEY (project_id) REFERENCES ${projectTarget}(id) ON DELETE CASCADE,\n  FOREIGN KEY (owner_id) REFERENCES ${ownerTarget}(id) ON DELETE CASCADE\n);`,
+    `CREATE TABLE IF NOT EXISTS ${orphan} (\n  annotation_id TEXT PRIMARY KEY,\n  saved_quote TEXT NOT NULL,\n  last_memberships TEXT NOT NULL CHECK (json_valid(last_memberships)),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE\n);`,
   ];
   for (const family of families) {
     const annConfig = descriptor.annotations.find(a => a.annotationName === family);
@@ -467,6 +484,7 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_membership_block_once ON ${membership} (annotation_id, block_id);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_membership_by_block ON ${membership} (block_id, annotation_id);`,
     `CREATE TABLE IF NOT EXISTS ${measurement} (\n  id TEXT PRIMARY KEY,\n  block_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${measurements.map((name) => `'${name}'`).join(', ')})),\n  format_version INTEGER NOT NULL CHECK (format_version > 0),\n  payload TEXT NOT NULL CHECK (json_valid(payload)),\n  FOREIGN KEY (block_id) REFERENCES ${block}(id) ON DELETE CASCADE\n);`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_measurement_once ON ${measurement} (block_id, family);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_measurement_block ON ${measurement} (block_id, family, id);`,
   );
   return statements;

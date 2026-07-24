@@ -191,7 +191,7 @@ export interface AnnotatedTextAnnotationDescriptor {
   readonly annotationName: string;
   readonly fields: Readonly<Record<string, FieldDescriptor>>;
   readonly actions: readonly AnnotatedTextActionDescriptor[];
-  readonly empty: unknown;
+  readonly empty: 'delete' | 'orphan';
 }
 export interface AnnotatedTextProtectingAnnotationDescriptor {
   readonly kind: 'protectingAnnotation';
@@ -199,7 +199,7 @@ export interface AnnotatedTextProtectingAnnotationDescriptor {
   readonly fields: Readonly<Record<string, FieldDescriptor>>;
   readonly protects: string | null;
   readonly actions: readonly AnnotatedTextActionDescriptor[];
-  readonly empty: unknown;
+  readonly empty: 'delete' | 'orphan';
 }
 export interface AnnotatedTextMeasurementDescriptor {
   readonly kind: 'measurement';
@@ -215,13 +215,13 @@ export interface AnnotatedTextActionDescriptor {
 export function annotation(name: string, options?: {
   fields?: Record<string, FieldDescriptor>;
   actions?: readonly AnnotatedTextActionDescriptor[];
-  empty?: unknown;
+  empty?: 'delete' | 'orphan';
 }): AnnotatedTextAnnotationDescriptor;
 export function protectingAnnotation(name: string, options?: {
   fields?: Record<string, FieldDescriptor>;
   protects?: string | null;
   actions?: readonly AnnotatedTextActionDescriptor[];
-  empty?: unknown;
+  empty?: 'delete' | 'orphan';
 }): AnnotatedTextProtectingAnnotationDescriptor;
 export function measurement(name: string, options?: {
   extension?: string | null;
@@ -243,6 +243,7 @@ export interface AnnotatedTextAnnotationHandle {
   readonly family: string;
   readonly annotationName: string;
   readonly actions: readonly string[];
+  readonly empty: 'delete' | 'orphan';
 }
 export interface AnnotatedTextMeasurementHandle {
   readonly family: string;

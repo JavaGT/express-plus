@@ -71,14 +71,15 @@ test('DDL generates correct table count and names', () => {
   const tables = ddl.filter(s => s.startsWith('CREATE TABLE'));
   const indexes = ddl.filter(s => s.startsWith('CREATE INDEX') || s.startsWith('CREATE UNIQUE INDEX'));
 
-  assert.equal(tables.length, 6);
+  assert.equal(tables.length, 7);
   assert.ok(tables.some(s => s.includes('Doc_body_block')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_highlight')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_tag')));
   assert.ok(tables.some(s => s.includes('Doc_body_membership')));
   assert.ok(tables.some(s => s.includes('Doc_body_measurement')));
-  assert.equal(indexes.length, 5);
+  assert.ok(tables.some(s => s.includes('Doc_body_annotation_orphan_state')));
+  assert.equal(indexes.length, 6);
 });
 
 test('block table has correct columns, constraints, and FKs', () => {
@@ -94,6 +95,7 @@ test('block table has correct columns, constraints, and FKs', () => {
   assert.ok(block.includes('position TEXT NOT NULL'));
   assert.ok(block.includes('body_checkpoint TEXT NOT NULL CHECK (json_valid(body_checkpoint))'));
   assert.ok(block.includes('epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0)'));
+  assert.ok(block.includes('structure_version INTEGER NOT NULL DEFAULT 1 CHECK (structure_version > 0)'));
   assert.ok(block.includes('source TEXT NOT NULL'));
   assert.ok(block.includes('score REAL NOT NULL'));
   assert.ok(block.includes('FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE'));
@@ -196,8 +198,73 @@ test('measurement index exists', () => {
   const ddl = annotatedTextDDL('Doc', 'body', fd(
     {}, { highlight: { col1: { kind: 'value', type: 'text' } } },
   ), makeFields());
+  const once = ddl.find(s => s.includes('idx_Doc_body_measurement_once'));
+  assert.ok(once.includes('UNIQUE INDEX'));
+  assert.ok(once.includes('(block_id, family)'));
+
   const idx = ddl.find(s => s.includes('idx_Doc_body_measurement_block'));
   assert.ok(idx.includes('(block_id, family, id)'));
+});
+
+test('orphan rows are one-to-one annotation state and cascade on annotation deletion', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  for (const sql of annotatedTextDDL('Doc', 'body', fd({}, { note: {} }), makeFields())) db.exec(sql);
+  db.exec("INSERT INTO Project VALUES ('p')");
+  db.exec("INSERT INTO User VALUES ('u')");
+  db.exec("INSERT INTO Doc VALUES ('d')");
+  db.exec("INSERT INTO Doc_body_annotation VALUES ('a', 'd', 'p', 'u', 'note')");
+  db.exec("INSERT INTO Doc_body_annotation_orphan_state VALUES ('a', 'saved', '[]')");
+  assert.throws(() => db.exec("INSERT INTO Doc_body_annotation_orphan_state VALUES ('a', 'again', '[]')"));
+  db.exec("DELETE FROM Doc_body_annotation WHERE id = 'a'");
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM Doc_body_annotation_orphan_state').get().count, 0);
+});
+
+test('forged annotation descriptors cannot bypass the closed empty policy', () => {
+  const forged = Object.freeze({
+    kind: 'annotation', annotationName: 'note', fields: Object.freeze({}), actions: Object.freeze([]), empty: 'retain',
+  });
+  assert.throws(() => validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
+    project: 'project', owner: 'owner', annotations: [forged], measurements: [measurement('m')],
+  }), makeFields()), /must be 'delete' or 'orphan'/);
+});
+
+test('generic orphan table does not collide with an orphan annotation family', () => {
+  const ddl = annotatedTextDDL('Doc', 'body', fd({}, { orphan: {} }), makeFields());
+  assert.ok(ddl.some(sql => sql.includes('CREATE TABLE IF NOT EXISTS Doc_body_annotation_orphan (')));
+  assert.ok(ddl.some(sql => sql.includes('CREATE TABLE IF NOT EXISTS Doc_body_annotation_orphan_state (')));
+});
+
+test('reserved orphan state family cannot collide with the generic orphan table', () => {
+  assert.throws(() => annotatedTextDDL('Doc', 'body', fd({}, { orphan_state: {} }), makeFields()), /reserved internal annotation family name/);
+});
+
+test('structure_version cannot be declared as a block extension field', () => {
+  assert.throws(() => annotatedTextDDL('Doc', 'body', annotatedText({
+    project: 'project', owner: 'owner', block: { structure_version: text() },
+    annotations: [annotation('note')], measurements: [measurement('m')],
+  }), makeFields()), /reserved/);
+});
+
+test('structure version and measurement family uniqueness are enforced by SQLite', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  for (const sql of annotatedTextDDL('Doc', 'body', fd({}, { note: {} }, { audio: { formatVersion: 1 }, words: { formatVersion: 1 } }), makeFields())) db.exec(sql);
+  db.exec("INSERT INTO Project VALUES ('p')");
+  db.exec("INSERT INTO User VALUES ('u')");
+  db.exec("INSERT INTO Doc VALUES ('d')");
+  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, body_checkpoint) VALUES ('b', 'd', 'p', 'u', '1', '{}')");
+  assert.equal(db.prepare('SELECT structure_version FROM Doc_body_block WHERE id = ?').get('b').structure_version, 1);
+  assert.throws(() => db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, body_checkpoint, structure_version) VALUES ('bad', 'd', 'p', 'u', '2', '{}', 0)"));
+  db.exec("INSERT INTO Doc_body_measurement VALUES ('m1', 'b', 'audio', 1, '{}')");
+  assert.throws(() => db.exec("INSERT INTO Doc_body_measurement VALUES ('m2', 'b', 'audio', 1, '{}')"));
+  db.exec("INSERT INTO Doc_body_measurement VALUES ('m3', 'b', 'words', 1, '{}')");
 });
 
 test('main entity table has no annotatedText column', () => {
@@ -627,14 +694,26 @@ test('valid: entity() compiles with annotatedText field', () => {
 // ---- New declarative API tests ----
 
 test('annotation() returns a frozen descriptor with correct shape', () => {
-  const a = annotation('highlight', { fields: { col1: text() }, empty: null });
+  const a = annotation('highlight', { fields: { col1: text() } });
   assert.equal(a.kind, 'annotation');
   assert.equal(a.annotationName, 'highlight');
   assert.ok(Object.isFrozen(a));
   assert.ok(Object.isFrozen(a.fields));
   assert.deepEqual(Object.keys(a.fields), ['col1']);
   assert.deepEqual(a.actions, []);
-  assert.equal(a.empty, null);
+  assert.equal(a.empty, 'delete');
+});
+
+test('annotation empty policy is closed and compiled into its static handle', () => {
+  assert.throws(() => annotation('bad', { empty: null }), /must be 'delete' or 'orphan'/);
+  assert.throws(() => protectingAnnotation('bad', { empty: 'retain' }), /must be 'delete' or 'orphan'/);
+  const descriptor = annotatedText({
+    project: 'project', owner: 'owner',
+    annotations: [annotation('comment', { empty: 'orphan' })],
+    measurements: [measurement('m')],
+  });
+  validateAnnotatedTextDeclaration('Doc', 'body', descriptor, makeFields());
+  assert.equal(getAnnotatedTextCompiledMetadata(descriptor).annotationHandles.comment.empty, 'orphan');
 });
 
 test('protectingAnnotation() returns a frozen descriptor with protects', () => {
