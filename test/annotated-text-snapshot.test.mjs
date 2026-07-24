@@ -4,12 +4,20 @@ import {
   annotatedText, annotation, annotationAction, entity, measurement, ref,
   registerAnnotatedTextContract,
 } from '../src/index.mjs';
+import { registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
 import { materializeAnnotatedTextSnapshot } from '../public/workbench-annotated-text-snapshot.mjs';
 import { materializeAnnotatedTextSnapshot as clientSnapshot } from '../public/workbench-client.mjs';
 
 const suffix = 'snapshotT3';
 registerAnnotatedTextContract(`${suffix}Action`, Object.freeze({ kind: 'annotation-action' }));
 registerAnnotatedTextContract(`${suffix}Measurement`, Object.freeze({ kind: 'measurement' }));
+registerAnnotatedTextStructuralExtension(`${suffix}Measurement`, Object.freeze({
+  version: 1,
+  validate: function validate() {},
+  edit: function edit() {},
+  partition: function partition() {},
+  combine: function combine() {},
+}));
 registerAnnotatedTextContract(`${suffix}Query`, Object.freeze({ kind: 'measurement-query' }));
 
 function declaration() {

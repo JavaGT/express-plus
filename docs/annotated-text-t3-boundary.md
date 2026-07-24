@@ -7,7 +7,7 @@
 - `annotatedTextDDL` generates one canonical per-document family-state relation, block, annotation, family, membership, orphan, and generic opaque measurement-payload relations. `<prefix>_state` owns the only full family checkpoint and its structural revision; block rows are ordered derived projections and never store a competing body checkpoint. Its primary-key/foreign-key pair enforces at most one state row per document. T4's create-event projector will atomically insert the parent, state row, and replay-stable initial block, enforcing at least one state row for every supported committed entity projection; direct SQL projection writes are unsupported. One generic one-to-one orphan table (`<prefix>_annotation_orphan_state`) preserves annotation-owned state outside active memberships without colliding with a declared family; actions do not produce it at T3. Measurement uniqueness is enforced by a unique index on `(block_id, family)`. These fresh-schema T4 prerequisites intentionally include no T3-to-T4 migration because the release contract has no production annotated-text databases. The public API never names those relations or exposes checkpoint, order-key, or payload encoding details.
 - The compiler retains declaration metadata in a private WeakMap. Entity field handles expose only frozen semantic annotation action identifiers, declared measurement query facades, and declared capability identifiers; annotated text cannot be used as a scalar scope predicate.
 - `materializeAnnotatedTextSnapshot` in the browser client accepts only a compiled static field handle (from `Entity.field`) and a v1 projected snapshot. It validates declared annotation, measurement, and capability names from the handle's public `annotations`, `measurements`, and `capabilities` properties, rejecting raw descriptors. It returns frozen logical blocks, annotations, whole-block memberships, opaque measurements, and capabilities. It neither folds T4 events nor exposes internal anchors, positions, checkpoints, or table identities.
-- `registerAnnotatedTextContract` is public for semantic contract registration. The deterministic structural-extension registry is internal-only: registered frozen `{ version, validate, partition, combine }` adapters are reserved for T4's atomic split/merge orchestration.
+- `registerAnnotatedTextContract` is public for semantic contract registration. The deterministic structural-extension registry is internal-only: registered frozen `{ version: 1, validate, edit, partition, combine }` adapters with closed own data properties are reserved for T4's atomic split/merge orchestration.
 - T3 declares metadata/contracts only. No T4 actions, handlers, projections, or SQL callbacks are accepted.
 
 ## Declarative API
@@ -48,6 +48,7 @@ registerAnnotatedTextContract('transcript', Object.freeze({ kind: 'measurement-q
 registerAnnotatedTextStructuralExtension('speech', Object.freeze({
   version: 1,
   validate: function validate(spec) { /* validate extension payload */ },
+  edit: function edit(spec, change) { /* edit within block */ },
   partition: function partition(spec, block) { /* split block */ },
   combine: function combine(spec, left, right) { /* merge blocks */ },
 }));

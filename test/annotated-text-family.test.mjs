@@ -39,7 +39,9 @@ test('v1 canonical graph and replay are unchanged through family boundary', () =
 test('split at utf16 3 on abcdef gives abc and def with every scalar exactly once', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const result = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(result.type, 'split');
+  const split = result.family;
   assert.equal(split.blocks.length, 2);
   assert.equal(materializeBlock(split, 'block1'), 'abc');
   assert.equal(materializeBlock(split, 'block2'), 'def');
@@ -55,7 +57,8 @@ test('split at utf16 3 on abcdef gives abc and def with every scalar exactly onc
 test('right child contains no scalar that was copied from left', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const result = splitBlock(family, 'block1', 'block2', 3);
+  const split = result.family;
   const leftBlock = split.blocks[0];
   const rightBlock = split.blocks[1];
   for (const key of leftBlock.elementKeys) {
@@ -69,7 +72,9 @@ test('right child contains no scalar that was copied from left', () => {
 test('split accepts Unicode scalar edge and rejects surrogate interior', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'a😀b']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 1);
+  const result = splitBlock(family, 'block1', 'block2', 1);
+  assert.equal(result.type, 'split');
+  const split = result.family;
   assert.equal(materializeBlock(split, 'block1'), 'a');
   assert.equal(materializeBlock(split, 'block2'), '😀b');
   assert.throws(() => splitBlock(family, 'block1', 'block2', 2), /splits/);
@@ -78,7 +83,9 @@ test('split accepts Unicode scalar edge and rejects surrogate interior', () => {
 test('split advances visibleCount by UTF-16 code units not scalar count', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'a😀b']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const result = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(result.type, 'split');
+  const split = result.family;
   assert.equal(materializeBlock(split, 'block1'), 'a😀');
   assert.equal(materializeBlock(split, 'block2'), 'b');
   assert.throws(() => splitBlock(family, 'block1', 'block2', 2), /splits/);
@@ -87,7 +94,8 @@ test('split advances visibleCount by UTF-16 code units not scalar count', () => 
 test('split and merge restores canonical family checkpoint byte-for-byte', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const result = splitBlock(family, 'block1', 'block2', 3);
+  const split = result.family;
   const merged = mergeBlocks(split, 'block1', 'block2');
   assert.equal(merged.blocks.length, 1);
   assert.equal(merged.blocks[0].id, 'block1');
@@ -104,8 +112,10 @@ test('split and merge restores canonical family checkpoint byte-for-byte', () =>
 test('recursive split produces multiple blocks preserving all scalars', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const s1 = splitBlock(family, 'block1', 'block2', 2);
-  const s2 = splitBlock(s1, 'block2', 'block3', 2);
+  const r1 = splitBlock(family, 'block1', 'block2', 2);
+  const s1 = r1.family;
+  const r2 = splitBlock(s1, 'block2', 'block3', 2);
+  const s2 = r2.family;
   assert.equal(s2.blocks.length, 3);
   assert.equal(materializeBlock(s2, 'block1'), 'ab');
   assert.equal(materializeBlock(s2, 'block2'), 'cd');
@@ -151,8 +161,10 @@ test('materialization preserves concurrent RGA descendant ordering', () => {
 test('non-adjacent merge is rejected', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const s1 = splitBlock(family, 'block1', 'block2', 2);
-  const s2 = splitBlock(s1, 'block2', 'block3', 2);
+  const r1 = splitBlock(family, 'block1', 'block2', 2);
+  const s1 = r1.family;
+  const r2 = splitBlock(s1, 'block2', 'block3', 2);
+  const s2 = r2.family;
   assert.throws(() => mergeBlocks(s2, 'block1', 'block3'), /adjacent/);
   assert.throws(() => mergeBlocks(s2, 'block3', 'block1'), /adjacent/);
 });
@@ -190,7 +202,9 @@ test('tombstoned elements are included in split traversal and ownership', () => 
   const del = ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['delete', [[[A, 1], 1, 1]]]];
   const cp = makeCheckpoint([first, del]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 1);
+  const result = splitBlock(family, 'block1', 'block2', 1);
+  assert.equal(result.type, 'split');
+  const split = result.family;
   assert.equal(materializeBlock(split, 'block1'), 'a');
   assert.equal(materializeBlock(split, 'block2'), 'c');
   const allKeys = split.blocks.flatMap((b) => b.elementKeys);
@@ -269,7 +283,9 @@ test('assertBlockOwnerships rejects non-contiguous blocks in rgaTraversal order'
 test('split operation produces deeply immutable result', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const result = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(result.type, 'split');
+  const split = result.family;
   assert.ok(Object.isFrozen(split));
   assert.ok(Object.isFrozen(split.blocks));
   assert.ok(Object.isFrozen(split.blocks[0]));
@@ -282,7 +298,8 @@ test('split operation produces deeply immutable result', () => {
 test('merge operation produces deeply immutable result', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const result = splitBlock(family, 'block1', 'block2', 3);
+  const split = result.family;
   const merged = mergeBlocks(split, 'block1', 'block2');
   assert.ok(Object.isFrozen(merged));
   assert.ok(Object.isFrozen(merged.blocks));
@@ -349,7 +366,8 @@ test('applyTextOperationToBlock rejects causally unready delete', () => {
 test('applyTextOperationToBlock rejects cross-block delete', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const r = splitBlock(family, 'block1', 'block2', 3);
+  const split = r.family;
   assert.throws(
     () => applyTextOperationToBlock(split, 'block1', ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['delete', [[[A, 1], 3, 1]]]]),
     /cannot delete elements not owned/,
@@ -411,7 +429,8 @@ test('applyTextOperationToBlock insert at element anchor within block', () => {
 test('applyTextOperationToBlock insert at root accepted when contiguity holds', () => {
   const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abc']]]);
   const family = createTextFamily('doc1', cp, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 2);
+  const r = splitBlock(family, 'block1', 'block2', 2);
+  const split = r.family;
   const result = applyTextOperationToBlock(split, 'block1', ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['insert', ROOT, 'x']]);
   assert.equal(materializeBlock(result, 'block1'), 'xab');
   assert.equal(materializeBlock(result, 'block2'), 'c');
@@ -420,7 +439,8 @@ test('applyTextOperationToBlock insert at root accepted when contiguity holds', 
 
 test('applyTextOperationToBlock insert breaking contiguity is rejected', () => {
   const family = makeFamily([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abc']]]);
-  const split = splitBlock(family, 'block1', 'block2', 2);
+  const r = splitBlock(family, 'block1', 'block2', 2);
+  const split = r.family;
   const anchor = ['element', [[A, 1], 0]];
   assert.throws(
     () => applyTextOperationToBlock(split, 'block2', ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['insert', anchor, 'x']]),
@@ -472,4 +492,100 @@ test('applyTextOperationToBlock reject unready op with no pending mutation', () 
     () => applyTextOperationToBlock(family, 'block1', ['workbench.text', 1, [B, 1], 2, [[A, 2]], ['insert', ROOT, 'x']]),
     /causally ready/,
   );
+});
+
+// =============================================
+// Sol final zero-ownership policy
+// =============================================
+
+test('empty checkpoint bootstrap block is accepted as single zero-owned block', () => {
+  const emptyState = createTextState();
+  const cp = textCheckpoint(emptyState);
+  assert.equal(Object.keys(cp.elements).length, 0);
+  const family = createTextFamily('bootstrap', cp, 'block1');
+  assert.equal(family.blocks.length, 1);
+  assert.equal(family.blocks[0].elementKeys.length, 0);
+  assert.equal(family.id, 'bootstrap');
+});
+
+test('restore empty checkpoint family with single zero-owned block round-trips', () => {
+  const emptyState = createTextState();
+  const cp = textCheckpoint(emptyState);
+  const family = createTextFamily('bootstrap', cp, 'block1');
+  const restored = restoreTextFamilyCheckpoint(textFamilyCheckpoint(family));
+  assert.deepEqual(restored, family);
+});
+
+test('restore nonempty checkpoint with zero-owned block rejected', () => {
+  const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'a']]]);
+  assert.throws(() => restoreTextFamilyCheckpoint({
+    id: 'doc1', checkpoint: cp, blocks: [{ id: 'b1', elementKeys: [] }],
+  }), /must own at least one structural element/);
+  assert.throws(() => restoreTextFamilyCheckpoint({
+    id: 'doc1', checkpoint: cp, blocks: [
+      { id: 'b1', elementKeys: Object.keys(cp.elements) },
+      { id: 'b2', elementKeys: [] },
+    ],
+  }), /must own at least one structural element/);
+});
+
+test('empty checkpoint with multiple blocks rejected', () => {
+  const emptyState = createTextState();
+  const cp = textCheckpoint(emptyState);
+  assert.throws(() => restoreTextFamilyCheckpoint({
+    id: 'doc1', checkpoint: cp, blocks: [{ id: 'b1', elementKeys: [] }, { id: 'b2', elementKeys: [] }],
+  }), /exactly one block/);
+});
+
+test('split at utf16 0 on nonempty block returns unchanged empty-child', () => {
+  const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
+  const family = createTextFamily('doc1', cp, 'block1');
+  const result = splitBlock(family, 'block1', 'block2', 0);
+  assert.equal(result.type, 'unchanged');
+  assert.equal(result.reason, 'empty-child');
+  assert.equal(result.retainedBlockId, 'block1');
+  assert.deepEqual(result.family, family);
+});
+
+test('split at visible offset 0 with leading tombstones returns unchanged', () => {
+  const family = makeFamily([
+    ['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abc']],
+    ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['delete', [[[A, 1], 0, 1]]]],
+  ]);
+  const result = splitBlock(family, 'block1', 'block2', 0);
+  assert.deepEqual(result, {
+    type: 'unchanged', reason: 'empty-child', family, retainedBlockId: 'block1',
+  });
+});
+
+test('split at utf16 end on nonempty block returns unchanged empty-child', () => {
+  const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
+  const family = createTextFamily('doc1', cp, 'block1');
+  const result = splitBlock(family, 'block1', 'block2', 6);
+  assert.equal(result.type, 'unchanged');
+  assert.equal(result.reason, 'empty-child');
+  assert.equal(result.retainedBlockId, 'block1');
+  assert.deepEqual(result.family, family);
+});
+
+test('split bootstrap empty block is rejected', () => {
+  const emptyState = createTextState();
+  const cp = textCheckpoint(emptyState);
+  const family = createTextFamily('bootstrap', cp, 'block1');
+  assert.throws(() => splitBlock(family, 'block1', 'block2', 0), /cannot split an empty block/);
+});
+
+test('tombstone-owned split remains real split when both partitions nonempty', () => {
+  const first = ['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcde']];
+  const del = ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['delete', [[[A, 1], 1, 3]]]];
+  const cp = makeCheckpoint([first, del]);
+  const family = createTextFamily('doc1', cp, 'block1');
+  const result = splitBlock(family, 'block1', 'block2', 1);
+  assert.equal(result.type, 'split');
+  const split = result.family;
+  assert.equal(split.blocks.length, 2);
+  assert.equal(materializeBlock(split, 'block1'), 'a');
+  assert.equal(materializeBlock(split, 'block2'), 'e');
+  assert.ok(split.blocks[0].elementKeys.length > 0);
+  assert.ok(split.blocks[1].elementKeys.length > 0);
 });

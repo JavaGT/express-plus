@@ -6,6 +6,16 @@ import { annotatedText, text, boolean, number, ref, date, json, annotation, prot
 import { entity, generateDDL } from '../src/internal.mjs';
 import { validateAnnotatedTextDeclaration, annotatedTextDDL, getAnnotatedTextCompiledMetadata, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, resolveDeclarationMeasurementExtension } from '../src/annotated-text-field.mjs';
 
+// Register test contracts and structural adapters for T8 measurement adapter validation
+registerAnnotatedTextContract('testFieldExt', Object.freeze({ kind: 'measurement' }));
+registerAnnotatedTextStructuralExtension('testFieldExt', Object.freeze({
+  version: 1,
+  validate: function validate() {},
+  edit: function edit() {},
+  partition: function partition() {},
+  combine: function combine() {},
+}));
+
 function makeFields() {
   return {
     title: text(),
@@ -26,8 +36,8 @@ function fd(blockAnnotations, annotations, measurements) {
   }
 
   const measList = [];
-  for (const [name, config] of Object.entries(measurements || { audio: { formatVersion: 1 } })) {
-    measList.push(measurement(name, { formatVersion: config.formatVersion }));
+  for (const [name, config] of Object.entries(measurements || { audio: { formatVersion: 1, extension: 'testFieldExt' } })) {
+    measList.push(measurement(name, { extension: config.extension || 'testFieldExt', formatVersion: config.formatVersion }));
   }
 
   return {
@@ -40,7 +50,7 @@ function fd(blockAnnotations, annotations, measurements) {
 }
 
 test('annotatedText() returns a frozen descriptor with kind annotatedText', () => {
-  const d = annotatedText({ project: 'p', owner: 'o', annotations: [annotation('note')], measurements: [measurement('m', { formatVersion: 1 })] });
+  const d = annotatedText({ project: 'p', owner: 'o', annotations: [annotation('note')], measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })] });
   assert.equal(d.kind, 'annotatedText');
   assert.equal(d.type, 'annotatedText');
   assert.ok(Object.isFrozen(d));
@@ -52,7 +62,7 @@ test('valid entity declaration with annotatedText, owner/project refs', () => {
     annotation('highlight', { fields: { col1: Object.freeze({ kind: 'value', type: 'text' }) } }),
     annotation('tag', { fields: { col2: Object.freeze({ kind: 'value', type: 'text' }) } }),
   ];
-  const measurements = [measurement('audio', { formatVersion: 1 }), measurement('sentiment', { formatVersion: 2 })];
+  const measurements = [measurement('audio', { extension: 'testFieldExt', formatVersion: 1 }), measurement('sentiment', { extension: 'testFieldExt', formatVersion: 2 })];
   const descriptor = fd(block, { highlight: { col1: Object.freeze({ kind: 'value', type: 'text' }) }, tag: { col2: Object.freeze({ kind: 'value', type: 'text' }) } }, { audio: { formatVersion: 1 }, sentiment: { formatVersion: 2 } });
   const fields = makeFields();
   const result = validateAnnotatedTextDeclaration('Doc', 'body', descriptor, fields);
@@ -248,7 +258,7 @@ test('forged annotation descriptors cannot bypass the closed empty policy', () =
     kind: 'annotation', annotationName: 'note', fields: Object.freeze({}), actions: Object.freeze([]), empty: 'retain',
   });
   assert.throws(() => validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-    project: 'project', owner: 'owner', annotations: [forged], measurements: [measurement('m')],
+    project: 'project', owner: 'owner', annotations: [forged], measurements: [measurement('m', { extension: 'testFieldExt' })],
   }), makeFields()), /must be 'delete' or 'orphan'/);
 });
 
@@ -265,7 +275,7 @@ test('reserved orphan state family cannot collide with the generic orphan table'
 test('structure_version cannot be declared as a block extension field', () => {
   assert.throws(() => annotatedTextDDL('Doc', 'body', annotatedText({
     project: 'project', owner: 'owner', block: { structure_version: text() },
-    annotations: [annotation('note')], measurements: [measurement('m')],
+    annotations: [annotation('note')], measurements: [measurement('m', { extension: 'testFieldExt' })],
   }), makeFields()), /reserved/);
 });
 
@@ -296,7 +306,7 @@ test('main entity table has no annotatedText column', () => {
       project: 'project', owner: 'owner',
       block: { source: text() },
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }),
   });
   const ddl = generateDDL(Doc);
@@ -429,7 +439,7 @@ test('rejects: project field does not name an existing ref field', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'nonexistent', owner: 'owner',
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /must name an enclosing ref field/);
 });
@@ -439,7 +449,7 @@ test('rejects: owner field does not name an existing ref field', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'nonexistent',
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /must name an enclosing ref field/);
 });
@@ -450,7 +460,7 @@ test('rejects: project field is a non-ref value field', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), fields);
   }, /must name an enclosing ref field with a target/);
 });
@@ -461,7 +471,7 @@ test('rejects: project field is a ref without a target', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), fields);
   }, /must name an enclosing ref field with a target/);
 });
@@ -472,7 +482,7 @@ test('rejects: block field with unsupported non-scalar kind', () => {
       project: 'project', owner: 'owner',
       block: { nested: Object.freeze({ kind: 'store', type: 'map' }) },
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /must be a frozen persisted scalar Workbench field descriptor/);
 });
@@ -483,7 +493,7 @@ test('rejects: block field with fts index', () => {
       project: 'project', owner: 'owner',
       block: { content: Object.freeze({ kind: 'value', type: 'text', indexed: 'fts' }) },
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /uses behavior unsupported/);
 });
@@ -494,7 +504,7 @@ test('rejects: block field with reserved column name id', () => {
       project: 'project', owner: 'owner',
       block: { id: text() },
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /invalid or reserved identifier/);
 });
@@ -505,7 +515,7 @@ test('rejects: block field with reserved column name document_id', () => {
       project: 'project', owner: 'owner',
       block: { document_id: text() },
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /invalid or reserved identifier/);
 });
@@ -516,7 +526,7 @@ test('rejects: block field with reserved column name position', () => {
       project: 'project', owner: 'owner',
       block: { position: text() },
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /invalid or reserved identifier/);
 });
@@ -526,7 +536,7 @@ test('rejects: annotation family with reserved column name annotation_id', () =>
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('hl', { fields: { annotation_id: Object.freeze({ kind: 'value', type: 'text' }) } })],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /invalid or reserved identifier/);
 });
@@ -536,7 +546,7 @@ test('rejects: annotation family with reserved column name family', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('hl', { fields: { family: Object.freeze({ kind: 'value', type: 'text' }) } })],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /invalid or reserved identifier/);
 });
@@ -546,7 +556,7 @@ test('rejects: annotations is empty array', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /must declare at least one annotation/);
 });
@@ -556,7 +566,7 @@ test('rejects: annotations is not an array', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: 'not-an-array',
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /must be a non-empty array/);
 });
@@ -586,7 +596,7 @@ test('rejects: measurement formatVersion is not a positive integer', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('hl')],
-      measurements: [measurement('audio', { formatVersion: 0 })],
+      measurements: [measurement('audio', { extension: 'testFieldExt', formatVersion: 0 })],
     }), makeFields());
   }, /must be a positive integer/);
 });
@@ -596,7 +606,7 @@ test('rejects: annotation family name with invalid identifier', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('123invalid')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /valid identifier/);
 });
@@ -607,7 +617,7 @@ test('rejects: block field name with invalid identifier', () => {
       project: 'project', owner: 'owner',
       block: { 'bad-name': text() },
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /invalid or reserved identifier/);
 });
@@ -618,7 +628,7 @@ test('rejects: block field with role access', () => {
       project: 'project', owner: 'owner',
       block: { secret: Object.freeze({ kind: 'value', type: 'text', role: 'owner' }) },
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /uses behavior unsupported/);
 });
@@ -629,7 +639,7 @@ test('rejects: block field with blob type', () => {
       project: 'project', owner: 'owner',
       block: { data: Object.freeze({ kind: 'value', type: 'text', blob: true }) },
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /uses behavior unsupported/);
 });
@@ -641,7 +651,7 @@ test('rejects: block field with access function', () => {
       project: 'project', owner: 'owner',
       block: { secret: withAccess },
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /uses behavior unsupported/);
 });
@@ -701,7 +711,7 @@ test('valid: entity() compiles with annotatedText field', () => {
       project: 'project', owner: 'owner',
       block: { source: text() },
       annotations: [annotation('hl', { fields: { severity: number() } })],
-      measurements: [measurement('audio', { formatVersion: 1 })],
+      measurements: [measurement('audio', { extension: 'testFieldExt', formatVersion: 1 })],
     }),
   });
   assert.ok(Doc.fields.body);
@@ -731,7 +741,7 @@ test('annotation empty policy is closed and compiled into its static handle', ()
   const descriptor = annotatedText({
     project: 'project', owner: 'owner',
     annotations: [annotation('comment', { empty: 'orphan' })],
-    measurements: [measurement('m')],
+    measurements: [measurement('m', { extension: 'testFieldExt' })],
   });
   validateAnnotatedTextDeclaration('Doc', 'body', descriptor, makeFields());
   assert.equal(getAnnotatedTextCompiledMetadata(descriptor).annotationHandles.comment.empty, 'orphan');
@@ -762,7 +772,7 @@ test('validation rejects protecting annotation that references undeclared family
         annotation('base'),
         protectingAnnotation('child', { protects: 'nonexistent' }),
       ],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /does not name a declared annotation family/);
 });
@@ -774,7 +784,7 @@ test('validation accepts protecting annotation that references a declared family
       annotation('base'),
       protectingAnnotation('child', { protects: 'base' }),
     ],
-    measurements: [measurement('m', { formatVersion: 1 })],
+    measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
   }), makeFields());
   assert.deepEqual(result.families, ['base', 'child']);
 });
@@ -825,7 +835,7 @@ test('validation rejects duplicate annotation names', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('dup'), annotation('dup')],
-      measurements: [measurement('m', { formatVersion: 1 })],
+      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
   }, /duplicate annotation name/);
 });
@@ -835,7 +845,7 @@ test('validation rejects duplicate measurement names', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('hl')],
-      measurements: [measurement('dup'), measurement('dup')],
+      measurements: [measurement('dup', { extension: 'testFieldExt' }), measurement('dup', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /duplicate measurement name/);
 });
@@ -846,7 +856,7 @@ test('validation rejects unknown keys on descriptor', () => {
       project: 'project', owner: 'owner',
       block: {},
       annotations: [annotation('hl')],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
       kind: 'annotatedText',
       type: 'annotatedText',
       unknownKey: true,
@@ -859,7 +869,7 @@ test('validation rejects unknown keys on annotation descriptors', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [Object.freeze({ ...annotation('hl'), unknownKey: true })],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /unknown key/);
 });
@@ -869,7 +879,7 @@ test('validation rejects unknown keys on measurement descriptors', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('hl')],
-      measurements: [Object.freeze({ ...measurement('m'), unknownKey: true })],
+      measurements: [Object.freeze({ ...measurement('m', { extension: 'testFieldExt' }), unknownKey: true })],
     }), makeFields());
   }, /unknown key/);
 });
@@ -881,7 +891,7 @@ test('validation rejects handlers/reducers on annotation actions at T3', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /T3 does not accept action handlers/);
 });
@@ -893,7 +903,7 @@ test('validation rejects actions referencing unregistered contracts', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /not a registered contract/);
 });
@@ -903,7 +913,7 @@ test('validation rejects queries referencing unregistered contracts', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('hl')],
-      measurements: [measurement('m', { queries: ['unregisteredQuery'] })],
+      measurements: [measurement('m', { extension: 'testFieldExt', queries: ['unregisteredQuery'] })],
     }), makeFields());
   }, /not a registered contract/);
 });
@@ -927,6 +937,13 @@ test('registerAnnotatedTextContract validates and stores contract', () => {
 
 test('registered contract allows validation to pass', () => {
   registerAnnotatedTextContract('myExt', Object.freeze({ kind: 'measurement', version: '1' }));
+  registerAnnotatedTextStructuralExtension('myExt', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  }));
   registerAnnotatedTextContract('myQuery', Object.freeze({ kind: 'measurement-query' }));
   registerAnnotatedTextContract('myAction', Object.freeze({ kind: 'annotation-action' }));
   const result = validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
@@ -942,6 +959,7 @@ test('registerAnnotatedTextStructuralExtension stores and resolves', () => {
   registerAnnotatedTextStructuralExtension('speech', Object.freeze({
     version: 1,
     validate: function validate() {},
+    edit: function edit() {},
     partition: function partition() {},
     combine: function combine() {},
   }));
@@ -955,15 +973,17 @@ test('registerAnnotatedTextStructuralExtension rejects invalid name', () => {
 });
 
 test('registerAnnotatedTextStructuralExtension rejects duplicate', () => {
-  registerAnnotatedTextStructuralExtension('uniqueExt', Object.freeze({
+  registerAnnotatedTextStructuralExtension('uniqueExt101', Object.freeze({
     version: 1,
     validate: function validate() {},
+    edit: function edit() {},
     partition: function partition() {},
     combine: function combine() {},
   }));
-  assert.throws(() => registerAnnotatedTextStructuralExtension('uniqueExt', Object.freeze({
+  assert.throws(() => registerAnnotatedTextStructuralExtension('uniqueExt101', Object.freeze({
     version: 1,
     validate: function validate() {},
+    edit: function edit() {},
     partition: function partition() {},
     combine: function combine() {},
   })), /already registered/);
@@ -986,7 +1006,7 @@ test('getAnnotatedTextCompiledMetadata returns compiled metadata', () => {
   const d = annotatedText({
     project: 'project', owner: 'owner',
     annotations: [annotation('hl')],
-    measurements: [measurement('m')],
+    measurements: [measurement('m', { extension: 'testFieldExt' })],
   });
   validateAnnotatedTextDeclaration('Doc', 'body', d, makeFields());
   const meta = getAnnotatedTextCompiledMetadata(d);
@@ -1007,7 +1027,7 @@ test('capabilities are validated and stored in compiled metadata', () => {
   const d = annotatedText({
     project: 'project', owner: 'owner',
     annotations: [annotation('hl')],
-    measurements: [measurement('m')],
+    measurements: [measurement('m', { extension: 'testFieldExt' })],
     capabilities: { readTranscript: cap },
   });
   validateAnnotatedTextDeclaration('Doc', 'body', d, makeFields());
@@ -1022,7 +1042,7 @@ test('rejects: capabilities must be an object', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('hl')],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
       capabilities: 'not-an-object',
     }), makeFields());
   }, /must be a non-empty object/);
@@ -1033,7 +1053,7 @@ test('rejects: capabilities must be frozen', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [annotation('hl')],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
       capabilities: { x: 'not-frozen' },
     }), makeFields());
   }, /must be a frozen descriptor/);
@@ -1048,7 +1068,7 @@ test('T3 rejects action with wrong kind (not annotationAction)', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /expected annotationAction descriptor/);
 });
@@ -1060,7 +1080,7 @@ test('T3 rejects action with no kind field', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /expected annotationAction descriptor/);
 });
@@ -1072,7 +1092,7 @@ test('T3 rejects action with extra unknown key', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /unknown key/);
 });
@@ -1084,7 +1104,7 @@ test('T3 rejects action with SQL callback', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /T3 does not accept action handlers, reducers, or SQL callbacks/);
 });
@@ -1096,7 +1116,7 @@ test('T3 rejects action with SQL uppercase callback', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /T3 does not accept action handlers, reducers, or SQL callbacks/);
 });
@@ -1108,7 +1128,7 @@ test('T3 rejects action with reducer callback', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /T3 does not accept action handlers, reducers, or SQL callbacks/);
 });
@@ -1120,7 +1140,7 @@ test('T3 rejects unfrozen action descriptor', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /each action must be a frozen object/);
 });
@@ -1132,7 +1152,7 @@ test('T3 rejects action with invalid actionName identifier', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /not a valid identifier/);
 });
@@ -1145,9 +1165,288 @@ test('T3 rejects action with wrong contract kind', () => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
       project: 'project', owner: 'owner',
       annotations: [badAnn],
-      measurements: [measurement('m')],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
     }), makeFields());
   }, /not an 'annotation-action' contract/);
+});
+
+// ---- T8 measurement structural adapter registration tests ----
+
+test('T8 rejects structural extension with unknown key', () => {
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8unknown', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+    unknownKey: 42,
+  })), /must have exactly/);
+});
+
+test('T8 rejects structural extension with wrong version', () => {
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8wrongVer', Object.freeze({
+    version: 2,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  })), /version exactly 1/);
+});
+
+test('T8 rejects structural extension with missing required function', () => {
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8missingFn', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+  })), /must have exactly/);
+});
+
+test('T8 rejects structural extension with unnamed function', () => {
+  const unnamed = function() {};
+  Object.defineProperty(unnamed, 'name', { value: '' });
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8unnamed', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: unnamed,
+  })), /must be a named function/);
+});
+
+test('T8 rejects structural extension with async function', () => {
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8async', Object.freeze({
+    version: 1,
+    validate: async function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  })), /direct synchronous function/);
+});
+
+test('T8 rejects an async function with a shadowed constructor', () => {
+  const validate = async function validate() {};
+  Object.defineProperty(validate, 'constructor', { value: { name: 'Function' } });
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8asyncShadowed', Object.freeze({
+    version: 1,
+    validate,
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  })), /direct synchronous function/);
+});
+
+test('T8 rejects bound and proxied async callbacks', () => {
+  const asyncValidate = async function validate() {};
+  for (const [name, validate] of [
+    ['t8asyncBound', asyncValidate.bind(null)],
+    ['t8asyncProxy', new Proxy(asyncValidate, {})],
+  ]) {
+    assert.throws(() => registerAnnotatedTextStructuralExtension(name, Object.freeze({
+      version: 1,
+      validate,
+      edit: function edit() {},
+      partition: function partition() {},
+      combine: function combine() {},
+    })), /direct synchronous function/);
+  }
+});
+
+test('T8 rejects structural extension with non-function value', () => {
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8nonfn', Object.freeze({
+    version: 1,
+    validate: 'not-a-fn',
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  })), /requires a named 'validate' function/);
+});
+
+test('T8 rejects structural extension with unfrozen spec', () => {
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8unfrozen', {
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  }), /requires a frozen spec object/);
+});
+
+test('T8 rejects hidden, symbolic, and accessor structural spec properties', () => {
+  const hidden = {
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  };
+  Object.defineProperty(hidden, 'hidden', { value: true });
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8hidden', Object.freeze(hidden)), /must have exactly/);
+
+  const symbolic = {
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  };
+  Object.defineProperty(symbolic, Symbol('hidden'), { value: true });
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8symbolic', Object.freeze(symbolic)), /must have exactly/);
+
+  const accessor = {
+    version: 1,
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  };
+  Object.defineProperty(accessor, 'validate', { enumerable: true, get() { return function validate() {}; } });
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8accessor', Object.freeze(accessor)), /own data property/);
+});
+
+test('T8 freezes registered callbacks before exposing the adapter', () => {
+  const validate = function validate() {};
+  const spec = Object.freeze({
+    version: 1,
+    validate,
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  });
+  registerAnnotatedTextStructuralExtension('t8frozenCallbacks', spec);
+  assert.ok(Object.isFrozen(validate));
+  assert.throws(() => { validate.changed = true; }, /Cannot add property/);
+  assert.equal(resolveDeclarationMeasurementExtension(measurement('m', { extension: 't8frozenCallbacks' })).validate, validate);
+});
+
+test('T8 rejects structural extension with duplicate name', () => {
+  registerAnnotatedTextStructuralExtension('t8dupe', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  }));
+  assert.throws(() => registerAnnotatedTextStructuralExtension('t8dupe', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  })), /already registered/);
+});
+
+test('T8 rejects structural extension with invalid identifier name', () => {
+  assert.throws(() => registerAnnotatedTextStructuralExtension('bad name!', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  })), /valid identifier/);
+});
+
+// ---- T8 measurement declaration validation tests ----
+
+test('T8 rejects measurement with null extension', () => {
+  assert.throws(() => {
+    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
+      project: 'project', owner: 'owner',
+      annotations: [annotation('hl')],
+      measurements: [measurement('m', { extension: null })],
+    }), makeFields());
+  }, /must declare an extension/);
+});
+
+test('T8 rejects measurement with unregistered extension (no semantic contract)', () => {
+  assert.throws(() => {
+    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
+      project: 'project', owner: 'owner',
+      annotations: [annotation('hl')],
+      measurements: [measurement('m', { extension: 'notRegistered' })],
+    }), makeFields());
+  }, /not a registered contract/);
+});
+
+test('T8 rejects measurement with registered semantic contract but no structural adapter', () => {
+  registerAnnotatedTextContract('t8semOnly', Object.freeze({ kind: 'measurement' }));
+  assert.throws(() => {
+    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
+      project: 'project', owner: 'owner',
+      annotations: [annotation('hl')],
+      measurements: [measurement('m', { extension: 't8semOnly' })],
+    }), makeFields());
+  }, /has no registered structural adapter/);
+});
+
+test('T8 rejects measurement with wrong contract kind (not measurement)', () => {
+  registerAnnotatedTextContract('t8wrongKind', Object.freeze({ kind: 'annotation-action' }));
+  registerAnnotatedTextStructuralExtension('t8wrongKind', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  }));
+  assert.throws(() => {
+    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
+      project: 'project', owner: 'owner',
+      annotations: [annotation('hl')],
+      measurements: [measurement('m', { extension: 't8wrongKind' })],
+    }), makeFields());
+  }, /is a 'annotation-action' contract, not a 'measurement' contract/);
+});
+
+test('T8 accepts measurement with both semantic contract and structural adapter', () => {
+  registerAnnotatedTextContract('t8dualValid', Object.freeze({ kind: 'measurement' }));
+  registerAnnotatedTextStructuralExtension('t8dualValid', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  }));
+  const result = validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
+    project: 'project', owner: 'owner',
+    annotations: [annotation('hl')],
+    measurements: [measurement('m', { extension: 't8dualValid' })],
+  }), makeFields());
+  assert.deepEqual(result.measurements, ['m']);
+});
+
+test('T8 rejects measurement extension with wrong contract kind (event)', () => {
+  registerAnnotatedTextContract('t8eventKind', Object.freeze({ kind: 'event' }));
+  registerAnnotatedTextStructuralExtension('t8eventKind', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  }));
+  assert.throws(() => {
+    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
+      project: 'project', owner: 'owner',
+      annotations: [annotation('hl')],
+      measurements: [measurement('m', { extension: 't8eventKind' })],
+    }), makeFields());
+  }, /not a 'measurement' contract/);
+});
+
+test('T8 rejects measurement extension with measurement-query kind contract', () => {
+  registerAnnotatedTextContract('t8queryKind', Object.freeze({ kind: 'measurement-query' }));
+  registerAnnotatedTextStructuralExtension('t8queryKind', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition() {},
+    combine: function combine() {},
+  }));
+  assert.throws(() => {
+    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
+      project: 'project', owner: 'owner',
+      annotations: [annotation('hl')],
+      measurements: [measurement('m', { extension: 't8queryKind' })],
+    }), makeFields());
+  }, /not a 'measurement' contract/);
 });
 
 // ---- ON DELETE CASCADE tests for project/owner deletion ----

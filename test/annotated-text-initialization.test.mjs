@@ -5,8 +5,19 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotation, boolean, entity, everyone, executeDDL, executeFrameworkDDL, measurement,
   grant, read, ref, scope, text, write,
+  registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension,
 } from '../src/internal.mjs';
 import { restoreTextFamilyCheckpoint } from '../src/annotated-text-family.mjs';
+
+// Register semantic contract and structural adapter for the init measurement
+registerAnnotatedTextContract('sourceInit', Object.freeze({ kind: 'measurement' }));
+registerAnnotatedTextStructuralExtension('sourceInit', Object.freeze({
+  version: 1,
+  validate: function validate() {},
+  edit: function edit() {},
+  partition: function partition() {},
+  combine: function combine() {},
+}));
 
 function doc() {
   return entity('InitDoc', {
@@ -17,7 +28,7 @@ function doc() {
       owner: 'owner',
       block: { reviewed: boolean({ default: true }) },
       annotations: [annotation('note', { fields: {} })],
-      measurements: [measurement('source')],
+      measurements: [measurement('source', { extension: 'sourceInit' })],
     }),
     grant: [scope(() => everyone()).can(() => grant(read, write))],
   });

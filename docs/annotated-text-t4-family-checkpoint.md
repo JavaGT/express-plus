@@ -103,3 +103,22 @@ target block while preserving all ownership invariants.
 - Exact action-level structure-version belongs later in action admission.
 
 [IMPLEMENTED — TERRA APPROVED 2026-07-25]
+
+## Split-block result shape and edge cases
+
+[IMPLEMENTED — TERRA APPROVED 2026-07-25]
+
+`splitBlock` returns a tagged result object rather than returning a family directly:
+
+- **`{ type: 'split', family, leftBlockId, rightBlockId }`** — both partitions are non-empty. The returned family has two adjacent blocks at the split point, each owning at least one structural element key.
+- **`{ type: 'unchanged', reason: 'empty-child', family, retainedBlockId }`** — the split offset would produce an empty child block (either offset 0 or offset equal to block text length). No block identity is consumed. The returned family is the original family (referentially identical). The `retainedBlockId` is the original block ID.
+
+### Invariants
+
+- **Nonempty checkpoint**: every non-empty checkpoint block owns at least one structural element key in `elementKeys`. A checkpoint with any elements must not have a zero-owned block.
+- **Empty checkpoint bootstrap**: exactly one zero-owned bootstrap block is allowed, and only when the checkpoint has zero elements. This is the only case where a block can have an empty `elementKeys` array.
+- **All-tombstoned owned block**: a block whose entire owned element set is tombstoned is valid. It materializes to the empty string but still owns structural element keys. This is distinct from the zero-owned bootstrap block.
+- **Edge offset returns `unchanged`**: `splitBlock` at offset 0 or at the UTF-16 text length of a nonempty block returns `{ type: 'unchanged', reason: 'empty-child', family, retainedBlockId }`. No new block identity is consumed; the original family is returned unchanged.
+- **Empty bootstrap cannot split**: `splitBlock` on a zero-owned bootstrap block (empty checkpoint) is rejected with `"cannot split an empty block"`, since there are no element keys to partition.
+
+[IMPLEMENTED — TERRA APPROVED 2026-07-25]

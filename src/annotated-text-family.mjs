@@ -53,7 +53,7 @@ function buildChildren(checkpoint) {
   return children;
 }
 
-function rgaTraversal(checkpoint) {
+export function rgaTraversal(checkpoint) {
   const children = buildChildren(checkpoint);
   const order = [];
   const visit = (parent) => {
@@ -84,6 +84,15 @@ function assertBlockOwnerships(checkpoint, blocks) {
       if (!Object.hasOwn(checkpoint.elements, key)) fail(`unknown element key in block: ${key}`);
       allOwnedKeys.push(key);
     }
+  }
+
+  const elementCount = Object.keys(checkpoint.elements).length;
+  if (elementCount > 0) {
+    for (const block of blocks) {
+      if (block.elementKeys.length === 0) fail('block must own at least one structural element on nonempty checkpoint');
+    }
+  } else {
+    if (blocks.length !== 1) fail('empty checkpoint must have exactly one block');
   }
 
   const seen = new Set();
@@ -161,9 +170,13 @@ export function splitBlock(family, blockId, newBlockId, utf16Offset) {
   if (family.blocks.some((b) => b.id === newBlockId)) fail(`duplicate block id: ${newBlockId}`);
   assertBlockId(newBlockId);
   const block = family.blocks[blockIndex];
+  if (block.elementKeys.length === 0) fail('cannot split an empty block');
   const ownedSet = new Set(block.elementKeys);
   const blockText = materializeBlock(family, blockId);
   assertUtf16Offset(blockText, utf16Offset);
+  if (utf16Offset === 0 || utf16Offset === blockText.length) {
+    return { type: 'unchanged', reason: 'empty-child', family, retainedBlockId: blockId };
+  }
   const order = rgaTraversal(family.checkpoint);
   let visibleCount = 0;
   let splitIndex = -1;
@@ -182,10 +195,18 @@ export function splitBlock(family, blockId, newBlockId, utf16Offset) {
   if (JSON.stringify(combined) !== JSON.stringify(original)) {
     fail('split lost or duplicated an element key');
   }
+  if (leftKeys.length === 0 || rightKeys.length === 0) {
+    return { type: 'unchanged', reason: 'empty-child', family, retainedBlockId: blockId };
+  }
   const newBlocks = [...family.blocks];
   newBlocks[blockIndex] = Object.freeze({ id: blockId, elementKeys: Object.freeze(leftKeys) });
   newBlocks.splice(blockIndex + 1, 0, Object.freeze({ id: newBlockId, elementKeys: Object.freeze(rightKeys) }));
-  return deepFreeze({ id: family.id, checkpoint: family.checkpoint, blocks: newBlocks });
+  return {
+    type: 'split',
+    family: deepFreeze({ id: family.id, checkpoint: family.checkpoint, blocks: newBlocks }),
+    leftBlockId: blockId,
+    rightBlockId: newBlockId,
+  };
 }
 
 export function mergeBlocks(family, leftBlockId, rightBlockId) {
@@ -462,9 +483,20 @@ export function assertMembershipRange(family, blockId, startEndpoint, endEndpoin
     fail('start anchor owned by named block is not the canonical lower boundary');
   } else {
     if (blockIndex === 0) fail('non-root start anchor must be in named block for first block');
-    const priorBlock = family.blocks[blockIndex - 1];
-    const priorOwned = new Set(priorBlock.elementKeys);
-    if (!priorOwned.has(startKey)) fail('start anchor must be in adjacent prior block');
+
+    let priorBlock = null;
+    let priorOwned = null;
+    for (let i = blockIndex - 1; i >= 0; i--) {
+      const candidate = family.blocks[i];
+      const candidateOwned = new Set(candidate.elementKeys);
+      if (candidateOwned.size > 0) {
+        priorBlock = candidate;
+        priorOwned = candidateOwned;
+        break;
+      }
+    }
+    if (!priorBlock) fail('no non-empty predecessor block found for start anchor');
+    if (!priorOwned.has(startKey)) fail('start anchor must be in a prior non-empty block');
     if (startEndpoint.point[2] !== 'right') fail('start from prior block must have right affinity');
     const lastPriorKey = findLastOwnedKey(family, priorOwned);
     if (startKey !== lastPriorKey) fail('start from prior block must be its final owned element');

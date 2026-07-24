@@ -40,8 +40,12 @@ export function registerAnnotatedTextContract(contractName, contract) {
 }
 
 // -- Structural extension registry --
-// Each registered extension must provide frozen, named, deterministic
-// validate, partition, combine functions and a version number.
+// Each registered extension must provide a frozen, closed spec with exactly
+// {version: 1, validate, edit, partition, combine}. Every callback is a
+// named, synchronous function. T4 atomic split/merge orchestration will
+// call these with frozen inputs and expect closed results.
+const STRUCTURAL_SPEC_KEYS = ['version', 'validate', 'edit', 'partition', 'combine'];
+const STRUCTURAL_REQUIRED_FNS = ['validate', 'edit', 'partition', 'combine'];
 const structuralExtensions = new Map();
 
 export function registerAnnotatedTextStructuralExtension(extensionName, spec) {
@@ -54,14 +58,38 @@ export function registerAnnotatedTextStructuralExtension(extensionName, spec) {
   if (!spec || typeof spec !== 'object' || !Object.isFrozen(spec)) {
     throw new Error(`annotatedText structural extension '${extensionName}' requires a frozen spec object`);
   }
-  if (typeof spec.version !== 'number' || !Number.isSafeInteger(spec.version) || spec.version < 1) {
-    throw new Error(`annotatedText structural extension '${extensionName}' requires a positive integer version`);
+  const prototype = Object.getPrototypeOf(spec);
+  if (prototype !== null && prototype !== Object.prototype) {
+    throw new Error(`annotatedText structural extension '${extensionName}' requires a plain spec object`);
   }
-  if (typeof spec.validate !== 'function' || typeof spec.partition !== 'function' || typeof spec.combine !== 'function') {
-    throw new Error(`annotatedText structural extension '${extensionName}' requires frozen validate, partition, and combine functions`);
+  const keys = Reflect.ownKeys(spec);
+  if (keys.length !== STRUCTURAL_SPEC_KEYS.length ||
+      keys.some((key) => typeof key !== 'string' || !STRUCTURAL_SPEC_KEYS.includes(key))) {
+    throw new Error(`annotatedText structural extension '${extensionName}' must have exactly version, validate, edit, partition, and combine own properties`);
   }
-  if (spec.validate.name === '' || spec.partition.name === '' || spec.combine.name === '') {
-    throw new Error(`annotatedText structural extension '${extensionName}' functions must be named`);
+  const descriptors = Object.fromEntries(STRUCTURAL_SPEC_KEYS.map((key) => [key, Object.getOwnPropertyDescriptor(spec, key)]));
+  for (const key of STRUCTURAL_SPEC_KEYS) {
+    const descriptor = descriptors[key];
+    if (!descriptor || !Object.hasOwn(descriptor, 'value') || descriptor.enumerable !== true) {
+      throw new Error(`annotatedText structural extension '${extensionName}' '${key}' must be an enumerable own data property`);
+    }
+  }
+  if (descriptors.version.value !== 1) {
+    throw new Error(`annotatedText structural extension '${extensionName}' requires version exactly 1`);
+  }
+  for (const fnName of STRUCTURAL_REQUIRED_FNS) {
+    const fn = descriptors[fnName].value;
+    if (typeof fn !== 'function') {
+      throw new Error(`annotatedText structural extension '${extensionName}' requires a named '${fnName}' function`);
+    }
+    if (typeof fn.name !== 'string' || fn.name === '') {
+      throw new Error(`annotatedText structural extension '${extensionName}' '${fnName}' must be a named function`);
+    }
+    const source = Function.prototype.toString.call(fn);
+    if (source.startsWith('async ') || source.includes('[native code]')) {
+      throw new Error(`annotatedText structural extension '${extensionName}' '${fnName}' must be a direct synchronous function`);
+    }
+    Object.freeze(fn);
   }
   structuralExtensions.set(extensionName, spec);
 }
@@ -274,17 +302,26 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     measurementNames.add(name);
     measurementConfigs[name] = meas;
 
-    // Validate extension contracts
-    if (meas.extension !== null) {
-      const extContract = contractRegistry.get(meas.extension);
-      if (!extContract) {
-        fail(entity, field, `measurements.${name}.extension`,
-          `'${meas.extension}' is not a registered contract`);
-      }
-      if (extContract.kind !== 'measurement') {
-        fail(entity, field, `measurements.${name}.extension`,
-          `'${meas.extension}' is a '${extContract.kind}' contract, not a 'measurement' contract`);
-      }
+    // Validate extension: every measurement must declare an extension that
+    // resolves BOTH a registered semantic contract of kind 'measurement' AND
+    // a matching registered structural adapter.
+    if (meas.extension === null) {
+      fail(entity, field, `measurements.${name}.extension`,
+        'measurement must declare an extension');
+    }
+    const extContract = contractRegistry.get(meas.extension);
+    if (!extContract) {
+      fail(entity, field, `measurements.${name}.extension`,
+        `'${meas.extension}' is not a registered contract`);
+    }
+    if (extContract.kind !== 'measurement') {
+      fail(entity, field, `measurements.${name}.extension`,
+        `'${meas.extension}' is a '${extContract.kind}' contract, not a 'measurement' contract`);
+    }
+    const structuralSpec = structuralExtensions.get(meas.extension);
+    if (!structuralSpec) {
+      fail(entity, field, `measurements.${name}.extension`,
+        `'${meas.extension}' has no registered structural adapter`);
     }
   }
 

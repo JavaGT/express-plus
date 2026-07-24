@@ -246,7 +246,9 @@ test('second block start uses predecessor right-point, not root-left', () => {
   const state = applyAll(createTextState(), cp);
   const checkpoint = textCheckpoint(state);
   const family = createTextFamily('doc1', checkpoint, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const splitResult = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(splitResult.type, 'split');
+  const split = splitResult.family;
   const ep0 = resolvePositionToEndpoint(split, 'block2', 0, split.checkpoint.frontier);
   const anchor = ep0.point[1];
   assert.equal(anchor[0], 'element');
@@ -260,7 +262,9 @@ test('start from prior adjacent block element is valid for membership', () => {
   const state = applyAll(createTextState(), cp);
   const checkpoint = textCheckpoint(state);
   const family = createTextFamily('doc1', checkpoint, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const splitResult = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(splitResult.type, 'split');
+  const split = splitResult.family;
   const start = assertStructuralEndpoint({
     point: ['point', ['element', [[A, 1], 2]], 'right'],
     basisFrontier: split.checkpoint.frontier,
@@ -283,7 +287,9 @@ test('cross-block range is rejected', () => {
   const state = applyAll(createTextState(), cp);
   const checkpoint = textCheckpoint(state);
   const family = createTextFamily('doc1', checkpoint, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const splitResult = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(splitResult.type, 'split');
+  const split = splitResult.family;
   const start = assertStructuralEndpoint({
     point: ['point', ['element', [[A, 1], 0]], 'left'],
     basisFrontier: split.checkpoint.frontier,
@@ -318,7 +324,9 @@ test('end anchor must be owned by named block', () => {
   const state = applyAll(createTextState(), cp);
   const checkpoint = textCheckpoint(state);
   const family = createTextFamily('doc1', checkpoint, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const splitResult = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(splitResult.type, 'split');
+  const split = splitResult.family;
   const start = assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier: split.checkpoint.frontier });
   const end = assertStructuralEndpoint({
     point: ['point', ['element', [[A, 1], 0]], 'left'],
@@ -416,7 +424,9 @@ test('resolvePositionToEndpoint on multi-block family', () => {
   const state = applyAll(createTextState(), cp);
   const checkpoint = textCheckpoint(state);
   const family = createTextFamily('doc1', checkpoint, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const splitResult = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(splitResult.type, 'split');
+  const split = splitResult.family;
   const ep0 = resolvePositionToEndpoint(split, 'block2', 0, split.checkpoint.frontier);
   assert.equal(projectEndpointToBlockOffset(split, 'block2', ep0), 0);
   const epRight = resolvePositionToEndpoint(split, 'block2', 3, split.checkpoint.frontier);
@@ -467,7 +477,9 @@ test('earlier prior anchor (non-final) rejected in projectEndpointToBlockOffset'
   const state = applyAll(createTextState(), cp);
   const checkpoint = textCheckpoint(state);
   const family = createTextFamily('doc1', checkpoint, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const splitResult = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(splitResult.type, 'split');
+  const split = splitResult.family;
   const ep = assertStructuralEndpoint({
     point: ['point', ['element', [[A, 1], 0]], 'right'],
     basisFrontier: split.checkpoint.frontier,
@@ -480,7 +492,9 @@ test('prior-left rejected in projectEndpointToBlockOffset', () => {
   const state = applyAll(createTextState(), cp);
   const checkpoint = textCheckpoint(state);
   const family = createTextFamily('doc1', checkpoint, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const splitResult = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(splitResult.type, 'split');
+  const split = splitResult.family;
   const ep = assertStructuralEndpoint({
     point: ['point', ['element', [[A, 1], 2]], 'left'],
     basisFrontier: split.checkpoint.frontier,
@@ -493,7 +507,9 @@ test('exact predecessor-right start accepted for second block membership', () =>
   const state = applyAll(createTextState(), cp);
   const checkpoint = textCheckpoint(state);
   const family = createTextFamily('doc1', checkpoint, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 3);
+  const splitResult = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(splitResult.type, 'split');
+  const split = splitResult.family;
   const start = assertStructuralEndpoint({
     point: ['point', ['element', [[A, 1], 2]], 'right'],
     basisFrontier: split.checkpoint.frontier,
@@ -513,7 +529,9 @@ test('exact predecessor-right with trailing tombstone accepted', () => {
   const state = applyAll(createTextState(), [first, del]);
   const checkpoint = textCheckpoint(state);
   const family = createTextFamily('doc1', checkpoint, 'block1');
-  const split = splitBlock(family, 'block1', 'block2', 1);
+  const splitResult = splitBlock(family, 'block1', 'block2', 1);
+  assert.equal(splitResult.type, 'split');
+  const split = splitResult.family;
   const start = assertStructuralEndpoint({
     point: ['point', ['element', [[A, 1], 1]], 'right'],
     basisFrontier: split.checkpoint.frontier,
@@ -525,6 +543,29 @@ test('exact predecessor-right with trailing tombstone accepted', () => {
   const range = assertMembershipRange(split, 'block2', start, end);
   assert.equal(range.blockId, 'block2');
   assert.equal(materializeBlock(split, 'block2'), 'c');
+});
+
+test('tombstone-only immediate predecessor remains the next block lower boundary', () => {
+  const first = ['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abc']];
+  const state = applyAll(createTextState(), [first]);
+  const family = createTextFamily('doc1', textCheckpoint(state), 'block1');
+  const splitOne = splitBlock(family, 'block1', 'block2', 1);
+  assert.equal(splitOne.type, 'split');
+  const splitTwo = splitBlock(splitOne.family, 'block2', 'block3', 1);
+  assert.equal(splitTwo.type, 'split');
+  const tombstoneMiddle = applyAll(createTextState(), [
+    first,
+    ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['delete', [[[A, 1], 1, 1]]]],
+  ]);
+  const checkpoint = textCheckpoint(tombstoneMiddle);
+  const restored = Object.freeze({ ...splitTwo.family, checkpoint });
+  const start = assertStructuralEndpoint({
+    point: ['point', ['element', [[A, 1], 1]], 'right'], basisFrontier: checkpoint.frontier,
+  });
+  const end = assertStructuralEndpoint({
+    point: ['point', ['element', [[A, 1], 2]], 'right'], basisFrontier: checkpoint.frontier,
+  });
+  assert.doesNotThrow(() => assertMembershipRange(restored, 'block3', start, end));
 });
 
 test('root-right start rejected for membership', () => {
