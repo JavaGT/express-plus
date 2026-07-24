@@ -166,3 +166,20 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
 
   return Object.freeze({ ...handlers, ...sideTableHandlers });
 }
+      if (Object.hasOwn(payload, '__workbench')) {
+        throw new ValidationError(`${name}.__workbench is reserved for framework event metadata`);
+      }
+        if (descriptor.kind === 'annotatedText' && Object.hasOwn(fieldsPayload, fieldName)) {
+          throw new ValidationError(`${name}.${fieldName} is an annotated-text field and cannot be set through create payloads`);
+        }
+      const annotatedText = Object.fromEntries(
+        Object.entries(fields)
+          .filter(([, descriptor]) => descriptor.kind === 'annotatedText')
+          .map(([fieldName]) => [fieldName, Object.freeze({ initialBlockId: randomUUID() })]),
+      );
+      if (Object.keys(annotatedText).length > 0) {
+        data.__workbench = Object.freeze({ annotatedText: Object.freeze(annotatedText) });
+      }
+        if (fields[fieldName]?.kind === 'annotatedText') {
+          throw new ValidationError(`${name}.${fieldName} is an annotated-text field and cannot be set through update payloads`);
+        }
