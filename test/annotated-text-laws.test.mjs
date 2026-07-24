@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import {
   applyTextOp, assertAnchor, assertFrontier, assertOpId, assertStructuralPoint,
   assertTextOp, assertUtf16Offset, assertUtf16Range, assertWellFormedText,
-  canonicalTextOp, compareInsertOrder, compareOpId, frontierDominates,
+  canonicalTextOp, compareInsertOrder, compareOpId, frontierDominates, scalarCount,
 } from '../src/annotated-text.mjs';
 
 const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -34,21 +34,54 @@ test('UTF-16 accepts scalar edges and rejects only a surrogate-pair interior', (
   assert.throws(() => assertUtf16Offset(text, 2), /splits/);
   assert.equal(assertUtf16Offset(text, 3), 3);
   assert.deepEqual(assertUtf16Range(text, 1, 3), [1, 3]);
-  assert.throws(() => assertWellFormedText('a\uD800'), /unpaired/);
+  assert.throws(() => assertWellFormedText(`a${String.fromCharCode(0xD800)}`), /unpaired/);
   assert.throws(() => assertUtf16Range('abc', 2, 1), /reversed/);
 });
 
-test('anchors name immutable scalar identities, not numeric positions', () => {
+test('RGA element ordinals count Unicode scalars, never UTF-16 units or gaps', () => {
+  assert.equal(scalarCount('A😀'), 2);
+  assert.equal(scalarCount('e\u0301'), 2);
+  // An anchor's referenced run length is state-aware validation in T2. The
+  // scalar count itself establishes that ordinal 2 is not an identity in A😀.
+  assert.equal(scalarCount('A😀'), 2);
+});
+
+test('anchor ["root"] is the virtual HEAD anchor for visible start', () => {
   assert.deepEqual(assertAnchor(ROOT), ROOT);
+});
+
+test('anchor scalarOrdinal must be a non-negative integer; zero is valid', () => {
   assert.deepEqual(assertAnchor(['element', [[A, 1], 0]]), ['element', [[A, 1], 0]]);
+  assert.deepEqual(assertAnchor(['element', [[A, 1], 5]]), ['element', [[A, 1], 5]]);
+  assert.throws(() => assertAnchor(['element', [[A, 1], -1]]), /non-negative/);
+  assert.throws(() => assertAnchor(['element', [[A, 1], 1.5]]), /safe integer/);
   assert.throws(() => assertAnchor(['element', [[A, 0], 0]]), /positive/);
+});
+
+test('deleted scalar remains anchorable in the grammar', () => {
+  // The anchor validator does not check deletion status; a deleted element ID
+  // is structurally valid as an anchor target. Both ordinals 0 and >0 are valid.
+  assert.deepEqual(assertAnchor(['element', [[A, 1], 0]]), ['element', [[A, 1], 0]]);
+  assert.deepEqual(assertAnchor(['element', [[A, 2], 3]]), ['element', [[A, 2], 3]]);
+});
+
+test('end anchor adopts root for empty or fully-deleted documents', () => {
+  // Root is the only valid anchor when no visible elements remain.
+  assert.deepEqual(assertAnchor(['root']), ['root']);
+});
+
+test('scalarCount counts Unicode scalars, not UTF-16 code units', () => {
+  assert.equal(scalarCount('abc'), 3);
+  assert.equal(scalarCount(''), 0);
+  assert.equal(scalarCount('a😀b'), 3);
+  assert.throws(() => scalarCount(`a${String.fromCharCode(0xD800)}`), /unpaired/);
 });
 
 test('insert operation grammar validates identity, local causality, and text', () => {
   assert.deepEqual(assertTextOp(insert()), insert());
   assert.throws(() => assertTextOp(['workbench.text', 1, [A, 2], 2, [], ['insert', ROOT, 'x']]), /previous local counter/);
   assert.throws(() => assertTextOp(insert([A, 2], 2, '')), /cannot be empty/);
-  assert.throws(() => assertTextOp(insert([A, 2], 2, '\uD800')), /unpaired/);
+  assert.throws(() => assertTextOp(insert([A, 2], 2, String.fromCharCode(0xD800))), /unpaired/);
 });
 
 test('delete spans are exact, sorted observed targets and cannot overlap', () => {

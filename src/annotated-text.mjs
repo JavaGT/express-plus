@@ -34,6 +34,11 @@ export function assertWellFormedText(text) {
   return text;
 }
 
+export function scalarCount(text) {
+  assertWellFormedText(text);
+  return [...text].length;
+}
+
 export function assertUtf16Offset(text, offset) {
   assertWellFormedText(text);
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length) fail('offset is outside text bounds');
@@ -104,6 +109,8 @@ export function assertAnchor(value) {
   assertClosedArray(value[1], 2, 'element identity');
   const [op, ordinal] = value[1];
   if (!Number.isSafeInteger(ordinal) || ordinal < 0) fail('element ordinal must be a non-negative safe integer');
+  // The operation grammar cannot know the referenced run length. T2 admission
+  // verifies this names an observed scalar, never the run-end gap.
   return Object.freeze(['element', Object.freeze([assertOpId(op), ordinal])]);
 }
 
