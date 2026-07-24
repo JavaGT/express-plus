@@ -4,6 +4,7 @@ import {
   applyTextOp, assertAnchor, assertFrontier, assertOpId, assertStructuralPoint,
   assertTextOp, assertUtf16Offset, assertUtf16Range, assertWellFormedText,
   canonicalTextOp, compareInsertOrder, compareOpId, frontierDominates, scalarCount,
+  createTextState, materializeText, restoreTextCheckpoint, textCheckpoint,
 } from '../src/annotated-text.mjs';
 
 const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -126,6 +127,79 @@ test('structural points retain a stable anchor and affinity', () => {
   assert.throws(() => assertStructuralPoint(['point', ROOT, 'middle']), /affinity/);
 });
 
-test('T1 does not silently start T2 reduction', () => {
-  assert.throws(() => applyTextOp(), /not implemented: T2/);
+test('normalized RGA reducer converges concurrent run inserts and preserves scalar parents', () => {
+  const initial = createTextState();
+  const first = ['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'a😀']];
+  const left = ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['insert', ['element', [[A, 1], 0]], 'x']];
+  const right = ['workbench.text', 1, [B, 1], 2, [[A, 1]], ['insert', ['element', [[A, 1], 0]], 'y']];
+  const forward = [first, left, right].reduce(applyTextOp, initial);
+  const reordered = [right, left, first].reduce(applyTextOp, initial);
+  assert.equal(materializeText(forward), 'ayx😀');
+  assert.equal(materializeText(reordered), materializeText(forward));
+  const checkpoint = textCheckpoint(forward);
+  assert.equal(checkpoint.elements[`${A}:1:1`].parent, `${A}:1:0`);
+  assert.equal(Object.hasOwn(checkpoint.elements[`${A}:1:0`], 'parent'), true);
+});
+
+test('tombstones retain children and observed-remove tags are idempotent', () => {
+  const first = ['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'ab']];
+  const child = ['workbench.text', 1, [B, 1], 2, [[A, 1]], ['insert', ['element', [[A, 1], 0]], 'x']];
+  const remove = ['workbench.text', 1, [A, 2], 3, [[A, 1], [B, 1]], ['delete', [[[A, 1], 0, 1]]]];
+  const state = [first, child, remove, remove].reduce(applyTextOp, createTextState());
+  assert.equal(materializeText(state), 'xb');
+  assert.deepEqual(textCheckpoint(state).elements[`${A}:1:0`].deletedBy, [`${A}:2`]);
+});
+
+test('pending readiness is atomic, duplicate IDs are digest-checked, and overflow fails closed', () => {
+  const first = ['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'a']];
+  const dependent = ['workbench.text', 1, [B, 1], 2, [[A, 1]], ['insert', ['element', [[A, 1], 0]], 'b']];
+  let state = applyTextOp(createTextState(), dependent);
+  assert.equal(materializeText(state), '');
+  assert.equal(Object.keys(textCheckpoint(state).pending).length, 1);
+  state = applyTextOp(state, first);
+  assert.equal(materializeText(state), 'ab');
+  assert.throws(() => applyTextOp(state, ['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'z']]), /reused/);
+  const overflow = applyTextOp(createTextState({ maxPending: 1 }), dependent);
+  const failed = applyTextOp(overflow, ['workbench.text', 1, [B, 2], 3, [[B, 1]], ['insert', ROOT, 'x']]);
+  assert.equal(textCheckpoint(failed).rebootstrapRequired, true);
+  assert.equal(materializeText(applyTextOp(failed, first)), '');
+});
+
+test('canonical behavior-preserving checkpoints restore the exact reducer state', () => {
+  const first = ['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, '😀']];
+  const state = applyTextOp(createTextState(), first);
+  const checkpoint = textCheckpoint(state);
+  const restored = restoreTextCheckpoint(checkpoint);
+  assert.deepEqual(textCheckpoint(restored), checkpoint);
+  assert.equal(materializeText(restored), '😀');
+});
+
+test('checkpoint restore rejects topology or readiness that disagrees with its operations', () => {
+  const first = ['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'a']];
+  const state = applyTextOp(createTextState(), first);
+  const missingElement = structuredClone(textCheckpoint(state));
+  delete missingElement.elements[`${A}:1:0`];
+  assert.throws(() => restoreTextCheckpoint(missingElement), /does not match/);
+
+  const readyPending = structuredClone(textCheckpoint(state));
+  const second = ['workbench.text', 1, [B, 1], 2, [[A, 1]], ['insert', ROOT, 'b']];
+  readyPending.pending[`${B}:1`] = { digest: JSON.stringify(second), op: second };
+  assert.throws(() => restoreTextCheckpoint(readyPending), /ready pending/);
+});
+
+test('checkpoint restore reduces operations causally and preserves terminal rebootstrap state', () => {
+  const high = 'ffffffffffffffffffffffffffffffff';
+  const low = '00000000000000000000000000000000';
+  const first = ['workbench.text', 1, [high, 1], 1, [], ['insert', ROOT, 'a']];
+  const second = ['workbench.text', 1, [low, 1], 2, [[high, 1]], ['insert', ROOT, 'b']];
+  const third = ['workbench.text', 1, [low, 2], 3, [[low, 1], [high, 1]], ['insert', ROOT, 'c']];
+  const complete = [first, second, third].reduce(applyTextOp, createTextState({ maxPending: 1 }));
+  assert.deepEqual(textCheckpoint(restoreTextCheckpoint(textCheckpoint(complete))), textCheckpoint(complete));
+
+  const dependent = ['workbench.text', 1, [low, 1], 2, [[high, 1]], ['insert', ['element', [[high, 1], 0]], 'b']];
+  const terminal = applyTextOp(
+    applyTextOp(createTextState({ maxPending: 1 }), dependent),
+    ['workbench.text', 1, [low, 2], 3, [[low, 1], [high, 1]], ['insert', ROOT, 'c']],
+  );
+  assert.equal(textCheckpoint(restoreTextCheckpoint(textCheckpoint(terminal))).rebootstrapRequired, true);
 });

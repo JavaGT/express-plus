@@ -184,5 +184,249 @@ export function assertStructuralPoint(value) {
   return Object.freeze(['point', anchor, value[2]]);
 }
 
-// T2 owns causal application, buffering, tombstones, and checkpoint reduction.
-export function applyTextOp() { throw new Error('not implemented: T2'); }
+const ROOT_ID = 'root';
+const DEFAULT_MAX_PENDING = 1_000;
+
+function opKey(op) {
+  return `${op[0]}:${op[1]}`;
+}
+
+function elementKey(op, ordinal) {
+  return `${opKey(op)}:${ordinal}`;
+}
+
+function anchorKey(anchor) {
+  return anchor[0] === 'root' ? ROOT_ID : elementKey(anchor[1][0], anchor[1][1]);
+}
+
+function canonicalDigest(op) {
+  return JSON.stringify(op);
+}
+
+function canonicalFrontier(frontier) {
+  return frontier.map(([actor, counter]) => [actor, counter]);
+}
+
+function makeState({ maxPending = DEFAULT_MAX_PENDING } = {}) {
+  if (!Number.isSafeInteger(maxPending) || maxPending < 1) throw new TypeError('maxPending must be a positive safe integer');
+  return {
+    version: 1,
+    frontier: [],
+    elements: {},
+    operations: {},
+    pending: {},
+    maxPending,
+    rebootstrapRequired: false,
+  };
+}
+
+function cloneState(state) {
+  return {
+    version: 1,
+    frontier: canonicalFrontier(state.frontier),
+    elements: Object.fromEntries(Object.entries(state.elements).map(([key, element]) => [key, {
+      op: [...element.op], ordinal: element.ordinal, scalar: element.scalar,
+      parent: element.parent, lamport: element.lamport, deletedBy: [...element.deletedBy],
+    }])),
+    operations: Object.fromEntries(Object.entries(state.operations).map(([key, value]) => [key, { digest: value.digest, op: value.op }])),
+    pending: Object.fromEntries(Object.entries(state.pending).map(([key, value]) => [key, { digest: value.digest, op: value.op }])),
+    maxPending: state.maxPending,
+    rebootstrapRequired: state.rebootstrapRequired,
+  };
+}
+
+function assertState(state) {
+  if (!state || state.version !== 1 || !Array.isArray(state.frontier) || !state.elements || !state.operations || !state.pending) {
+    throw new TypeError('invalid annotated-text reducer state');
+  }
+  assertFrontier(state.frontier);
+  return state;
+}
+
+export function createTextState(options) {
+  return Object.freeze(makeState(options));
+}
+
+function stateFrontierCounter(state, actor) {
+  return state.frontier.find(([candidate]) => candidate === actor)?.[1] ?? 0;
+}
+
+function operationReady(state, op) {
+  if (!frontierDominates(state.frontier, op[4])) return false;
+  const body = op[5];
+  if (body[0] === 'insert') return body[1][0] === 'root' || Object.hasOwn(state.elements, anchorKey(body[1]));
+  return body[1].every(([target, first, count]) => {
+    for (let ordinal = first; ordinal < first + count; ordinal += 1) {
+      if (!Object.hasOwn(state.elements, elementKey(target, ordinal))) return false;
+    }
+    return true;
+  });
+}
+
+function advanceFrontier(state, op) {
+  const [actor, counter] = op[2];
+  const frontier = state.frontier.filter(([candidate]) => candidate !== actor);
+  frontier.push([actor, counter]);
+  frontier.sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  state.frontier = frontier;
+}
+
+function applyReadyOperation(state, op, digest) {
+  const body = op[5];
+  if (body[0] === 'insert') {
+    const parent = anchorKey(body[1]);
+    let previous = parent;
+    let ordinal = 0;
+    for (const scalar of body[2]) {
+      const key = elementKey(op[2], ordinal);
+      state.elements[key] = {
+        op: [...op[2]], ordinal, scalar, parent: previous, lamport: op[3], deletedBy: [],
+      };
+      previous = key;
+      ordinal += 1;
+    }
+  } else {
+    const deleteTag = opKey(op[2]);
+    for (const [target, first, count] of body[1]) {
+      for (let ordinal = first; ordinal < first + count; ordinal += 1) {
+        const element = state.elements[elementKey(target, ordinal)];
+        if (!element.deletedBy.includes(deleteTag)) element.deletedBy.push(deleteTag);
+      }
+    }
+  }
+  state.operations[opKey(op[2])] = { digest, op };
+  advanceFrontier(state, op);
+}
+
+function drainPending(state) {
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const key of Object.keys(state.pending).sort()) {
+      const entry = state.pending[key];
+      if (!operationReady(state, entry.op)) continue;
+      delete state.pending[key];
+      applyReadyOperation(state, entry.op, entry.digest);
+      progressed = true;
+    }
+  }
+}
+
+function assertCheckpoint(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some((key) => !['version', 'frontier', 'elements', 'operations', 'pending', 'maxPending', 'rebootstrapRequired'].includes(key))) {
+    throw new TypeError('invalid annotated-text checkpoint');
+  }
+  const state = makeState({ maxPending: value.maxPending });
+  state.frontier = assertFrontier(value.frontier).map((entry) => [...entry]);
+  state.rebootstrapRequired = value.rebootstrapRequired === true;
+  for (const [key, element] of Object.entries(value.elements ?? {})) {
+    if (!element || typeof element.scalar !== 'string' || scalarCount(element.scalar) !== 1 || typeof element.parent !== 'string' || !Array.isArray(element.op) || !Number.isSafeInteger(element.ordinal) || element.ordinal < 0 || !SAFE_POSITIVE(element.lamport) || !Array.isArray(element.deletedBy)) throw new TypeError('invalid annotated-text checkpoint element');
+    if (key !== elementKey(element.op, element.ordinal)) throw new TypeError('invalid annotated-text checkpoint element identity');
+    state.elements[key] = { op: [...assertOpId(element.op)], ordinal: element.ordinal, scalar: element.scalar, parent: element.parent, lamport: element.lamport, deletedBy: [...element.deletedBy].sort() };
+  }
+  for (const registryName of ['operations', 'pending']) {
+    for (const [key, entry] of Object.entries(value[registryName] ?? {})) {
+      const op = canonicalTextOp(entry?.op);
+      const digest = canonicalDigest(op);
+      if (key !== opKey(op[2]) || entry.digest !== digest) throw new TypeError('invalid annotated-text checkpoint operation registry');
+      state[registryName][key] = { digest, op };
+    }
+  }
+  return state;
+}
+
+export function restoreTextCheckpoint(checkpoint) {
+  const supplied = assertCheckpoint(checkpoint);
+  const applied = Object.values(supplied.operations).map((entry) => entry.op);
+  const pending = Object.values(supplied.pending).map((entry) => entry.op);
+  const appliedIds = new Set(applied.map((op) => opKey(op[2])));
+  if (pending.some((op) => appliedIds.has(opKey(op[2])))) {
+    throw new TypeError('annotated-text checkpoint duplicates an operation across registries');
+  }
+
+  // Reducer effects are derived from the canonical operation registry. Never
+  // admit independently supplied topology, tombstones, or frontier state.
+  let restored = createTextState({ maxPending: supplied.maxPending });
+  const remaining = [...applied];
+  while (remaining.length > 0) {
+    const nextIndex = remaining.findIndex((operation) => operationReady(restored, operation));
+    if (nextIndex === -1) {
+      throw new TypeError('annotated-text checkpoint applied operations are not causally reducible');
+    }
+    const [operation] = remaining.splice(nextIndex, 1);
+    restored = applyTextOp(restored, operation);
+  }
+  for (const operation of pending.sort((left, right) => compareOpId(left[2], right[2]))) {
+    if (operationReady(restored, operation)) {
+      throw new TypeError('annotated-text checkpoint contains a ready pending operation');
+    }
+    restored = applyTextOp(restored, operation);
+  }
+  // The operation that exceeded the live pending cap is intentionally not
+  // retained. Its terminal outcome is nevertheless durable checkpoint state.
+  if (supplied.rebootstrapRequired) restored = Object.freeze({ ...cloneState(restored), rebootstrapRequired: true });
+  if (JSON.stringify(textCheckpoint(supplied)) !== JSON.stringify(textCheckpoint(restored))) {
+    throw new TypeError('annotated-text checkpoint does not match its operation registry');
+  }
+  return restored;
+}
+
+export function textCheckpoint(state) {
+  assertState(state);
+  const sortedElements = Object.fromEntries(Object.entries(state.elements).sort(([left], [right]) => left.localeCompare(right)).map(([key, element]) => [key, {
+    op: [...element.op], ordinal: element.ordinal, scalar: element.scalar, parent: element.parent,
+    lamport: element.lamport, deletedBy: [...element.deletedBy].sort(),
+  }]));
+  const registry = (entries) => Object.fromEntries(Object.entries(entries).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, { digest: entry.digest, op: entry.op }]));
+  return Object.freeze({ version: 1, frontier: canonicalFrontier(state.frontier), elements: sortedElements, operations: registry(state.operations), pending: registry(state.pending), maxPending: state.maxPending, rebootstrapRequired: state.rebootstrapRequired });
+}
+
+export function materializeText(state) {
+  assertState(state);
+  const children = new Map([[ROOT_ID, []]]);
+  for (const [key, element] of Object.entries(state.elements)) {
+    const list = children.get(element.parent) ?? [];
+    list.push([key, element]);
+    children.set(element.parent, list);
+  }
+  for (const list of children.values()) {
+    list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpId(left.op, right.op));
+  }
+  let text = '';
+  const visit = (parent) => {
+    for (const [key, element] of children.get(parent) ?? []) {
+      if (element.deletedBy.length === 0) text += element.scalar;
+      visit(key);
+    }
+  };
+  visit(ROOT_ID);
+  return text;
+}
+
+// Applies one immutable operation. It is deliberately atomic: an operation is
+// either fully reduced, retained intact in the bounded pending registry, or the
+// replica fails closed and must rebootstrap from a checkpoint.
+export function applyTextOp(current, value) {
+  const state = cloneState(assertState(current));
+  if (state.rebootstrapRequired) return Object.freeze(state);
+  const op = canonicalTextOp(value);
+  const key = opKey(op[2]);
+  const digest = canonicalDigest(op);
+  const known = state.operations[key] ?? state.pending[key];
+  if (known) {
+    if (known.digest !== digest) throw new Error('annotated-text operation ID was reused with different content');
+    return Object.freeze(state);
+  }
+  // A contiguous frontier also makes a counter at or behind it equivocal even
+  // if a damaged checkpoint omitted its operation registry entry.
+  if (stateFrontierCounter(state, op[2][0]) >= op[2][1]) throw new Error('annotated-text operation ID is behind the applied frontier');
+  if (operationReady(state, op)) {
+    applyReadyOperation(state, op, digest);
+    drainPending(state);
+  } else if (Object.keys(state.pending).length >= state.maxPending) {
+    state.rebootstrapRequired = true;
+  } else {
+    state.pending[key] = { digest, op };
+  }
+  return Object.freeze(state);
+}
