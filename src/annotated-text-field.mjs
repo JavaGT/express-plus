@@ -246,6 +246,27 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
 
   const blockFields = assertScalarFields(entity, field, 'block', descriptor.block ?? {}, RESERVED_BLOCK_COLUMNS);
 
+  let caret = null;
+  if (descriptor.carets !== undefined) {
+    const spec = descriptor.carets;
+    if (!spec || typeof spec !== 'object' || Array.isArray(spec) ||
+        Object.keys(spec).length !== 2 || !Object.hasOwn(spec, 'field') || !Object.hasOwn(spec, 'cell')) {
+      fail(entity, field, 'carets', 'must be exactly { field, cell }');
+    }
+    if (typeof spec.field !== 'string' || !IDENTIFIER.test(spec.field) ||
+        typeof spec.cell !== 'string' || !IDENTIFIER.test(spec.cell)) {
+      fail(entity, field, 'carets', 'field and cell must be identifiers');
+    }
+    const presenceField = fields[spec.field];
+    if (!presenceField || presenceField.kind !== 'ephemeral') {
+      fail(entity, field, 'carets.field', 'must name an enclosing ephemeral field');
+    }
+    if (!Object.hasOwn(presenceField.cells ?? {}, spec.cell)) {
+      fail(entity, field, 'carets.cell', 'must name a declared ephemeral cell');
+    }
+    caret = Object.freeze({ field: spec.field, cell: spec.cell });
+  }
+
   // Validate annotations array
   if (!descriptor.annotations || !Array.isArray(descriptor.annotations)) {
     fail(entity, field, 'annotations', 'must be a non-empty array of annotation descriptors');
@@ -359,7 +380,7 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   // `access` is set by makeDescriptor's initial properties, and `can` is a
   // method added by makeDescriptor. Both are field descriptor properties, not
   // declaration keys, and are allowed to pass through.
-  const ALLOWED_KEYS = new Set(['project', 'owner', 'block', 'annotations', 'measurements', 'capabilities', 'kind', 'type', 'access', 'can']);
+  const ALLOWED_KEYS = new Set(['project', 'owner', 'block', 'annotations', 'measurements', 'capabilities', 'carets', 'kind', 'type', 'access', 'can']);
   for (const key of Object.keys(descriptor)) {
     if (!ALLOWED_KEYS.has(key)) {
       fail(entity, field, key, `unknown key '${key}'`);
@@ -501,6 +522,7 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     capabilityHandles: descriptor.capabilities
       ? Object.freeze(Object.fromEntries(Object.keys(descriptor.capabilities).map(n => [n, Object.freeze({ name: n })])))
       : null,
+    caret,
   };
   compiledMeta.set(descriptor, Object.freeze(compiled));
 

@@ -5,6 +5,7 @@ export { projectAnnotatedTextForRecipient } from './annotated-text-recipient-pro
 export { protectingAnnotationCapabilities } from './row-grant.mjs';
 export { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
 export { getAnnotatedTextCompiledMetadata, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';
+export { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.mjs';
 export { owner } from './owner.mjs';
 export { createLog, getLog } from './log.mjs';
 export { now } from './deferred.mjs';
