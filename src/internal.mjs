@@ -4,6 +4,7 @@ export { text, annotatedText, annotation, protectingAnnotation, measurement, ann
 export { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
 export { protectingAnnotationCapabilities } from './row-grant.mjs';
 export { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
+export { projectAnnotatedTextCaretSnapshot } from './annotated-text-snapshot.mjs';
 export { getAnnotatedTextCompiledMetadata, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';
 export { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.mjs';
 export { owner } from './owner.mjs';

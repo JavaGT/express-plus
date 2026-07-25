@@ -2,6 +2,7 @@ import { deserializeField } from './field-strategy.mjs';
 import { materializeBlock, restoreTextFamilyCheckpoint } from './annotated-text-family.mjs';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 import { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
+import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.mjs';
 import { protectingAnnotationCapabilities } from './row-grant.mjs';
 import { read } from './grant.mjs';
 
@@ -10,7 +11,7 @@ function fail(message) { throw new Error(`annotated-text snapshot: ${message}`);
 // Reads only Workbench-owned annotated-text relations and projects them before
 // an HTTP snapshot is serialized. Any malformed state or access failure throws;
 // callers deny the entire snapshot rather than falling back to canonical facts.
-export async function projectAnnotatedTextSnapshot({ db, entity, row, principal, fieldName, descriptor }) {
+async function projectAnnotatedText({ db, entity, row, principal, fieldName, descriptor, caret = null, presence = null }) {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail(`field '${fieldName}' is not compiled`);
   const prefix = `${entity.name}_${fieldName}`;
@@ -66,5 +67,16 @@ export async function projectAnnotatedTextSnapshot({ db, entity, row, principal,
     const decision = await protectingAnnotationCapabilities(entity, row, annotation, access, principal);
     protectors.push({ protectorId: annotation.id, outcome: decision.capabilities.includes(read) ? 'allow' : 'deny' });
   }
-  return projectAnnotatedTextForRecipient(canonical, descriptor, { version: 1, protectors, capabilityHints: [] });
+  const decisions = { version: 1, protectors, capabilityHints: [] };
+  return caret === null
+    ? projectAnnotatedTextForRecipient(canonical, descriptor, decisions)
+    : projectAnnotatedTextCaretForRecipient(canonical, descriptor, decisions, caret, presence);
+}
+
+export async function projectAnnotatedTextSnapshot(input) {
+  return projectAnnotatedText(input);
+}
+
+export async function projectAnnotatedTextCaretSnapshot(input) {
+  return projectAnnotatedText(input);
 }

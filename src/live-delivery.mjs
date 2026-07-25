@@ -14,6 +14,7 @@ import { upgradeWebSocket } from './websocket.mjs';
 import { isSameOriginRequest } from './middleware.mjs';
 import { createLiveFanout } from './live-fanout.mjs';
 import { LiveConnection } from './live-connection.mjs';
+import { createAnnotatedTextCaretLive } from './annotated-text-caret-live.mjs';
 import { readSeq } from './cursor.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 
@@ -41,6 +42,7 @@ export function createLiveDelivery(httpServer, {
   log = null,
 } = {}) {
   const fanout = createLiveFanout({ mayVerb });
+  const carets = createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanout });
   const connections = new Set();
   const pendingUpgrades = new Set();
   let closed = false;
@@ -108,6 +110,7 @@ export function createLiveDelivery(httpServer, {
           db,
           currentSeq,
           log,
+          carets,
           onClose: () => connections.delete(conn),
         });
         conn.setPrincipal(principalOf(req));

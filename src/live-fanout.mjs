@@ -28,6 +28,7 @@ export function createLiveFanout({ mayVerb = null } = {}) {
   const byScope = new Map();   // Map<scopeKey, Map<conn, SubSpec>>
   const connSubs = new Map();  // Map<conn, Set<scopeKey>>
   const paceBuffers = new Map();
+  let onCaretInterestChange = null;
 
   const deltaProjector = createDeltaProjector();
 
@@ -58,6 +59,10 @@ export function createLiveFanout({ mayVerb = null } = {}) {
 
   function addSubscriptionScope(scope, conn, fields = null, pace = null, interest = {}) {
     if (!byScope.has(scope)) byScope.set(scope, new Map());
+    const previous = byScope.get(scope).get(conn);
+    const nextCarets = interest.carets ?? [];
+    const removedCarets = (previous?.interest?.carets ?? []).filter((field) => !nextCarets.includes(field));
+    if (removedCarets.length > 0) onCaretInterestChange?.(conn, scope, removedCarets);
     byScope.get(scope).set(conn, { fields, latch: true, pace, interest });
     let mine = connSubs.get(conn);
     if (!mine) { mine = new Set(); connSubs.set(conn, mine); }
@@ -82,6 +87,8 @@ export function createLiveFanout({ mayVerb = null } = {}) {
   function removeSubscriptionScope(scope, conn) {
     const subs = byScope.get(scope);
     if (subs) {
+      const removedCarets = subs.get(conn)?.interest?.carets ?? [];
+      if (removedCarets.length > 0) onCaretInterestChange?.(conn, scope, removedCarets);
       subs.delete(conn);
       if (subs.size === 0) byScope.delete(scope);
     }
@@ -102,6 +109,8 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     for (const scope of mine) {
       const subs = byScope.get(scope);
       if (subs) {
+        const removedCarets = subs.get(conn)?.interest?.carets ?? [];
+        if (removedCarets.length > 0) onCaretInterestChange?.(conn, scope, removedCarets);
         subs.delete(conn);
         if (subs.size === 0) byScope.delete(scope);
       }
@@ -114,6 +123,20 @@ export function createLiveFanout({ mayVerb = null } = {}) {
         paceBuffers.delete(bufKey);
       }
     }
+
+  }
+
+  function recipients(scope, field) {
+    return [...(byScope.get(scope) ?? [])]
+      .filter(([conn, spec]) => !conn.closed && spec.interest?.carets?.includes(field));
+  }
+
+  function hasCaretInterest(conn, scope, field) {
+    return byScope.get(scope)?.get(conn)?.interest?.carets?.includes(field) ?? false;
+  }
+
+  function setOnCaretInterestChange(callback) {
+    onCaretInterestChange = callback;
   }
 
   async function flushPacedBuffer(key) {
@@ -291,6 +314,9 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     removeAll,
     subscriptionCount,
     hasSubscription,
+    recipients,
+    hasCaretInterest,
+    setOnCaretInterestChange,
     emit,
     close,
   };

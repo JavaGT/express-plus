@@ -30,8 +30,9 @@ export class LiveConnection {
   #currentSeq;
   #onClose;
   #log;
+  #carets;
 
-  constructor(socket, id, { fanout, resolveEntity, mayVerb, db, currentSeq, onClose, log = null } = {}) {
+  constructor(socket, id, { fanout, resolveEntity, mayVerb, db, currentSeq, onClose, log = null, carets = null } = {}) {
     this.#socket = socket;
     this.#sender = new FrameSender();
     this.#parser = new FrameParser();
@@ -44,6 +45,7 @@ export class LiveConnection {
     this.#currentSeq = currentSeq;
     this.#onClose = onClose;
     this.#log = log;
+    this.#carets = carets;
 
     socket.on('data', (chunk) => {
       this.#parser.feed(chunk);
@@ -58,6 +60,8 @@ export class LiveConnection {
   get id() { return this.#id; }
   get closed() { return this.#closed; }
   get principal() { return this.#principal; }
+
+  close() { this.#close(); }
 
   setPrincipal(p) {
     this.#principal = p;
@@ -130,6 +134,12 @@ export class LiveConnection {
       case 'unsubscribe':
         this.#handleUnsubscribe(msg);
         break;
+      case 'caret.update':
+        this.#carets?.update(this, msg).catch(() => this.error(failure('invalid-input', 'Invalid caret update.')));
+        break;
+      case 'caret.clear':
+        this.#carets?.clear(this, msg).catch(() => this.error(failure('invalid-input', 'Invalid caret clear.')));
+        break;
       default:
         this.error(
           failure('unknown-action', `Unknown message type: ${String(msg.type)}.`),
@@ -141,6 +151,7 @@ export class LiveConnection {
   #handleUnsubscribe(msg) {
     const normalized = parseSubscribeMsg(msg);
     if (normalized) {
+      this.#carets?.removeConnection(this, normalized.scope).catch(() => {});
       this.#fanout.removeSubscription(normalized.scope, this);
       const response = { type: 'unsubscribed', scope: normalized.scope };
       if (normalized.interest.entity) response.entity = normalized.interest.entity;
@@ -161,7 +172,7 @@ export class LiveConnection {
       this.error(result.failure, requestId);
       return;
     }
-    this.#fanout.addSubscription(result.scope, this, result.fields, result.pace, result.interest);
+    this.#fanout.addSubscription(result.scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
     const response = {
       type: 'subscribed',
       scope: result.scope,
@@ -182,6 +193,7 @@ export class LiveConnection {
 
   #cleanup() {
     this.#fanout.removeAll(this);
+    this.#carets?.removeConnection(this).catch(() => {});
     this.#onClose?.();
   }
 }

@@ -11,6 +11,7 @@ import { mayRow } from './row-grant.mjs';
 import { validatePaceSelection } from './field-pace.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { failure } from './outcome.mjs';
+import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 
 const MAX_SUBS_PER_CONN = 256;
 const MAX_ID_LEN = 256;
@@ -53,6 +54,7 @@ export function parseSubscribeMsg(msg) {
     const interest = { entity: handle.entity, id: handle.id };
     if (msg.fields !== undefined && msg.fields !== null) interest.fields = msg.fields;
     if (msg.pace !== undefined && msg.pace !== null) interest.pace = msg.pace;
+    if (msg.carets !== undefined && msg.carets !== null) interest.carets = msg.carets;
     return { scope: handle.key, interest };
   }
 
@@ -92,7 +94,24 @@ function buildInterest(interest, entity) {
     pace = validatePaceSelection('ephemeral', interest.pace);
   }
 
-  return { fields, pace };
+  let carets = null;
+  if (interest.carets !== undefined && interest.carets !== null) {
+    if (!Array.isArray(interest.carets) || interest.carets.length > 16 || new Set(interest.carets).size !== interest.carets.length) {
+      throw new Error('Invalid annotated-text caret interest.');
+    }
+    for (const field of interest.carets) {
+      if (typeof field !== 'string' || entity.fields?.[field]?.kind !== 'annotatedText') {
+        throw new Error('Invalid annotated-text caret interest.');
+      }
+      const descriptor = entity.fields?.[field];
+      if (!getAnnotatedTextCompiledMetadata(descriptor)?.caret) {
+        throw new Error('Invalid annotated-text caret interest.');
+      }
+    }
+    carets = interest.carets;
+  }
+
+  return { fields, pace, carets };
 }
 
 export async function authorizeSubscription(msg, conn, {
@@ -146,14 +165,14 @@ export async function authorizeSubscription(msg, conn, {
 
   // Entity-specific validation happens only after row authorization. Otherwise
   // different validation errors reveal which entity names and fields exist.
-  let fields, pace;
+  let fields, pace, carets;
   try {
-    ({ fields, pace } = buildInterest(interest, entity));
+    ({ fields, pace, carets } = buildInterest(interest, entity));
   } catch (err) {
     return { admitted: false, failure: failure('invalid-input', err.message || 'Invalid fields or pace selection.') };
   }
 
-  return { admitted: true, scope, entityName, id, idStr, fields, pace, interest };
+  return { admitted: true, scope, entityName, id, idStr, fields, pace, carets, interest };
 }
 
 export const normalizeSubscribeMsg = parseSubscribeMsg;
