@@ -25,6 +25,8 @@ export class LiveChannel {
 
   unsubscribe(entity: string, id: string | number): Promise<void>;
   unsubscribeScope(scope: string): Promise<void>;
+  updateCaret(input: CaretUpdate): boolean;
+  clearCaret(input: CaretClear): boolean;
   close(): void;
   onConnectionChange(cb: (status: ConnectionStatus) => void): () => void;
 }
@@ -48,6 +50,8 @@ export interface SubscriptionCheckpoint {
 export interface SubscribeOptions {
   fields?: FieldInterest;
   pace?: PaceSelection;
+  carets?: string[];
+  onCaret?: OnCaret;
   onCheckpoint?: (checkpoint: SubscriptionCheckpoint) => void;
 }
 
@@ -57,15 +61,67 @@ export interface ScopeSubscribeOptions {
     id?: string | number;
     fields?: FieldInterest;
     pace?: PaceSelection;
+    carets?: string[];
   };
   fields?: FieldInterest;
   pace?: PaceSelection;
+  carets?: string[];
+  onCaret?: OnCaret;
   onCheckpoint?: (checkpoint: SubscriptionCheckpoint) => void;
 }
 
 export type ConnectionStatus = 'connected' | 'disconnected' | 'reconnecting';
 
 export type OnEvent = (envelope: WsEnvelope) => void;
+export type OnCaret = (frame: AnnotatedTextCaretFrame) => void;
+
+export interface CaretUpdate {
+  entity: string;
+  id: string;
+  field: string;
+  blockId: string;
+  offset: number;
+}
+
+export interface CaretClear {
+  entity: string;
+  id: string;
+  field: string;
+}
+
+export type AnnotatedTextCaretFrame = AnnotatedTextCaretUpsert | AnnotatedTextCaretRemove;
+
+export interface AnnotatedTextCaretUpsert {
+  type: 'annotated-text-caret';
+  version: 1;
+  entity: string;
+  id: string;
+  field: string;
+  change: { op: 'upsert'; value: AnnotatedTextVisibleCaret | AnnotatedTextRestrictedCaret };
+}
+
+export interface AnnotatedTextCaretRemove {
+  type: 'annotated-text-caret';
+  version: 1;
+  entity: string;
+  id: string;
+  field: string;
+  change: { op: 'remove'; presence: string };
+}
+
+export interface AnnotatedTextVisibleCaret {
+  kind: 'caret';
+  presence: string;
+  blockId: string;
+  offset: number;
+}
+
+export interface AnnotatedTextRestrictedCaret {
+  kind: 'edge';
+  presence: string;
+  blockId: string;
+  edge: 'start' | 'end';
+}
 
 // ---------------------------------------------------------------------------
 // Wire protocol envelopes (server → client)

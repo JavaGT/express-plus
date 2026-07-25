@@ -50,11 +50,18 @@ function normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent) {
   return { options: optionsOrOnEvent, onEvent: maybeOnEvent };
 }
 
-function subscribeEnvelope(entity, id, { fields, pace } = {}) {
+function subscribeEnvelope(entity, id, { fields, pace, carets } = {}) {
   const envelope = { type: 'subscribe', entity, id };
   if (fields !== undefined) envelope.fields = fields;
   if (pace !== undefined) envelope.pace = pace;
+  if (carets !== undefined) envelope.carets = carets;
   return envelope;
+}
+
+function isPlainJsonObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
 }
 
 class ClientClosedError extends Error {
@@ -133,14 +140,18 @@ class LiveSyncSession {
       throw new Error(`unsubscribe is still pending for ${entity}:${id}`);
     }
 
+    const carets = Array.isArray(options.carets) ? options.carets : undefined;
+    const onCaret = typeof options.onCaret === 'function' ? options.onCaret : undefined;
     const ready = new Promise((resolve, reject) => {
       this._subs.set(key, {
         onEvent,
+        onCaret,
         onCheckpoint: options.onCheckpoint,
         onResync: options.onResync,
         fields: options.fields,
         pace: options.pace,
-        envelope: subscribeEnvelope(entity, id, options),
+        carets,
+        envelope: subscribeEnvelope(entity, id, { ...options, carets }),
         sentGeneration: 0,
       });
       this._pendingSubs.set(key, { resolve, reject });
@@ -172,23 +183,25 @@ class LiveSyncSession {
       throw new Error(`unsubscribe is still pending for scope ${scope}`);
     }
 
+    const interest = { ...options.interest };
+    if (options.fields !== undefined) interest.fields = options.fields;
+    if (options.pace !== undefined) interest.pace = options.pace;
+    const carets = Array.isArray(options.carets) ? options.carets : interest.carets;
+    if (carets !== undefined) interest.carets = carets;
     const envelope = { type: 'subscribe', scope };
-    if (options.interest) envelope.interest = options.interest;
-    else if (options.fields !== undefined || options.pace !== undefined) {
-      envelope.interest = {};
-      if (options.fields !== undefined) envelope.interest.fields = options.fields;
-      if (options.pace !== undefined) envelope.interest.pace = options.pace;
-    }
+    if (Object.keys(interest).length > 0) envelope.interest = interest;
     const ready = new Promise((resolve, reject) => {
       this._subs.set(key, {
         onEvent,
+        onCaret: typeof options.onCaret === 'function' ? options.onCaret : undefined,
         onCheckpoint: options.onCheckpoint,
         onResync: options.onResync,
         fields: options.fields,
         pace: options.pace,
+        carets,
         scope,
-        entity: options.interest?.entity,
-        id: options.interest?.id,
+        entity: interest.entity,
+        id: interest.id,
         envelope,
         sentGeneration: 0,
       });
@@ -278,6 +291,50 @@ class LiveSyncSession {
     this._state = 'closed';
     this._emitConnectionStatus('disconnected');
     this._connCallbacks.clear();
+  }
+
+  // Send a volatile caret update. Returns false when offline (no queue/replay).
+  updateCaret({ entity, id, field, blockId, offset }) {
+    if (this._closed) throw new ClientClosedError();
+    const arg = arguments[0];
+    if (!arg || typeof arg !== 'object' || Array.isArray(arg)) {
+      throw new TypeError('updateCaret requires exactly type/entity/id/field/blockId/offset');
+    }
+    const argKeys = Object.keys(arg);
+    if (argKeys.length !== 5 || argKeys.some((k) => !['entity','id','field','blockId','offset'].includes(k))) {
+      throw new TypeError('updateCaret requires exactly type/entity/id/field/blockId/offset');
+    }
+    if (typeof entity !== 'string' || entity.length === 0 ||
+        typeof id !== 'string' || id.length === 0 ||
+        typeof field !== 'string' || field.length === 0 ||
+        typeof blockId !== 'string' || blockId.length === 0) {
+      throw new TypeError('updateCaret requires non-empty strings for entity, id, field, blockId');
+    }
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new TypeError('updateCaret requires a non-negative safe integer offset');
+    }
+    const msg = { type: 'caret.update', entity, id, field, blockId, offset };
+    return this._send(msg);
+  }
+
+  // Send a volatile caret clear. Returns false when offline (no queue/replay).
+  clearCaret({ entity, id, field }) {
+    if (this._closed) throw new ClientClosedError();
+    const arg = arguments[0];
+    if (!arg || typeof arg !== 'object' || Array.isArray(arg)) {
+      throw new TypeError('clearCaret requires exactly type/entity/id/field');
+    }
+    const argKeys = Object.keys(arg);
+    if (argKeys.length !== 3 || argKeys.some((k) => !['entity','id','field'].includes(k))) {
+      throw new TypeError('clearCaret requires exactly type/entity/id/field');
+    }
+    if (typeof entity !== 'string' || entity.length === 0 ||
+        typeof id !== 'string' || id.length === 0 ||
+        typeof field !== 'string' || field.length === 0) {
+      throw new TypeError('clearCaret requires non-empty strings for entity, id, field');
+    }
+    const msg = { type: 'caret.clear', entity, id, field };
+    return this._send(msg);
   }
 
   // --- internal ---
@@ -444,6 +501,7 @@ class LiveSyncSession {
     if (sub.id !== undefined) interest.id = sub.id;
     if (sub.fields !== undefined) interest.fields = sub.fields;
     if (sub.pace !== undefined) interest.pace = sub.pace;
+    if (sub.carets !== undefined) interest.carets = sub.carets;
     if (Object.keys(interest).length > 0) envelope.interest = interest;
     return envelope;
   }
@@ -520,6 +578,64 @@ class LiveSyncSession {
       if (sub && typeof sub.onResync === 'function') {
         sub.onResync(envelope);
       }
+    } else if (envelope.type === 'annotated-text-caret') {
+      this._handleCaretFrame(envelope);
+    }
+  }
+
+  // --- annotated-text-caret exact version 1 grammar ---
+
+  // Route an inbound annotated-text-caret frame to matching subscriptions.
+  // Drops malformed, unmatched, unsupported frames silently.
+  _handleCaretFrame(envelope) {
+    if (!isPlainJsonObject(envelope)) return;
+    if (envelope.version !== 1 || envelope.type !== 'annotated-text-caret') return;
+    if (typeof envelope.entity !== 'string' || envelope.entity.length === 0 ||
+        typeof envelope.id !== 'string' || envelope.id.length === 0 ||
+        typeof envelope.field !== 'string' || envelope.field.length === 0) return;
+    const expectedTop = ['type', 'version', 'entity', 'id', 'field', 'change'];
+    if (Object.keys(envelope).length !== expectedTop.length) return;
+    const topKeys = Object.keys(envelope).sort();
+    for (const k of topKeys) {
+      if (!expectedTop.includes(k)) return;
+    }
+    if (!isPlainJsonObject(envelope.change)) return;
+    if (envelope.change.op === 'remove') {
+      const changeKeys = Object.keys(envelope.change).sort();
+      if (changeKeys.length !== 2 || changeKeys[0] !== 'op' || changeKeys[1] !== 'presence') return;
+      if (typeof envelope.change.presence !== 'string' || envelope.change.presence.length === 0) return;
+    } else if (envelope.change.op === 'upsert') {
+      const changeKeys = Object.keys(envelope.change).sort();
+      if (changeKeys.length !== 2 || changeKeys[0] !== 'op' || changeKeys[1] !== 'value') return;
+      const value = envelope.change.value;
+      if (!isPlainJsonObject(value)) return;
+      const valueKeys = Object.keys(value).sort();
+      if (value.kind === 'caret') {
+        if (valueKeys.length !== 4 || valueKeys[0] !== 'blockId' || valueKeys[1] !== 'kind' || valueKeys[2] !== 'offset' || valueKeys[3] !== 'presence') return;
+        if (typeof value.blockId !== 'string' || value.blockId.length === 0 ||
+            typeof value.presence !== 'string' || value.presence.length === 0 ||
+            !Number.isSafeInteger(value.offset) || value.offset < 0) return;
+      } else if (value.kind === 'edge') {
+        if (valueKeys.length !== 4 || valueKeys[0] !== 'blockId' || valueKeys[1] !== 'edge' || valueKeys[2] !== 'kind' || valueKeys[3] !== 'presence') return;
+        if (typeof value.blockId !== 'string' || value.blockId.length === 0 ||
+            typeof value.presence !== 'string' || value.presence.length === 0 ||
+            (value.edge !== 'start' && value.edge !== 'end')) return;
+      } else {
+        return;
+      }
+    } else {
+      return;
+    }
+
+    const directKey = `${envelope.entity}:${String(envelope.id)}`;
+    for (const [key, sub] of this._subs) {
+      const directMatch = key === directKey;
+      const scopedMatch = sub.scope !== undefined && sub.entity === envelope.entity && String(sub.id) === envelope.id;
+      if (!directMatch && !scopedMatch) continue;
+      if (typeof sub.onCaret !== 'function' || !sub.carets?.includes(envelope.field)) continue;
+      try {
+        sub.onCaret(envelope);
+      } catch { /* isolate consumer errors */ }
     }
   }
 
