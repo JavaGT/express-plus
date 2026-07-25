@@ -7,7 +7,7 @@ import workbench, {
   createServer, grant, read, ref, scope, write,
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension,
 } from '../src/internal.mjs';
-import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, textFamilyCheckpoint, materializeBlock, splitBlock } from '../src/annotated-text-family.mjs';
+import { applyTextOperationToBlock, mergeBlocks, restoreTextFamilyCheckpoint, textFamilyCheckpoint, materializeBlock, splitBlock } from '../src/annotated-text-family.mjs';
 import { native } from '../src/event-handle.mjs';
 import { frozenJsonSnapshot } from '../src/annotated-text-r2.mjs';
 
@@ -32,7 +32,17 @@ registerAnnotatedTextStructuralExtension('sourceInit', Object.freeze({
       rightPayload: Object.freeze({ ...payload, text: rightText, offset }),
     });
   },
-  combine: function combine() {},
+  combine: function combine(input) {
+    if (input.left !== null && input.right !== null) {
+      return Object.freeze({
+        version: 1,
+        payload: Object.freeze({ text: input.left.payload.text + input.right.payload.text }),
+      });
+    }
+    if (input.left !== null) return Object.freeze({ version: 1, payload: input.left.payload });
+    if (input.right !== null) return Object.freeze({ version: 1, payload: input.right.payload });
+    return Object.freeze({ version: 1, payload: null });
+  },
 }));
 
 function doc() {
@@ -59,6 +69,42 @@ test('R2 measurement adapter inputs receive an isolated deep-frozen JSON snapsho
   assert.equal(Object.isFrozen(snapshot.nested), true);
   assert.throws(() => { snapshot.nested.value = 2; }, TypeError);
   assert.equal(source.nested.value, 1);
+});
+
+test('frozenJsonSnapshot rejects undefined top-level value', () => {
+  assert.throws(() => frozenJsonSnapshot(undefined), /undefined/);
+});
+
+test('frozenJsonSnapshot rejects undefined property', () => {
+  assert.throws(() => frozenJsonSnapshot({ x: undefined }), /undefined/);
+});
+
+test('frozenJsonSnapshot rejects NaN', () => {
+  assert.throws(() => frozenJsonSnapshot(NaN), /finite/);
+  assert.throws(() => frozenJsonSnapshot({ x: NaN }), /finite/);
+});
+
+test('frozenJsonSnapshot rejects Infinity', () => {
+  assert.throws(() => frozenJsonSnapshot(Infinity), /finite/);
+  assert.throws(() => frozenJsonSnapshot({ x: Infinity }), /finite/);
+});
+
+test('frozenJsonSnapshot rejects sparse array', () => {
+  assert.throws(() => frozenJsonSnapshot([1, , 3]), /sparse/);
+});
+
+test('frozenJsonSnapshot leaves valid source mutable and unmodified while snapshot freezes', () => {
+  const source = { nested: { value: 1 } };
+  const snapshot = frozenJsonSnapshot(source);
+  assert.notEqual(snapshot, source);
+  assert.notEqual(snapshot.nested, source.nested);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(Object.isFrozen(snapshot.nested), true);
+  assert.equal(Object.isFrozen(source), false);
+  assert.equal(Object.isFrozen(source.nested), false);
+  source.nested.value = 2;
+  assert.equal(source.nested.value, 2);
+  assert.equal(snapshot.nested.value, 1);
 });
 
 async function appFor(db = new DatabaseSync(':memory:')) {
@@ -848,6 +894,621 @@ test('R1 text.apply still works after R2 code is present', async () => {
 
   const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
   assert.equal(materializeBlock(family, blockId), 'hello');
+
+  await app.close?.();
+});
+
+// ── R3 block.merge tests ──────────────────────────────────────────────────────
+
+function r3AppFor(db = new DatabaseSync(':memory:')) {
+  const InitDoc = doc();
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  db.exec("INSERT INTO Project (id) VALUES ('p1')");
+  db.exec("INSERT INTO User (id) VALUES ('u1')");
+  executeDDL(InitDoc, db);
+  const app = workbench({ db, entities: [InitDoc] });
+  app.start();
+  return { app, db, InitDoc };
+}
+
+function setupR3Doc(app) {
+  return app.dispatch({
+    actionId: 'create', type: 'InitDoc.create',
+    payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
+  });
+}
+
+function setupR3Split(app, blockId) {
+  return app.dispatch({
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
+  });
+}
+
+function setupR3Split2(app, blockId) {
+  return app.dispatch({
+    actionId: 'op2', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'text.apply', blockId, operation: INSERT_WORLD } },
+  });
+}
+
+async function setupR3Mergable(app, db) {
+  const created = await setupR3Doc(app);
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  await setupR3Split(app, blockId);
+  await setupR3Split2(app, blockId);
+  const split = await app.dispatch({
+    actionId: 'split', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 2]] }, operation: { kind: 'block.split', blockId, utf16Offset: 5 } },
+  });
+  const rightBlockId = split.events[0].data.operation.rightBlockId;
+  return { blockId, rightBlockId, created, split };
+}
+
+test('R3 successful block.merge produces one v3 event, left identity survives, right removed, text restored, revision 3, frontier unchanged', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+
+  const merge = await app.dispatch({
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
+  });
+  assert.equal(merge.ok, true);
+  assert.equal(merge.events.length, 1);
+  assert.equal(merge.events[0].type, 'InitDoc.body.operated');
+  assert.equal(merge.events[0].data.version, 3);
+  assert.equal(merge.events[0].data.operation.kind, 'block.merge');
+  assert.equal(merge.events[0].data.operation.leftBlockId, blockId);
+  assert.equal(merge.events[0].data.operation.rightBlockId, rightBlockId);
+
+  const state = db.prepare('SELECT structure_version, family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('d1');
+  assert.equal(state.structure_version, 3);
+
+  const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+  assert.equal(family.blocks.length, 1);
+  assert.equal(family.blocks[0].id, blockId);
+  assert.equal(materializeBlock(family, blockId), 'worldhello');
+
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_block WHERE document_id = ?').get('d1').count, 1);
+  const leftBlock = db.prepare('SELECT * FROM InitDoc_body_block WHERE id = ?').get(blockId);
+  assert.ok(leftBlock);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_block WHERE id = ?').get(rightBlockId).count, 0);
+
+  assert.deepEqual(merge.events[0].data.before, { structuralRevision: 2, frontier: [[A, 2]] });
+  assert.deepEqual(merge.events[0].data.after, { structuralRevision: 3, frontier: [[A, 2]] });
+
+  await app.close?.();
+});
+
+test('R3 merge receipt retry dedupes without duplicate rows', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+
+  const payload = { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } };
+  const first = await app.dispatch({ actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' }, payload });
+  assert.equal(first.ok, true);
+  const retry = await app.dispatch({ actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' }, payload });
+  assert.equal(retry.ok, true);
+  assert.equal(retry.deduped, true);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE eventType = 'InitDoc.body.operated' AND actionId = 'merge'").get().count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_block').get().count, 1);
+  assert.equal(db.prepare('SELECT structure_version FROM InitDoc_body_state WHERE document_id = ?').get('d1').structure_version, 3);
+
+  await app.close?.();
+});
+
+test('R3 merge rejects stale structural revision', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+
+  const result = await app.dispatch({
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 3, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.equal(db.prepare('SELECT structure_version FROM InitDoc_body_state WHERE document_id = ?').get('d1').structure_version, 2);
+
+  await app.close?.();
+});
+
+test('R3 merge rejects non-adjacent blocks', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+  const otherBlockId = 'dddddddddddddddddddddddddddddddd';
+
+  const result = await app.dispatch({
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: otherBlockId, rightBlockId } },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.equal(db.prepare('SELECT structure_version FROM InitDoc_body_state WHERE document_id = ?').get('d1').structure_version, 2);
+
+  await app.close?.();
+});
+
+test('R3 merge rejects mismatched block memberships', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+
+  const annId = 'ann1';
+  db.prepare(`INSERT INTO InitDoc_body_annotation (id, document_id, project_id, owner_id, family) VALUES (?, 'd1', 'p1', 'u1', 'note')`).run(annId);
+  db.prepare(`INSERT INTO InitDoc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES (?, ?, 0, ?, ?)`)
+    .run(annId, blockId, JSON.stringify({ point: ['point', ['root'], 'left'], basisFrontier: [] }), JSON.stringify({ point: ['point', ['element', [[A, 2], 1]], 'right'], basisFrontier: [[A, 2]] }));
+
+  const result = await app.dispatch({
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
+  });
+  assert.equal(result.ok, false);
+  assert.equal(db.prepare('SELECT structure_version FROM InitDoc_body_state WHERE document_id = ?').get('d1').structure_version, 2);
+
+  await app.close?.();
+});
+
+test('R3 merge with both-present measurements retains correct ID and rehomes safely', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const created = await setupR3Doc(app);
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  await setupR3Split(app, blockId);
+
+  const measId = 'meas1';
+  db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES (?, ?, 'source', 1, ?)`).run(measId, blockId, JSON.stringify({ source: 'test', text: 'hello', offset: 0 }));
+
+  const split = await app.dispatch({
+    actionId: 'split', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 2 } },
+  });
+  assert.equal(split.ok, true);
+  const rightBlockId = split.events[0].data.operation.rightBlockId;
+
+  const merge = await app.dispatch({
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 1]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
+  });
+  assert.equal(merge.ok, true);
+
+  const measurements = db.prepare(`SELECT * FROM InitDoc_body_measurement WHERE block_id = ?`).all(blockId);
+  assert.equal(measurements.length, 1);
+  assert.equal(measurements[0].id, measId);
+  const payload = JSON.parse(measurements[0].payload);
+  assert.equal(payload.text, 'hello');
+  assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM InitDoc_body_measurement WHERE block_id = ?`).get(rightBlockId).count, 0);
+
+  await app.close?.();
+});
+
+test('R3 merge with left-only measurement retains correct ID and rehomes safely', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+
+  const measId = 'meas1';
+  db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES (?, ?, 'source', 1, ?)`).run(measId, blockId, JSON.stringify({ source: 'test', text: 'helloworld', offset: 0 }));
+
+  const merge = await app.dispatch({
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
+  });
+  assert.equal(merge.ok, true);
+
+  const measurements = db.prepare(`SELECT * FROM InitDoc_body_measurement WHERE block_id = ?`).all(blockId);
+  assert.equal(measurements.length, 1);
+  assert.equal(measurements[0].id, measId);
+  assert.equal(JSON.parse(measurements[0].payload).text, 'helloworld');
+  assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM InitDoc_body_measurement WHERE id = ?`).get(rightBlockId).count, 0);
+
+  await app.close?.();
+});
+
+test('R3 merge with right-only measurement retains correct ID and rehomes safely', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+
+  const measId = 'meas1';
+  db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES (?, ?, 'source', 1, ?)`).run(measId, rightBlockId, JSON.stringify({ source: 'test', text: 'helloworld', offset: 0 }));
+
+  const merge = await app.dispatch({
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
+  });
+  assert.equal(merge.ok, true);
+
+  const measurements = db.prepare(`SELECT * FROM InitDoc_body_measurement WHERE block_id = ?`).all(blockId);
+  assert.equal(measurements.length, 1);
+  assert.equal(measurements[0].id, measId);
+  assert.equal(JSON.parse(measurements[0].payload).text, 'helloworld');
+  assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM InitDoc_body_measurement WHERE id = ?`).get(rightBlockId).count, 0);
+
+  await app.close?.();
+});
+
+test('R3 merge combine invoked exactly twice with frozen non-identical input/payload snapshots', async () => {
+  const combineCalls = [];
+  registerAnnotatedTextContract('combineCheck', Object.freeze({ kind: 'measurement' }));
+  registerAnnotatedTextStructuralExtension('combineCheck', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition(input) {
+      return Object.freeze({ version: 1, leftPayload: { text: input.blockText.slice(0, input.utf16Offset), offset: input.utf16Offset }, rightPayload: { text: input.blockText.slice(input.utf16Offset), offset: input.utf16Offset } });
+    },
+    combine: function combine(input) {
+      combineCalls.push({ input, frozen: Object.isFrozen(input) && Object.isFrozen(input.left?.payload) && Object.isFrozen(input.right?.payload) });
+      if (input.left !== null && input.right !== null) {
+        return Object.freeze({ version: 1, payload: Object.freeze({ text: input.left.payload.text + input.right.payload.text }) });
+      }
+      if (input.left !== null) return Object.freeze({ version: 1, payload: input.left.payload });
+      if (input.right !== null) return Object.freeze({ version: 1, payload: input.right.payload });
+      return Object.freeze({ version: 1, payload: null });
+    },
+  }));
+
+  function ccDoc() {
+    return entity('CcDoc', {
+      project: ref('Project'), owner: ref('User'),
+      body: annotatedText({ project: 'project', owner: 'owner', block: {}, annotations: [annotation('note', { fields: {} })], measurements: [measurement('cc', { extension: 'combineCheck' })] }),
+      grant: [scope(() => everyone()).can(() => grant(read, write))],
+    });
+  }
+
+  const db = new DatabaseSync(':memory:');
+  const CcDoc = ccDoc();
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  db.exec("INSERT INTO Project (id) VALUES ('p1')");
+  db.exec("INSERT INTO User (id) VALUES ('u1')");
+  executeDDL(CcDoc, db);
+  const app = workbench({ db, entities: [CcDoc] });
+  app.start();
+  await app.ready;
+
+  const created = await app.dispatch({
+    actionId: 'create', type: 'CcDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
+  });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+
+  await app.dispatch({
+    actionId: 'op1', type: 'CcDoc.body.operation', scope: 'CcDoc:d1', principal: { id: 'u1' },
+    payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
+  });
+
+  db.prepare(`INSERT INTO CcDoc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', ?, 'cc', 1, '{}')`).run(blockId);
+
+  const split = await app.dispatch({
+    actionId: 'split', type: 'CcDoc.body.operation', scope: 'CcDoc:d1', principal: { id: 'u1' },
+    payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 2 } },
+  });
+  assert.equal(split.ok, true);
+  const rightBlockId = split.events[0].data.operation.rightBlockId;
+
+  combineCalls.length = 0;
+  const merge = await app.dispatch({
+    actionId: 'merge', type: 'CcDoc.body.operation', scope: 'CcDoc:d1', principal: { id: 'u1' },
+    payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 1]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
+  });
+  assert.equal(merge.ok, true);
+  assert.equal(combineCalls.length, 2);
+  assert.equal(combineCalls[0].frozen, true);
+  assert.equal(combineCalls[1].frozen, true);
+  assert.notEqual(combineCalls[0].input, combineCalls[1].input);
+  assert.notEqual(combineCalls[0].input.left, combineCalls[1].input.left);
+  assert.notEqual(combineCalls[0].input.right, combineCalls[1].input.right);
+  assert.notEqual(combineCalls[0].input.left.payload, combineCalls[1].input.left.payload);
+  assert.notEqual(combineCalls[0].input.right.payload, combineCalls[1].input.right.payload);
+  assert.deepEqual(combineCalls[0].input, combineCalls[1].input);
+
+  await app.close?.();
+});
+
+test('R3 merge nondeterministic combine rolls back', async () => {
+  let callCount = 0;
+  registerAnnotatedTextContract('nonDetMergMeas', Object.freeze({ kind: 'measurement' }));
+  registerAnnotatedTextStructuralExtension('nonDetMergMeas', Object.freeze({
+    version: 1,
+    validate: function validate() {},
+    edit: function edit() {},
+    partition: function partition(input) {
+      return Object.freeze({ version: 1, leftPayload: { text: input.blockText.slice(0, input.utf16Offset) }, rightPayload: { text: input.blockText.slice(input.utf16Offset) } });
+    },
+    combine: function combine(input) {
+      callCount++;
+      if (callCount === 1) return Object.freeze({ version: 1, payload: { text: 'hello' } });
+      return Object.freeze({ version: 1, payload: { text: 'WORLD' } });
+    },
+  }));
+
+  function ndDoc() {
+    return entity('NdDoc', {
+      project: ref('Project'), owner: ref('User'),
+      body: annotatedText({ project: 'project', owner: 'owner', block: {}, annotations: [annotation('note', { fields: {} })], measurements: [measurement('nd', { extension: 'nonDetMergMeas' })] }),
+      grant: [scope(() => everyone()).can(() => grant(read, write))],
+    });
+  }
+
+  const db = new DatabaseSync(':memory:');
+  const NdDoc = ndDoc();
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  db.exec("INSERT INTO Project (id) VALUES ('p1')");
+  db.exec("INSERT INTO User (id) VALUES ('u1')");
+  executeDDL(NdDoc, db);
+  const app = workbench({ db, entities: [NdDoc] });
+  app.start();
+  await app.ready;
+
+  const created = await app.dispatch({
+    actionId: 'create', type: 'NdDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
+  });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+
+  await app.dispatch({
+    actionId: 'op1', type: 'NdDoc.body.operation', scope: 'NdDoc:d1', principal: { id: 'u1' },
+    payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
+  });
+
+  db.prepare(`INSERT INTO NdDoc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', ?, 'nd', 1, '{}')`).run(blockId);
+
+  const split = await app.dispatch({
+    actionId: 'split', type: 'NdDoc.body.operation', scope: 'NdDoc:d1', principal: { id: 'u1' },
+    payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 2 } },
+  });
+  assert.equal(split.ok, true);
+  const rightBlockId = split.events[0].data.operation.rightBlockId;
+
+  callCount = 0;
+  const merge = await app.dispatch({
+    actionId: 'merge', type: 'NdDoc.body.operation', scope: 'NdDoc:d1', principal: { id: 'u1' },
+    payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 1]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
+  });
+  assert.equal(merge.ok, false);
+  assert.equal(merge.failure.category, 'invalid-input');
+  assert.equal(db.prepare('SELECT structure_version FROM NdDoc_body_state WHERE document_id = ?').get('d1').structure_version, 2);
+
+  await app.close?.();
+});
+
+test('R3 projection valid event applies even if combine is changed to throw after event admission', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+
+  const merge = await app.dispatch({
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
+  });
+  assert.equal(merge.ok, true);
+
+  const state = db.prepare('SELECT structure_version FROM InitDoc_body_state WHERE document_id = ?').get('d1');
+  assert.equal(state.structure_version, 3);
+  const family = restoreTextFamilyCheckpoint(JSON.parse(db.prepare('SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint));
+  assert.equal(materializeBlock(family, blockId), 'worldhello');
+
+  await app.close?.();
+});
+
+test('R3 tampered event rejects with unchanged state and rows', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+
+  const originalState = JSON.parse(JSON.stringify(db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1')));
+  const originalBlockCount = db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_block WHERE document_id = ?').get('d1').count;
+
+  const handle = native('InitDoc', 'body', 'operated');
+  const currentFamily = restoreTextFamilyCheckpoint(JSON.parse(originalState.family_checkpoint));
+  const reduced = mergeBlocks(currentFamily, blockId, rightBlockId);
+  const tamperedFamily = { ...reduced, checkpoint: { ...reduced.checkpoint, frontier: [['bogus', 1]] } };
+
+  assert.throws(() => app.entities.get('InitDoc').projection.apply({
+    handle,
+    data: {
+      version: 3,
+      id: 'd1',
+      before: { structuralRevision: 2, frontier: [[A, 2]] },
+      operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId },
+      after: { structuralRevision: 3, frontier: [[A, 2]] },
+      family: textFamilyCheckpoint(tamperedFamily),
+      block: { id: blockId, epoch: 1, cells: { reviewed: true } },
+      memberships: [],
+      measurements: [],
+    },
+  }, db));
+
+  const afterState = db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1');
+  assert.equal(afterState.structure_version, originalState.structure_version);
+  assert.equal(afterState.family_checkpoint, originalState.family_checkpoint);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_block WHERE document_id = ?').get('d1').count, originalBlockCount);
+
+  await app.close?.();
+});
+
+test('R3 projection rejects tampered stored right block cells with unchanged state', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+
+  const originalState = JSON.parse(JSON.stringify(db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1')));
+  const originalBlockCount = db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_block WHERE document_id = ?').get('d1').count;
+
+  db.prepare(`UPDATE InitDoc_body_block SET reviewed = 0 WHERE id = ?`).run(rightBlockId);
+
+  const handle = native('InitDoc', 'body', 'operated');
+  const currentFamily = restoreTextFamilyCheckpoint(JSON.parse(originalState.family_checkpoint));
+  const reduced = mergeBlocks(currentFamily, blockId, rightBlockId);
+
+  assert.throws(() => app.entities.get('InitDoc').projection.apply({
+    handle,
+    data: {
+      version: 3,
+      id: 'd1',
+      before: { structuralRevision: 2, frontier: [[A, 2]] },
+      operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId },
+      after: { structuralRevision: 3, frontier: [[A, 2]] },
+      family: textFamilyCheckpoint(reduced),
+      block: { id: blockId, epoch: 1, cells: { reviewed: true } },
+      memberships: [],
+      measurements: [],
+    },
+  }, db), /right block cells must equal left block cells/);
+
+  const afterState = db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1');
+  assert.equal(afterState.structure_version, originalState.structure_version);
+  assert.equal(afterState.family_checkpoint, originalState.family_checkpoint);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_block WHERE document_id = ?').get('d1').count, originalBlockCount);
+
+  await app.close?.();
+});
+
+test('R3 projection rejects an event that omits a present measurement family', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+  db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', ?, 'source', 1, ?)`)
+    .run(blockId, JSON.stringify({ source: 'test', text: 'world', offset: 0 }));
+
+  const originalState = JSON.parse(JSON.stringify(db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1')));
+  const originalMeasurements = db.prepare('SELECT * FROM InitDoc_body_measurement ORDER BY id').all();
+  const currentFamily = restoreTextFamilyCheckpoint(JSON.parse(originalState.family_checkpoint));
+  const reduced = mergeBlocks(currentFamily, blockId, rightBlockId);
+
+  assert.throws(() => app.entities.get('InitDoc').projection.apply({
+    handle: native('InitDoc', 'body', 'operated'),
+    data: {
+      version: 3,
+      id: 'd1',
+      before: { structuralRevision: 2, frontier: [[A, 2]] },
+      operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId },
+      after: { structuralRevision: 3, frontier: [[A, 2]] },
+      family: textFamilyCheckpoint(reduced),
+      block: { id: blockId, epoch: 1, cells: { reviewed: true } },
+      memberships: [],
+      measurements: [],
+    },
+  }, db), /measurement family count does not match source rows/);
+
+  const afterState = db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1');
+  assert.equal(afterState.structure_version, originalState.structure_version);
+  assert.equal(afterState.family_checkpoint, originalState.family_checkpoint);
+  assert.deepEqual(db.prepare('SELECT * FROM InitDoc_body_measurement ORDER BY id').all(), originalMeasurements);
+
+  await app.close?.();
+});
+
+test('R3 projection rejects per-side source omission when both sides have rows', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+  const sourcePayload = { source: 'test', text: 'hello', offset: 0 };
+  db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES ('left-source', ?, 'source', 1, ?)`)
+    .run(blockId, JSON.stringify(sourcePayload));
+  db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES ('right-source', ?, 'source', 1, ?)`)
+    .run(rightBlockId, JSON.stringify(sourcePayload));
+
+  const originalState = JSON.parse(JSON.stringify(db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1')));
+  const originalBlocks = db.prepare('SELECT * FROM InitDoc_body_block ORDER BY id').all();
+  const originalMeasurements = db.prepare('SELECT * FROM InitDoc_body_measurement ORDER BY id').all();
+  const reduced = mergeBlocks(restoreTextFamilyCheckpoint(JSON.parse(originalState.family_checkpoint)), blockId, rightBlockId);
+  const base = () => ({
+    version: 3, id: 'd1',
+    before: { structuralRevision: 2, frontier: [[A, 2]] },
+    operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId },
+    after: { structuralRevision: 3, frontier: [[A, 2]] },
+    family: textFamilyCheckpoint(reduced),
+    block: { id: blockId, epoch: 1, cells: { reviewed: true } },
+    memberships: [],
+    measurements: [{
+      family: 'source', formatVersion: 1,
+      leftSource: { id: 'left-source', blockId, payload: sourcePayload },
+      rightSource: { id: 'right-source', blockId: rightBlockId, payload: sourcePayload },
+      result: { id: 'left-source', blockId, payload: { text: 'worldhello' } },
+      removedId: 'right-source',
+    }],
+  });
+  const invalidEvents = [
+    (data) => { data.measurements[0].leftSource = null; },
+    (data) => { data.measurements[0].rightSource = null; },
+  ];
+
+  for (const mutate of invalidEvents) {
+    const data = base();
+    mutate(data);
+    assert.throws(() => app.entities.get('InitDoc').projection.apply({
+      handle: native('InitDoc', 'body', 'operated'), data,
+    }, db));
+    const afterState = db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1');
+    assert.equal(afterState.structure_version, originalState.structure_version);
+    assert.equal(afterState.family_checkpoint, originalState.family_checkpoint);
+    assert.equal(JSON.stringify(db.prepare('SELECT * FROM InitDoc_body_block ORDER BY id').all()), JSON.stringify(originalBlocks));
+    assert.equal(JSON.stringify(db.prepare('SELECT * FROM InitDoc_body_measurement ORDER BY id').all()), JSON.stringify(originalMeasurements));
+  }
+
+  await app.close?.();
+});
+
+test('R3 projection rejects invalid right-only measurement lineage and result payloads', async () => {
+  const { app, db } = r3AppFor();
+  await app.ready;
+  const { blockId, rightBlockId } = await setupR3Mergable(app, db);
+  const sourcePayload = { source: 'test', text: 'hello', offset: 0 };
+  db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES ('right-source', ?, 'source', 1, ?)`)
+    .run(rightBlockId, JSON.stringify(sourcePayload));
+
+  const originalState = JSON.parse(JSON.stringify(db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1')));
+  const originalBlocks = db.prepare('SELECT * FROM InitDoc_body_block ORDER BY id').all();
+  const originalMeasurements = db.prepare('SELECT * FROM InitDoc_body_measurement ORDER BY id').all();
+  const reduced = mergeBlocks(restoreTextFamilyCheckpoint(JSON.parse(originalState.family_checkpoint)), blockId, rightBlockId);
+  const base = () => ({
+    version: 3, id: 'd1',
+    before: { structuralRevision: 2, frontier: [[A, 2]] },
+    operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId },
+    after: { structuralRevision: 3, frontier: [[A, 2]] },
+    family: textFamilyCheckpoint(reduced),
+    block: { id: blockId, epoch: 1, cells: { reviewed: true } },
+    memberships: [],
+    measurements: [{
+      family: 'source', formatVersion: 1,
+      leftSource: null,
+      rightSource: { id: 'right-source', blockId: rightBlockId, payload: sourcePayload },
+      result: { id: 'right-source', blockId, payload: { text: 'worldhello' } },
+      removedId: null,
+    }],
+  });
+  const invalidEvents = [
+    (data) => { data.measurements[0].result.id = 'substituted'; },
+    (data) => { data.measurements[0].rightSource.id = 'left-source'; },
+    (data) => { data.measurements[0].removedId = 'right-source'; },
+    (data) => { data.measurements[0].result.blockId = rightBlockId; },
+    (data) => { data.measurements[0].result.blockId = 'some-arbitrary-id'; },
+    (data) => { data.measurements[0].result.payload = undefined; },
+    (data) => { data.measurements[0].result.payload = { value: NaN }; },
+    (data) => { data.measurements[0].result.payload = { value: Infinity }; },
+  ];
+
+  for (const mutate of invalidEvents) {
+    const data = base();
+    mutate(data);
+    assert.throws(() => app.entities.get('InitDoc').projection.apply({
+      handle: native('InitDoc', 'body', 'operated'), data,
+    }, db));
+    const afterState = db.prepare('SELECT * FROM InitDoc_body_state WHERE document_id = ?').get('d1');
+    assert.equal(afterState.structure_version, originalState.structure_version);
+    assert.equal(afterState.family_checkpoint, originalState.family_checkpoint);
+    assert.equal(JSON.stringify(db.prepare('SELECT * FROM InitDoc_body_block ORDER BY id').all()), JSON.stringify(originalBlocks));
+    assert.equal(JSON.stringify(db.prepare('SELECT * FROM InitDoc_body_measurement ORDER BY id').all()), JSON.stringify(originalMeasurements));
+  }
 
   await app.close?.();
 });

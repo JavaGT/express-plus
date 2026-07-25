@@ -3,10 +3,10 @@ import { serializeField, flattenStruct, resolveStrategy, deserializeField } from
 import * as eventHandle from '../event-handle.mjs';
 import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
 import { applyTextOp, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
-import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock } from '../annotated-text-family.mjs';
-import { splitBlockMemberships } from '../annotated-text-membership.mjs';
-import { getAnnotatedTextCompiledMetadata } from '../annotated-text-field.mjs';
-import { deriveBlockPosition } from '../annotated-text-r2.mjs';
+import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock, mergeBlocks } from '../annotated-text-family.mjs';
+import { splitBlockMemberships, mergeBlocksMemberships } from '../annotated-text-membership.mjs';
+import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
+import { deriveBlockPosition, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
 
 const INITIAL_BLOCK_POSITION = 'a0';
 
@@ -85,6 +85,7 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db }) {
   }
   if (data.version === 1) return applyR1AnnotatedTextOperation({ name, handle, db, data });
   if (data.version === 2) return applyR2AnnotatedTextOperation({ name, handle, db, descriptor, data });
+  if (data.version === 3) return applyR3AnnotatedTextOperation({ name, handle, db, descriptor, data });
   throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
 }
 
@@ -396,6 +397,357 @@ function applyR2AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   }
 
   getLog().debug('dispatch', `${name}.${handle.field}.operated v2`, { id: data.id, leftBlockId, rightBlockId });
+  return true;
+}
+
+function applyR3AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+  const prefix = `${name}_${handle.field}`;
+  const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
+  const measurementConfigs = compiledMeta?.measurementConfigs ?? {};
+  const measurementFamilyList = compiledMeta?.measurementFamilyList ?? [];
+
+  const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
+
+  const operation = data.operation;
+  if (Object.keys(data).length !== 9 || data.version !== 3 ||
+      !isVersion(data.before) || !isVersion(data.after) ||
+      !operation || typeof operation !== 'object' ||
+      operation.kind !== 'block.merge' ||
+      typeof operation.leftBlockId !== 'string' || typeof operation.rightBlockId !== 'string' ||
+      !data.family || !data.block || !data.memberships || !data.measurements) {
+    throw new Error(`${name}.${handle.field}.operated v3 event has invalid composite data`);
+  }
+
+  const { leftBlockId, rightBlockId } = operation;
+  if (leftBlockId === rightBlockId) {
+    throw new Error(`${name}.${handle.field}.operated v3 event left and right block IDs must differ`);
+  }
+
+  const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
+  if (!state) throw new Error(`${name}.${handle.field}.operated document does not exist`);
+  const currentFamily = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+  if (state.structure_version !== data.before.structuralRevision ||
+      JSON.stringify(currentFamily.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v3 event conflicts with projection state`);
+  }
+
+  const next = restoreTextFamilyCheckpoint(data.family);
+  if (next.id !== data.id || JSON.stringify(textFamilyCheckpoint(next)) !== JSON.stringify(data.family)) {
+    throw new Error(`${name}.${handle.field}.operated v3 event family is not canonical`);
+  }
+
+  const expectedAfterRevision = data.before.structuralRevision + 1;
+  if (data.after.structuralRevision !== expectedAfterRevision ||
+      JSON.stringify(data.after.frontier) !== JSON.stringify(data.before.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v3 event has inconsistent after revision`);
+  }
+
+  let reduced;
+  try {
+    reduced = mergeBlocks(currentFamily, leftBlockId, rightBlockId);
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v3 event merge is not applicable to prior state`);
+  }
+  if (JSON.stringify(textFamilyCheckpoint(reduced)) !== JSON.stringify(data.family)) {
+    throw new Error(`${name}.${handle.field}.operated v3 event family does not match its merge operation`);
+  }
+
+  const leftBlockStored = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(leftBlockId);
+  if (!leftBlockStored) throw new Error(`${name}.${handle.field}.operated v3 left block not found`);
+  const rightBlockStored = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(rightBlockId);
+  if (!rightBlockStored) throw new Error(`${name}.${handle.field}.operated v3 right block not found`);
+  if (rightBlockStored.epoch !== leftBlockStored.epoch) {
+    throw new Error(`${name}.${handle.field}.operated v3 event right block epoch must equal left block epoch`);
+  }
+
+  const blockFieldNames = Object.keys(descriptor.block ?? {});
+
+  const leftBlockCells = {};
+  for (const bf of blockFieldNames) {
+    const bd = descriptor.block[bf];
+    leftBlockCells[bf] = deserializeField(bd, leftBlockStored[bf]);
+  }
+
+  const rightBlockCells = {};
+  for (const bf of blockFieldNames) {
+    const bd = descriptor.block[bf];
+    rightBlockCells[bf] = deserializeField(bd, rightBlockStored[bf]);
+  }
+
+  if (JSON.stringify(rightBlockCells) !== JSON.stringify(leftBlockCells)) {
+    throw new Error(`${name}.${handle.field}.operated v3 event right block cells must equal left block cells`);
+  }
+
+  const blockFact = data.block;
+  if (!blockFact || typeof blockFact !== 'object' || Array.isArray(blockFact) ||
+      JSON.stringify(Object.keys(blockFact).sort()) !== JSON.stringify(['cells', 'epoch', 'id'].sort()) ||
+      blockFact.id !== leftBlockId || blockFact.epoch !== leftBlockStored.epoch) {
+    throw new Error(`${name}.${handle.field}.operated v3 event block fact does not match stored left block`);
+  }
+  const factCellKeys = Object.keys(blockFact.cells).sort();
+  if (JSON.stringify(factCellKeys) !== JSON.stringify([...blockFieldNames].sort())) {
+    throw new Error(`${name}.${handle.field}.operated v3 event block fact cells do not match declaration`);
+  }
+  for (const fieldName of blockFieldNames) {
+    if (JSON.stringify(blockFact.cells[fieldName]) !== JSON.stringify(leftBlockCells[fieldName])) {
+      throw new Error(`${name}.${handle.field}.operated v3 event block fact cells do not match stored left block`);
+    }
+  }
+
+  const sourceMemberships = db.prepare(
+    `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point
+       FROM ${prefix}_membership AS membership
+       JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
+      WHERE annotation.document_id = ?`,
+  ).all(data.id);
+  const pureMemberships = sourceMemberships.map(m => ({
+    annotationId: m.annotation_id,
+    blockId: m.block_id,
+    ordinal: m.ordinal,
+    start: JSON.parse(m.start_point),
+    end: JSON.parse(m.end_point),
+  }));
+
+  const annotationRows = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ?`).all(data.id);
+  const pureAnnotations = annotationRows.map(a => ({ id: a.id, family: a.family }));
+
+  let membershipResult;
+  try {
+    membershipResult = mergeBlocksMemberships(currentFamily, pureAnnotations, pureMemberships, leftBlockId, rightBlockId);
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v3 event membership merge is not applicable to prior state`);
+  }
+
+  const affectedAnnotationIds = new Set(pureMemberships.filter(m => m.blockId === leftBlockId || m.blockId === rightBlockId).map(m => m.annotationId));
+  const expectedMemberships = membershipResult.memberships.filter(m => affectedAnnotationIds.has(m.annotationId)).map(m => ({
+    annotationId: m.annotationId,
+    blockId: m.blockId,
+    ordinal: m.ordinal,
+    start: m.start,
+    end: m.end,
+  }));
+
+  if (JSON.stringify(data.memberships) !== JSON.stringify(expectedMemberships)) {
+    throw new Error(`${name}.${handle.field}.operated v3 event memberships do not match merge membership projection`);
+  }
+
+  if (!Array.isArray(data.measurements)) {
+    throw new Error(`${name}.${handle.field}.operated v3 event measurements must be an array`);
+  }
+
+  const expectedKeys = ['family', 'formatVersion', 'leftSource', 'rightSource', 'result', 'removedId'];
+
+  const leftMeasRows = db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id = ? ORDER BY family`).all(leftBlockId);
+  const rightMeasRows = db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id = ? ORDER BY family`).all(rightBlockId);
+
+  const leftMeasByFamily = {};
+  for (const row of leftMeasRows) leftMeasByFamily[row.family] = row;
+  const rightMeasByFamily = {};
+  for (const row of rightMeasRows) rightMeasByFamily[row.family] = row;
+
+  const leftFamilies = leftMeasRows.map(r => r.family);
+  const rightFamilies = rightMeasRows.map(r => r.family);
+  const allSourceFamilies = new Set([...leftFamilies, ...rightFamilies]);
+
+  const factFamilies = data.measurements.map(f => f.family);
+  const factFamilySet = new Set(factFamilies);
+
+  if (factFamilies.length !== factFamilySet.size) {
+    throw new Error(`${name}.${handle.field}.operated v3 event measurements contain duplicate families`);
+  }
+  if (factFamilies.length !== allSourceFamilies.size) {
+    throw new Error(`${name}.${handle.field}.operated v3 event measurement family count does not match source rows`);
+  }
+  for (const family of allSourceFamilies) {
+    if (!factFamilySet.has(family)) {
+      throw new Error(`${name}.${handle.field}.operated v3 event measurements missing family '${family}' present in source blocks`);
+    }
+  }
+  for (const family of factFamilies) {
+    if (!allSourceFamilies.has(family)) {
+      throw new Error(`${name}.${handle.field}.operated v3 event measurements contain family '${family}' not present in source blocks`);
+    }
+  }
+  for (const family of factFamilies) {
+    if (!measurementConfigs[family]) {
+      throw new Error(`${name}.${handle.field}.operated v3 event measurement fact has unknown family '${family}'`);
+    }
+  }
+
+  const factSnapshots = [];
+
+  for (let i = 0; i < data.measurements.length; i++) {
+    const fact = data.measurements[i];
+    if (!fact || typeof fact !== 'object' || Array.isArray(fact) ||
+        JSON.stringify(Object.keys(fact).sort()) !== JSON.stringify([...expectedKeys].sort())) {
+      throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} has invalid shape`);
+    }
+
+    if (typeof fact.family !== 'string' || typeof fact.formatVersion !== 'number') {
+      throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} has invalid family or formatVersion`);
+    }
+
+    const config = measurementConfigs[fact.family];
+    if (!config) throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} has unknown family '${fact.family}'`);
+    if (fact.formatVersion !== config.formatVersion) {
+      throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} format version does not match declaration`);
+    }
+
+    const leftSource = fact.leftSource;
+    const rightSource = fact.rightSource;
+    const result = fact.result;
+    if (!result || typeof result !== 'object' || Array.isArray(result) ||
+        JSON.stringify(Object.keys(result).sort()) !== JSON.stringify(['blockId', 'id', 'payload'].sort())) {
+      throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} result has invalid shape`);
+    }
+    if (typeof result.id !== 'string' || result.id.length === 0) {
+      throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} result id must be a nonempty string`);
+    }
+    if (result.blockId !== leftBlockId) {
+      throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} result blockId must be left blockId`);
+    }
+    const removedId = fact.removedId;
+
+    const leftRow = leftMeasByFamily[fact.family];
+    const rightRow = rightMeasByFamily[fact.family];
+
+    if (leftSource === null) {
+      if (leftRow) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} leftSource must be non-null when left has a row for family '${fact.family}'`);
+      }
+    } else {
+      if (!leftRow) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} leftSource must be null when left has no row for family '${fact.family}'`);
+      }
+      if (typeof leftSource !== 'object' || Array.isArray(leftSource) ||
+          JSON.stringify(Object.keys(leftSource).sort()) !== JSON.stringify(['blockId', 'id', 'payload'].sort())) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} leftSource has invalid shape`);
+      }
+      if (leftSource.blockId !== leftBlockId) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} leftSource blockId must be left block`);
+      }
+      if (leftSource.id !== leftRow.id) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} leftSource id does not match stored row`);
+      }
+      if (leftRow.family !== fact.family) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} leftSource family does not match fact`);
+      }
+      if (leftRow.format_version !== fact.formatVersion) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} leftSource format_version does not match fact`);
+      }
+      if (JSON.stringify(JSON.parse(leftRow.payload)) !== JSON.stringify(leftSource.payload)) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} leftSource payload does not match stored row`);
+      }
+      frozenJsonSnapshot(leftSource.payload);
+      if (result.id !== leftSource.id) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} result id must be leftSource id when leftSource is present`);
+      }
+    }
+
+    if (rightSource === null) {
+      if (rightRow) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} rightSource must be non-null when right has a row for family '${fact.family}'`);
+      }
+    } else {
+      if (!rightRow) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} rightSource must be null when right has no row for family '${fact.family}'`);
+      }
+      if (typeof rightSource !== 'object' || Array.isArray(rightSource) ||
+          JSON.stringify(Object.keys(rightSource).sort()) !== JSON.stringify(['blockId', 'id', 'payload'].sort())) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} rightSource has invalid shape`);
+      }
+      if (rightSource.blockId !== rightBlockId) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} rightSource blockId must be right block`);
+      }
+      if (rightSource.id !== rightRow.id) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} rightSource id does not match stored row`);
+      }
+      if (rightRow.family !== fact.family) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} rightSource family does not match fact`);
+      }
+      if (rightRow.format_version !== fact.formatVersion) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} rightSource format_version does not match fact`);
+      }
+      if (JSON.stringify(JSON.parse(rightRow.payload)) !== JSON.stringify(rightSource.payload)) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} rightSource payload does not match stored row`);
+      }
+      frozenJsonSnapshot(rightSource.payload);
+      if (leftSource === null && result.id !== rightSource.id) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} result id must be rightSource id when only rightSource is present`);
+      }
+    }
+
+    if (leftSource !== null && rightSource !== null) {
+      if (removedId !== rightSource.id) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} removedId must be rightSource id when both sources present`);
+      }
+    } else if (leftSource === null && rightSource === null) {
+      throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} has both sources null`);
+    } else {
+      if (removedId !== null) {
+        throw new Error(`${name}.${handle.field}.operated v3 event measurement fact ${i} removedId must be null when one source is absent`);
+      }
+    }
+
+    const resultSnapshot = frozenJsonSnapshot(result.payload);
+    factSnapshots.push(resultSnapshot);
+  }
+
+  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`)
+    .run(data.after.structuralRevision, JSON.stringify(textFamilyCheckpoint(reduced)), data.id);
+
+  const familyBlocks = reduced.blocks;
+  const blocksToUpdate = db.prepare(`SELECT * FROM ${prefix}_block WHERE document_id = ?`).all(data.id);
+  const existingById = {};
+  for (const b of blocksToUpdate) existingById[b.id] = b;
+
+  if (!existingById[leftBlockId]) {
+    throw new Error(`${name}.${handle.field}.operated v3 left block vanished before projection`);
+  }
+  if (!existingById[rightBlockId]) {
+    throw new Error(`${name}.${handle.field}.operated v3 right block vanished before projection`);
+  }
+
+  for (const [index, fb] of familyBlocks.entries()) {
+    const pos = deriveBlockPosition(index);
+    const bid = fb.id;
+    const existing = existingById[bid];
+    if (!existing) {
+      throw new Error(`${name}.${handle.field}.operated v3 family references unknown block '${bid}'`);
+    }
+    if (existing.structure_version >= data.after.structuralRevision) {
+      throw new Error(`${name}.${handle.field}.operated v3 block '${bid}' structure_version already at or past target`);
+    }
+    db.prepare(`UPDATE ${prefix}_block SET position = ?, structure_version = ? WHERE id = ?`)
+      .run(pos, data.after.structuralRevision, bid);
+  }
+
+  for (const annId of affectedAnnotationIds) {
+    db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(annId);
+  }
+
+  for (const m of membershipResult.memberships.filter(m => affectedAnnotationIds.has(m.annotationId))) {
+    db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES (?, ?, ?, ?, ?)`)
+      .run(m.annotationId, m.blockId, m.ordinal, JSON.stringify(m.start), JSON.stringify(m.end));
+  }
+
+  for (let fi = 0; fi < data.measurements.length; fi++) {
+    const fact = data.measurements[fi];
+    const result = fact.result;
+    const removedId = fact.removedId;
+
+    if (removedId) {
+      db.prepare(`DELETE FROM ${prefix}_measurement WHERE id = ?`).run(removedId);
+    }
+
+    db.prepare(`UPDATE ${prefix}_measurement SET block_id = ?, payload = ? WHERE id = ?`)
+      .run(result.blockId, JSON.stringify(factSnapshots[fi]), result.id);
+  }
+
+  db.prepare(`DELETE FROM ${prefix}_block WHERE id = ?`).run(rightBlockId);
+
+  getLog().debug('dispatch', `${name}.${handle.field}.operated v3`, { id: data.id, leftBlockId, rightBlockId });
   return true;
 }
 

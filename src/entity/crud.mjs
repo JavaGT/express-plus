@@ -13,10 +13,11 @@ import { validateMaterializedField, validateMutation, ValidationError, deseriali
 import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { canonicalTextOp } from '../annotated-text.mjs';
-import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, materializeBlock, textFamilyCheckpoint } from '../annotated-text-family.mjs';
-import { splitBlockMemberships } from '../annotated-text-membership.mjs';
+import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint } from '../annotated-text-family.mjs';
+import { splitBlockMemberships, mergeBlocksMemberships } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { assertR2BlockSplitPayload, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
+import { assertR3BlockMergePayload, canonicalJsonEqual } from '../annotated-text-r3.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 
@@ -224,8 +225,10 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         command = assertAnnotatedTextOperationPayload(name, fieldName, payload);
       } else if (payload.version === 2) {
         command = assertR2BlockSplitPayload(name, fieldName, payload);
+      } else if (payload.version === 3) {
+        command = assertR3BlockMergePayload(name, fieldName, payload);
       } else {
-        throw new ValidationError(`${name}.${fieldName}.operation requires version 1 or 2`);
+        throw new ValidationError(`${name}.${fieldName}.operation requires version 1, 2, or 3`);
       }
       const documentScope = scopeOf(name, command.id).key;
       if (scope !== documentScope) {
@@ -485,9 +488,237 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       }];
     };
 
+    const r3Handler = ({ payload, db, scope }) => {
+      const command = assertDocumentScope({ payload, scope });
+      const documentScope = scopeOf(name, command.id).key;
+      const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
+      if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+      const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+      if (state.structure_version !== command.expected.structuralRevision ||
+          JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(command.expected.frontier)) {
+        throw new ValidationError(`${name}.${fieldName}.operation conflicts with the current structural revision or frontier`);
+      }
+
+      const { leftBlockId, rightBlockId } = command.operation;
+      if (leftBlockId === rightBlockId) {
+        throw new ValidationError(`${name}.${fieldName}.operation left and right block IDs must be different`);
+      }
+
+      const leftBlockStored = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(leftBlockId);
+      if (!leftBlockStored) throw new ValidationError(`${name}.${fieldName}.operation left block not found`);
+      const rightBlockStored = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(rightBlockId);
+      if (!rightBlockStored) throw new ValidationError(`${name}.${fieldName}.operation right block not found`);
+
+      const blockFields = Object.keys(descriptor.block ?? {});
+
+      const leftBlockCells = {};
+      for (const bf of blockFields) {
+        const bd = descriptor.block[bf];
+        leftBlockCells[bf] = deserializeField(bd, leftBlockStored[bf]);
+      }
+      const rightBlockCells = {};
+      for (const bf of blockFields) {
+        const bd = descriptor.block[bf];
+        rightBlockCells[bf] = deserializeField(bd, rightBlockStored[bf]);
+      }
+
+      if (JSON.stringify(rightBlockCells) !== JSON.stringify(leftBlockCells)) {
+        throw new ValidationError(`${name}.${fieldName}.operation right block cells must equal left block cells`);
+      }
+      if (rightBlockStored.epoch !== leftBlockStored.epoch) {
+        throw new ValidationError(`${name}.${fieldName}.operation right block epoch must equal left block epoch`);
+      }
+
+      const afterRevision = state.structure_version + 1;
+
+      let mergeResult;
+      try {
+        mergeResult = mergeBlocks(family, leftBlockId, rightBlockId);
+      } catch (error) {
+        throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+      }
+
+      const memberships = db.prepare(
+        `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point
+           FROM ${prefix}_membership AS membership
+           JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
+          WHERE annotation.document_id = ?`,
+      ).all(command.id);
+      const pureMemberships = memberships.map(m => ({
+        annotationId: m.annotation_id,
+        blockId: m.block_id,
+        ordinal: m.ordinal,
+        start: JSON.parse(m.start_point),
+        end: JSON.parse(m.end_point),
+      }));
+
+      const annotations = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ?`).all(command.id);
+      const pureAnnotations = annotations.map(a => ({ id: a.id, family: a.family }));
+
+      let membershipResult;
+      try {
+        membershipResult = mergeBlocksMemberships(
+          family, pureAnnotations, pureMemberships, leftBlockId, rightBlockId,
+        );
+      } catch (error) {
+        throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+      }
+
+      const affectedAnnotationIds = new Set(pureMemberships.filter(m => m.blockId === leftBlockId || m.blockId === rightBlockId).map(m => m.annotationId));
+
+      const measurementFacts = [];
+      if (measurementFamilyList.length > 0) {
+        const leftMeasurements = db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id = ? ORDER BY family`).all(leftBlockId);
+        const rightMeasurements = db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id = ? ORDER BY family`).all(rightBlockId);
+
+        const leftByFamily = {};
+        for (const row of leftMeasurements) leftByFamily[row.family] = row;
+        const rightByFamily = {};
+        for (const row of rightMeasurements) rightByFamily[row.family] = row;
+
+        const allFamilies = new Set([...Object.keys(leftByFamily), ...Object.keys(rightByFamily)]);
+        const mergedBlockText = materializeBlock(mergeResult, leftBlockId);
+
+        for (const familyName of allFamilies) {
+          const leftRow = leftByFamily[familyName] ?? null;
+          const rightRow = rightByFamily[familyName] ?? null;
+
+          if (leftRow === null && rightRow === null) continue;
+
+          const measConfig = measurementConfigs[familyName];
+          if (!measConfig) throw new ValidationError(`${name}.${fieldName}.operation unknown measurement family '${familyName}'`);
+
+          const extSpec = resolveDeclarationMeasurementExtension(measConfig);
+          if (!extSpec) throw new ValidationError(`${name}.${fieldName}.operation no structural adapter for measurement '${familyName}'`);
+
+          if (leftRow !== null && leftRow.format_version !== measConfig.formatVersion) {
+            throw new ValidationError(`${name}.${fieldName}.operation left measurement format version does not match declaration`);
+          }
+          if (rightRow !== null && rightRow.format_version !== measConfig.formatVersion) {
+            throw new ValidationError(`${name}.${fieldName}.operation right measurement format version does not match declaration`);
+          }
+          if (leftRow !== null && rightRow !== null && leftRow.format_version !== rightRow.format_version) {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement format version mismatch between left and right`);
+          }
+
+          const leftPayload = leftRow ? frozenJsonSnapshot(JSON.parse(leftRow.payload)) : null;
+          const rightPayload = rightRow ? frozenJsonSnapshot(JSON.parse(rightRow.payload)) : null;
+
+          let leftBlockText = null;
+          let rightBlockText = null;
+          if (leftRow) leftBlockText = materializeBlock(family, leftBlockId);
+          if (rightRow) rightBlockText = materializeBlock(family, rightBlockId);
+
+          const validatePayload = (payload, blockText) => {
+            try {
+              const result = extSpec.validate(Object.freeze({
+                version: 1,
+                formatVersion: measConfig.formatVersion,
+                blockText,
+                payload: frozenJsonSnapshot(payload),
+              }));
+              if (result !== undefined) throw new Error('returned a value');
+            } catch {
+              throw new ValidationError(`${name}.${fieldName}.operation measurement validation failed`);
+            }
+          };
+
+          if (leftRow) validatePayload(leftPayload, leftBlockText);
+          if (rightRow) validatePayload(rightPayload, rightBlockText);
+
+          const makeCombineInput = () => {
+            const freshLeftPayload = leftPayload !== null ? frozenJsonSnapshot(leftPayload) : null;
+            const freshRightPayload = rightPayload !== null ? frozenJsonSnapshot(rightPayload) : null;
+            return Object.freeze({
+              version: 1,
+              formatVersion: measConfig.formatVersion,
+              blockText: mergedBlockText,
+              left: freshLeftPayload !== null ? Object.freeze({ blockText: leftBlockText, payload: freshLeftPayload }) : null,
+              right: freshRightPayload !== null ? Object.freeze({ blockText: rightBlockText, payload: freshRightPayload }) : null,
+            });
+          };
+
+          let result1;
+          let result2;
+          try {
+            result1 = extSpec.combine(makeCombineInput());
+            result2 = extSpec.combine(makeCombineInput());
+          } catch {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement combine failed`);
+          }
+
+          if (!canonicalJsonEqual(result1, result2)) {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement combine is not deterministic`);
+          }
+
+          if (!result1 || typeof result1 !== 'object' || Array.isArray(result1) ||
+              result1.version !== 1 || !Object.hasOwn(result1, 'payload')) {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement combine result must have version 1 and payload`);
+          }
+
+          let combinedPayload;
+          try {
+            combinedPayload = frozenJsonSnapshot(result1.payload);
+          } catch {
+            throw new ValidationError(`${name}.${fieldName}.operation measurement combine payload is not JSON`);
+          }
+
+          validatePayload(combinedPayload, mergedBlockText);
+
+          const retainedId = leftRow ? leftRow.id : rightRow.id;
+          const removedId = leftRow && rightRow ? rightRow.id : null;
+          const formatVersion = (leftRow || rightRow).format_version;
+
+          measurementFacts.push(Object.freeze({
+            family: familyName,
+            formatVersion,
+            leftSource: leftRow ? Object.freeze({ id: leftRow.id, blockId: leftBlockId, payload: leftPayload }) : null,
+            rightSource: rightRow ? Object.freeze({ id: rightRow.id, blockId: rightBlockId, payload: rightPayload }) : null,
+            result: Object.freeze({ id: retainedId, blockId: leftBlockId, payload: combinedPayload }),
+            removedId: removedId || null,
+          }));
+        }
+      }
+
+      const cleanBlockFact = Object.freeze({
+        id: leftBlockId,
+        epoch: leftBlockStored.epoch,
+        cells: Object.freeze(leftBlockCells),
+      });
+
+      const handle = eventHandles.native(name, fieldName, 'operated');
+      return [{
+        handle,
+        type: handle.type,
+        scope: documentScope,
+        data: Object.freeze({
+          version: 3,
+          id: command.id,
+          before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
+          operation: Object.freeze({
+            kind: 'block.merge',
+            leftBlockId,
+            rightBlockId,
+          }),
+          after: Object.freeze({ structuralRevision: afterRevision, frontier: family.checkpoint.frontier }),
+          family: textFamilyCheckpoint(mergeResult),
+          block: cleanBlockFact,
+          memberships: Object.freeze(membershipResult.memberships.filter(m => affectedAnnotationIds.has(m.annotationId)).map(m => ({
+            annotationId: m.annotationId,
+            blockId: m.blockId,
+            ordinal: m.ordinal,
+            start: m.start,
+            end: m.end,
+          }))),
+          measurements: Object.freeze(measurementFacts),
+        }),
+      }];
+    };
+
     const handler = ({ payload, db, scope }) => {
       if (payload.version === 1) return r1Handler({ payload, db, scope });
-      return r2Handler({ payload, db, scope });
+      if (payload.version === 2) return r2Handler({ payload, db, scope });
+      return r3Handler({ payload, db, scope });
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', { value: true });
