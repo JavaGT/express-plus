@@ -147,12 +147,16 @@ function buildDurableAdmission(app) {
         return granted;
       }
       if (verb === 'update') {
-        rearmChangedScheduleReceipts({
-          entity: app.entities?.get(entityName),
-          event,
-          principal,
-          db: hookDb ?? app.db,
-        });
+        const granted = await admitsExistingRow({ entityName, verb, principal, event });
+        if (granted) {
+          rearmChangedScheduleReceipts({
+            entity: app.entities?.get(entityName),
+            event,
+            principal,
+            db: hookDb ?? app.db,
+          });
+        }
+        return granted;
       }
       return true;
     },

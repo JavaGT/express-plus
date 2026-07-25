@@ -46,7 +46,11 @@ registerAnnotatedTextStructuralExtension('sourceInit', Object.freeze({
   },
 }));
 
-function r4Doc({ protectingAccess = async ({ is }) => (await is.owner()) ? grant(read) : grant(), commentEmpty = 'orphan' } = {}) {
+function r4Doc({
+  protectingAccess = async ({ is }) => (await is.owner()) ? grant(read) : grant(),
+  commentEmpty = 'orphan',
+  access = () => grant(read, write),
+} = {}) {
   return entity('R4Doc', {
     project: ref('Project'),
     owner: ref('User', { role: 'owner' }),
@@ -63,7 +67,7 @@ function r4Doc({ protectingAccess = async ({ is }) => (await is.owner()) ? grant
       ],
       measurements: [measurement('source', { extension: 'sourceInit' })],
     }),
-    grant: [scope(() => everyone()).can(() => grant(read, write))],
+    grant: [scope(() => everyone()).can(access)],
   });
 }
 
@@ -233,6 +237,32 @@ test('R5 annotation.detach deletes a last annotation, cleans incoming edges, and
   db.deserialize(beforeDetach);
   app.entities.get('R4Doc').projection.apply({ handle: native('R4Doc', 'body', 'operated'), data: event }, db);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation WHERE id = 'r5-theme'").get().count, 0);
+  await app.close?.();
+});
+
+test('R5 annotation.detach denies a non-writer before log or projection changes', async () => {
+  const ownerOnly = async ({ is }) => (await is.owner()) ? grant(read, write) : grant(read);
+  const { app, db, blockId, state } = await setupDoc('hello world', null, { access: ownerOnly });
+  const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+  const applied = await app.dispatch({
+    actionId: 'r5-denied-theme', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 5, 'r5-denied-theme', 'theme', {}, expected),
+  });
+  assert.equal(applied.ok, true, applied.failure?.message);
+  const afterApply = db.prepare('SELECT structure_version, family_checkpoint FROM R4Doc_body_state WHERE document_id = ?').get('d1');
+  const detachExpected = { structuralRevision: afterApply.structure_version, frontier: JSON.parse(afterApply.family_checkpoint).checkpoint.frontier };
+  const beforeLogCount = db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count;
+  const beforeMembershipCount = db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = 'r5-denied-theme'").get().count;
+
+  const denied = await app.dispatch({
+    actionId: 'r5-denied-detach', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u2' },
+    payload: v5Payload('d1', 'r5-denied-theme', blockId, detachExpected),
+  });
+
+  assert.equal(denied.ok, false);
+  assert.equal(denied.failure?.category, 'denied');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, beforeLogCount);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = 'r5-denied-theme'").get().count, beforeMembershipCount);
   await app.close?.();
 });
 
