@@ -58,7 +58,7 @@ Operations return explicit post-image effects for the caller to persist:
 // Delete outcome — annotation is removed entirely
 { type: 'delete', annotationId: string }
 
-// Orphan outcome — annotation is removed but provenance is preserved
+// Orphan outcome — active membership is removed while durable annotation identity remains
 {
   type: 'orphan',
   annotationId: string,
@@ -106,8 +106,10 @@ Removes a membership for an annotation on a block.
 - **Last membership, `empty: 'orphan'`**: produces orphan outcome with
   `savedQuote` (concatenated visible text from all pre-action memberships,
   direct, no normalization/separators) and closed v1 `lastMemberships`
-  provenance. Historical entries are syntax-validated but not revalidated
-  against later family topology.
+  provenance. The annotation is retained in the returned annotations array
+  (no memberships remain) so the caller can persist the durable identity;
+  historical entries are syntax-validated but not revalidated against later
+  family topology.
 - **Protection**: if the last membership is protected by an active protector
   with overlapping block membership, the removal is rejected. Protection does
   not block non-last removal. Boundary touch (no overlap) does not protect.

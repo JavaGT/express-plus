@@ -296,7 +296,7 @@ export function removeMembership(family, annotations, memberships, annotationId,
       ]),
     ]);
     return deepFreeze({
-      annotations: annotations.filter(a => a.id !== annotationId),
+      annotations,
       memberships: memberships.filter(m => m.annotationId !== annotationId),
       outcomes: [deepFreeze({
         type: 'orphan',

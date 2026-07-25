@@ -254,13 +254,39 @@ test('removeMembership last orphan from nonempty prestate produces orphan outcom
   const r1 = addMembership(family, [ann], [], 'ann1', 'block1', start, end);
   const result = removeMembership(family, [ann], r1.memberships, 'ann1', 'block1', { structuralRevision: 1 });
   assert.equal(result.memberships.length, 0);
-  assert.equal(result.annotations.length, 0);
+  assert.equal(result.annotations.length, 1);
+  assert.equal(result.annotations[0].id, 'ann1');
+  assert.equal(result.annotations[0].empty, 'orphan');
   assert.equal(result.outcomes.length, 1);
   const outcome = result.outcomes[0];
   assert.equal(outcome.type, 'orphan');
   assert.equal(outcome.savedQuote, 'abc');
   assert.deepEqual(outcome.lastMemberships, [
     'workbench.annotation-last-memberships', 1, 1, [], [[
+      0, 'block1', ['endpoint', start.basisFrontier, start.point], ['endpoint', end.basisFrontier, end.point],
+    ]],
+  ]);
+});
+
+test('removeMembership orphan retains annotation identity and preserves savedQuote with lastMemberships', () => {
+  const family = makeFamily([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abc']]]);
+  const ann = sampleAnnotation({ empty: 'orphan', protectedTargetIds: ['prot1'] });
+  const frontier = family.checkpoint.frontier;
+  const start = assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier: frontier });
+  const end = resolvePositionToEndpoint(family, 'block1', 3, frontier);
+  const r1 = addMembership(family, [ann], [], 'ann1', 'block1', start, end);
+  const result = removeMembership(family, [ann], r1.memberships, 'ann1', 'block1', { structuralRevision: 1 });
+  assert.equal(result.annotations.length, 1);
+  assert.equal(result.annotations[0].id, 'ann1');
+  assert.equal(result.annotations[0].family, 'test_family');
+  assert.equal(result.annotations[0].empty, 'orphan');
+  assert.deepEqual(result.annotations[0].protectedTargetIds, ['prot1']);
+  assert.equal(result.memberships.length, 0);
+  assert.equal(result.outcomes.length, 1);
+  assert.equal(result.outcomes[0].type, 'orphan');
+  assert.equal(result.outcomes[0].savedQuote, 'abc');
+  assert.deepEqual(result.outcomes[0].lastMemberships, [
+    'workbench.annotation-last-memberships', 1, 1, ['prot1'], [[
       0, 'block1', ['endpoint', start.basisFrontier, start.point], ['endpoint', end.basisFrontier, end.point],
     ]],
   ]);
@@ -275,6 +301,8 @@ test('removeMembership orphan includes protectedTargetIds', () => {
   const r1 = addMembership(family, [ann], [], 'ann1', 'block1', start, end);
   const result = removeMembership(family, [ann], r1.memberships, 'ann1', 'block1', { structuralRevision: 1 });
   assert.deepEqual(result.outcomes[0].lastMemberships[3], ['prot1', 'prot2']);
+  assert.equal(result.annotations.length, 1);
+  assert.equal(result.annotations[0].id, 'ann1');
 });
 
 test('removeMembership orphan savedQuote concatenates visible strings from all pre-action memberships', () => {
