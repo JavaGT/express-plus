@@ -91,7 +91,7 @@ test('upsert with a dynamic column name (the side-table ownerCol shape) works', 
 test('a conforming custom driver (already providing txn+upsert) is passed through untouched', () => {
   let upsertCalls = 0;
   const driver = {
-    prepare: (sql) => ({ run() {}, get() { return undefined; }, all() { return []; } }),
+    prepare: (_sql) => ({ run() {}, get() { return undefined; }, all() { return []; } }),
     exec() {},
     txn: async (fn) => fn(),
     begin() {},

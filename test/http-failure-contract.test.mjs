@@ -1,6 +1,6 @@
 // Canonical HTTP failure contract: {ok:false, failure:{category,message,details?}}.
 
-import { allowAnonymous, statusForFailure, text } from '../src/index.mjs';
+import { allowAnonymous, text } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';

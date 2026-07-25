@@ -7,7 +7,7 @@
 import workbench, {
   entity, ref, text, map, membership, read, Invitation, createInvitationApi,
 } from '../src/index.mjs';
-import { test, before, after } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 

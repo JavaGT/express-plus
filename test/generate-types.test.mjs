@@ -1,4 +1,4 @@
-import { text, boolean, ref, map, scope, grant, read, write, entity, computed, generateTypes, link, everyone } from '../src/internal.mjs';
+import { text, boolean, ref, map, scope, grant, read, write, entity, computed, generateTypes, link } from '../src/internal.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

@@ -20,7 +20,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, effectSource, buildEffectsRegistry, validateEffects, generateDDL, generateFrameworkDDL, executeFrameworkDDL, created } from '../src/internal.mjs';
+  entity, effectSource, buildEffectsRegistry, validateEffects, generateDDL, executeFrameworkDDL, created } from '../src/internal.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 
 function setupDb() {

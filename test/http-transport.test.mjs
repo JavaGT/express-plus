@@ -23,7 +23,7 @@ import assert from 'node:assert/strict';
 
 import workbench, {
   entity } from '../src/internal.mjs';
-import { principal, anonymous } from '../src/principal.mjs';
+import { principal } from '../src/principal.mjs';
 
 // An owned entity, routes omitted → auto-CRUD, every verb default-on.
 function makeNote() {

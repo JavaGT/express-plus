@@ -247,7 +247,7 @@ function shareRoutes(Doc) {
     const rows = await req.doc.collaborators.toArray();          // FK population is async (a DB query)
     res.json({ shares: rows.map(([u, role]) => ({ id: u.id, username: u.username, role })) });
   });
-  r.post('/', async (req, res, next) => {
+  r.post('/', async (req, res, _next) => {
     const invitee = await User.getOrFail(req.body.userId);        // baked-in 404
     await req.doc.collaborators.set(invitee.id, { role: req.body.role }); // → emits collaborators:added:<id>
     res.status(201).json({ sharedWith: { id: invitee.id, role: req.body.role } });
