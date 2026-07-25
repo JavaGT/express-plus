@@ -277,6 +277,16 @@ export function buildKernel(app) {
   app.postCommitConsumerDescriptors = postCommitConsumerDescriptors;
 
   const registeredActions = new Map((app.actions ?? []).map((action) => [action.type, action]));
+  const annotatedEntities = new Set(
+    [...entities.values()]
+      .filter((entity) => Object.values(entity.fields).some((field) => field.kind === 'annotatedText'))
+      .map((entity) => entity.name),
+  );
+  const annotatedActionTypes = new Set(
+    [...entities.values()].flatMap((entity) => Object.entries(entity.fields)
+      .filter(([, field]) => field.kind === 'annotatedText')
+      .map(([field]) => `${entity.name}.${field}.operation`)),
+  );
 
   // Generated CRUD is authorized by row admission. Registered actions own an
   // explicit authorization function which runs at both durable auth gates.
@@ -286,6 +296,7 @@ export function buildKernel(app) {
     db: app.db,
     history: app._history,
     cursorPolicy,
+    annotatedHistory: Object.freeze({ entities: annotatedEntities, actionTypes: annotatedActionTypes }),
     pipeline: durableMutationVariant({
       projectionConsumers: projections,
       admission: buildDurableAdmission(app),

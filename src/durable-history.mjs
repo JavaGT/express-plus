@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { eventsFromReceipt, receiptFor, rowToEvent } from './committed-log.mjs';
 import { parseEventType } from './event-handle.mjs';
 import { upsert } from './driver.mjs';
+import { tryParseScopeKey } from './scope-handle.mjs';
 
 const HISTORY_DESCRIPTOR = Symbol('workbench.durable-history');
 
@@ -103,7 +104,7 @@ export function durableHistory({ authorize, inverse, redo } = {}) {
   return Object.freeze({ [HISTORY_DESCRIPTOR]: true, authorize, inverse, redo });
 }
 
-export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPolicy }) {
+export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPolicy, annotatedHistory = null }) {
   if (!db) throw new Error('durable history requires a durable database');
   if (!descriptor?.[HISTORY_DESCRIPTOR]) {
     throw new TypeError('history must be created with durableHistory(...)');
@@ -119,6 +120,36 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPo
     }
   }
   const resolvedPolicy = cursorPolicy ?? new Map();
+  const annotatedEntities = annotatedHistory?.entities ?? new Set();
+  const annotatedActionTypes = annotatedHistory?.actionTypes ?? new Set();
+
+  function isAnnotatedScope(scope) {
+    return annotatedEntities.has(tryParseScopeKey(scope)?.entity);
+  }
+
+  function receiptContainsAnnotatedText(receipt) {
+    if (annotatedActionTypes.has(receipt.actionType)) return true;
+    if (receipt.actionType === '$batch') {
+      let actions;
+      try { actions = parseJson(receipt.actionData, null); } catch { return true; }
+      if (!Array.isArray(actions) || actions.some((action) => !action || typeof action.type !== 'string')) return true;
+      if (actions.some((action) => annotatedActionTypes.has(action.type))) return true;
+    }
+    let refs;
+    try { refs = Array.isArray(receipt.eventRefs) ? receipt.eventRefs : parseJson(receipt.eventRefs, []); } catch { return true; }
+    if (!Array.isArray(refs) || refs.some((ref) => !ref || typeof ref.scope !== 'string' || !Number.isSafeInteger(ref.seq) || ref.seq < 1)) return true;
+    return refs.some((ref) => isAnnotatedScope(ref.scope));
+  }
+
+  function scopeContainsAnnotatedText(scope) {
+    if (isAnnotatedScope(scope)) return true;
+    const receipts = db.prepare('SELECT actionType, actionData, eventRefs FROM _ActionReceipt WHERE scope = :scope').all({ scope });
+    return receipts.some(receiptContainsAnnotatedText);
+  }
+
+  function requireReadableHistory(scope) {
+    if (scopeContainsAnnotatedText(scope)) throw forbidden();
+  }
 
   function cursorPolicyFor(type) {
     return resolvedPolicy.get(type) ?? 'eligible';
@@ -182,6 +213,7 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPo
   async function actions({ scope, principal, after = 0, limit = 100 } = {}) {
     requireText(scope, 'scope');
     await admitted(descriptor, { operation: 'read', scope, principal });
+    requireReadableHistory(scope);
     if (!Number.isInteger(after) || after < 0) throw new TypeError('after must be a non-negative integer');
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new TypeError('limit must be an integer from 1 to 1000');
     return db.prepare(
@@ -193,6 +225,7 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPo
   async function events({ scope, principal, after = 0, limit = 100 } = {}) {
     requireText(scope, 'scope');
     await admitted(descriptor, { operation: 'read', scope, principal });
+    requireReadableHistory(scope);
     if (!Number.isInteger(after) || after < 0) throw new TypeError('after must be a non-negative integer');
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new TypeError('limit must be an integer from 1 to 1000');
     return db.prepare(
@@ -214,8 +247,10 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPo
     const source = operation === 'undo' ? expected.past : expected.future;
     const targetId = source[source.length - 1];
     if (!targetId) return Object.freeze({ ok: true, deduped: false, events: [], empty: true });
+    if (scopeContainsAnnotatedText(key.scope)) throw forbidden();
     const receipt = receiptFor(db, key.scope, targetId);
     if (!receipt) throw new Error(`history action '${targetId}' is no longer retained`);
+    if (receiptContainsAnnotatedText(receipt)) throw forbidden();
     const action = actionFromRow(db, receipt);
     const translate = operation === 'undo' ? descriptor.inverse : descriptor.redo;
     const translated = translate
@@ -224,6 +259,7 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPo
     if (!translated || typeof translated.type !== 'string') {
       throw new TypeError(`durableHistory ${operation === 'undo' ? 'inverse' : 'redo'} must return an action`);
     }
+    if (annotatedActionTypes.has(translated.type)) throw forbidden();
     if (translated.scope !== undefined && translated.scope !== key.scope) {
       throw new TypeError(`durableHistory ${operation === 'undo' ? 'inverse' : 'redo'} must keep the original history scope`);
     }

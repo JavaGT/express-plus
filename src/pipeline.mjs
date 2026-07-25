@@ -416,7 +416,7 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
 // gate + grant engine compose — it is not a second, looser auth path.
-export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), history, cursorPolicy } = {}) {
+export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), history, cursorPolicy, annotatedHistory } = {}) {
   if (typeof authorize !== 'function') {
     throw new Error(
       `createServer requires an authorize function. There is no default — a ` +
@@ -685,7 +685,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   }
 
   const historyRuntime = history
-    ? createDurableHistoryRuntime({ db, descriptor: history, dispatch, cursorPolicy })
+    ? createDurableHistoryRuntime({ db, descriptor: history, dispatch, cursorPolicy, annotatedHistory })
     : undefined;
   return { dispatch, dispatchBatch, history: historyRuntime, db, log: [] };  // log is the durable _Log table; empty array for compat
 }

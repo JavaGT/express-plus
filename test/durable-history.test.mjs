@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import { durableHistory } from '../src/index.mjs';
 import { createServer, executeFrameworkDDL } from '../src/internal.mjs';
+import { retentionPrune } from '../src/committed-log.mjs';
 
 const principal = Object.freeze({ type: 'user', id: 'u1', attributes: {} });
 const scope = 'Document:1';
@@ -22,11 +23,12 @@ function historyDescriptor(authorize = () => true) {
   });
 }
 
-function makeServer(db, history = historyDescriptor(), cursorPolicy) {
+function makeServer(db, history = historyDescriptor(), cursorPolicy, annotatedHistory) {
   return createServer({
     db,
     history,
     cursorPolicy,
+    annotatedHistory,
     authorize: () => true,
     handlers: {
       'document.set': ({ payload }) => [{
@@ -47,6 +49,16 @@ function makeServer(db, history = historyDescriptor(), cursorPolicy) {
       'explicit.excluded': ({ payload }) => [{
         type: 'explicit.changed',
         scope,
+        data: payload,
+      }],
+      'AnnotatedDoc.body.operation': ({ payload }) => [{
+        type: 'AnnotatedDoc.body.operated',
+        scope: 'AnnotatedDoc:1',
+        data: payload,
+      }],
+      'mixed.set': ({ payload }) => [{
+        type: 'AnnotatedDoc.created',
+        scope: 'AnnotatedDoc:1',
         data: payload,
       }],
     },
@@ -425,6 +437,91 @@ test('history authorization fails closed', async () => {
 
   await assert.rejects(server.history.actions({ scope, principal }), { status: 403 });
   await assert.rejects(server.history.undo({ scope, principal, session: 'tab-a' }), { status: 403 });
+});
+
+test('annotated history reads deny before canonical receipts or events materialize', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const annotatedHistory = {
+    entities: new Set(['AnnotatedDoc']),
+    actionTypes: new Set(['AnnotatedDoc.body.operation']),
+  };
+  const server = makeServer(db, undefined, undefined, annotatedHistory);
+  await server.dispatch({
+    actionId: 'annotated-a1', type: 'AnnotatedDoc.body.operation', scope: 'AnnotatedDoc:1', principal,
+    payload: { operation: ['secret operation'], family: { text: 'secret body' } }, history: { session: 'tab-a' },
+  });
+
+  await assert.rejects(server.history.actions({ scope: 'AnnotatedDoc:1', principal }), { status: 403 });
+  await assert.rejects(server.history.events({ scope: 'AnnotatedDoc:1', principal }), { status: 403 });
+  await assert.rejects(server.history.undo({ scope: 'AnnotatedDoc:1', principal, session: 'tab-a' }), { status: 403 });
+  assert.deepEqual(await server.history.cursor({ scope: 'AnnotatedDoc:1', principal, session: 'tab-a' }), { undo: 1, redo: 0 });
+});
+
+test('receipt references deny mixed history even after annotated log retention', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const annotatedHistory = {
+    entities: new Set(['AnnotatedDoc']),
+    actionTypes: new Set(['AnnotatedDoc.body.operation']),
+  };
+  const server = makeServer(db, undefined, undefined, annotatedHistory);
+  await server.dispatch({
+    actionId: 'mixed-a1', type: 'mixed.set', scope: 'custom:1', principal,
+    payload: { text: 'secret canonical fact' }, history: { session: 'tab-a' },
+  });
+
+  retentionPrune(db, '9999-01-01T00:00:00.000Z');
+  await assert.rejects(server.history.actions({ scope: 'custom:1', principal, after: 99, limit: 1 }), { status: 403 });
+  await assert.rejects(server.history.events({ scope: 'custom:1', principal, after: 99, limit: 1 }), { status: 403 });
+});
+
+test('malformed receipt metadata denies history before canonical materialization', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const server = makeServer(db, undefined, undefined, {
+    entities: new Set(['AnnotatedDoc']),
+    actionTypes: new Set(['AnnotatedDoc.body.operation']),
+  });
+  await set(server, { actionId: 'a1', value: 1, before: 0, session: 'tab-a' });
+  db.prepare("UPDATE _ActionReceipt SET eventRefs = '[{}]' WHERE scope = :scope AND actionId = 'a1'").run({ scope });
+  await assert.rejects(server.history.actions({ scope, principal }), { status: 403 });
+  await assert.rejects(server.history.events({ scope, principal }), { status: 403 });
+  db.prepare("UPDATE _ActionReceipt SET actionType = '$batch', actionData = '{\"type\":\"document.set\"}', eventRefs = '[]' WHERE scope = :scope AND actionId = 'a1'").run({ scope });
+  await assert.rejects(server.history.actions({ scope, principal }), { status: 403 });
+});
+
+test('undo denies a zero-event receipt owned by an annotated scope', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const annotatedHistory = {
+    entities: new Set(['AnnotatedDoc']),
+    actionTypes: new Set(['AnnotatedDoc.body.operation']),
+  };
+  const server = makeServer(db, undefined, undefined, annotatedHistory);
+  const annotatedScope = 'AnnotatedDoc:1';
+  await server.dispatch({
+    actionId: 'zero-event', type: 'document.set', scope: annotatedScope, principal,
+    payload: { value: 'secret receipt', before: null }, history: { session: 'tab-a' },
+  });
+  await assert.rejects(server.history.undo({ scope: annotatedScope, principal, session: 'tab-a' }), { status: 403 });
+});
+
+test('history rejects an inverse translated to an annotated operation', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const history = durableHistory({
+    authorize: () => true,
+    inverse: ({ action }) => ({ type: 'AnnotatedDoc.body.operation', scope: action.scope, payload: {} }),
+  });
+  const server = makeServer(db, history, undefined, {
+    entities: new Set(['AnnotatedDoc']),
+    actionTypes: new Set(['AnnotatedDoc.body.operation']),
+  });
+  await set(server, { actionId: 'a1', value: 1, before: 0, session: 'tab-a' });
+
+  await assert.rejects(server.history.undo({ scope, principal, session: 'tab-a' }), { status: 403 });
+  assert.deepEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
 });
 
 test('in-transaction history denial rolls back inverse event, receipt, and cursor', async () => {
