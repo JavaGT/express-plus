@@ -20,6 +20,7 @@ import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.mjs';
 import { publicEvent } from './event-delivery.mjs';
+import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
 
 function reject(res, status, message, details) {
   const workbenchFailure = failureForHttpError({ status, message, details });
@@ -81,12 +82,36 @@ async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
     reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
+  let snapshot;
+  try {
+    snapshot = await projectEntitySnapshot(app, entity, auth.row, principal);
+    // Projection can await policy checks. Do not pair facts assembled across a
+    // concurrent scope mutation with the cursor captured before those checks.
+    if (hasAnnotatedTextFields(entity) && readSeq(app.db, scopeKey) !== lastSeq) throw new Error('snapshot changed while projecting');
+  } catch {
+    reject(res, 403, 'forbidden');
+    return true;
+  }
   sendJson(res, 200, {
-    snapshot: entity.deserializeRow({ ...auth.row }),
+    snapshot,
     seq: lastSeq,
     reducers: textReducerCheckpoints(entity, storedRow),
   });
   return true;
+}
+
+async function projectEntitySnapshot(app, entity, row, principal) {
+  const snapshot = entity.deserializeRow({ ...row });
+  for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
+    if (descriptor.kind === 'annotatedText') {
+      snapshot[fieldName] = await projectAnnotatedTextSnapshot({ db: app.db, entity, row, principal, fieldName, descriptor });
+    }
+  }
+  return snapshot;
+}
+
+function hasAnnotatedTextFields(entity) {
+  return Object.values(entity.fields).some((descriptor) => descriptor.kind === 'annotatedText');
 }
 
 async function snapshotScopeRoute(app, scope, principal, res) {
@@ -107,11 +132,17 @@ async function snapshotScopeRoute(app, scope, principal, res) {
     const lastSeq = readSeq(app.db, scope);
     const storedRow = app.db.prepare(`SELECT * FROM ${access.anchor.entity} WHERE id = ?`).get(access.anchor.id);
     const entity = app.entities.get(access.anchor.entity);
-    sendJson(res, 200, {
-      snapshot: entity.deserializeRow({ ...access.anchor.row }),
-      cursors: { [scope]: lastSeq },
-      reducers: textReducerCheckpoints(entity, storedRow),
-    });
+    try {
+      const snapshot = await projectEntitySnapshot(app, entity, access.anchor.row, principal);
+      if (readSeq(app.db, scope) !== lastSeq) throw new Error('snapshot changed while projecting');
+      sendJson(res, 200, {
+        snapshot,
+        cursors: { [scope]: lastSeq },
+        reducers: textReducerCheckpoints(entity, storedRow),
+      });
+    } catch {
+      reject(res, 403, 'forbidden');
+    }
     return true;
   }
   // A custom scope may aggregate several rows, but its resolver must first map
@@ -122,8 +153,14 @@ async function snapshotScopeRoute(app, scope, principal, res) {
     ? await app.scopeSnapshot(scope, principal, access.anchor)
     : null;
   if (scopeSnapshot !== null && scopeSnapshot !== undefined) {
+    // An aggregate callback has no recipient annotated-text grammar. Never let
+    // it become an unprojected alternate delivery path for an annotated entity.
     const lastSeq = readSeq(app.db, scope);
     const entity = app.entities.get(access.anchor.entity);
+    if (hasAnnotatedTextFields(entity)) {
+      reject(res, 403, 'forbidden');
+      return true;
+    }
     const storedAnchor = app.db.prepare(`SELECT * FROM ${access.anchor.entity} WHERE id = ?`).get(access.anchor.id);
     sendJson(res, 200, {
       snapshot: scopeSnapshot,

@@ -46,10 +46,10 @@ registerAnnotatedTextStructuralExtension('sourceInit', Object.freeze({
   },
 }));
 
-function r4Doc() {
+function r4Doc({ protectingAccess = async ({ is }) => (await is.owner()) ? grant(read) : grant() } = {}) {
   return entity('R4Doc', {
     project: ref('Project'),
-    owner: ref('User'),
+    owner: ref('User', { role: 'owner' }),
     body: annotatedText({
       project: 'project',
       owner: 'owner',
@@ -57,7 +57,7 @@ function r4Doc() {
       annotations: [
         annotation('theme', { fields: { color: text({ default: 'blue' }), weight: number({ default: 1 }) } }),
         annotation('flag', { fields: { flagged: boolean({ default: false }) } }),
-        protectingAnnotation('confidential', { protects: 'theme', access: () => grant(read) }),
+        protectingAnnotation('confidential', { protects: 'theme', access: protectingAccess }),
         protectingAnnotation('standalone', { access: () => grant(read) }),
       ],
       measurements: [measurement('source', { extension: 'sourceInit' })],
@@ -66,8 +66,8 @@ function r4Doc() {
   });
 }
 
-async function appFor(db = new DatabaseSync(':memory:')) {
-  const R4Doc = r4Doc();
+async function appFor(db = new DatabaseSync(':memory:'), principalId = null, options) {
+  const R4Doc = r4Doc(options);
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
@@ -75,13 +75,14 @@ async function appFor(db = new DatabaseSync(':memory:')) {
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   executeDDL(R4Doc, db);
   const app = workbench({ db, entities: [R4Doc] });
-  app.start();
+  if (principalId !== null) app.listen(0, { principalOf: () => typeof principalId === 'function' ? principalId() : ({ id: principalId }) });
+  else app.start();
   await app.ready;
   return { app, db };
 }
 
-async function setupDoc(blockText) {
-  const { app, db } = await appFor();
+async function setupDoc(blockText, principalId = null, options) {
+  const { app, db } = await appFor(new DatabaseSync(':memory:'), principalId, options);
   const created = await app.dispatch({
     actionId: 'create', type: 'R4Doc.create',
     payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
@@ -175,6 +176,78 @@ test('R4 annotation.apply persists sorted protecting targets through its sole ev
   app.entities.get('R4Doc').projection.apply({ handle: native('R4Doc', 'body', 'operated'), data: replay }, db);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation_protected_target WHERE annotation_id = 'protect-1' AND target_annotation_id = 'theme-1'").get().count, 1);
   await app.close?.();
+});
+
+test('HTTP snapshot projects protected annotated text for each recipient before serialization', async (t) => {
+  let principal = { id: 'u1' };
+  let ownerMayRead = true;
+  const { app, db, blockId, state } = await setupDoc('hello world', () => principal, {
+    protectingAccess: async ({ is }) => (ownerMayRead && await is.owner()) ? grant(read) : grant(),
+  });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+  assert.equal((await app.dispatch({
+    actionId: 'http-theme', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 11, 'http-theme', 'theme', {}, expected),
+  })).ok, true);
+  assert.equal((await app.dispatch({
+    actionId: 'http-protection', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 11, 'http-protect', 'confidential', {}, expected, ['http-theme']),
+  })).ok, true);
+  db.prepare("INSERT INTO R4Doc_body_measurement (id, block_id, family, format_version, payload) VALUES ('http-measurement', ?, 'source', 1, '{\"text\":\"hello world\"}')").run(blockId);
+  const ownerResponse = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(ownerResponse.status, 200);
+  const owner = await ownerResponse.json();
+  assert.equal(owner.snapshot.body.blocks[0].kind, 'visible');
+  assert.equal(owner.snapshot.body.blocks[0].text, 'hello world');
+
+  principal = { id: 'u2' };
+  const response = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(response.status, 200);
+  const recipient = await response.json();
+  assert.deepEqual(recipient.snapshot.body, {
+    kind: 'workbench.annotatedText.recipient', version: 1,
+    blocks: [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }],
+    annotations: [], memberships: [], measurements: [], capabilityHints: [],
+  });
+  const serialized = JSON.stringify(recipient.snapshot.body);
+  assert.equal(serialized.includes('hello world'), false);
+  assert.equal(serialized.includes('http-measurement'), false);
+  assert.equal(serialized.includes('http-theme'), false);
+  assert.equal(serialized.includes('http-protect'), false);
+  assert.equal(serialized.includes('protectedTargetIds'), false);
+
+  principal = { id: 'u1' };
+  ownerMayRead = false;
+  const revoked = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(revoked.status, 200, 'a fresh snapshot re-evaluates changed recipient authorization');
+  assert.deepEqual((await revoked.json()).snapshot.body.blocks, [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }]);
+});
+
+test('HTTP snapshot fails closed on malformed state and throwing protector access', async (t) => {
+  let principal = { id: 'u1' };
+  const { app, db, blockId, state } = await setupDoc('secret', () => principal, {
+    protectingAccess: () => { throw new Error('access failure'); },
+  });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+  assert.equal((await app.dispatch({
+    actionId: 'failed-theme', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal,
+    payload: v4Payload('d1', blockId, 0, 6, 'failed-theme', 'theme', {}, expected),
+  })).ok, true);
+  assert.equal((await app.dispatch({
+    actionId: 'failed-protection', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal,
+    payload: v4Payload('d1', blockId, 0, 6, 'failed-protection', 'confidential', {}, expected, ['failed-theme']),
+  })).ok, true);
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const throwing = await fetch(`${origin}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(throwing.status, 403);
+  assert.equal((await throwing.text()).includes('secret'), false);
+
+  db.prepare("DELETE FROM R4Doc_body_state WHERE document_id = 'd1'").run();
+  const malformed = await fetch(`${origin}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(malformed.status, 403);
+  assert.equal((await malformed.text()).includes('secret'), false);
 });
 
 test('R4 annotation.apply rejects target IDs on ordinary, standalone, and wrong-family protectors', async () => {
