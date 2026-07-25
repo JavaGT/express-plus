@@ -44,6 +44,9 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     exact(membership, ['annotationId', 'blockId', 'ordinal'], 'membership');
     if (!annotations.has(membership.annotationId) || !blockIds.has(membership.blockId) || !Number.isSafeInteger(membership.ordinal) || membership.ordinal < 0) fail('membership is invalid');
   }
+  for (const annotationId of annotations.keys()) {
+    if (!canonical.memberships.some((membership) => membership.annotationId === annotationId)) fail('canonical annotation has no membership');
+  }
   const canonicalMemberships = new Map();
   for (const membership of canonical.memberships) {
     const key = `${membership.annotationId}\u0000${membership.blockId}`;

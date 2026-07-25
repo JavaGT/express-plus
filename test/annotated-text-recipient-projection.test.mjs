@@ -95,3 +95,17 @@ test('malformed canonical memberships and measurements fail closed', () => {
   extraMeasurement.measurements[0].private = 'leak';
   assert.throws(() => projectAnnotatedTextForRecipient(extraMeasurement, descriptor(), decisions), /invalid shape/);
 });
+
+test('membershipless canonical annotations fail closed', () => {
+  const ordinary = canonical();
+  ordinary.annotations.push({ id: 'orphan', family: 'coding', fields: {} });
+  assert.throws(() => projectAnnotatedTextForRecipient(ordinary, descriptor(), {
+    version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
+  }), /no membership/);
+
+  const protector = canonical();
+  protector.annotations.push({ id: 'orphan-protector', family: 'confidential', fields: {}, protectedTargetIds: ['code'] });
+  assert.throws(() => projectAnnotatedTextForRecipient(protector, descriptor(), {
+    version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
+  }), /no membership/);
+});

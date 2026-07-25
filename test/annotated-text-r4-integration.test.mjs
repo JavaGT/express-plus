@@ -256,6 +256,18 @@ test('HTTP snapshot fails closed on malformed state and throwing protector acces
   assert.equal((await malformed.text()).includes('secret'), false);
 });
 
+test('HTTP snapshot keeps persisted orphan annotations server-side', async (t) => {
+  const { app, db } = await setupDoc('visible', 'u1');
+  t.after(async () => { await app.shutdown(); db.close(); });
+  db.prepare("INSERT INTO R4Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('orphan', 'd1', 'p1', 'u1', 'theme')").run();
+  db.prepare("INSERT INTO R4Doc_body_annotation_theme (annotation_id, color, weight) VALUES ('orphan', 'secret-color', 7)").run();
+  db.prepare("INSERT INTO R4Doc_body_annotation_orphan_state (annotation_id, saved_quote, last_memberships) VALUES ('orphan', 'secret orphan quote', '[]')").run();
+  const response = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(response.status, 200);
+  const serialized = await response.text();
+  for (const secret of ['orphan', 'secret-color', 'secret orphan quote']) assert.equal(serialized.includes(secret), false);
+});
+
 test('HTTP replay never serializes annotated-text events and requires a fresh snapshot', async (t) => {
   let principal = { id: 'u1' };
   const { app, db, blockId, state } = await setupDoc('replay secret', () => principal, {

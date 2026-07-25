@@ -20,7 +20,9 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
   const blockRows = db.prepare(`SELECT * FROM ${prefix}_block WHERE document_id = ? ORDER BY position`).all(row.id);
   if (blockRows.length !== family.blocks.length) fail(`field '${fieldName}' blocks disagree with checkpoint`);
-  const annotations = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(row.id);
+  const annotations = db.prepare(
+    `SELECT annotation.id, annotation.family FROM ${prefix}_annotation AS annotation WHERE annotation.document_id = ? AND EXISTS (SELECT 1 FROM ${prefix}_membership AS membership WHERE membership.annotation_id = annotation.id) ORDER BY annotation.id`,
+  ).all(row.id);
   const memberships = db.prepare(
     `SELECT membership.annotation_id, membership.block_id, membership.ordinal FROM ${prefix}_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ? ORDER BY membership.annotation_id, membership.ordinal`,
   ).all(row.id);
@@ -29,6 +31,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   ).all(row.id);
   const targets = new Map();
   for (const edge of targetRows) targets.set(edge.annotation_id, [...(targets.get(edge.annotation_id) ?? []), edge.target_annotation_id]);
+  const canonicalMemberships = memberships.map((membership) => ({ annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal }));
   const canonicalAnnotations = annotations.map((annotation) => {
     const declared = descriptor.annotations.find((entry) => entry.annotationName === annotation.family);
     if (!declared) fail(`annotation '${annotation.id}' has unknown family`);
@@ -41,7 +44,6 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   });
   const blockIds = new Set(blockRows.map((block) => block.id));
   if (blockIds.size !== blockRows.length || family.blocks.some((block) => !blockIds.has(block.id))) fail(`field '${fieldName}' block IDs disagree with checkpoint`);
-  const canonicalMemberships = memberships.map((membership) => ({ annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal }));
   const canonical = {
     kind: 'workbench.annotatedText.canonical', version: 1,
     blocks: blockRows.map((block) => ({
