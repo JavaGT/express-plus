@@ -198,6 +198,8 @@ export interface AnnotatedTextProtectingAnnotationDescriptor {
   readonly annotationName: string;
   readonly fields: Readonly<Record<string, FieldDescriptor>>;
   readonly protects: string | null;
+  readonly placeholder: string;
+  readonly access: ((context: { readonly is: Record<string, () => Promise<boolean>>; readonly entity: unknown; readonly annotation: unknown }) => unknown) | null;
   readonly actions: readonly AnnotatedTextActionDescriptor[];
   readonly empty: 'delete' | 'orphan';
 }
@@ -220,6 +222,8 @@ export function annotation(name: string, options?: {
 export function protectingAnnotation(name: string, options?: {
   fields?: Record<string, FieldDescriptor>;
   protects?: string | null;
+  placeholder?: string;
+  access?: (context: { readonly is: Record<string, () => Promise<boolean>>; readonly entity: unknown; readonly annotation: unknown }) => unknown;
   actions?: readonly AnnotatedTextActionDescriptor[];
   empty?: 'delete' | 'orphan';
 }): AnnotatedTextProtectingAnnotationDescriptor;

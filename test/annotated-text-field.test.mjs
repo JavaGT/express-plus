@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { annotatedText, text, boolean, number, ref, date, json, annotation, protectingAnnotation, measurement, annotationAction } from '../src/index.mjs';
+import { annotatedText, text, boolean, number, ref, date, json, annotation, protectingAnnotation, measurement, annotationAction, grant, read } from '../src/index.mjs';
 import { entity, generateDDL } from '../src/internal.mjs';
 import { validateAnnotatedTextDeclaration, annotatedTextDDL, getAnnotatedTextCompiledMetadata, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, resolveDeclarationMeasurementExtension } from '../src/annotated-text-field.mjs';
 
@@ -81,7 +81,7 @@ test('DDL generates correct table count and names', () => {
   const tables = ddl.filter(s => s.startsWith('CREATE TABLE'));
   const indexes = ddl.filter(s => s.startsWith('CREATE INDEX') || s.startsWith('CREATE UNIQUE INDEX'));
 
-  assert.equal(tables.length, 8);
+  assert.equal(tables.length, 9);
   assert.ok(tables.some(s => s.includes('Doc_body_block')));
   assert.ok(tables.some(s => s.includes('Doc_body_state')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation')));
@@ -90,7 +90,8 @@ test('DDL generates correct table count and names', () => {
   assert.ok(tables.some(s => s.includes('Doc_body_membership')));
   assert.ok(tables.some(s => s.includes('Doc_body_measurement')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_orphan_state')));
-  assert.equal(indexes.length, 6);
+  assert.ok(tables.some(s => s.includes('Doc_body_annotation_protected_target')));
+  assert.equal(indexes.length, 7);
 });
 
 test('block table has correct columns, constraints, and FKs', () => {
@@ -770,7 +771,7 @@ test('validation rejects protecting annotation that references undeclared family
       project: 'project', owner: 'owner',
       annotations: [
         annotation('base'),
-        protectingAnnotation('child', { protects: 'nonexistent' }),
+        protectingAnnotation('child', { protects: 'nonexistent', access: () => grant(read) }),
       ],
       measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
@@ -782,7 +783,7 @@ test('validation accepts protecting annotation that references a declared family
     project: 'project', owner: 'owner',
     annotations: [
       annotation('base'),
-      protectingAnnotation('child', { protects: 'base' }),
+      protectingAnnotation('child', { protects: 'base', access: () => grant(read) }),
     ],
     measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
   }), makeFields());

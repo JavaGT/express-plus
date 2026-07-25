@@ -748,6 +748,19 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       if (!annotationFamilyMeta || !annotationDescriptor) {
         throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family '${annInput.family}'`);
       }
+      const protectedTargetIds = annInput.protectedTargetIds ?? [];
+      if (protectedTargetIds.length !== 0 &&
+          (annotationDescriptor.kind !== 'protectingAnnotation' || annotationDescriptor.protects === null)) {
+        throw new ValidationError(`${name}.${fieldName}.operation only protecting annotations with a declared target family may name protected targets`);
+      }
+      if (annotationDescriptor.kind === 'protectingAnnotation' && annotationDescriptor.protects !== null) {
+        for (const targetId of protectedTargetIds) {
+          const target = db.prepare(`SELECT family FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(targetId, command.id);
+          if (!target || target.family !== annotationDescriptor.protects) {
+            throw new ValidationError(`${name}.${fieldName}.operation protected target '${targetId}' must be an existing '${annotationDescriptor.protects}' annotation on this document`);
+          }
+        }
+      }
 
       const familyFieldDescs = annotationDescriptor.fields;
       const canonicalFields = { ...annInput.fields };
@@ -801,7 +814,16 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         end: JSON.parse(m.end_point),
       }));
       const annotationRows = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ?`).all(command.id);
-      let pureAnnotations = annotationRows.map(a => ({ id: a.id, family: a.family }));
+      const protectedTargets = db.prepare(
+        `SELECT annotation_id, target_annotation_id FROM ${prefix}_annotation_protected_target WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?) ORDER BY annotation_id, target_annotation_id`,
+      ).all(command.id);
+      const targetsByAnnotation = new Map();
+      for (const target of protectedTargets) {
+        const ids = targetsByAnnotation.get(target.annotation_id) ?? [];
+        ids.push(target.target_annotation_id);
+        targetsByAnnotation.set(target.annotation_id, ids);
+      }
+      let pureAnnotations = annotationRows.map(a => ({ id: a.id, family: a.family, protectedTargetIds: targetsByAnnotation.get(a.id) ?? [] }));
 
       const blockFields = Object.keys(descriptor.block ?? {});
       const blockFacts = [];
@@ -932,7 +954,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
       }
 
-      const annotationVirtual = { id: annInput.id, family: annInput.family };
+      const annotationVirtual = { id: annInput.id, family: annInput.family, protectedTargetIds };
       const virtualAnnotations = [...pureAnnotations, annotationVirtual];
       let addMembershipResult;
       try {
@@ -982,11 +1004,11 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
           operation: Object.freeze({
             kind: 'annotation.apply',
             selection: { blockId, startUtf16Offset, endUtf16Offset },
-            annotation: { id: annInput.id, family: annInput.family, fields: Object.freeze(canonicalFields) },
+            annotation: Object.freeze({ id: annInput.id, family: annInput.family, fields: Object.freeze(canonicalFields), ...(protectedTargetIds.length ? { protectedTargetIds: Object.freeze([...protectedTargetIds]) } : {}) }),
           }),
           after: Object.freeze({ structuralRevision: afterRevision, frontier: family.checkpoint.frontier }),
           family: textFamilyCheckpoint(currentFamily),
-          annotation: Object.freeze({ id: annInput.id, family: annInput.family, fields: Object.freeze(canonicalFields) }),
+          annotation: Object.freeze({ id: annInput.id, family: annInput.family, fields: Object.freeze(canonicalFields), ...(protectedTargetIds.length ? { protectedTargetIds: Object.freeze([...protectedTargetIds]) } : {}) }),
           splitBlockIds: Object.freeze([...splitBlockIds]),
           selectedBlockId,
           splitOps: Object.freeze(splitOps),

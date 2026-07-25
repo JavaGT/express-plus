@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { annotatedText, annotation, entity, measurement, protectingAnnotation, ref, registerAnnotatedTextContract } from '../src/index.mjs';
+import { annotatedText, annotation, entity, grant, measurement, protectingAnnotation, read, ref, registerAnnotatedTextContract } from '../src/index.mjs';
 import { registerAnnotatedTextStructuralExtension, projectAnnotatedTextForRecipient } from '../src/internal.mjs';
 
 const suffix = 'recipientProjection';
@@ -10,7 +10,7 @@ registerAnnotatedTextStructuralExtension(`${suffix}Measurement`, Object.freeze({
 function descriptor() {
   const body = annotatedText({
     project: 'project', owner: 'owner',
-    annotations: [annotation('coding'), protectingAnnotation('confidential', { protects: 'coding', placeholder: '[Private]' })],
+    annotations: [annotation('coding'), protectingAnnotation('confidential', { protects: 'coding', placeholder: '[Private]', access: () => grant(read) })],
     measurements: [measurement('words', { extension: `${suffix}Measurement` })],
     capabilities: { 'body.read': Object.freeze({}), 'body.edit': Object.freeze({}) },
   });

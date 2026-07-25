@@ -35,6 +35,27 @@ function makeIs(entityRecord, row, principal) {
   return is;
 }
 
+// Protecting annotations are authorization subjects of the owning entity. This
+// reuses the row grant's check registry and decision backstop; it does not add
+// a policy evaluator beside Workbench authorization.
+export async function protectingAnnotationCapabilities(entityRecord, row, annotation, access, principal) {
+  if (typeof access !== 'function') return { granted: false, capabilities: [] };
+  const is = makeIs(entityRecord, row, principal);
+  let decision;
+  await resolveDecision(
+    async () => {
+      decision = await access({ is, entity: row, annotation });
+      return decision?.granted === true;
+    },
+    [],
+    { where: `the protecting annotation access body on entity('${entityRecord.name}')` },
+  );
+  if (!decision || decision.granted !== true || !Array.isArray(decision.capabilities)) {
+    return { granted: false, capabilities: [] };
+  }
+  return { granted: true, capabilities: decision.capabilities };
+}
+
 // Run the grant clause's `.can` body against a materialized row + principal and
 // return its decision: { granted, capabilities } from grant(...), or
 // { granted: false } from deny(...). The body runs through resolveDecision so an

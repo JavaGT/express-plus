@@ -783,18 +783,20 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
 
   const annOp = operation.annotation;
   if (typeof annOp !== 'object' || Array.isArray(annOp) ||
-      JSON.stringify(Object.keys(annOp).sort()) !== JSON.stringify(['family', 'fields', 'id']) ||
+      JSON.stringify(Object.keys(annOp).sort()) !== JSON.stringify(Object.keys(annOp).includes('protectedTargetIds') ? ['family', 'fields', 'id', 'protectedTargetIds'] : ['family', 'fields', 'id']) ||
       typeof annOp.id !== 'string' || annOp.id.length === 0 ||
       typeof annOp.family !== 'string' || annOp.family.length === 0 ||
-      !annOp.fields || typeof annOp.fields !== 'object' || Array.isArray(annOp.fields)) {
+      !annOp.fields || typeof annOp.fields !== 'object' || Array.isArray(annOp.fields) ||
+      (annOp.protectedTargetIds !== undefined && (!Array.isArray(annOp.protectedTargetIds) || annOp.protectedTargetIds.some((id, index, ids) => typeof id !== 'string' || id.length === 0 || (index > 0 && ids[index - 1] >= id))))) {
     throw new Error(`${name}.${handle.field}.operated v4 event has invalid annotation in operation`);
   }
 
   const evAnn = data.annotation;
   if (!evAnn || typeof evAnn !== 'object' || Array.isArray(evAnn) ||
-      JSON.stringify(Object.keys(evAnn).sort()) !== JSON.stringify(['family', 'fields', 'id']) ||
+      JSON.stringify(Object.keys(evAnn).sort()) !== JSON.stringify(Object.keys(evAnn).includes('protectedTargetIds') ? ['family', 'fields', 'id', 'protectedTargetIds'] : ['family', 'fields', 'id']) ||
       evAnn.id !== annOp.id || evAnn.family !== annOp.family ||
-      JSON.stringify(evAnn.fields) !== JSON.stringify(annOp.fields)) {
+      JSON.stringify(evAnn.fields) !== JSON.stringify(annOp.fields) ||
+      JSON.stringify(evAnn.protectedTargetIds ?? []) !== JSON.stringify(annOp.protectedTargetIds ?? [])) {
     throw new Error(`${name}.${handle.field}.operated v4 event annotation facts do not match operation`);
   }
 
@@ -943,7 +945,16 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   }));
 
   const annotationRows = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ?`).all(data.id);
-  const pureAnnotations = annotationRows.map(a => ({ id: a.id, family: a.family }));
+  const protectedTargets = db.prepare(
+    `SELECT annotation_id, target_annotation_id FROM ${prefix}_annotation_protected_target WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?) ORDER BY annotation_id, target_annotation_id`,
+  ).all(data.id);
+  const targetsByAnnotation = new Map();
+  for (const target of protectedTargets) {
+    const ids = targetsByAnnotation.get(target.annotation_id) ?? [];
+    ids.push(target.target_annotation_id);
+    targetsByAnnotation.set(target.annotation_id, ids);
+  }
+  const pureAnnotations = annotationRows.map(a => ({ id: a.id, family: a.family, protectedTargetIds: targetsByAnnotation.get(a.id) ?? [] }));
 
   let derivedMemberships = pureMemberships;
   let derivedAnnotations = pureAnnotations;
@@ -965,7 +976,7 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
     throw new Error(`${name}.${handle.field}.operated v4 event failed to resolve selected block endpoints`);
   }
 
-  const virtualAnnotations = [...derivedAnnotations, { id: evAnn.id, family: evAnn.family }];
+  const virtualAnnotations = [...derivedAnnotations, { id: evAnn.id, family: evAnn.family, protectedTargetIds: evAnn.protectedTargetIds ?? [] }];
   let addMembershipResult;
   try {
     addMembershipResult = addMembership(reduced, virtualAnnotations, derivedMemberships, evAnn.id, selectedBlockId, startEndpoint, endEndpoint);
@@ -992,6 +1003,19 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   const annotationDescriptor = descriptor.annotations.find((entry) => entry.annotationName === evAnn.family);
   if (!annotationFamilyMeta || !annotationDescriptor) {
     throw new Error(`${name}.${handle.field}.operated v4 event references unknown annotation family '${evAnn.family}'`);
+  }
+  const protectedTargetIds = evAnn.protectedTargetIds ?? [];
+  if (protectedTargetIds.length !== 0 &&
+      (annotationDescriptor.kind !== 'protectingAnnotation' || annotationDescriptor.protects === null)) {
+    throw new Error(`${name}.${handle.field}.operated v4 event only protecting annotations with a declared target family may name protected targets`);
+  }
+  if (annotationDescriptor.kind === 'protectingAnnotation' && annotationDescriptor.protects !== null) {
+    for (const targetId of protectedTargetIds) {
+      const target = db.prepare(`SELECT family FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(targetId, data.id);
+      if (!target || target.family !== annotationDescriptor.protects) {
+        throw new Error(`${name}.${handle.field}.operated v4 event protected target '${targetId}' is invalid`);
+      }
+    }
   }
   const familyFieldNames = Object.keys(annotationDescriptor.fields).sort();
   const evFieldNames = Object.keys(evAnn.fields).sort();
@@ -1158,6 +1182,11 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
 
   db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
     .run(evAnn.id, data.id, sourceBlock.project_id, sourceBlock.owner_id, evAnn.family);
+
+  for (const targetId of protectedTargetIds) {
+    db.prepare(`INSERT INTO ${prefix}_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)`)
+      .run(evAnn.id, targetId);
+  }
 
   const familyTable = `${prefix}_annotation_${evAnn.family}`;
   const familyFieldNamesArray = Object.keys(annotationDescriptor.fields);

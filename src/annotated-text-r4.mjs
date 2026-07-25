@@ -34,12 +34,15 @@ export function assertR4AnnotationApplyPayload(name, fieldName, payload) {
   if (!operation || typeof operation !== 'object' || Array.isArray(operation) ||
       Object.keys(operation).length !== 3 || operation.kind !== 'annotation.apply' ||
       !operation.annotation || typeof operation.annotation !== 'object' || Array.isArray(operation.annotation) ||
-      Object.keys(operation.annotation).length !== 3 ||
+      (Object.keys(operation.annotation).length !== 3 && Object.keys(operation.annotation).length !== 4) ||
       !Object.hasOwn(operation.annotation, 'id') || !Object.hasOwn(operation.annotation, 'family') || !Object.hasOwn(operation.annotation, 'fields') ||
       typeof operation.annotation.id !== 'string' || operation.annotation.id.length === 0 ||
       typeof operation.annotation.family !== 'string' || operation.annotation.family.length === 0 ||
-      !operation.annotation.fields || typeof operation.annotation.fields !== 'object' || Array.isArray(operation.annotation.fields)) {
-    throw new ValidationError(`${name}.${fieldName}.operation requires annotation.apply with annotation { id, family, fields }`);
+      !operation.annotation.fields || typeof operation.annotation.fields !== 'object' || Array.isArray(operation.annotation.fields) ||
+      (Object.hasOwn(operation.annotation, 'protectedTargetIds') &&
+        (!Array.isArray(operation.annotation.protectedTargetIds) ||
+          operation.annotation.protectedTargetIds.some((id, index, values) => typeof id !== 'string' || id.length === 0 || (index > 0 && values[index - 1] >= id))))) {
+    throw new ValidationError(`${name}.${fieldName}.operation requires annotation.apply with annotation { id, family, fields, protectedTargetIds? }`);
   }
   if (!operation.selection || typeof operation.selection !== 'object' || Array.isArray(operation.selection) ||
       Object.keys(operation.selection).length !== 3 ||
@@ -59,6 +62,9 @@ export function assertR4AnnotationApplyPayload(name, fieldName, payload) {
         id: operation.annotation.id,
         family: operation.annotation.family,
         fields: Object.freeze(operation.annotation.fields),
+        ...(Object.hasOwn(operation.annotation, 'protectedTargetIds')
+          ? { protectedTargetIds: Object.freeze([...operation.annotation.protectedTargetIds]) }
+          : {}),
       }),
       selection: Object.freeze({
         blockId: operation.selection.blockId,

@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  annotatedText, annotation, boolean, number, text, entity, everyone, executeDDL, executeFrameworkDDL, measurement,
+  annotatedText, annotation, boolean, number, text, entity, everyone, executeDDL, executeFrameworkDDL, measurement, protectingAnnotation,
   grant, read, ref, scope, write,
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension,
 } from '../src/internal.mjs';
@@ -57,6 +57,8 @@ function r4Doc() {
       annotations: [
         annotation('theme', { fields: { color: text({ default: 'blue' }), weight: number({ default: 1 }) } }),
         annotation('flag', { fields: { flagged: boolean({ default: false }) } }),
+        protectingAnnotation('confidential', { protects: 'theme', access: () => grant(read) }),
+        protectingAnnotation('standalone', { access: () => grant(read) }),
       ],
       measurements: [measurement('source', { extension: 'sourceInit' })],
     }),
@@ -104,7 +106,7 @@ async function setupDoc(blockText) {
   return { app, db, blockId, family, state };
 }
 
-function v4Payload(docId, blockId, startUtf16Offset, endUtf16Offset, annId, family, fields, expected) {
+function v4Payload(docId, blockId, startUtf16Offset, endUtf16Offset, annId, family, fields, expected, protectedTargetIds) {
   return {
     version: 4,
     id: docId,
@@ -112,7 +114,7 @@ function v4Payload(docId, blockId, startUtf16Offset, endUtf16Offset, annId, fami
     operation: {
       kind: 'annotation.apply',
       selection: { blockId, startUtf16Offset, endUtf16Offset },
-      annotation: { id: annId, family, fields },
+      annotation: { id: annId, family, fields, ...(protectedTargetIds ? { protectedTargetIds } : {}) },
     },
   };
 }
@@ -145,6 +147,55 @@ test('R4 annotation.apply on full block produces no splits, creates annotation w
   const memberships = db.prepare("SELECT * FROM R4Doc_body_membership WHERE annotation_id = 'ann-1' ORDER BY ordinal").all();
   assert.equal(memberships.length, 1);
   assert.equal(memberships[0].block_id, blockId);
+  await app.close?.();
+});
+
+test('R4 annotation.apply persists sorted protecting targets through its sole event and projection path', async () => {
+  const { app, db, blockId, state } = await setupDoc('hello world');
+  const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+  const coded = await app.dispatch({
+    actionId: 'apply-theme', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 11, 'theme-1', 'theme', {}, expected),
+  });
+  assert.equal(coded.ok, true, coded.failure?.message);
+  const afterCoded = db.serialize();
+  const protectedResult = await app.dispatch({
+    actionId: 'apply-protection', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 11, 'protect-1', 'confidential', {}, expected, ['theme-1']),
+  });
+  assert.equal(protectedResult.ok, true, protectedResult.failure?.message);
+  assert.deepEqual(protectedResult.events[0].data.annotation.protectedTargetIds, ['theme-1']);
+  const targets = db.prepare("SELECT annotation_id, target_annotation_id FROM R4Doc_body_annotation_protected_target").all();
+  assert.equal(targets.length, 1);
+  assert.equal(targets[0].annotation_id, 'protect-1');
+  assert.equal(targets[0].target_annotation_id, 'theme-1');
+  db.deserialize(afterCoded);
+  const replay = JSON.parse(JSON.stringify(protectedResult.events[0].data));
+  delete replay.__workbench;
+  app.entities.get('R4Doc').projection.apply({ handle: native('R4Doc', 'body', 'operated'), data: replay }, db);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation_protected_target WHERE annotation_id = 'protect-1' AND target_annotation_id = 'theme-1'").get().count, 1);
+  await app.close?.();
+});
+
+test('R4 annotation.apply rejects target IDs on ordinary, standalone, and wrong-family protectors', async () => {
+  const { app, db, blockId, state } = await setupDoc('hello world');
+  const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+  const ordinary = await app.dispatch({
+    actionId: 'bad-targets', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 11, 'flag-1', 'flag', {}, expected, ['nope']),
+  });
+  assert.equal(ordinary.ok, false);
+  const standalone = await app.dispatch({
+    actionId: 'bad-standalone-protection', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 11, 'standalone-1', 'standalone', {}, expected, ['nope']),
+  });
+  assert.equal(standalone.ok, false);
+  const wrongFamily = await app.dispatch({
+    actionId: 'bad-protection', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 11, 'protect-2', 'confidential', {}, expected, ['nope']),
+  });
+  assert.equal(wrongFamily.ok, false);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM R4Doc_body_annotation_protected_target').get().count, 0);
   await app.close?.();
 });
 

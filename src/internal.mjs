@@ -2,6 +2,7 @@ export { check, resolveDecision, UnawaitedCheckError } from './check.mjs';
 export { assertGuarded } from './guard/static.mjs';
 export { text, annotatedText, annotation, protectingAnnotation, measurement, annotationAction, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';
 export { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
+export { protectingAnnotationCapabilities } from './row-grant.mjs';
 export { getAnnotatedTextCompiledMetadata, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';
 export { owner } from './owner.mjs';
 export { createLog, getLog } from './log.mjs';

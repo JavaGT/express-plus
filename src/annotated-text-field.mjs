@@ -2,6 +2,7 @@
 // action handlers remain separate so a descriptor cannot imply a partial write.
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+import { assertGuarded } from './guard/static.mjs';
 const CAPABILITY_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
 const SCALAR_TYPES = new Set(['text', 'boolean', 'date', 'number', 'json', 'vector', 'ref']);
 const RESERVED_BLOCK_COLUMNS = new Set(['id', 'document_id', 'project_id', 'owner_id', 'position', 'epoch', 'structure_version']);
@@ -160,7 +161,7 @@ export function annotation(name, { fields = {}, actions = [], empty = 'delete' }
   });
 }
 
-export function protectingAnnotation(name, { fields = {}, protects = null, placeholder = '[Restricted]', actions = [], empty = 'delete' } = {}) {
+export function protectingAnnotation(name, { fields = {}, protects = null, placeholder = '[Restricted]', access = null, actions = [], empty = 'delete' } = {}) {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`protectingAnnotation name '${name}' is not a valid identifier`);
   }
@@ -175,6 +176,9 @@ export function protectingAnnotation(name, { fields = {}, protects = null, place
   if (typeof placeholder !== 'string' || placeholder.length === 0) {
     throw new Error(`protectingAnnotation '${name}' placeholder must be a non-empty string`);
   }
+  if (access !== null && typeof access !== 'function') {
+    throw new Error(`protectingAnnotation '${name}' access must be a function or null`);
+  }
   const frozenFields = {};
   for (const [k, v] of Object.entries(fields)) {
     frozenFields[k] = Object.freeze({ ...v });
@@ -186,6 +190,7 @@ export function protectingAnnotation(name, { fields = {}, protects = null, place
     fields: Object.freeze(frozenFields),
     protects,
     placeholder,
+    access,
     actions: frozenActions,
     empty,
   });
@@ -280,6 +285,10 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
         fail(entity, field, `annotations.${ann.annotationName}.protects`,
           `'${ann.protects}' does not name a declared annotation family`);
       }
+      if (typeof ann.access !== 'function') {
+        fail(entity, field, `annotations.${ann.annotationName}.access`, 'must be a function');
+      }
+      assertGuarded(ann.access, { where: `annotatedText protecting annotation '${ann.annotationName}' access` });
     }
   }
 
@@ -358,7 +367,7 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   }
 
   // Validate no unknown keys on annotation annotations
-  const ALLOWED_ANN_KEYS = new Set(['kind', 'annotationName', 'fields', 'actions', 'empty', 'protects', 'placeholder']);
+  const ALLOWED_ANN_KEYS = new Set(['kind', 'annotationName', 'fields', 'actions', 'empty', 'protects', 'placeholder', 'access']);
   for (const ann of descriptor.annotations) {
     for (const key of Object.keys(ann)) {
       if (!ALLOWED_ANN_KEYS.has(key)) {
@@ -447,9 +456,9 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   for (const ann of descriptor.annotations) {
     const actionIds = ann.actions.map(a => a.actionName);
     annotationActionIds[ann.annotationName] = Object.freeze([...actionIds]);
-    if (ann.kind === 'protectingAnnotation') protectingFamilies[ann.annotationName] = ann.placeholder;
+    if (ann.kind === 'protectingAnnotation') protectingFamilies[ann.annotationName] = Object.freeze({ placeholder: ann.placeholder, access: ann.access });
   }
-  const protectingPlaceholders = [...new Set(Object.values(protectingFamilies))];
+  const protectingPlaceholders = [...new Set(Object.values(protectingFamilies).map((family) => family.placeholder))];
   if (protectingPlaceholders.length > 1) {
     fail(entity, field, 'annotations', 'protecting annotations must share one placeholder');
   }
@@ -516,6 +525,7 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
   const block = `${prefix}_block`;
   const annotation = `${prefix}_annotation`;
   const orphan = `${prefix}${ORPHAN_TABLE_SUFFIX}`;
+  const protectedTarget = `${prefix}_annotation_protected_target`;
   const membership = `${prefix}_membership`;
   const measurement = `${prefix}_measurement`;
   const state = `${prefix}_state`;
@@ -525,6 +535,8 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_block_order ON ${block} (document_id, position);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_block_project ON ${block} (project_id, document_id, position, id);`,
     `CREATE TABLE IF NOT EXISTS ${annotation} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  owner_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${families.map((name) => `'${name}'`).join(', ')})),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE,\n  FOREIGN KEY (project_id) REFERENCES ${projectTarget}(id) ON DELETE CASCADE,\n  FOREIGN KEY (owner_id) REFERENCES ${ownerTarget}(id) ON DELETE CASCADE\n);`,
+    `CREATE TABLE IF NOT EXISTS ${protectedTarget} (\n  annotation_id TEXT NOT NULL,\n  target_annotation_id TEXT NOT NULL,\n  PRIMARY KEY (annotation_id, target_annotation_id),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE,\n  FOREIGN KEY (target_annotation_id) REFERENCES ${annotation}(id) ON DELETE RESTRICT\n);`,
+    `CREATE INDEX IF NOT EXISTS idx_${prefix}_annotation_protected_target_target ON ${protectedTarget} (target_annotation_id, annotation_id);`,
     `CREATE TABLE IF NOT EXISTS ${orphan} (\n  annotation_id TEXT PRIMARY KEY,\n  saved_quote TEXT NOT NULL,\n  last_memberships TEXT NOT NULL CHECK (json_valid(last_memberships)),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE\n);`,
   ];
   for (const family of families) {
