@@ -9,6 +9,7 @@
 //   server → client: {type:'subscribed', requestId, scope, entity, id, currentSeq}
 //                    {type:'unsubscribed', scope, entity, id}
 //                    {type:'event', entity, id, seq, seqSpan, event, delta?}
+//                    {type:'resync', entity, id, seq, reason}
 //                    {type:'error', requestId?, failure}
 
 import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } from './workbench-annotated-text.mjs';
@@ -136,6 +137,7 @@ class LiveSyncSession {
       this._subs.set(key, {
         onEvent,
         onCheckpoint: options.onCheckpoint,
+        onResync: options.onResync,
         fields: options.fields,
         pace: options.pace,
         envelope: subscribeEnvelope(entity, id, options),
@@ -181,6 +183,7 @@ class LiveSyncSession {
       this._subs.set(key, {
         onEvent,
         onCheckpoint: options.onCheckpoint,
+        onResync: options.onResync,
         fields: options.fields,
         pace: options.pace,
         scope,
@@ -511,6 +514,12 @@ class LiveSyncSession {
       if (sub && typeof sub.onEvent === 'function') {
         sub.onEvent(envelope);
       }
+    } else if (envelope.type === 'resync') {
+      const key = scopeKey ?? `${envelope.entity}:${String(envelope.id)}`;
+      const sub = this._subs.get(key);
+      if (sub && typeof sub.onResync === 'function') {
+        sub.onResync(envelope);
+      }
     }
   }
 
@@ -628,6 +637,9 @@ export class LiveList {
     this._maxResyncBackoff = maxResyncBackoff;
     this._resyncAttempt = 0;
     this._resyncRetryTimer = null;
+    this._snapshotRequiredSeq = 0;
+    this._snapshotRecovery = false;
+    this._forceSnapshotRequested = false;
     this._renderCallbacks = new Set();
     this._ordered = {};             // { [field]: [{id, key, item}] } — internal ordered tracking
     this._textStates = {};          // durable annotated-text reducer state by field
@@ -690,6 +702,7 @@ export class LiveList {
         fields: this._fields,
         pace: this._pace,
         onCheckpoint: ({ currentSeq }) => this._onCheckpoint(currentSeq),
+        onResync: (control) => this._onLiveResync(control),
       }, (envelope) => {
         this._onLiveEnvelope(envelope);
       });
@@ -768,12 +781,36 @@ export class LiveList {
     this._resync().catch(() => {});
   }
 
+  _onLiveResync(control) {
+    if (this._closed
+      || control?.reason !== 'annotated-text-snapshot-required'
+      || control.entity !== this._entity
+      || String(control.id) !== String(this._id)
+      || !Number.isSafeInteger(control.seq)
+      || control.seq < 0) return;
+    this._snapshotRequiredSeq = Math.max(this._snapshotRequiredSeq, control.seq);
+    this._forceSnapshotRequested = true;
+    // A control can arrive while an ordinary replay is in flight. From that
+    // point every queued live envelope contributes to the snapshot high-water.
+    this._snapshotRecovery = true;
+    this._resync(true).catch(() => {});
+  }
+
   /**
    * Called by the channel for every live envelope. Queues if not yet ready
    * or currently resyncing; otherwise ingests directly.
    */
   _onLiveEnvelope(envelope) {
     if (this._closed) return;
+    if (this._isAnnotatedOperation(envelope?.event)) {
+      this._onLiveResync({
+        entity: this._entity,
+        id: this._id,
+        seq: Array.isArray(envelope?.seqSpan) ? envelope.seqSpan[1] : envelope?.seq,
+        reason: 'annotated-text-snapshot-required',
+      });
+      return;
+    }
     if (!this._ready || this._resyncing) {
       this._bufferEnvelope(envelope);
       return;
@@ -782,6 +819,12 @@ export class LiveList {
   }
 
   _bufferEnvelope(envelope) {
+    if (this._snapshotRecovery && !this._isEntityRemoval(envelope?.event)) {
+      const seq = Array.isArray(envelope?.seqSpan) ? envelope.seqSpan[1] : envelope?.seq;
+      if (Number.isSafeInteger(seq) && seq >= 0) {
+        this._snapshotRequiredSeq = Math.max(this._snapshotRequiredSeq, seq);
+      }
+    }
     if (this._queue.length >= this._maxBufferedEvents) {
       this._queue = [];
       this._bufferOverflow = true;
@@ -799,6 +842,40 @@ export class LiveList {
       delta: envelope.delta,
       reducers: envelope.reducers,
     };
+  }
+
+  _isAnnotatedOperation(event) {
+    if (typeof event?.type !== 'string') return false;
+    const prefix = `${this._entity}.`;
+    if (!event.type.startsWith(prefix) || !event.type.endsWith('.operated')) return false;
+    const field = event.type.slice(prefix.length, -'.operated'.length);
+    return this._state?.[field]?.kind === 'workbench.annotatedText.recipient';
+  }
+
+  _isEntityRemoval(event) {
+    return event?.type === `${this._entity}.removed`;
+  }
+
+  _consumeTerminalRemoval() {
+    const removal = this._queue.find((envelope) => this._isEntityRemoval(envelope?.event));
+    if (!removal) return false;
+    let span;
+    try {
+      span = normalizeSeqSpan(removal.seqSpan ?? removal.seq);
+    } catch {
+      return false;
+    }
+    if (span[1] < this._cursor) return false;
+    this._state = null;
+    this._cursor = span[1];
+    this._removed = true;
+    this._ordered = {};
+    this._textStates = {};
+    this._textReducerReady = Promise.resolve();
+    this._bufferOverflow = false;
+    this._snapshotRequiredSeq = 0;
+    this._queue = [];
+    return true;
   }
 
   /**
@@ -847,12 +924,15 @@ export class LiveList {
   async _resync(forceSnapshot = false) {
     if (this._resyncing) return; // prevent re-entrancy
     this._resyncing = true;
+    const snapshotRequested = forceSnapshot || this._forceSnapshotRequested;
+    this._forceSnapshotRequested = false;
+    this._snapshotRecovery = snapshotRequested;
     const epoch = this._epoch;
     let failed = false;
 
     try {
       let body = null;
-      if (!forceSnapshot) {
+      if (!snapshotRequested) {
         const res = await this._fetchImpl(
           this._eventsSinceUrl(this._entity, this._id, this._cursor),
           { signal: this._abortController.signal },
@@ -871,7 +951,7 @@ export class LiveList {
         this._textReducerReady = Promise.resolve();
         this._bufferOverflow = false;
         this._queue = [];
-      } else if (forceSnapshot || this._bufferOverflow || body?.resync === 'stale') {
+      } else if (snapshotRequested || this._bufferOverflow || body?.resync === 'stale') {
         // Forced re-bootstrap: fresh snapshot replaces state entirely.
         const snapRes = await this._fetchImpl(
           this._snapshotUrl(this._entity, this._id),
@@ -885,7 +965,15 @@ export class LiveList {
         this._removed = false;
         this._ordered = {};
         this._bufferOverflow = false;
-        this._queue = [];
+        if (this._cursor < this._snapshotRequiredSeq) {
+          failed = true;
+        } else if (this._consumeTerminalRemoval()) {
+          // A removal may arrive after the snapshot's sequence. It has no
+          // snapshot representation, so preserve its terminal live meaning.
+        } else {
+          this._snapshotRequiredSeq = 0;
+          this._queue = [];
+        }
       } else if (body?.events) {
         // Fold events-since rows in order. Events-since is authoritative
         // ordered fill — apply seq>cursor rows directly without span checks.
@@ -914,13 +1002,19 @@ export class LiveList {
         }
       }
     } catch {
-      failed = true;
+      failed = !this._consumeTerminalRemoval();
     }
 
     this._resyncing = false;
+    this._snapshotRecovery = false;
     if (this._closed || epoch !== this._epoch) return;
     if (failed) {
+      this._forceSnapshotRequested = this._forceSnapshotRequested || snapshotRequested;
       this._scheduleResync();
+      return;
+    }
+    if (this._forceSnapshotRequested) {
+      await this._resync(true);
       return;
     }
     this._resyncAttempt = 0;

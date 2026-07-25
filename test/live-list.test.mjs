@@ -22,6 +22,7 @@ function deferred() {
 function makeFakeChannel() {
   const subs = new Map();
   const checkpoints = new Map();
+  const resyncs = new Map();
   let subscribeAck = { currentSeq: 1 };
 
   const channel = {
@@ -34,12 +35,16 @@ function makeFakeChannel() {
       if (typeof optionsOrOnEvent?.onCheckpoint === 'function') {
         checkpoints.set(key, optionsOrOnEvent.onCheckpoint);
       }
+      if (typeof optionsOrOnEvent?.onResync === 'function') {
+        resyncs.set(key, optionsOrOnEvent.onResync);
+      }
       return Promise.resolve(subscribeAck);
     },
     unsubscribe(entity, id) {
       const key = `${entity}\0${String(id)}`;
       subs.delete(key);
       checkpoints.delete(key);
+      resyncs.delete(key);
       return Promise.resolve();
     },
     close() {},
@@ -50,6 +55,9 @@ function makeFakeChannel() {
     },
     checkpoint(entity, id, currentSeq) {
       checkpoints.get(`${entity}\0${String(id)}`)?.({ currentSeq });
+    },
+    resync(entity, id, control) {
+      resyncs.get(`${entity}\0${String(id)}`)?.(control);
     },
   };
   return channel;
@@ -709,6 +717,125 @@ describe('LiveList', () => {
     assert.equal(snapshotCalls, 1);
     assert.equal(list.state, null);
     assert.equal(list.cursor, 7);
+    await list.close();
+  });
+
+  it('opaque live resync replaces annotated state only after a projected snapshot reaches its sequence', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 3 });
+    let snapshotCalls = 0;
+    const fetch = makeFakeFetch([
+      {
+        match: '/snapshot',
+        responseFn: () => {
+          snapshotCalls++;
+          return snapshotCalls === 1
+            ? { snapshot: { body: { kind: 'workbench.annotatedText.recipient', version: 1 } }, seq: 3 }
+            : { snapshot: { body: { kind: 'workbench.annotatedText.recipient', version: 1, blocks: [{ kind: 'restricted', id: 'b1', placeholder: '[Restricted]' }] } }, seq: 7 };
+        },
+      },
+    ]);
+    const list = new LiveList({ entity: 'Doc', id: 'd1', channel, fetchImpl: fetch, snapshotUrl, eventsSinceUrl });
+    await list.subscribe();
+    channel.resync('Doc', 'd1', { type: 'resync', entity: 'Doc', id: 'd1', seq: 7, reason: 'annotated-text-snapshot-required' });
+    await new Promise(r => setTimeout(r, 20));
+    assert.equal(snapshotCalls, 2);
+    assert.equal(list.cursor, 7);
+    assert.deepEqual(list.state.body.blocks, [{ kind: 'restricted', id: 'b1', placeholder: '[Restricted]' }]);
+    await list.close();
+  });
+
+  it('opaque live resync retains a concurrent envelope high-water until its snapshot catches up', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 3 });
+    const secondSnapshot = deferred();
+    let snapshotCalls = 0;
+    const fetch = makeFakeFetch([
+      {
+        match: '/snapshot',
+        responseFn: () => {
+          snapshotCalls++;
+          if (snapshotCalls === 1) return { snapshot: { body: { kind: 'workbench.annotatedText.recipient', version: 1 } }, seq: 3 };
+          if (snapshotCalls === 2) return secondSnapshot.promise;
+          return { snapshot: { body: { kind: 'workbench.annotatedText.recipient', version: 1 }, title: 'latest' }, seq: 8 };
+        },
+      },
+    ]);
+    const list = new LiveList({ entity: 'Doc', id: 'd1', channel, fetchImpl: fetch, snapshotUrl, eventsSinceUrl, resyncBackoffBase: 1 });
+    await list.subscribe();
+    channel.resync('Doc', 'd1', { type: 'resync', entity: 'Doc', id: 'd1', seq: 7, reason: 'annotated-text-snapshot-required' });
+    await new Promise(r => setTimeout(r, 0));
+    channel.emit({
+      type: 'event', entity: 'Doc', id: 'd1', seq: 8, seqSpan: [8, 8],
+      event: { type: 'Doc.updated', data: {} }, delta: { title: { set: 'queued' } },
+    });
+    secondSnapshot.resolve({ snapshot: { body: { kind: 'workbench.annotatedText.recipient', version: 1 }, title: 'too-old' }, seq: 7 });
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(snapshotCalls, 3);
+    assert.equal(list.cursor, 8);
+    assert.equal(list.state.title, 'latest');
+    await list.close();
+  });
+
+  it('opaque live resync reaches terminal removal when a deleted snapshot cannot recover', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 6 });
+    const deferredSnapshot = deferred();
+    let snapshotCalls = 0;
+    const fetch = makeFakeFetch([
+      {
+        match: '/snapshot',
+        responseFn: () => {
+          snapshotCalls++;
+          if (snapshotCalls === 1) return { snapshot: { body: { kind: 'workbench.annotatedText.recipient', version: 1 } }, seq: 6 };
+          return deferredSnapshot.promise;
+        },
+      },
+    ]);
+    const list = new LiveList({ entity: 'Doc', id: 'd1', channel, fetchImpl: fetch, snapshotUrl, eventsSinceUrl, resyncBackoffBase: 1 });
+    await list.subscribe();
+    channel.resync('Doc', 'd1', { type: 'resync', entity: 'Doc', id: 'd1', seq: 7, reason: 'annotated-text-snapshot-required' });
+    await new Promise(r => setTimeout(r, 0));
+    channel.emit({
+      type: 'event', entity: 'Doc', id: 'd1', seq: 8, seqSpan: [8, 8],
+      event: { type: 'Doc.removed' },
+    });
+    deferredSnapshot.reject(new Error('deleted snapshot is unavailable'));
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(snapshotCalls, 2);
+    assert.equal(list.state, null);
+    assert.equal(list.cursor, 8);
+    await list.close();
+  });
+
+  it('opaque live resync preserves a queued removal after a successful stale snapshot', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 6 });
+    const deferredSnapshot = deferred();
+    let snapshotCalls = 0;
+    const fetch = makeFakeFetch([
+      {
+        match: '/snapshot',
+        responseFn: () => {
+          snapshotCalls++;
+          if (snapshotCalls === 1) return { snapshot: { body: { kind: 'workbench.annotatedText.recipient', version: 1 } }, seq: 6 };
+          return deferredSnapshot.promise;
+        },
+      },
+    ]);
+    const list = new LiveList({ entity: 'Doc', id: 'd1', channel, fetchImpl: fetch, snapshotUrl, eventsSinceUrl });
+    await list.subscribe();
+    channel.resync('Doc', 'd1', { type: 'resync', entity: 'Doc', id: 'd1', seq: 7, reason: 'annotated-text-snapshot-required' });
+    await new Promise(r => setTimeout(r, 0));
+    channel.emit({
+      type: 'event', entity: 'Doc', id: 'd1', seq: 8, seqSpan: [8, 8],
+      event: { type: 'Doc.removed' },
+    });
+    deferredSnapshot.resolve({ snapshot: { body: { kind: 'workbench.annotatedText.recipient', version: 1 } }, seq: 7 });
+    await new Promise(r => setTimeout(r, 30));
+    assert.equal(snapshotCalls, 2);
+    assert.equal(list.state, null);
+    assert.equal(list.cursor, 8);
     await list.close();
   });
 

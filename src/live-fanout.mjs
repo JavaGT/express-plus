@@ -165,7 +165,17 @@ export function createLiveFanout({ mayVerb = null } = {}) {
     }
 
     const eventScope = committedEvent.scope ?? scopeOf(name, id).key;
+    const directScope = scopeOf(name, id).key;
     const removed = row === undefined;
+
+    // Annotated-text operations have no recipient event grammar. Classify them
+    // before delta/reducer construction so canonical family facts cannot enter
+    // any live envelope; recipients recover through the projected snapshot.
+    const isAnnotatedTextOperation = !scopeAnchored
+      && eventScope === directScope
+      && handle.kind === EventKind.native
+      && handle.nativeName === 'operated'
+      && entityRecord.fields?.[handle.field]?.kind === 'annotatedText';
 
     let authzRow = row;
     if (!removed && !hydrated && entityRecord.findById) {
@@ -185,7 +195,9 @@ export function createLiveFanout({ mayVerb = null } = {}) {
 
     // Delta projection is per-entity state diffing; a scope-anchored foreign
     // event carries its own data and must not be fed to the anchor's projector.
-    const delta = scopeAnchored ? undefined : deltaProjector.project(entityRecord, id, authzRow, committed);
+    const delta = scopeAnchored || isAnnotatedTextOperation
+      ? undefined
+      : deltaProjector.project(entityRecord, id, authzRow, committed);
 
     const scopeSubs = byScope.get(eventScope);
     if (!scopeSubs) return;
@@ -212,6 +224,14 @@ export function createLiveFanout({ mayVerb = null } = {}) {
         // Envelope identity (entity, id) is always the ANCHOR — matching the
         // subscription's scope — even for a scope-anchored foreign event;
         // the nested `event` carries its own type/data (e.g. Job.updated).
+        if (isAnnotatedTextOperation) {
+          if (!Number.isSafeInteger(committed.seq) || committed.seq < 0) continue;
+          conn.send({
+            type: 'resync', entity: name, id, seq: committed.seq,
+            reason: 'annotated-text-snapshot-required',
+          });
+          continue;
+        }
         const envelope = {
           type: 'event', entity: name, id, seq: committed.seq,
           seqSpan: [committed.seq, committed.seq],

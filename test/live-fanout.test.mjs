@@ -89,6 +89,42 @@ test('live fanout strips framework-only event metadata', async () => {
   assert.deepEqual(conn.drain()[0].event.data, { id: 'd1' });
 });
 
+test('live fanout invalidates annotated-text operations without serializing their facts', async () => {
+  const fanout = createLiveFanout({ mayVerb: async () => true });
+  const conn = makeConn('c1');
+  const entity = makeEntity({ fields: { body: { kind: 'annotatedText' } } });
+  fanout.addSubscription('Doc', 'd1', conn);
+
+  await fanout.emit(entity, 'd1', { id: 'd1' }, {
+    type: 'Doc.body.operated', seq: 7,
+    data: {
+      operation: ['secret operation'], family: { text: 'secret body' },
+      memberships: ['secret-membership'], protectedTargetIds: ['secret-target'],
+    },
+  });
+
+  const messages = conn.drain();
+  assert.deepEqual(messages, [{
+    type: 'resync', entity: 'Doc', id: 'd1', seq: 7,
+    reason: 'annotated-text-snapshot-required',
+  }]);
+  assert.equal(JSON.stringify(messages).includes('secret'), false);
+});
+
+test('live fanout drops annotated-text operations with invalid sequence metadata', async () => {
+  const fanout = createLiveFanout({ mayVerb: async () => true });
+  const conn = makeConn('c1');
+  const entity = makeEntity({ fields: { body: { kind: 'annotatedText' } } });
+  fanout.addSubscription('Doc', 'd1', conn);
+
+  await fanout.emit(entity, 'd1', { id: 'd1' }, {
+    type: 'Doc.body.operated', seq: Number.MAX_SAFE_INTEGER + 1,
+    data: { operation: ['secret operation'], family: { text: 'secret body' } },
+  });
+
+  assert.deepEqual(conn.drain(), []);
+});
+
 test('live fanout delivers removed events without re-authorization', async () => {
   let calls = 0;
   const fanout = createLiveFanout({
