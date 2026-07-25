@@ -297,7 +297,7 @@ test('onShutdown: hook exceeding timeout is force-abandoned', async (t) => {
   app.onShutdown('slow', async () => {
     slowRan = true;
     // This should timeout
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await new Promise(resolve => setTimeout(resolve, 100));
     slowCompleted = true;
   }, { timeoutMs: 50 });
 

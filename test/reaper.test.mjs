@@ -2,7 +2,7 @@ import { scope, everyone, grant, read, tick, date, schedule } from '../src/index
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import workbench, { entity, Session, executeFrameworkDDL } from '../src/internal.mjs';
+import workbench, { createClock, entity, Session, executeFrameworkDDL } from '../src/internal.mjs';
 import { generateDDL } from '../src/ddl.mjs';
 import { createServer, durableMutationVariant } from '../src/pipeline.mjs';
 import { principal as makePrincipal } from '../src/principal.mjs';
@@ -369,11 +369,11 @@ test('e2e: while-fails — row with mismatched status stays unchanged (DENIED)',
   const now = Date.now();
   db.prepare('INSERT INTO BlogSchedDeny (id, status, publishedAt) VALUES (?, ?, ?)').run('b2', 'archived', now - 1000);
 
-  const clock = startClockTriggers({ db, entities, dispatch: server.dispatch });
-  t.after(() => clock.stop());
+  const clock = createClock({ now: () => 0 });
+  const triggers = startClockTriggers({ db, entities, dispatch: server.dispatch, clock });
+  t.after(() => triggers.stop());
 
-  // After ~2 intervals, the row must NOT have been mutated.
-  await new Promise((resolve) => setTimeout(resolve, 2500));
+  clock._tick(2000);
   const row = db.prepare('SELECT status FROM BlogSchedDeny WHERE id = ?').get('b2');
   assert.equal(row.status, 'archived', 'while-failed row stays unmutated');
 });
@@ -502,13 +502,13 @@ test('e2e: clock-dispatch dispatch error continues sweep (stderr, no throw)', as
     throw new Error('simulated auth deny');
   };
 
-  const clock = startClockTriggers({ db, entities, dispatch: throwingDispatch });
-  t.after(() => clock.stop());
+  const clock = createClock({ now: () => 0 });
+  const triggers = startClockTriggers({ db, entities, dispatch: throwingDispatch, clock });
+  t.after(() => triggers.stop());
 
-  // After ~2 intervals, the engine must have kept running and kept dispatching.
-  await new Promise((resolve) => setTimeout(resolve, 2500));
+  clock._tick(2000);
   assert.ok(dispatchCount > 0, 'engine kept dispatching despite errors');
-  assert.doesNotThrow(() => clock.stop());
+  assert.doesNotThrow(() => triggers.stop());
 });
 
 // ============================================================
@@ -536,17 +536,18 @@ test('clock-dispatch survives discovery-phase throw (bad table)', async (t) => {
   entities.set('BadTable', { ...Blog, name: 'NonExistentTable' });
 
   let dispatchCalled = false;
-  const clock = startClockTriggers({
+  const clock = createClock({ now: () => 0 });
+  const triggers = startClockTriggers({
     db,
     entities,
     dispatch: () => { dispatchCalled = true; },
+    clock,
   });
-  t.after(() => clock.stop());
+  t.after(() => triggers.stop());
 
-  // Wait for at least one interval — the outer try/catch should catch the SQL error.
-  await new Promise((resolve) => setTimeout(resolve, 1500));
+  clock._tick(1000);
 
   // The timer is still alive (engine didn't crash), and dispatch was never called.
-  assert.doesNotThrow(() => clock.stop());
+  assert.doesNotThrow(() => triggers.stop());
   assert.equal(dispatchCalled, false, 'dispatch was not called');
 });

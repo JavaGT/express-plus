@@ -576,12 +576,12 @@ test('e2e: while-fails — row not matching while is never mutated', async (t) =
     }),
   });
 
-  const clock = startClockTriggers({ db, entities, dispatch: server.dispatch });
-  t.after(() => clock.stop());
+  const clock = createClock({ now: () => 0 });
+  const triggers = startClockTriggers({ db, entities, dispatch: server.dispatch, clock });
+  t.after(() => triggers.stop());
 
-  // After multiple intervals, the row must NOT have been mutated.
-  await new Promise((resolve) => setTimeout(resolve, 250)); // ~5 intervals
-  assert.doesNotThrow(() => clock.stop()); // verify engine didn't throw
+  clock._tick(250);
+  assert.doesNotThrow(() => triggers.stop()); // verify engine didn't throw
 
   const row = db.prepare('SELECT status FROM BlogWhileFail WHERE id = ?').get('b2');
   assert.equal(row.status, 'dead', 'while-failed row stays unmutated');
@@ -698,12 +698,11 @@ test('e2e: engine dispatch error continues sweep (stderr, no throw)', async (t) 
 
   const goodEntities = new Map([[Blog.name, Blog]]);
 
-  const clock = startClockTriggers({ db, entities: goodEntities, dispatch: throwingDispatch });
-  t.after(() => clock.stop());
+  const clock = createClock({ now: () => 0 });
+  const triggers = startClockTriggers({ db, entities: goodEntities, dispatch: throwingDispatch, clock });
+  t.after(() => triggers.stop());
 
-  // After multiple intervals, the engine must have kept running (didn't crash)
-  // and kept dispatching each pass despite every dispatch throwing.
-  await new Promise((resolve) => setTimeout(resolve, 350)); // ~7 intervals
+  clock._tick(350);
   assert.ok(dispatchCount > 0, 'engine kept dispatching despite errors');
-  assert.doesNotThrow(() => clock.stop());
+  assert.doesNotThrow(() => triggers.stop());
 });
