@@ -46,7 +46,7 @@ registerAnnotatedTextStructuralExtension('sourceInit', Object.freeze({
   },
 }));
 
-function r4Doc({ protectingAccess = async ({ is }) => (await is.owner()) ? grant(read) : grant() } = {}) {
+function r4Doc({ protectingAccess = async ({ is }) => (await is.owner()) ? grant(read) : grant(), commentEmpty = 'orphan' } = {}) {
   return entity('R4Doc', {
     project: ref('Project'),
     owner: ref('User', { role: 'owner' }),
@@ -57,6 +57,7 @@ function r4Doc({ protectingAccess = async ({ is }) => (await is.owner()) ? grant
       annotations: [
         annotation('theme', { fields: { color: text({ default: 'blue' }), weight: number({ default: 1 }) } }),
         annotation('flag', { fields: { flagged: boolean({ default: false }) } }),
+        annotation('comment', { empty: commentEmpty }),
         protectingAnnotation('confidential', { protects: 'theme', access: protectingAccess }),
         protectingAnnotation('standalone', { access: () => grant(read) }),
       ],
@@ -120,6 +121,15 @@ function v4Payload(docId, blockId, startUtf16Offset, endUtf16Offset, annId, fami
   };
 }
 
+function v5Payload(docId, annotationId, blockId, expected) {
+  return {
+    version: 5,
+    id: docId,
+    expected,
+    operation: { kind: 'annotation.detach', annotationId, blockId },
+  };
+}
+
 test('R4 annotation.apply on full block produces no splits, creates annotation with whole-block membership', async () => {
   const { app, db, blockId, state } = await setupDoc('hello world');
   const result = await app.dispatch({
@@ -175,6 +185,114 @@ test('R4 annotation.apply persists sorted protecting targets through its sole ev
   delete replay.__workbench;
   app.entities.get('R4Doc').projection.apply({ handle: native('R4Doc', 'body', 'operated'), data: replay }, db);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation_protected_target WHERE annotation_id = 'protect-1' AND target_annotation_id = 'theme-1'").get().count, 1);
+  await app.close?.();
+});
+
+test('R5 annotation.detach deletes a last annotation, cleans incoming edges, and replays', async () => {
+  const { app, db, blockId, state } = await setupDoc('hello world');
+  const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+  const theme = await app.dispatch({
+    actionId: 'r5-theme', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 5, 'r5-theme', 'theme', {}, expected),
+  });
+  assert.equal(theme.ok, true, theme.failure?.message);
+  const rightBlockId = db.prepare("SELECT id FROM R4Doc_body_block WHERE document_id = 'd1' AND id != ?").get(blockId).id;
+  const afterSplit = db.prepare("SELECT structure_version, family_checkpoint FROM R4Doc_body_state WHERE document_id = 'd1'").get();
+  const afterSplitExpected = { structuralRevision: afterSplit.structure_version, frontier: JSON.parse(afterSplit.family_checkpoint).checkpoint.frontier };
+  const applied = await app.dispatch({
+    actionId: 'r5-z-protect', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', rightBlockId, 0, 6, 'r5-z-protect', 'confidential', {}, afterSplitExpected, ['r5-theme']),
+  });
+  assert.equal(applied.ok, true);
+  assert.equal((await app.dispatch({
+    actionId: 'r5-a-protect', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', rightBlockId, 0, 6, 'r5-a-protect', 'confidential', {}, afterSplitExpected, ['r5-theme']),
+  })).ok, true);
+  const beforeDetach = db.serialize();
+  const detached = await app.dispatch({
+    actionId: 'r5-detach', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v5Payload('d1', 'r5-theme', blockId, afterSplitExpected),
+  });
+  assert.equal(detached.ok, true, detached.failure?.message);
+  assert.equal(detached.events.length, 1);
+  assert.equal(detached.events[0].data.version, 5);
+  assert.deepEqual(detached.events[0].data.before, detached.events[0].data.after);
+  assert.equal(detached.events[0].data.result.disposition.kind, 'deleted');
+  assert.deepEqual(detached.events[0].data.result.changedProtectors, [
+    { annotationId: 'r5-a-protect', protectsPostimage: [] },
+    { annotationId: 'r5-z-protect', protectsPostimage: [] },
+  ]);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation WHERE id = 'r5-theme'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation_protected_target WHERE annotation_id = 'r5-z-protect'").get().count, 0);
+  assert.equal((await app.dispatch({
+    actionId: 'r5-detach', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v5Payload('d1', 'r5-theme', blockId, afterSplitExpected),
+  })).ok, true);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'r5-detach'").get().count, 1);
+  const event = structuredClone(detached.events[0].data);
+  db.deserialize(beforeDetach);
+  app.entities.get('R4Doc').projection.apply({ handle: native('R4Doc', 'body', 'operated'), data: event }, db);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation WHERE id = 'r5-theme'").get().count, 0);
+  await app.close?.();
+});
+
+test('R5 annotation.detach persists an orphan outcome and rejects stale or tampered facts', async () => {
+  const { app, db, blockId, state } = await setupDoc('comment');
+  const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+  assert.equal((await app.dispatch({
+    actionId: 'r5-comment', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 7, 'r5-comment', 'comment', {}, expected),
+  })).ok, true);
+  const preimage = db.serialize();
+  const stale = await app.dispatch({
+    actionId: 'r5-stale', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v5Payload('d1', 'r5-comment', blockId, { structuralRevision: expected.structuralRevision + 1, frontier: expected.frontier }),
+  });
+  assert.equal(stale.ok, false);
+  const detached = await app.dispatch({
+    actionId: 'r5-orphan', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v5Payload('d1', 'r5-comment', blockId, expected),
+  });
+  assert.equal(detached.ok, true, detached.failure?.message);
+  assert.equal(detached.events[0].data.result.disposition.kind, 'orphaned');
+  assert.equal(detached.events[0].data.result.disposition.savedQuote, 'comment');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = 'r5-comment'").get().count, 0);
+  assert.equal(db.prepare("SELECT saved_quote FROM R4Doc_body_annotation_orphan_state WHERE annotation_id = 'r5-comment'").get().saved_quote, 'comment');
+  const tampered = structuredClone(detached.events[0].data);
+  tampered.result.disposition.savedQuote = 'forged';
+  db.deserialize(preimage);
+  assert.throws(() => app.entities.get('R4Doc').projection.apply({ handle: native('R4Doc', 'body', 'operated'), data: tampered }, db), /result does not match/);
+  assert.deepEqual(db.serialize(), preimage);
+  const replayApp = workbench({ db, entities: [r4Doc({ commentEmpty: 'delete' })] });
+  replayApp.start();
+  await replayApp.ready;
+  replayApp.entities.get('R4Doc').projection.apply({ handle: native('R4Doc', 'body', 'operated'), data: detached.events[0].data }, db);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation WHERE id = 'r5-comment'").get().count, 1);
+  assert.equal(db.prepare("SELECT saved_quote FROM R4Doc_body_annotation_orphan_state WHERE annotation_id = 'r5-comment'").get().saved_quote, 'comment');
+  await replayApp.close?.();
+  await app.close?.();
+});
+
+test('R5 annotation.detach retains a non-last annotation and normalizes ordinals', async () => {
+  const { app, db, blockId, state } = await setupDoc('hello world');
+  const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+  assert.equal((await app.dispatch({
+    actionId: 'r5-retain', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 5, 'r5-retain', 'theme', {}, expected),
+  })).ok, true);
+  const rightBlockId = db.prepare("SELECT id FROM R4Doc_body_block WHERE document_id = 'd1' AND id != ?").get(blockId).id;
+  const afterSplit = db.prepare("SELECT structure_version, family_checkpoint FROM R4Doc_body_state WHERE document_id = 'd1'").get();
+  const afterSplitExpected = { structuralRevision: afterSplit.structure_version, frontier: JSON.parse(afterSplit.family_checkpoint).checkpoint.frontier };
+  db.prepare("INSERT INTO R4Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) SELECT 'r5-retain', id, 1, ?, ? FROM R4Doc_body_block WHERE id = ?")
+    .run(JSON.stringify(['endpoint', afterSplitExpected.frontier, ['point', ['root'], 'left']]), JSON.stringify(['endpoint', afterSplitExpected.frontier, ['point', ['root'], 'right']]), rightBlockId);
+  const detached = await app.dispatch({
+    actionId: 'r5-retain-detach', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v5Payload('d1', 'r5-retain', blockId, afterSplitExpected),
+  });
+  assert.equal(detached.ok, true, detached.failure?.message);
+  assert.deepEqual(detached.events[0].data.result.disposition, { kind: 'retained' });
+  assert.deepEqual(detached.events[0].data.result.memberships, { annotationId: 'r5-retain', postimage: [{ blockId: rightBlockId, ordinal: 0 }] });
+  assert.equal(db.prepare("SELECT ordinal FROM R4Doc_body_membership WHERE annotation_id = 'r5-retain' AND block_id = ?").get(rightBlockId).ordinal, 0);
   await app.close?.();
 });
 

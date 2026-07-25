@@ -4,7 +4,7 @@ import * as eventHandle from '../event-handle.mjs';
 import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
 import { applyTextOp, assertUtf16Offset, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
 import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, resolvePositionToEndpoint } from '../annotated-text-family.mjs';
-import { splitBlockMemberships, mergeBlocksMemberships, addMembership } from '../annotated-text-membership.mjs';
+import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata } from '../annotated-text-field.mjs';
 import { deriveBlockPosition, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
 
@@ -87,7 +87,97 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db }) {
   if (data.version === 2) return applyR2AnnotatedTextOperation({ name, handle, db, descriptor, data });
   if (data.version === 3) return applyR3AnnotatedTextOperation({ name, handle, db, descriptor, data });
   if (data.version === 4) return applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data });
+  if (data.version === 5) return applyR5AnnotatedTextOperation({ name, handle, db, descriptor, data });
   throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
+}
+
+function applyR5AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+  const prefix = `${name}_${handle.field}`;
+  const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
+  const operation = data?.operation;
+  if (!data || typeof data !== 'object' || Object.keys(data).length !== 7 || data.version !== 5 ||
+      typeof data.id !== 'string' || data.id.length === 0 || !isVersion(data.before) || !isVersion(data.after) ||
+      JSON.stringify(data.after) !== JSON.stringify(data.before) || !operation || typeof operation !== 'object' || Array.isArray(operation) ||
+      JSON.stringify(Object.keys(operation).sort()) !== JSON.stringify(['annotationId', 'blockId', 'kind']) ||
+      operation.kind !== 'annotation.detach' || typeof operation.annotationId !== 'string' || operation.annotationId.length === 0 ||
+      typeof operation.blockId !== 'string' || operation.blockId.length === 0 || !data.lifecycle || typeof data.lifecycle !== 'object' || Array.isArray(data.lifecycle) ||
+      Object.keys(data.lifecycle).length !== 1 || (data.lifecycle.empty !== 'delete' && data.lifecycle.empty !== 'orphan') || !data.result || typeof data.result !== 'object' || Array.isArray(data.result) ||
+      JSON.stringify(Object.keys(data.result).sort()) !== JSON.stringify(['changedProtectors', 'disposition', 'memberships'])) {
+    throw new Error(`${name}.${handle.field}.operated v5 event has invalid data`);
+  }
+  const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
+  if (!state) throw new Error(`${name}.${handle.field}.operated document does not exist`);
+  const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+  if (state.structure_version !== data.before.structuralRevision || JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v5 event conflicts with projection state`);
+  }
+  const sourceMemberships = db.prepare(
+    `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point
+       FROM ${prefix}_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
+      WHERE annotation.document_id = ?`,
+  ).all(data.id);
+  const memberships = sourceMemberships.map((membership) => ({
+    annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal,
+    start: JSON.parse(membership.start_point), end: JSON.parse(membership.end_point),
+  }));
+  const annotationRows = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(data.id);
+  const targets = db.prepare(
+    `SELECT annotation_id, target_annotation_id FROM ${prefix}_annotation_protected_target WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?) ORDER BY annotation_id, target_annotation_id`,
+  ).all(data.id);
+  const targetsByAnnotation = new Map();
+  for (const target of targets) targetsByAnnotation.set(target.annotation_id, [...(targetsByAnnotation.get(target.annotation_id) ?? []), target.target_annotation_id]);
+  const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
+  const annotations = annotationRows.map((annotation) => {
+    const metadata = compiledMeta.annotationHandles[annotation.family];
+    if (!metadata) throw new Error(`${name}.${handle.field}.operated v5 event references unknown annotation family`);
+    return { id: annotation.id, family: annotation.family, empty: annotation.id === operation.annotationId ? data.lifecycle.empty : metadata.empty, protectedTargetIds: targetsByAnnotation.get(annotation.id) ?? [] };
+  });
+  const targetAnnotation = annotations.find((annotation) => annotation.id === operation.annotationId);
+  if (!targetAnnotation) throw new Error(`${name}.${handle.field}.operated v5 annotation not found`);
+  let reduced;
+  try {
+    reduced = removeMembership(family, annotations, memberships, operation.annotationId, operation.blockId, { structuralRevision: state.structure_version });
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v5 operation is not applicable to projection state`);
+  }
+  const outcome = reduced.outcomes[0];
+  const expected = {
+    memberships: {
+      annotationId: operation.annotationId,
+      postimage: reduced.memberships.filter((membership) => membership.annotationId === operation.annotationId)
+        .map((membership) => ({ blockId: membership.blockId, ordinal: membership.ordinal })),
+    },
+    disposition: !outcome
+      ? { kind: 'retained' }
+      : outcome.type === 'delete'
+        ? { kind: 'deleted', family: targetAnnotation.family, savedQuote: null, lastMemberships: null }
+        : { kind: 'orphaned', family: targetAnnotation.family, savedQuote: outcome.savedQuote, lastMemberships: outcome.lastMemberships },
+    changedProtectors: reduced.annotations
+      .filter((annotation) => JSON.stringify(annotation.protectedTargetIds ?? []) !== JSON.stringify(targetsByAnnotation.get(annotation.id) ?? []))
+      .map((annotation) => ({ annotationId: annotation.id, protectsPostimage: annotation.protectedTargetIds ?? [] }))
+      .sort((left, right) => left.annotationId.localeCompare(right.annotationId)),
+  };
+  if (JSON.stringify(data.result) !== JSON.stringify(expected)) throw new Error(`${name}.${handle.field}.operated v5 event result does not match derived state`);
+
+  db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(operation.annotationId);
+  for (const membership of reduced.memberships.filter((item) => item.annotationId === operation.annotationId)) {
+    db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES (?, ?, ?, ?, ?)`)
+      .run(membership.annotationId, membership.blockId, membership.ordinal, JSON.stringify(membership.start), JSON.stringify(membership.end));
+  }
+  for (const protector of expected.changedProtectors) {
+    db.prepare(`DELETE FROM ${prefix}_annotation_protected_target WHERE annotation_id = ?`).run(protector.annotationId);
+    for (const targetId of protector.protectsPostimage) {
+      db.prepare(`INSERT INTO ${prefix}_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)`).run(protector.annotationId, targetId);
+    }
+  }
+  if (outcome?.type === 'delete') {
+    db.prepare(`DELETE FROM ${prefix}_annotation WHERE id = ?`).run(operation.annotationId);
+  } else if (outcome?.type === 'orphan') {
+    db.prepare(`INSERT INTO ${prefix}_annotation_orphan_state (annotation_id, saved_quote, last_memberships) VALUES (?, ?, ?)`)
+      .run(operation.annotationId, outcome.savedQuote, JSON.stringify(outcome.lastMemberships));
+  }
+  return true;
 }
 
 function applyR1AnnotatedTextOperation({ name, handle, db, data }) {

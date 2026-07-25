@@ -14,11 +14,12 @@ import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { canonicalTextOp } from '../annotated-text.mjs';
 import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint } from '../annotated-text-family.mjs';
-import { splitBlockMemberships, mergeBlocksMemberships, addMembership } from '../annotated-text-membership.mjs';
+import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { assertR2BlockSplitPayload, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
 import { assertR3BlockMergePayload, canonicalJsonEqual } from '../annotated-text-r3.mjs';
 import { assertR4AnnotationApplyPayload } from '../annotated-text-r4.mjs';
+import { assertR5AnnotationDetachPayload } from '../annotated-text-r5.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 
@@ -230,8 +231,10 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         command = assertR3BlockMergePayload(name, fieldName, payload);
       } else if (payload.version === 4) {
         command = assertR4AnnotationApplyPayload(name, fieldName, payload);
+      } else if (payload.version === 5) {
+        command = assertR5AnnotationDetachPayload(name, fieldName, payload);
       } else {
-        throw new ValidationError(`${name}.${fieldName}.operation requires version 1, 2, 3, or 4`);
+        throw new ValidationError(`${name}.${fieldName}.operation requires version 1, 2, 3, 4, or 5`);
       }
       const documentScope = scopeOf(name, command.id).key;
       if (scope !== documentScope) {
@@ -1019,11 +1022,91 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       }];
     };
 
+    const r5Handler = ({ payload, db, scope }) => {
+      const command = assertDocumentScope({ payload, scope });
+      const documentScope = scopeOf(name, command.id).key;
+      const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
+      if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+      const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+      if (state.structure_version !== command.expected.structuralRevision ||
+          JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(command.expected.frontier)) {
+        throw new ValidationError(`${name}.${fieldName}.operation conflicts with the current structural revision or frontier`);
+      }
+
+      const sourceMemberships = db.prepare(
+        `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point
+           FROM ${prefix}_membership AS membership
+           JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
+          WHERE annotation.document_id = ?`,
+      ).all(command.id);
+      const memberships = sourceMemberships.map((membership) => ({
+        annotationId: membership.annotation_id,
+        blockId: membership.block_id,
+        ordinal: membership.ordinal,
+        start: JSON.parse(membership.start_point),
+        end: JSON.parse(membership.end_point),
+      }));
+      const annotationRows = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(command.id);
+      const targets = db.prepare(
+        `SELECT annotation_id, target_annotation_id FROM ${prefix}_annotation_protected_target WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?) ORDER BY annotation_id, target_annotation_id`,
+      ).all(command.id);
+      const targetsByAnnotation = new Map();
+      for (const target of targets) targetsByAnnotation.set(target.annotation_id, [...(targetsByAnnotation.get(target.annotation_id) ?? []), target.target_annotation_id]);
+      const annotations = annotationRows.map((annotation) => {
+        const metadata = compiledMeta.annotationHandles[annotation.family];
+        if (!metadata) throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family '${annotation.family}'`);
+        return { id: annotation.id, family: annotation.family, empty: metadata.empty, protectedTargetIds: targetsByAnnotation.get(annotation.id) ?? [] };
+      });
+      const targetAnnotation = annotations.find((annotation) => annotation.id === command.operation.annotationId);
+      if (!targetAnnotation) throw new ValidationError(`${name}.${fieldName}.operation annotation not found`);
+      let reduced;
+      try {
+        reduced = removeMembership(family, annotations, memberships, command.operation.annotationId, command.operation.blockId, { structuralRevision: state.structure_version });
+      } catch (error) {
+        throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+      }
+      const outcome = reduced.outcomes[0];
+      const changedProtectors = reduced.annotations
+        .filter((annotation) => JSON.stringify(annotation.protectedTargetIds ?? []) !== JSON.stringify(targetsByAnnotation.get(annotation.id) ?? []))
+        .map((annotation) => Object.freeze({ annotationId: annotation.id, protectsPostimage: Object.freeze([...(annotation.protectedTargetIds ?? [])]) }))
+        .sort((left, right) => left.annotationId.localeCompare(right.annotationId));
+      const disposition = !outcome
+        ? Object.freeze({ kind: 'retained' })
+        : outcome.type === 'delete'
+          ? Object.freeze({ kind: 'deleted', family: targetAnnotation.family, savedQuote: null, lastMemberships: null })
+          : Object.freeze({ kind: 'orphaned', family: targetAnnotation.family, savedQuote: outcome.savedQuote, lastMemberships: outcome.lastMemberships });
+      const result = Object.freeze({
+        memberships: Object.freeze({
+          annotationId: command.operation.annotationId,
+          postimage: Object.freeze(reduced.memberships.filter((membership) => membership.annotationId === command.operation.annotationId)
+            .map((membership) => Object.freeze({ blockId: membership.blockId, ordinal: membership.ordinal }))),
+        }),
+        disposition,
+        changedProtectors: Object.freeze(changedProtectors),
+      });
+      const handle = eventHandles.native(name, fieldName, 'operated');
+      return [{
+        handle,
+        type: handle.type,
+        scope: documentScope,
+        data: Object.freeze({
+          version: 5,
+          id: command.id,
+          before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
+          operation: command.operation,
+          after: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
+          lifecycle: Object.freeze({ empty: targetAnnotation.empty }),
+          result,
+        }),
+      }];
+    };
+
     const handler = ({ payload, db, scope }) => {
       if (payload.version === 1) return r1Handler({ payload, db, scope });
       if (payload.version === 2) return r2Handler({ payload, db, scope });
       if (payload.version === 3) return r3Handler({ payload, db, scope });
-      return r4Handler({ payload, db, scope });
+      if (payload.version === 4) return r4Handler({ payload, db, scope });
+      return r5Handler({ payload, db, scope });
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', { value: true });
