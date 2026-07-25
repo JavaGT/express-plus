@@ -24,6 +24,7 @@ export class LiveConnection {
   #closed = false;
   #principal;
   #fanout;
+  #core;
   #resolveEntity;
   #mayVerb;
   #db;
@@ -31,14 +32,16 @@ export class LiveConnection {
   #onClose;
   #log;
   #carets;
+  #coreAcs;
 
-  constructor(socket, id, { fanout, resolveEntity, mayVerb, db, currentSeq, onClose, log = null, carets = null } = {}) {
+  constructor(socket, id, { fanout, core = null, resolveEntity, mayVerb, db, currentSeq, onClose, log = null, carets = null } = {}) {
     this.#socket = socket;
     this.#sender = new FrameSender();
     this.#parser = new FrameParser();
     this.#id = id;
     this.#principal = null;
     this.#fanout = fanout;
+    this.#core = core;
     this.#resolveEntity = resolveEntity;
     this.#mayVerb = mayVerb;
     this.#db = db;
@@ -46,6 +49,7 @@ export class LiveConnection {
     this.#onClose = onClose;
     this.#log = log;
     this.#carets = carets;
+    this.#coreAcs = new Map();
 
     socket.on('data', (chunk) => {
       this.#parser.feed(chunk);
@@ -153,6 +157,11 @@ export class LiveConnection {
     if (normalized) {
       this.#carets?.removeConnection(this, normalized.scope).catch(() => {});
       this.#fanout.removeSubscription(normalized.scope, this);
+      const ac = this.#coreAcs.get(normalized.scope);
+      if (ac) {
+        ac.abort();
+        this.#coreAcs.delete(normalized.scope);
+      }
       const response = { type: 'unsubscribed', scope: normalized.scope };
       if (normalized.interest.entity) response.entity = normalized.interest.entity;
       if (normalized.interest.id !== undefined) response.id = normalized.interest.id;
@@ -172,11 +181,51 @@ export class LiveConnection {
       this.error(result.failure, requestId);
       return;
     }
-    this.#fanout.addSubscription(result.scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
+
+    const scope = result.scope;
+
+    // Subscribe to the core for committed-event delivery BEFORE sending the
+    // subscribed ack. If core subscription fails, we remove the fanout
+    // registration and send only an error — no ack reaches the client.
+    if (this.#core) {
+      const previousAc = this.#coreAcs.get(scope);
+      if (previousAc) previousAc.abort();
+      const ac = new AbortController();
+      this.#coreAcs.set(scope, ac);
+      try {
+        await this.#core.subscribe({
+          principal: this.#principal,
+          scope,
+          after: this.#currentSeq(scope),
+          signal: ac.signal,
+          deliver: async (batch) => {
+            if (this.#closed) throw new Error('live connection closed');
+            for (const envelope of batch) {
+              if (this.#closed) throw new Error('live connection closed');
+              this.send(envelope);
+            }
+          },
+        });
+        if (ac.signal.aborted) return;
+      } catch (err) {
+        // A newer subscribe or unsubscribe owns this scope now. Its controller
+        // and fan-out registration must not be clobbered by this stale attempt.
+        if (this.#coreAcs.get(scope) !== ac) return;
+        this.#coreAcs.delete(scope);
+        this.#fanout.removeSubscription(scope, this);
+        this.#log?.error?.('live', 'core subscription failed', { scope, err: String(err) });
+        this.error(failure('denied', 'Subscription failed.'), requestId);
+        return;
+      }
+      if (this.#coreAcs.get(scope) !== ac) return;
+    }
+
+    this.#fanout.addSubscription(scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
+
     const response = {
       type: 'subscribed',
-      scope: result.scope,
-      currentSeq: this.#currentSeq(result.scope),
+      scope,
+      currentSeq: this.#currentSeq(scope),
     };
     if (requestId !== undefined) response.requestId = requestId;
     if (result.entityName) response.entity = result.entityName;
@@ -192,6 +241,10 @@ export class LiveConnection {
   }
 
   #cleanup() {
+    for (const ac of this.#coreAcs.values()) {
+      ac.abort();
+    }
+    this.#coreAcs.clear();
     this.#fanout.removeAll(this);
     this.#carets?.removeConnection(this).catch(() => {});
     this.#onClose?.();

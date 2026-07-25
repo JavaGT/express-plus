@@ -26,7 +26,6 @@ import { config } from './config.mjs';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/session.mjs';
 import { createLiveDelivery } from './live-delivery.mjs';
-import { tryParseScopeKey } from './scope-handle.mjs';
 import { getLog, withLog } from './log.mjs';
 import { createRateLimiter } from './rate-limit.mjs';
 import { BodyError, readRequestBody } from './http-body.mjs';
@@ -392,8 +391,6 @@ export function listen(app, port, optionsOrCallback = {}) {
   const isCallback = typeof optionsOrCallback === 'function';
   const options = isCallback ? {} : optionsOrCallback;
   const onListening = isCallback ? optionsOrCallback : options.onListening;
-  const log = app.log ?? getLog();
-
   // The default principal source is session hydration when the app has a db: the
   // principal is built server-side from the request's session cookie (SPEC §572).
   // An explicit `principalOf` option overrides (tests inject a fixed principal).
@@ -498,28 +495,14 @@ export function listen(app, port, optionsOrCallback = {}) {
 
   // Job lifecycle events (W3 slice 2): the queue appends its _Job.* events to
   // _Log itself, not through the durable pipeline, so the post-commit consumer
-  // never sees them. Bridge the queue's listener hook into the SAME fan-out:
-  // resolve the event's scope key to its anchor entity + row (the shape
-  // live-delivery's createConsumer uses) and emit scope-anchored — authz is
-  // re-checked against the anchor row inside the fan-out. Fail closed: an
-  // unparseable scope, unknown entity, or missing anchor row delivers nothing
-  // live (a foreign event must never ride the removed-row path, which skips
-  // re-auth); the event stays durable in _Log for cursor catch-up either way.
+  // never sees them. Bridge the queue's listener hook into the committed-event
+  // delivery core — the core re-reads the _Log, re-authorises, projects, and
+  // delivers to WebSocket subscribers. The event stays durable in _Log for
+  // cursor catch-up either way. The fan-out is only for non-_Log ephemerals.
   if (app.jobs) {
     app._detachJobLive = app.jobs.onEvent((ev) => {
-      const handle = tryParseScopeKey(ev.scope);
-      if (!handle) return;
-      const entity = app.entities?.get(handle.entity);
-      if (!entity) return;
-      let raw;
-      try {
-        raw = app.db.prepare(`SELECT * FROM ${handle.entity} WHERE id = ?`).get(handle.id);
-      } catch { return; }
-      if (!raw) return;
-      const hydrated = typeof entity.hydrate === 'function';
-      const row = hydrated ? entity.hydrate(raw, null) ?? raw : raw;
-      Promise.resolve(app.live.emit(entity, handle.id, row, ev, { hydrated }))
-        .catch((err) => log.warn('live', 'job event fan-out failed', { err, scope: ev.scope }));
+      if (!ev.scope) return;
+      app.live.wake(ev.scope);
     });
   }
 

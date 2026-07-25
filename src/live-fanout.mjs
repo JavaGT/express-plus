@@ -238,14 +238,10 @@ export function createLiveFanout({ mayVerb = null } = {}) {
       if (!removed && !(await mayRow(entityRecord, 'subscribe', authzRow, conn.principal ?? anonymous, mayVerb))) {
         continue;
       }
-      if (ephemeralField !== null) {
-        const fields = subSpec?.fields;
-        if (!fields || fields[ephemeralField] !== true) continue;
-      }
 
-      // Generic ephemeral cells have no recipient caret/presence grammar on an
-      // annotated-text entity. They are still sequenced today, so resync rather
-      // than silently omit a committed event and leave the client cursor stale.
+      // Annotated-text resync must be sent to ALL subscribers regardless of
+      // field interest — the subscriber needs to know about the event to
+      // maintain its cursor, even if it didn't ask for the ephemeral field.
       if (isAnnotatedTextOperation || isAnnotatedTextEphemeral) {
         if (!Number.isSafeInteger(committed.seq) || committed.seq < 0) continue;
         conn.send({
@@ -253,6 +249,11 @@ export function createLiveFanout({ mayVerb = null } = {}) {
           reason: 'annotated-text-snapshot-required',
         });
         continue;
+      }
+
+      if (ephemeralField !== null) {
+        const fields = subSpec?.fields;
+        if (!fields || fields[ephemeralField] !== true) continue;
       }
 
       let pace = { window: 0, by: null };

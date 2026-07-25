@@ -401,6 +401,7 @@ test('B2: revoked subscriber receives NOTHING at flush time', async () => {
   const http = await import('node:http');
   const httpServer = http.createServer();
   const { createLiveServer } = await import('../src/live.mjs');
+  const boundCanvas = Canvas.bind({ db, entityOf: (declaration) => declaration });
 
   let bobAllowed = true;
 
@@ -417,7 +418,7 @@ test('B2: revoked subscriber receives NOTHING at flush time', async () => {
       return { type: 'user', id: u };
     },
     db,
-    resolveEntity: () => Canvas,
+    resolveEntity: () => boundCanvas,
   });
 
   httpServer.listen(0);
@@ -435,11 +436,11 @@ test('B2: revoked subscriber receives NOTHING at flush time', async () => {
     assert.equal((await bob.nextMessage())?.type, 'subscribed');
 
     // Emit some ephemeral events (buffered)
-    await live.emit(Canvas, 'c1', { id: 'c1', title: 'Drawing' }, {
+    await live.emit(boundCanvas, 'c1', { id: 'c1', title: 'Drawing' }, {
       type: 'Canvas.activeStroke.set', seq: 1,
       data: { owner: 'bob', client: 'bob', cells: { points: [{ x: 0, y: 0 }] } },
     });
-    await live.emit(Canvas, 'c1', { id: 'c1', title: 'Drawing' }, {
+    await live.emit(boundCanvas, 'c1', { id: 'c1', title: 'Drawing' }, {
       type: 'Canvas.activeStroke.set', seq: 2,
       data: { owner: 'bob', client: 'bob', cells: { points: [{ x: 1, y: 1 }] } },
     });

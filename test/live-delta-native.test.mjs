@@ -138,6 +138,7 @@ function bootServer() {
   for (const sql of generateDDL(Doc)) db.exec(sql);
 
   const httpServer = http.createServer();
+  const boundDoc = Doc.bind({ db, entityOf: (decl) => decl });
   const live = createLiveServer(httpServer, {
     path: '/events',
     mayVerb: async () => true,
@@ -146,11 +147,11 @@ function bootServer() {
       return { type: 'user', id: u };
     },
     db,
-    resolveEntity: () => Doc,
+    resolveEntity: () => boundDoc,
   });
 
   httpServer.listen(0);
-  return { db, httpServer, live };
+  return { db, httpServer, live, boundDoc };
 }
 
 // Helper: re-read a Doc row from db
@@ -176,14 +177,14 @@ async function wsSubscribe(ws, entity, id) {
 // ============================================================
 
 test('P6e-2 B2: map .added delta', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundDoc } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test1';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D1');
-    const entityRecord = (() => Doc)();
+    const entityRecord = boundDoc;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
@@ -207,14 +208,14 @@ test('P6e-2 B2: map .added delta', async () => {
 // ============================================================
 
 test('P6e-2 B2: map .roleChanged delta', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundDoc } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test2';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D2');
-    const entityRecord = (() => Doc)();
+    const entityRecord = boundDoc;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
@@ -237,14 +238,14 @@ test('P6e-2 B2: map .roleChanged delta', async () => {
 // ============================================================
 
 test('P6e-2 B2: map .removed delta', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundDoc } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test3';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D3');
-    const entityRecord = (() => Doc)();
+    const entityRecord = boundDoc;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
@@ -267,7 +268,7 @@ test('P6e-2 B2: map .removed delta', async () => {
 // ============================================================
 
 test('P6e-2 B2: ordered .inserted delta', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundDoc } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test4';
@@ -275,7 +276,7 @@ test('P6e-2 B2: ordered .inserted delta', async () => {
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D4');
-    const entityRecord = (() => Doc)();
+    const entityRecord = boundDoc;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
@@ -298,14 +299,14 @@ test('P6e-2 B2: ordered .inserted delta', async () => {
 // ============================================================
 
 test('P6e-2 B2: ordered .moved delta', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundDoc } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test5';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D5');
-    const entityRecord = (() => Doc)();
+    const entityRecord = boundDoc;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
@@ -328,14 +329,14 @@ test('P6e-2 B2: ordered .moved delta', async () => {
 // ============================================================
 
 test('P6e-2 B2: pass-through invariance — pace subscriber gets non-ephemeral events inline', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundDoc } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test6';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D6');
-    const entityRecord = (() => Doc)();
+    const entityRecord = boundDoc;
 
     ws = await openRawWS(port, 'alice');
     // Subscribe with pace (profile '15fps' is accepted by pace validator).
@@ -360,14 +361,14 @@ test('P6e-2 B2: pass-through invariance — pace subscriber gets non-ephemeral e
 // ============================================================
 
 test('P6e-2 B2: backward-compat — envelope has both delta and event', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundDoc } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test7';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D7');
-    const entityRecord = (() => Doc)();
+    const entityRecord = boundDoc;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');

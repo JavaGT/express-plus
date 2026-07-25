@@ -15,6 +15,7 @@ import http from 'node:http';
 
 import {
   entity, generateDDL, executeFrameworkDDL, createLiveServer } from '../src/internal.mjs';
+import { createTextState, textCheckpoint } from '../src/annotated-text.mjs';
 
 // --- test entity ---
 
@@ -131,6 +132,7 @@ function bootServer() {
   for (const sql of generateDDL(Canvas)) db.exec(sql);
 
   const httpServer = http.createServer();
+  const boundCanvas = Canvas.bind({ db, entityOf: (decl) => decl });
   const live = createLiveServer(httpServer, {
     path: '/events',
     mayVerb: async () => true,
@@ -139,18 +141,18 @@ function bootServer() {
       return { type: 'user', id: u };
     },
     db,
-    resolveEntity: () => Canvas,
+    resolveEntity: () => boundCanvas,
   });
 
   httpServer.listen(0);
-  return { db, httpServer, live };
+  return { db, httpServer, live, boundCanvas };
 }
 
 // Helper: insert a Canvas row into db
 function insertRow(db, id, overrides = {}) {
   const title = overrides.title ?? 'Original';
   const status = overrides.status ?? 'draft';
-  const body = overrides.body ?? JSON.stringify({ version: 1, operations: {}, elements: {}, applied: [], pending: [], frontier: [] });
+  const body = overrides.body ?? JSON.stringify(textCheckpoint(createTextState()));
   db.prepare('INSERT INTO Canvas (id, title, status, body) VALUES (?, ?, ?, ?)').run(id, title, status, body);
 }
 
@@ -196,14 +198,14 @@ async function wsSubscribe(ws, entity, id) {
 // ============================================================
 
 test('P6e-2 B1: value field .updated delta (cold shadow → set-from-empty)', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundCanvas } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test1';
 
   try {
     insertRow(db, cid, { title: 'v1' });
-    const entityRecord = (() => Canvas)();
+    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
@@ -237,14 +239,14 @@ test('P6e-2 B1: value field .updated delta (cold shadow → set-from-empty)', as
 // ============================================================
 
 test('text.crdt native events carry their exact operation instead of a whole-value delta', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundCanvas } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test2';
 
   try {
     insertRow(db, cid);
-    const entityRecord = (() => Canvas)();
+    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
@@ -266,7 +268,7 @@ test('text.crdt native events carry their exact operation instead of a whole-val
 });
 
 test('text.crdt created live envelopes seed empty reducer sidecars', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundCanvas } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-text-created';
@@ -275,7 +277,7 @@ test('text.crdt created live envelopes seed empty reducer sidecars', async () =>
     insertRow(db, cid);
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
-    await live.emit(Canvas, cid, reRead(db, cid), {
+    await live.emit(boundCanvas, cid, reRead(db, cid), {
       type: 'Canvas.created', seq: 1, data: { id: cid, title: 'new', body: '' },
     });
     const ev = await ws.nextEvent(400);
@@ -296,14 +298,14 @@ test('text.crdt created live envelopes seed empty reducer sidecars', async () =>
 // ============================================================
 
 test('P6e-2 B1: state field .updated delta ({from, to})', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundCanvas } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test3';
 
   try {
     insertRow(db, cid, { status: 'draft' });
-    const entityRecord = (() => Canvas)();
+    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
@@ -335,14 +337,14 @@ test('P6e-2 B1: state field .updated delta ({from, to})', async () => {
 // ============================================================
 
 test('P6e-2 B1: removed evicts shadow → post-recreate delta is set-from-empty', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundCanvas } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test4';
 
   try {
     insertRow(db, cid, { title: 'v1' });
-    const entityRecord = (() => Canvas)();
+    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
@@ -393,14 +395,14 @@ test('P6e-2 B1: removed evicts shadow → post-recreate delta is set-from-empty'
 // ============================================================
 
 test('P6e-2 B1: created event has no delta', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundCanvas } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test5';
 
   try {
     insertRow(db, cid, { title: 'Fresh' });
-    const entityRecord = (() => Canvas)();
+    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
@@ -424,14 +426,14 @@ test('P6e-2 B1: created event has no delta', async () => {
 // ============================================================
 
 test('P6e-2 B1: multi-field .updated is ONE envelope with multi-key delta map', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundCanvas } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test6';
 
   try {
     insertRow(db, cid, { title: 'Old', status: 'draft' });
-    const entityRecord = (() => Canvas)();
+    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
@@ -472,14 +474,14 @@ test('P6e-2 B1: multi-field .updated is ONE envelope with multi-key delta map', 
 // ============================================================
 
 test('P6e-2 B1: unchanged .updated yields {} delta (present but empty)', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundCanvas } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test7';
 
   try {
     insertRow(db, cid, { title: 'Same', status: 'draft' });
-    const entityRecord = (() => Canvas)();
+    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
@@ -509,14 +511,14 @@ test('P6e-2 B1: unchanged .updated yields {} delta (present but empty)', async (
 // ============================================================
 
 test('P6e-2 B1: backward-compat — subscriber receives both delta and event.data', async () => {
-  const { db, httpServer, live } = bootServer();
+  const { db, httpServer, live, boundCanvas } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test8';
 
   try {
     insertRow(db, cid, { title: 'b1' });
-    const entityRecord = (() => Canvas)();
+    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
