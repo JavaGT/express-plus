@@ -222,6 +222,12 @@ test('HTTP snapshot projects protected annotated text for each recipient before 
   const revoked = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(revoked.status, 200, 'a fresh snapshot re-evaluates changed recipient authorization');
   assert.deepEqual((await revoked.json()).snapshot.body.blocks, [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }]);
+
+  app.resolveScope = async (requestedScope) => requestedScope === 'project:p1' ? { entity: 'R4Doc', id: 'd1' } : null;
+  app.scopeSnapshot = async () => ({ body: 'canonical aggregate fallback' });
+  const aggregate = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot?scope=project:p1`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(aggregate.status, 403, 'custom aggregate snapshots cannot bypass annotated-text recipient projection');
+  assert.equal((await aggregate.text()).includes('canonical aggregate fallback'), false);
 });
 
 test('HTTP snapshot fails closed on malformed state and throwing protector access', async (t) => {
