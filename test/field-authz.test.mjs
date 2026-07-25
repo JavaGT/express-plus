@@ -47,6 +47,10 @@ async function startApp(db, principalId) {
   return { app, origin: `http://127.0.0.1:${port}`, port };
 }
 
+async function stopApp(app) {
+  await app.shutdown();
+}
+
 // Create a doc via HTTP as the current principal and return { id }.
 async function createDoc(origin) {
   const created = await fetch(`${origin}/docs`, {
@@ -64,7 +68,7 @@ test('Non-owner (non-reader) cannot add a collaborator (404, denied at read-scop
   // Create doc as alice.
   const aliceApp = await startApp(db, '1');
   const doc = await createDoc(aliceApp.origin);
-  aliceApp.app.httpServer.close();
+  await stopApp(aliceApp.app);
 
   // Try to add collaborator as bob. bob is neither owner nor collaborator, so
   // the read-scope excludes the doc entirely → 404 (fail closed: bob must not
@@ -78,7 +82,7 @@ test('Non-owner (non-reader) cannot add a collaborator (404, denied at read-scop
     });
     assert.equal(added.status, 404, 'non-reader must be denied at read-scope (404)');
   } finally {
-    bobApp.app.httpServer.close();
+    await stopApp(bobApp.app);
   }
 });
 
@@ -87,7 +91,7 @@ test('Non-owner (non-reader) cannot list shares (404, denied at read-scope)', as
   // Create doc as alice.
   const aliceApp = await startApp(db, '1');
   const doc = await createDoc(aliceApp.origin);
-  aliceApp.app.httpServer.close();
+  await stopApp(aliceApp.app);
 
   // Try to list shares as bob (non-reader) → 404 at read-scope (fail closed).
   const bobApp = await startApp(db, '2');
@@ -95,7 +99,7 @@ test('Non-owner (non-reader) cannot list shares (404, denied at read-scope)', as
     const listed = await fetch(`${bobApp.origin}/docs/${doc.id}/shares`);
     assert.equal(listed.status, 404, 'non-reader must be denied at read-scope (404)');
   } finally {
-    bobApp.app.httpServer.close();
+    await stopApp(bobApp.app);
   }
 });
 
@@ -109,7 +113,7 @@ test('Non-owner cannot remove a collaborator (403)', async () => {
     body: JSON.stringify({ userId: '2', role: 'editor' }),
   });
   assert.equal(added.status, 201, 'owner must be able to add collaborator');
-  aliceApp.app.httpServer.close();
+  await stopApp(aliceApp.app);
 
   // Try to remove bob as bob.
   const bobApp = await startApp(db, '2');
@@ -117,7 +121,7 @@ test('Non-owner cannot remove a collaborator (403)', async () => {
     const removed = await fetch(`${bobApp.origin}/docs/${doc.id}/shares/2`, { method: 'DELETE' });
     assert.equal(removed.status, 403, 'non-owner removing collaborator must 403');
   } finally {
-    bobApp.app.httpServer.close();
+    await stopApp(bobApp.app);
   }
 });
 
@@ -154,7 +158,7 @@ test('Owner can manage collaborators (regression guard)', async () => {
     const after = await fetch(`${origin}/docs/${doc.id}/shares`);
     assert.deepEqual((await after.json()).shares, []);
   } finally {
-    app.httpServer.close();
+    await stopApp(app);
   }
 });
 
@@ -169,7 +173,7 @@ test('Trusted query API (no principal) bypasses field authz (mechanics)', async 
   // Insert a doc row directly — the trusted query API bypasses the create
   // dispatch, so owner must be set by raw SQL (the dispatch path owns the
   // principal→owner assignment; the query API is unscoped — DECISIONLOG #41).
-  db.prepare("INSERT INTO Doc (id, title, owner) VALUES (1, 'Trusted Test', 1)").run();
+  db.prepare("INSERT INTO Doc (id, title, body, owner) VALUES (1, 'Trusted Test', '{\"version\":1,\"frontier\":[],\"elements\":{},\"operations\":{},\"pending\":{},\"maxPending\":1000,\"rebootstrapRequired\":false}', 1)").run();
 
   const app = workbench({ db, entities: [Doc] });
   const BoundDoc = app.entity(Doc);

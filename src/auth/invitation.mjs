@@ -85,8 +85,9 @@ export async function admitInvitationCreation({ Invitation, event, principal }) 
   }
 
   const target = invitationTargetFor(runtime, invitation.targetEntity, invitation.role);
-  const row = readScopedRow({ db: runtime.db }, target.entity, invitation.targetId, principal);
-  if (!row) throw httpError(404, `${target.entity.name} ${invitation.targetId} not found`);
+  const storedRow = readScopedRow({ db: runtime.db }, target.entity, invitation.targetId, principal);
+  if (!storedRow) throw httpError(404, `${target.entity.name} ${invitation.targetId} not found`);
+  const row = target.entity.deserializeRow({ ...storedRow });
   const decision = await rowCapabilities(target.entity, row, principal);
   return decision.granted && decision.capabilities.includes(admin);
 }

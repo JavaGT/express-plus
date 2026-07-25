@@ -25,6 +25,10 @@ function setup() {
   return db;
 }
 
+async function stopApp(app) {
+  await app.shutdown();
+}
+
 test('doc.mjs share routes: list (empty), add, list (populated), remove', async () => {
   const db = setup();
   const app = workbench({ db }).mount('/docs', Doc);
@@ -74,7 +78,7 @@ test('doc.mjs share routes: list (empty), add, list (populated), remove', async 
     const after = await fetch(`${origin}/docs/${doc.id}/shares`);
     assert.deepEqual((await after.json()).shares, []);
   } finally {
-    app.httpServer.close();
+    await stopApp(app);
   }
 });
 
@@ -96,7 +100,7 @@ test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', asyn
     const aDoc = await a.json();
 
     // bob creates a doc by swapping the principal via a second app on the same db.
-    app.httpServer.close();
+    await stopApp(app);
     const app2 = workbench({ db }).mount('/docs', Doc);
     app2.listen(0, { principalOf: () => ({ type: 'user', id: '2' }) });
     await app2.ready;
@@ -115,7 +119,7 @@ test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', asyn
       body: JSON.stringify({ userId: '1', role: 'viewer' }),
     });
     assert.equal(shared.status, 201, await shared.clone().text());
-    app2.httpServer.close();
+    await stopApp(app2);
 
     // Back as alice: /feed lists her owned doc AND the doc bob shared with her.
     const app3 = workbench({ db }).mount('/docs', Doc);
@@ -129,7 +133,7 @@ test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', asyn
     assert.ok(body.owned.some((d) => d.id === aDoc.id), 'alice sees her own doc in owned');
     assert.ok(body.shared.some((d) => d.id === bDoc.id), 'alice sees bobs shared doc in shared');
 
-    app3.httpServer.close();
+    await stopApp(app3);
   } finally {
     // servers already closed above
   }

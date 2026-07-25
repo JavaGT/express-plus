@@ -81,7 +81,11 @@ async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
     reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
-  sendJson(res, 200, { snapshot: auth.row, seq: lastSeq, reducers: textReducerCheckpoints(entity, storedRow) });
+  sendJson(res, 200, {
+    snapshot: entity.deserializeRow({ ...auth.row }),
+    seq: lastSeq,
+    reducers: textReducerCheckpoints(entity, storedRow),
+  });
   return true;
 }
 
@@ -103,7 +107,11 @@ async function snapshotScopeRoute(app, scope, principal, res) {
     const lastSeq = readSeq(app.db, scope);
     const storedRow = app.db.prepare(`SELECT * FROM ${access.anchor.entity} WHERE id = ?`).get(access.anchor.id);
     const entity = app.entities.get(access.anchor.entity);
-    sendJson(res, 200, { snapshot: access.anchor.row, cursors: { [scope]: lastSeq }, reducers: textReducerCheckpoints(entity, storedRow) });
+    sendJson(res, 200, {
+      snapshot: entity.deserializeRow({ ...access.anchor.row }),
+      cursors: { [scope]: lastSeq },
+      reducers: textReducerCheckpoints(entity, storedRow),
+    });
     return true;
   }
   // A custom scope may aggregate several rows, but its resolver must first map

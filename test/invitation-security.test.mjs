@@ -8,6 +8,7 @@ import workbench, {
   Invitation,
   entity,
   grant,
+  json,
   map,
   membership,
   read,
@@ -91,6 +92,34 @@ test('invitation creation cannot authorize an admin-capable row hidden by its sc
       && db.prepare('SELECT count(*) AS n FROM Invitation').get().n === 0,
   );
   app.httpServer.close();
+  db.close();
+});
+
+test('invitation admission materializes declared fields before evaluating row capability', async () => {
+  const PolicyProject = entity('InvitationPolicyProject', {
+    title: text(),
+    policy: json(),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    members: map(ref('User'), { role: ['member'] }),
+    grant: () => [scope(({ is }) => is.owner()).can(({ entity: row }) => (
+      row.policy?.allowInvites ? grant(admin) : []
+    ))],
+  });
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, entities: [PolicyProject] });
+  await app.prepareSchema();
+  app.entity(PolicyProject).insert({
+    id: 'policy-1', title: 'Policy', policy: { allowInvites: true }, owner: owner.id,
+  });
+  await app.start();
+  const api = createInvitationApi({ Invitation: app.entity(Invitation) });
+
+  const invitation = await api.createInvitation({
+    targetEntity: PolicyProject.name, targetId: 'policy-1', role: 'member', principal: owner,
+  });
+  assert.ok(invitation.token);
+  assert.equal(db.prepare('SELECT count(*) AS n FROM Invitation').get().n, 1);
+  await app.shutdown();
   db.close();
 });
 

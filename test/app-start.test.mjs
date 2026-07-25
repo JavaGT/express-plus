@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'node:http';
+import { Agent, createServer, request } from 'node:http';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
@@ -357,6 +357,37 @@ test('shutdown is concurrent-safe, closes live delivery, and drains accepted wri
   assert.equal(liveCloseCount, 1);
   assert.equal(hookCount, 1);
   db.close();
+});
+
+test('shutdown closes idle HTTP keep-alive connections after stopping ingress', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db }).mount('/start-notes', startNote()).listen(0);
+  const agent = new Agent({ keepAlive: true });
+  t.after(() => {
+    agent.destroy();
+    db.close();
+  });
+  await app.ready;
+
+  let socket;
+  await new Promise((resolve, reject) => {
+    const req = request(`http://127.0.0.1:${app.httpServer.address().port}/missing`, { agent }, (res) => {
+      res.resume();
+      res.on('end', resolve);
+    });
+    req.on('socket', (value) => { socket = value; });
+    req.on('error', reject);
+    req.end();
+  });
+  assert.ok(socket && !socket.destroyed);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(Object.values(agent.freeSockets).flat().includes(socket), 'request socket is idle');
+
+  const socketClosed = new Promise((resolve) => socket.once('close', resolve));
+  await app.shutdown();
+  await socketClosed;
+  assert.equal(app.httpServer.listening, false);
+  assert.equal(socket.destroyed, true);
 });
 
 test('an HTTP bind failure rejects the singular ready promise and closes acquired owners', async (t) => {

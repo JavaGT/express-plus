@@ -82,8 +82,10 @@ export function prepareGracefulShutdown(app) {
         try { app.live?.close?.(); } catch { /* best-effort transport close */ }
         try { app._detachJobLive?.(); } catch { /* best-effort listener detach */ }
         const serverClosed = new Promise((resolve) => {
-          if (!app.httpServer?.listening) return resolve();
-          app.httpServer.close(() => resolve());
+          const server = app.httpServer;
+          if (!server?.listening) return resolve();
+          server.close(() => resolve());
+          server.closeIdleConnections?.();
         });
 
         // A user may shut down immediately after listen() while asynchronous

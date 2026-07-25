@@ -44,10 +44,9 @@ async function runKernelMutation(app, kernel, res, sendJson, action, { validatio
 
 export function readScopedRow(app, entity, id, principal) {
   const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
-  const row = app.db
+  return app.db
     .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
     .get({ ...scopeParams, id });
-  return entity.deserializeRow(row);
 }
 
 // `allowDeletedAnchor` is a narrow, explicit opt-in (default off — every
@@ -63,12 +62,17 @@ export function readScopedRow(app, entity, id, principal) {
 export async function authorizeRow(app, entity, verb, id, principal, preRow = null, { allowDeletedAnchor = false } = {}) {
   const row = preRow ?? readScopedRow(app, entity, id, principal);
   if (row) {
-    if (!(await mayRow(entity, verb, row, principal))) return { status: 403 };
+    // Authorization and route hydration have different ownership: grants see a
+    // materialized copy, while callers retain the stored row for one later
+    // hydration at their public boundary.
+    const materialized = entity.deserializeRow({ ...row });
+    if (!(await mayRow(entity, verb, materialized, principal))) return { status: 403 };
     return { row };
   }
   if (allowDeletedAnchor) {
-    const anchorRow = entity.deserializeRow(readDeletedRowAnchor(app.db, entity.name, id));
-    if (anchorRow && (await mayRow(entity, verb, anchorRow, principal))) {
+    const anchorRow = readDeletedRowAnchor(app.db, entity.name, id);
+    const materialized = anchorRow && entity.deserializeRow({ ...anchorRow });
+    if (materialized && (await mayRow(entity, verb, materialized, principal))) {
       return { row: anchorRow, historical: true };
     }
   }
@@ -113,7 +117,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
       return void sendFailure(sendJson, res, denied);
     }
     const cursorHeaders = projectedCursorHeaders(readProjectedCursors(db, entity));
-    sendJson(res, 200, auth.row, { 'x-workbench-action-id': actionId, ...cursorHeaders });
+    sendJson(res, 200, entity.deserializeRow({ ...auth.row }), { 'x-workbench-action-id': actionId, ...cursorHeaders });
     return;
   }
 

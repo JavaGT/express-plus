@@ -10,6 +10,7 @@ export function materializeStoredRow(storedRow, fields, { freeze = false } = {})
 
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind === 'crdt' && descriptor.type === 'text') {
+      if (!Object.prototype.hasOwnProperty.call(row, fieldName)) continue;
       const checkpoint = JSON.parse(row[fieldName]);
       const state = restoreTextCheckpoint(checkpoint);
       row[fieldName] = materializeText(state);
