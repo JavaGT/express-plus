@@ -149,6 +149,19 @@ test('annotation table has correct columns, family CHECK, and FKs', () => {
   assert.ok(ann.includes('FOREIGN KEY (owner_id) REFERENCES User(id) ON DELETE CASCADE'));
 });
 
+test('annotation family CHECK rejects undeclared families in SQLite', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  for (const sql of annotatedTextDDL('Doc', 'body', fd({}, { highlight: {} }), makeFields())) db.exec(sql);
+  db.exec("INSERT INTO Project VALUES ('p')");
+  db.exec("INSERT INTO User VALUES ('u')");
+  db.exec("INSERT INTO Doc VALUES ('d')");
+  assert.throws(() => db.exec("INSERT INTO Doc_body_annotation VALUES ('a', 'd', 'p', 'u', 'undeclared')"));
+});
+
 test('annotation family tables have correct columns and FK cascade', () => {
   const ddl = annotatedTextDDL('Doc', 'body', fd(
     {},
@@ -209,6 +222,20 @@ test('block order index and project index exist', () => {
   assert.ok(proj.includes('(project_id, document_id, position, id)'));
 });
 
+test('block order index rejects duplicate positions in one document', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  for (const sql of annotatedTextDDL('Doc', 'body', fd({}, { highlight: {} }), makeFields())) db.exec(sql);
+  db.exec("INSERT INTO Project VALUES ('p')");
+  db.exec("INSERT INTO User VALUES ('u')");
+  db.exec("INSERT INTO Doc VALUES ('d')");
+  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position) VALUES ('b1', 'd', 'p', 'u', 'a0')");
+  assert.throws(() => db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position) VALUES ('b2', 'd', 'p', 'u', 'a0')"));
+});
+
 test('measurement table has correct columns, constraints, and FK', () => {
   const ddl = annotatedTextDDL('Doc', 'body', fd(
     {}, { highlight: { col1: { kind: 'value', type: 'text' } } },
@@ -223,6 +250,16 @@ test('measurement table has correct columns, constraints, and FK', () => {
   assert.ok(meas.includes('format_version INTEGER NOT NULL CHECK (format_version > 0)'));
   assert.ok(meas.includes('payload TEXT NOT NULL CHECK (json_valid(payload))'));
   assert.ok(meas.includes('FOREIGN KEY (block_id) REFERENCES Doc_body_block(id) ON DELETE CASCADE'));
+});
+
+test('measurement block FK rejects nonexistent blocks in SQLite', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  for (const sql of annotatedTextDDL('Doc', 'body', fd({}, { highlight: {} }, { audio: { formatVersion: 1 } }), makeFields())) db.exec(sql);
+  assert.throws(() => db.exec("INSERT INTO Doc_body_measurement VALUES ('m', 'missing', 'audio', 1, '{}')"));
 });
 
 test('measurement index exists', () => {
