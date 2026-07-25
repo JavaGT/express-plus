@@ -1,5 +1,6 @@
-// T3 browser snapshot materialization for annotated-text fields.
-// Validates a v1 snapshot envelope against a compiled static field handle
+// Browser materialization accepts only the recipient projection produced by
+// Workbench delivery. Canonical protection facts never cross this seam.
+// Validates a v1 recipient envelope against a compiled static field handle
 // and returns a frozen logical document with public semantic shapes only.
 // No physical names, internal encoding, tables, or WeakMap internals leak.
 //
@@ -25,8 +26,8 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
   if (!snapshot || typeof snapshot !== 'object') {
     fail('', 'snapshot must be a non-null object');
   }
-  if (snapshot.version !== 1) {
-    fail('version', 'only version 1 is supported');
+  if (snapshot.kind !== 'workbench.annotatedText.recipient' || snapshot.version !== 1) {
+    fail('kind', 'must be a version 1 recipient projection');
   }
   if (typeof handle !== 'object' || handle === null) {
     fail('', 'handle must be a non-null object');
@@ -69,8 +70,15 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
       fail(`blocks[${i}].id`, `duplicate block id '${b.id}'`);
     }
     seenBlockIds.add(b.id);
-    if (typeof b.text !== 'string') {
-      fail(`blocks[${i}].text`, 'must be a string');
+    if (b.kind === 'restricted') {
+      if (Object.keys(b).length !== 3 || typeof b.placeholder !== 'string' || b.placeholder.length === 0) {
+        fail(`blocks[${i}]`, 'restricted block must contain only kind, id, and placeholder');
+      }
+      blocks.push(Object.freeze({ kind: 'restricted', id: b.id, placeholder: b.placeholder }));
+      continue;
+    }
+    if (b.kind !== 'visible' || Object.keys(b).length !== 5 || typeof b.text !== 'string') {
+      fail(`blocks[${i}]`, 'visible block must contain only kind, id, text, fields, and annotationIds');
     }
     const fields = b.fields && typeof b.fields === 'object' && !Array.isArray(b.fields)
       ? Object.freeze({ ...b.fields })
@@ -84,6 +92,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
       }
     }
     blocks.push(Object.freeze({
+      kind: 'visible',
       id: b.id,
       text: b.text,
       fields,
@@ -154,6 +163,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
   // Validate that blocks' annotationIds reference real annotations and that
   // every annotation with memberships is listed in the block's annotationIds.
   for (const block of blocks) {
+    if (block.kind === 'restricted') continue;
     for (const aid of block.annotationIds) {
       if (!seenAnnotationIds.has(aid)) {
         fail('blocks', `block '${block.id}' annotationIds references unknown annotation '${aid}'`);
@@ -162,7 +172,10 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
   }
   for (const membership of memberships) {
     const block = blocks.find(b => b.id === membership.blockId);
-    if (block && !block.annotationIds.includes(membership.annotationId)) {
+    if (!block || block.kind === 'restricted') {
+      fail('memberships', `restricted block '${membership.blockId}' cannot have memberships`);
+    }
+    if (!block.annotationIds.includes(membership.annotationId)) {
       fail('memberships', `membership annotation '${membership.annotationId}' not in block '${membership.blockId}' annotationIds`);
     }
   }
@@ -183,6 +196,9 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
     if (typeof m.blockId !== 'string' || !seenBlockIds.has(m.blockId)) {
       fail(`measurements[${i}].blockId`, `must reference a declared block`);
     }
+    if (blocks.find(b => b.id === m.blockId)?.kind === 'restricted') {
+      fail(`measurements[${i}].blockId`, 'restricted blocks cannot have measurements');
+    }
     if (typeof m.family !== 'string' || !IDENTIFIER.test(m.family)) {
       fail(`measurements[${i}].family`, 'must be a valid identifier');
     }
@@ -201,28 +217,25 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
     }));
   }
 
-  // Validate capabilities are present when declared
+  // Validate recipient capability hints. They are guidance, not authority.
   let capabilities = null;
   if (declaredCapabilityNames.size > 0) {
-    if (!snapshot.capabilities || typeof snapshot.capabilities !== 'object' || Array.isArray(snapshot.capabilities)) {
-      fail('capabilities', 'must be present when capabilities are declared');
+    if (!Array.isArray(snapshot.capabilityHints)) {
+      fail('capabilityHints', 'must be present when capabilities are declared');
     }
     const capList = [];
-    for (const capKey of Object.keys(snapshot.capabilities)) {
+    for (const capKey of snapshot.capabilityHints) {
       if (!declaredCapabilityNames.has(capKey)) {
-        fail(`capabilities.${capKey}`, `'${capKey}' is not a declared capability`);
+        fail(`capabilityHints.${capKey}`, `'${capKey}' is not a declared capability`);
       }
+      if (capList.includes(capKey)) fail('capabilityHints', 'must not contain duplicates');
       capList.push(capKey);
-    }
-    for (const declared of declaredCapabilityNames) {
-      if (!Object.hasOwn(snapshot.capabilities, declared)) {
-        fail('capabilities', `missing declared capability '${declared}'`);
-      }
     }
     capabilities = Object.freeze([...capList]);
   }
 
   return Object.freeze({
+    kind: 'workbench.annotatedText.recipient',
     version: 1,
     blocks: Object.freeze(blocks),
     annotations: Object.freeze(annotations),

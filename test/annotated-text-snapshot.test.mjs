@@ -35,12 +35,12 @@ function declaration() {
 
 function snapshot() {
   return {
-    version: 1,
-    blocks: [{ id: 'block-1', text: 'Hello', fields: {}, annotationIds: ['annotation-1'] }],
+    kind: 'workbench.annotatedText.recipient', version: 1,
+    blocks: [{ kind: 'visible', id: 'block-1', text: 'Hello', fields: {}, annotationIds: ['annotation-1'] }],
     annotations: [{ id: 'annotation-1', family: 'coding', fields: {} }],
     memberships: [{ annotationId: 'annotation-1', blockId: 'block-1', ordinal: 0 }],
     measurements: [{ id: 'measurement-1', blockId: 'block-1', family: 'words', formatVersion: 1, payload: {} }],
-    capabilities: { read: Object.freeze({}) },
+    capabilityHints: ['read'],
   };
 }
 
@@ -50,8 +50,8 @@ test('materializes a compiled annotated-text snapshot into public immutable shap
   });
   const document = materializeAnnotatedTextSnapshot(snapshot(), Doc.body);
   assert.deepEqual(document, {
-    version: 1,
-    blocks: [{ id: 'block-1', text: 'Hello', fields: {}, annotationIds: ['annotation-1'] }],
+    kind: 'workbench.annotatedText.recipient', version: 1,
+    blocks: [{ kind: 'visible', id: 'block-1', text: 'Hello', fields: {}, annotationIds: ['annotation-1'] }],
     annotations: [{ id: 'annotation-1', family: 'coding', fields: {} }],
     memberships: [{ annotationId: 'annotation-1', blockId: 'block-1', ordinal: 0 }],
     measurements: [{ id: 'measurement-1', blockId: 'block-1', family: 'words', formatVersion: 1, payload: {} }],
@@ -72,7 +72,7 @@ test('rejects uncompiled declarations and undeclared projected names', () => {
   badFamily.annotations[0].family = 'unknown';
   assert.throws(() => materializeAnnotatedTextSnapshot(badFamily, Doc.body), /not a declared annotation family/);
   const badCapability = snapshot();
-  badCapability.capabilities = { write: Object.freeze({}) };
+  badCapability.capabilityHints = ['write'];
   assert.throws(() => materializeAnnotatedTextSnapshot(badCapability, Doc.body), /not a declared capability/);
 });
 
@@ -83,6 +83,29 @@ test('rejects inconsistent block membership projections', () => {
   const projected = snapshot();
   projected.blocks[0].annotationIds = [];
   assert.throws(() => materializeAnnotatedTextSnapshot(projected, Doc.body), /annotationIds/);
+});
+
+test('rejects raw canonical snapshots and hidden fields on restricted blocks', () => {
+  const Doc = entity('RecipientOnlySnapshotDoc', {
+    project: ref('Project'), owner: ref('User'), body: declaration(),
+  });
+  const raw = snapshot();
+  delete raw.kind;
+  assert.throws(() => materializeAnnotatedTextSnapshot(raw, Doc.body), /recipient projection/);
+  const restricted = snapshot();
+  restricted.blocks[0] = { kind: 'restricted', id: 'block-1', placeholder: '[Restricted]', text: 'hidden' };
+  restricted.annotations = [];
+  restricted.memberships = [];
+  restricted.measurements = [];
+  assert.throws(() => materializeAnnotatedTextSnapshot(restricted, Doc.body), /restricted block/);
+  restricted.blocks[0] = { kind: 'restricted', id: 'block-1', placeholder: '[Restricted]' };
+  const document = materializeAnnotatedTextSnapshot(restricted, Doc.body);
+  assert.deepEqual(document.blocks, [{ kind: 'restricted', id: 'block-1', placeholder: '[Restricted]' }]);
+  restricted.blocks[0].extra = true;
+  assert.throws(() => materializeAnnotatedTextSnapshot(restricted, Doc.body), /restricted block/);
+  delete restricted.blocks[0].extra;
+  restricted.measurements = [{ id: 'm', blockId: 'block-1', family: 'words', formatVersion: 1, payload: {} }];
+  assert.throws(() => materializeAnnotatedTextSnapshot(restricted, Doc.body), /restricted blocks cannot have measurements/);
 });
 
 test('static field handle exposes only declared semantic handles and cannot compare', () => {

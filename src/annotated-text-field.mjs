@@ -2,6 +2,7 @@
 // action handlers remain separate so a descriptor cannot imply a partial write.
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const CAPABILITY_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
 const SCALAR_TYPES = new Set(['text', 'boolean', 'date', 'number', 'json', 'vector', 'ref']);
 const RESERVED_BLOCK_COLUMNS = new Set(['id', 'document_id', 'project_id', 'owner_id', 'position', 'epoch', 'structure_version']);
 const RESERVED_ANNOTATION_COLUMNS = new Set(['annotation_id', 'id', 'document_id', 'project_id', 'owner_id', 'family']);
@@ -159,7 +160,7 @@ export function annotation(name, { fields = {}, actions = [], empty = 'delete' }
   });
 }
 
-export function protectingAnnotation(name, { fields = {}, protects = null, actions = [], empty = 'delete' } = {}) {
+export function protectingAnnotation(name, { fields = {}, protects = null, placeholder = '[Restricted]', actions = [], empty = 'delete' } = {}) {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`protectingAnnotation name '${name}' is not a valid identifier`);
   }
@@ -171,6 +172,9 @@ export function protectingAnnotation(name, { fields = {}, protects = null, actio
       throw new Error(`protectingAnnotation '${name}' protects must name a valid annotation family or be null`);
     }
   }
+  if (typeof placeholder !== 'string' || placeholder.length === 0) {
+    throw new Error(`protectingAnnotation '${name}' placeholder must be a non-empty string`);
+  }
   const frozenFields = {};
   for (const [k, v] of Object.entries(fields)) {
     frozenFields[k] = Object.freeze({ ...v });
@@ -181,6 +185,7 @@ export function protectingAnnotation(name, { fields = {}, protects = null, actio
     annotationName: name,
     fields: Object.freeze(frozenFields),
     protects,
+    placeholder,
     actions: frozenActions,
     empty,
   });
@@ -331,7 +336,9 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
       fail(entity, field, 'capabilities', 'must be a non-empty object of named capability handles');
     }
     for (const capKey of Object.keys(descriptor.capabilities)) {
-      assertName(entity, field, `capabilities.${capKey}`, capKey);
+      if (!CAPABILITY_IDENTIFIER.test(capKey)) {
+        fail(entity, field, `capabilities.${capKey}`, `invalid capability name '${capKey}'`);
+      }
       const cap = descriptor.capabilities[capKey];
       if (!cap || typeof cap !== 'object' || !Object.isFrozen(cap)) {
         fail(entity, field, `capabilities.${capKey}`, 'must be a frozen descriptor');
@@ -351,7 +358,7 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   }
 
   // Validate no unknown keys on annotation annotations
-  const ALLOWED_ANN_KEYS = new Set(['kind', 'annotationName', 'fields', 'actions', 'empty', 'protects']);
+  const ALLOWED_ANN_KEYS = new Set(['kind', 'annotationName', 'fields', 'actions', 'empty', 'protects', 'placeholder']);
   for (const ann of descriptor.annotations) {
     for (const key of Object.keys(ann)) {
       if (!ALLOWED_ANN_KEYS.has(key)) {
@@ -436,9 +443,15 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
 
   // Build action identifiers per annotation
   const annotationActionIds = {};
+  const protectingFamilies = {};
   for (const ann of descriptor.annotations) {
     const actionIds = ann.actions.map(a => a.actionName);
     annotationActionIds[ann.annotationName] = Object.freeze([...actionIds]);
+    if (ann.kind === 'protectingAnnotation') protectingFamilies[ann.annotationName] = ann.placeholder;
+  }
+  const protectingPlaceholders = [...new Set(Object.values(protectingFamilies))];
+  if (protectingPlaceholders.length > 1) {
+    fail(entity, field, 'annotations', 'protecting annotations must share one placeholder');
   }
 
   const compiled = {
@@ -448,6 +461,8 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     measurementConfigs,
     measurementFamilyList,
     capabilities: descriptor.capabilities ? Object.freeze({ ...descriptor.capabilities }) : null,
+    protectingFamilies: Object.freeze({ ...protectingFamilies }),
+    restrictedPlaceholder: protectingPlaceholders[0] ?? null,
     // Create frozen typed runtime static handles
     annotationHandles: Object.freeze(
       Object.fromEntries([...annotationNames].map(n => {
