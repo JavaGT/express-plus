@@ -125,6 +125,45 @@ test('live fanout drops annotated-text operations with invalid sequence metadata
   assert.deepEqual(conn.drain(), []);
 });
 
+test('live fanout invalidates generic ephemeral cells on annotated-text entities without buffering them', async () => {
+  const fanout = createLiveFanout({ mayVerb: async () => true });
+  const conn = makeConn('c1');
+  const entity = makeEntity({
+    fields: { body: { kind: 'annotatedText' }, cursor: { kind: 'ephemeral' } },
+  });
+  fanout.addSubscription('Doc', 'd1', conn, { cursor: true }, { window: 20, by: 'latest-wins' });
+
+  await fanout.emit(entity, 'd1', { id: 'd1' }, {
+    type: 'Doc.cursor.set', seq: 8,
+    data: { owner: 'd1', client: 'secret-client', cells: { offset: 42, selectedText: 'secret body' } },
+  });
+
+  const messages = conn.drain();
+  assert.deepEqual(messages, [{
+    type: 'resync', entity: 'Doc', id: 'd1', seq: 8,
+    reason: 'annotated-text-snapshot-required',
+  }]);
+  assert.equal(JSON.stringify(messages).includes('secret'), false);
+  await sleep(40);
+  assert.deepEqual(conn.drain(), [], 'forbidden cells never enter a paced buffer');
+});
+
+test('live fanout drops annotated ephemeral cells with invalid sequence metadata', async () => {
+  const fanout = createLiveFanout({ mayVerb: async () => true });
+  const conn = makeConn('c1');
+  const entity = makeEntity({
+    fields: { body: { kind: 'annotatedText' }, cursor: { kind: 'ephemeral' } },
+  });
+  fanout.addSubscription('Doc', 'd1', conn, { cursor: true });
+
+  await fanout.emit(entity, 'd1', { id: 'd1' }, {
+    type: 'Doc.cursor.set', seq: Number.MAX_SAFE_INTEGER + 1,
+    data: { cells: { offset: 42 } },
+  });
+
+  assert.deepEqual(conn.drain(), []);
+});
+
 test('live fanout delivers removed events without re-authorization', async () => {
   let calls = 0;
   const fanout = createLiveFanout({

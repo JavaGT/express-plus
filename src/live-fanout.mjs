@@ -20,6 +20,10 @@ import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { createdTextReducerSeeds } from './text-reducer-transport.mjs';
 import { publicEvent } from './event-delivery.mjs';
 
+function hasAnnotatedText(entityRecord) {
+  return Object.values(entityRecord.fields ?? {}).some((field) => field?.kind === 'annotatedText');
+}
+
 export function createLiveFanout({ mayVerb = null } = {}) {
   const byScope = new Map();   // Map<scopeKey, Map<conn, SubSpec>>
   const connSubs = new Map();  // Map<conn, Set<scopeKey>>
@@ -192,10 +196,11 @@ export function createLiveFanout({ mayVerb = null } = {}) {
         ephemeralField = handle.field;
       }
     }
+    const isAnnotatedTextEphemeral = ephemeralField !== null && hasAnnotatedText(entityRecord);
 
     // Delta projection is per-entity state diffing; a scope-anchored foreign
     // event carries its own data and must not be fed to the anchor's projector.
-    const delta = scopeAnchored || isAnnotatedTextOperation
+    const delta = scopeAnchored || isAnnotatedTextOperation || isAnnotatedTextEphemeral
       ? undefined
       : deltaProjector.project(entityRecord, id, authzRow, committed);
 
@@ -215,6 +220,18 @@ export function createLiveFanout({ mayVerb = null } = {}) {
         if (!fields || fields[ephemeralField] !== true) continue;
       }
 
+      // Generic ephemeral cells have no recipient caret/presence grammar on an
+      // annotated-text entity. They are still sequenced today, so resync rather
+      // than silently omit a committed event and leave the client cursor stale.
+      if (isAnnotatedTextOperation || isAnnotatedTextEphemeral) {
+        if (!Number.isSafeInteger(committed.seq) || committed.seq < 0) continue;
+        conn.send({
+          type: 'resync', entity: name, id, seq: committed.seq,
+          reason: 'annotated-text-snapshot-required',
+        });
+        continue;
+      }
+
       let pace = { window: 0, by: null };
       if (ephemeralField !== null && subSpec?.pace !== null && subSpec?.pace !== undefined) {
         pace = subSpec.pace;
@@ -224,14 +241,6 @@ export function createLiveFanout({ mayVerb = null } = {}) {
         // Envelope identity (entity, id) is always the ANCHOR — matching the
         // subscription's scope — even for a scope-anchored foreign event;
         // the nested `event` carries its own type/data (e.g. Job.updated).
-        if (isAnnotatedTextOperation) {
-          if (!Number.isSafeInteger(committed.seq) || committed.seq < 0) continue;
-          conn.send({
-            type: 'resync', entity: name, id, seq: committed.seq,
-            reason: 'annotated-text-snapshot-required',
-          });
-          continue;
-        }
         const envelope = {
           type: 'event', entity: name, id, seq: committed.seq,
           seqSpan: [committed.seq, committed.seq],

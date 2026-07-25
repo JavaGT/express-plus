@@ -15,6 +15,10 @@ import { failure } from './outcome.mjs';
 const MAX_SUBS_PER_CONN = 256;
 const MAX_ID_LEN = 256;
 
+function hasAnnotatedText(entity) {
+  return Object.values(entity.fields ?? {}).some((field) => field?.kind === 'annotatedText');
+}
+
 export function parseSubscribeMsg(msg) {
   if (typeof msg !== 'object' || msg === null) return null;
 
@@ -72,6 +76,9 @@ function buildInterest(interest, entity) {
       }
       if (!entity.fields || !(key in entity.fields)) {
         throw new Error(`Unknown field ${key} in interest.`);
+      }
+      if (hasAnnotatedText(entity) && entity.fields[key]?.kind === 'ephemeral') {
+        throw new Error('Ephemeral interest is unavailable for annotated-text entities.');
       }
       if (value !== true) {
         throw new Error('Coordinate narrowing is not supported.');
