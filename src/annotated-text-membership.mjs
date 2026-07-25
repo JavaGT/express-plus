@@ -276,7 +276,11 @@ export function removeMembership(family, annotations, memberships, annotationId,
 
   if (annotation.empty === 'delete') {
     return deepFreeze({
-      annotations: annotations.filter(a => a.id !== annotationId),
+      annotations: annotations
+        .filter(a => a.id !== annotationId)
+        .map(a => a.protectedTargetIds?.includes(annotationId)
+          ? { ...a, protectedTargetIds: a.protectedTargetIds.filter(id => id !== annotationId) }
+          : a),
       memberships: memberships.filter(m => m.annotationId !== annotationId),
       outcomes: [deepFreeze({ type: 'delete', annotationId })],
     });

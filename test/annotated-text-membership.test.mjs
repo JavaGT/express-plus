@@ -386,6 +386,7 @@ test('protection requires active overlap — protector on different block does n
   assert.equal(result.outcomes[0].type, 'delete');
   assert.equal(result.annotations.length, 1);
   assert.equal(result.annotations[0].id, 'protector1');
+  assert.deepEqual(result.annotations[0].protectedTargetIds, []);
 });
 
 test('protection boundary touch does not protect', () => {

@@ -141,6 +141,10 @@ Merges memberships when blocks are merged. Blocks must be adjacent.
 - Active membership cannot exist on a fully tombstoned block.
 - Protection requires the protector to have `protectedTargetIds` containing the
   target's ID AND positive active membership overlap on the same block.
+- A permitted delete removes incoming protection references in its returned
+  annotation postimage before the target identity is removed. This lets the
+  transactional caller satisfy SQLite's direct-delete guard while preserving
+  overlap-scoped protection; retained orphan identities keep their edges.
 - Split and merge never produce invalid zero visible membership. A nonempty
   family never persists a zero-owned block; the empty-document bootstrap is
   the sole exception.

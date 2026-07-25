@@ -254,6 +254,24 @@ test('orphan rows are one-to-one annotation state and cascade on annotation dele
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM Doc_body_annotation_orphan_state').get().count, 0);
 });
 
+test('target annotation deletion is restricted while a protecting edge exists', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  for (const sql of annotatedTextDDL('Doc', 'body', fd({}, { note: {}, protector: {} }), makeFields())) db.exec(sql);
+  db.exec("INSERT INTO Project VALUES ('p')");
+  db.exec("INSERT INTO User VALUES ('u')");
+  db.exec("INSERT INTO Doc VALUES ('d')");
+  db.exec("INSERT INTO Doc_body_annotation VALUES ('target', 'd', 'p', 'u', 'note')");
+  db.exec("INSERT INTO Doc_body_annotation VALUES ('protector', 'd', 'p', 'u', 'protector')");
+  db.exec("INSERT INTO Doc_body_annotation_protected_target VALUES ('protector', 'target')");
+  assert.throws(() => db.exec("DELETE FROM Doc_body_annotation WHERE id = 'target'"));
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM Doc_body_annotation_protected_target WHERE annotation_id = 'protector'").get().count, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM Doc_body_annotation WHERE id = 'protector'").get().count, 1);
+});
+
 test('forged annotation descriptors cannot bypass the closed empty policy', () => {
   const forged = Object.freeze({
     kind: 'annotation', annotationName: 'note', fields: Object.freeze({}), actions: Object.freeze([]), empty: 'retain',
