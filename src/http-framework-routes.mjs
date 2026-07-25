@@ -185,6 +185,20 @@ async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
     return true;
   }
   const rows = readSince(app.db, scope, cursor);
+  const entity = app.entities.get(access.anchor.entity);
+  // The T5b snapshot reader is the only recipient grammar for annotated text.
+  // Historical operation facts cannot cross replay until a projected event
+  // grammar exists, so force the client through that reader instead.
+  if (hasAnnotatedTextFields(entity)) {
+    if (!access.direct) {
+      reject(res, 403, 'forbidden');
+      return true;
+    }
+    if (rows.length > 0) {
+      sendJson(res, 200, { resync: 'stale', reason: 'annotated-text-snapshot-required' });
+      return true;
+    }
+  }
   const events = rows.map((r) => {
     const data = JSON.parse(r.eventData);
     const reducers = createdTextReducerSeeds(app.entities.get(tryParseScopeKey(r.scope)?.entity), { type: r.eventType, data });
@@ -242,6 +256,20 @@ async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
     return true;
   }
   const rows = readSince(app.db, scopeKey, cursor);
+  // A deleted annotated document has no recipient snapshot to recover from.
+  // Its historical row grant permits only an opaque terminal disposition, not
+  // replay of the canonical events that preceded deletion.
+  if (auth.historical && hasAnnotatedTextFields(entity)) {
+    sendJson(res, 200, { resync: 'deleted', seq: readSeq(app.db, scopeKey) });
+    return true;
+  }
+  // Do not selectively redact event.data: annotated-text events also carry
+  // canonical family facts in reducers and framework metadata. A nonempty
+  // replay is terminally redirected to the recipient-projected snapshot.
+  if (hasAnnotatedTextFields(entity) && rows.length > 0) {
+    sendJson(res, 200, { resync: 'stale', reason: 'annotated-text-snapshot-required' });
+    return true;
+  }
   const events = rows.map((r) => {
     const data = r.data ?? null;
     const reducers = createdTextReducerSeeds(entity, { type: r.eventType, data });

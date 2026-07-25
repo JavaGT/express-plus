@@ -838,6 +838,7 @@ export class LiveList {
    * Resync: fetch events-since from the server to fill a gap or stale state.
    * Handles two response shapes:
    *   {resync:'stale', reason}  → forced re-bootstrap from fresh snapshot
+   *   {resync:'deleted', seq}   → terminal removal without a deleted snapshot
    *   {events:[...]}           → fold each row in order (bypass span dup/gap logic)
    *
    * During resync, any arriving live envelopes are queued; they are drained and
@@ -860,7 +861,17 @@ export class LiveList {
         this._assertActive(epoch);
       }
 
-      if (forceSnapshot || this._bufferOverflow || body?.resync === 'stale') {
+      if (body?.resync === 'deleted') {
+        if (!Number.isFinite(body.seq) || body.seq < this._cursor) throw new Error('deleted resync has invalid cursor');
+        this._state = null;
+        this._cursor = body.seq;
+        this._removed = true;
+        this._ordered = {};
+        this._textStates = {};
+        this._textReducerReady = Promise.resolve();
+        this._bufferOverflow = false;
+        this._queue = [];
+      } else if (forceSnapshot || this._bufferOverflow || body?.resync === 'stale') {
         // Forced re-bootstrap: fresh snapshot replaces state entirely.
         const snapRes = await this._fetchImpl(
           this._snapshotUrl(this._entity, this._id),

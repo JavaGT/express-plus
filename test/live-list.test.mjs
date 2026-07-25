@@ -682,6 +682,36 @@ describe('LiveList', () => {
     await list.close();
   });
 
+  it('events-since deleted terminates without fetching a deleted snapshot', async () => {
+    const channel = makeFakeChannel();
+    channel._setAck({ currentSeq: 3 });
+    let snapshotCalls = 0;
+    const fetch = makeFakeFetch([
+      {
+        match: '/snapshot',
+        responseFn: () => {
+          snapshotCalls++;
+          return { snapshot: { title: 'old' }, seq: 3 };
+        },
+      },
+      { match: '/events', response: { resync: 'deleted', seq: 7 } },
+    ]);
+    const list = new LiveList({
+      entity: 'ticket', id: '1', channel, fetchImpl: fetch,
+      snapshotUrl, eventsSinceUrl,
+    });
+    await list.subscribe();
+    channel.emit({
+      type: 'event', entity: 'ticket', id: '1', seq: 7, seqSpan: [7, 7],
+      event: { type: 'ticket.updated', data: {} },
+    });
+    await new Promise(r => setTimeout(r, 20));
+    assert.equal(snapshotCalls, 1);
+    assert.equal(list.state, null);
+    assert.equal(list.cursor, 7);
+    await list.close();
+  });
+
   // --- 12. Close ---
   it('close(): after close, further emitted envelopes do not change state or render', async () => {
     const channel = makeFakeChannel();

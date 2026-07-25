@@ -256,6 +256,58 @@ test('HTTP snapshot fails closed on malformed state and throwing protector acces
   assert.equal((await malformed.text()).includes('secret'), false);
 });
 
+test('HTTP replay never serializes annotated-text events and requires a fresh snapshot', async (t) => {
+  let principal = { id: 'u1' };
+  const { app, db, blockId, state } = await setupDoc('replay secret', () => principal, {
+    protectingAccess: async ({ is }) => (await is.owner()) ? grant(read) : grant(),
+  });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+  assert.equal((await app.dispatch({
+    actionId: 'replay-theme', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal,
+    payload: v4Payload('d1', blockId, 0, 13, 'replay-theme', 'theme', {}, expected),
+  })).ok, true);
+  assert.equal((await app.dispatch({
+    actionId: 'replay-protection', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal,
+    payload: v4Payload('d1', blockId, 0, 13, 'replay-protection', 'confidential', {}, expected, ['replay-theme']),
+  })).ok, true);
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const replay = await fetch(`${origin}/events-since/R4Doc/d1?cursor=0`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(replay.status, 200);
+  const serialized = await replay.text();
+  assert.deepEqual(JSON.parse(serialized), { resync: 'stale', reason: 'annotated-text-snapshot-required' });
+  for (const hidden of ['replay secret', 'replay-theme', 'replay-protection', 'protectedTargetIds', 'operation', 'frontier']) {
+    assert.equal(serialized.includes(hidden), false, `replay must not expose ${hidden}`);
+  }
+
+  principal = { id: 'u2' };
+  const revoked = await fetch(`${origin}/events-since/R4Doc/d1?cursor=0`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(revoked.status, 200, 'current row authorization permits opaque recovery only');
+  assert.deepEqual(await revoked.json(), { resync: 'stale', reason: 'annotated-text-snapshot-required' });
+  const snapshot = await fetch(`${origin}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(snapshot.status, 200);
+  assert.deepEqual((await snapshot.json()).snapshot.body.blocks, [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }]);
+
+  app.resolveScope = async (requestedScope) => requestedScope === 'project:p1' ? { entity: 'R4Doc', id: 'd1' } : null;
+  const aggregate = await fetch(`${origin}/events-since?scope=project:p1&cursor=99`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(aggregate.status, 403, 'aggregate replay cannot bypass the entity recipient grammar even when it is empty');
+  assert.equal((await aggregate.text()).includes('replay secret'), false);
+});
+
+test('HTTP replay returns an opaque terminal disposition after annotated-text deletion', async (t) => {
+  const { app, db } = await setupDoc('deleted secret', 'u1');
+  t.after(async () => { await app.shutdown(); db.close(); });
+  assert.equal((await app.dispatch({
+    actionId: 'delete-r4-doc', type: 'R4Doc.remove', scope: 'R4Doc:d1', principal: { id: 'u1' }, payload: { id: 'd1' },
+  })).ok, true);
+  const response = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/events-since/R4Doc/d1?cursor=0`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(response.status, 200);
+  const serialized = await response.text();
+  assert.deepEqual(JSON.parse(serialized), { resync: 'deleted', seq: 3 });
+  assert.equal(serialized.includes('deleted secret'), false);
+  assert.equal(serialized.includes('R4Doc.removed'), false);
+});
+
 test('R4 annotation.apply rejects target IDs on ordinary, standalone, and wrong-family protectors', async () => {
   const { app, db, blockId, state } = await setupDoc('hello world');
   const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
