@@ -27,12 +27,24 @@ test('note.mjs imports, generates DDL, and note CRUD works', async () => {
   try {
     const r = await fetch(`${origin}/notes`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ body: 'hello world' }),
+      body: JSON.stringify({}),
     });
     assert.equal(r.status, 201, 'note create');
     const doc = await r.json();
-    assert.equal(doc.body, 'hello world');
+    assert.equal(doc.body, '');
     assert.equal(doc.owner, '1');
+
+    const operation = ['workbench.text', 1, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1], 1, [], ['insert', ['root'], 'hello world']];
+    const apply = await fetch(`${origin}/notes/${doc.id}/body/apply`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ operation }),
+    });
+    assert.equal(apply.status, 200, 'note text apply');
+    assert.equal((await apply.json()).body, 'hello world');
+
+    const read = await fetch(`${origin}/notes/${doc.id}`);
+    assert.equal(read.status, 200, 'note read');
+    assert.equal((await read.json()).body, 'hello world');
   } finally {
     app.httpServer.close();
   }

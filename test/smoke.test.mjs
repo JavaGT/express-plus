@@ -106,20 +106,30 @@ test('HTTP CRUD: create and read a Doc row through the server', async () => {
     const createRes = await fetch(`${origin}/docs`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title: 'My Doc', body: 'hello world' }),
+      body: JSON.stringify({ title: 'My Doc' }),
     });
     assert.equal(createRes.status, 201);
     const created = await createRes.json();
     assert.equal(created.title, 'My Doc');
-    assert.equal(created.body, 'hello world');
+    assert.equal(created.body, '');
     assert.equal(created.owner, '1');
     const docId = created.id;
+
+    const operation = ['workbench.text', 1, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1], 1, [], ['insert', ['root'], 'hello world']];
+    const applyRes = await fetch(`${origin}/docs/${docId}/body/apply`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ operation }),
+    });
+    assert.equal(applyRes.status, 200);
+    assert.equal((await applyRes.json()).body, 'hello world');
 
     // Read the Doc
     const readRes = await fetch(`${origin}/docs/${docId}`);
     assert.equal(readRes.status, 200);
     const doc = await readRes.json();
     assert.equal(doc.title, 'My Doc');
+    assert.equal(doc.body, 'hello world');
 
     // List all Docs
     const listRes = await fetch(`${origin}/docs`);

@@ -16,9 +16,9 @@ test('hash kind is not invertible', () => {
   assert.equal(s.laws.coalescible, false);
 });
 
-test('crdt text kind is invertible and commutative', () => {
+test('crdt text kind requires authored compensation and is commutative', () => {
   const s = resolveStrategy('crdt');
-  assert.equal(s.laws.invertible, true, 'insert/delete ops are inverses');
+  assert.equal(s.laws.invertible, false, 'generic history cannot construct a compensating immutable text operation');
   assert.equal(s.laws.coalescible, true, 'insert+delete at same position cancel');
   assert.equal(s.laws.commutativeMerge, true, 'CRDT ops commute by definition');
 });
