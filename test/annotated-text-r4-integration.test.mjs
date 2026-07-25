@@ -292,6 +292,14 @@ test('HTTP replay never serializes annotated-text events and requires a fresh sn
   const aggregate = await fetch(`${origin}/events-since?scope=project:p1&cursor=99`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(aggregate.status, 403, 'aggregate replay cannot bypass the entity recipient grammar even when it is empty');
   assert.equal((await aggregate.text()).includes('replay secret'), false);
+
+  db.prepare('INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('project:p1', 1, 'R4Doc.updated', '{"id":"d1"}', 'aggregate-old', '2026-07-25T00:00:00.000Z');
+  db.prepare('INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('project:p1', 2, 'R4Doc.updated', '{"id":"d1"}', 'aggregate-retained', '2026-07-25T00:00:01.000Z');
+  db.prepare('DELETE FROM _Log WHERE scope = ? AND seq = 1').run('project:p1');
+  const staleAggregate = await fetch(`${origin}/events-since?scope=project:p1&cursor=0`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(staleAggregate.status, 403, 'retention cannot bypass aggregate annotated-text denial');
 });
 
 test('HTTP replay returns an opaque terminal disposition after annotated-text deletion', async (t) => {
@@ -306,6 +314,10 @@ test('HTTP replay returns an opaque terminal disposition after annotated-text de
   assert.deepEqual(JSON.parse(serialized), { resync: 'deleted', seq: 3 });
   assert.equal(serialized.includes('deleted secret'), false);
   assert.equal(serialized.includes('R4Doc.removed'), false);
+
+  db.prepare('DELETE FROM _Log WHERE scope = ? AND seq = 1').run('R4Doc:d1');
+  const pruned = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/events-since/R4Doc/d1?cursor=0`, { signal: AbortSignal.timeout(5_000) });
+  assert.deepEqual(await pruned.json(), { resync: 'deleted', seq: 3 });
 });
 
 test('R4 annotation.apply rejects target IDs on ordinary, standalone, and wrong-family protectors', async () => {

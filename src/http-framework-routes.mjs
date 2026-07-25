@@ -179,21 +179,23 @@ async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
     reject(res, access.status, access.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
+  const entity = app.entities.get(access.anchor.entity);
+  // A custom aggregate has no annotated-text recipient grammar. Deny before
+  // retention handling so it cannot acquire a transport-specific disposition.
+  if (hasAnnotatedTextFields(entity) && !access.direct) {
+    reject(res, 403, 'forbidden');
+    return true;
+  }
   const minSeq = minSeqForScope(app.db, scope);
   if (minSeq !== null && cursor + 1 < minSeq) {
     sendJson(res, 200, { resync: 'stale', reason: 'cursor-behind-retention' });
     return true;
   }
   const rows = readSince(app.db, scope, cursor);
-  const entity = app.entities.get(access.anchor.entity);
   // The T5b snapshot reader is the only recipient grammar for annotated text.
   // Historical operation facts cannot cross replay until a projected event
   // grammar exists, so force the client through that reader instead.
   if (hasAnnotatedTextFields(entity)) {
-    if (!access.direct) {
-      reject(res, 403, 'forbidden');
-      return true;
-    }
     if (rows.length > 0) {
       sendJson(res, 200, { resync: 'stale', reason: 'annotated-text-snapshot-required' });
       return true;
@@ -247,6 +249,14 @@ async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
     reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
+  // A deleted annotated document has no recipient snapshot to recover from.
+  // Its historical row grant permits only an opaque terminal disposition, not
+  // replay of the canonical events that preceded deletion. This wins over
+  // retention because a stale response would demand an impossible snapshot.
+  if (auth.historical && hasAnnotatedTextFields(entity)) {
+    sendJson(res, 200, { resync: 'deleted', seq: readSeq(app.db, scopeKey) });
+    return true;
+  }
   const minSeq = minSeqForScope(app.db, scopeKey);
   // The client wants events > cursor; the first wanted is cursor+1. If that is
   // older than the oldest RETAINED event, the gap can never be filled → HARD-FAIL.
@@ -256,13 +266,6 @@ async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
     return true;
   }
   const rows = readSince(app.db, scopeKey, cursor);
-  // A deleted annotated document has no recipient snapshot to recover from.
-  // Its historical row grant permits only an opaque terminal disposition, not
-  // replay of the canonical events that preceded deletion.
-  if (auth.historical && hasAnnotatedTextFields(entity)) {
-    sendJson(res, 200, { resync: 'deleted', seq: readSeq(app.db, scopeKey) });
-    return true;
-  }
   // Do not selectively redact event.data: annotated-text events also carry
   // canonical family facts in reducers and framework metadata. A nonempty
   // replay is terminally redirected to the recipient-projected snapshot.
