@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import { txn } from './driver.mjs';
 
 function failure(code) { const error = new Error(code); error.code = code; throw error; }
 function token() { return randomBytes(32).toString('base64url'); }
@@ -37,6 +38,7 @@ export function createPendingBlobLifecycle(app, options) {
     throw new TypeError('blobLifecycle requires non-negative pendingTtlMs and adoptedRecoveryTtlMs');
   }
   const byActionField = new Map(fields.map((field) => [`${field.actionName}:${field.field}`, field]));
+  if (byActionField.size !== fields.length) throw new TypeError('blobLifecycle fields must not contain duplicate actionName/field pairs');
   async function stage(principal, request) {
     if (!request || typeof request.projectId !== 'string' || !request.projectId || typeof request.fileId !== 'string' || !request.fileId) throw new TypeError('projectId and fileId are required');
     const pendingKey = `${request.projectId}/${request.fileId}.pending`;
@@ -57,22 +59,64 @@ export function createPendingBlobLifecycle(app, options) {
     }
     return Object.freeze({ claim: Object.freeze({ pendingKey, claimToken }), pendingKey, byteLength: bytes.length, contentDigest: digest });
   }
-  async function validateClaim({ claim, actionName, actionId, authenticatedPrincipalId, scopeId, committedEventId }) {
+  async function validateClaim({ claim, field, actionName, actionId, authenticatedPrincipalId, scopeId, committedEventId }) {
     if (!claim || typeof claim.pendingKey !== 'string' || typeof claim.claimToken !== 'string') failure('INVALID_PENDING_BLOB_CLAIM');
     const row = app.db.prepare('SELECT * FROM _PendingBlob WHERE pendingKey = ?').get(claim.pendingKey);
     if (!row || !timingSafeEqual(Buffer.from(hash(claim.claimToken)), Buffer.from(row.claimTokenHash))) failure('INVALID_PENDING_BLOB_CLAIM');
     if (row.status === 'claimed' && row.actionId === actionId) return Object.freeze({ blobId: row.blobId });
     if (row.status !== 'pending') failure('PENDING_BLOB_ALREADY_CLAIMED');
     if (row.principalId !== authenticatedPrincipalId) failure('PENDING_BLOB_WRONG_PRINCIPAL');
-    const declaration = byActionField.get(`${actionName}:${claim.field ?? ''}`);
+    const declaration = byActionField.get(`${actionName}:${field}`);
     if (!declaration) failure('UNDECLARED_BLOB_FIELD');
     const decision = await declaration.validator(Object.freeze({ actionName, actionId, authenticatedPrincipalId, scopeId, committedEventId, pendingKey: row.pendingKey, contentDigest: row.contentDigest, byteLength: row.byteLength }));
     if (!decision || decision.allow !== true) failure(decision?.code ?? 'BLOB_CLAIM_DENIED');
-    app.db.prepare(`UPDATE _PendingBlob SET status = 'claimed', actionId = ?, committedEventId = ?, scopeId = ?
+    const claimed = app.db.prepare(`UPDATE _PendingBlob SET status = 'claimed', actionId = ?, committedEventId = ?, scopeId = ?
       WHERE pendingKey = ? AND status = 'pending'`).run(actionId, committedEventId, scopeId, row.pendingKey);
+    if (!claimed.changes) failure('PENDING_BLOB_ALREADY_CLAIMED');
+    // BlobStore adoption is metadata-only and shares the dispatch transaction
+    // with the claim, event log, projection, and receipt.
+    app.blobs.adopt(app.db, row.blobId);
     return Object.freeze({ blobId: row.blobId });
   }
-  return Object.freeze({ stage, validateClaim, fields, options: Object.freeze({ ...options }) });
+  async function reconcile() {
+    const claimed = app.db.prepare("SELECT * FROM _PendingBlob WHERE status = 'claimed'").all();
+    for (const row of claimed) {
+      try {
+        const bytes = app.blobs.readRange(row.blobId);
+        if (bytes.length !== row.byteLength || createHash('sha256').update(bytes).digest('hex') !== row.contentDigest) {
+          app.db.prepare("UPDATE _PendingBlob SET status = 'recovery-failed' WHERE pendingKey = ?").run(row.pendingKey);
+          continue;
+        }
+        app.blobs.finalize(row.blobId);
+        app.db.prepare("UPDATE _PendingBlob SET status = 'finalized' WHERE pendingKey = ? AND status = 'claimed'").run(row.pendingKey);
+      } catch {
+        // The claimed generation remains durable and readable from its verified
+        // pending slot while a later boot reconciliation retries finalization.
+      }
+    }
+  }
+  async function reap() {
+    const stale = new Date(Date.now() - options.pendingTtlMs).toISOString();
+    await txn(app.db, () => {
+      const rows = app.db.prepare("SELECT pendingKey, blobId FROM _PendingBlob WHERE status = 'pending' AND createdAt < ?").all(stale);
+      for (const row of rows) {
+        app.blobs.discardPending(row.blobId);
+        app.db.prepare("DELETE FROM _PendingBlob WHERE pendingKey = ? AND status = 'pending'").run(row.pendingKey);
+      }
+    });
+  }
+  return Object.freeze({
+    stage,
+    validateClaim,
+    reconcile,
+    reap,
+    // Finalization is package-owned post-commit work. Reconciliation scans the
+    // durable claim table, so a crash before this callback is equivalent to a
+    // missed wake and is recovered on the next boot.
+    consumer: async () => reconcile(),
+    fields,
+    options: Object.freeze({ ...options }),
+  });
 }
 
 export function pendingBlobStager(workbench, authenticatedPrincipal) {

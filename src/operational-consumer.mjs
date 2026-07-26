@@ -93,7 +93,18 @@ export function createOperationalConsumers(consumers = []) {
     } catch (error) { await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, String(error)); return false; }
     let result;
     try { result = await consumer.handle(Object.freeze({ ...partial, idempotencyKey })); } catch (error) { result = { kind: 'retry', afterMs: 0, detail: String(error) }; }
-    if (!result || !['ack', 'retry', 'terminal'].includes(result.kind)) fail('handle must return ack, retry, or terminal');
+    if (!result || !['ack', 'retry', 'terminal'].includes(result.kind)) {
+      await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, 'handle must return ack, retry, or terminal');
+      return false;
+    }
+    if (result.kind === 'retry' && (!Number.isFinite(result.afterMs) || result.afterMs < 0)) {
+      await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, 'retry afterMs must be a non-negative finite number');
+      return false;
+    }
+    if (result.kind === 'terminal' && (typeof result.code !== 'string' || typeof result.detail !== 'string')) {
+      await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, 'terminal result requires string code and detail');
+      return false;
+    }
     if (result.kind === 'ack') {
       await txn(db, () => {
         db.prepare('DELETE FROM _OperationalConsumerFailure WHERE consumer = ? AND scope = ? AND committedEventId = ?').run(consumer.name, row.scope, `${row.scope}:${row.seq}`);

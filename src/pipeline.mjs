@@ -119,6 +119,7 @@ export function durableMutationVariant({
   projectionConsumers = [],
   admission = noAdmission(),
   blobAdapter = noBlobAdapter(),
+  pendingBlobLifecycle = null,
   effectsRegistry = null,
   executeEffectsForEvent = null,
   postCommitConsumers = [],
@@ -137,8 +138,19 @@ export function durableMutationVariant({
       principal,
       depth = 0,
       payload,
+      type,
+      scope,
     } = {}) {
       const finalizedEvents = [];
+
+      if (pendingBlobLifecycle && !Array.isArray(payload)) {
+        // The eventual first committed event identity is derived from trusted
+        // dispatch state before the append, never from the action payload.
+        await pendingBlobLifecycle.admitInTxn(db, {
+          actionName: type, actionId, principal, scopeId: scope,
+          committedEventId: `${scope}:${readSeq(db, scope) + 1}`, payload,
+        });
+      }
 
       // Pre-projection admission — runs IN-TXN against the PRE-mutation row,
       // before the _Log append and before projection. Denial leaves zero
@@ -386,13 +398,13 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
         }
       }
 
-      if (handler) events = await handler({ payload, principal, db, now, scope });
+      if (handler) events = await handler({ payload, principal, db, now, scope, actionId });
       if (!Array.isArray(events)) {
         throw new TypeError(`action '${type}' handler must return an event array`);
       }
 
       const result = await pipeline.applyInTxn(db, events, {
-        now, actionId, nextSeq, principal, payload,
+        now, actionId, nextSeq, principal, payload, type, scope,
       });
       // The owning-stream action receipt (Wave 4.9): written atomically with
       // the events it references, so a retry's dedupe check and a crash

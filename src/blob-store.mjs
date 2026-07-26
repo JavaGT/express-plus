@@ -90,6 +90,15 @@ export function createBlobStore({ root, db, bytes }) {
     return readRange(id, range);
   }
 
+  // Pending-blob lifecycle owns removal of staged generations. This is not an
+  // application escape hatch: only the package lifecycle invokes it after its
+  // durable state transition has selected an unclaimed generation.
+  function discardPending(id) {
+    safeId(id);
+    remove(id, { pending: true });
+    db.prepare('DELETE FROM BlobStore WHERE id = ? AND status = ?').run(id, 'pending');
+  }
+
   function reap({ ttl, blobColumns }) {
     const now = Date.now();
     let orphans = 0;
@@ -140,6 +149,7 @@ export function createBlobStore({ root, db, bytes }) {
     adopt,
     finalize,
     readRange: readRangeBytes,
+    discardPending,
     reap,
     stat,
     pathFor,

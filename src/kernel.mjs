@@ -17,6 +17,7 @@ import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './dur
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { createOperationalConsumers } from './operational-consumer.mjs';
 import { createPendingBlobLifecycle } from './pending-blob.mjs';
+import { readSeq } from './committed-log.mjs';
 import { CRUD_CURSOR_POLICY } from './entity/crud.mjs';
 import { EventKind } from './event-handle.mjs';
 
@@ -50,7 +51,23 @@ function collectAppEntities(app) {
       throw new Error(`registered action '${declaration.type}' requires a handler function`);
     }
     if (handlers[declaration.type]) throw new Error(`action '${declaration.type}' is already registered`);
-    const handler = (context) => declaration.handler(context);
+    const handler = async (context) => {
+      const events = await declaration.handler(context);
+      const lifecycle = app.pendingBlobLifecycle;
+      if (!lifecycle) return events;
+      for (const field of lifecycle.fields) {
+        if (field.actionName !== declaration.type || context.payload?.[field.field] === undefined) continue;
+        const event = events?.[0];
+        if (!event || event.scope !== context.scope) throw new Error(`declared blob action '${declaration.type}' must emit an owning event in its dispatch scope`);
+        const committedEventId = `${context.scope}:${readSeq(context.db, context.scope) + 1}`;
+        await lifecycle.validateClaim({
+          claim: context.payload[field.field], field: field.field, actionName: declaration.type,
+          actionId: context.actionId, authenticatedPrincipalId: context.principal?.id,
+          scopeId: context.scope, committedEventId,
+        });
+      }
+      return events;
+    };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     handlers[declaration.type] = handler;
     for (const projection of declaration.projections ?? []) {
@@ -242,9 +259,10 @@ export const POST_COMMIT_CONSUMER_KINDS = Object.freeze([
   'best-effort-external-consumer',
 ]);
 
-function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsumer, durableEffectsRegistry, operationalConsumer }) {
+function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsumer, pendingBlobConsumer, durableEffectsRegistry, operationalConsumer }) {
   return [
     { name: 'blob.finalize', kind: 'durable-projection-consumer', consumer: blobFinalizeConsumer },
+    { name: 'pending-blob.finalize', kind: 'durable-projection-consumer', consumer: pendingBlobConsumer },
     { name: 'live', kind: 'live-delivery-consumer', consumer: app.live?.createConsumer?.(app) },
     { name: 'projected.async', kind: 'durable-projection-consumer', consumer: createProjectedAsyncConsumer({ entities }) },
     { name: 'effect.durable', kind: 'durable-projection-consumer', consumer: createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }) },
@@ -297,6 +315,7 @@ export function buildKernel(app) {
 
   const postCommitConsumerDescriptors = engagedPostCommitConsumerDescriptors(app, entities, {
     blobFinalizeConsumer,
+    pendingBlobConsumer: app.pendingBlobLifecycle?.consumer,
     durableEffectsRegistry,
     operationalConsumer: operational.declared.length ? operational.consumer : null,
   });

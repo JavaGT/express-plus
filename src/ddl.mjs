@@ -270,7 +270,12 @@ export function generateFrameworkDDL() {
   actionId TEXT,
   committedEventId TEXT,
   scopeId TEXT,
-  createdAt TEXT NOT NULL
+  createdAt TEXT NOT NULL,
+  claimedAt TEXT,
+  finalizedAt TEXT,
+  deletedAt TEXT,
+  deleteActionId TEXT,
+  recoveryFailure TEXT
 );`,
     // _Log, _Cursor, and their index are owned by committed-log.mjs.
     ...frameworkLogDDL(),
@@ -327,6 +332,14 @@ export function executeFrameworkDDL(db) {
   ensureJobColumns(db);
   ensureActionReceiptColumns(db);
   ensureAuthEntityColumns(db);
+  ensurePendingBlobColumns(db);
+}
+
+function ensurePendingBlobColumns(db) {
+  const cols = new Set(db.prepare('PRAGMA table_info(_PendingBlob)').all().map((r) => r.name));
+  for (const [name, type] of [['claimedAt', 'TEXT'], ['finalizedAt', 'TEXT'], ['deletedAt', 'TEXT'], ['deleteActionId', 'TEXT'], ['recoveryFailure', 'TEXT']]) {
+    if (!cols.has(name)) db.exec(`ALTER TABLE _PendingBlob ADD COLUMN ${name} ${type}`);
+  }
 }
 
 function ensureActionReceiptColumns(db) {
