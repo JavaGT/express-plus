@@ -17,13 +17,13 @@ import {
   frameworkTableNames, readCommittedCursor,
   runMigrations, describeEntityStorage, describeSqliteStorage,
   type BlobStore, type SqliteStorageDescription,
-  type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type Migration, type UserPrincipal,
+  type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type LiveDeliveryEnvelope as ServerLiveDeliveryEnvelope, type Migration, type UserPrincipal,
   type WorkbenchDatabase,
 } from 'workbench/server';
 import {
   LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore,
-  createScopeLiveStore, decodeResult,
-  type EventsSinceResponse, type LiveStore, type ScopeLiveStore, type SnapshotResponse,
+  createLiveDeliverySession, createScopeLiveStore, decodeResult,
+  type EventsSinceResponse, type LiveDeliverySession, type LiveStore, type ScopeLiveStore, type SnapshotResponse,
   type StaleResponse, type WsEnvelope,
 } from 'workbench/client';
 import { DatabaseSync } from 'node:sqlite';
@@ -217,8 +217,19 @@ const scopeStore: ScopeLiveStore<{ projects: ProjectRow[] }> = createScopeLiveSt
   optimistic: (current) => current,
   sendAction: async () => ({ ok: true }),
 });
+const deliverySession: LiveDeliverySession<{ projects: ProjectRow[] }> = createLiveDeliverySession({
+  bootstrap: async () => ({ kind: 'snapshot', snapshot: { projects: [] }, cursor: 0 }),
+  subscribe: async ({ deliver }) => {
+    const recipientBatch = null as unknown as readonly ServerLiveDeliveryEnvelope[];
+    await deliver(recipientBatch);
+    return { close() {} };
+  },
+  validateSnapshot: (value) => value as { projects: ProjectRow[] },
+  fold: (current) => current,
+  sendAction: async () => ({ ok: true }),
+});
 const auth = createAuthClient({ baseUrl: 'https://example.test' });
-void [list, store, scopeStore, auth.login('researcher', 'password'), decodeResult(new Response(null, { status: 204 }))];
+void [list, store, scopeStore, deliverySession, auth.login('researcher', 'password'), decodeResult(new Response(null, { status: 204 }))];
 
 declare const envelope: WsEnvelope;
 declare const snapshot: SnapshotResponse<ProjectRow>;

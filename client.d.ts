@@ -366,6 +366,67 @@ export function createLiveStore<Row extends Record<string, unknown> = Record<str
 ): LiveStore<Row>;
 
 // ---------------------------------------------------------------------------
+// createLiveDeliverySession — recipient-envelope delivery and recovery
+// ---------------------------------------------------------------------------
+
+export interface LiveDeliveryEventEnvelope {
+  readonly type: 'event';
+  readonly seq: number;
+  readonly seqSpan?: readonly [number, number];
+  readonly event: { readonly type: string; readonly data?: unknown; readonly actionId?: string };
+  readonly delta?: Readonly<Record<string, unknown>>;
+}
+
+export interface LiveDeliveryResyncEnvelope {
+  readonly type: 'resync';
+  readonly seq: number;
+  readonly reason: string;
+}
+
+export type LiveDeliveryEnvelope = LiveDeliveryEventEnvelope | LiveDeliveryResyncEnvelope;
+
+export type LiveDeliveryBootstrap<Snapshot> =
+  | { kind: 'snapshot'; snapshot: Snapshot; cursor: number }
+  | { kind: 'catchup'; envelopes: readonly LiveDeliveryEnvelope[]; cursor: number }
+  | { kind: 'revoked'; reason?: unknown };
+
+export interface LiveDeliverySubscription {
+  close?: () => void;
+}
+
+export interface LiveDeliverySessionConfig<Snapshot, Payload = unknown> {
+  bootstrap(input: { after?: number; mode: 'snapshot' | 'catchup' }): Promise<LiveDeliveryBootstrap<Snapshot>>;
+  subscribe(input: {
+    after: number;
+    deliver: (envelopes: readonly LiveDeliveryEnvelope[]) => Promise<void>;
+    revoke: (reason?: unknown) => void;
+    closed: () => void;
+  }): Promise<LiveDeliverySubscription>;
+  validateSnapshot(snapshot: unknown): Snapshot;
+  fold(snapshot: Snapshot, envelope: LiveDeliveryEventEnvelope): Snapshot;
+  optimistic?: (snapshot: Snapshot, action: { actionId: string; type: string; payload: Payload }) => Snapshot;
+  sendAction(action: { actionId: string; type: string; payload: Payload }): Promise<{ ok?: boolean; value?: unknown; failure?: unknown; error?: unknown } | void>;
+  createActionId?: () => string;
+}
+
+export interface LiveDeliverySession<Snapshot, Payload = unknown> {
+  readonly snapshot: Snapshot | null;
+  readonly cursor: number;
+  readonly status: 'bootstrapping' | 'recovering' | 'catching-up' | 'live' | 'unavailable' | 'revoked';
+  readonly ready: Promise<void>;
+  dispatch(type: string, payload: Payload): Promise<ScopeDispatchResult>;
+  reconnect(): Promise<void>;
+  operations(): Array<{ opId: string; actionId: string; action: { actionId: string; type: string; payload: Payload }; status: 'pending'; error: unknown }>;
+  pendingCount(): number;
+  subscribe(listener: (snapshot: Snapshot | null) => void): () => void;
+  close(): void;
+}
+
+export function createLiveDeliverySession<Snapshot, Payload = unknown>(
+  config: LiveDeliverySessionConfig<Snapshot, Payload>,
+): LiveDeliverySession<Snapshot, Payload>;
+
+// ---------------------------------------------------------------------------
 // createScopeLiveStore — composite scope projection
 // ---------------------------------------------------------------------------
 

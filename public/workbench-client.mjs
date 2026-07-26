@@ -2168,6 +2168,282 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl, repli
 }
 
 // ---------------------------------------------------------------------------
+// createLiveDeliverySession — recipient-envelope delivery and recovery.
+// ---------------------------------------------------------------------------
+
+/**
+ * Package-owned client ingest for a recipient-safe delivery stream. Transport
+ * adapters provide atomic snapshots/catch-up and recipient envelopes only;
+ * they never provide raw log rows or choose cursor recovery.
+ */
+export function createLiveDeliverySession({
+  bootstrap,
+  subscribe,
+  validateSnapshot,
+  fold,
+  optimistic = (snapshot) => snapshot,
+  sendAction,
+  createActionId,
+}) {
+  if (typeof bootstrap !== 'function') throw new TypeError('bootstrap is required');
+  if (typeof subscribe !== 'function') throw new TypeError('subscribe is required');
+  if (typeof validateSnapshot !== 'function') throw new TypeError('validateSnapshot is required');
+  if (typeof fold !== 'function') throw new TypeError('fold is required');
+  if (typeof sendAction !== 'function') throw new TypeError('sendAction is required');
+
+  let baseSnapshot = null;
+  let visibleSnapshot = null;
+  let cursor = 0;
+  let status = 'bootstrapping';
+  let closed = false;
+  let reconnecting = false;
+  let subscription = null;
+  let actionCounter = 0;
+  let deliveryChain = Promise.resolve();
+  const listeners = new Set();
+  const operations = new Map();
+
+  function nextActionId() {
+    if (createActionId) return createActionId();
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `delivery_op_${++actionCounter}`;
+  }
+
+  function publish() {
+    if (closed || baseSnapshot === null) return;
+    let projected = baseSnapshot;
+    for (const operation of operations.values()) {
+      if (operation.status === 'pending') projected = optimistic(projected, operation.action);
+    }
+    visibleSnapshot = projected;
+    for (const listener of listeners) {
+      try { listener(visibleSnapshot); } catch { /* isolate consumers */ }
+    }
+  }
+
+  function assertCursor(value, label) {
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be a nonnegative safe integer`);
+  }
+
+  function normalizeEvent(envelope) {
+    if (!envelope || envelope.type !== 'event') throw new Error('delivery batch contains an invalid recipient envelope');
+    const span = envelope.seqSpan ?? envelope.seq;
+    const [lo, hi] = normalizeSeqSpan(span);
+    assertCursor(lo, 'delivery sequence');
+    assertCursor(hi, 'delivery sequence');
+    if (lo > hi) throw new Error('delivery sequence span is inverted');
+    return { envelope, seqSpan: [lo, hi] };
+  }
+
+  function applyEvent(envelope) {
+    const { seqSpan } = normalizeEvent(envelope);
+    const decision = decideReplay(cursor, seqSpan);
+    if (decision.kind === 'duplicate') return { status: 'duplicate' };
+    if (decision.kind === 'gap') return { status: 'gap' };
+
+    baseSnapshot = fold(baseSnapshot, envelope);
+    cursor = decision.cursor;
+    const actionId = envelope.event?.actionId;
+    const operation = actionId ? operations.get(actionId) : null;
+    if (operation) {
+      operation.echoCursor = cursor;
+      if (operation.delivered
+        && (operation.confirmedCursor == null || cursor >= operation.confirmedCursor)) {
+        operations.delete(actionId);
+      }
+    }
+    publish();
+    return { status: operation ? 'confirmed' : 'applied' };
+  }
+
+  async function applyCatchup(result) {
+    if (!Array.isArray(result.envelopes)) throw new Error('catch-up is missing recipient envelopes');
+    assertCursor(result.cursor, 'catch-up cursor');
+    const initialCursor = cursor;
+    for (const envelope of result.envelopes) {
+      if (envelope?.type === 'resync') return false;
+      const applied = applyEvent(envelope);
+      if (applied.status === 'gap') throw new Error('catch-up recipient envelopes are not contiguous');
+    }
+    if (result.envelopes.length === 0 && result.cursor !== initialCursor) {
+      throw new Error('empty catch-up cannot advance its cursor');
+    }
+    if (cursor !== result.cursor) throw new Error('catch-up final cursor does not match its recipient envelopes');
+    return true;
+  }
+
+  async function recover(mode) {
+    if (closed) return;
+    status = mode === 'snapshot' ? 'recovering' : 'catching-up';
+    const result = await bootstrap({ after: mode === 'catchup' ? cursor : undefined, mode });
+    if (closed) return;
+    if (!result || typeof result !== 'object') throw new Error('bootstrap returned an invalid result');
+    if (result.kind === 'revoked') {
+      revoke(result.reason);
+      return;
+    }
+    if (result.kind === 'snapshot') {
+      assertCursor(result.cursor, 'snapshot cursor');
+      baseSnapshot = validateSnapshot(result.snapshot);
+      cursor = result.cursor;
+      publish();
+      status = 'live';
+      return;
+    }
+    if (result.kind === 'catchup' && mode === 'catchup') {
+      if (!(await applyCatchup(result))) return recover('snapshot');
+      status = 'live';
+      return;
+    }
+    throw new Error('bootstrap returned an unsupported result');
+  }
+
+  async function receive(envelopes) {
+    if (!Array.isArray(envelopes)) throw new Error('delivery callback requires an envelope array');
+    for (const envelope of envelopes) {
+      if (closed || status === 'revoked') return;
+      if (envelope?.type === 'resync') {
+        // Recovery causes are intentionally opaque to applications.
+        await recover('snapshot');
+        continue;
+      }
+      const applied = applyEvent(envelope);
+      if (applied.status === 'gap') {
+        await recover('catchup');
+        if (closed || status === 'revoked') return;
+        const replayed = applyEvent(envelope);
+        if (replayed.status === 'gap') throw new Error('delivery remains gapped after catch-up');
+      }
+    }
+  }
+
+  function deliver(envelopes) {
+    // A later, transport-triggered recovery can proceed after a failed batch.
+    const attempt = deliveryChain.catch(() => {}).then(() => receive(envelopes));
+    deliveryChain = attempt.catch(() => {});
+    return attempt;
+  }
+
+  async function connect() {
+    subscription = await subscribe({
+      after: cursor,
+      deliver,
+      revoke,
+      closed: () => reconnect().catch(() => {}),
+    });
+  }
+
+  async function reconnect() {
+    if (closed || status === 'revoked' || reconnecting) return;
+    // Some adapters report their own close synchronously. Mark reconnecting
+    // before closing the old subscription so that callback cannot recurse.
+    reconnecting = true;
+    try {
+      subscription?.close?.();
+      subscription = null;
+      await recover('catchup');
+      if (!closed && status !== 'revoked') await connect();
+    } catch (error) {
+      if (!closed && status !== 'revoked') status = 'unavailable';
+      throw error;
+    } finally {
+      reconnecting = false;
+    }
+  }
+
+  function revoke(_reason) {
+    if (closed || status === 'revoked') return;
+    status = 'revoked';
+    baseSnapshot = null;
+    visibleSnapshot = null;
+    operations.clear();
+    subscription?.close?.();
+    subscription = null;
+    for (const listener of listeners) {
+      try { listener(null); } catch { /* isolate consumers */ }
+    }
+  }
+
+  async function start() {
+    await recover('snapshot');
+    if (!closed && status !== 'revoked') await connect();
+  }
+
+  async function dispatch(type, payload) {
+    const actionId = nextActionId();
+    const action = { actionId, type, payload };
+    const operation = {
+      opId: actionId, actionId, action, status: 'pending', error: null,
+      delivered: false, confirmedCursor: null, echoCursor: null,
+    };
+    if (closed || status !== 'live') {
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery is unavailable') };
+    }
+    operations.set(actionId, operation);
+    publish();
+    try {
+      const receipt = await sendAction(action);
+      if (status === 'revoked') {
+        return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery access was revoked') };
+      }
+      if (receipt?.ok === false) {
+        // The matching committed envelope is authoritative when a request
+        // failure races its delivery; never tell callers to retry that action.
+        if (operation.echoCursor != null) {
+          operations.delete(actionId);
+          publish();
+          return { ok: true, status: 'committed', opId: actionId };
+        }
+        throw receipt.failure ?? receipt.error ?? receipt;
+      }
+      operation.delivered = true;
+      const confirmedCursor = receipt?.cursor ?? receipt?.seq;
+      if (Number.isSafeInteger(confirmedCursor) && confirmedCursor >= 0) operation.confirmedCursor = confirmedCursor;
+      if (operation.echoCursor != null
+        && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
+        operations.delete(actionId);
+      }
+      publish();
+      return { ok: true, status: 'committed', opId: actionId, value: receipt?.value };
+    } catch (error) {
+      if (operations.get(actionId) === operation) {
+        operations.delete(actionId);
+        operation.status = 'failed';
+        operation.error = error;
+        publish();
+      }
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: error };
+    }
+  }
+
+  const ready = start();
+  ready.catch(() => {});
+
+  return {
+    get snapshot() { return visibleSnapshot; },
+    get cursor() { return cursor; },
+    get status() { return status; },
+    get ready() { return ready; },
+    dispatch,
+    reconnect,
+    operations() { return [...operations.values()]; },
+    pendingCount() { return [...operations.values()].filter((operation) => operation.status === 'pending').length; },
+    subscribe(listener) {
+      listeners.add(listener);
+      if (visibleSnapshot !== null || status === 'revoked') listener(visibleSnapshot);
+      return () => listeners.delete(listener);
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      subscription?.close?.();
+      subscription = null;
+      listeners.clear();
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // createScopeLiveStore — one validated composite snapshot + one scope cursor.
 // ---------------------------------------------------------------------------
 
