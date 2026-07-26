@@ -10,7 +10,7 @@ import workbench, {
   type ActionHandle, type BatchAction, type CommittedEvent, type DispatchRequest,
   type DispatchResult, type EventHandle, type FailureCategory, type FailureOutcome,
   type InheritDirective, type Principal, type WorkbenchFailure,
-  type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
+  type RegisteredAction, type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
 import {
   createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredTableNames,
@@ -101,6 +101,12 @@ const request: DispatchRequest = {
   principal: principal({ type: 'user', id: 'user-1' }),
 };
 const dispatchResult: Promise<DispatchResult> = app.dispatch(request);
+const scopeAwareAction: RegisteredAction = {
+  type: 'Project.rename',
+  authorize: () => true,
+  handler: ({ scope }) => [{ type: 'Project.renamed', scope, data: {} }],
+};
+void scopeAwareAction;
 
 const configuredHistory = durableHistory({
   authorize: ({ operation, scope: historyScope, principal: historyPrincipal }) =>

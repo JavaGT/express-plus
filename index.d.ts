@@ -642,6 +642,8 @@ export interface RegisteredAction<Payload = Record<string, unknown>> {
     principal: Principal;
     db: WorkbenchDatabase;
     now: string;
+    /** Exact caller-selected owning scope for this dispatch. */
+    readonly scope: string;
   }): readonly Readonly<{ type: string; scope: string; data: unknown }>[] | Promise<readonly Readonly<{ type: string; scope: string; data: unknown }>[] >;
   readonly projections?: readonly RegisteredProjection[];
 }

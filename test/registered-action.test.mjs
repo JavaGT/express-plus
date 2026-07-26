@@ -58,6 +58,28 @@ test('registered action commits projection, project event, cursor, and receipt o
   assert.equal(readCommittedCursor(db, 'project:p1'), 1);
 });
 
+test('registered action handler receives the exact caller-selected owning scope', async () => {
+  let receivedScope = null;
+  const scopeAware = (db) => {
+    const declaration = sourceAction(db);
+    return {
+      ...declaration,
+      handler: ({ scope, ...context }) => {
+        receivedScope = scope;
+        return declaration.handler(context);
+      },
+    };
+  };
+  const { app } = await appWith(scopeAware);
+  const result = await app.dispatch({
+    actionId: 'scope-aware', scope: 'project:distinct-scope', type: 'source.create',
+    payload: { id: 's1', projectId: 'p1', name: 'Interview' },
+    principal: { type: 'user', id: 'u1', attributes: {} },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(receivedScope, 'project:distinct-scope');
+});
+
 test('registered action receipt commits immutable request attribution', async () => {
   const { app, db } = await appWith(sourceAction);
   const request = {
