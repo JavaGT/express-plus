@@ -50,6 +50,9 @@ function collectAppEntities(app) {
     if (typeof declaration.handler !== 'function') {
       throw new Error(`registered action '${declaration.type}' requires a handler function`);
     }
+    if (declaration.erasure === true && declaration.history?.cursor !== 'excluded') {
+      throw new Error(`erasure action '${declaration.type}' must exclude its history cursor`);
+    }
     if (handlers[declaration.type]) throw new Error(`action '${declaration.type}' is already registered`);
     const handler = async (context) => {
       const lifecycle = app.pendingBlobLifecycle;
@@ -63,12 +66,14 @@ function collectAppEntities(app) {
           committedEventId: `${context.scope}:${readSeq(context.db, context.scope) + 1}`,
         });
       }
-      const events = await declaration.handler(context);
-      if (!lifecycle) return events;
-      let rewritten = events;
+      const result = await declaration.handler(context);
+      const commit = Array.isArray(result) ? { events: result } : result;
+      if (!commit || !Array.isArray(commit.events)) throw new Error(`registered action '${declaration.type}' must return an event array`);
+      if (!lifecycle) return result;
+      let rewritten = commit.events;
       for (const field of lifecycle.fields) {
         if (field.actionName !== declaration.type || context.payload?.[field.field] === undefined) continue;
-        const owningEvents = (events ?? []).filter((event) => event?.scope === context.scope && event.data && Object.prototype.hasOwnProperty.call(event.data, field.field));
+        const owningEvents = commit.events.filter((event) => event?.scope === context.scope && event.data && Object.prototype.hasOwnProperty.call(event.data, field.field));
         if (owningEvents.length !== 1) throw new Error(`declared blob action '${declaration.type}' must emit exactly one owning event field '${field.field}' in its dispatch scope`);
         const committedEventId = `${context.scope}:${readSeq(context.db, context.scope) + 1}`;
         const { blobId } = await lifecycle.validateClaim({
@@ -80,9 +85,10 @@ function collectAppEntities(app) {
           ? { ...event, data: { ...event.data, [field.field]: blobId } }
           : event);
       }
-      return rewritten;
+      return commit.directive === undefined ? rewritten : { events: rewritten, directive: commit.directive };
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
+    Object.defineProperty(handler, 'erasureCapable', { value: declaration.erasure === true });
     handlers[declaration.type] = handler;
     for (const projection of declaration.projections ?? []) {
       if (!Array.isArray(projection?.eventTypes) || typeof projection.apply !== 'function') {

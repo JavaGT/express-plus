@@ -674,6 +674,42 @@ export interface RegisteredProjection {
   apply(event: CommittedEvent, db: WorkbenchDatabase): void;
 }
 
+export interface ErasureEventTargetV1 {
+  readonly scope: string;
+  readonly seq: number;
+  readonly actionId: string;
+  readonly eventType: string;
+  readonly committedAt: string;
+  readonly eventDataDigest: string;
+}
+export interface ErasureActionTargetV1 {
+  readonly scope: string;
+  readonly actionId: string;
+  readonly historyOrder: number;
+  readonly committedAt: string;
+  readonly receiptDigest: string;
+  readonly events: readonly ErasureEventTargetV1[];
+}
+export interface ErasureCensusRuleV1 {
+  readonly kind: 'action' | 'event';
+  readonly type: string;
+  readonly disposition: 'target' | 'retain';
+  readonly identityPointers: readonly string[];
+}
+export interface ErasureDirectiveV1 {
+  readonly kind: 'workbench.erasure';
+  readonly version: 1;
+  readonly owningScope: string;
+  readonly subject: string;
+  readonly actions: readonly ErasureActionTargetV1[];
+  readonly census: { readonly version: 1; readonly rules: readonly ErasureCensusRuleV1[] };
+}
+export interface RegisteredActionCommit {
+  readonly events: readonly Readonly<{ type: string; scope: string; data: unknown }>[];
+  readonly directive?: ErasureDirectiveV1;
+}
+export function erasureDirective(input: ErasureDirectiveV1): Readonly<ErasureDirectiveV1>;
+
 export interface RegisteredAction<Payload = Record<string, unknown>> {
   readonly type: string;
   authorize(context: {
@@ -690,8 +726,11 @@ export interface RegisteredAction<Payload = Record<string, unknown>> {
     now: string;
     /** Exact caller-selected owning scope for this dispatch. */
     readonly scope: string;
-  }): readonly Readonly<{ type: string; scope: string; data: unknown }>[] | Promise<readonly Readonly<{ type: string; scope: string; data: unknown }>[] >;
+  }): readonly Readonly<{ type: string; scope: string; data: unknown }>[] | RegisteredActionCommit | Promise<readonly Readonly<{ type: string; scope: string; data: unknown }>[] | RegisteredActionCommit>;
   readonly projections?: readonly RegisteredProjection[];
+  readonly history?: { readonly cursor?: 'eligible' | 'excluded' };
+  /** Privileged durable-pipeline erasure directive; requires history.cursor excluded. */
+  readonly erasure?: true;
 }
 
 /** Serializes all application writes and drains them during shutdown. */
