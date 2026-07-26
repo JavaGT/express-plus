@@ -65,18 +65,22 @@ function collectAppEntities(app) {
       }
       const events = await declaration.handler(context);
       if (!lifecycle) return events;
+      let rewritten = events;
       for (const field of lifecycle.fields) {
         if (field.actionName !== declaration.type || context.payload?.[field.field] === undefined) continue;
-        const event = events?.[0];
-        if (!event || event.scope !== context.scope) throw new Error(`declared blob action '${declaration.type}' must emit an owning event in its dispatch scope`);
+        const owningEvents = (events ?? []).filter((event) => event?.scope === context.scope && event.data && Object.prototype.hasOwnProperty.call(event.data, field.field));
+        if (owningEvents.length !== 1) throw new Error(`declared blob action '${declaration.type}' must emit exactly one owning event field '${field.field}' in its dispatch scope`);
         const committedEventId = `${context.scope}:${readSeq(context.db, context.scope) + 1}`;
-        await lifecycle.validateClaim({
+        const { blobId } = await lifecycle.validateClaim({
           claim: context.payload[field.field], field: field.field, actionName: declaration.type,
           actionId: context.actionId, authenticatedPrincipalId: context.principal?.id,
           scopeId: context.scope, committedEventId,
         });
+        rewritten = rewritten.map((event) => event === owningEvents[0]
+          ? { ...event, data: { ...event.data, [field.field]: blobId } }
+          : event);
       }
-      return events;
+      return rewritten;
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     handlers[declaration.type] = handler;
@@ -319,7 +323,10 @@ export function buildKernel(app) {
   // pick it up here alongside the other reconcile sweeps kernel already owns.
   // No-op default when the email seam was never installed.
   app.reconcileEmailDelivery = app._reconcileEmailDelivery ?? (async () => ({ delivered: 0 }));
-  const operational = createOperationalConsumers(app.operationalConsumers);
+  const operational = createOperationalConsumers(app.operationalConsumers, {
+    writeQueue: app.writeQueue,
+    onShutdown: app.onShutdown,
+  });
   operational.engage(app.db);
   app.reconcileOperationalConsumers = () => operational.reconcile(app.db);
 

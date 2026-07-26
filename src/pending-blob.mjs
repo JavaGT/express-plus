@@ -41,6 +41,7 @@ export function createPendingBlobLifecycle(app, options) {
   if (byActionField.size !== fields.length) throw new TypeError('blobLifecycle fields must not contain duplicate actionName/field pairs');
   async function stage(principal, request) {
     if (!request || typeof request.projectId !== 'string' || !request.projectId || typeof request.fileId !== 'string' || !request.fileId) throw new TypeError('projectId and fileId are required');
+    const authenticatedPrincipalId = principalId(principal);
     const pendingKey = `${request.projectId}/${request.fileId}.pending`;
     const existing = app.db.prepare('SELECT 1 FROM _PendingBlob WHERE pendingKey = ?').get(pendingKey);
     if (existing) failure('PENDING_KEY_EXISTS');
@@ -52,9 +53,9 @@ export function createPendingBlobLifecycle(app, options) {
       app.db.prepare(`INSERT INTO _PendingBlob
         (pendingKey, blobId, claimTokenHash, principalId, contentDigest, byteLength, status, createdAt)
         VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`)
-        .run(pendingKey, blob.id, hash(claimToken), principalId(principal), digest, bytes.length, new Date().toISOString());
+        .run(pendingKey, blob.id, hash(claimToken), authenticatedPrincipalId, digest, bytes.length, new Date().toISOString());
     } catch (error) {
-      try { app.blobs.reap({ ttl: 0, blobColumns: [] }); } catch {}
+      try { app.blobs.discardPending(blob.id); } catch {}
       throw error;
     }
     return Object.freeze({ claim: Object.freeze({ pendingKey, claimToken }), pendingKey, byteLength: bytes.length, contentDigest: digest });
@@ -121,7 +122,8 @@ export function createPendingBlobLifecycle(app, options) {
           continue;
         }
         app.blobs.finalize(row.blobId);
-        app.db.prepare("UPDATE _PendingBlob SET status = 'finalized' WHERE pendingKey = ? AND status = 'claimed'").run(row.pendingKey);
+        app.db.prepare("UPDATE _PendingBlob SET status = 'finalized', finalizedAt = ?, recoveryFailure = NULL WHERE pendingKey = ? AND status = 'claimed'")
+          .run(new Date().toISOString(), row.pendingKey);
       } catch (error) {
         // The claimed generation remains durable and readable from its verified
         // pending slot while a later boot reconciliation retries finalization.

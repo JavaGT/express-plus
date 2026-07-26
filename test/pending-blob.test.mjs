@@ -29,14 +29,19 @@ test('declared blob claims are validated and adopted atomically with the registe
   const db = new DatabaseSync(':memory:');
   const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
   const seen = [];
+  const handled = [];
+  const projected = [];
   const app = workbench({
     db,
     blobs: { root },
     actions: [{
       type: 'File.upload',
       authorize: () => true,
-      projections: [{ eventTypes: ['File.created'], apply: () => {} }],
-      handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { id: 'f1', blob: payload.blob } }],
+      projections: [{ eventTypes: ['File.created'], apply: (event) => projected.push(event) }],
+      handler: ({ actionId, payload, scope }) => {
+        handled.push({ actionId, blob: payload.blob });
+        return [{ type: 'File.created', scope, data: { id: 'f1', blob: payload.blob } }];
+      },
     }],
     blobLifecycle: {
       fields: [declaredBlobField({
@@ -53,12 +58,36 @@ test('declared blob claims are validated and adopted atomically with the registe
   const staged = await stager.stage({ projectId: 'p1', fileId: 'f1', bytes: new Uint8Array([7, 8]) });
   const outcome = await app.dispatch({ actionId: 'upload-1', type: 'File.upload', scope: 'project:p1', payload: { blob: staged.claim }, principal: principal({ type: 'user', id: 'u1' }) });
   assert.equal(outcome.ok, true, JSON.stringify(outcome));
+  assert.deepEqual(handled, [{ actionId: 'upload-1', blob: staged.claim }]);
   assert.equal(seen.length, 1);
   assert.deepEqual(Object.keys(seen[0]).sort(), ['actionId', 'actionName', 'authenticatedPrincipalId', 'byteLength', 'committedEventId', 'contentDigest', 'pendingKey', 'scopeId']);
   assert.equal(seen[0].pendingKey, 'p1/f1.pending');
+  const blobId = app.db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
+  assert.equal(projected[0].data.blob, blobId, 'projections receive the canonical blob id, not a pending claim');
+  const persisted = app.db.prepare('SELECT eventData FROM _Log WHERE actionId = ?').get('upload-1').eventData;
+  assert.equal(JSON.parse(persisted).blob, blobId, 'the committed event never retains a pending claim token');
+  assert.equal(persisted.includes(staged.claim.claimToken), false);
   assert.equal(app.db.prepare('SELECT status FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).status, 'finalized');
   const duplicate = await app.dispatch({ actionId: 'upload-2', type: 'File.upload', scope: 'project:p1', payload: { blob: staged.claim }, principal: principal({ type: 'user', id: 'u1' }) });
   assert.equal(duplicate.ok, false);
+});
+
+test('a failed duplicate staging request leaves an unrelated pending blob intact', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db,
+    blobs: { root },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', validator: async () => ({ allow: true }) })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const stager = pendingBlobStager(app, principal({ type: 'user', id: 'u1' }));
+  const first = await stager.stage({ projectId: 'p1', fileId: 'first', bytes: new Uint8Array([1]) });
+  await stager.stage({ projectId: 'p1', fileId: 'second', bytes: new Uint8Array([2]) });
+  await assert.rejects(stager.stage({ projectId: 'p1', fileId: 'second', bytes: new Uint8Array([3]) }), /PENDING_KEY_EXISTS/);
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS count FROM _PendingBlob WHERE pendingKey IN (?, ?)').get(first.pendingKey, 'p1/second.pending').count, 2);
+  assert.deepEqual(app.blobs.readRange(app.db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(first.pendingKey).blobId), Buffer.from([1]));
 });
 
 test('declared deletion is authorized, idempotent, and makes claimed bytes unavailable', async (t) => {

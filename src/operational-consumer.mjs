@@ -51,7 +51,7 @@ function metadata(row) {
   return Object.freeze({ committedEventId: `${row.scope}:${row.seq}`, actionId: row.actionId, scopeId: row.scope, eventType: row.eventType, committedAt: row.committedAt });
 }
 
-export function createOperationalConsumers(consumers = []) {
+export function createOperationalConsumers(consumers = [], { writeQueue, onShutdown, now = Date.now } = {}) {
   const declared = consumers.map(validate);
   const names = new Set();
   for (const consumer of declared) {
@@ -70,11 +70,44 @@ export function createOperationalConsumers(consumers = []) {
     }
   }
 
+  let retryTimer = null;
+  let stopped = false;
+
+  function clearRetryTimer() {
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+  }
+
+  function armRetryScheduler(db) {
+    clearRetryTimer();
+    if (stopped || declared.length === 0) return;
+    const names = declared.map(({ name }) => name);
+    const placeholders = names.map(() => '?').join(', ');
+    const next = db.prepare(`SELECT MIN(nextAttemptAt) AS nextAttemptAt
+      FROM _OperationalConsumerFailure
+      WHERE status = 'retry' AND nextAttemptAt IS NOT NULL AND consumer IN (${placeholders})`).get(...names)?.nextAttemptAt;
+    if (next == null) return;
+    // A due retry still yields to the event loop, avoiding a zero-delay loop.
+    retryTimer = setTimeout(() => {
+      retryTimer = null;
+      if (stopped) return;
+      const run = () => reconcile(db);
+      const queued = writeQueue ? writeQueue.run(run) : Promise.resolve().then(run);
+      queued.catch(() => {}).finally(() => armRetryScheduler(db));
+    }, Math.max(1, next - now()));
+    if (typeof retryTimer.unref === 'function') retryTimer.unref();
+  }
+
+  if (onShutdown) onShutdown('operational consumer retry scheduler', () => {
+    stopped = true;
+    clearRetryTimer();
+  }, { timeoutMs: 1000 });
+
   async function deliver(db, consumer, row) {
     const declarationFingerprint = fingerprint(consumer);
     const failed = db.prepare('SELECT status, nextAttemptAt FROM _OperationalConsumerFailure WHERE consumer = ? AND scope = ? AND committedEventId = ?')
       .get(consumer.name, row.scope, `${row.scope}:${row.seq}`);
-    if (failed?.status === 'terminal' || (failed?.nextAttemptAt != null && failed.nextAttemptAt > Date.now())) return false;
+    if (failed?.status === 'terminal' || (failed?.nextAttemptAt != null && failed.nextAttemptAt > now())) return false;
     let data;
     try { data = JSON.parse(row.eventData); } catch { data = {}; }
     const fields = Object.create(null);
@@ -122,29 +155,38 @@ export function createOperationalConsumers(consumers = []) {
       (consumer, scope, committedEventId, declarationFingerprint, code, detail, status, nextAttemptAt)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(consumer, scope, committedEventId) DO UPDATE SET code = excluded.code, detail = excluded.detail, status = excluded.status, nextAttemptAt = excluded.nextAttemptAt`)
-      .run(consumer.name, row.scope, `${row.scope}:${row.seq}`, declarationFingerprint, terminal ? String(result.code ?? 'terminal') : 'retry', detail, terminal ? 'terminal' : 'retry', terminal ? null : Date.now() + Math.max(0, Number(result.afterMs) || 0)));
+      .run(consumer.name, row.scope, `${row.scope}:${row.seq}`, declarationFingerprint, terminal ? String(result.code ?? 'terminal') : 'retry', detail, terminal ? 'terminal' : 'retry', terminal ? null : now() + Math.max(0, Number(result.afterMs) || 0)));
   }
 
   async function reconcile(db) {
     engage(db);
-    for (const consumer of declared) {
-      const cursors = consumerCursorMap(db, cursorName(consumer.name));
-      const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
-      for (const row of rows) {
-        if ((cursors.get(row.scope) ?? 0) >= row.seq) continue;
-        if (row.eventType !== consumer.event.eventType) {
-          upsertConsumerCursor(db, { consumer: cursorName(consumer.name), scope: row.scope, lastSeq: row.seq });
+    try {
+      for (const consumer of declared) {
+        const cursors = consumerCursorMap(db, cursorName(consumer.name));
+        const blockedScopes = new Set();
+        const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
+        for (const row of rows) {
+          if (blockedScopes.has(row.scope)) continue;
+          if ((cursors.get(row.scope) ?? 0) >= row.seq) continue;
+          if (row.eventType !== consumer.event.eventType) {
+            upsertConsumerCursor(db, { consumer: cursorName(consumer.name), scope: row.scope, lastSeq: row.seq });
+            cursors.set(row.scope, row.seq);
+            continue;
+          }
+          if (!await deliver(db, consumer, row)) {
+            blockedScopes.add(row.scope);
+            continue;
+          }
           cursors.set(row.scope, row.seq);
-          continue;
         }
-        if (!await deliver(db, consumer, row)) break;
-        cursors.set(row.scope, row.seq);
       }
+    } finally {
+      armRetryScheduler(db);
     }
   }
 
   const consumer = async (_events, { db } = {}) => { await reconcile(db); };
-  return { engage, consumer, reconcile, declared };
+  return { engage, consumer, reconcile, declared, stop: () => { stopped = true; clearRetryTimer(); } };
 }
 
 export function operationalConsumerAdmin(workbench) {
@@ -154,10 +196,12 @@ export function operationalConsumerAdmin(workbench) {
         FROM _OperationalConsumerFailure WHERE consumer = ? AND status = 'terminal' ORDER BY scope, committedEventId`).all(consumer);
     },
     async retryFailure(failure) {
-      const result = workbench.db.prepare(`UPDATE _OperationalConsumerFailure SET status = 'retry', nextAttemptAt = 0
+      const update = () => workbench.db.prepare(`UPDATE _OperationalConsumerFailure SET status = 'retry', nextAttemptAt = 0
         WHERE consumer = ? AND scope = ? AND committedEventId = ? AND status = 'terminal'`).run(failure.consumer, failure.scopeId, failure.committedEventId);
+      const result = await (workbench.writeQueue ? workbench.writeQueue.run(update) : update());
       if (!result.changes) throw new Error('operational terminal failure not found');
-      await workbench.reconcileOperationalConsumers?.();
+      const reconcile = () => workbench.reconcileOperationalConsumers?.();
+      await (workbench.writeQueue ? workbench.writeQueue.run(reconcile) : reconcile());
     },
   };
 }

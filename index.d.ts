@@ -683,6 +683,7 @@ export interface RegisteredAction<Payload = Record<string, unknown>> {
     db: WorkbenchDatabase;
   }): boolean | Promise<boolean>;
   handler(context: {
+    readonly actionId: string;
     payload: Payload;
     principal: Principal;
     db: WorkbenchDatabase;

@@ -18,6 +18,12 @@ function consumer(results, terminal = false) {
   });
 }
 
+function appendLog(db, scope, seq, eventData = {}) {
+  db.prepare(`INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt)
+    VALUES (?, ?, 'Note.created', ?, ?, '2026-07-26T00:00:00.000Z')`)
+    .run(scope, seq, JSON.stringify(eventData), `${scope}-${seq}`);
+}
+
 async function appWith(t, operationalConsumers) {
   const db = new DatabaseSync(':memory:');
   const Note = entity('Note', { title: text(), secret: text(), grant: () => grant(read, write, subscribe) });
@@ -50,6 +56,66 @@ test('terminal failures block progress until the sole retryFailure transition', 
   assert.equal(failures.length, 1);
   await admin.retryFailure(failures[0]);
   assert.equal(delivered.length, 2, 'retry replays the same durable record');
+});
+
+test('a failed scope blocks only its later records', async (t) => {
+  const delivered = [];
+  let failed = true;
+  const scoped = operationalConsumer({
+    ...consumer(delivered),
+    handle: async (delivery) => {
+      delivered.push(delivery);
+      if (delivery.metadata.scopeId === 'a' && failed) {
+        failed = false;
+        return { kind: 'terminal', code: 'POISON', detail: 'bad document' };
+      }
+      return { kind: 'ack' };
+    },
+  });
+  const app = await appWith(t, [scoped]);
+  appendLog(app.db, 'a', 1, { id: 'a1', title: 'blocked' });
+  appendLog(app.db, 'a', 2, { id: 'a2', title: 'later' });
+  appendLog(app.db, 'b', 1, { id: 'b1', title: 'independent' });
+  await app.writeQueue.run(() => app.reconcileOperationalConsumers());
+  assert.deepEqual(delivered.map(({ metadata }) => metadata.committedEventId), ['a:1', 'b:1']);
+});
+
+test('idle retry is delivered after its durable deadline', async (t) => {
+  const delivered = [];
+  let attempts = 0;
+  const scoped = operationalConsumer({
+    ...consumer(delivered),
+    handle: async (delivery) => {
+      delivered.push(delivery);
+      attempts++;
+      return attempts === 1 ? { kind: 'retry', afterMs: 20, detail: 'try again' } : { kind: 'ack' };
+    },
+  });
+  const app = await appWith(t, [scoped]);
+  appendLog(app.db, 'a', 1, { id: 'a1', title: 'retry' });
+  await app.writeQueue.run(() => app.reconcileOperationalConsumers());
+  assert.equal(delivered.length, 1);
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(delivered.length, 2);
+  assert.equal(app.db.prepare('SELECT status FROM _OperationalConsumerFailure').get(), undefined);
+});
+
+test('shutdown cancels a scheduled idle retry', async (t) => {
+  const delivered = [];
+  const scoped = operationalConsumer({
+    ...consumer(delivered),
+    handle: async (delivery) => {
+      delivered.push(delivery);
+      return { kind: 'retry', afterMs: 30, detail: 'wait' };
+    },
+  });
+  const app = await appWith(t, [scoped]);
+  appendLog(app.db, 'a', 1, { id: 'a1', title: 'retry' });
+  await app.writeQueue.run(() => app.reconcileOperationalConsumers());
+  assert.equal(delivered.length, 1);
+  await app.shutdown();
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(delivered.length, 1);
 });
 
 test('changed declarations under the same operational name fail closed', async () => {
