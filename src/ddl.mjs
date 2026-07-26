@@ -259,6 +259,19 @@ export function generateFrameworkDDL() {
   nextAttemptAt INTEGER,
   PRIMARY KEY (consumer, scope, committedEventId)
 );`,
+    `CREATE TABLE IF NOT EXISTS _PendingBlob (
+  pendingKey TEXT PRIMARY KEY,
+  blobId TEXT NOT NULL UNIQUE,
+  claimTokenHash TEXT NOT NULL,
+  principalId TEXT NOT NULL,
+  contentDigest TEXT NOT NULL,
+  byteLength INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  actionId TEXT,
+  committedEventId TEXT,
+  scopeId TEXT,
+  createdAt TEXT NOT NULL
+);`,
     // _Log, _Cursor, and their index are owned by committed-log.mjs.
     ...frameworkLogDDL(),
     `CREATE TABLE IF NOT EXISTS _ScheduleReceipt (

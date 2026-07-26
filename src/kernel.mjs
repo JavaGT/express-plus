@@ -16,6 +16,7 @@ import { createProjectedAsyncConsumer } from './projected-async.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { createOperationalConsumers } from './operational-consumer.mjs';
+import { createPendingBlobLifecycle } from './pending-blob.mjs';
 import { CRUD_CURSOR_POLICY } from './entity/crud.mjs';
 import { EventKind } from './event-handle.mjs';
 
@@ -282,6 +283,7 @@ export function buildKernel(app) {
     entities,
   });
   app.blobColumns = blobColumns;
+  if (app._blobLifecycleOptions) app.pendingBlobLifecycle = createPendingBlobLifecycle(app, app._blobLifecycleOptions);
   app.durableEffectsRegistry = durableEffectsRegistry;
   app.reconcileBlobFinalize = reconcileBlobFinalize;
   // emailSeam(...).install(app) (called by the app author before .listen(),

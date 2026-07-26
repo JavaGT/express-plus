@@ -52,7 +52,7 @@ test('terminal failures block progress until the sole retryFailure transition', 
   assert.equal(delivered.length, 2, 'retry replays the same durable record');
 });
 
-test('changed declarations under the same operational name fail closed', async (t) => {
+test('changed declarations under the same operational name fail closed', async () => {
   const db = new DatabaseSync(':memory:');
   const Note = entity('Note', { title: text(), grant: () => grant(read, write, subscribe) });
   const first = workbench({ db, entities: [Note], operationalConsumers: [consumer([])] });

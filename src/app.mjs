@@ -36,6 +36,7 @@ import { wrapDriver } from './driver.mjs';
 import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
+import { createPendingBlobLifecycle } from './pending-blob.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { createClock } from './clock.mjs';
 import { createWriteQueue } from './write-queue.mjs';
@@ -96,6 +97,7 @@ export default function workbench({
   logRetentionDays = maintenanceDefaults.logRetentionDays,
   logRetentionIntervalMs = maintenanceDefaults.logRetentionIntervalMs,
   operationalConsumers = [],
+  blobLifecycle,
 } = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
@@ -233,6 +235,10 @@ export default function workbench({
       mkdirSync(root, { recursive: true });
       app.blobs = createBlobStore({ root, db });
     }
+  }
+  if (blobLifecycle) {
+    if (!db) throw new Error('blobLifecycle requires a database');
+    app._blobLifecycleOptions = blobLifecycle;
   }
   // The job-queue substrate (spec #5) — a separate seam, opt-in. Built at
   // construction when a db + `jobs` config are engaged (the shared secret is
