@@ -4,8 +4,11 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   createLiveDelivery,
+  declaredTableNames,
+  frameworkTableNames,
   readCommittedCursor,
 } from '../src/server.mjs';
+import { entity, text } from '../src/index.mjs';
 import { executeFrameworkDDL } from '../src/ddl.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -48,6 +51,14 @@ test('server exposes committed cursors without raw event delivery', () => {
 
   assert.equal(readCommittedCursor(db, 'Project:project-1'), 1);
   db.close();
+});
+
+test('server exposes immutable framework and declaration table censuses', () => {
+  const Widget = entity('Widget', { name: text() });
+
+  assert.ok(Object.isFrozen(frameworkTableNames));
+  assert.ok(frameworkTableNames.includes('_Log'));
+  assert.deepEqual(declaredTableNames([Widget]), ['Widget']);
 });
 
 test('server exposes the transport-neutral live delivery factory', () => {
