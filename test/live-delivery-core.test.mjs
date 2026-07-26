@@ -307,6 +307,7 @@ test('terminal removal delivers after its authorization row is deleted', async (
   insertRow(db, 'n1', 'hello');
 
   const delivered = [];
+  let revoked = false;
   const core = createLiveDeliveryCore({
     db,
     entities: new Map([['Note', makeEntityRecord('Note')]]),
@@ -320,6 +321,7 @@ test('terminal removal delivers after its authorization row is deleted', async (
     after: 0,
     signal: null,
     deliver: async (batch) => { delivered.push(...batch); },
+    revoke: () => { revoked = true; },
   });
 
   db.prepare('DELETE FROM Note WHERE id = ?').run('n1');
@@ -328,6 +330,7 @@ test('terminal removal delivers after its authorization row is deleted', async (
   await sleep(30);
 
   assert.deepEqual(delivered.map((event) => event.type), ['Note.removed']);
+  assert.equal(revoked, false);
   core.close();
 });
 
@@ -360,11 +363,12 @@ test('missing authorization row rejects non-removal events', async () => {
   core.close();
 });
 
-test('deleted-row catch-up delivers a terminal removal from a mixed batch only', async () => {
+test('deleted-row catch-up revokes rather than delivering a gapped terminal removal', async () => {
   const db = makeDb();
   insertRow(db, 'n1', 'hello');
 
   const delivered = [];
+  let revoked = false;
   const core = createLiveDeliveryCore({
     db,
     entities: new Map([['Note', makeEntityRecord('Note')]]),
@@ -378,6 +382,7 @@ test('deleted-row catch-up delivers a terminal removal from a mixed batch only',
     after: 0,
     signal: null,
     deliver: async (batch) => { delivered.push(...batch); },
+    revoke: () => { revoked = true; },
   });
 
   db.prepare('DELETE FROM Note WHERE id = ?').run('n1');
@@ -386,7 +391,8 @@ test('deleted-row catch-up delivers a terminal removal from a mixed batch only',
   await core.wake('Note:n1');
   await sleep(30);
 
-  assert.deepEqual(delivered.map((event) => event.type), ['Note.removed']);
+  assert.deepEqual(delivered, []);
+  assert.equal(revoked, true);
   core.close();
 });
 
@@ -1369,7 +1375,7 @@ test('(R6) recipient envelope rebuilds lifecycle data and hides raw operation pa
   assert.equal(JSON.stringify(annotatedLifecycle).includes('raw body'), false);
 });
 
-test('(R6) malformed durable event identity fails closed without acknowledging its cursor', async () => {
+test('(R6) composite stream foreign events require a recipient snapshot without exposing facts', async () => {
   const db = makeDb();
   insertRow(db, 'n1', 'hello');
   appendEvent(db, 'Note:n1', 1, 'Other.updated', { title: 'foreign' });
@@ -1380,11 +1386,13 @@ test('(R6) malformed durable event identity fails closed without acknowledging i
     mayVerb: alwaysAllow,
     projectRecipient: (ctx) => builder.buildEnvelope(ctx),
   });
-  const subscribe = () => core.subscribe({
-    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null, deliver: async () => {},
+  const delivered = [];
+  await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null,
+    deliver: async (batch) => delivered.push(...batch),
   });
-  await assert.rejects(subscribe, /projectRecipient threw/);
-  await assert.rejects(subscribe, /projectRecipient threw/);
+  assert.deepEqual(delivered, [{ type: 'resync', entity: 'Note', id: 'n1', seq: 1, reason: 'recipient-snapshot-required' }]);
+  assert.equal(JSON.stringify(delivered).includes('foreign'), false);
   builder.clear();
   core.close();
 });

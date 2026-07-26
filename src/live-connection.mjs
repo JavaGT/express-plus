@@ -209,6 +209,15 @@ export class LiveConnection {
               this.send(envelope);
             }
           },
+          revoke: () => {
+            // A reauthorization failure after acknowledgement is terminal for
+            // this recipient. Do not leave the transport appearing live.
+            if (this.#coreAcs.get(scope) !== ac) return;
+            this.#coreAcs.delete(scope);
+            this.#fanout.removeSubscription(scope, this);
+            ac.abort();
+            this.error(failure('denied', 'Subscription revoked.'), requestId);
+          },
         });
         activateCore = coreSubscription?.activate ?? null;
         if (ac.signal.aborted) return;

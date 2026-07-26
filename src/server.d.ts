@@ -481,11 +481,24 @@ export interface LiveDeliverySubscription {
   readonly after?: number;
   readonly signal: AbortSignal;
   readonly deliver: (batch: readonly LiveDeliveryEnvelope[]) => void | Promise<void>;
+  readonly revoke?: (reason?: unknown) => void;
 }
 
 export interface LiveDeliveryActivation {
-  activate(): Promise<void>;
+  activate(): Promise<number | undefined>;
 }
+
+export type LiveDeliveryBootstrap<Snapshot> =
+  | { readonly kind: 'snapshot'; readonly snapshot: Snapshot; readonly cursor: number }
+  | { readonly kind: 'revoked'; readonly reason?: unknown };
+
+export type LiveDeliveryCatchup =
+  | {
+      readonly kind: 'catchup';
+      readonly envelopes: readonly LiveDeliveryEnvelope[];
+      readonly cursor: number;
+    }
+  | { readonly kind: 'revoked'; readonly reason?: unknown };
 
 export interface LiveDeliveryEntity {
   readonly name: string;
@@ -495,6 +508,16 @@ export interface LiveDeliveryEntity {
 }
 
 export interface LiveDelivery {
+  bootstrap<Snapshot>(input: {
+    readonly principal: Principal;
+    readonly scope: string;
+    snapshot(input: { readonly principal: Principal; readonly scope: string }): Snapshot;
+  }): Promise<LiveDeliveryBootstrap<Snapshot>>;
+  catchup(input: {
+    readonly principal: Principal;
+    readonly scope: string;
+    readonly after: number;
+  }): Promise<LiveDeliveryCatchup>;
   subscribe(input: LiveDeliverySubscription): Promise<LiveDeliveryActivation>;
   wake(scope: string): void;
 }

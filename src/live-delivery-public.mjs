@@ -25,14 +25,24 @@ export function createLiveDelivery({ db, entities, mayVerb, log = null }) {
   return {
     // Public subscribers always acknowledge before any durable batch drains.
     subscribe(input) {
-      const { paused: _paused, signal, ...subscription } = input ?? {};
+      const { paused: _paused, signal, revoke, ...subscription } = input ?? {};
       if (!signal || typeof signal.addEventListener !== 'function') {
         throw new Error('live delivery subscription requires an AbortSignal');
       }
       if (signal.aborted) {
         throw new Error('live delivery subscription is aborted');
       }
-      return core.subscribe({ ...subscription, signal, paused: true });
+      return core.subscribe({ ...subscription, signal, paused: true, revoke }).catch((error) => {
+        if (error?.code !== 'live-delivery-revoked') throw error;
+        revoke?.();
+        return { activate: async () => undefined };
+      });
+    },
+    bootstrap(input) {
+      return core.bootstrap(input);
+    },
+    catchup(input) {
+      return core.catchup(input);
     },
     wake(scope) {
       // A wake is only a payloadless hint; it is not a delivery barrier.

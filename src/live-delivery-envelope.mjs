@@ -82,11 +82,10 @@ export function createLiveEnvelopeBuilder({ stateful = true } = {}) {
 
     const lifecycle = [EventKind.created, EventKind.updated, EventKind.removed].includes(evHandle.kind);
     if (evHandle.entity !== entityName) {
-      // Jobs are scoped to an authorized anchor (for example Note:n1), but
-      // have no recipient-hydrated lifecycle grammar yet.
-      if (evHandle.entity !== '_Job' || !lifecycle) {
-        throw new Error('committed event entity does not match delivery scope');
-      }
+      // A composite stream can be anchored to an authorized container such as
+      // Project while carrying changes to many declared child entities. Without
+      // a declared cross-entity recipient grammar, the only safe output is an
+      // opaque snapshot requirement, never the raw event fact.
       return recovery(ctx, entityName, id, 'recipient-snapshot-required');
     }
 

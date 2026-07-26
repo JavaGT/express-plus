@@ -28,7 +28,7 @@
 // projectors that suppress certain event types — the consumer has acknowledged
 // them and should not re-deliver on reconnect.
 
-import { readSince } from './committed-log.mjs';
+import { readSeq, readSince } from './committed-log.mjs';
 import { EventKind, parseEventType } from './event-handle.mjs';
 import { mayRow } from './row-grant.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
@@ -37,6 +37,12 @@ let nextSubId = 1;
 
 function generateSubId() {
   return nextSubId++;
+}
+
+function deniedError(scope) {
+  const error = new Error(`subscribe authorization denied for scope '${scope}'`);
+  error.code = 'live-delivery-revoked';
+  return error;
 }
 
 export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient, log = null }) {
@@ -54,6 +60,43 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     const record = resolveEntity(name);
     if (!record) throw new Error(`unknown entity '${name}'`);
     return record;
+  }
+
+  async function authorizeSnapshot(principal, scope) {
+    const handle = tryParseScopeKey(scope);
+    if (!handle) throw new Error(`invalid scope '${scope}'`);
+    let entityRec;
+    try {
+      entityRec = entityRecord(handle.entity);
+    } catch {
+      log?.error?.('live', 'entity not found', { scope, entity: handle.entity });
+      return false;
+    }
+    const auth = reauthFor(entityRec, principal, handle);
+    if (!auth || !(await checkMayRow(entityRec, auth.row, principal))) {
+      log?.error?.('live', 'bootstrap denied', { scope });
+      return false;
+    }
+    return true;
+  }
+
+  async function bootstrap({ principal, scope, snapshot }) {
+    if (closed) throw new Error('live-delivery-core is closed');
+    if (typeof snapshot !== 'function') throw new Error('live delivery bootstrap requires a snapshot function');
+    if (!(await authorizeSnapshot(principal, scope))) return { kind: 'revoked' };
+    // Scope's single-process SQLite writer cannot interleave with this
+    // synchronous materialisation/cursor pair. Async readers are forbidden so
+    // callers cannot accidentally create an unpaired snapshot boundary.
+    const value = snapshot({ principal, scope });
+    if (value && typeof value.then === 'function') {
+      throw new Error('live delivery snapshot function must be synchronous');
+    }
+    const cursor = readSeq(db, scope);
+    // Authorization can await application policy. Recheck after the synchronous
+    // snapshot/cursor pair so a revocation during the first check never returns
+    // recipient state; a later committed change is caught up from this cursor.
+    if (!(await authorizeSnapshot(principal, scope))) return { kind: 'revoked' };
+    return { kind: 'snapshot', snapshot: value, cursor };
   }
 
   function reauthFor(entityRec, principal, handle) {
@@ -107,6 +150,13 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
+  function revokeSub(subId) {
+    const sub = subs.get(subId);
+    if (!sub) return;
+    try { sub.revoke?.(); } catch { /* transport lifecycle callbacks are isolated */ }
+    removeSub(subId);
+  }
+
   async function catchUp(subId) {
     const sub = subs.get(subId);
     if (!sub || !sub.active) return;
@@ -135,12 +185,12 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         // removals for this entity may be projected; other committed rows in
         // the catch-up batch stay fail-closed. The terminal subscription is
         // then removed without acknowledging withheld events.
-        const terminalRemoval = !auth;
+        const terminalRemoval = !auth && events.length > 0 && events.every((event) => isTerminalRemoval(event, sub.entityRec.name));
         const deliverableEvents = auth
           ? events
-          : events.filter((event) => isTerminalRemoval(event, sub.entityRec.name));
-        if (!auth && deliverableEvents.length === 0) { removeSub(subId); log?.error?.('live', 'reauth denied', { scope: sub.scope }); throw new Error(`subscribe authorization denied for scope '${sub.scope}'`); }
-        if (auth && !(await checkMayRow(sub.entityRec, auth.row, sub.principal))) { removeSub(subId); log?.error?.('live', 'mayRow denied', { scope: sub.scope }); throw new Error(`subscribe authorization denied for scope '${sub.scope}'`); }
+          : terminalRemoval ? events : [];
+        if (!auth && !terminalRemoval) { revokeSub(subId); log?.error?.('live', 'reauth denied', { scope: sub.scope }); return; }
+        if (auth && !(await checkMayRow(sub.entityRec, auth.row, sub.principal))) { revokeSub(subId); log?.error?.('live', 'mayRow denied', { scope: sub.scope }); return; }
         if (!sub.active) return;
         if (events.length === 0) {
           if (sub.dirty) continue;
@@ -190,6 +240,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
           // The authorization subject is gone. A terminal removal is the only
           // allowed output, and this subscription cannot acknowledge unrelated
           // earlier events that were withheld by the fail-closed filter.
+          sub.cursor = events[events.length - 1].seq;
           removeSub(subId);
           return;
         }
@@ -223,7 +274,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  async function subscribe({ principal, scope, after = 0, signal, deliver, paused = false }) {
+  async function subscribe({ principal, scope, after = 0, signal, deliver, revoke = null, paused = false, allowTerminal = false }) {
     if (closed) throw new Error('live-delivery-core is closed');
     if (signal?.aborted) return;
     const handle = tryParseScopeKey(scope);
@@ -246,15 +297,22 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
     const auth = reauthFor(entityRec, principal, handle);
     if (!auth) {
-      log?.error?.('live', 'subscribe denied', { scope });
-      throw new Error(`subscribe authorization denied for scope '${scope}'`);
+      const unread = allowTerminal ? readSince(db, scope, after) : [];
+      if (unread.length > 0 && unread.every((event) => isTerminalRemoval(event, entityRec.name))) {
+        // A catch-up may begin immediately after deletion. Only a fully
+        // contiguous suffix of this anchor's terminal removals is safe to
+        // deliver without a current authorization row.
+      } else {
+        log?.error?.('live', 'subscribe denied', { scope });
+        throw deniedError(scope);
+      }
     }
-    if (!(await checkMayRow(entityRec, auth.row, principal))) {
+    if (auth && !(await checkMayRow(entityRec, auth.row, principal))) {
       log?.error?.('live', 'subscribe denied', { scope });
-      throw new Error(`subscribe authorization denied for scope '${scope}'`);
+      throw deniedError(scope);
     }
     const subId = generateSubId();
-    const sub = { entityRec, principal, deliver, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true };
+    const sub = { entityRec, principal, deliver, revoke, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true };
     subs.set(subId, sub);
     let set = byScope.get(scope);
     if (!set) { set = new Set(); byScope.set(scope, set); }
@@ -280,6 +338,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
             removeSub(subId);
             throw err;
           }
+          return current.cursor;
         })();
       }
       return current.activation;
@@ -319,5 +378,46 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     byScope.clear();
   }
 
-  return { subscribe, wake, close };
+  async function catchup({ principal, scope, after = 0 }) {
+    if (!Number.isSafeInteger(after) || after < 0) {
+      throw new Error(`after must be a nonnegative safe integer, got ${after}`);
+    }
+    const authorized = await authorizeSnapshot(principal, scope);
+    if (!authorized) {
+      const handle = tryParseScopeKey(scope);
+      const entityRec = handle ? resolveEntity(handle.entity) : null;
+      const unread = entityRec ? readSince(db, scope, after) : [];
+      if (unread.length === 0 || !unread.every((event) => isTerminalRemoval(event, entityRec.name))) {
+        return { kind: 'revoked' };
+      }
+    }
+    const controller = new AbortController();
+    const envelopes = [];
+    let revoked = false;
+    let activation;
+    try {
+      activation = await subscribe({
+        principal,
+        scope,
+        after,
+        signal: controller.signal,
+        paused: true,
+        deliver: async (batch) => { envelopes.push(...batch); },
+        revoke: () => { revoked = true; },
+        allowTerminal: true,
+      });
+    } catch (error) {
+      controller.abort();
+      if (error?.code === 'live-delivery-revoked') return { kind: 'revoked' };
+      throw error;
+    }
+    try {
+      const cursor = await activation.activate();
+      return revoked ? { kind: 'revoked' } : { kind: 'catchup', envelopes, cursor };
+    } finally {
+      controller.abort();
+    }
+  }
+
+  return { bootstrap, catchup, subscribe, wake, close };
 }

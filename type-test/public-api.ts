@@ -17,7 +17,7 @@ import {
   frameworkTableNames, readCommittedCursor,
   runMigrations, describeEntityStorage, describeSqliteStorage,
   type BlobStore, type SqliteStorageDescription,
-  type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type LiveDeliveryEnvelope as ServerLiveDeliveryEnvelope, type Migration, type UserPrincipal,
+  type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type LiveDeliveryBootstrap, type LiveDeliveryCatchup, type LiveDeliveryEnvelope as ServerLiveDeliveryEnvelope, type Migration, type UserPrincipal,
   type WorkbenchDatabase,
 } from 'workbench/server';
 import {
@@ -153,6 +153,16 @@ const blobs: BlobStore = createBlobStore({ db, bytes: {} as never });
 void [job, blobs, runMigrations(db, [migration]), readCommittedCursor(db, 'Project:project-1')];
 const live: LiveDelivery = createLiveDelivery({ db, entities: new Map(), mayVerb: () => true });
 const liveAbort = new AbortController();
+const liveBootstrap: Promise<LiveDeliveryBootstrap<{ projects: ProjectRow[] }>> = live.bootstrap({
+  principal: request.principal,
+  scope: 'Project:project-1',
+  snapshot: () => ({ projects: [] }),
+});
+const liveCatchup: Promise<LiveDeliveryCatchup> = live.catchup({
+  principal: request.principal,
+  scope: 'Project:project-1',
+  after: 0,
+});
 const liveActivation: Promise<LiveDeliveryActivation> = live.subscribe({
   principal: request.principal,
   scope: 'Project:project-1',
@@ -166,7 +176,7 @@ const liveActivation: Promise<LiveDeliveryActivation> = live.subscribe({
 });
 // @ts-expect-error public delivery requires per-subscription cancellation
 live.subscribe({ principal: request.principal, scope: 'Project:project-1', deliver: async () => {} });
-void [live, liveActivation];
+void [live, liveActivation, liveBootstrap, liveCatchup];
 
 const actor: Principal = principal({ type: 'apiKey', id: 'key-1' });
 void actor;
