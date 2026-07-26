@@ -2197,6 +2197,8 @@ export function createLiveDeliverySession({
   let status = 'bootstrapping';
   let closed = false;
   let reconnecting = false;
+  let connectionGeneration = 0;
+  let recoveryGeneration = 0;
   let subscription = null;
   let actionCounter = 0;
   let deliveryChain = Promise.resolve();
@@ -2214,6 +2216,9 @@ export function createLiveDeliverySession({
     let projected = baseSnapshot;
     for (const operation of operations.values()) {
       if (operation.status === 'pending') projected = optimistic(projected, operation.action);
+      // Application callbacks may synchronously trigger terminal revocation.
+      // Never publish a projection that was computed before that transition.
+      if (closed || status === 'revoked' || baseSnapshot === null) return;
     }
     visibleSnapshot = projected;
     for (const listener of listeners) {
@@ -2241,7 +2246,11 @@ export function createLiveDeliverySession({
     if (decision.kind === 'duplicate') return { status: 'duplicate' };
     if (decision.kind === 'gap') return { status: 'gap' };
 
-    baseSnapshot = fold(baseSnapshot, envelope);
+    const nextSnapshot = fold(baseSnapshot, envelope);
+    // A fold callback may synchronously trigger terminal revocation through a
+    // host lifecycle reaction. Do not restore state after that fail-closed turn.
+    if (closed || status === 'revoked') return { status: 'revoked' };
+    baseSnapshot = nextSnapshot;
     cursor = decision.cursor;
     const actionId = envelope.event?.actionId;
     const operation = actionId ? operations.get(actionId) : null;
@@ -2263,6 +2272,7 @@ export function createLiveDeliverySession({
     for (const envelope of result.envelopes) {
       if (envelope?.type === 'resync') return false;
       const applied = applyEvent(envelope);
+      if (closed || status === 'revoked') return true;
       if (applied.status === 'gap') throw new Error('catch-up recipient envelopes are not contiguous');
     }
     if (result.envelopes.length === 0 && result.cursor !== initialCursor) {
@@ -2274,9 +2284,12 @@ export function createLiveDeliverySession({
 
   async function recover(mode) {
     if (closed) return;
+    const generation = ++recoveryGeneration;
     status = mode === 'snapshot' ? 'recovering' : 'catching-up';
     const result = await bootstrap({ after: mode === 'catchup' ? cursor : undefined, mode });
-    if (closed) return;
+    // A transport can revoke access while an authorized recovery request is
+    // pending. Its late result must never rematerialize project state.
+    if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
     if (!result || typeof result !== 'object') throw new Error('bootstrap returned an invalid result');
     if (result.kind === 'revoked') {
       revoke(result.reason);
@@ -2284,53 +2297,83 @@ export function createLiveDeliverySession({
     }
     if (result.kind === 'snapshot') {
       assertCursor(result.cursor, 'snapshot cursor');
-      baseSnapshot = validateSnapshot(result.snapshot);
+      const nextSnapshot = validateSnapshot(result.snapshot);
+      if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
+      baseSnapshot = nextSnapshot;
       cursor = result.cursor;
       publish();
+      if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       status = 'live';
       return;
     }
     if (result.kind === 'catchup' && mode === 'catchup') {
       if (!(await applyCatchup(result))) return recover('snapshot');
+      if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       status = 'live';
       return;
     }
     throw new Error('bootstrap returned an unsupported result');
   }
 
-  async function receive(envelopes) {
+  async function receive(envelopes, generation) {
     if (!Array.isArray(envelopes)) throw new Error('delivery callback requires an envelope array');
     for (const envelope of envelopes) {
-      if (closed || status === 'revoked') return;
+      if (closed || status === 'revoked' || generation !== connectionGeneration) return;
       if (envelope?.type === 'resync') {
         // Recovery causes are intentionally opaque to applications.
-        await recover('snapshot');
+        try {
+          await recover('snapshot');
+        } catch (error) {
+          if (!closed && status !== 'revoked') status = 'unavailable';
+          throw error;
+        }
         continue;
       }
       const applied = applyEvent(envelope);
       if (applied.status === 'gap') {
-        await recover('catchup');
-        if (closed || status === 'revoked') return;
+        try {
+          await recover('catchup');
+        } catch (error) {
+          if (!closed && status !== 'revoked') status = 'unavailable';
+          throw error;
+        }
+        if (closed || status === 'revoked' || generation !== connectionGeneration) return;
         const replayed = applyEvent(envelope);
-        if (replayed.status === 'gap') throw new Error('delivery remains gapped after catch-up');
+        if (replayed.status === 'gap') {
+          if (!closed && status !== 'revoked') status = 'unavailable';
+          throw new Error('delivery remains gapped after catch-up');
+        }
       }
     }
   }
 
-  function deliver(envelopes) {
+  function deliver(envelopes, generation) {
     // A later, transport-triggered recovery can proceed after a failed batch.
-    const attempt = deliveryChain.catch(() => {}).then(() => receive(envelopes));
+    const attempt = deliveryChain.catch(() => {}).then(() => receive(envelopes, generation));
     deliveryChain = attempt.catch(() => {});
     return attempt;
   }
 
   async function connect() {
-    subscription = await subscribe({
+    const generation = ++connectionGeneration;
+    const nextSubscription = await subscribe({
       after: cursor,
-      deliver,
+      deliver: (envelopes) => {
+        if (closed || status === 'revoked' || generation !== connectionGeneration) return;
+        return deliver(envelopes, generation);
+      },
       revoke,
-      closed: () => reconnect().catch(() => {}),
+      closed: () => {
+        if (generation === connectionGeneration) reconnect().catch(() => {});
+      },
     });
+    // Delivery can revoke access while transport establishment is pending.
+    // Never retain a subscription that became unauthorized before its handle.
+    if (closed || status === 'revoked' || generation !== connectionGeneration) {
+      nextSubscription?.close?.();
+      return;
+    }
+    subscription = nextSubscription;
   }
 
   async function reconnect() {
@@ -2339,6 +2382,8 @@ export function createLiveDeliverySession({
     // before closing the old subscription so that callback cannot recurse.
     reconnecting = true;
     try {
+      // Invalidate the old transport before recovery reauthorizes the stream.
+      connectionGeneration += 1;
       subscription?.close?.();
       subscription = null;
       await recover('catchup');
@@ -2365,8 +2410,13 @@ export function createLiveDeliverySession({
   }
 
   async function start() {
-    await recover('snapshot');
-    if (!closed && status !== 'revoked') await connect();
+    try {
+      await recover('snapshot');
+      if (!closed && status !== 'revoked') await connect();
+    } catch (error) {
+      if (!closed && status !== 'revoked') status = 'unavailable';
+      throw error;
+    }
   }
 
   async function dispatch(type, payload) {
@@ -2381,6 +2431,9 @@ export function createLiveDeliverySession({
     }
     operations.set(actionId, operation);
     publish();
+    if (closed || status !== 'live') {
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery is unavailable') };
+    }
     try {
       const receipt = await sendAction(action);
       if (status === 'revoked') {
@@ -2406,6 +2459,16 @@ export function createLiveDeliverySession({
       publish();
       return { ok: true, status: 'committed', opId: actionId, value: receipt?.value };
     } catch (error) {
+      if (status === 'revoked') {
+        return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery access was revoked') };
+      }
+      // A delivery echo proves the action reached the committed recipient
+      // stream even when its request promise fails after that point.
+      if (operation.echoCursor != null) {
+        operations.delete(actionId);
+        publish();
+        return { ok: true, status: 'committed', opId: actionId };
+      }
       if (operations.get(actionId) === operation) {
         operations.delete(actionId);
         operation.status = 'failed';
