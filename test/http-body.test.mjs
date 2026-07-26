@@ -215,7 +215,7 @@ test('readRawBody rejects oversized upload with 413', async () => {
   const data = Buffer.alloc(2000, 'x');
   let pushed = false;
   const req = Object.assign(new Readable({
-    read(size) { if (!pushed) { pushed = true; this.push(data); this.push(null); } },
+    read(_size) { if (!pushed) { pushed = true; this.push(data); this.push(null); } },
   }), { headers: {}, method: 'POST' });
   await assert.rejects(
     () => readRawBody(req, 500),

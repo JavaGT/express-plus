@@ -5,7 +5,7 @@
 // All tests use raw WebSocket against a direct createLiveServer + compiled entity
 // (mirrors live-delta.test.mjs and live-pace.test.mjs).
 
-import { text, map, list, ref, scope, everyone, grant, read, write, subscribe, principal as makePrincipal } from '../src/index.mjs';
+import { text, map, list, ref, scope, everyone, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';

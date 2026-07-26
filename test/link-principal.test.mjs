@@ -113,7 +113,7 @@ test('bindReadScope fills the token param from principal.attributes.token', () =
 // ---- runtime (per-row) face ------------------------------------------------
 
 test('a link principal may read a doc their token grants (tier=comment)', async () => {
-  const { Doc, db } = setup();
+  const { Doc } = setup();
   const doc = Doc.findById('1');           // hydrated: doc.linkShare = {token,tier}
   const link = principal({ type: 'link', id: 'share-xyz', attributes: { token: 'share-xyz' } });
   assert.equal(await mayVerb(Doc, 'read', doc, link), true);

@@ -9,7 +9,7 @@
 // path). A role CHANGE is `.roleChanged`, NOT a fresh `:added` (DECISIONLOG #57:
 // idempotent re-share re-fire of native added would double-deliver), so the effect
 // does NOT re-fire on a repeat share.
-import { text, ref, map, grant, read, write, subscribe, principal } from '../src/index.mjs';
+import { text, ref, map, grant, read, write, subscribe } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';

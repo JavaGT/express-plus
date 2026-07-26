@@ -48,7 +48,7 @@ test('frameworkCursorSchema declares _ProjectedCursor and _ConsumerCursor via de
 });
 
 test('generateFrameworkDDL still includes cursor tables (backwards compatible)', async () => {
-  const { generateFrameworkDDL, frameworkCursorSchema } = await import('../src/ddl.mjs');
+  const { generateFrameworkDDL } = await import('../src/ddl.mjs');
   const frameworkDdl = generateFrameworkDDL();
   const joined = frameworkDdl.join('\n');
 

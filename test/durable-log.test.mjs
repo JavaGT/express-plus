@@ -134,7 +134,7 @@ test('app.ddl() creates framework tables (Log and Cursor) alongside entity table
   await app.ddl();
 
   // Verify framework tables exist
-  const logRow = db.prepare(
+  db.prepare(
     'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
   ).run('Note:1', 1, 'note.create', '{}', 'a1', new Date().toISOString());
   assert.ok(db.prepare('SELECT * FROM _Log WHERE scope = ?').get('Note:1'));

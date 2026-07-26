@@ -13,7 +13,7 @@
 // enqueue/claim/complete, client store CRUD surface, bindAction/bindField
 // handles, and canUndoField vocabulary — all four wave layers in one run.
 
-import { entity, text, date, owner, ref, grant, deny, read, write, subscribe, scope } from 'workbench';
+import { entity, text, date, owner, grant, deny, read, write, subscribe, scope } from 'workbench';
 
 // ---------------------------------------------------------------------------
 // ProjectTask — a Scope-style project task entity.

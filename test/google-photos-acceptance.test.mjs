@@ -13,7 +13,7 @@
 // AND the runtime .can — agree on every verdict for album owners, members,
 // editors, and strangers, against a real node:sqlite DB.
 
-import { text, date, ref, map, scope, grant, deny, read, write, subscribe, anyOf, never, inherit } from '../src/index.mjs';
+import { text, date, ref, map, scope, grant, deny, read, write, subscribe, anyOf, never } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';

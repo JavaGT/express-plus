@@ -2,7 +2,7 @@
 //
 // Tests the pure delta-computation core: no I/O, no DB, no live.mjs change.
 
-import { text, ref, hash, link, map, list, log, state, raster, polyline, everyone, grant, scope, read } from '../src/index.mjs';
+import { text, ref, hash, link, map, list, state, raster, polyline, everyone, grant, scope, read } from '../src/index.mjs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 

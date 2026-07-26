@@ -8,7 +8,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
-  entity, generateDDL, generateFrameworkDDL, executeFrameworkDDL, action, event, createServer, durableMutationVariant, buildEffectsRegistry, detectCrossEntityCycles, validateEffects, created, updated } from '../src/internal.mjs';
+  entity, generateDDL, executeFrameworkDDL, createServer, durableMutationVariant, buildEffectsRegistry, detectCrossEntityCycles, validateEffects, created, updated } from '../src/internal.mjs';
 
 // Helper to set up a fresh in-memory db with framework tables
 function setupDb() {
@@ -194,7 +194,7 @@ test('non-compilable when predicate (references I/O) throws at entity() compile'
         [BadEntity.created, {
           mutate: entity('Target', { x: text(), grant: () => grant(read, write, subscribe) }),
           with: { x: 'y' },
-          when: ({ delta }) => {
+          when: ({ delta: _delta }) => {
             // Forbidden: references external I/O (fetch)
             fetch('http://example.com');
             return true;
@@ -427,7 +427,7 @@ test('self inc: emits :updated with read-modify-write (seed=5, inc(2) → 7)', a
         count: number(),
 
     grant: () => grant(read, write, subscribe),
-    admitsEffects: ({ effect, principal }) => true,
+    admitsEffects: ({ effect: _effect, principal: _principal }) => true,
     effects: (Counter) => [
       [Counter.created, {
         mutate: self,
@@ -472,7 +472,7 @@ test('self dec: emits :updated with read-modify-write (seed=10, dec(3) → 7)', 
         count: number(),
 
     grant: () => grant(read, write, subscribe),
-    admitsEffects: ({ effect, principal }) => true,
+    admitsEffects: ({ effect: _effect, principal: _principal }) => true,
     effects: (Counter) => [
       [Counter.created, {
         mutate: self,
@@ -517,7 +517,7 @@ test('inc-on-create (non-self): degenerate literal (0+4=4), emits :created', asy
         count: number(),
 
     grant: () => grant(read, write, subscribe),
-    admitsEffects: ({ effect, principal }) => true,
+    admitsEffects: ({ effect: _effect, principal: _principal }) => true,
   });
   for (const sql of generateDDL(Target)) db.exec(sql);
 
@@ -573,7 +573,7 @@ test('depth cap: self-recursion bounded (Counter.updated → Counter.updated)', 
         count: number(), phase: text(),
 
     grant: () => grant(read, write, subscribe),
-    admitsEffects: ({ effect, principal }) => true,
+    admitsEffects: ({ effect: _effect, principal: _principal }) => true,
     effects: (Counter) => [
       [Counter.updated, {
         mutate: self,
@@ -634,7 +634,7 @@ test('db threaded through effects executor: RMW read uses in-txn db handle', asy
         count: number(),
 
     grant: () => grant(read, write, subscribe),
-    admitsEffects: ({ effect, principal }) => true,
+    admitsEffects: ({ effect: _effect, principal: _principal }) => true,
     effects: (Counter) => [
       [Counter.created, {
         mutate: self,
@@ -700,7 +700,7 @@ test('many fan-out: creates N target rows (one per collection member at trigger 
     collaborators: collaboratorsField,
 
     grant: () => grant(read, write, subscribe),
-    admitsEffects: ({ effect, principal }) => true,
+    admitsEffects: ({ effect: _effect, principal: _principal }) => true,
     effects: (User) => [
       [User.collaborators.added, {
         mutate: many(Inbox, { over: collaboratorsField }),
@@ -807,7 +807,7 @@ test('many fan-out: create-only (no dedup, two origins each add member → separ
     collaborators: collaboratorsField,
 
     grant: () => grant(read, write, subscribe),
-    admitsEffects: ({ effect, principal }) => true,
+    admitsEffects: ({ effect: _effect, principal: _principal }) => true,
     effects: (User) => [
       [User.collaborators.added, {
         mutate: many(Inbox, { over: collaboratorsField }),
@@ -924,7 +924,7 @@ test('Fan-IN: anyOf(Source.created, Source.updated) fires on EITHER event', asyn
         count: number(),
 
     grant: () => grant(read, write, subscribe),
-    admitsEffects: ({ effect, principal }) => true,
+    admitsEffects: ({ effect: _effect, principal: _principal }) => true,
   });
   for (const sql of generateDDL(Target)) db.exec(sql);
 
@@ -1022,7 +1022,7 @@ test('Dedupe: anyOf(X.created, X.created) registers effect ONCE', async () => {
         count: number(),
 
     grant: () => grant(read, write, subscribe),
-    admitsEffects: ({ effect, principal }) => true,
+    admitsEffects: ({ effect: _effect, principal: _principal }) => true,
   });
   for (const sql of generateDDL(Target)) db.exec(sql);
 
@@ -1081,7 +1081,7 @@ test('Self-recursion depth cap: anyOf effect with self-mutate bounded by maxDept
         count: number(), phase: text(),
 
     grant: () => grant(read, write, subscribe),
-    admitsEffects: ({ effect, principal }) => true,
+    admitsEffects: ({ effect: _effect, principal: _principal }) => true,
     effects: (Counter) => [
       // anyOf triggers on Counter.updated - self-effect creates recursion
       [effect.anyOf(Counter.updated), {
