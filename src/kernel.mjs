@@ -7,11 +7,16 @@ import {
 import { createServer, durableMutationVariant } from './pipeline.mjs';
 import { buildEffectsRegistry, validateEffects, executeEffectsForEvent } from './effect-compiler.mjs';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
-import { admitInvitationCreation, isInvitationCreationAuthority } from './auth/invitation.mjs';
+import {
+  admitInvitationAcceptance,
+  admitInvitationCreation,
+  isInvitationCreationAuthority,
+} from './auth/invitation.mjs';
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { CRUD_CURSOR_POLICY } from './entity/crud.mjs';
+import { EventKind } from './event-handle.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -92,10 +97,18 @@ function buildDurableAdmission(app) {
     (app.actions ?? []).flatMap((action) =>
       (action.projections ?? []).flatMap((projection) => projection.eventTypes ?? [])),
   );
+  function admissionRowId(event) {
+    // Native field events are scoped to their parent row as `owner`; lifecycle
+    // events use their entity row `id` (and may independently declare an owner
+    // field). The parsed handle is the authoritative discriminator.
+    return event?.handle?.kind === EventKind.native
+      ? event.data?.owner ?? event.data?.id
+      : event?.data?.id;
+  }
   async function admitsExistingRow({ entityName, verb, principal, event }) {
     const entity = app.entities?.get(entityName);
     if (!entity) return false;
-    const id = event?.data?.id;
+    const id = admissionRowId(event);
     if (id == null) return false;
     let row = null;
     try {
@@ -110,6 +123,7 @@ function buildDurableAdmission(app) {
   return {
     async beforeProjection({ entityName, verb, principal, event, payload, db: hookDb, now }) {
       if (registeredEventTypes.has(event?.type)) return true;
+      if (admitInvitationAcceptance({ event, principal })) return true;
       if (
         entityName === Invitation.name
         && verb === 'create'
@@ -127,7 +141,7 @@ function buildDurableAdmission(app) {
         return admitSystemMutation({
           entity,
           verb,
-          rowId: event?.data?.id,
+          rowId: admissionRowId(event),
           payload,
           principal,
           db: hookDb ?? app.db,

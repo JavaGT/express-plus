@@ -4,11 +4,13 @@
 
 import { randomBytes } from 'node:crypto';
 import { admin } from '../grant.mjs';
+import { Invitation } from './entities.mjs';
 import { readScopedRow } from '../http-crud-dispatch.mjs';
 import { rowCapabilities } from '../row-grant.mjs';
 import { MEMBER_COLUMN, membershipOwnerCol, membershipTable } from '../scope-sql.mjs';
 import { mapMutationAction } from '../side-table-strategy.mjs';
 import { failure } from '../outcome.mjs';
+import { EventKind } from '../event-handle.mjs';
 
 function httpError(status, message) {
   return Object.assign(new Error(message), { status });
@@ -21,6 +23,7 @@ function requireSuccess(result, operation) {
 }
 
 const invitationCreationAuthorities = new WeakSet();
+const invitationAcceptanceAuthorities = new WeakMap();
 
 function invitationCreationPrincipal(user) {
   const authority = Object.freeze({
@@ -34,6 +37,41 @@ function invitationCreationPrincipal(user) {
 
 export function isInvitationCreationAuthority(principal) {
   return principal != null && invitationCreationAuthorities.has(principal);
+}
+
+function invitationAcceptancePrincipal(user) {
+  const authority = Object.freeze({
+    type: 'user',
+    id: user.id,
+    attributes: Object.freeze({ ...(user.attributes ?? {}) }),
+  });
+  invitationAcceptanceAuthorities.set(authority, null);
+  return authority;
+}
+
+function authorizeInvitationAcceptance(authority, details) {
+  invitationAcceptanceAuthorities.set(authority, Object.freeze(details));
+}
+
+export function admitInvitationAcceptance({ event, principal }) {
+  const details = invitationAcceptanceAuthorities.get(principal);
+  if (!details || !event?.handle) return false;
+  const { handle, data } = event;
+  if (
+    handle.entity === details.targetEntity
+    && handle.field === details.fieldName
+    && handle.kind === EventKind.native
+    && handle.nativeName === details.mapOperation
+  ) {
+    return String(data?.owner) === details.targetId
+      && String(data?.member) === details.memberId
+      && data?.role === details.role;
+  }
+  if (handle.entity !== Invitation.name || String(data?.id) !== details.invitationId) return false;
+  if (details.invitationOperation === 'update') {
+    return handle.kind === EventKind.updated && data?.useCount === details.useCount;
+  }
+  return details.invitationOperation === 'remove' && handle.kind === EventKind.removed;
 }
 
 function invitationTargetFor(runtime, name, role) {
@@ -154,6 +192,7 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
     }
 
     let accepted;
+    const authority = invitationAcceptancePrincipal(user);
     const result = await runtime.batch(() => {
       const invitation = Invitation.findOne(Invitation.token.is(token));
       if (!invitation) throw httpError(404, 'invitation not found');
@@ -213,6 +252,17 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
         if (invitation.targetUser !== null) {
           actions.push({ type: 'Invitation.remove', payload: { id: invitation.id } });
         }
+        authorizeInvitationAcceptance(authority, {
+          targetEntity: target.entity.name,
+          targetId: String(invitation.targetId),
+          fieldName: target.fieldName,
+          role: invitation.role,
+          memberId: String(user.id),
+          mapOperation: membershipChanged ? (existing ? 'roleChanged' : 'added') : null,
+          invitationId: String(invitation.id),
+          invitationOperation: invitation.targetUser !== null ? 'remove' : membershipChanged ? 'update' : null,
+          useCount: invitation.useCount + 1,
+        });
       } catch (error) {
         if (error.status) throw error;
         throw httpError(500, `failed to grant membership on ${target.entity.name}: ${error.message}`);
@@ -224,7 +274,7 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
         role: invitation.role,
       };
       return actions;
-    }, { principal: user });
+    }, { principal: authority });
     requireSuccess(result, 'acceptance');
     return accepted;
   }
