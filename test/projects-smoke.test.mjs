@@ -11,7 +11,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,44 @@ import { fileURLToPath } from 'node:url';
 const REPO = resolve(fileURLToPath(import.meta.url), '../..');
 const SAMPLE_ROOTS = [join(REPO, 'projects'), join(REPO, 'examples')];
 const LOAD_WINDOW_MS = 1500;
+const OUTPUT_LIMIT = 16_384;
+const CLOSE_TIMEOUT_MS = 1000;
+
+function appendOutput(output, chunk) {
+  if (output.length >= OUTPUT_LIMIT) return output;
+  const remaining = OUTPUT_LIMIT - output.length;
+  const text = chunk.toString();
+  return output + text.slice(0, remaining);
+}
+
+function waitForChildClose(child) {
+  return new Promise((resolveFn) => {
+    child.once('close', resolveFn);
+  });
+}
+
+function diagnostic(...parts) {
+  return parts.join('').slice(0, OUTPUT_LIMIT);
+}
+
+async function cleanupChild(child, childClosed, cwd) {
+  try {
+    if (process.platform === 'win32') {
+      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+    } else if (child.pid) {
+      // Detached children lead a process group, including descendants holding stdio.
+      try { process.kill(-child.pid, 'SIGKILL'); } catch { /* ignore */ }
+    } else {
+      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+    }
+    await Promise.race([
+      childClosed,
+      new Promise((resolveFn) => setTimeout(resolveFn, CLOSE_TIMEOUT_MS)),
+    ]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
 
 function listSampleFiles() {
   const out = [];
@@ -40,24 +78,28 @@ function loadSample(file) {
     const cwd = mkdtempSync(join(tmpdir(), 'projects-smoke-'));
     const child = spawn('node', [file], {
       cwd,
+      detached: process.platform !== 'win32',
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, PORT: '0' }, // preferred free-port when sample honors PORT
     });
+    const childClosed = waitForChildClose(child);
     let stderr = '';
-    child.stderr.on('data', (d) => { stderr += d.toString(); });
+    child.stderr.on('data', (d) => { stderr = appendOutput(stderr, d); });
     let settled = false;
-    const settle = (result) => {
+    let loadTimer;
+    const settle = async (result) => {
       if (settled) return;
       settled = true;
-      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      clearTimeout(loadTimer);
+      await cleanupChild(child, childClosed, cwd);
       resolveFn(result);
     };
     child.on('exit', (code) => {
       if (code === 0) settle({ ok: true });
       else if (code !== null) settle({ ok: false, code, stderr });
     });
-    child.on('error', (err) => settle({ ok: false, code: -1, stderr: String(err) }));
-    setTimeout(() => settle({ ok: true }), LOAD_WINDOW_MS);
+    child.on('error', (err) => settle({ ok: false, code: -1, stderr: appendOutput(stderr, err) }));
+    loadTimer = setTimeout(() => settle({ ok: true }), LOAD_WINDOW_MS);
   });
 }
 
@@ -70,7 +112,7 @@ for (const file of files) {
     const result = await loadSample(file);
     if (result.ok) return;
     assert.fail(
-      `${rel} crashed at load (exit ${result.code}):\n${result.stderr}`,
+      diagnostic(`${rel} crashed at load (exit ${result.code}):\n`, result.stderr),
     );
   });
 }

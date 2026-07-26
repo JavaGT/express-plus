@@ -22,7 +22,7 @@
 	"scripts": {
 		"lint": "eslint .",
 		"test": "node scripts/run-tests.mjs",
-		"test:coverage": "node --experimental-test-coverage --test",
+		"test:coverage": "node scripts/check-coverage.mjs 0",
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {

@@ -62,7 +62,14 @@ function attemptHandshake(port, { origin } = {}) {
 
     let buf = Buffer.alloc(0);
     let settled = false;
-    const finish = (v) => { if (settled) return; settled = true; try { sock.destroy(); } catch { /* ignore */ } resolve(v); };
+    let timeout;
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      try { sock.destroy(); } catch { /* ignore */ }
+      resolve(v);
+    };
 
     sock.on('connect', () => sock.write(handshake));
     sock.on('data', (chunk) => {
@@ -75,7 +82,13 @@ function attemptHandshake(port, { origin } = {}) {
     // A destroyed socket (guard rejected) closes with no HTTP response.
     sock.on('close', () => finish({ upgraded: false }));
     sock.on('error', () => finish({ upgraded: false }));
-    setTimeout(() => reject(new Error('handshake timed out')), 2000);
+    timeout = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      try { sock.destroy(); } catch { /* ignore */ }
+      reject(new Error('handshake timed out'));
+    }, 2000);
   });
 }
 
