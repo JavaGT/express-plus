@@ -30,12 +30,10 @@ function recipientLifecycleData(ctx, handle, id) {
   if (handle.kind === EventKind.removed) return { id };
   if (!ctx.row || typeof ctx.row !== 'object' || Array.isArray(ctx.row)) return null;
 
-  const source = ctx.event.data;
-  if (!source || typeof source !== 'object' || Array.isArray(source)) return null;
   const declared = ctx.entity?.fields ?? {};
-  const keys = handle.kind === EventKind.created
-    ? Object.keys(declared)
-    : Object.keys(source).filter((key) => key !== 'id' && Object.hasOwn(declared, key));
+  // Recipient lifecycle output derives only from declarations and the
+  // recipient-hydrated row, never from raw durable operation keys.
+  const keys = Object.keys(declared);
   const data = { id };
   for (const key of keys) {
     if (Object.hasOwn(ctx.row, key)) data[key] = ctx.row[key];
@@ -43,8 +41,8 @@ function recipientLifecycleData(ctx, handle, id) {
   return data;
 }
 
-export function createLiveEnvelopeBuilder() {
-  const deltaProjector = createDeltaProjector();
+export function createLiveEnvelopeBuilder({ stateful = true } = {}) {
+  const deltaProjector = stateful ? createDeltaProjector() : null;
 
   /**
    * Build WebSocket envelopes from a core projection context.
@@ -103,7 +101,6 @@ export function createLiveEnvelopeBuilder() {
     const event = { ...loggedEvent, data };
     Object.defineProperty(event, 'handle', { value: evHandle, enumerable: false });
 
-    const delta = deltaProjector.project(ctx.entity, id, ctx.row, event);
     const envelope = {
       type: 'event',
       entity: entityName,
@@ -112,15 +109,21 @@ export function createLiveEnvelopeBuilder() {
       seqSpan: [ctx.event.seq, ctx.event.seq],
       event,
     };
-    if (delta !== undefined) envelope.delta = delta;
-    const reducers = createdTextReducerSeeds(ctx.entity, event);
-    if (reducers) envelope.reducers = reducers;
+    // Public transport-neutral delivery is a stateless recipient grammar.
+    // Delta baselines and reducer seeds belong to the connection-owned WebSocket
+    // path; sharing either between recipients would make delivery state unsafe.
+    if (deltaProjector) {
+      const delta = deltaProjector.project(ctx.entity, id, ctx.row, event);
+      if (delta !== undefined) envelope.delta = delta;
+      const reducers = createdTextReducerSeeds(ctx.entity, event);
+      if (reducers) envelope.reducers = reducers;
+    }
 
     return [envelope];
   }
 
   function clear() {
-    deltaProjector.clear();
+    deltaProjector?.clear();
   }
 
   return { buildEnvelope, clear };

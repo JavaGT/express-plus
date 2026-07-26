@@ -133,8 +133,9 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         // A removal deletes its authorization subject, so it cannot be
         // re-authorized against a current row. Without that row, only terminal
         // removals for this entity may be projected; other committed rows in
-        // the catch-up batch stay fail-closed and are acknowledged with the
-        // terminal removal so they cannot replay after the subject is gone.
+        // the catch-up batch stay fail-closed. The terminal subscription is
+        // then removed without acknowledging withheld events.
+        const terminalRemoval = !auth;
         const deliverableEvents = auth
           ? events
           : events.filter((event) => isTerminalRemoval(event, sub.entityRec.name));
@@ -185,6 +186,13 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
           }
         }
         if (!sub.active) return;
+        if (terminalRemoval) {
+          // The authorization subject is gone. A terminal removal is the only
+          // allowed output, and this subscription cannot acknowledge unrelated
+          // earlier events that were withheld by the fail-closed filter.
+          removeSub(subId);
+          return;
+        }
         // Advance cursor past the last event we processed (even if projection
         // returned empty — the events were acknowledged).
         sub.cursor = events[events.length - 1].seq;
@@ -263,13 +271,18 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     async function activate() {
       const current = subs.get(subId);
       if (!current || !current.active) return;
-      current.paused = false;
-      try {
-        await catchUp(subId);
-      } catch (err) {
-        removeSub(subId);
-        throw err;
+      if (!current.activation) {
+        current.activation = (async () => {
+          current.paused = false;
+          try {
+            await catchUp(subId);
+          } catch (err) {
+            removeSub(subId);
+            throw err;
+          }
+        })();
       }
+      return current.activation;
     }
     if (paused) return { activate };
     await activate();

@@ -13,10 +13,10 @@ import workbench, {
   type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
 import {
-  createBlobStore, createInvitationApi, createJobQueue, readCommittedCursor,
-  readCommittedEventsSince, runMigrations, describeEntityStorage, describeSqliteStorage,
+  createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, readCommittedCursor,
+  runMigrations, describeEntityStorage, describeSqliteStorage,
   type BlobStore, type SqliteStorageDescription,
-  type Invitation, type JobQueue, type JobRow, type Migration, type UserPrincipal,
+  type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type Migration, type UserPrincipal,
   type WorkbenchDatabase,
 } from 'workbench/server';
 import {
@@ -147,8 +147,22 @@ const queue: JobQueue = createJobQueue({ db, sharedSecret: 'secret' });
 const job: JobRow = queue.enqueue({ kind: 'index', payload: { projectId: 'project-1' } });
 const blobs: BlobStore = createBlobStore({ db, bytes: {} as never });
 void [job, blobs, runMigrations(db, [migration]), readCommittedCursor(db, 'Project:project-1')];
-const committed: CommittedEvent[] = readCommittedEventsSince(db, 'Project:project-1', 0);
-void committed;
+const live: LiveDelivery = createLiveDelivery({ db, entities: new Map(), mayVerb: () => true });
+const liveAbort = new AbortController();
+const liveActivation: Promise<LiveDeliveryActivation> = live.subscribe({
+  principal: request.principal,
+  scope: 'Project:project-1',
+  signal: liveAbort.signal,
+  deliver: async (batch) => {
+    for (const envelope of batch) {
+      if (envelope.type === 'event') void envelope.event.data;
+      else void envelope.reason;
+    }
+  },
+});
+// @ts-expect-error public delivery requires per-subscription cancellation
+live.subscribe({ principal: request.principal, scope: 'Project:project-1', deliver: async () => {} });
+void [live, liveActivation];
 
 const actor: Principal = principal({ type: 'apiKey', id: 'key-1' });
 void actor;

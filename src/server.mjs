@@ -24,15 +24,4 @@ export { runMigrations } from './migrations.mjs';
 export { defineSqliteSchema } from './sqlite-schema.mjs';
 export { describeEntityStorage, describeSqliteStorage } from './sqlite-storage-description.mjs';
 export { readSeq as readCommittedCursor } from './committed-log.mjs';
-import { readSince } from './committed-log.mjs';
-
-export function readCommittedEventsSince(db, scope, cursor) {
-  return readSince(db, scope, cursor).map((row) => ({
-    type: row.eventType,
-    scope: row.scope,
-    seq: row.seq,
-    actionId: row.actionId,
-    committedAt: row.committedAt,
-    data: row.data,
-  }));
-}
+export { createLiveDelivery } from './live-delivery-public.mjs';

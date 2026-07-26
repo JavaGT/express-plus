@@ -33,7 +33,7 @@ export const PUBLIC_API = Object.freeze({
       'apiKeyPrincipalOf', 'parseCookies', 'SESSION_COOKIE',
       'createInvitationApi', 'emailSeam', 'noopTransport',
       'matchRoute', 'serveStatic', 'createJobQueue', 'createBlobStore',
-      'runMigrations', 'readCommittedCursor', 'readCommittedEventsSince',
+      'runMigrations', 'readCommittedCursor', 'createLiveDelivery',
     ]),
   }),
   'workbench/client': Object.freeze({

@@ -2,7 +2,6 @@
 
 import type {
   BoundWorkbenchEntity,
-  CommittedEvent,
   EntityDeclaration,
   Principal,
   UserPrincipal,
@@ -452,11 +451,60 @@ export function readCommittedCursor(
   scope: string,
 ): number;
 
-export function readCommittedEventsSince(
-  db: WorkbenchDatabase,
-  scope: string,
-  cursor: number,
-): CommittedEvent[];
+export type LiveDeliveryEnvelope =
+  | {
+      readonly type: 'event';
+      readonly entity: string;
+      readonly id: string;
+      readonly seq: number;
+      readonly seqSpan: readonly [number, number];
+      readonly event: {
+        readonly type: string;
+        readonly scope: string;
+        readonly seq: number;
+        readonly actionId: string;
+        readonly committedAt: string;
+        readonly data: Readonly<Record<string, unknown>>;
+      };
+    }
+  | {
+      readonly type: 'resync';
+      readonly entity: string;
+      readonly id: string;
+      readonly seq: number;
+      readonly reason: 'recipient-snapshot-required' | 'annotated-text-snapshot-required';
+    };
+
+export interface LiveDeliverySubscription {
+  readonly principal: Principal;
+  readonly scope: string;
+  readonly after?: number;
+  readonly signal: AbortSignal;
+  readonly deliver: (batch: readonly LiveDeliveryEnvelope[]) => void | Promise<void>;
+}
+
+export interface LiveDeliveryActivation {
+  activate(): Promise<void>;
+}
+
+export interface LiveDeliveryEntity {
+  readonly name: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  scopeFilter(principal: Principal): { sql: string; params: Readonly<Record<string, unknown>> };
+  hydrate?(raw: unknown, principal: Principal): Record<string, unknown> | null | undefined;
+}
+
+export interface LiveDelivery {
+  subscribe(input: LiveDeliverySubscription): Promise<LiveDeliveryActivation>;
+  wake(scope: string): void;
+}
+
+export function createLiveDelivery(options: {
+  db: WorkbenchDatabase;
+  entities: ReadonlyMap<string, LiveDeliveryEntity> | ((name: string) => LiveDeliveryEntity | undefined);
+  mayVerb: (entity: LiveDeliveryEntity, verb: 'subscribe', row: Record<string, unknown>, principal: Principal) => boolean | Promise<boolean>;
+  log?: { error?: (channel: string, message: string, context?: Record<string, unknown>) => void } | null;
+}): LiveDelivery;
 
 // ---------------------------------------------------------------------------
 // Email seam factory

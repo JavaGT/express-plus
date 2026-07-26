@@ -206,7 +206,7 @@ test('P6e-2 B1: value field .updated delta (cold shadow → set-from-empty)', as
     assert.ok(ev1, 'first event received');
     assert.equal(ev1.event.type, 'Canvas.updated');
     assert.ok(ev1.delta, 'delta present on first update');
-    assert.deepEqual(ev1.delta, { title: { set: 'v1' } }, 'cold shadow → set-from-empty delta');
+    assert.deepEqual(ev1.delta, { title: { set: 'v1' }, status: { to: 'draft' } }, 'cold shadow captures the authorized lifecycle state');
     assert.equal(ev1.event.data.title, 'v1', 'whole state preserved');
 
     // 2nd update: diff against v1 → delta shows change
@@ -325,7 +325,7 @@ test('P6e-2 B1: removed evicts shadow → post-recreate delta is set-from-empty'
     await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null } });
     const ev1 = await ws.nextEvent(400);
     assert.ok(ev1, 'first update received');
-    assert.deepEqual(ev1.delta, { title: { set: 'v1' } }, 'first delta set-from-empty');
+    assert.deepEqual(ev1.delta, { title: { set: 'v1' }, status: { to: 'draft' } }, 'first delta captures the authorized lifecycle state');
 
     // Remove — delete row, then append event, then wake.
     // Note: after removal, the subscription is terminated by the core (no auth
@@ -468,7 +468,7 @@ test('P6e-2 B1: unchanged .updated yields {} delta (present but empty)', async (
     await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null } });
     const ev1 = await ws.nextEvent(400);
     assert.ok(ev1, 'first update received');
-    assert.deepEqual(ev1.delta, { title: { set: 'Same' } }, 'first delta set-from-empty');
+    assert.deepEqual(ev1.delta, { title: { set: 'Same' }, status: { to: 'draft' } }, 'first delta captures the authorized lifecycle state');
 
     // Second update with the SAME values — delta should be {} (empty object)
     await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null } });
@@ -514,7 +514,7 @@ test('P6e-2 B1: backward-compat — subscriber receives both delta and event.dat
     assert.ok('event' in ev, 'event key is present on envelope');
     assert.ok(ev.event.data, 'event.data is present (whole state)');
     assert.equal(ev.event.data.title, 'b2', 'whole state title in event.data');
-    assert.deepEqual(ev.delta, { title: { set: 'b2' } }, 'delta computed correctly');
+    assert.deepEqual(ev.delta, { title: { set: 'b2' }, status: { to: 'draft' } }, 'delta is derived from the authorized lifecycle state');
   } finally {
     ws?.close();
     live.close();
