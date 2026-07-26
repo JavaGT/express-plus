@@ -13,7 +13,7 @@ const started = performance.now();
 
 const child = spawn(
   process.execPath,
-  ['--test', '--test-reporter=dot', '--test-timeout=30000', ...process.argv.slice(2)],
+  ['--test', '--test-force-exit', '--test-reporter=dot', '--test-timeout=30000', ...process.argv.slice(2)],
   { cwd: process.cwd(), env: process.env, stdio: ['ignore', output, output] },
 );
 
@@ -37,7 +37,7 @@ if (result.code === 0 && !result.error) {
   if (result.error) console.error(result.error.message);
 
   const log = readFileSync(logPath, 'utf8');
-  const failureStart = log.search(/failing tests:/i);
+  const failureStart = log.search(/failed tests:/i);
   const relevant = failureStart === -1 ? log : log.slice(failureStart);
   const excerpt = relevant.split('\n').slice(0, MAX_FAILURE_LINES).join('\n').slice(0, MAX_FAILURE_CHARS);
   if (excerpt) console.error(excerpt);

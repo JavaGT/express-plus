@@ -23,6 +23,7 @@ const started = performance.now();
 const child = spawn(process.execPath, [
   '--experimental-test-coverage',
   '--test',
+  '--test-force-exit',
   '--test-timeout=30000',
   ...process.argv.slice(3),
 ], {
@@ -43,7 +44,7 @@ if (result.code !== 0 || result.error) {
   console.error(`FAIL node --experimental-test-coverage --test (${seconds}s${result.signal ? `, signal ${result.signal}` : ''})`);
   if (result.error) console.error(result.error.message);
 
-  const failureStart = log.search(/failing tests:/i);
+  const failureStart = log.search(/failed tests:/i);
   const relevant = failureStart === -1 ? log : log.slice(failureStart);
   const excerpt = relevant.split('\n').slice(0, MAX_FAILURE_LINES).join('\n').slice(0, MAX_FAILURE_CHARS);
   if (excerpt) console.error(excerpt);
