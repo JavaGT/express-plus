@@ -110,6 +110,10 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
   async function catchUp(subId) {
     const sub = subs.get(subId);
     if (!sub || !sub.active) return;
+    if (sub.paused) {
+      sub.dirty = true;
+      return;
+    }
     sub.pending = true;
     try {
       while (true) {
@@ -211,7 +215,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  async function subscribe({ principal, scope, after = 0, signal, deliver }) {
+  async function subscribe({ principal, scope, after = 0, signal, deliver, paused = false }) {
     if (closed) throw new Error('live-delivery-core is closed');
     if (signal?.aborted) return;
     const handle = tryParseScopeKey(scope);
@@ -242,7 +246,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
       throw new Error(`subscribe authorization denied for scope '${scope}'`);
     }
     const subId = generateSubId();
-    const sub = { entityRec, principal, deliver, signal, cursor: after, pending: false, dirty: false, scope, active: true };
+    const sub = { entityRec, principal, deliver, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true };
     subs.set(subId, sub);
     let set = byScope.get(scope);
     if (!set) { set = new Set(); byScope.set(scope, set); }
@@ -256,13 +260,19 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         throw new Error('subscription aborted');
       }
     }
-    try {
-      await catchUp(subId);
-    } catch (err) {
-      removeSub(subId);
-      throw err;
+    async function activate() {
+      const current = subs.get(subId);
+      if (!current || !current.active) return;
+      current.paused = false;
+      try {
+        await catchUp(subId);
+      } catch (err) {
+        removeSub(subId);
+        throw err;
+      }
     }
-    if (!sub.active) return;
+    if (paused) return { activate };
+    await activate();
   }
 
   async function wake(scope) {
@@ -272,6 +282,10 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     for (const subId of set) {
       const sub = subs.get(subId);
       if (!sub || !sub.active) continue;
+      if (sub.paused) {
+        sub.dirty = true;
+        continue;
+      }
       if (sub.pending) {
         sub.dirty = true;
       } else {

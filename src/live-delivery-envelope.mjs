@@ -9,12 +9,38 @@
 
 import { createDeltaProjector } from './field-delta.mjs';
 import { EventKind, parseEventType } from './event-handle.mjs';
-import { publicEvent } from './event-delivery.mjs';
 import { createdTextReducerSeeds } from './text-reducer-transport.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 
 function hasAnnotatedText(entityRecord) {
   return Object.values(entityRecord.fields ?? {}).some((field) => field?.kind === 'annotatedText');
+}
+
+function assertCommittedSequence(event) {
+  if (!Number.isSafeInteger(event.seq) || event.seq < 0) {
+    throw new Error('invalid committed event sequence');
+  }
+}
+
+function recovery(ctx, entity, id, reason) {
+  return [{ type: 'resync', entity, id, seq: ctx.event.seq, reason }];
+}
+
+function recipientLifecycleData(ctx, handle, id) {
+  if (handle.kind === EventKind.removed) return { id };
+  if (!ctx.row || typeof ctx.row !== 'object' || Array.isArray(ctx.row)) return null;
+
+  const source = ctx.event.data;
+  if (!source || typeof source !== 'object' || Array.isArray(source)) return null;
+  const declared = ctx.entity?.fields ?? {};
+  const keys = handle.kind === EventKind.created
+    ? Object.keys(declared)
+    : Object.keys(source).filter((key) => key !== 'id' && Object.hasOwn(declared, key));
+  const data = { id };
+  for (const key of keys) {
+    if (Object.hasOwn(ctx.row, key)) data[key] = ctx.row[key];
+  }
+  return data;
 }
 
 export function createLiveEnvelopeBuilder() {
@@ -34,58 +60,48 @@ export function createLiveEnvelopeBuilder() {
   function buildEnvelope(ctx) {
     const handle = tryParseScopeKey(ctx.scope);
     if (!handle) return [];
+    assertCommittedSequence(ctx.event);
 
     const entityName = handle.entity;
     const id = handle.id;
 
-    // _Log rows carry storage columns such as eventType/eventData. Expose only
-    // the committed public event grammar, never the raw durable row.
-    const event = {
+    // _Log rows carry storage columns such as eventType/eventData. The durable
+    // payload is rebuilt below from the recipient-hydrated row, never copied.
+    const loggedEvent = {
       type: ctx.event.eventType ?? ctx.event.type,
       scope: ctx.event.scope,
       seq: ctx.event.seq,
       actionId: ctx.event.actionId,
       committedAt: ctx.event.committedAt,
-      data: ctx.event.data,
     };
 
     let evHandle;
     try {
-      evHandle = parseEventType(event.type);
-      Object.defineProperty(event, 'handle', { value: evHandle, enumerable: false });
+      evHandle = parseEventType(loggedEvent.type);
     } catch {
-      return [];
+      throw new Error('invalid committed event type');
     }
 
-    const isAnnotatedTextOperated =
-      evHandle.kind === EventKind.native &&
-      evHandle.nativeName === 'operated' &&
-      ctx.entity?.fields?.[evHandle.field]?.kind === 'annotatedText';
-
-    if (isAnnotatedTextOperated) {
-      return [{
-        type: 'resync',
-        entity: entityName,
-        id,
-        seq: ctx.event.seq,
-        reason: 'annotated-text-snapshot-required',
-      }];
+    const lifecycle = [EventKind.created, EventKind.updated, EventKind.removed].includes(evHandle.kind);
+    if (evHandle.entity !== entityName) {
+      // Jobs are scoped to an authorized anchor (for example Note:n1), but
+      // have no recipient-hydrated lifecycle grammar yet.
+      if (evHandle.entity !== '_Job' || !lifecycle) {
+        throw new Error('committed event entity does not match delivery scope');
+      }
+      return recovery(ctx, entityName, id, 'recipient-snapshot-required');
     }
 
-    const isAnnotatedTextEphemeral =
-      evHandle.kind === EventKind.fieldSet &&
-      ctx.entity?.fields?.[evHandle.field]?.kind === 'ephemeral' &&
-      hasAnnotatedText(ctx.entity);
-
-    if (isAnnotatedTextEphemeral) {
-      return [{
-        type: 'resync',
-        entity: entityName,
-        id,
-        seq: ctx.event.seq,
-        reason: 'annotated-text-snapshot-required',
-      }];
+    if (!lifecycle) {
+      return recovery(ctx, entityName, id, hasAnnotatedText(ctx.entity)
+        ? 'annotated-text-snapshot-required'
+        : 'recipient-snapshot-required');
     }
+
+    const data = recipientLifecycleData(ctx, evHandle, id);
+    if (!data) throw new Error('invalid lifecycle event data');
+    const event = { ...loggedEvent, data };
+    Object.defineProperty(event, 'handle', { value: evHandle, enumerable: false });
 
     const delta = deltaProjector.project(ctx.entity, id, ctx.row, event);
     const envelope = {
@@ -94,7 +110,7 @@ export function createLiveEnvelopeBuilder() {
       id,
       seq: ctx.event.seq,
       seqSpan: [ctx.event.seq, ctx.event.seq],
-      event: publicEvent(event),
+      event,
     };
     if (delta !== undefined) envelope.delta = delta;
     const reducers = createdTextReducerSeeds(ctx.entity, event);

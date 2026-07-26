@@ -123,6 +123,17 @@ async function boot(t, mounts) {
   return { app, db, origin: `http://127.0.0.1:${port}`, port };
 }
 
+function appendLiveEvent(app, scope, type) {
+  const seq = app.db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM _Log WHERE scope = ?').get(scope).seq;
+  app.db.prepare(
+    'INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET lastSeq = ?',
+  ).run(scope, seq, seq);
+  app.db.prepare(
+    'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(scope, seq, type, '{}', 'test-action', new Date(0).toISOString());
+  app.live.wake(scope);
+}
+
 function readableArticle() {
   return entity('D5Article', {
         title: text(),
@@ -247,14 +258,7 @@ test('D5 readable-but-not-writable rows deny write through every row-auth seam',
   const ws = await assertSubscribeAdmitted(port, 'D5Article', 'a1', alice.id);
   try {
     db.prepare('UPDATE D5Article SET owner = ? WHERE id = ?').run('charlie', 'a1');
-    const Article_b = app.entity(Article);
-    await app.live.emit(Article_b, 'a1', { id: 'a1', title: 'Changed', owner: 'charlie' }, {
-      type: 'D5Article.updated',
-      seq: 1,
-      data: { id: 'a1', title: 'Changed' },
-      actionId: 'd5-fanout-deny',
-      committedAt: new Date(0).toISOString(),
-    });
+    appendLiveEvent(app, 'D5Article:a1', 'D5Article.updated');
     assert.equal(await ws.nextEvent(250), null);
   } finally {
     ws.close();
@@ -294,14 +298,7 @@ test('D5 inherited rows delegate every transport decision to the parent row gran
 
   const ws = await assertSubscribeAdmitted(port, 'D5ProjectChild', 'c1', bob.id);
   try {
-    const Child_b = app.entity(Child);
-    await app.live.emit(Child_b, 'c1', { id: 'c1', project: 'p1', title: 'Changed' }, {
-      type: 'D5ProjectChild.updated',
-      seq: 1,
-      data: { id: 'c1', title: 'Changed' },
-      actionId: 'd5-inherit-fanout',
-      committedAt: new Date(0).toISOString(),
-    });
+    appendLiveEvent(app, 'D5ProjectChild:c1', 'D5ProjectChild.updated');
     const event = await ws.nextEvent();
     assert.ok(event);
     assert.equal(event.event.type, 'D5ProjectChild.updated');
@@ -338,14 +335,7 @@ test('D5 scope-only rows stay admitted by mayRow across transports', async (t) =
 
   const ws = await assertSubscribeAdmitted(port, 'D5ScopeOnlyRecord', row.id, bob.id);
   try {
-    const ScopeOnly_b = app.entity(ScopeOnly);
-    await app.live.emit(ScopeOnly_b, row.id, { id: row.id, title: 'Live' }, {
-      type: 'D5ScopeOnlyRecord.updated',
-      seq: 2,
-      data: { id: row.id, title: 'Live' },
-      actionId: 'd5-scope-only-fanout',
-      committedAt: new Date(0).toISOString(),
-    });
+    appendLiveEvent(app, `D5ScopeOnlyRecord:${row.id}`, 'D5ScopeOnlyRecord.updated');
     const event = await ws.nextEvent();
     assert.ok(event);
     assert.equal(event.event.type, 'D5ScopeOnlyRecord.updated');

@@ -13,7 +13,7 @@ import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import workbench, {
-  anyOf, executeDDL } from '../src/internal.mjs';
+  anyOf, executeDDL, executeFrameworkDDL } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
 
 const owner = principal({ type: 'user', id: 'owner-1' });
@@ -51,6 +51,7 @@ function projectEntities() {
 function seedProjectDocuments() {
   const db = new DatabaseSync(':memory:');
   const { Project, ProjectDocument } = projectEntities();
+  executeFrameworkDDL(db);
   executeDDL(Project, db);
   executeDDL(ProjectDocument, db);
   db.prepare('INSERT INTO Project (id, title, owner) VALUES (?, ?, ?)')
@@ -64,6 +65,17 @@ function seedProjectDocuments() {
   db.prepare('INSERT INTO ProjectDocument (id, project, title) VALUES (?, ?, ?)')
     .run('d2', 'p2', 'Private document');
   return { db, Project, ProjectDocument };
+}
+
+function appendLiveEvent(app, scope, type) {
+  const seq = app.db.prepare('SELECT COALESCE(MAX(seq), 0) + 1 AS seq FROM _Log WHERE scope = ?').get(scope).seq;
+  app.db.prepare(
+    'INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET lastSeq = ?',
+  ).run(scope, seq, seq);
+  app.db.prepare(
+    'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(scope, seq, type, '{}', 'test-action', new Date(0).toISOString());
+  app.live.wake(scope);
 }
 
 async function serveProjectDocuments(t, who) {
@@ -99,7 +111,7 @@ async function serveProjectDocumentsByHeader(t) {
     db.close();
   });
   const { port } = app.httpServer.address();
-  return { app, port, ProjectDocument };
+  return { app, port };
 }
 
 function openRawWS(port, userId) {
@@ -233,8 +245,7 @@ test('non-members cannot see child documents inherited from private projects', a
 });
 
 test('project members receive live child events through inherited project membership', async (t) => {
-  const { app, port, ProjectDocument } = await serveProjectDocumentsByHeader(t);
-  const ProjectDocument_b = app.entity(ProjectDocument);
+  const { app, port } = await serveProjectDocumentsByHeader(t);
   let ws;
   try {
     ws = await openRawWS(port, member.id);
@@ -242,13 +253,7 @@ test('project members receive live child events through inherited project member
     const ack = await ws.nextMessage();
     assert.equal(ack.type, 'subscribed');
 
-    await app.live.emit(ProjectDocument_b, 'd1', { id: 'd1', project: 'p1', title: 'Shared document' }, {
-      type: 'ProjectDocument.updated',
-      seq: 1,
-      data: { id: 'd1', title: 'Changed remotely' },
-      actionId: 'test-action',
-      committedAt: new Date(0).toISOString(),
-    });
+    appendLiveEvent(app, 'ProjectDocument:d1', 'ProjectDocument.updated');
 
     const event = await ws.nextEvent();
     assert.ok(event, 'member subscriber receives the child event');

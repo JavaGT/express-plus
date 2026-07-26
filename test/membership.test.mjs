@@ -11,7 +11,7 @@ import { connect as tcpConnect } from 'node:net';
 import { randomBytes } from 'node:crypto';
 
 import workbench, {
-  anyOf, executeDDL } from '../src/internal.mjs';
+  anyOf, executeDDL, executeFrameworkDDL } from '../src/internal.mjs';
 import { principal } from '../src/principal.mjs';
 
 const owner = principal({ type: 'user', id: 'owner-1' });
@@ -180,6 +180,19 @@ function openRawWS(port, userId) {
   });
 }
 
+function emitLiveLog(app, entityRec, id, row, opts) {
+  const scope = `${entityRec.name}:${id}`;
+  const db = app.db;
+  const seq = opts.seq ?? 1;
+  db.prepare(
+    'INSERT OR REPLACE INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)'
+  ).run(scope, seq, opts.type, JSON.stringify(opts.data ?? {}), opts.actionId, opts.committedAt);
+  db.prepare(
+    'INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET lastSeq = ?'
+  ).run(scope, seq, seq);
+  app.live.wake(scope);
+}
+
 test('membership: owner can read their project', async (t) => {
   const { origin } = await serveProjectDocuments(t, owner);
 
@@ -263,18 +276,13 @@ test('membership: members can subscribe to live events on parent rows', async (t
     const ack = await ws.nextMessage();
     assert.equal(ack.type, 'subscribed');
 
-    await app.live.emit(
-      Project_b,
-      'p1',
-      { id: 'p1', title: 'Shared project', owner: owner.id },
-      {
-        type: 'Project.updated',
-        seq: 1,
-        data: { id: 'p1', title: 'Changed remotely' },
-        actionId: 'test-action',
-        committedAt: new Date(0).toISOString(),
-      },
-    );
+    await emitLiveLog(app, Project_b, 'p1', { id: 'p1', title: 'Shared project', owner: owner.id }, {
+      type: 'Project.updated',
+      seq: 1,
+      data: { id: 'p1', title: 'Changed remotely' },
+      actionId: 'test-action',
+      committedAt: new Date(0).toISOString(),
+    });
 
     const event = await ws.nextEvent();
     assert.ok(event, 'member subscriber receives the parent event');
@@ -294,18 +302,13 @@ test('membership: members can subscribe to live events on inherited child rows',
     const ack = await ws.nextMessage();
     assert.equal(ack.type, 'subscribed');
 
-    await app.live.emit(
-      ProjectDocument_b,
-      'd1',
-      { id: 'd1', project: 'p1', title: 'Shared document' },
-      {
+    await emitLiveLog(app, ProjectDocument_b, 'd1', { id: 'd1', project: 'p1', title: 'Shared document' }, {
         type: 'ProjectDocument.updated',
         seq: 1,
         data: { id: 'd1', title: 'Changed remotely' },
         actionId: 'test-action',
         committedAt: new Date(0).toISOString(),
-      },
-    );
+      });
 
     const event = await ws.nextEvent();
     assert.ok(event, 'member subscriber receives the child event');

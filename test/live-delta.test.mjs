@@ -2,6 +2,10 @@
 // events ONLY. Delta is computed from committed-state vs prior committed shadow,
 // attached alongside event.data (one-path backward-compat, #71 F5).
 //
+// Reworked: no public `live.emit`. All durable events use canonical _Log insert
+// → _Cursor update → live.wake(scope). Lifecycle envelope payload derives from
+// CURRENT Canvas DB row, so test helpers persist relevant values before appending.
+//
 // All tests use raw WebSocket against a direct createLiveServer + compiled entity
 // (mirrors live-pace.test.mjs).
 
@@ -16,14 +20,15 @@ import http from 'node:http';
 import {
   entity, generateDDL, executeFrameworkDDL, createLiveServer } from '../src/internal.mjs';
 import { createTextState, textCheckpoint } from '../src/annotated-text.mjs';
+import { readSeq } from '../src/committed-log.mjs';
 
 // --- test entity ---
 
 const Canvas = entity('Canvas', {
-    title: text(),
+  title: text(),
   status: state({ values: ['draft', 'published'] }),
   body: text.crdt(),
-  share: link(),  // struct (dormant-but-correct — .updated doesn't persist struct),
+  share: link(),
 
   grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
@@ -111,7 +116,7 @@ function openRawWS(port, userId = 'test') {
       while (Date.now() - start <= timeoutMs) {
         while (inbox.length > 0) {
           const msg = JSON.parse(inbox.shift());
-          if (msg.type === 'event') return msg;
+          if (msg.type === 'event' || msg.type === 'resync') return msg;
         }
         await new Promise((r) => setTimeout(r, 20));
       }
@@ -156,38 +161,22 @@ function insertRow(db, id, overrides = {}) {
   db.prepare('INSERT INTO Canvas (id, title, status, body) VALUES (?, ?, ?, ?)').run(id, title, status, body);
 }
 
-// Helper: re-read a row from db (for emit's row param)
-function reRead(db, id) {
-  return db.prepare('SELECT * FROM Canvas WHERE id = ?').get(id);
+// Helper: append a durable event to _Log, update _Cursor, and wake live.
+// The caller is responsible for updating the Canvas DB row to the desired
+// state BEFORE calling this — the envelope payload derives from the CURRENT row.
+function emitEvent({ db, live, scope, type, data = {} }) {
+  const seq = readSeq(db, scope) + 1;
+  db.prepare(
+    'INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET lastSeq = ?',
+  ).run(scope, seq, seq);
+  db.prepare(
+    'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run(scope, seq, type, JSON.stringify(data), 'test-action', new Date().toISOString());
+  live.wake(scope);
+  return seq;
 }
 
-// Helper: emit an update event (simulates kernel post-commit)
-function emitUpdated(live, entityRecord, db, id, seq, data) {
-  const row = reRead(db, id);
-  return live.emit(entityRecord, id, row, {
-    type: 'Canvas.updated', seq,
-    data: { id, ...data },
-  });
-}
-
-// Helper: emit a created event
-function emitCreated(live, entityRecord, db, id, seq, data) {
-  const row = reRead(db, id);
-  return live.emit(entityRecord, id, row, {
-    type: 'Canvas.created', seq,
-    data: { id, ...data },
-  });
-}
-
-// Helper: emit a removed event
-function emitRemoved(live, entityRecord, db, id, seq) {
-  return live.emit(entityRecord, id, undefined, {
-    type: 'Canvas.removed', seq,
-  });
-}
-
-// Helper: subscribe and wait for ack (named wsSubscribe to avoid collision with
-// the imported `subscribe` grant-capability used in the entity declaration).
+// Helper: subscribe and wait for ack
 async function wsSubscribe(ws, entity, id) {
   ws.send(JSON.stringify({ type: 'subscribe', entity, id }));
   return ws.nextMessage();
@@ -198,20 +187,21 @@ async function wsSubscribe(ws, entity, id) {
 // ============================================================
 
 test('P6e-2 B1: value field .updated delta (cold shadow → set-from-empty)', async () => {
-  const { db, httpServer, live, boundCanvas } = bootServer();
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test1';
+  const scope = 'Canvas:' + cid;
 
   try {
     insertRow(db, cid, { title: 'v1' });
-    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
 
     // 1st update: cold shadow → set-from-empty delta
-    await emitUpdated(live, entityRecord, db, cid, 1, { title: 'v1' });
+    db.prepare('UPDATE Canvas SET title = ? WHERE id = ?').run('v1', cid);
+    await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null } });
     const ev1 = await ws.nextEvent(400);
     assert.ok(ev1, 'first event received');
     assert.equal(ev1.event.type, 'Canvas.updated');
@@ -221,7 +211,7 @@ test('P6e-2 B1: value field .updated delta (cold shadow → set-from-empty)', as
 
     // 2nd update: diff against v1 → delta shows change
     db.prepare('UPDATE Canvas SET title = ? WHERE id = ?').run('v2', cid);
-    await emitUpdated(live, entityRecord, db, cid, 2, { title: 'v2' });
+    await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null } });
     const ev2 = await ws.nextEvent(400);
     assert.ok(ev2, 'second event received');
     assert.ok(ev2.delta, 'delta present on second update');
@@ -235,57 +225,38 @@ test('P6e-2 B1: value field .updated delta (cold shadow → set-from-empty)', as
 });
 
 // ============================================================
-// Test 2: crdt field `.updated` delta — per-element diff (insert-op object)
+// Test 2: non-lifecycle durable events → recipient-snapshot-required
 // ============================================================
 
-test('text.crdt native events carry their exact operation instead of a whole-value delta', async () => {
-  const { db, httpServer, live, boundCanvas } = bootServer();
+test('non-lifecycle durable events produce recipient-snapshot-required resync', async () => {
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test2';
+  const scope = 'Canvas:' + cid;
 
   try {
     insertRow(db, cid);
-    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
 
-    const operation = ['workbench.text', 1, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1], 1, [], ['insert', ['root'], 'hello']];
-    await live.emit(entityRecord, cid, reRead(db, cid), {
-      type: 'Canvas.body.applied', seq: 1, data: { id: cid, operation },
+    // A non-lifecycle event (3-part type) — no canonical event type/data/op leak
+    await emitEvent({
+      db, live, scope,
+      type: 'Canvas.body.applied',
+      data: { id: cid, operation: ['workbench.text', 1, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1], 1, [], ['insert', ['root'], 'hello']] },
     });
     const ev = await ws.nextEvent(400);
-    assert.ok(ev, 'event received');
-    assert.equal(ev.event.type, 'Canvas.body.applied');
-    assert.deepEqual(ev.event.data, { id: cid, operation });
-    assert.equal(ev.delta, undefined);
-  } finally {
-    ws?.close();
-    live.close();
-    httpServer.close();
-  }
-});
-
-test('text.crdt created live envelopes seed empty reducer sidecars', async () => {
-  const { db, httpServer, live, boundCanvas } = bootServer();
-  const port = httpServer.address().port;
-  let ws;
-  const cid = 'c-text-created';
-
-  try {
-    insertRow(db, cid);
-    ws = await openRawWS(port, 'alice');
-    assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
-    await live.emit(boundCanvas, cid, reRead(db, cid), {
-      type: 'Canvas.created', seq: 1, data: { id: cid, title: 'new', body: '' },
-    });
-    const ev = await ws.nextEvent(400);
-    assert.equal(ev.event.type, 'Canvas.created');
-    assert.equal(ev.reducers.length, 1);
-    assert.deepEqual(Object.keys(ev.reducers[0]).sort(), ['checkpoint', 'entity', 'field', 'id', 'reducer', 'version']);
-    assert.equal(ev.reducers[0].reducer, 'workbench.text');
-    assert.deepEqual(ev.reducers[0].checkpoint.operations, {});
+    assert.ok(ev, 'resync received');
+    assert.equal(ev.type, 'resync');
+    assert.equal(ev.entity, 'Canvas');
+    assert.equal(ev.id, cid);
+    assert.equal(ev.reason, 'recipient-snapshot-required');
+    assert.ok(Number.isSafeInteger(ev.seq) && ev.seq > 0, 'seq present');
+    // No canonical event type/data/op leak
+    assert.equal(ev.event, undefined, 'no event envelope leaked');
+    assert.equal(ev.delta, undefined, 'no delta leaked');
   } finally {
     ws?.close();
     live.close();
@@ -298,26 +269,26 @@ test('text.crdt created live envelopes seed empty reducer sidecars', async () =>
 // ============================================================
 
 test('P6e-2 B1: state field .updated delta ({from, to})', async () => {
-  const { db, httpServer, live, boundCanvas } = bootServer();
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test3';
+  const scope = 'Canvas:' + cid;
 
   try {
     insertRow(db, cid, { status: 'draft' });
-    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
 
     // Emit .created to seed the prev-shadow with status='draft' (mirrors production).
-    await emitCreated(live, entityRecord, db, cid, 1, { status: 'draft' });
+    await emitEvent({ db, live, scope, type: 'Canvas.created', data: { id: cid } });
     const evSeed = await ws.nextEvent(400);
     assert.ok(evSeed, 'created event received');
 
     // Update status from draft to published
     db.prepare('UPDATE Canvas SET status = ? WHERE id = ?').run('published', cid);
-    await emitUpdated(live, entityRecord, db, cid, 2, { status: 'published' });
+    await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { status: null } });
     const ev = await ws.nextEvent(400);
     assert.ok(ev, 'event received');
     assert.equal(ev.event.type, 'Canvas.updated');
@@ -337,47 +308,53 @@ test('P6e-2 B1: state field .updated delta ({from, to})', async () => {
 // ============================================================
 
 test('P6e-2 B1: removed evicts shadow → post-recreate delta is set-from-empty', async () => {
-  const { db, httpServer, live, boundCanvas } = bootServer();
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test4';
+  const scope = 'Canvas:' + cid;
 
   try {
     insertRow(db, cid, { title: 'v1' });
-    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
 
     // Update to seed shadow
-    await emitUpdated(live, entityRecord, db, cid, 1, { title: 'v1' });
+    db.prepare('UPDATE Canvas SET title = ? WHERE id = ?').run('v1', cid);
+    await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null } });
     const ev1 = await ws.nextEvent(400);
     assert.ok(ev1, 'first update received');
     assert.deepEqual(ev1.delta, { title: { set: 'v1' } }, 'first delta set-from-empty');
 
-    // Remove — evicts shadow
-    await emitRemoved(live, entityRecord, db, cid, 2);
+    // Remove — delete row, then append event, then wake.
+    // Note: after removal, the subscription is terminated by the core (no auth
+    // row for subsequent events), so we must resubscribe for the recreate cycle.
+    db.prepare('DELETE FROM Canvas WHERE id = ?').run(cid);
+    await emitEvent({ db, live, scope, type: 'Canvas.removed', data: { id: cid } });
     const evRemove = await ws.nextEvent(400);
     assert.ok(evRemove, 'removed event received');
     assert.equal(evRemove.event.type, 'Canvas.removed');
-    // The remove handler DELETEd the row in production; mirror that here so the
-    // re-create INSERT below doesn't UNIQUE-fail on the still-present row.
-    db.prepare('DELETE FROM Canvas WHERE id = ?').run(cid);
 
-    // Re-create row (same id)
-    db.prepare('INSERT INTO Canvas (id, title, status, body) VALUES (?, ?, ?, ?)').run(cid, 'reborn', 'draft', '');
+    // Re-create through the normal fixture so CRDT hydration stays valid.
+    insertRow(db, cid, { title: 'reborn' });
+
+    // Resubscribe — fresh cursor, fresh shadow
+    ws.close();
+    ws = await openRawWS(port, 'alice');
+    const subAck = await wsSubscribe(ws, 'Canvas', cid);
+    assert.equal(subAck?.type, 'subscribed', `expected 'subscribed', got ${JSON.stringify(subAck)}`);
 
     // Emit created (seeds the shadow)
-    await emitCreated(live, entityRecord, db, cid, 3, { title: 'reborn', status: 'draft', body: '' });
+    await emitEvent({ db, live, scope, type: 'Canvas.created', data: { id: cid } });
     const evCreated = await ws.nextEvent(400);
     assert.ok(evCreated, 'created event received');
     assert.equal(evCreated.event.type, 'Canvas.created');
-    // created has no delta
     assert.equal(evCreated.delta, undefined, 'created has no delta');
 
     // Now update the re-created row — should be set-from-empty (NOT diffed against stale v1)
     db.prepare('UPDATE Canvas SET title = ? WHERE id = ?').run('reborn-v2', cid);
-    await emitUpdated(live, entityRecord, db, cid, 4, { title: 'reborn-v2' });
+    await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null } });
     const evPost = await ws.nextEvent(400);
     assert.ok(evPost, 'post-recreate update received');
     assert.ok(evPost.delta, 'delta present on post-recreate update');
@@ -395,20 +372,20 @@ test('P6e-2 B1: removed evicts shadow → post-recreate delta is set-from-empty'
 // ============================================================
 
 test('P6e-2 B1: created event has no delta', async () => {
-  const { db, httpServer, live, boundCanvas } = bootServer();
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test5';
+  const scope = 'Canvas:' + cid;
 
   try {
     insertRow(db, cid, { title: 'Fresh' });
-    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
 
     // Emit created (already subscribed — receives the event)
-    await emitCreated(live, entityRecord, db, cid, 1, { title: 'Fresh' });
+    await emitEvent({ db, live, scope, type: 'Canvas.created', data: { id: cid } });
     const ev = await ws.nextEvent(400);
     assert.ok(ev, 'created event received');
     assert.equal(ev.event.type, 'Canvas.created');
@@ -426,26 +403,26 @@ test('P6e-2 B1: created event has no delta', async () => {
 // ============================================================
 
 test('P6e-2 B1: multi-field .updated is ONE envelope with multi-key delta map', async () => {
-  const { db, httpServer, live, boundCanvas } = bootServer();
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test6';
+  const scope = 'Canvas:' + cid;
 
   try {
     insertRow(db, cid, { title: 'Old', status: 'draft' });
-    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
 
     // Emit .created to seed the prev-shadow with title='Old', status='draft'.
-    await emitCreated(live, entityRecord, db, cid, 1, { title: 'Old', status: 'draft' });
+    await emitEvent({ db, live, scope, type: 'Canvas.created', data: { id: cid } });
     const evSeed = await ws.nextEvent(400);
     assert.ok(evSeed, 'created event received');
 
     // Update both title AND status
     db.prepare('UPDATE Canvas SET title = ?, status = ? WHERE id = ?').run('New Title', 'published', cid);
-    await emitUpdated(live, entityRecord, db, cid, 2, { title: 'New Title', status: 'published' });
+    await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null, status: null } });
     const ev = await ws.nextEvent(400);
     assert.ok(ev, 'event received');
     assert.equal(ev.event.type, 'Canvas.updated');
@@ -474,26 +451,27 @@ test('P6e-2 B1: multi-field .updated is ONE envelope with multi-key delta map', 
 // ============================================================
 
 test('P6e-2 B1: unchanged .updated yields {} delta (present but empty)', async () => {
-  const { db, httpServer, live, boundCanvas } = bootServer();
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test7';
+  const scope = 'Canvas:' + cid;
 
   try {
     insertRow(db, cid, { title: 'Same', status: 'draft' });
-    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
 
     // First update to seed shadow
-    await emitUpdated(live, entityRecord, db, cid, 1, { title: 'Same' });
+    db.prepare('UPDATE Canvas SET title = ? WHERE id = ?').run('Same', cid);
+    await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null } });
     const ev1 = await ws.nextEvent(400);
     assert.ok(ev1, 'first update received');
     assert.deepEqual(ev1.delta, { title: { set: 'Same' } }, 'first delta set-from-empty');
 
     // Second update with the SAME values — delta should be {} (empty object)
-    await emitUpdated(live, entityRecord, db, cid, 2, { title: 'Same' });
+    await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null } });
     const ev2 = await ws.nextEvent(400);
     assert.ok(ev2, 'second update received');
     assert.ok(ev2.delta, 'delta present');
@@ -511,28 +489,23 @@ test('P6e-2 B1: unchanged .updated yields {} delta (present but empty)', async (
 // ============================================================
 
 test('P6e-2 B1: backward-compat — subscriber receives both delta and event.data', async () => {
-  const { db, httpServer, live, boundCanvas } = bootServer();
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const cid = 'c-test8';
+  const scope = 'Canvas:' + cid;
 
   try {
     insertRow(db, cid, { title: 'b1' });
-    const entityRecord = boundCanvas;
 
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Canvas', cid))?.type, 'subscribed');
-
-    // Subscribe with NO fields/pace (no pace, no field interest — bare subscriber)
-    // This exercises the delta-unaware backward-compat path: the envelope carries
-    // delta alongside event.data so a subscriber using event.data exclusively sees
-    // the whole state as before.
 
     // UPDATE the DB to 'b2' so the post-commit re-read (authzRow) matches the
     // mutation payload — mirrors production, where the .update handler applies the
     // mutation BEFORE the post-commit consumer re-reads.
     db.prepare('UPDATE Canvas SET title = ? WHERE id = ?').run('b2', cid);
-    await emitUpdated(live, entityRecord, db, cid, 1, { title: 'b2' });
+    await emitEvent({ db, live, scope, type: 'Canvas.updated', data: { title: null } });
     const ev = await ws.nextEvent(400);
     assert.ok(ev, 'event received');
     assert.equal(ev.event.type, 'Canvas.updated');

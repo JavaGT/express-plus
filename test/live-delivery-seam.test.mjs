@@ -127,6 +127,7 @@ function makeNoteEntity() {
     name: 'Note',
     hydrate: (row) => ({ ...row }),
     scopeFilter: () => ({ sql: '1=1', params: {} }),
+    fields: { title: { kind: 'value' } },
     grant: [],
   };
 }
@@ -158,7 +159,7 @@ test('createLiveDelivery is the singular factory (createLiveServer is the same f
   assert.equal(createLiveServer, createLiveDelivery);
 });
 
-test('createLiveDelivery returns emit, count, close, and createConsumer', async () => {
+test('createLiveDelivery exposes no public durable fanout', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT)`);
@@ -173,7 +174,7 @@ test('createLiveDelivery returns emit, count, close, and createConsumer', async 
     resolveEntity: () => makeNoteEntity(),
   });
 
-  assert.equal(typeof live.emit, 'function');
+  assert.equal(live.emit, undefined);
   assert.equal(typeof live.count, 'function');
   assert.equal(typeof live.close, 'function');
   assert.equal(typeof live.createConsumer, 'function');
@@ -243,12 +244,8 @@ test('WebSocket subscribe receives ack, consumer delivers core-projected event v
     assert.ok(Number.isSafeInteger(ack.currentSeq), 'currentSeq is present');
 
     // Append a committed event to _Log AFTER subscription
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('world', 'n1');
     appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'world' });
-
-    // Spy on fanout.emit to prove it is NOT called by the consumer.
-    const emittedScopes = [];
-    const origEmit = live.emit;
-    live.emit = (...args) => { emittedScopes.push('emit-called'); return origEmit(...args); };
 
     // Call the post-commit consumer — this is what the kernel calls.
     const consumer = live.createConsumer({
@@ -257,9 +254,6 @@ test('WebSocket subscribe receives ack, consumer delivers core-projected event v
     await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 2, data: { title: 'world' } }], { db });
 
     await sleep(100);
-
-    // Verify consumer did NOT call fanout.emit directly.
-    assert.equal(emittedScopes.length, 0, 'consumer must not call fanout.emit');
 
     // Verify event arrives via WS (core-projected delivery).
     const ev = await ws.nextEvent(200);
@@ -420,6 +414,7 @@ test('(R1) one connection with two entity scopes, unsubscribe one, subsequent co
     assert.equal(ev1, null, 'no event for unsubscribed scope n1');
 
     // Append a committed event to Note:n2 — should still be delivered
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('b-delivered', 'n2');
     appendEvent(db, 'Note:n2', 2, 'Note.updated', { title: 'b-delivered' });
     await consumer([{ scope: 'Note:n2', type: 'Note.updated', seq: 2, data: { title: 'b-delivered' } }], { db });
     await sleep(100);
@@ -441,7 +436,7 @@ test('(R1) one connection with two entity scopes, unsubscribe one, subsequent co
   }
 });
 
-test('(R4) annotated-text generic ephemeral fieldSet yields opaque resync only with no raw data', async () => {
+test('(R4) public live delivery cannot emit an annotated-text ephemeral payload', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   db.exec(`CREATE TABLE Doc (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
@@ -472,33 +467,7 @@ test('(R4) annotated-text generic ephemeral fieldSet yields opaque resync only w
     assert.equal(ack.type, 'subscribed');
     assert.equal(ack.scope, 'Doc:d1');
 
-    // Emit an ephemeral fieldSet event for the 'cursor' field on the annotated-text entity
-    // This goes through the fan-out, which should produce a resync for annotated-text entities
-    // with ephemeral fields, not raw event data.
-    const entity = makeDocWithEphemeralEntity();
-    const row = db.prepare(`SELECT * FROM Doc WHERE id = ?`).get('d1');
-    await live.emit(entity, 'd1', row, {
-      type: 'Doc.cursor.set',
-      seq: 2,
-      data: { owner: 'd1', client: 'secret-client', cells: { offset: 42, selectedText: 'secret body' } },
-    }, {});
-    await sleep(100);
-
-    // Verify resync message arrives, NOT an event with raw data.
-    const resync = await ws.nextResync(200);
-    assert.ok(resync, 'resync message received for ephemeral fieldSet on annotated-text entity');
-    assert.equal(resync.type, 'resync');
-    assert.equal(resync.entity, 'Doc');
-    assert.equal(resync.id, 'd1');
-    assert.equal(resync.seq, 2);
-    assert.equal(resync.reason, 'annotated-text-snapshot-required');
-
-    // Verify NO raw event was delivered
-    const raw = await ws.nextEvent(100);
-    assert.equal(raw, null, 'no raw event delivered for ephemeral fieldSet on annotated-text entity');
-
-    const other = await ws.nextMessage(50);
-    assert.equal(other, null, 'no other messages');
+    assert.equal(live.emit, undefined, 'generic ephemeral fanout is not publicly callable');
   } finally {
     live.close();
     httpServer.close();
@@ -511,11 +480,12 @@ function makeNoteEntityWithGrant() {
     name: 'Note',
     hydrate: (row) => ({ ...row }),
     scopeFilter: () => ({ sql: '1=1', params: {} }),
+    fields: { title: { kind: 'value' } },
     grant: () => [scope(() => true).can(() => grant(read, write, subscribe))],
   };
 }
 
-test('(R6) subscription failure sends no subscribed ack and removes ephemeral fanout subscription', async () => {
+test('(R6) activation failure occurs only after the subscribed acknowledgement', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
@@ -551,15 +521,13 @@ test('(R6) subscription failure sends no subscribed ack and removes ephemeral fa
 
     ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
 
-    // Should get an error, not a subscribed ack
-    const msg = await ws.nextMessage(500);
-    assert.ok(msg, 'response received');
-    assert.equal(msg.type, 'error', 'subscription failure should produce error, not subscribed');
-    assert.ok(msg.failure, 'error should contain failure');
-
-    // Verify no subscribed ack was sent
-    const second = await ws.nextMessage(200);
-    assert.equal(second, null, 'no subscribed ack after core subscription failure');
+    const ack = await ws.nextMessage(500);
+    assert.ok(ack, 'subscribed acknowledgement received');
+    assert.equal(ack.type, 'subscribed');
+    const error = await ws.nextMessage(500);
+    assert.ok(error, 'activation failure is reported after acknowledgement');
+    assert.equal(error.type, 'error');
+    assert.ok(error.failure);
   } finally {
     live.close();
     httpServer.close();

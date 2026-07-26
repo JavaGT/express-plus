@@ -1,7 +1,7 @@
 // Live Delivery — singular public seam for the Deliver loop (SPEC §8).
 //
 // One factory: createLiveDelivery(httpServer, opts) →
-//   { emit, count, close, createConsumer, wake }
+//   { count, close, createConsumer, wake }
 //
 // Owns: WS upgrade, connection lifecycle, fan-out, subscribe admission (via
 // LiveConnection), per-commit authz row latch (createConsumer), and the
@@ -40,7 +40,7 @@ import { readSeq } from './cursor.mjs';
  * @param {Function|null} [options.resolveEntity] — name → entity record
  * @param {Function} [options.ready] — resolves when protocol admission is safe
  * @param {object|null} [options.log] — application-owned structured logger
- * @returns {{ emit: Function, count: Function, close: Function, createConsumer: Function, wake: Function }}
+ * @returns {{ count: Function, close: Function, createConsumer: Function, wake: Function }}
  */
 export function createLiveDelivery(httpServer, {
   path = '/events',
@@ -172,7 +172,6 @@ export function createLiveDelivery(httpServer, {
   }
 
   return {
-    emit: fanout.emit.bind(fanout),
     count,
     close,
     createConsumer,

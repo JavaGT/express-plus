@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import workbench, { entity } from '../src/internal.mjs';
 import { LiveChannel } from '../public/workbench-client.mjs';
+import { createLiveFanout } from '../src/live-fanout.mjs';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -51,6 +52,27 @@ async function patchDoc(origin, id, title) {
   });
   assert.equal(r.status, 200);
   return r.json();
+}
+
+// Minimal fake conn for package-private fanout tests.
+function makeConn(id) {
+  const messages = [];
+  return {
+    id,
+    closed: false,
+    principal: { type: 'user', id: 'test' },
+    send(msg) { messages.push(msg); },
+    drain() { const out = [...messages]; messages.length = 0; return out; },
+  };
+}
+
+function makeEntity({ fields = {} } = {}) {
+  return {
+    name: 'Doc',
+    fields,
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+    findById() { return { id: 'd1', title: 'drawing' }; },
+  };
 }
 
 // --- Tests ---
@@ -215,36 +237,29 @@ test('reconnect after socket drop — re-subscribes and resumes receiving', asyn
 });
 
 test('subscribe sends field interest and pace to server fanout', async () => {
-  const { app, origin, db } = await bootApp();
-  const channel = new LiveChannel(origin);
-  try {
-    const doc = await createDoc(origin, 'drawing');
-    const received = [];
-    await channel.subscribe('Doc', doc.id, {
-      fields: { cursor: true },
-      pace: { profile: '15fps' },
-    }, (envelope) => { received.push(envelope); });
+  const fanout = createLiveFanout({ mayVerb: async () => true });
+  const conn = makeConn('c1');
+  const entity = makeEntity({ fields: { cursor: { kind: 'ephemeral' } } });
 
-    const entityRecord = app.entities.get('Doc');
-    await app.live.emit(entityRecord, doc.id, { id: doc.id, title: 'drawing' }, {
-      type: 'Doc.cursor.set', seq: 1,
-      data: { owner: doc.id, client: 'test', cells: { x: 1, y: 1 } },
-    });
-    await app.live.emit(entityRecord, doc.id, { id: doc.id, title: 'drawing' }, {
-      type: 'Doc.cursor.set', seq: 2,
-      data: { owner: doc.id, client: 'test', cells: { x: 2, y: 2 } },
-    });
-    await sleep(250);
+  fanout.addSubscription('Doc', 'd1', conn, { cursor: true }, { window: 20, by: 'latest-wins' });
 
-    assert.equal(received.length, 1);
-    assert.equal(received[0].event.type, 'Doc.cursor.set');
-    assert.equal(received[0].seq, 2);
-    assert.deepEqual(received[0].seqSpan, [1, 2]);
-  } finally {
-    channel.close();
-    app.httpServer.close();
-    db.close();
-  }
+  await fanout.emit(entity, 'd1', { id: 'd1', title: 'drawing' }, {
+    type: 'Doc.cursor.set', seq: 1,
+    data: { owner: 'd1', client: 'test', cells: { x: 1, y: 1 } },
+  });
+  await fanout.emit(entity, 'd1', { id: 'd1', title: 'drawing' }, {
+    type: 'Doc.cursor.set', seq: 2,
+    data: { owner: 'd1', client: 'test', cells: { x: 2, y: 2 } },
+  });
+
+  await sleep(250);
+
+  const received = conn.drain();
+  assert.equal(received.length, 1);
+  assert.equal(received[0].event.type, 'Doc.cursor.set');
+  assert.equal(received[0].seq, 2);
+  assert.deepEqual(received[0].seqSpan, [1, 2]);
+  fanout.close();
 });
 
 test('close() cleanup — no further deliveries or reconnects', async () => {

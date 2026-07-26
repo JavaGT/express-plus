@@ -77,6 +77,27 @@ test('two concurrent subscriptions share one connection and send desired state o
   channel.close();
 });
 
+test('post-ack activation failure removes the acknowledged subscription', async () => {
+  const { channel, sockets } = harness();
+  const ready = channel.subscribe('Doc', 'd1', () => {});
+  await tick();
+  sockets[0].open();
+  await tick();
+  const request = sockets[0].sent[0];
+  sockets[0].emit('message', { type: 'subscribed', entity: 'Doc', id: 'd1', requestId: request.requestId, currentSeq: 0 });
+  await ready;
+  sockets[0].emit('message', {
+    type: 'error', requestId: request.requestId,
+    failure: { category: 'denied', message: 'Subscription failed.' },
+  });
+  const replacement = channel.subscribe('Doc', 'd1', () => {});
+  await tick();
+  const replacementRequest = sockets[0].sent[1];
+  sockets[0].emit('message', { type: 'subscribed', entity: 'Doc', id: 'd1', requestId: replacementRequest.requestId, currentSeq: 0 });
+  await replacement;
+  channel.close();
+});
+
 test('a denied subscription rejects only its matching request and remains reusable', async () => {
   const { channel, sockets } = harness();
   const allowedEvents = [];

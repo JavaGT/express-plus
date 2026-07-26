@@ -1330,3 +1330,126 @@ test('(R3) shared envelope builder preserves delta and text reducer outputs for 
 
   envelopeBuilder.clear();
 });
+
+test('(R6) recipient envelope rebuilds lifecycle data and hides raw operation payloads', () => {
+  const builder = createLiveEnvelopeBuilder();
+  const entity = {
+    name: 'Note',
+    fields: { title: { kind: 'value' } },
+  };
+  const lifecycle = builder.buildEnvelope({
+    entity,
+    event: { scope: 'Note:n1', seq: 7, eventType: 'Note.updated', data: { id: 'n1', title: 'raw secret', private: 'must not leak' } },
+    principal: { type: 'user', id: 'reader' },
+    row: { id: 'n1', title: 'recipient title' },
+    scope: 'Note:n1',
+  });
+  assert.deepEqual(lifecycle[0].event.data, { id: 'n1', title: 'recipient title' });
+  assert.equal(JSON.stringify(lifecycle).includes('raw secret'), false);
+  assert.equal(JSON.stringify(lifecycle).includes('must not leak'), false);
+
+  const operation = builder.buildEnvelope({
+    entity,
+    event: { scope: 'Note:n1', seq: 8, eventType: 'Note.title.operated', data: { operation: 'secret operation' } },
+    principal: { type: 'user', id: 'reader' },
+    row: { id: 'n1', title: 'recipient title' },
+    scope: 'Note:n1',
+  });
+  assert.deepEqual(operation, [{ type: 'resync', entity: 'Note', id: 'n1', seq: 8, reason: 'recipient-snapshot-required' }]);
+
+  const annotatedLifecycle = builder.buildEnvelope({
+    entity: { name: 'Doc', fields: { title: { kind: 'value' }, body: { kind: 'annotatedText' } } },
+    event: { scope: 'Doc:d1', seq: 9, eventType: 'Doc.created', data: { id: 'd1', title: 'raw', body: 'raw body' } },
+    principal: { type: 'user', id: 'reader' },
+    row: { id: 'd1', title: 'recipient title', body: 'recipient body' },
+    scope: 'Doc:d1',
+  });
+  assert.deepEqual(annotatedLifecycle[0].event.data, { id: 'd1', title: 'recipient title', body: 'recipient body' });
+  assert.equal(annotatedLifecycle[0].type, 'event');
+  assert.equal(JSON.stringify(annotatedLifecycle).includes('raw body'), false);
+});
+
+test('(R6) malformed durable event identity fails closed without acknowledging its cursor', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Other.updated', { title: 'foreign' });
+  const builder = createLiveEnvelopeBuilder();
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', { ...makeEntityRecord('Note'), fields: { title: { kind: 'value' } } }]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: (ctx) => builder.buildEnvelope(ctx),
+  });
+  const subscribe = () => core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null, deliver: async () => {},
+  });
+  await assert.rejects(subscribe, /projectRecipient threw/);
+  await assert.rejects(subscribe, /projectRecipient threw/);
+  builder.clear();
+  core.close();
+});
+
+test('(R6) malformed durable event sequence fails closed without acknowledging its cursor', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1.5, 'Note.updated', { title: 'must not be acknowledged' });
+  const builder = createLiveEnvelopeBuilder();
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', { ...makeEntityRecord('Note'), fields: { title: { kind: 'value' } } }]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: (ctx) => builder.buildEnvelope(ctx),
+  });
+  const subscribe = () => core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null, deliver: async () => {},
+  });
+  await assert.rejects(subscribe, /projectRecipient threw/);
+  await assert.rejects(subscribe, /projectRecipient threw/);
+  builder.clear();
+  core.close();
+});
+
+test('(R6) anchored job lifecycle uses opaque recovery instead of raw job payload', () => {
+  const builder = createLiveEnvelopeBuilder();
+  const envelope = builder.buildEnvelope({
+    entity: { name: 'Note', fields: { title: { kind: 'value' } } },
+    event: {
+      scope: 'Note:n1', seq: 10, eventType: '_Job.updated',
+      data: { id: 'job-1', status: 'completed', transition: 'secret transition' },
+    },
+    principal: { type: 'user', id: 'reader' },
+    row: { id: 'n1', title: 'recipient title' },
+    scope: 'Note:n1',
+  });
+  assert.deepEqual(envelope, [{ type: 'resync', entity: 'Note', id: 'n1', seq: 10, reason: 'recipient-snapshot-required' }]);
+  assert.equal(JSON.stringify(envelope).includes('secret transition'), false);
+  builder.clear();
+});
+
+test('(R6) paused subscription records wakes and only delivers after activation', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  const delivered = [];
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+  const subscription = await core.subscribe({
+    principal: { type: 'user', id: 'u1' },
+    scope: 'Note:n1',
+    after: 0,
+    paused: true,
+    signal: null,
+    deliver: async (batch) => delivered.push(...batch),
+  });
+  appendEvent(db, 'Note:n1', 1, 'Note.updated', { title: 'after ack' });
+  core.wake('Note:n1');
+  await sleep(20);
+  assert.equal(delivered.length, 0);
+  await subscription.activate();
+  assert.equal(delivered.length, 1);
+  assert.equal(delivered[0].seq, 1);
+  core.close();
+});

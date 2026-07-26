@@ -183,6 +183,8 @@ export class LiveConnection {
     }
 
     const scope = result.scope;
+    let activateCore = null;
+    let coreAc = null;
 
     // Subscribe to the core for committed-event delivery BEFORE sending the
     // subscribed ack. If core subscription fails, we remove the fanout
@@ -191,13 +193,15 @@ export class LiveConnection {
       const previousAc = this.#coreAcs.get(scope);
       if (previousAc) previousAc.abort();
       const ac = new AbortController();
+      coreAc = ac;
       this.#coreAcs.set(scope, ac);
       try {
-        await this.#core.subscribe({
+        const coreSubscription = await this.#core.subscribe({
           principal: this.#principal,
           scope,
           after: this.#currentSeq(scope),
           signal: ac.signal,
+          paused: true,
           deliver: async (batch) => {
             if (this.#closed) throw new Error('live connection closed');
             for (const envelope of batch) {
@@ -206,6 +210,7 @@ export class LiveConnection {
             }
           },
         });
+        activateCore = coreSubscription?.activate ?? null;
         if (ac.signal.aborted) return;
       } catch (err) {
         // A newer subscribe or unsubscribe owns this scope now. Its controller
@@ -220,8 +225,6 @@ export class LiveConnection {
       if (this.#coreAcs.get(scope) !== ac) return;
     }
 
-    this.#fanout.addSubscription(scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
-
     const response = {
       type: 'subscribed',
       scope,
@@ -231,6 +234,21 @@ export class LiveConnection {
     if (result.entityName) response.entity = result.entityName;
     if (result.id !== undefined) response.id = result.id;
     this.send(response);
+
+    if (activateCore) {
+      try {
+        await activateCore();
+      } catch (err) {
+        if (this.#coreAcs.get(scope) === coreAc) {
+          this.#coreAcs.delete(scope);
+        }
+        this.#log?.error?.('live', 'core activation failed', { scope, err: String(err) });
+        this.error(failure('denied', 'Subscription failed.'), requestId);
+        return;
+      }
+    }
+    if (this.#coreAcs.get(scope) === undefined) return;
+    this.#fanout.addSubscription(scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
   }
 
   #close() {

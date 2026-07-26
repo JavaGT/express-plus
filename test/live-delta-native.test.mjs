@@ -1,7 +1,6 @@
-// P6e-2 (Slice B2): store/ordered native events are delta-native — their
-// committedEvent.data IS the structural delta (no diff computed). Normalized
-// under the same `delta` map key so a client dispatches one uniform delta
-// shape regardless of kind (DECISIONLOG #71 risk #7, #71 F5 backward-compat).
+// Non-lifecycle durable operations are recipient-opaque. The committed log
+// triggers snapshot recovery; canonical map/list operation data never crosses
+// the live-delivery boundary.
 //
 // All tests use raw WebSocket against a direct createLiveServer + compiled entity
 // (mirrors live-delta.test.mjs and live-pace.test.mjs).
@@ -11,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { connect as tcpConnect } from 'node:net';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes } from 'node:crypto';
 import http from 'node:http';
 
 import {
@@ -66,7 +65,7 @@ function openRawWS(port, userId = 'test') {
           return;
         }
         upgraded = true;
-        resolve({ sock, send, nextMessage, nextEvent, close });
+        resolve({ sock, send, nextMessage, nextResync, close });
       }
       while (buf.length >= 2) {
         const b0 = buf[0];
@@ -111,12 +110,12 @@ function openRawWS(port, userId = 'test') {
       return null;
     }
 
-    async function nextEvent(timeoutMs = 400) {
+    async function nextResync(timeoutMs = 400) {
       const start = Date.now();
       while (Date.now() - start <= timeoutMs) {
         while (inbox.length > 0) {
           const msg = JSON.parse(inbox.shift());
-          if (msg.type === 'event') return msg;
+          if (msg.type === 'resync') return msg;
         }
         await new Promise((r) => setTimeout(r, 20));
       }
@@ -154,15 +153,24 @@ function bootServer() {
   return { db, httpServer, live, boundDoc };
 }
 
-// Helper: re-read a Doc row from db
-function reRead(db, id) {
-  return db.prepare('SELECT * FROM Doc WHERE id = ?').get(id);
+function appendNativeAndWake(db, live, id, seq, type, data) {
+  const scope = `Doc:${id}`;
+  db.prepare(
+    `INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt)
+     VALUES (?, ?, ?, ?, ?, ?)`,
+  ).run(scope, seq, type, JSON.stringify(data), `action-${id}-${seq}`, new Date().toISOString());
+  db.prepare(
+    `INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?)
+     ON CONFLICT(scope) DO UPDATE SET lastSeq = excluded.lastSeq`,
+  ).run(scope, seq);
+  live.wake(scope);
 }
 
-// Helper: emit a store/ordered native event (no shadow involved)
-function emitNative(live, entityRecord, db, id, seq, type, data) {
-  const row = reRead(db, id);
-  return live.emit(entityRecord, id, row, { type, seq, data });
+function assertOpaqueRecovery(resync, id, seq, secret) {
+  assert.deepEqual(resync, {
+    type: 'resync', entity: 'Doc', id, seq, reason: 'recipient-snapshot-required',
+  });
+  assert.equal(JSON.stringify(resync).includes(secret), false);
 }
 
 // Helper: subscribe and wait for ack (named wsSubscribe to avoid collision with
@@ -173,29 +181,22 @@ async function wsSubscribe(ws, entity, id) {
 }
 
 // ============================================================
-// Test 1: map `.added` delta
+// Test 1: map `.added` recovery
 // ============================================================
 
-test('P6e-2 B2: map .added delta', async () => {
-  const { db, httpServer, live, boundDoc } = bootServer();
+test('native map additions require recipient snapshot recovery', async () => {
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test1';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D1');
-    const entityRecord = boundDoc;
-
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
 
-    await emitNative(live, entityRecord, db, id, 1, 'Doc.collaborators.added', { owner: id, member: 'u2', role: 'viewer' });
-    const ev = await ws.nextEvent(400);
-    assert.ok(ev, 'event received');
-    assert.equal(ev.event.type, 'Doc.collaborators.added');
-    assert.deepEqual(ev.delta, { collaborators: { owner: id, member: 'u2', role: 'viewer' } });
-    assert.deepEqual(ev.event.data, { owner: id, member: 'u2', role: 'viewer' });
-    assert.deepEqual(ev.seqSpan, [1, 1]);
+    appendNativeAndWake(db, live, id, 1, 'Doc.collaborators.added', { owner: id, member: 'u2', role: 'viewer' });
+    assertOpaqueRecovery(await ws.nextResync(), id, 1, 'viewer');
   } finally {
     ws?.close();
     live.close();
@@ -204,28 +205,22 @@ test('P6e-2 B2: map .added delta', async () => {
 });
 
 // ============================================================
-// Test 2: map `.roleChanged` delta
+// Test 2: map `.roleChanged` recovery
 // ============================================================
 
-test('P6e-2 B2: map .roleChanged delta', async () => {
-  const { db, httpServer, live, boundDoc } = bootServer();
+test('native map role changes require recipient snapshot recovery', async () => {
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test2';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D2');
-    const entityRecord = boundDoc;
-
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
 
-    await emitNative(live, entityRecord, db, id, 1, 'Doc.collaborators.roleChanged', { owner: id, member: 'u2', role: 'editor' });
-    const ev = await ws.nextEvent(400);
-    assert.ok(ev, 'event received');
-    assert.equal(ev.event.type, 'Doc.collaborators.roleChanged');
-    assert.deepEqual(ev.delta, { collaborators: { owner: id, member: 'u2', role: 'editor' } });
-    assert.deepEqual(ev.event.data, { owner: id, member: 'u2', role: 'editor' });
+    appendNativeAndWake(db, live, id, 1, 'Doc.collaborators.roleChanged', { owner: id, member: 'u2', role: 'editor' });
+    assertOpaqueRecovery(await ws.nextResync(), id, 1, 'editor');
   } finally {
     ws?.close();
     live.close();
@@ -234,28 +229,22 @@ test('P6e-2 B2: map .roleChanged delta', async () => {
 });
 
 // ============================================================
-// Test 3: map `.removed` delta
+// Test 3: map `.removed` recovery
 // ============================================================
 
-test('P6e-2 B2: map .removed delta', async () => {
-  const { db, httpServer, live, boundDoc } = bootServer();
+test('native map removals require recipient snapshot recovery', async () => {
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test3';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D3');
-    const entityRecord = boundDoc;
-
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
 
-    await emitNative(live, entityRecord, db, id, 1, 'Doc.collaborators.removed', { owner: id, member: 'u2' });
-    const ev = await ws.nextEvent(400);
-    assert.ok(ev, 'event received');
-    assert.equal(ev.event.type, 'Doc.collaborators.removed');
-    assert.deepEqual(ev.delta, { collaborators: { owner: id, member: 'u2' } });
-    assert.deepEqual(ev.event.data, { owner: id, member: 'u2' });
+    appendNativeAndWake(db, live, id, 1, 'Doc.collaborators.removed', { owner: id, member: 'u2' });
+    assertOpaqueRecovery(await ws.nextResync(), id, 1, 'u2');
   } finally {
     ws?.close();
     live.close();
@@ -264,29 +253,22 @@ test('P6e-2 B2: map .removed delta', async () => {
 });
 
 // ============================================================
-// Test 4: ordered `.inserted` delta
+// Test 4: ordered `.inserted` recovery
 // ============================================================
 
-test('P6e-2 B2: ordered .inserted delta', async () => {
-  const { db, httpServer, live, boundDoc } = bootServer();
+test('native ordered inserts require recipient snapshot recovery', async () => {
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test4';
-  const uuid = randomUUID();
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D4');
-    const entityRecord = boundDoc;
-
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
 
-    await emitNative(live, entityRecord, db, id, 1, 'Doc.items.inserted', { owner: id, id: uuid, key: 'a', value: 'first' });
-    const ev = await ws.nextEvent(400);
-    assert.ok(ev, 'event received');
-    assert.equal(ev.event.type, 'Doc.items.inserted');
-    assert.deepEqual(ev.delta, { items: { owner: id, id: uuid, key: 'a', value: 'first' } });
-    assert.deepEqual(ev.event.data, { owner: id, id: uuid, key: 'a', value: 'first' });
+    appendNativeAndWake(db, live, id, 1, 'Doc.items.inserted', { owner: id, id: 'item-secret', key: 'a', value: 'first' });
+    assertOpaqueRecovery(await ws.nextResync(), id, 1, 'item-secret');
   } finally {
     ws?.close();
     live.close();
@@ -295,28 +277,22 @@ test('P6e-2 B2: ordered .inserted delta', async () => {
 });
 
 // ============================================================
-// Test 5: ordered `.moved` delta
+// Test 5: ordered `.moved` recovery
 // ============================================================
 
-test('P6e-2 B2: ordered .moved delta', async () => {
-  const { db, httpServer, live, boundDoc } = bootServer();
+test('native ordered moves require recipient snapshot recovery', async () => {
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test5';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D5');
-    const entityRecord = boundDoc;
-
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
 
-    await emitNative(live, entityRecord, db, id, 1, 'Doc.items.moved', { owner: id, id: 'i1', key: 'b' });
-    const ev = await ws.nextEvent(400);
-    assert.ok(ev, 'event received');
-    assert.equal(ev.event.type, 'Doc.items.moved');
-    assert.deepEqual(ev.delta, { items: { owner: id, id: 'i1', key: 'b' } });
-    assert.deepEqual(ev.event.data, { owner: id, id: 'i1', key: 'b' });
+    appendNativeAndWake(db, live, id, 1, 'Doc.items.moved', { owner: id, id: 'i1', key: 'b' });
+    assertOpaqueRecovery(await ws.nextResync(), id, 1, 'i1');
   } finally {
     ws?.close();
     live.close();
@@ -325,30 +301,25 @@ test('P6e-2 B2: ordered .moved delta', async () => {
 });
 
 // ============================================================
-// Test 6: pass-through invariance — pace subscriber gets non-ephemeral events inline
+// Test 6: paced subscriptions also receive opaque recovery
 // ============================================================
 
-test('P6e-2 B2: pass-through invariance — pace subscriber gets non-ephemeral events inline', async () => {
-  const { db, httpServer, live, boundDoc } = bootServer();
+test('paced subscriptions receive opaque native recovery immediately', async () => {
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test6';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D6');
-    const entityRecord = boundDoc;
-
     ws = await openRawWS(port, 'alice');
     // Subscribe with pace (profile '15fps' is accepted by pace validator).
-    // Doc has no ephemeral field, so pace is unused — the event passes through.
+    // Doc has no ephemeral field, so durable recovery is not paced.
     ws.send(JSON.stringify({ type: 'subscribe', entity: 'Doc', id, pace: { profile: '15fps' } }));
     assert.equal((await ws.nextMessage())?.type, 'subscribed');
 
-    await emitNative(live, entityRecord, db, id, 1, 'Doc.collaborators.added', { owner: id, member: 'u2', role: 'viewer' });
-    const ev = await ws.nextEvent(400);
-    assert.ok(ev, 'event received within 400ms (pass-through, not coalesced)');
-    assert.deepEqual(ev.seqSpan, [1, 1]);
-    assert.deepEqual(ev.delta, { collaborators: { owner: id, member: 'u2', role: 'viewer' } });
+    appendNativeAndWake(db, live, id, 1, 'Doc.collaborators.added', { owner: id, member: 'u2', role: 'viewer' });
+    assertOpaqueRecovery(await ws.nextResync(), id, 1, 'viewer');
   } finally {
     ws?.close();
     live.close();
@@ -357,32 +328,25 @@ test('P6e-2 B2: pass-through invariance — pace subscriber gets non-ephemeral e
 });
 
 // ============================================================
-// Test 7: backward-compat — both delta AND event present
+// Test 7: recovery contains no event envelope
 // ============================================================
 
-test('P6e-2 B2: backward-compat — envelope has both delta and event', async () => {
-  const { db, httpServer, live, boundDoc } = bootServer();
+test('native recovery has no raw event envelope', async () => {
+  const { db, httpServer, live } = bootServer();
   const port = httpServer.address().port;
   let ws;
   const id = 'doc-test7';
 
   try {
     db.prepare('INSERT INTO Doc (id, title) VALUES (?, ?)').run(id, 'D7');
-    const entityRecord = boundDoc;
-
     ws = await openRawWS(port, 'alice');
     assert.equal((await wsSubscribe(ws, 'Doc', id))?.type, 'subscribed');
 
-    await emitNative(live, entityRecord, db, id, 1, 'Doc.collaborators.added', { owner: id, member: 'u2', role: 'editor' });
-    const ev = await ws.nextEvent(400);
-    assert.ok(ev, 'event received');
-    // Both delta AND event keys present
-    assert.ok('delta' in ev, 'delta key present');
-    assert.ok('event' in ev, 'event key present');
-    assert.ok(ev.event.data, 'event.data present');
-    assert.deepEqual(ev.delta, { collaborators: { owner: id, member: 'u2', role: 'editor' } });
-    assert.deepEqual(ev.event.data, { owner: id, member: 'u2', role: 'editor' });
-    assert.equal(ev.event.type, 'Doc.collaborators.added');
+    appendNativeAndWake(db, live, id, 1, 'Doc.collaborators.added', { owner: id, member: 'u2', role: 'editor' });
+    const resync = await ws.nextResync();
+    assertOpaqueRecovery(resync, id, 1, 'editor');
+    assert.equal(Object.hasOwn(resync, 'event'), false);
+    assert.equal(Object.hasOwn(resync, 'delta'), false);
   } finally {
     ws?.close();
     live.close();

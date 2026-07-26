@@ -530,7 +530,6 @@ class LiveSyncSession {
     if (envelope.type === 'subscribed') {
       const sub = scopeKey ? this._subs.get(scopeKey) : null;
       if (sub && envelope.requestId !== undefined && sub.requestId !== envelope.requestId) return;
-      if (sub?.requestId !== undefined) this._subRequests.delete(sub.requestId);
       if (sub && typeof sub.onCheckpoint === 'function') {
         try { sub.onCheckpoint({ currentSeq: envelope.currentSeq }); } catch { /* isolate consumer */ }
       }
@@ -899,7 +898,8 @@ export class LiveList {
 
   _onLiveResync(control) {
     if (this._closed
-      || control?.reason !== 'annotated-text-snapshot-required'
+      || (control?.reason !== 'annotated-text-snapshot-required'
+        && control?.reason !== 'recipient-snapshot-required')
       || control.entity !== this._entity
       || String(control.id) !== String(this._id)
       || !Number.isSafeInteger(control.seq)

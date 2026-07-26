@@ -1,9 +1,10 @@
 // W3 live job visibility, end to end: the job queue appends _Job.* events to
 // _Log itself, and serve.mjs bridges app.jobs.onEvent into the live fan-out.
-// A WS subscriber of the anchor scope (e.g. Note:n1) receives _Job.created /
-// _Job.updated pushed live, scope-anchored (anchor identity, no delta), with
-// the shared per-scope kernel seq. Fail-closed: a missing anchor row delivers
-// nothing live, though the event stays durable in _Log for catch-up.
+// A WS subscriber of the anchor scope (e.g. Note:n1) receives opaque recovery
+// controls for _Job lifecycle changes. Jobs do not yet have a recipient-hydrated
+// lifecycle grammar, so their raw durable payload never crosses live delivery.
+// Fail-closed: a missing anchor row delivers nothing live, though the event
+// stays durable in _Log for catch-up.
 
 import { text, ref, grant, read, write, subscribe, scope } from '../src/index.mjs';
 import { test } from 'node:test';
@@ -98,7 +99,7 @@ function openRawWS(port) {
       while (Date.now() - start <= timeoutMs) {
         while (inbox.length > 0) {
           const msg = JSON.parse(inbox.shift());
-          if (msg.type === 'event') return msg;
+        if (msg.type === 'event' || msg.type === 'resync') return msg;
           // skip subscribe confirmations / errors
         }
         await new Promise((r) => setTimeout(r, 20));
@@ -130,7 +131,7 @@ function bootApp() {
   return { db, app };
 }
 
-test('scoped job enqueue is pushed live to the anchor-scope subscriber', async (t) => {
+test('scoped job enqueue requires anchor-scope snapshot recovery', async (t) => {
   const { app } = bootApp();
   t.after(() => app.shutdown());
   await app.ready;
@@ -144,20 +145,20 @@ test('scoped job enqueue is pushed live to the anchor-scope subscriber', async (
   app.jobs.enqueue({ kind: 'index', payload: { noteId: 'n1' }, scope: 'Note:n1' });
 
   const ev = await ws.nextEvent();
-  assert.ok(ev, 'job event pushed live');
-  assert.equal(ev.type, 'event');
+  assert.ok(ev, 'job recovery control pushed live');
+  assert.equal(ev.type, 'resync');
   assert.equal(ev.entity, 'Note', 'anchor entity identity');
   assert.equal(ev.id, 'n1', 'anchor id identity');
   assert.equal(ev.seq, 1);
-  assert.equal(ev.event.type, '_Job.created');
-  assert.equal(ev.event.data.transition, 'enqueued');
-  assert.equal('delta' in ev, false, 'scope-anchored envelope carries no delta');
+  assert.equal(ev.reason, 'recipient-snapshot-required');
+  assert.equal(ev.event, undefined, 'job event data is not delivered');
+  assert.equal(ev.delta, undefined, 'job recovery carries no delta');
 
   ws.close();
   app.httpServer.close();
 });
 
-test('job lifecycle transitions arrive as ordered _Job.updated events', async (t) => {
+test('job lifecycle transitions require ordered anchor-scope recovery', async (t) => {
   const { app } = bootApp();
   t.after(() => app.shutdown());
   await app.ready;
@@ -177,13 +178,18 @@ test('job lifecycle transitions arrive as ordered _Job.updated events', async (t
 
   const evs = [];
   for (let i = 0; i < 3; i++) evs.push(await ws.nextEvent());
-  assert.ok(evs.every(Boolean), 'three events received');
-  assert.deepEqual(evs.map((e) => e.event.type), ['_Job.created', '_Job.updated', '_Job.updated']);
-  assert.deepEqual(evs.map((e) => e.event.data.transition), ['enqueued', 'claimed', 'completed']);
+  assert.ok(evs.every(Boolean), 'three recovery controls received');
+  assert.deepEqual(evs.map((e) => e.type), ['resync', 'resync', 'resync']);
+  assert.deepEqual(evs.map((e) => e.reason), [
+    'recipient-snapshot-required',
+    'recipient-snapshot-required',
+    'recipient-snapshot-required',
+  ]);
   assert.deepEqual(evs.map((e) => e.seq), [1, 2, 3], 'shared per-scope seq, in order');
   for (const e of evs) {
     assert.equal(e.entity, 'Note');
     assert.equal(e.id, 'n1');
+    assert.equal(e.event, undefined, 'job transition is not delivered');
   }
 
   ws.close();

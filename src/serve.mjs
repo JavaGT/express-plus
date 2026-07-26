@@ -479,18 +479,19 @@ export function listen(app, port, optionsOrCallback = {}) {
   });
   if (typeof onListening === 'function') httpServer.once('listening', onListening);
 
-  // Live Delivery (singular Deliver-loop seam): WS upgrade + fan-out + consumer.
-  // Same mayVerb / principalOf as HTTP — no second auth path. createConsumer is
-  // registered by the Kernel when assembling engaged post-commit seams.
-  app.live = createLiveDelivery(httpServer, {
-    path: '/events',
-    mayVerb: (entity, verb, row, principal) => mayVerb(entity, verb, row, principal),
-    principalOf,
-    db: app.db,
-    resolveEntity: (name) => app.entities?.get(name),
-    ready: () => app.ready,
-    log: app.log,
-  });
+  // Live Delivery is a durable _Log consumer, so a headless HTTP application
+  // has no delivery seam to attach. DB-backed apps retain the single seam.
+  if (app.db) {
+    app.live = createLiveDelivery(httpServer, {
+      path: '/events',
+      mayVerb: (entity, verb, row, principal) => mayVerb(entity, verb, row, principal),
+      principalOf,
+      db: app.db,
+      resolveEntity: (name) => app.entities?.get(name),
+      ready: () => app.ready,
+      log: app.log,
+    });
+  }
   app._transportAttached = true;
 
   // Job lifecycle events (W3 slice 2): the queue appends its _Job.* events to
@@ -502,7 +503,7 @@ export function listen(app, port, optionsOrCallback = {}) {
   if (app.jobs) {
     app._detachJobLive = app.jobs.onEvent((ev) => {
       if (!ev.scope) return;
-      app.live.wake(ev.scope);
+      app.live?.wake(ev.scope);
     });
   }
 
