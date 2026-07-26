@@ -36,7 +36,6 @@ import { wrapDriver } from './driver.mjs';
 import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
-import { createPendingBlobLifecycle } from './pending-blob.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { createClock } from './clock.mjs';
 import { createWriteQueue } from './write-queue.mjs';
