@@ -130,12 +130,14 @@ function bootApp() {
   return { db, app };
 }
 
-test('scoped job enqueue is pushed live to the anchor-scope subscriber', async () => {
+test('scoped job enqueue is pushed live to the anchor-scope subscriber', async (t) => {
   const { app } = bootApp();
+  t.after(() => app.shutdown());
   await app.ready;
   const { port } = app.httpServer.address();
 
   const ws = await openRawWS(port);
+  t.after(() => ws.close());
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 
@@ -155,12 +157,14 @@ test('scoped job enqueue is pushed live to the anchor-scope subscriber', async (
   app.httpServer.close();
 });
 
-test('job lifecycle transitions arrive as ordered _Job.updated events', async () => {
+test('job lifecycle transitions arrive as ordered _Job.updated events', async (t) => {
   const { app } = bootApp();
+  t.after(() => app.shutdown());
   await app.ready;
   const { port } = app.httpServer.address();
 
   const ws = await openRawWS(port);
+  t.after(() => ws.close());
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 
@@ -186,12 +190,14 @@ test('job lifecycle transitions arrive as ordered _Job.updated events', async ()
   app.httpServer.close();
 });
 
-test('unscoped job delivers nothing live', async () => {
+test('unscoped job delivers nothing live', async (t) => {
   const { app } = bootApp();
+  t.after(() => app.shutdown());
   await app.ready;
   const { port } = app.httpServer.address();
 
   const ws = await openRawWS(port);
+  t.after(() => ws.close());
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 
@@ -203,12 +209,14 @@ test('unscoped job delivers nothing live', async () => {
   app.httpServer.close();
 });
 
-test('missing anchor row fails closed: no live delivery, event stays durable', async () => {
+test('missing anchor row fails closed: no live delivery, event stays durable', async (t) => {
   const { db, app } = bootApp();
+  t.after(() => app.shutdown());
   await app.ready;
   const { port } = app.httpServer.address();
 
   const ws = await openRawWS(port);
+  t.after(() => ws.close());
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 

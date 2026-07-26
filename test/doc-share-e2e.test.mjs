@@ -29,9 +29,10 @@ async function stopApp(app) {
   await app.shutdown();
 }
 
-test('doc.mjs share routes: list (empty), add, list (populated), remove', async () => {
+test('doc.mjs share routes: list (empty), add, list (populated), remove', async (t) => {
   const db = setup();
   const app = workbench({ db }).mount('/docs', Doc);
+  t.after(() => app.shutdown());
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -82,9 +83,10 @@ test('doc.mjs share routes: list (empty), add, list (populated), remove', async 
   }
 });
 
-test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', async () => {
+test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', async (t) => {
   const db = setup();
   const app = workbench({ db }).mount('/docs', Doc);
+  t.after(() => app.shutdown());
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -102,6 +104,7 @@ test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', asyn
     // bob creates a doc by swapping the principal via a second app on the same db.
     await stopApp(app);
     const app2 = workbench({ db }).mount('/docs', Doc);
+    t.after(() => app2.shutdown());
     app2.listen(0, { principalOf: () => ({ type: 'user', id: '2' }) });
     await app2.ready;
     const port2 = app2.httpServer.address().port;
@@ -123,6 +126,7 @@ test('doc.mjs /feed: owned + shared via findAll(predicate).sort().limit()', asyn
 
     // Back as alice: /feed lists her owned doc AND the doc bob shared with her.
     const app3 = workbench({ db }).mount('/docs', Doc);
+    t.after(() => app3.shutdown());
     app3.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
     await app3.ready;
     const port3 = app3.httpServer.address().port;

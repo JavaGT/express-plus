@@ -121,7 +121,7 @@ function openRawWS(port) {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-test('update emits a WS event with seq:1', async () => {
+test('update emits a WS event with seq:1', async (t) => {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   db.exec("INSERT INTO User (id, username, password) VALUES ('1', 'alice', 'hash')");
@@ -130,12 +130,14 @@ test('update emits a WS event with seq:1', async () => {
   db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'hello', '1')").run();
 
   const app = workbench({ db }).mount('/notes', Note);
+  t.after(() => app.shutdown());
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
   const origin = `http://127.0.0.1:${port}`;
 
   const ws = await openRawWS(port);
+  t.after(() => ws.close());
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 
@@ -161,7 +163,7 @@ test('update emits a WS event with seq:1', async () => {
 // counter live mints itself. A mutation dispatched with no subscriber still
 // advances the kernel cursor; a later mutation (now with a subscriber) must
 // carry the kernel's next seq — not 1 as a freshly-seeded local counter would.
-test('live event carries the kernel committed seq, not a local counter', async () => {
+test('live event carries the kernel committed seq, not a local counter', async (t) => {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   db.exec("INSERT INTO User (id, username, password) VALUES ('1', 'alice', 'hash')");
@@ -170,6 +172,7 @@ test('live event carries the kernel committed seq, not a local counter', async (
   db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'hello', '1')").run();
 
   const app = workbench({ db }).mount('/notes', Note);
+  t.after(() => app.shutdown());
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -185,6 +188,7 @@ test('live event carries the kernel committed seq, not a local counter', async (
 
   // Now subscribe, then mutate again. The kernel's next seq is 2.
   const ws = await openRawWS(port);
+  t.after(() => ws.close());
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 
@@ -209,7 +213,7 @@ test('live event carries the kernel committed seq, not a local counter', async (
 // snapshot at seq N, then subscribes, compares currentSeq to N and resyncs the
 // gap if the server is ahead — never missing an event committed between the
 // snapshot read and the subscribe (eng-review Walk 3, D7).
-test('subscribe reports the kernel currentSeq for the scope', async () => {
+test('subscribe reports the kernel currentSeq for the scope', async (t) => {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   db.exec("INSERT INTO User (id, username, password) VALUES ('1', 'alice', 'hash')");
@@ -218,6 +222,7 @@ test('subscribe reports the kernel currentSeq for the scope', async () => {
   db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'hello', '1')").run();
 
   const app = workbench({ db }).mount('/notes', Note);
+  t.after(() => app.shutdown());
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
@@ -231,6 +236,7 @@ test('subscribe reports the kernel currentSeq for the scope', async () => {
   });
 
   const ws = await openRawWS(port);
+  t.after(() => ws.close());
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   const ack = await ws.nextMessage();
   assert.ok(ack, 'subscribed ack received');
@@ -241,7 +247,7 @@ test('subscribe reports the kernel currentSeq for the scope', async () => {
   app.httpServer.close();
 });
 
-test('update and delete emit sequential WS events', async () => {
+test('update and delete emit sequential WS events', async (t) => {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE IF NOT EXISTS User (id TEXT PRIMARY KEY, username TEXT, password TEXT)');
   db.exec("INSERT INTO User (id, username, password) VALUES ('1', 'alice', 'hash')");
@@ -250,12 +256,14 @@ test('update and delete emit sequential WS events', async () => {
   db.prepare("INSERT INTO Note (id, body, owner) VALUES ('n1', 'first', '1')").run();
 
   const app = workbench({ db }).mount('/notes', Note);
+  t.after(() => app.shutdown());
   app.listen(0, { principalOf: () => ({ type: 'user', id: '1' }) });
   await app.ready;
   const { port } = app.httpServer.address();
   const origin = `http://127.0.0.1:${port}`;
 
   const ws = await openRawWS(port);
+  t.after(() => ws.close());
   ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
   await sleep(50);
 

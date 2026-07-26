@@ -63,10 +63,11 @@ async function createDoc(origin) {
 
 // ---- tests -----------------------------------------------------------------
 
-test('Non-owner (non-reader) cannot add a collaborator (404, denied at read-scope)', async () => {
+test('Non-owner (non-reader) cannot add a collaborator (404, denied at read-scope)', async (t) => {
   const db = setup();
   // Create doc as alice.
   const aliceApp = await startApp(db, '1');
+  t.after(() => aliceApp.app.shutdown());
   const doc = await createDoc(aliceApp.origin);
   await stopApp(aliceApp.app);
 
@@ -75,6 +76,7 @@ test('Non-owner (non-reader) cannot add a collaborator (404, denied at read-scop
   // even learn the doc exists), not 403 (which the pre-H1 bypass produced by
   // loading the row unscoped then denying downstream).
   const bobApp = await startApp(db, '2');
+  t.after(() => bobApp.app.shutdown());
   try {
     const added = await fetch(`${bobApp.origin}/docs/${doc.id}/shares`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
@@ -86,15 +88,17 @@ test('Non-owner (non-reader) cannot add a collaborator (404, denied at read-scop
   }
 });
 
-test('Non-owner (non-reader) cannot list shares (404, denied at read-scope)', async () => {
+test('Non-owner (non-reader) cannot list shares (404, denied at read-scope)', async (t) => {
   const db = setup();
   // Create doc as alice.
   const aliceApp = await startApp(db, '1');
+  t.after(() => aliceApp.app.shutdown());
   const doc = await createDoc(aliceApp.origin);
   await stopApp(aliceApp.app);
 
   // Try to list shares as bob (non-reader) → 404 at read-scope (fail closed).
   const bobApp = await startApp(db, '2');
+  t.after(() => bobApp.app.shutdown());
   try {
     const listed = await fetch(`${bobApp.origin}/docs/${doc.id}/shares`);
     assert.equal(listed.status, 404, 'non-reader must be denied at read-scope (404)');
@@ -103,10 +107,11 @@ test('Non-owner (non-reader) cannot list shares (404, denied at read-scope)', as
   }
 });
 
-test('Non-owner cannot remove a collaborator (403)', async () => {
+test('Non-owner cannot remove a collaborator (403)', async (t) => {
   const db = setup();
   // Create doc as alice, add bob as editor.
   const aliceApp = await startApp(db, '1');
+  t.after(() => aliceApp.app.shutdown());
   const doc = await createDoc(aliceApp.origin);
   const added = await fetch(`${aliceApp.origin}/docs/${doc.id}/shares`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
@@ -117,6 +122,7 @@ test('Non-owner cannot remove a collaborator (403)', async () => {
 
   // Try to remove bob as bob.
   const bobApp = await startApp(db, '2');
+  t.after(() => bobApp.app.shutdown());
   try {
     const removed = await fetch(`${bobApp.origin}/docs/${doc.id}/shares/2`, { method: 'DELETE' });
     assert.equal(removed.status, 403, 'non-owner removing collaborator must 403');
@@ -125,9 +131,10 @@ test('Non-owner cannot remove a collaborator (403)', async () => {
   }
 });
 
-test('Owner can manage collaborators (regression guard)', async () => {
+test('Owner can manage collaborators (regression guard)', async (t) => {
   const db = setup();
   const { app, origin } = await startApp(db, '1');
+  t.after(() => app.shutdown());
   try {
     const doc = await createDoc(origin);
 

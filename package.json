@@ -21,7 +21,7 @@
 	},
 	"scripts": {
 		"lint": "eslint .",
-		"test": "node --test",
+		"test": "node --test --test-reporter=dot --test-timeout=30000",
 		"test:coverage": "node --experimental-test-coverage --test",
 		"typecheck": "tsc --noEmit"
 	},
