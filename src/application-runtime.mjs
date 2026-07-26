@@ -128,6 +128,13 @@ async function bootApplication(app) {
       log.warn('system', 'email delivery recovery sweep failed', { err });
     }
   }
+  if (app.db && app.reconcileOperationalConsumers) {
+    try {
+      await app.writeQueue.run(() => app.reconcileOperationalConsumers());
+    } catch (err) {
+      log.warn('system', 'operational consumer recovery sweep failed', { err });
+    }
+  }
   if (app._shutdownStarted) return app;
   if (app.jobs && app.durableEffectsRegistry) {
     try {

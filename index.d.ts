@@ -622,7 +622,42 @@ export interface WorkbenchOptions {
   logRetentionDays?: number;
   /** Durable-log sweep cadence in milliseconds; must be finite and > 0. */
   logRetentionIntervalMs?: number;
+  operationalConsumers?: readonly OperationalConsumer<unknown, any>[];
 }
+
+export type OperationalConsumerName = string & { readonly __brand: 'OperationalConsumerName' };
+export type OperationalDeclarationVersion = string & { readonly __brand: 'OperationalDeclarationVersion' };
+export type OperationalIdempotencyKey = string & { readonly __brand: 'OperationalIdempotencyKey' };
+export type OperationalCommittedMetadata = Readonly<{
+  committedEventId: string;
+  actionId: string;
+  scopeId: string;
+  eventType: string;
+  committedAt: string;
+}>;
+export type OperationalEventSpec<TFields extends object, TPayload> = Readonly<{
+  eventType: string;
+  fields: readonly (keyof TFields)[];
+  project(fields: Readonly<TFields>, metadata: OperationalCommittedMetadata): TPayload;
+}>;
+export function defineOperationalEvent<TFields extends object, TPayload>(spec: OperationalEventSpec<TFields, TPayload>): OperationalEventSpec<TFields, TPayload>;
+export type OperationalDelivery<TPayload> = Readonly<{
+  metadata: OperationalCommittedMetadata;
+  payload: TPayload;
+  idempotencyKey: OperationalIdempotencyKey;
+}>;
+export type OperationalRetry = Readonly<{ kind: 'retry'; afterMs: number }> | Readonly<{ kind: 'terminal'; code: string; detail: string }>;
+export type OperationalEffectResult = Readonly<{ kind: 'ack' }> | OperationalRetry;
+export type OperationalConsumer<TPayload, TFields extends object = object> = Readonly<{
+  name: OperationalConsumerName;
+  declarationVersion: OperationalDeclarationVersion;
+  projectionId: string;
+  effectId: string;
+  event: OperationalEventSpec<TFields, TPayload>;
+  idempotencyKey(delivery: Readonly<Omit<OperationalDelivery<TPayload>, 'idempotencyKey'>>): OperationalIdempotencyKey;
+  handle(delivery: OperationalDelivery<TPayload>): Promise<OperationalEffectResult>;
+}>;
+export function operationalConsumer<TPayload, TFields extends object>(consumer: OperationalConsumer<TPayload, TFields>): OperationalConsumer<TPayload, TFields>;
 
 export interface RegisteredProjection {
   readonly eventTypes: readonly string[];

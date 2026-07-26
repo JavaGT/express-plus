@@ -95,6 +95,7 @@ export default function workbench({
   blobReapTtlMs = maintenanceDefaults.blobReapTtlMs,
   logRetentionDays = maintenanceDefaults.logRetentionDays,
   logRetentionIntervalMs = maintenanceDefaults.logRetentionIntervalMs,
+  operationalConsumers = [],
 } = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
@@ -163,6 +164,7 @@ export default function workbench({
   };
   const app = makeMountable({ entityOf: runtime.entityOf });
   app.actions = Object.freeze([...actions]);
+  app.operationalConsumers = Object.freeze([...operationalConsumers]);
   app.dispatch = async () => {
     throw new Error('application is not started; call start() before dispatching');
   };

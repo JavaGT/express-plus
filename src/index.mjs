@@ -34,4 +34,5 @@ export { schedule, tick, simulate } from './schedule.mjs';
 export { membership } from './auth/membership.mjs';
 export { createInvitationApi } from './auth/invitation.mjs';
 export { emailSeam, noopTransport } from './email-seam.mjs';
+export { defineOperationalEvent, operationalConsumer } from './operational-consumer.mjs';
 export { default } from './app.mjs';

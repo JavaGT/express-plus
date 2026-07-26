@@ -15,6 +15,7 @@ import {
 import { createProjectedAsyncConsumer } from './projected-async.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
+import { createOperationalConsumers } from './operational-consumer.mjs';
 import { CRUD_CURSOR_POLICY } from './entity/crud.mjs';
 import { EventKind } from './event-handle.mjs';
 
@@ -240,13 +241,14 @@ export const POST_COMMIT_CONSUMER_KINDS = Object.freeze([
   'best-effort-external-consumer',
 ]);
 
-function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsumer, durableEffectsRegistry }) {
+function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsumer, durableEffectsRegistry, operationalConsumer }) {
   return [
     { name: 'blob.finalize', kind: 'durable-projection-consumer', consumer: blobFinalizeConsumer },
     { name: 'live', kind: 'live-delivery-consumer', consumer: app.live?.createConsumer?.(app) },
     { name: 'projected.async', kind: 'durable-projection-consumer', consumer: createProjectedAsyncConsumer({ entities }) },
     { name: 'effect.durable', kind: 'durable-projection-consumer', consumer: createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }) },
     { name: 'email', kind: 'durable-projection-consumer', consumer: app._emailConsumer },
+    { name: 'operational', kind: 'durable-projection-consumer', consumer: operationalConsumer },
   ].filter((d) => Boolean(d.consumer));
 }
 
@@ -287,10 +289,14 @@ export function buildKernel(app) {
   // pick it up here alongside the other reconcile sweeps kernel already owns.
   // No-op default when the email seam was never installed.
   app.reconcileEmailDelivery = app._reconcileEmailDelivery ?? (async () => ({ delivered: 0 }));
+  const operational = createOperationalConsumers(app.operationalConsumers);
+  operational.engage(app.db);
+  app.reconcileOperationalConsumers = () => operational.reconcile(app.db);
 
   const postCommitConsumerDescriptors = engagedPostCommitConsumerDescriptors(app, entities, {
     blobFinalizeConsumer,
     durableEffectsRegistry,
+    operationalConsumer: operational.declared.length ? operational.consumer : null,
   });
   app.postCommitConsumerDescriptors = postCommitConsumerDescriptors;
 

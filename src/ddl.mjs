@@ -244,6 +244,21 @@ export function generateFrameworkDDL() {
   createdAt TEXT NOT NULL
 );`,
     'CREATE INDEX IF NOT EXISTS idx_blob_status ON BlobStore(status);',
+    `CREATE TABLE IF NOT EXISTS _OperationalConsumerDeclaration (
+  name TEXT PRIMARY KEY,
+  declarationFingerprint TEXT NOT NULL
+);`,
+    `CREATE TABLE IF NOT EXISTS _OperationalConsumerFailure (
+  consumer TEXT NOT NULL,
+  scope TEXT NOT NULL,
+  committedEventId TEXT NOT NULL,
+  declarationFingerprint TEXT NOT NULL,
+  code TEXT NOT NULL,
+  detail TEXT NOT NULL,
+  status TEXT NOT NULL,
+  nextAttemptAt INTEGER,
+  PRIMARY KEY (consumer, scope, committedEventId)
+);`,
     // _Log, _Cursor, and their index are owned by committed-log.mjs.
     ...frameworkLogDDL(),
     `CREATE TABLE IF NOT EXISTS _ScheduleReceipt (

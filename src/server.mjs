@@ -25,3 +25,4 @@ export { defineSqliteSchema } from './sqlite-schema.mjs';
 export { describeEntityStorage, describeSqliteStorage } from './sqlite-storage-description.mjs';
 export { readSeq as readCommittedCursor } from './committed-log.mjs';
 export { createLiveDelivery } from './live-delivery-public.mjs';
+export { operationalConsumerAdmin } from './operational-consumer.mjs';

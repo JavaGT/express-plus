@@ -1,0 +1,152 @@
+import { createHash } from 'node:crypto';
+import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
+import { txn } from './driver.mjs';
+
+const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
+const cursorName = (name) => `operational:${name}`;
+
+function fail(message) { throw new TypeError(`operational consumer: ${message}`); }
+
+function canonical(value) { return JSON.stringify(value); }
+
+function fingerprint(consumer) {
+  return createHash('sha256').update(canonical({
+    name: consumer.name,
+    declarationVersion: consumer.declarationVersion,
+    eventType: consumer.event.eventType,
+    fields: consumer.event.fields,
+    projectionId: consumer.projectionId,
+    effectId: consumer.effectId,
+  })).digest('hex');
+}
+
+function json(value, message) {
+  try {
+    const encoded = JSON.stringify(value);
+    if (encoded === undefined) throw new Error('undefined');
+    return JSON.parse(encoded);
+  } catch { fail(message); }
+}
+
+function validate(consumer) {
+  if (!consumer || typeof consumer !== 'object') fail('must be an object');
+  for (const key of ['name', 'projectionId', 'effectId']) {
+    if (typeof consumer[key] !== 'string' || !IDENTIFIER.test(consumer[key])) fail(`${key} must be an ASCII identifier`);
+  }
+  if (typeof consumer.declarationVersion !== 'string' || consumer.declarationVersion.length === 0) fail('declarationVersion must be non-empty');
+  if (!consumer.event || typeof consumer.event.eventType !== 'string' || !Array.isArray(consumer.event.fields)
+    || typeof consumer.event.project !== 'function') fail('event must declare eventType, fields, and project');
+  if (new Set(consumer.event.fields).size !== consumer.event.fields.length || consumer.event.fields.some((field) => typeof field !== 'string')) fail('event fields must be unique strings');
+  if (typeof consumer.idempotencyKey !== 'function' || typeof consumer.handle !== 'function') fail('idempotencyKey and handle are required');
+  return Object.freeze({ ...consumer, event: Object.freeze({ ...consumer.event, fields: Object.freeze([...consumer.event.fields]) }) });
+}
+
+export function defineOperationalEvent(spec) {
+  return validate({ name: 'Temporary', declarationVersion: '1', projectionId: 'temporary', effectId: 'temporary', event: spec, idempotencyKey: () => 'temporary', handle: async () => ({ kind: 'ack' }) }).event;
+}
+
+export function operationalConsumer(consumer) { return validate(consumer); }
+
+function metadata(row) {
+  return Object.freeze({ committedEventId: `${row.scope}:${row.seq}`, actionId: row.actionId, scopeId: row.scope, eventType: row.eventType, committedAt: row.committedAt });
+}
+
+export function createOperationalConsumers(consumers = []) {
+  const declared = consumers.map(validate);
+  const names = new Set();
+  for (const consumer of declared) {
+    if (names.has(consumer.name)) fail(`duplicate name '${consumer.name}'`);
+    names.add(consumer.name);
+  }
+
+  function engage(db) {
+    for (const consumer of declared) {
+      const declarationFingerprint = fingerprint(consumer);
+      const existing = db.prepare('SELECT declarationFingerprint FROM _OperationalConsumerDeclaration WHERE name = ?').get(consumer.name);
+      if (existing && existing.declarationFingerprint !== declarationFingerprint) {
+        throw new Error(`operational consumer '${consumer.name}' declaration changed; use a new name`);
+      }
+      db.prepare('INSERT OR IGNORE INTO _OperationalConsumerDeclaration (name, declarationFingerprint) VALUES (?, ?)').run(consumer.name, declarationFingerprint);
+    }
+  }
+
+  async function deliver(db, consumer, row) {
+    const declarationFingerprint = fingerprint(consumer);
+    const failed = db.prepare('SELECT status, nextAttemptAt FROM _OperationalConsumerFailure WHERE consumer = ? AND scope = ? AND committedEventId = ?')
+      .get(consumer.name, row.scope, `${row.scope}:${row.seq}`);
+    if (failed?.status === 'terminal' || (failed?.nextAttemptAt != null && failed.nextAttemptAt > Date.now())) return false;
+    let data;
+    try { data = JSON.parse(row.eventData); } catch { data = {}; }
+    const fields = Object.create(null);
+    for (const field of consumer.event.fields) fields[field] = data[field];
+    let payload;
+    try { payload = json(consumer.event.project(Object.freeze(fields), metadata(row)), 'projection result must be JSON serializable'); } catch (error) {
+      await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, String(error));
+      return false;
+    }
+    const partial = Object.freeze({ metadata: metadata(row), payload });
+    let idempotencyKey;
+    try {
+      idempotencyKey = consumer.idempotencyKey(partial);
+      if (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0) fail('idempotencyKey must return a non-empty string');
+      if (consumer.idempotencyKey(partial) !== idempotencyKey) fail('idempotencyKey must be deterministic');
+    } catch (error) { await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, String(error)); return false; }
+    let result;
+    try { result = await consumer.handle(Object.freeze({ ...partial, idempotencyKey })); } catch (error) { result = { kind: 'retry', afterMs: 0, detail: String(error) }; }
+    if (!result || !['ack', 'retry', 'terminal'].includes(result.kind)) fail('handle must return ack, retry, or terminal');
+    if (result.kind === 'ack') {
+      await txn(db, () => {
+        db.prepare('DELETE FROM _OperationalConsumerFailure WHERE consumer = ? AND scope = ? AND committedEventId = ?').run(consumer.name, row.scope, `${row.scope}:${row.seq}`);
+        upsertConsumerCursor(db, { consumer: cursorName(consumer.name), scope: row.scope, lastSeq: row.seq });
+      });
+      return true;
+    }
+    await recordFailure(db, consumer, row, declarationFingerprint, result, result.detail ?? 'consumer did not acknowledge');
+    return false;
+  }
+
+  async function recordFailure(db, consumer, row, declarationFingerprint, result, detail) {
+    const terminal = result.kind === 'terminal';
+    await txn(db, () => db.prepare(`INSERT INTO _OperationalConsumerFailure
+      (consumer, scope, committedEventId, declarationFingerprint, code, detail, status, nextAttemptAt)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(consumer, scope, committedEventId) DO UPDATE SET code = excluded.code, detail = excluded.detail, status = excluded.status, nextAttemptAt = excluded.nextAttemptAt`)
+      .run(consumer.name, row.scope, `${row.scope}:${row.seq}`, declarationFingerprint, terminal ? String(result.code ?? 'terminal') : 'retry', detail, terminal ? 'terminal' : 'retry', terminal ? null : Date.now() + Math.max(0, Number(result.afterMs) || 0)));
+  }
+
+  async function reconcile(db) {
+    engage(db);
+    for (const consumer of declared) {
+      const cursors = consumerCursorMap(db, cursorName(consumer.name));
+      const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
+      for (const row of rows) {
+        if ((cursors.get(row.scope) ?? 0) >= row.seq) continue;
+        if (row.eventType !== consumer.event.eventType) {
+          upsertConsumerCursor(db, { consumer: cursorName(consumer.name), scope: row.scope, lastSeq: row.seq });
+          cursors.set(row.scope, row.seq);
+          continue;
+        }
+        if (!await deliver(db, consumer, row)) break;
+        cursors.set(row.scope, row.seq);
+      }
+    }
+  }
+
+  const consumer = async (_events, { db } = {}) => { await reconcile(db); };
+  return { engage, consumer, reconcile, declared };
+}
+
+export function operationalConsumerAdmin(workbench) {
+  return {
+    async listFailures(consumer) {
+      return workbench.db.prepare(`SELECT consumer, scope AS scopeId, committedEventId, declarationFingerprint, code, detail, status
+        FROM _OperationalConsumerFailure WHERE consumer = ? AND status = 'terminal' ORDER BY scope, committedEventId`).all(consumer);
+    },
+    async retryFailure(failure) {
+      const result = workbench.db.prepare(`UPDATE _OperationalConsumerFailure SET status = 'retry', nextAttemptAt = 0
+        WHERE consumer = ? AND scope = ? AND committedEventId = ? AND status = 'terminal'`).run(failure.consumer, failure.scopeId, failure.committedEventId);
+      if (!result.changes) throw new Error('operational terminal failure not found');
+      await workbench.reconcileOperationalConsumers?.();
+    },
+  };
+}

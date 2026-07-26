@@ -12,6 +12,21 @@ import type {
 } from '../index.d.ts';
 export type { WorkbenchDatabase, WorkbenchStatement, UserPrincipal } from '../index.d.ts';
 
+export type OperationalFailure = Readonly<{
+  consumer: import('../index.d.ts').OperationalConsumerName;
+  scopeId: string;
+  committedEventId: string;
+  declarationFingerprint: string;
+  code: string;
+  detail: string;
+  status: 'terminal';
+}>;
+export interface OperationalConsumerAdmin {
+  listFailures(consumer: import('../index.d.ts').OperationalConsumerName): Promise<readonly OperationalFailure[]>;
+  retryFailure(failure: Pick<OperationalFailure, 'consumer' | 'scopeId' | 'committedEventId'>): Promise<void>;
+}
+export function operationalConsumerAdmin(workbench: import('../index.d.ts').WorkbenchApp): OperationalConsumerAdmin;
+
 // ---------------------------------------------------------------------------
 // Framework table names (derived from DDL generators)
 // ---------------------------------------------------------------------------
