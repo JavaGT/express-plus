@@ -74,14 +74,6 @@ function engageMaintenance(app, log) {
       fn: () => void app.sweepPendingBlobs().catch((err) => log.warn('system', 'pending blob reap failed', { err })),
     });
   }
-  if (app.pendingBlobLifecycle) {
-    app.sweepPendingBlobs = () => app.writeQueue.run(() => app.pendingBlobLifecycle.reap());
-    app.clock.add({
-      name: 'pending-blob-reaper',
-      intervalMs: options.blobReapIntervalMs,
-      fn: () => void app.sweepPendingBlobs().catch((err) => log.warn('system', 'pending blob reap failed', { err })),
-    });
-  }
   if (options.logRetentionDays > 0) {
     app.sweepLog = () => app.writeQueue.run(() => {
       const cutoff = new Date(Date.now() - options.logRetentionDays * 86_400_000).toISOString();
@@ -141,13 +133,6 @@ async function bootApplication(app) {
       await app.writeQueue.run(() => app.pendingBlobLifecycle.reconcile());
     } catch (err) {
       log.warn('system', 'pending blob lifecycle recovery sweep failed', { err });
-    }
-  }
-  if (app.db && app.pendingBlobLifecycle) {
-    try {
-      await app.writeQueue.run(() => app.pendingBlobLifecycle.reconcile());
-    } catch (err) {
-      log.warn('system', 'pending blob recovery sweep failed', { err });
     }
   }
   if (app._shutdownStarted) return app;

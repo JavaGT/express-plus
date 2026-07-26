@@ -99,6 +99,15 @@ export function createBlobStore({ root, db, bytes }) {
     db.prepare('DELETE FROM BlobStore WHERE id = ? AND status = ?').run(id, 'pending');
   }
 
+  // Pending-blob deletion is package-owned. Remove both locations because a
+  // deletion request may race finalization and either slot may be present.
+  function discard(id) {
+    safeId(id);
+    remove(id, { pending: true });
+    remove(id, { pending: false });
+    db.prepare('DELETE FROM BlobStore WHERE id = ?').run(id);
+  }
+
   function reap({ ttl, blobColumns }) {
     const now = Date.now();
     let orphans = 0;
@@ -150,6 +159,7 @@ export function createBlobStore({ root, db, bytes }) {
     finalize,
     readRange: readRangeBytes,
     discardPending,
+    discard,
     reap,
     stat,
     pathFor,

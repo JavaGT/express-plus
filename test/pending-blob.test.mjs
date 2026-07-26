@@ -5,7 +5,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import workbench, { principal } from '../src/index.mjs';
-import { pendingBlobStager, declaredBlobField } from '../src/server.mjs';
+import { pendingBlobStager, declaredBlobField, readClaimedBlob } from '../src/server.mjs';
 
 test('pending blob staging retains Scope canonical key and immutable digest identity', async (t) => {
   const db = new DatabaseSync(':memory:');
@@ -59,4 +59,33 @@ test('declared blob claims are validated and adopted atomically with the registe
   assert.equal(app.db.prepare('SELECT status FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).status, 'finalized');
   const duplicate = await app.dispatch({ actionId: 'upload-2', type: 'File.upload', scope: 'project:p1', payload: { blob: staged.claim }, principal: principal({ type: 'user', id: 'u1' }) });
   assert.equal(duplicate.ok, false);
+});
+
+test('declared deletion is authorized, idempotent, and makes claimed bytes unavailable', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db,
+    blobs: { root },
+    actions: [
+      { type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] },
+      { type: 'File.delete', authorize: () => true, projections: [{ eventTypes: ['File.deleted'], apply: () => {} }], handler: ({ scope }) => [{ type: 'File.deleted', scope, data: {} }] },
+    ],
+    blobLifecycle: {
+      fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', deletionActionName: 'File.delete', validator: async ({ authenticatedPrincipalId }) => ({ allow: authenticatedPrincipalId === 'u1', code: 'DENIED' }) })],
+      pendingTtlMs: 1, adoptedRecoveryTtlMs: 1,
+    },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const stager = pendingBlobStager(app, principal({ type: 'user', id: 'u1' }));
+  const staged = await stager.stage({ projectId: 'p1', fileId: 'f1', bytes: new Uint8Array([7, 8]) });
+  assert.equal((await app.dispatch({ actionId: 'upload', type: 'File.upload', scope: 'project:p1', payload: { blob: staged.claim }, principal: principal({ type: 'user', id: 'u1' }) })).ok, true);
+  const blobId = app.db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
+  assert.deepEqual(readClaimedBlob(app, blobId), Buffer.from([7, 8]));
+  assert.equal((await app.dispatch({ actionId: 'denied', type: 'File.delete', scope: 'project:p1', payload: { blob: { blobId } }, principal: principal({ type: 'user', id: 'u2' }) })).ok, false);
+  assert.equal((await app.dispatch({ actionId: 'delete', type: 'File.delete', scope: 'project:p1', payload: { blob: { blobId } }, principal: principal({ type: 'user', id: 'u1' }) })).ok, true);
+  await app.pendingBlobLifecycle.reconcile();
+  assert.equal(app.db.prepare('SELECT status FROM _PendingBlob WHERE blobId = ?').get(blobId).status, 'deleted');
+  assert.throws(() => readClaimedBlob(app, blobId), /BLOB_UNAVAILABLE/);
 });

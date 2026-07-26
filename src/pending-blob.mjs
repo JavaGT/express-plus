@@ -70,28 +70,62 @@ export function createPendingBlobLifecycle(app, options) {
     if (!declaration) failure('UNDECLARED_BLOB_FIELD');
     const decision = await declaration.validator(Object.freeze({ actionName, actionId, authenticatedPrincipalId, scopeId, committedEventId, pendingKey: row.pendingKey, contentDigest: row.contentDigest, byteLength: row.byteLength }));
     if (!decision || decision.allow !== true) failure(decision?.code ?? 'BLOB_CLAIM_DENIED');
-    const claimed = app.db.prepare(`UPDATE _PendingBlob SET status = 'claimed', actionId = ?, committedEventId = ?, scopeId = ?
-      WHERE pendingKey = ? AND status = 'pending'`).run(actionId, committedEventId, scopeId, row.pendingKey);
+    const claimed = app.db.prepare(`UPDATE _PendingBlob SET status = 'claimed', actionId = ?, committedEventId = ?, scopeId = ?, claimedAt = ?
+      WHERE pendingKey = ? AND status = 'pending'`).run(actionId, committedEventId, scopeId, new Date().toISOString(), row.pendingKey);
     if (!claimed.changes) failure('PENDING_BLOB_ALREADY_CLAIMED');
     // BlobStore adoption is metadata-only and shares the dispatch transaction
     // with the claim, event log, projection, and receipt.
     app.blobs.adopt(app.db, row.blobId);
     return Object.freeze({ blobId: row.blobId });
   }
+  async function requestDeletion({ blobId, actionName, actionId, authenticatedPrincipalId, scopeId, committedEventId }) {
+    const declaration = fields.find((field) => field.deletionActionName === actionName);
+    if (!declaration) return false;
+    if (typeof blobId !== 'string') failure('INVALID_CLAIMED_BLOB_REF');
+    const row = app.db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId);
+    if (!row || row.status === 'deleted') failure('BLOB_NOT_FOUND');
+    const decision = await declaration.validator(Object.freeze({
+      actionName, actionId, authenticatedPrincipalId, scopeId, committedEventId,
+      pendingKey: row.pendingKey, contentDigest: row.contentDigest, byteLength: row.byteLength,
+    }));
+    if (!decision || decision.allow !== true) failure(decision?.code ?? 'BLOB_DELETE_DENIED');
+    if (row.status === 'delete-requested') return true;
+    const changed = app.db.prepare(`UPDATE _PendingBlob SET status = 'delete-requested', deleteActionId = ?
+      WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed')`).run(actionId, blobId);
+    if (!changed.changes) failure('BLOB_DELETE_CONFLICT');
+    return true;
+  }
+  function markRecoveryFailure(row, error) {
+    const claimedAt = Date.parse(row.claimedAt ?? row.createdAt);
+    const expired = Number.isFinite(claimedAt) && Date.now() - claimedAt >= options.adoptedRecoveryTtlMs;
+    app.db.prepare(`UPDATE _PendingBlob SET recoveryFailure = ?, status = CASE WHEN ? THEN 'recovery-failed' ELSE status END
+      WHERE pendingKey = ?`).run(String(error?.message ?? error), expired ? 1 : 0, row.pendingKey);
+  }
   async function reconcile() {
+    const deleting = app.db.prepare("SELECT * FROM _PendingBlob WHERE status = 'delete-requested'").all();
+    for (const row of deleting) {
+      try {
+        app.blobs.discard(row.blobId);
+        app.db.prepare("UPDATE _PendingBlob SET status = 'deleted', deletedAt = ? WHERE pendingKey = ? AND status = 'delete-requested'")
+          .run(new Date().toISOString(), row.pendingKey);
+      } catch (error) {
+        markRecoveryFailure(row, error);
+      }
+    }
     const claimed = app.db.prepare("SELECT * FROM _PendingBlob WHERE status = 'claimed'").all();
     for (const row of claimed) {
       try {
         const bytes = app.blobs.readRange(row.blobId);
         if (bytes.length !== row.byteLength || createHash('sha256').update(bytes).digest('hex') !== row.contentDigest) {
-          app.db.prepare("UPDATE _PendingBlob SET status = 'recovery-failed' WHERE pendingKey = ?").run(row.pendingKey);
+          markRecoveryFailure(row, 'BLOB_UNAVAILABLE');
           continue;
         }
         app.blobs.finalize(row.blobId);
         app.db.prepare("UPDATE _PendingBlob SET status = 'finalized' WHERE pendingKey = ? AND status = 'claimed'").run(row.pendingKey);
-      } catch {
+      } catch (error) {
         // The claimed generation remains durable and readable from its verified
         // pending slot while a later boot reconciliation retries finalization.
+        markRecoveryFailure(row, error);
       }
     }
   }
@@ -105,9 +139,23 @@ export function createPendingBlobLifecycle(app, options) {
       }
     });
   }
+  function readClaimed(blobId) {
+    const row = app.db.prepare("SELECT * FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized')").get(blobId);
+    if (!row) failure('BLOB_UNAVAILABLE');
+    try {
+      const bytes = app.blobs.readRange(blobId);
+      if (bytes.length !== row.byteLength || createHash('sha256').update(bytes).digest('hex') !== row.contentDigest) throw new Error('BLOB_UNAVAILABLE');
+      return bytes;
+    } catch (error) {
+      markRecoveryFailure(row, error);
+      failure('BLOB_UNAVAILABLE');
+    }
+  }
   return Object.freeze({
     stage,
     validateClaim,
+    requestDeletion,
+    readClaimed,
     reconcile,
     reap,
     // Finalization is package-owned post-commit work. Reconciliation scans the
@@ -122,4 +170,9 @@ export function createPendingBlobLifecycle(app, options) {
 export function pendingBlobStager(workbench, authenticatedPrincipal) {
   if (!workbench.pendingBlobLifecycle) throw new Error('blobLifecycle is not configured');
   return Object.freeze({ stage: (request) => workbench.pendingBlobLifecycle.stage(authenticatedPrincipal, request) });
+}
+
+export function readClaimedBlob(workbench, blobId) {
+  if (!workbench.pendingBlobLifecycle) throw new Error('blobLifecycle is not configured');
+  return workbench.pendingBlobLifecycle.readClaimed(blobId);
 }

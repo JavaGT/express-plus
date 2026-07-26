@@ -52,8 +52,18 @@ function collectAppEntities(app) {
     }
     if (handlers[declaration.type]) throw new Error(`action '${declaration.type}' is already registered`);
     const handler = async (context) => {
-      const events = await declaration.handler(context);
       const lifecycle = app.pendingBlobLifecycle;
+      const deletion = lifecycle?.fields.find((field) => field.deletionActionName === declaration.type);
+      if (deletion && context.payload?.[deletion.field] !== undefined) {
+        const blobRef = context.payload[deletion.field];
+        const blobId = typeof blobRef === 'string' ? blobRef : blobRef?.blobId;
+        await lifecycle.requestDeletion({
+          blobId, actionName: declaration.type, actionId: context.actionId,
+          authenticatedPrincipalId: context.principal?.id, scopeId: context.scope,
+          committedEventId: `${context.scope}:${readSeq(context.db, context.scope) + 1}`,
+        });
+      }
+      const events = await declaration.handler(context);
       if (!lifecycle) return events;
       for (const field of lifecycle.fields) {
         if (field.actionName !== declaration.type || context.payload?.[field.field] === undefined) continue;

@@ -119,7 +119,6 @@ export function durableMutationVariant({
   projectionConsumers = [],
   admission = noAdmission(),
   blobAdapter = noBlobAdapter(),
-  pendingBlobLifecycle = null,
   effectsRegistry = null,
   executeEffectsForEvent = null,
   postCommitConsumers = [],
@@ -142,15 +141,6 @@ export function durableMutationVariant({
       scope,
     } = {}) {
       const finalizedEvents = [];
-
-      if (pendingBlobLifecycle && !Array.isArray(payload)) {
-        // The eventual first committed event identity is derived from trusted
-        // dispatch state before the append, never from the action payload.
-        await pendingBlobLifecycle.admitInTxn(db, {
-          actionName: type, actionId, principal, scopeId: scope,
-          committedEventId: `${scope}:${readSeq(db, scope) + 1}`, payload,
-        });
-      }
 
       // Pre-projection admission — runs IN-TXN against the PRE-mutation row,
       // before the _Log append and before projection. Denial leaves zero

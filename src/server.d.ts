@@ -34,6 +34,7 @@ export type StagePendingBlobRequest = Readonly<{ projectId: string; fileId: stri
 export type StagedPendingBlob = Readonly<{ claim: PendingBlobClaim; pendingKey: PendingBlobKey; byteLength: number; contentDigest: string }>;
 export interface PendingBlobStager { stage(request: StagePendingBlobRequest): Promise<StagedPendingBlob>; }
 export function pendingBlobStager(workbench: import('../index.d.ts').WorkbenchApp, authenticatedPrincipal: Principal): PendingBlobStager;
+export function readClaimedBlob(workbench: import('../index.d.ts').WorkbenchApp, blobId: ClaimedBlobRef['blobId']): Buffer;
 export type TrustedBlobClaimContext = import('../index.d.ts').TrustedBlobClaimContext;
 export type BlobClaimDecision = import('../index.d.ts').BlobClaimDecision;
 export type BlobClaimValidator = import('../index.d.ts').BlobClaimValidator;
