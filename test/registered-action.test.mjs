@@ -58,6 +58,73 @@ test('registered action commits projection, project event, cursor, and receipt o
   assert.equal(readCommittedCursor(db, 'project:p1'), 1);
 });
 
+test('registered action receipt commits immutable request attribution', async () => {
+  const { app, db } = await appWith(sourceAction);
+  const request = {
+    actionId: 'attributed-action', scope: 'project:p1', type: 'source.create',
+    payload: { id: 's1', projectId: 'p1', name: 'Interview' },
+    principal: { type: 'user', id: 'u1', attributes: {} }, clientId: 'session-1',
+  };
+
+  assert.equal((await app.dispatch(request)).ok, true);
+  assert.equal((await app.dispatch({ ...request, principal: { type: 'user', id: 'u2', attributes: {} }, clientId: 'session-2' })).deduped, true);
+  const receipt = db.prepare('SELECT principalKey, sessionId FROM _ActionReceipt WHERE actionId = ?').get('attributed-action');
+  assert.equal(receipt.principalKey, 'user:u1');
+  assert.equal(receipt.sessionId, 'session-1');
+
+  assert.equal((await app.dispatch({
+    ...request, actionId: 'anonymous-attribution', payload: { id: 's2', projectId: 'p1', name: 'Anonymous' },
+    principal: { type: 'anonymous', id: null, attributes: {} }, clientId: 'session-3',
+  })).ok, true);
+  const anonymousReceipt = db.prepare('SELECT principalKey, sessionId FROM _ActionReceipt WHERE actionId = ?').get('anonymous-attribution');
+  assert.equal(anonymousReceipt.principalKey, null);
+  assert.equal(anonymousReceipt.sessionId, 'session-3');
+});
+
+test('registered actions reject malformed receipt client attribution before writes', async () => {
+  const { app, db } = await appWith(sourceAction);
+  const result = await app.dispatch({
+    actionId: 'invalid-attribution', scope: 'project:p1', type: 'source.create',
+    payload: { id: 's1', projectId: 'p1', name: 'Interview' },
+    principal: { type: 'user', id: 'u1', attributes: {} }, clientId: '',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM Source').get().count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt').get().count, 0);
+
+  const mismatch = await app.dispatch({
+    actionId: 'mismatched-attribution', scope: 'project:p1', type: 'source.create',
+    payload: { id: 's2', projectId: 'p1', name: 'Interview' },
+    principal: { type: 'user', id: 'u1', attributes: {} }, clientId: 'session-1', history: { session: 'session-2' },
+  });
+  assert.equal(mismatch.ok, false);
+  assert.equal(mismatch.failure.category, 'invalid-input');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt').get().count, 0);
+
+  const emptyBatch = await app.batch([], {
+    principal: { type: 'user', id: 'u1', attributes: {} }, clientId: '',
+  });
+  assert.equal(emptyBatch.ok, false);
+  assert.equal(emptyBatch.failure.category, 'invalid-input');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt').get().count, 0);
+});
+
+test('registered action batch commits request attribution once', async () => {
+  const { app, db } = await appWith(sourceAction);
+  const result = await app.batch([{
+    type: 'source.create', payload: { id: 's1', projectId: 'p1', name: 'Interview' },
+  }], {
+    principal: { type: 'user', id: 'u1', attributes: {} }, clientId: 'session-1',
+  });
+
+  assert.equal(result.ok, true);
+  const receipt = db.prepare('SELECT principalKey, sessionId FROM _ActionReceipt').get();
+  assert.equal(receipt.principalKey, 'user:u1');
+  assert.equal(receipt.sessionId, 'session-1');
+});
+
 test('registered action authorization denies before handler and projection', async () => {
   let handled = false;
   const denied = (db) => {

@@ -321,6 +321,21 @@ test('sessionless excluded action receipt has metadata', async () => {
   assert.equal(row.operation, 'action');
 });
 
+test('durable history retains its legacy principal key grammar', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const server = makeServer(db);
+  const result = await server.dispatch({
+    actionId: 'legacy-principal', type: 'document.set', payload: { value: 1 },
+    principal: { type: 'robot', id: 7 }, scope, history: { session: 'tab-a' },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(
+    db.prepare('SELECT principalKey FROM _ActionReceipt WHERE actionId = ?').get('legacy-principal').principalKey,
+    'robot:7',
+  );
+});
+
 test('mixed batch: excluded action excludes cursor entry for whole batch', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);

@@ -428,6 +428,8 @@ export interface DispatchRequest<Payload = Record<string, unknown>> {
   payload: Payload;
   principal: Principal;
   scope?: string;
+  /** Caller-owned session identifier recorded with the immutable action receipt. */
+  clientId?: string;
   history?: { session: string };
 }
 export type DispatchResult<Event extends CommittedEvent = CommittedEvent> =
@@ -691,7 +693,7 @@ export interface WorkbenchApp extends RouteBuilder {
   ): Promise<DispatchResult>;
   batch<Action extends BatchAction>(
     actions: readonly Action[] | BatchActionFactory<Action>,
-    options?: { principal?: Principal },
+    options?: { principal?: Principal; clientId?: string },
   ): Promise<DispatchResult>;
   listen(): this;
   listen(callback: () => void): this;

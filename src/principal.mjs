@@ -30,6 +30,14 @@ export class UnknownPrincipalTypeError extends Error {
 
 const PRINCIPAL_TYPES = Object.freeze(['user', 'link', 'system', 'anonymous', 'apiKey']);
 
+export function principalKeyOf(value) {
+  if (value?.id == null) return null;
+  if (!PRINCIPAL_TYPES.includes(value.type) || typeof value.id !== 'string' || value.id.length === 0) {
+    throw new UnknownPrincipalTypeError('an attributed principal requires a closed type and non-empty string id');
+  }
+  return `${value.type}:${value.id}`;
+}
+
 // Build a frozen principal from a declared shape. `attributes` defaults to an
 // empty frozen object (a link principal carries `{ token }`; a user typically
 // carries none at this layer). The id/type invariants are checked here so an

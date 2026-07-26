@@ -21,6 +21,7 @@ import { createDurableHistoryRuntime } from './durable-history.mjs';
 import { decideReplay } from './replay-decision.mjs';
 import { getLog } from './log.mjs';
 import { failure, failureFromError, failureOutcome } from './outcome.mjs';
+import { principalKeyOf } from './principal.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -412,6 +413,26 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
   return successOutcome(committed);
 }
 
+function receiptMetadata(request, historyCommit) {
+  const clientId = request.clientId;
+  const historySession = request.history?.session;
+  if (clientId === undefined) return historyCommit;
+  if (typeof clientId !== 'string' || clientId.length === 0) {
+    throw new ValidationError('clientId must be a non-empty string');
+  }
+  if (historySession !== undefined && historySession !== clientId) {
+    throw new ValidationError('clientId must match history.session when both are provided');
+  }
+  return {
+    ...historyCommit,
+    metadata: {
+      ...historyCommit?.metadata,
+      principalKey: principalKeyOf(request.principal),
+      sessionId: clientId,
+    },
+  };
+}
+
 // gate's default-on requireUser(). Authorization is always an explicit function
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
@@ -555,6 +576,13 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const handler = checkHandler(handlers, type);
     if (!handler) return unknownActionOutcome(type);
 
+    let historyCommit;
+    try {
+      historyCommit = receiptMetadata(request, request._historyCommit ?? historyRuntime?.normalCommit(request));
+    } catch (err) {
+      return executionFailure(err, { actionId, type });
+    }
+
     // Fork C — AUTHORIZE FIRST (outside the transaction). A retried action by a
     // since-revoked principal returns denied (403), even if the mutation already
     // committed. The same authorize runs again inside commitEvents's txn (Wave 4.4)
@@ -600,7 +628,6 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // rolls back cleanly with no partial state. node:sqlite's DatabaseSync is
     // single-writer; BEGIN/COMMIT serialize writes.
     const now = new Date().toISOString();
-    const historyCommit = request._historyCommit ?? historyRuntime?.normalCommit(request);
     const committed = await commitEvents(db, emitted, {
       now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit,
       handler: handler.inTransaction ? handler : null,
@@ -623,6 +650,13 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   // for crash atomicity with log, cursor, projection, and receipt writes.
   async function dispatchBatch(request) {
     const { actionId, actions = [], principal, scope = '' } = request;
+    let historyCommit;
+    try {
+      historyCommit = receiptMetadata(request, request._historyCommit ?? historyRuntime?.normalCommit(request));
+    } catch (err) {
+      return executionFailure(err, { actionId });
+    }
+
     if (actions.length === 0) {
       return successOutcome([]);
     }
@@ -677,7 +711,6 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     }
 
     const now = new Date().toISOString();
-    const historyCommit = request._historyCommit ?? historyRuntime?.normalCommit(request);
     const committed = await commitEvents(db, allEmitted, {
       now, actionId, nextSeq, principal, payload: actions, pipeline, scope, authorize, historyCommit,
     });
