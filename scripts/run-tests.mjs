@@ -1,0 +1,42 @@
+import { closeSync, mkdtempSync, openSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { spawn } from 'node:child_process';
+
+const MAX_FAILURE_CHARS = 12_000;
+const MAX_FAILURE_LINES = 80;
+const logDirectory = mkdtempSync(join(tmpdir(), 'workbench-test-'));
+const logPath = join(logDirectory, 'node-test.log');
+const output = openSync(logPath, 'w');
+const started = performance.now();
+
+const child = spawn(
+  process.execPath,
+  ['--test', '--test-reporter=dot', '--test-timeout=30000', ...process.argv.slice(2)],
+  { cwd: process.cwd(), env: process.env, stdio: ['ignore', output, output] },
+);
+
+const result = await new Promise((resolve) => {
+  child.once('error', (error) => resolve({ code: 1, error }));
+  child.once('close', (code, signal) => resolve({ code: code ?? 1, signal }));
+});
+closeSync(output);
+
+const seconds = ((performance.now() - started) / 1000).toFixed(1);
+if (result.code === 0) {
+  console.log(`PASS node --test (${seconds}s)`);
+  console.log(`Full log: ${logPath}`);
+  process.exit(0);
+}
+
+console.error(`FAIL node --test (${seconds}s${result.signal ? `, signal ${result.signal}` : ''})`);
+if (result.error) console.error(result.error.message);
+
+const log = readFileSync(logPath, 'utf8');
+const failureStart = log.indexOf('Failed tests:');
+const relevant = failureStart === -1 ? log : log.slice(failureStart);
+const excerpt = relevant.split('\n').slice(0, MAX_FAILURE_LINES).join('\n').slice(0, MAX_FAILURE_CHARS);
+if (excerpt) console.error(excerpt);
+if (excerpt.length < relevant.length) console.error('... failure output truncated; inspect the full log for all failures.');
+console.error(`Full log: ${logPath}`);
+process.exit(result.code);
