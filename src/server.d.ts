@@ -19,7 +19,7 @@ export type { WorkbenchDatabase, WorkbenchStatement, UserPrincipal } from '../in
 export const frameworkTableNames: readonly string[];
 
 export function declaredTableNames(
-  entities: readonly EntityDeclaration<Record<string, unknown>>[],
+  entities: readonly WorkbenchEntity<any>[],
 ): readonly string[];
 
 // ---------------------------------------------------------------------------

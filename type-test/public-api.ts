@@ -13,7 +13,8 @@ import workbench, {
   type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
 import {
-  createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, readCommittedCursor,
+  createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredTableNames,
+  frameworkTableNames, readCommittedCursor,
   runMigrations, describeEntityStorage, describeSqliteStorage,
   type BlobStore, type SqliteStorageDescription,
   type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type Migration, type UserPrincipal,
@@ -44,6 +45,9 @@ const Project: WorkbenchEntity<ProjectRow> = entity('Project', {
   grant: grant(read, write),
   routes: (routes) => routes.resource(),
 });
+const frameworkTables: readonly string[] = frameworkTableNames;
+const projectTables: readonly string[] = declaredTableNames([Project]);
+void [frameworkTables, projectTables];
 // @ts-expect-error projected is a namespace; asynchronous projections use projected.async(...)
 projected({ compute: async () => 'invalid' });
 
