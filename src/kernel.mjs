@@ -70,13 +70,13 @@ function collectAppEntities(app) {
     if (handlers[declaration.type]) throw new Error(`action '${declaration.type}' is already registered`);
     const handler = async (context) => {
       const lifecycle = app.pendingBlobLifecycle;
-      const deletion = lifecycle?.fields.find((field) => field.deletionActionName === declaration.type);
+      const deletion = lifecycle?.fields.find((field) => field.purgeActionName === declaration.type);
       if (deletion && context.payload?.[deletion.field] !== undefined) {
         const blobRef = context.payload[deletion.field];
         const blobId = typeof blobRef === 'string' ? blobRef : blobRef?.blobId;
         await lifecycle.requestDeletion({
           blobId, actionName: declaration.type, actionId: context.actionId,
-          scopeId: context.scope,
+          scopeId: context.scope, resourceId: context.payload?.[deletion.resourceField],
         });
       }
       let handlerContext = context;
@@ -85,18 +85,39 @@ function collectAppEntities(app) {
         for (const field of lifecycle.fields) {
           if (field.actionName !== declaration.type) continue;
           const committedEventId = `${context.scope}:${readSeq(context.db, context.scope) + 1}`;
-          const { blobId } = await lifecycle.validateClaim({
+          const claimedBlob = await lifecycle.validateClaim({
             claim: context.payload[field.field], field: field.field, actionName: declaration.type,
             actionId: context.actionId, authenticatedPrincipal: context.principal,
-            scopeId: context.scope, committedEventId,
+            scopeId: context.scope, resourceId: context.payload[field.resourceField], committedEventId,
           });
+          const { blobId } = claimedBlob;
           claimedFields.push({ field, blobId });
-          handlerContext = { ...handlerContext, payload: { ...handlerContext.payload, [field.field]: blobId } };
+          handlerContext = {
+            ...handlerContext,
+            payload: { ...handlerContext.payload, [field.field]: blobId },
+            claimedBlobs: Object.freeze({ ...(handlerContext.claimedBlobs ?? {}), [field.field]: claimedBlob }),
+          };
         }
       }
       const result = await declaration.handler(handlerContext);
       const commit = Array.isArray(result) ? { events: result } : result;
       if (!commit || !Array.isArray(commit.events)) throw new Error(`registered action '${declaration.type}' must return an event array`);
+      if (handlerContext.claimedBlobs) {
+        const claimedBlobValues = Object.values(handlerContext.claimedBlobs);
+        const forbiddenEventMetadata = claimedBlobValues.flatMap((blob) => [blob.sha256, blob.md5, blob.byteLength, blob.mediaType]).filter((value) => value !== null);
+        const forbiddenPrivateMetadata = claimedBlobValues.flatMap((blob) => [blob.resourceId, blob.sha256, blob.md5, blob.byteLength, blob.mediaType]).filter((value) => value !== null);
+        const containsAttestationMetadata = (value, forbidden, seen = new Set()) => {
+          if (typeof value !== 'object' || value === null) return forbidden.some((candidate) => Object.is(candidate, value));
+          if (seen.has(value)) return false;
+          seen.add(value);
+          if (Array.isArray(value)) return value.some((item) => containsAttestationMetadata(item, forbidden, seen));
+          return Object.values(value).some((item) => containsAttestationMetadata(item, forbidden, seen));
+        };
+        if (containsAttestationMetadata(commit.events, forbiddenEventMetadata)
+          || containsAttestationMetadata({ directive: commit.directive, privateFact: commit.privateFact, effects: commit.effects }, forbiddenPrivateMetadata)) {
+          throw new Error(`declared blob action '${declaration.type}' cannot serialize claimed blob metadata`);
+        }
+      }
       if (!lifecycle) return Array.isArray(result) ? result : {
         events: commit.events,
         ...(commit.directive === undefined ? {} : { directive: commit.directive }),
@@ -110,7 +131,7 @@ function collectAppEntities(app) {
       }
       return {
         events: commit.events,
-        ...(claimedFields.length === 0 ? {} : { canonicalPayload: handlerContext.payload }),
+        ...(claimedFields.length === 0 ? {} : { canonicalPayload: handlerContext.payload, claimedBlobs: handlerContext.claimedBlobs }),
         ...(commit.directive === undefined ? {} : { directive: commit.directive }),
         ...(commit.privateFact === undefined ? {} : { privateFact: commit.privateFact }),
         ...(commit.effects === undefined ? {} : { effects: commit.effects }),

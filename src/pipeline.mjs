@@ -142,6 +142,7 @@ export function durableMutationVariant({
       type,
       scope,
       privateFact,
+      claimedBlobs,
     } = {}) {
       const finalizedEvents = [];
 
@@ -187,7 +188,9 @@ export function durableMutationVariant({
             if (consumer.actionType !== undefined && consumer.actionType !== type) continue;
             if (consumer.privateFact === true) {
               if (privateFact === undefined) throw new TypeError('private-fact projection requires a canonical private fact');
-              consumer.apply(ev, db, Object.freeze({ privateFact }));
+              consumer.apply(ev, db, Object.freeze({ privateFact, ...(claimedBlobs ? { claimedBlobs } : {}) }));
+            } else if (claimedBlobs) {
+              consumer.apply(ev, db, Object.freeze({ claimedBlobs }));
             } else {
               consumer.apply(ev, db);
             }
@@ -434,6 +437,7 @@ async function commitEvents(db, events, {
       const canonicalPayload = commit.canonicalPayload ?? payload;
       const result = await pipeline.applyInTxn(db, commit.events, {
         now, actionId, nextSeq, principal, payload: canonicalPayload, type, scope, privateFact,
+        claimedBlobs: commit.claimedBlobs,
       });
       // The owning-stream action receipt (Wave 4.9): written atomically with
       // the events it references, so a retry's dedupe check and a crash

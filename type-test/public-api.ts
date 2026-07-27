@@ -12,7 +12,7 @@ import workbench, {
   type InheritDirective, type Principal, type WorkbenchFailure,
   type ErasurePreparationContext, type ErasurePreparationReads,
   type OrdinaryRegisteredProjection, type PrivateFactRegisteredProjection,
-  type RegisteredAction, type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
+  type DeclaredClaimedBlob, type RegisteredAction, type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
 import {
   createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredTableNames,
@@ -124,6 +124,16 @@ const scopeAwareAction: RegisteredAction = {
   authorize: () => true,
   handler: ({ scope }) => [{ type: 'Project.renamed', scope, data: {} }],
 };
+const claimedBlobAction: RegisteredAction<{ id: string; blob: unknown }> = {
+  type: 'File.upload',
+  authorize: () => true,
+  handler: ({ claimedBlobs }) => {
+    const blob: DeclaredClaimedBlob | undefined = claimedBlobs?.blob;
+    if (blob) void [blob.blobId, blob.resourceId, blob.sha256, blob.md5, blob.byteLength, blob.mediaType];
+    return [];
+  },
+};
+void claimedBlobAction;
 const historyAwareAction: RegisteredAction<Record<string, unknown>> = {
   type: 'Project.restoreName',
   authorize: () => true,
@@ -154,7 +164,8 @@ const purgeAction: RegisteredAction<{ rootId: string }> = {
 void purgeAction;
 declare const committedEvent: CommittedEvent;
 scopeAwareAction.projections?.[0]?.apply(committedEvent, db);
-// @ts-expect-error ordinary projections preserve their two-argument public contract
+scopeAwareAction.projections?.[0]?.apply(committedEvent, db, { claimedBlobs: {} });
+// @ts-expect-error ordinary projections cannot receive private facts
 scopeAwareAction.projections?.[0]?.apply(committedEvent, db, { privateFact: { before: {}, after: {} } });
 
 type PrivateFact = Readonly<{ before: { value: string }; after: { value: string } }>;

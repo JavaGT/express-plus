@@ -30,9 +30,10 @@ function principalKey(principal) {
 export function declaredBlobField(field) {
   const keys = field && typeof field === 'object' ? Object.keys(field) : [];
   if (!field || typeof field.actionName !== 'string' || typeof field.field !== 'string'
-    || keys.some((key) => !['actionName', 'field', 'deletionActionName'].includes(key))
-    || (field.deletionActionName !== undefined && typeof field.deletionActionName !== 'string')) {
-    throw new TypeError('declaredBlobField requires actionName and field');
+    || typeof field.resourceField !== 'string'
+    || keys.some((key) => !['actionName', 'field', 'resourceField', 'purgeActionName'].includes(key))
+    || (field.purgeActionName !== undefined && typeof field.purgeActionName !== 'string')) {
+    throw new TypeError('declaredBlobField requires actionName, field, and resourceField');
   }
   return Object.freeze({ ...field });
 }
@@ -60,16 +61,16 @@ export function createPendingBlobLifecycle(app, options) {
     const blob = app.blobs.upload({ bytes, mime: request.mediaType });
     try {
       app.db.prepare(`INSERT INTO _PendingBlob
-        (pendingKey, blobId, claimTokenHash, principalKey, contentDigest, byteLength, status, scopeId, createdAt)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
-        .run(pendingKey, blob.id, hash(claimToken), authenticatedPrincipalKey, digest, bytes.length, request.scopeId, new Date().toISOString());
+        (pendingKey, blobId, claimTokenHash, principalKey, resourceId, contentDigest, byteLength, status, scopeId, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
+        .run(pendingKey, blob.id, hash(claimToken), authenticatedPrincipalKey, request.resourceId, digest, bytes.length, request.scopeId, new Date().toISOString());
     } catch (error) {
       try { app.blobs.discardPending(blob.id); } catch {}
       throw error;
     }
     return Object.freeze({ claim: Object.freeze({ pendingKey, claimToken }), pendingKey, byteLength: bytes.length, contentDigest: digest });
   }
-  async function validateClaim({ claim, field, actionName, actionId, authenticatedPrincipal, scopeId, committedEventId }) {
+  async function validateClaim({ claim, field, resourceId, actionName, actionId, authenticatedPrincipal, scopeId, committedEventId }) {
     if (!claim || typeof claim.pendingKey !== 'string' || typeof claim.claimToken !== 'string') failure('INVALID_PENDING_BLOB_CLAIM');
     const row = app.db.prepare('SELECT * FROM _PendingBlob WHERE pendingKey = ?').get(claim.pendingKey);
     if (!row || !timingSafeEqual(Buffer.from(hash(claim.claimToken)), Buffer.from(row.claimTokenHash))) failure('INVALID_PENDING_BLOB_CLAIM');
@@ -77,7 +78,11 @@ export function createPendingBlobLifecycle(app, options) {
     if (!declaration) failure('UNDECLARED_BLOB_FIELD');
     if (row.principalKey !== principalKey(authenticatedPrincipal)) failure('PENDING_BLOB_WRONG_PRINCIPAL');
     if (row.scopeId !== scopeId) failure('PENDING_BLOB_WRONG_SCOPE');
-    if (row.status === 'claimed' && row.actionId === actionId) return Object.freeze({ blobId: row.blobId });
+    if (row.resourceId !== resourceId) failure('PENDING_BLOB_WRONG_RESOURCE');
+    const metadata = app.blobs.stat(row.blobId);
+    if (!metadata || metadata.sha256 !== row.contentDigest || metadata.size !== row.byteLength) failure('BLOB_UNAVAILABLE');
+    const claimedBlob = Object.freeze({ blobId: row.blobId, resourceId: row.resourceId, sha256: metadata.sha256, md5: metadata.md5, byteLength: metadata.size, mediaType: metadata.mime });
+    if (row.status === 'claimed' && row.actionId === actionId) return claimedBlob;
     if (row.status !== 'pending') failure('PENDING_BLOB_ALREADY_CLAIMED');
     if (Date.now() - Date.parse(row.createdAt) >= options.pendingTtlMs) failure('PENDING_BLOB_EXPIRED');
     const claimed = app.db.prepare(`UPDATE _PendingBlob SET status = 'claimed', actionId = ?, committedEventId = ?, scopeId = ?, claimedAt = ?
@@ -86,15 +91,16 @@ export function createPendingBlobLifecycle(app, options) {
     // BlobStore adoption is metadata-only and shares the dispatch transaction
     // with the claim, event log, projection, and receipt.
     if (app.blobs.adopt(app.db, row.blobId).adopted !== 1) failure('BLOB_UNAVAILABLE');
-    return Object.freeze({ blobId: row.blobId });
+    return claimedBlob;
   }
-  async function requestDeletion({ blobId, actionName, actionId, scopeId }) {
-    const declaration = fields.find((field) => field.deletionActionName === actionName);
+  async function requestDeletion({ blobId, resourceId, actionName, actionId, scopeId }) {
+    const declaration = fields.find((field) => field.purgeActionName === actionName);
     if (!declaration) return false;
     if (typeof blobId !== 'string') failure('INVALID_CLAIMED_BLOB_REF');
     const row = app.db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId);
     if (!row || row.status === 'deleted') failure('BLOB_NOT_FOUND');
     if (row.scopeId !== scopeId) failure('BLOB_DELETE_WRONG_SCOPE');
+    if (row.resourceId !== resourceId) failure('BLOB_DELETE_WRONG_RESOURCE');
     if (row.status === 'delete-requested') return true;
     const changed = app.db.prepare(`UPDATE _PendingBlob SET status = 'delete-requested', deleteActionId = ?
       WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed')`).run(actionId, blobId);

@@ -629,7 +629,9 @@ export interface WorkbenchOptions {
 export type PendingBlobKey = string & { readonly __brand: 'PendingBlobKey' };
 export type PendingBlobClaim = Readonly<{ pendingKey: PendingBlobKey; claimToken: string & { readonly __brand: 'PendingBlobClaimToken' } }>;
 export type ClaimedBlobRef = Readonly<{ blobId: string & { readonly __brand: 'ClaimedBlobId' } }>;
-export type DeclaredBlobField = Readonly<{ actionName: string; field: string; deletionActionName?: string }>;
+export type DeclaredClaimedBlob = Readonly<{ blobId: ClaimedBlobRef['blobId']; resourceId: string; sha256: string; md5: string; byteLength: number; mediaType: string | null }>;
+export type DeclaredClaimedBlobs = Readonly<Record<string, DeclaredClaimedBlob>>;
+export type DeclaredBlobField = Readonly<{ actionName: string; field: string; resourceField: string; purgeActionName?: string }>;
 export type BlobLifecycleOptions = Readonly<{ fields: readonly DeclaredBlobField[]; pendingTtlMs: number; adoptedRecoveryTtlMs: number }>;
 
 export type OperationalConsumerName = string & { readonly __brand: 'OperationalConsumerName' };
@@ -669,12 +671,12 @@ export function operationalConsumer<TPayload, TFields extends object>(consumer: 
 export interface OrdinaryRegisteredProjection {
   readonly eventTypes: readonly string[];
   readonly privateFact?: never;
-  apply(event: CommittedEvent, db: WorkbenchDatabase): void;
+  apply(event: CommittedEvent, db: WorkbenchDatabase, context?: Readonly<{ claimedBlobs?: DeclaredClaimedBlobs }>): void;
 }
 export interface PrivateFactRegisteredProjection<PrivateFact = { readonly before: unknown; readonly after: unknown }> {
   readonly eventTypes: readonly string[];
   readonly privateFact: true;
-  apply(event: CommittedEvent, db: WorkbenchDatabase, context: Readonly<{ privateFact: PrivateFact }>): void;
+  apply(event: CommittedEvent, db: WorkbenchDatabase, context: Readonly<{ privateFact: PrivateFact; claimedBlobs?: DeclaredClaimedBlobs }>): void;
 }
 export type RegisteredProjection = OrdinaryRegisteredProjection | PrivateFactRegisteredProjection;
 
@@ -805,6 +807,8 @@ export interface RegisteredAction<
     now: string;
     /** Exact caller-selected owning scope for this dispatch. */
     readonly scope: string;
+    /** Package-attested staged-blob identity and metadata; transaction-bound and never serialized. */
+    readonly claimedBlobs?: DeclaredClaimedBlobs;
     /** Present only for a Workbench-owned inverse/redo dispatch; never serialized. */
     readonly history?: Readonly<{
       readonly operation: 'undo' | 'redo';

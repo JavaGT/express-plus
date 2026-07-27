@@ -36,6 +36,8 @@ export function operationalConsumerAdmin(workbench: import('../index.d.ts').Work
 export type PendingBlobKey = string & { readonly __brand: 'PendingBlobKey' };
 export type PendingBlobClaim = Readonly<{ pendingKey: PendingBlobKey; claimToken: string & { readonly __brand: 'PendingBlobClaimToken' } }>;
 export type ClaimedBlobRef = Readonly<{ blobId: string & { readonly __brand: 'ClaimedBlobId' } }>;
+export type DeclaredClaimedBlob = import('../index.d.ts').DeclaredClaimedBlob;
+export type DeclaredClaimedBlobs = import('../index.d.ts').DeclaredClaimedBlobs;
 export type StagePendingBlobRequest = Readonly<{ scopeId: string; resourceId: string; bytes: Uint8Array | AsyncIterable<Uint8Array>; mediaType?: string }>;
 export type StagedPendingBlob = Readonly<{ claim: PendingBlobClaim; pendingKey: PendingBlobKey; byteLength: number; contentDigest: string }>;
 export interface PendingBlobStager { stage(request: StagePendingBlobRequest): Promise<StagedPendingBlob>; }

@@ -264,6 +264,7 @@ export function generateFrameworkDDL() {
   blobId TEXT NOT NULL UNIQUE,
   claimTokenHash TEXT NOT NULL,
   principalKey TEXT NOT NULL,
+  resourceId TEXT NOT NULL,
   contentDigest TEXT NOT NULL,
   byteLength INTEGER NOT NULL,
   status TEXT NOT NULL,
@@ -368,8 +369,18 @@ export function executeFrameworkDDL(db) {
 
 function ensurePendingBlobColumns(db) {
   const cols = new Set(db.prepare('PRAGMA table_info(_PendingBlob)').all().map((r) => r.name));
-  for (const [name, type] of [['claimedAt', 'TEXT'], ['finalizedAt', 'TEXT'], ['deletedAt', 'TEXT'], ['deleteActionId', 'TEXT'], ['recoveryFailure', 'TEXT']]) {
+  for (const [name, type] of [['resourceId', 'TEXT'], ['claimedAt', 'TEXT'], ['finalizedAt', 'TEXT'], ['deletedAt', 'TEXT'], ['deleteActionId', 'TEXT'], ['recoveryFailure', 'TEXT']]) {
     if (!cols.has(name)) db.exec(`ALTER TABLE _PendingBlob ADD COLUMN ${name} ${type}`);
+  }
+  const legacyRows = db.prepare('SELECT pendingKey, scopeId FROM _PendingBlob WHERE resourceId IS NULL').all();
+  for (const row of legacyRows) {
+    const prefix = `${row.scopeId}/`;
+    const suffixLength = 1 + 64 + '.pending'.length;
+    if (typeof row.scopeId !== 'string' || !row.pendingKey.startsWith(prefix) || row.pendingKey.length <= prefix.length + suffixLength) {
+      throw new Error(`cannot recover pending blob resource identity for '${row.pendingKey}'`);
+    }
+    const resourceId = row.pendingKey.slice(prefix.length, -suffixLength);
+    db.prepare('UPDATE _PendingBlob SET resourceId = ? WHERE pendingKey = ? AND resourceId IS NULL').run(resourceId, row.pendingKey);
   }
 }
 
