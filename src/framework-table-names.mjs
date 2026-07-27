@@ -13,11 +13,40 @@ function unquoteIdentifier(name) {
   return name;
 }
 
+function stripSqlLineComments(sql) {
+  let result = '';
+  let quote = null;
+  for (let index = 0; index < sql.length; index += 1) {
+    const character = sql[index];
+    if (quote === '[') {
+      if (character === ']' && sql[index + 1] === ']') {
+        result += ']]'; index += 1;
+      } else {
+        result += character;
+        if (character === ']') quote = null;
+      }
+    } else if (quote) {
+      if (character === quote && sql[index + 1] === quote) {
+        result += quote + quote; index += 1;
+      } else {
+        result += character;
+        if (character === quote) quote = null;
+      }
+    } else if (character === '-' && sql[index + 1] === '-') {
+      while (index + 1 < sql.length && sql[index + 1] !== '\n') index += 1;
+    } else {
+      result += character;
+      if (character === "'" || character === '"' || character === '`' || character === '[') quote = character;
+    }
+  }
+  return result;
+}
+
 export function collectTableNamesFromDdl(entries) {
   const seen = new Map();
   const names = [];
   for (const { source, sql } of entries) {
-    const uncommented = sql.replace(/^\s*--.*$/gm, '');
+    const uncommented = stripSqlLineComments(sql);
     for (const match of uncommented.matchAll(CREATE_TABLE_NAME)) {
       const name = unquoteIdentifier(match[1]);
       const lower = name.toLowerCase();

@@ -114,10 +114,12 @@ test('collectTableNamesFromDdl — ignores SQL line comments', () => {
   const result = collectTableNamesFromDdl([
     { source: 'com1', sql: '-- CREATE TABLE Commented (id INTEGER)' },
     { source: 'com2', sql: '  -- CREATE TABLE IndentedCommented (id INTEGER)' },
+    { source: 'com3', sql: 'SELECT 1; -- CREATE TABLE InlineCommented (id INTEGER)' },
+    { source: 'quoted', sql: "SELECT '-- not a comment'; CREATE TABLE QuotedMarker (id INTEGER)" },
     { source: 'real', sql: 'CREATE TABLE RealTable (id INTEGER)' },
   ]);
 
-  assert.deepStrictEqual(result, ['RealTable']);
+  assert.deepStrictEqual(result, ['QuotedMarker', 'RealTable']);
 });
 
 test('collectTableNamesFromDdl — rejects duplicate declarations case-insensitively', () => {
