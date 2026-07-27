@@ -158,6 +158,34 @@ test('collectTableNamesFromDdl — preserves comment markers inside SQL quotes',
   ]);
 });
 
+test('collectTableNamesFromDdl — ignores CREATE TABLE text inside quoted SQL regions', () => {
+  const result = collectTableNamesFromDdl([
+    { source: 'single', sql: "SELECT 'CREATE TABLE SinglePhantom (id INTEGER)'; CREATE TABLE SingleReal (id INTEGER)" },
+    { source: 'double', sql: 'SELECT "CREATE TABLE DoublePhantom (id INTEGER)"; CREATE TABLE DoubleReal (id INTEGER)' },
+    { source: 'backtick', sql: 'SELECT `CREATE TABLE BacktickPhantom (id INTEGER)`; CREATE TABLE BacktickReal (id INTEGER)' },
+    { source: 'bracket', sql: 'SELECT [CREATE TABLE BracketPhantom (id INTEGER)]; CREATE TABLE BracketReal (id INTEGER)' },
+    { source: 'escaped', sql: "SELECT 'it''s CREATE TABLE EscapedPhantom (id INTEGER)', \"a\"\" CREATE TABLE AlsoPhantom (id INTEGER)\"; CREATE TABLE MixedReal (id INTEGER)" },
+  ]);
+
+  assert.deepStrictEqual(result, ['BacktickReal', 'BracketReal', 'DoubleReal', 'MixedReal', 'SingleReal']);
+});
+
+test('collectTableNamesFromDdl — extracts real quoted names beside quoted and commented phantoms', () => {
+  const result = collectTableNamesFromDdl([{
+    source: 'mixed',
+    sql: `
+      SELECT 'CREATE TABLE Fake (id INTEGER)';
+      -- CREATE TABLE LineFake (id INTEGER)
+      CREATE TABLE "Double""Name" (id INTEGER);
+      /* CREATE TABLE BlockFake (id INTEGER) */
+      CREATE TABLE \`Backtick\`\`Name\` (id INTEGER);
+      CREATE TABLE [Bracket]]Name] (id INTEGER);
+    `,
+  }]);
+
+  assert.deepStrictEqual(result, ['Backtick`Name', 'Bracket]Name', 'Double"Name']);
+});
+
 test('collectTableNamesFromDdl — rejects duplicate declarations case-insensitively', () => {
   assert.throws(
     () => collectTableNamesFromDdl([
