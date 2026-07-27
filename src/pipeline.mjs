@@ -554,6 +554,14 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
           { actionIndex: batchForbiddenIdx },
         );
       }
+      const privateProjectionIdx = actions.findIndex((action) => handlers[action.type].privateFactProjection);
+      if (privateProjectionIdx !== -1) {
+        return executionFailure(
+          new ValidationError(`action '${actions[privateProjectionIdx].type}' with a private-fact projection requires single dispatch`),
+          { actionId, type: actions[privateProjectionIdx].type },
+          { actionIndex: privateProjectionIdx },
+        );
+      }
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
         const action = actions[actionIndex];
         let authorized;
@@ -705,6 +713,14 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
         new ValidationError(`action '${actions[batchForbiddenIdx].type}' requires single dispatch`),
         { actionId, type: actions[batchForbiddenIdx].type },
         { actionIndex: batchForbiddenIdx },
+      );
+    }
+    const privateProjectionIdx = actions.findIndex((action) => handlers[action.type].privateFactProjection);
+    if (privateProjectionIdx !== -1) {
+      return executionFailure(
+        new ValidationError(`action '${actions[privateProjectionIdx].type}' with a private-fact projection requires single dispatch`),
+        { actionId, type: actions[privateProjectionIdx].type },
+        { actionIndex: privateProjectionIdx },
       );
     }
 

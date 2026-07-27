@@ -97,6 +97,9 @@ function collectAppEntities(app) {
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'erasureCapable', { value: declaration.erasure === true });
+    Object.defineProperty(handler, 'privateFactProjection', {
+      value: declaration.projections?.some((projection) => projection?.privateFact === true) ?? false,
+    });
     handlers[declaration.type] = handler;
     for (const projection of declaration.projections ?? []) {
       if (!Array.isArray(projection?.eventTypes) || typeof projection.apply !== 'function') {

@@ -205,6 +205,62 @@ test('private fact projection is bound to its declaring action when event types 
   assert.deepEqual(db.prepare('SELECT value FROM PrivateProjection').all().map((row) => row.value), ['owned']);
 });
 
+test('batch rejects a private-fact-projection action before any handler runs while ordinary batches remain supported', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE PrivateProjection (value TEXT NOT NULL)');
+  const ran = { ordinary: 0, private: 0 };
+  const app = workbench({ db, actions: [
+    {
+      type: 'ordinary.batchable', authorize: () => true,
+      handler: () => {
+        ran.ordinary += 1;
+        return [{ type: 'ordinary.batched', scope: 'owner:o1', data: {} }];
+      },
+    },
+    {
+      type: 'private.single-only', authorize: () => true,
+      handler: () => {
+        ran.private += 1;
+        return {
+          events: [{ type: 'private.single-only.committed', scope: 'owner:o1', data: {} }],
+          privateFact: { before: {}, after: { value: 'projected' } },
+        };
+      },
+      projections: [{
+        eventTypes: ['private.single-only.committed'], privateFact: true,
+        apply(_event, tx, { privateFact }) {
+          tx.prepare('INSERT INTO PrivateProjection VALUES (?)').run(privateFact.after.value);
+        },
+      }],
+    },
+  ] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+
+  const rejected = await app.kernel.dispatchBatch({
+    actionId: 'mixed-private', scope: 'owner:o1', principal,
+    actions: [
+      { type: 'ordinary.batchable', payload: {} },
+      { type: 'private.single-only', payload: {} },
+    ],
+  });
+  assert.equal(rejected.ok, false);
+  assert.equal(rejected.failure.category, 'invalid-input');
+  assert.match(rejected.failure.message, /private-fact projection.*requires single dispatch/);
+  assert.deepEqual(ran, { ordinary: 0, private: 0 }, 'batch eligibility is checked before handlers');
+  for (const table of ['PrivateProjection', '_Log', '_PrivateActionFact', '_ActionReceipt']) {
+    assert.equal(db.prepare(`SELECT COUNT(*) count FROM ${table}`).get().count, 0, `${table} remains untouched`);
+  }
+
+  const ordinary = await app.kernel.dispatchBatch({
+    actionId: 'ordinary-batch', scope: 'owner:o1', principal,
+    actions: [{ type: 'ordinary.batchable', payload: {} }],
+  });
+  assert.equal(ordinary.ok, true);
+  assert.equal(ran.ordinary, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM _Log').get().count, 1);
+});
+
 test('private-fact projection receives canonical fact while public durable records remain sanitized', async (t) => {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE PrivateProjection (id TEXT PRIMARY KEY, value TEXT NOT NULL)');
