@@ -24,7 +24,8 @@ import {
 } from 'workbench/server';
 import {
   LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore,
-  createLiveDeliverySession, createScopeLiveStore, decodeResult,
+  createLiveDeliverySession, createScopeLiveStore, decodeResult, materializeAnnotatedTextSnapshot,
+  type AnnotatedTextBlock,
   type EventsSinceResponse, type LiveDeliverySession, type LiveStore, type ScopeLiveStore, type SnapshotResponse,
   type StaleResponse, type WsEnvelope,
 } from 'workbench/client';
@@ -81,6 +82,43 @@ registerAnnotatedTextStructuralExtension('invalidAsyncMeasurement', {
   },
 });
 void [annotatedTextHandle, protecting];
+
+declare const projectedAnnotatedTextSnapshot: Record<string, unknown>;
+declare const compiledAnnotatedTextHandle: Record<string, unknown>;
+const projectedAnnotatedText = materializeAnnotatedTextSnapshot(
+  projectedAnnotatedTextSnapshot,
+  compiledAnnotatedTextHandle,
+);
+const projectedKind: 'workbench.annotatedText.recipient' = projectedAnnotatedText.kind;
+for (const block of projectedAnnotatedText.blocks) {
+  const blockId: string = block.id;
+  if (block.kind === 'restricted') {
+    const placeholder: string = block.placeholder;
+    // @ts-expect-error restricted blocks never expose transcript text
+    block.text;
+    // @ts-expect-error restricted blocks never expose semantic fields
+    block.fields;
+    // @ts-expect-error restricted blocks never expose annotation identities
+    block.annotationIds;
+    // @ts-expect-error restricted blocks never expose measurements
+    block.measurements;
+    // @ts-expect-error restricted blocks never expose body length or offsets
+    block.length;
+    // @ts-expect-error restricted blocks never expose body length or offsets
+    block.offsets;
+    // @ts-expect-error restricted blocks never expose capability hints
+    block.capabilityHints;
+    void placeholder;
+  } else {
+    const text: string = block.text;
+    // @ts-expect-error visible blocks do not carry a restriction placeholder
+    block.placeholder;
+    void text;
+  }
+  void blockId;
+}
+declare const publicBlock: AnnotatedTextBlock;
+void [projectedKind, publicBlock];
 
 type ProjectRow = { id: string; name: string; ownerId: string };
 const category: FailureCategory = FAILURE_CATEGORIES[0];

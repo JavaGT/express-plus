@@ -522,12 +522,21 @@ export function createAuthClient(config?: AuthClientConfig): AuthClient;
 // materializeAnnotatedTextSnapshot — browser snapshot materialization
 // ---------------------------------------------------------------------------
 
-export interface AnnotatedTextBlock {
+export interface AnnotatedTextVisibleBlock {
+  readonly kind: 'visible';
   readonly id: string;
   readonly text: string;
   readonly fields: Readonly<Record<string, unknown>>;
   readonly annotationIds: readonly string[];
 }
+
+export interface AnnotatedTextRestrictedBlock {
+  readonly kind: 'restricted';
+  readonly id: string;
+  readonly placeholder: string;
+}
+
+export type AnnotatedTextBlock = AnnotatedTextVisibleBlock | AnnotatedTextRestrictedBlock;
 
 export interface AnnotatedTextAnnotation {
   readonly id: string;
@@ -550,6 +559,7 @@ export interface AnnotatedTextMeasurement {
 }
 
 export interface AnnotatedTextDocument {
+  readonly kind: 'workbench.annotatedText.recipient';
   readonly version: 1;
   readonly blocks: readonly AnnotatedTextBlock[];
   readonly annotations: readonly AnnotatedTextAnnotation[];

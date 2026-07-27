@@ -10,7 +10,8 @@
 // to annotatedText() — which have annotations as an array — are rejected.
 //
 // Public shapes:
-//   Block: {id, text, fields, annotationIds}
+//   Block: visible {kind, id, text, fields, annotationIds}
+//          | restricted {kind, id, placeholder}
 //   Annotation: {id, family, fields}
 //   Membership: {annotationId, blockId, ordinal}
 //   Measurement: {id, blockId, family, formatVersion, payload}
