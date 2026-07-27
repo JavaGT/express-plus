@@ -45,9 +45,12 @@ export function createPendingBlobLifecycle(app, options) {
   const byActionField = new Map(fields.map((field) => [`${field.actionName}:${field.field}`, field]));
   if (byActionField.size !== fields.length) throw new TypeError('blobLifecycle fields must not contain duplicate actionName/field pairs');
   async function stage(principal, request) {
+    return app.writeQueue.run(() => stageInQueue(principal, request));
+  }
+  async function stageInQueue(principal, request) {
     if (!request || typeof request.scopeId !== 'string' || !request.scopeId || typeof request.resourceId !== 'string' || !request.resourceId) throw new TypeError('scopeId and resourceId are required');
     const authenticatedPrincipalKey = principalKey(principal);
-    if (request.scopeId.includes('/') || request.resourceId.includes('/') || request.resourceId === '.' || request.resourceId === '..') throw new TypeError('scopeId and resourceId must be single safe path segments');
+    if (request.scopeId.includes('/') || request.scopeId === '.' || request.scopeId === '..' || request.resourceId.includes('/') || request.resourceId === '.' || request.resourceId === '..') throw new TypeError('scopeId and resourceId must be single safe path segments');
     const pendingKey = `${request.scopeId}/${request.resourceId}.pending`;
     const existing = app.db.prepare('SELECT 1 FROM _PendingBlob WHERE pendingKey = ?').get(pendingKey);
     if (existing) failure('PENDING_KEY_EXISTS');
@@ -109,8 +112,7 @@ export function createPendingBlobLifecycle(app, options) {
     for (const row of deleting) {
       try {
         app.blobs.discard(row.blobId);
-        app.db.prepare("UPDATE _PendingBlob SET status = 'deleted', deletedAt = ? WHERE pendingKey = ? AND status = 'delete-requested'")
-          .run(new Date().toISOString(), row.pendingKey);
+        app.db.prepare("DELETE FROM _PendingBlob WHERE pendingKey = ? AND status = 'delete-requested'").run(row.pendingKey);
       } catch (error) {
         markRecoveryFailure(row, error);
       }

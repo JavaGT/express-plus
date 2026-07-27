@@ -109,8 +109,27 @@ test('declared deletion is authorized, idempotent, and makes claimed bytes unava
   assert.equal((await app.dispatch({ actionId: 'denied', type: 'File.delete', scope: 'project:p1', payload: { blob: { blobId } }, principal: principal({ type: 'user', id: 'u2' }) })).ok, false);
   assert.equal((await app.dispatch({ actionId: 'delete', type: 'File.delete', scope: 'project:p1', payload: { blob: { blobId } }, principal: principal({ type: 'user', id: 'u1' }) })).ok, true);
   await app.pendingBlobLifecycle.reconcile();
-  assert.equal(app.db.prepare('SELECT status FROM _PendingBlob WHERE blobId = ?').get(blobId).status, 'deleted');
+  assert.equal(app.db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId), undefined);
   assert.throws(() => readClaimedBlob(app, blobId), /BLOB_UNAVAILABLE/);
+  assert.ok((await stager.stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([9]) })).claim, 'deletion releases the deterministic identity for replacement');
+});
+
+test('the ordinary blob reaper retains a finalized pending-blob generation', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db, blobs: { root },
+    actions: [{ type: 'File.upload', authorize: () => true, projections: [{ eventTypes: ['File.created'], apply: () => {} }], handler: ({ payload, scope }) => [{ type: 'File.created', scope, data: { blob: payload.blob } }] }],
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
+  assert.equal((await app.dispatch({ actionId: 'upload', type: 'File.upload', scope: 'project:p1', payload: { blob: staged.claim }, principal: actor })).ok, true);
+  const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
+  assert.deepEqual(app.blobs.reap({ ttl: 0, blobColumns: [] }), { orphans: 0, danglers: 0 });
+  assert.deepEqual(readClaimedBlob(app, blobId), Buffer.from([1]));
 });
 
 test('claims are scope-bound and action authorization runs before claiming', async (t) => {
@@ -128,6 +147,17 @@ test('claims are scope-bound and action authorization runs before claiming', asy
   assert.equal((await app.dispatch({ actionId: 'foreign', type: 'File.upload', scope: 'project:p2', payload: { blob: staged.claim }, principal: principal({ type: 'user', id: 'u1' }) })).ok, false);
   assert.equal((await app.dispatch({ actionId: 'denied', type: 'File.upload', scope: 'project:p1', payload: { blob: staged.claim }, principal: principal({ type: 'user', id: 'u2' }) })).ok, false);
   assert.equal(handled, 0);
+  assert.equal(db.prepare('SELECT status FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).status, 'pending');
+});
+
+test('a foreign principal with a valid token cannot claim a staged blob', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({ db, blobs: { root }, actions: [{ type: 'File.upload', authorize: () => true, handler: () => [] }], blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 } });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const staged = await pendingBlobStager(app, principal({ type: 'user', id: 'u1' })).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
+  assert.equal((await app.dispatch({ actionId: 'stolen', type: 'File.upload', scope: 'project:p1', payload: { blob: staged.claim }, principal: principal({ type: 'user', id: 'u2' }) })).ok, false);
   assert.equal(db.prepare('SELECT status FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).status, 'pending');
 });
 

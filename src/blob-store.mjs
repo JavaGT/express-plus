@@ -128,6 +128,7 @@ export function createBlobStore({ root, db, bytes }) {
     // 2. Refcount sweep: adopted blobs with no references
     const adoptedForRefcount = db.prepare('SELECT id FROM BlobStore WHERE status = ?').all('adopted');
     for (const row of adoptedForRefcount) {
+      if (db.prepare("SELECT 1 FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed', 'delete-requested')").get(row.id)) continue;
       let referenced = false;
       for (const { table, column } of blobColumns) {
         const ref = db.prepare(`SELECT 1 FROM "${table}" WHERE "${column}" = ? LIMIT 1`).get(row.id);

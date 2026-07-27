@@ -105,13 +105,16 @@ function collectAppEntities(app) {
       }
       return {
         events: commit.events,
-        canonicalPayload: handlerContext.payload,
+        ...(claimedFields.length === 0 ? {} : { canonicalPayload: handlerContext.payload }),
         ...(commit.directive === undefined ? {} : { directive: commit.directive }),
         ...(commit.privateFact === undefined ? {} : { privateFact: commit.privateFact }),
         ...(commit.effects === undefined ? {} : { effects: commit.effects }),
       };
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
+    Object.defineProperty(handler, 'batchForbidden', {
+      value: (app._blobLifecycleOptions?.fields ?? []).some((field) => field.actionName === declaration.type),
+    });
     Object.defineProperty(handler, 'erasureCapable', { value: Boolean(declaration.erasure) });
     Object.defineProperty(handler, 'erasurePrepare', {
       value: declaration.erasure === true ? undefined : declaration.erasure?.prepare,

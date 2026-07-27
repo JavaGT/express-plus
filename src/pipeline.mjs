@@ -439,7 +439,7 @@ async function commitEvents(db, events, {
       }
       await historyCommit?.apply?.(db);
       insertReceipt(db, scope, actionId, now, result, directive === undefined
-        ? { ...historyCommit?.metadata, actionType: type, actionData: canonicalPayload }
+        ? { ...historyCommit?.metadata, actionType: type, actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData }
         : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
       return result;
     });
@@ -751,6 +751,9 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // atomicity; the outer check is the Fork C semantic gate.
     for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
       const action = actions[actionIndex];
+      if (handlers[action.type].batchForbidden) {
+        return executionFailure(new ValidationError(`action '${action.type}' with a declared blob field requires single dispatch`), { actionId, type: action.type }, { actionIndex });
+      }
       let authResult;
       try {
         authResult = await authorize({ type: action.type, payload: action.payload, principal });
