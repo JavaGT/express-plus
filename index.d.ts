@@ -707,6 +707,46 @@ export interface ErasureDirectiveV1 {
 export interface RegisteredActionCommit {
   readonly events: readonly Readonly<{ type: string; scope: string; data: unknown }>[];
   readonly directive?: ErasureDirectiveV1;
+  readonly privateFact?: { readonly before: unknown; readonly after: unknown };
+  readonly effects?: readonly PostCommitEffectDeclaration[];
+}
+export interface PostCommitEffectDeclaration {
+  readonly file: string;
+  readonly operation: string;
+  readonly key?: string;
+  readonly verification: string;
+  readonly payload?: unknown;
+}
+export function postCommitEffect(input: PostCommitEffectDeclaration): Readonly<PostCommitEffectDeclaration>;
+export interface AuthorizedRowRequirement {
+  readonly entity: string | WorkbenchEntity;
+  readonly id: string;
+  readonly capability: typeof read | typeof write | typeof subscribe;
+}
+export function authorizedRows<Payload = Record<string, unknown>>(
+  resolve: (context: { payload: Payload; principal: Principal }) => readonly AuthorizedRowRequirement[] | Promise<readonly AuthorizedRowRequirement[]>,
+): RegisteredAction<Payload>['authorize'];
+export interface PostCommitEffectId {
+  readonly scope: string;
+  readonly actionId: string;
+  readonly file: string;
+  readonly operation: string;
+  readonly ordinal: number;
+}
+export interface ClaimedPostCommitEffect {
+  readonly id: PostCommitEffectId;
+  readonly key: string;
+  readonly verification: string;
+  readonly payload: unknown;
+  readonly fence: number;
+  readonly leaseUntil: number;
+}
+export interface PostCommitEffectRunner {
+  claim(workerId: string): ClaimedPostCommitEffect | null;
+  heartbeat(id: PostCommitEffectId, workerId: string, fence: number): boolean;
+  complete(id: PostCommitEffectId, workerId: string, fence: number, result: { verification: string }): { accepted: boolean; noop?: boolean; verification?: false };
+  fail(id: PostCommitEffectId, workerId: string, fence: number, result?: { retryAt?: number }): { accepted: boolean };
+  reconstruct(): { inserted: number };
 }
 export function erasureDirective(input: ErasureDirectiveV1): Readonly<ErasureDirectiveV1>;
 
@@ -754,6 +794,7 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly port?: number;
   readonly httpServer?: Server;
   readonly jobs?: unknown;
+  readonly postCommitEffects?: PostCommitEffectRunner;
   readonly blobs?: unknown;
   readonly history?: DurableHistoryRuntime;
   resolveScope?: WorkbenchOptions['resolveScope'];

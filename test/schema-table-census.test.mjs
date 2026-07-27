@@ -18,6 +18,8 @@ test('frameworkTableNames is a frozen, sorted, duplicate-free array of persisten
     '_OperationalConsumerDeclaration',
     '_OperationalConsumerFailure',
     '_PendingBlob',
+    '_PostCommitEffect',
+    '_PrivateActionFact',
     '_ProjectedCursor',
     '_ScheduleReceipt',
     '_Worker',

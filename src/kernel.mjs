@@ -20,6 +20,7 @@ import { createPendingBlobLifecycle } from './pending-blob.mjs';
 import { readSeq } from './committed-log.mjs';
 import { CRUD_CURSOR_POLICY } from './entity/crud.mjs';
 import { EventKind } from './event-handle.mjs';
+import { bindAuthorizedRows, isAuthorizedRows } from './action-authorization.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -85,7 +86,12 @@ function collectAppEntities(app) {
           ? { ...event, data: { ...event.data, [field.field]: blobId } }
           : event);
       }
-      return commit.directive === undefined ? rewritten : { events: rewritten, directive: commit.directive };
+      return {
+        events: rewritten,
+        ...(commit.directive === undefined ? {} : { directive: commit.directive }),
+        ...(commit.privateFact === undefined ? {} : { privateFact: commit.privateFact }),
+        ...(commit.effects === undefined ? {} : { effects: commit.effects }),
+      };
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'erasureCapable', { value: declaration.erasure === true });
@@ -360,7 +366,14 @@ export function buildKernel(app) {
   // explicit authorization function which runs at both durable auth gates.
   return createServer({
     handlers,
-    authorize: (context) => registeredActions.get(context.type)?.authorize({ ...context, db: app.db }) ?? true,
+    authorize: (context) => {
+      const declaration = registeredActions.get(context.type);
+      if (!declaration) return true;
+      const authorize = isAuthorizedRows(declaration.authorize)
+        ? bindAuthorizedRows(declaration.authorize, app)
+        : declaration.authorize;
+      return authorize({ ...context, db: app.db });
+    },
     db: app.db,
     history: app._history,
     cursorPolicy,

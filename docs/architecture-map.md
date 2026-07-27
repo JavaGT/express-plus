@@ -47,6 +47,8 @@ Action → authorize → handler → `_Log` append → projection (+ in-txn effe
 | `write-queue.mjs` | Single-writer serialization |
 | `driver.mjs` / `db.mjs` / `migrations.mjs` | SQLite engagement |
 | `blob-lifecycle.mjs` (in-txn adopt) | Blob adopt atomic with commit |
+| `post-commit-effects.mjs` (declaration) | Immutable private fact + ordered external-work declarations atomic with commit |
+| `action-authorization.mjs` | Multi-row action admission through existing row grants/check registry |
 
 ## Deliver loop
 
@@ -90,6 +92,7 @@ authorization (`authz.mjs`, `scope-sql`, `row-grant`) stays outside this folder.
 | `auth/membership.mjs` | Two-plane membership sugar |
 | `auth/index.mjs` | Coat barrel |
 | `job-queue.mjs` | Worker claim/lease board |
+| `post-commit-effects.mjs` (runner) | Fenced app-owned claim/complete/fail for declared external work; never executes I/O |
 | `blob-store.mjs` | Blob bytes |
 | `public/workbench-ui*.mjs` + Svelte primitives | UI kit over the client store |
 | `public/workbench-local-*.mjs` | Local log / cross-tab (**demand-gated** — S6) |

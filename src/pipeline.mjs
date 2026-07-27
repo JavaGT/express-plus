@@ -23,6 +23,7 @@ import { getLog } from './log.mjs';
 import { failure, failureFromError, failureOutcome } from './outcome.mjs';
 import { principalKeyOf } from './principal.mjs';
 import { applyErasureDirective, isErasureDirective } from './erasure-directive.mjs';
+import { declarePostCommitEffectsInTxn } from './post-commit-effects.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -410,6 +411,9 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
         applyErasureDirective(db, directive, { scope, actionId });
       }
       await historyCommit?.apply?.(db);
+      declarePostCommitEffectsInTxn(db, {
+        scope, actionId, committedAt: now, privateFact: commit.privateFact, effects: commit.effects,
+      });
       insertReceipt(db, scope, actionId, now, result, directive === undefined
         ? historyCommit?.metadata
         : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });

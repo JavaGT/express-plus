@@ -26,4 +26,5 @@ export { describeEntityStorage, describeSqliteStorage } from './sqlite-storage-d
 export { readSeq as readCommittedCursor } from './committed-log.mjs';
 export { createLiveDelivery } from './live-delivery-public.mjs';
 export { operationalConsumerAdmin } from './operational-consumer.mjs';
+export { createPostCommitEffectRunner } from './post-commit-effects.mjs';
 export { pendingBlobStager, declaredBlobField, readClaimedBlob } from './pending-blob.mjs';

@@ -37,6 +37,7 @@ import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
 import { createBlobStore } from './blob-store.mjs';
 import { createJobQueue } from './job-queue.mjs';
+import { createPostCommitEffectRunner } from './post-commit-effects.mjs';
 import { createClock } from './clock.mjs';
 import { createWriteQueue } from './write-queue.mjs';
 import { prepareGracefulShutdown } from './lifecycle.mjs';
@@ -235,6 +236,7 @@ export default function workbench({
       app.blobs = createBlobStore({ root, db });
     }
   }
+  if (db) app.postCommitEffects = createPostCommitEffectRunner({ db });
   if (blobLifecycle) {
     if (!db) throw new Error('blobLifecycle requires a database');
     app._blobLifecycleOptions = blobLifecycle;

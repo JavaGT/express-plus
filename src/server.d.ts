@@ -11,6 +11,12 @@ import type {
   WorkbenchStatement,
 } from '../index.d.ts';
 export type { WorkbenchDatabase, WorkbenchStatement, UserPrincipal } from '../index.d.ts';
+export type { PostCommitEffectRunner } from '../index.d.ts';
+export function createPostCommitEffectRunner(options: {
+  db: WorkbenchDatabase;
+  leaseMs?: number;
+  now?: () => number;
+}): import('../index.d.ts').PostCommitEffectRunner;
 
 export type OperationalFailure = Readonly<{
   consumer: import('../index.d.ts').OperationalConsumerName;
