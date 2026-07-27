@@ -3,6 +3,9 @@ import { createHash } from 'node:crypto';
 const TOMBSTONE_TYPE = '$workbench.erased';
 const TOMBSTONE_ACTION_ID = '$workbench.erased';
 const TOMBSTONE_DATA = JSON.stringify({ version: 1 });
+const PACKAGE_TABLES = new Set([
+  'BlobStore', 'User', 'Session', 'Inbox', 'Credential', 'Invitation', 'ApiKey', 'TwoFactor',
+]);
 
 function fail(message) { throw new TypeError(`invalid erasure directive: ${message}`); }
 function text(value, name) {
@@ -20,6 +23,88 @@ function keys(value, allowed, name) {
 function digest(value) { return createHash('sha256').update(value).digest('hex'); }
 function json(value, name) {
   try { return JSON.parse(value); } catch { fail(`${name} must contain JSON`); }
+}
+function freeze(value) {
+  if (value && typeof value === 'object') {
+    for (const child of Object.values(value)) freeze(child);
+    if (!Object.isFrozen(value)) Object.freeze(value);
+  }
+  return value;
+}
+function identifier(name, label = 'identifier') {
+  text(name, label);
+  return `"${name.replaceAll('"', '""')}"`;
+}
+function applicationTable(name, allowedTables) {
+  text(name, 'table');
+  if (!allowedTables.has(name)) {
+    fail(`application writes cannot access undeclared table '${name}'`);
+  }
+  return identifier(name);
+}
+function columns(record, name) {
+  if (!record || typeof record !== 'object' || Array.isArray(record) || Object.keys(record).length === 0) {
+    fail(`${name} must be a non-empty record`);
+  }
+  return Object.entries(record);
+}
+function identifiers(entries) { return entries.map(([name]) => identifier(name, 'column')).join(', '); }
+function predicate(entries) { return entries.map(([name]) => `${identifier(name, 'column')} = ?`).join(' AND '); }
+
+/** Transaction-bound, write-only authority over application-owned tables. */
+function erasurePreparationWrites(db, tables) {
+  const allowedTables = new Set(tables);
+  let active = true;
+  const open = () => { if (!active) fail('application writes are available only during erasure preparation'); };
+  const safeTable = (table) => {
+    applicationTable(table, allowedTables);
+    if (db.prepare('SELECT 1 FROM sqlite_temp_master WHERE lower(name) = lower(?)').get(table)) {
+      fail(`application writes cannot access shadowed table '${table}'`);
+    }
+    const stored = db.prepare("SELECT type FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type IN ('table', 'view')").get(table);
+    if (stored?.type !== 'table') fail(`application writes require table '${table}'`);
+    const canonical = db.prepare("SELECT name FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type = 'table'").get(table).name;
+    if (canonical.startsWith('_') || canonical.toLowerCase().startsWith('sqlite_')
+      || [...PACKAGE_TABLES].some((name) => name.toLowerCase() === canonical.toLowerCase())) {
+      fail(`application writes cannot access undeclared table '${table}'`);
+    }
+    const name = identifier(canonical);
+    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical)
+      || db.prepare("SELECT 1 FROM sqlite_temp_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical)) {
+      fail(`application writes cannot access triggered table '${table}'`);
+    }
+    if (db.prepare(`PRAGMA foreign_key_list(${name})`).get()) {
+      fail(`application writes cannot access foreign-key table '${table}'`);
+    }
+    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all();
+    for (const candidate of tables) {
+      if (db.prepare(`PRAGMA foreign_key_list(${identifier(candidate.name)})`).all().some((fk) => fk.table.toLowerCase() === canonical.toLowerCase())) {
+        fail(`application writes cannot access referenced table '${table}'`);
+      }
+    }
+    return `main.${name}`;
+  };
+  const writes = Object.freeze({
+    insert(table, values) {
+      open();
+      const entries = columns(values, 'values');
+      return db.prepare(`INSERT INTO ${safeTable(table)} (${identifiers(entries)}) VALUES (${entries.map(() => '?').join(', ')})`)
+        .run(...entries.map(([, value]) => value)).changes;
+    },
+    update(table, values, where) {
+      open();
+      const changes = columns(values, 'values'); const filters = columns(where, 'where');
+      return db.prepare(`UPDATE ${safeTable(table)} SET ${changes.map(([name]) => `${identifier(name, 'column')} = ?`).join(', ')} WHERE ${predicate(filters)}`)
+        .run(...changes.map(([, value]) => value), ...filters.map(([, value]) => value)).changes;
+    },
+    delete(table, where) {
+      open();
+      const filters = columns(where, 'where');
+      return db.prepare(`DELETE FROM ${safeTable(table)} WHERE ${predicate(filters)}`)
+        .run(...filters.map(([, value]) => value)).changes;
+    },
+  });
+  return { writes, close() { active = false; } };
 }
 function pointer(value, path) {
   if (path === '') return value;
@@ -64,10 +149,23 @@ export function erasureDirective(input) {
     }
   }
   for (const [index, rule] of input.census.rules.entries()) validateRule(rule, `census.rules[${index}]`);
-  return Object.freeze(input);
+  return freeze(input);
 }
 
 export function isErasureDirective(value) { return value?.kind === 'workbench.erasure' && value?.version === 1; }
+
+/** Declare census inputs without exposing the prepared target manifest to the handler. */
+export function erasureDirectivePreparation(input) {
+  keys(input, new Set(['owningScope', 'subject', 'census']), 'preparation');
+  text(input.owningScope, 'owningScope'); text(input.subject, 'subject');
+  if (!input.census || input.census.version !== 1 || !Array.isArray(input.census.rules)) fail('census must be version 1 with rules');
+  for (const [index, rule] of input.census.rules.entries()) validateRule(rule, `census.rules[${index}]`);
+  return freeze({ kind: 'workbench.erasure.preparation', version: 1, ...input });
+}
+
+export function isErasureDirectivePreparation(value) {
+  return value?.kind === 'workbench.erasure.preparation' && value?.version === 1;
+}
 
 function receiptDigest(row) {
   return digest(JSON.stringify({
@@ -94,36 +192,69 @@ function matchesSubject(data, rule, subject) {
   return matches;
 }
 
+function censusTargets(db, { owningScope, subject, census }) {
+  const actionRules = ruleMap(census.rules, 'action');
+  const eventRules = ruleMap(census.rules, 'event');
+  const receipts = db.prepare('SELECT * FROM _ActionReceipt WHERE scope = ? ORDER BY historyOrder').all(owningScope);
+  const rows = db.prepare('SELECT * FROM _Log WHERE scope = ? ORDER BY seq').all(owningScope);
+  const targetIds = new Set();
+  for (const receipt of receipts) {
+    const rule = actionRules.get(receipt.actionType);
+    if (!rule) fail(`missing action census rule '${receipt.actionType}'`);
+    if (matchesSubject(json(receipt.actionData, `action '${receipt.actionId}' data`), rule, subject)) targetIds.add(receipt.actionId);
+  }
+  for (const row of rows) {
+    const rule = eventRules.get(row.eventType);
+    if (!rule) fail(`missing event census rule '${row.eventType}'`);
+    if (matchesSubject(json(row.eventData, `event ${row.scope}/${row.seq} data`), rule, subject)) targetIds.add(row.actionId);
+  }
+  return { receipts, rows, targetIds };
+}
+
+/** Prepare an exact package-owned manifest from the current transaction snapshot. */
+export function prepareErasureDirective(db, input) {
+  const declared = isErasureDirectivePreparation(input)
+    ? { owningScope: input.owningScope, subject: input.subject, census: input.census }
+    : input;
+  erasureDirectivePreparation(declared);
+  const { receipts, rows, targetIds } = censusTargets(db, declared);
+  if (targetIds.size === 0) fail('structural census found no targets');
+  const rowByKey = new Map(rows.map((row) => [`${row.scope}:${row.seq}`, row]));
+  const actions = receipts.filter((receipt) => targetIds.has(receipt.actionId)).map((receipt) => {
+    const refs = json(receipt.eventRefs, `receipt '${receipt.actionId}' refs`);
+    if (!Array.isArray(refs)) fail(`receipt '${receipt.actionId}' refs must be an array`);
+    return {
+      scope: receipt.scope, actionId: receipt.actionId, historyOrder: receipt.historyOrder,
+      committedAt: receipt.committedAt, receiptDigest: receiptDigest(receipt),
+      events: refs.map((ref, index) => {
+        const row = rowByKey.get(`${ref?.scope}:${ref?.seq}`);
+        if (!row || row.actionId !== receipt.actionId) fail(`receipt '${receipt.actionId}' has stale event ref at index ${index}`);
+        return {
+          scope: row.scope, seq: row.seq, actionId: row.actionId, eventType: row.eventType,
+          committedAt: row.committedAt, eventDataDigest: digest(row.eventData),
+        };
+      }),
+    };
+  });
+  if (actions.length !== targetIds.size) fail('structural census target has no owning receipt');
+  return erasureDirective({ kind: 'workbench.erasure', version: 1, ...declared, actions });
+}
+
 /** Apply a validated directive inside an already-open durable transaction. */
-export function applyErasureDirective(db, directive, { scope, actionId }) {
+export async function applyErasureDirective(db, directive, { scope, actionId, prepare, tables = [] }) {
   erasureDirective(directive);
   if (directive.owningScope !== scope) fail('owningScope must equal request scope');
   if (directive.actions.some((target) => target.scope !== scope || target.actionId === actionId)) {
     fail('targets must remain in the owning scope and cannot include the purge action');
   }
 
-  const actionRules = ruleMap(directive.census.rules, 'action');
-  const eventRules = ruleMap(directive.census.rules, 'event');
-  const receipts = db.prepare('SELECT * FROM _ActionReceipt WHERE scope = ? ORDER BY historyOrder').all(scope);
-  const rows = db.prepare('SELECT * FROM _Log WHERE scope = ? ORDER BY seq').all(scope);
+  const { receipts, rows, targetIds: computedTargets } = censusTargets(db, directive);
   const targetById = new Map();
   for (const target of directive.actions) {
     if (targetById.has(target.actionId)) fail(`duplicate target action '${target.actionId}'`);
     targetById.set(target.actionId, target);
   }
 
-  const computedTargets = new Set();
-  for (const receipt of receipts) {
-    const rule = actionRules.get(receipt.actionType);
-    if (!rule) fail(`missing action census rule '${receipt.actionType}'`);
-    if (matchesSubject(json(receipt.actionData, `action '${receipt.actionId}' data`), rule, directive.subject)) computedTargets.add(receipt.actionId);
-  }
-  for (const row of rows) {
-    const rule = eventRules.get(row.eventType);
-    if (!rule) fail(`missing event census rule '${row.eventType}'`);
-    const matches = matchesSubject(json(row.eventData, `event ${row.scope}/${row.seq} data`), rule, directive.subject);
-    if (matches) computedTargets.add(row.actionId);
-  }
   if (computedTargets.size !== targetById.size || [...computedTargets].some((id) => !targetById.has(id))) {
     fail('manifest does not exactly match the structural census target set');
   }
@@ -143,6 +274,15 @@ export function applyErasureDirective(db, directive, { scope, actionId }) {
         fail(`stale event target '${target.actionId}' at index ${index}`);
       }
     }
+  }
+
+  if (prepare !== undefined) {
+    const capability = erasurePreparationWrites(db, tables);
+    try {
+      try { await prepare(Object.freeze({ writes: capability.writes, manifest: directive })); }
+      catch { throw new TypeError('erasure preparation failed'); }
+    }
+    finally { capability.close(); }
   }
 
   const ids = [...targetById.keys()];

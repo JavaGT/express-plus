@@ -711,9 +711,21 @@ export interface ErasureDirectiveV1 {
   readonly actions: readonly ErasureActionTargetV1[];
   readonly census: { readonly version: 1; readonly rules: readonly ErasureCensusRuleV1[] };
 }
+export interface ErasureDirectivePreparationV1 {
+  readonly kind: 'workbench.erasure.preparation';
+  readonly version: 1;
+  readonly owningScope: string;
+  readonly subject: string;
+  readonly census: ErasureDirectiveV1['census'];
+}
+export interface ErasurePreparationWrites {
+  insert(table: string, values: Readonly<Record<string, unknown>>): number | bigint;
+  update(table: string, values: Readonly<Record<string, unknown>>, where: Readonly<Record<string, unknown>>): number | bigint;
+  delete(table: string, where: Readonly<Record<string, unknown>>): number | bigint;
+}
 export interface RegisteredActionCommit {
   readonly events: readonly Readonly<{ type: string; scope: string; data: unknown }>[];
-  readonly directive?: ErasureDirectiveV1;
+  readonly directive?: ErasureDirectiveV1 | ErasureDirectivePreparationV1;
   readonly privateFact?: { readonly before: unknown; readonly after: unknown };
   readonly effects?: readonly PostCommitEffectDeclaration[];
 }
@@ -756,6 +768,9 @@ export interface PostCommitEffectRunner {
   reconstruct(): { inserted: number };
 }
 export function erasureDirective(input: ErasureDirectiveV1): Readonly<ErasureDirectiveV1>;
+export function erasureDirectivePreparation(
+  input: Pick<ErasureDirectiveV1, 'owningScope' | 'subject' | 'census'>,
+): Readonly<ErasureDirectivePreparationV1>;
 
 export interface RegisteredAction<
   Payload = Record<string, unknown>,
@@ -780,7 +795,16 @@ export interface RegisteredAction<
   readonly projections?: readonly Projection[];
   readonly history?: { readonly cursor?: 'eligible' | 'excluded' };
   /** Privileged durable-pipeline erasure directive; requires history.cursor excluded. */
-  readonly erasure?: true;
+  readonly erasure?: true | Readonly<{
+    /** Exact application-owned tables the preparation callback may mutate. */
+    tables: readonly string[];
+    /** Runs once inside the origin transaction, after exact manifest validation and before erasure. */
+    prepare(context: Readonly<{
+      /** Transaction-bound, write-only access to application-owned tables. */
+      writes: ErasurePreparationWrites;
+      manifest: Readonly<ErasureDirectiveV1>;
+    }>): void | Promise<void>;
+  }>;
 }
 
 /** Serializes all application writes and drains them during shutdown. */

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { erasureDirective } from '../src/index.mjs';
-import { generateFrameworkDDL } from '../src/internal.mjs';
+import workbench, { erasureDirective, erasureDirectivePreparation } from '../src/index.mjs';
+import { generateFrameworkDDL, prepareErasureDirective } from '../src/internal.mjs';
 
 const scope = 'Project:project-1';
 const oldData = JSON.stringify({ projectId: 'project-1', id: 'artefact-1', sensitive: 'remove-me' });
@@ -44,14 +44,133 @@ function directive(db, overrides = {}) {
   });
 }
 
-function app(db, makeDirective) {
+function app(db, makeDirective, erasure = true) {
+  const privilege = erasure === true ? true : { tables: erasure.tables ?? ['DomainCleanup'], ...erasure };
   return workbench({ db, actions: [{
-    type: 'lifecycle.purge', erasure: true, history: { cursor: 'excluded' }, authorize: () => true,
+    type: 'lifecycle.purge', erasure: privilege, history: { cursor: 'excluded' }, authorize: () => true,
     handler(context) {
       return { events: [{ type: 'lifecycle.purged', scope, data: { done: true } }], directive: makeDirective(context.db) };
     },
   }] });
 }
+
+test('package prepares the exact frozen structural manifest from the transaction snapshot', () => {
+  const db = fixture();
+  const prepared = prepareErasureDirective(db, {
+    owningScope: scope, subject: 'artefact-1', census: directive(db).census,
+  });
+  assert.deepEqual(prepared.actions, directive(db).actions);
+  assert.equal(Object.isFrozen(prepared), true);
+  assert.equal(Object.isFrozen(prepared.actions), true);
+  assert.equal(Object.isFrozen(prepared.actions[0].events[0]), true);
+});
+
+test('package deep-freezes a shallow-frozen explicit manifest', () => {
+  const db = fixture(); const shallow = { ...directive(db), actions: [{ ...directive(db).actions[0] }] };
+  Object.freeze(shallow);
+  const prepared = erasureDirective(shallow);
+  assert.equal(Object.isFrozen(prepared.actions), true);
+  assert.equal(Object.isFrozen(prepared.actions[0]), true);
+  assert.equal(Object.isFrozen(prepared.actions[0].events), true);
+  assert.equal(Object.isFrozen(prepared.census.rules[0]), true);
+});
+
+test('opted-in preparation receives only the validated manifest and joins the erasure transaction', async () => {
+  const db = fixture();
+  db.exec('CREATE TABLE DomainCleanup (id TEXT PRIMARY KEY, targetCount INTEGER NOT NULL)');
+  let calls = 0; let observed;
+  const instance = app(db, (database) => erasureDirectivePreparation({
+    owningScope: scope, subject: 'artefact-1', census: directive(database).census,
+  }), { prepare({ writes, manifest }) {
+    calls += 1; observed = manifest;
+    writes.insert('DomainCleanup', { id: 'cleanup', targetCount: manifest.actions.length });
+    return { secret: 'must not become a dispatch result' };
+  } });
+  await instance.start();
+  const first = await instance.dispatch({ actionId: 'purge-prepare', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(first.ok, true); assert.equal(calls, 1);
+  assert.deepEqual({ ...db.prepare('SELECT * FROM DomainCleanup').get() }, { id: 'cleanup', targetCount: 1 });
+  assert.equal(observed.actions[0].actionId, 'old-action');
+  assert.equal(JSON.stringify(first).includes('secret'), false);
+  assert.equal(JSON.stringify(db.prepare('SELECT * FROM _ActionReceipt WHERE actionId = ?').get('purge-prepare')).includes('old-action'), false);
+  const retry = await instance.dispatch({ actionId: 'purge-prepare', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(retry.ok, true); assert.equal(retry.deduped, true); assert.equal(calls, 1);
+});
+
+test('preparation failure rolls back its writes, purge event, receipt, and erasure', async () => {
+  const db = fixture();
+  db.exec('CREATE TABLE DomainCleanup (id TEXT PRIMARY KEY)');
+  const instance = app(db, directive, { prepare({ writes }) {
+    writes.insert('DomainCleanup', { id: 'rolled-back' });
+    throw new Error('domain preparation failed');
+  } });
+  await instance.start();
+  const result = await instance.dispatch({ actionId: 'purge-fails', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(result.ok, false); assert.equal(JSON.stringify(result).includes('domain preparation failed'), false);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM DomainCleanup').get().count, 0);
+  assert.equal(db.prepare('SELECT eventType FROM _Log WHERE seq = 1').get().eventType, 'artefact.deleted');
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM _Log').get().count, 1);
+  assert.equal(db.prepare('SELECT 1 FROM _ActionReceipt WHERE actionId = ?').get('purge-fails'), undefined);
+});
+
+test('preparation has no raw Workbench-table authority even if mis-allowlisted', async () => {
+  const db = fixture();
+  const instance = app(db, directive, { tables: ['_Log'], prepare({ writes }) { writes.delete('_Log', { scope }); } });
+  await instance.start();
+  const result = await instance.dispatch({ actionId: 'purge-no-raw-db', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(result.ok, false);
+  assert.equal(db.prepare('SELECT eventType FROM _Log WHERE seq = 1').get().eventType, 'artefact.deleted');
+});
+
+test('preparation cannot mutate package-owned non-underscore tables', async () => {
+  const db = fixture();
+  const instance = app(db, directive, { tables: ['BlobStore'], prepare({ writes }) { writes.delete('BlobStore', { id: 'x' }); } });
+  await instance.start();
+  const result = await instance.dispatch({ actionId: 'purge-no-blobstore', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(result.ok, false);
+  assert.equal(db.prepare('SELECT eventType FROM _Log WHERE seq = 1').get().eventType, 'artefact.deleted');
+});
+
+test('preparation rejects allowlisted tables whose triggers could escape the capability', async () => {
+  const db = fixture();
+  db.exec('CREATE TABLE DomainCleanup (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TRIGGER cleanup_escape AFTER INSERT ON DomainCleanup BEGIN DELETE FROM _ActionReceipt; END');
+  const instance = app(db, directive, { prepare({ writes }) { writes.insert('DomainCleanup', { id: 'escape' }); } });
+  await instance.start();
+  const result = await instance.dispatch({ actionId: 'purge-no-trigger', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(result.ok, false);
+  assert.ok(db.prepare('SELECT 1 FROM _ActionReceipt WHERE actionId = ?').get('old-action'));
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM DomainCleanup').get().count, 0);
+});
+
+test('preparation writes cannot escape their transaction-bound callback', async () => {
+  const db = fixture(); db.exec('CREATE TABLE DomainCleanup (id TEXT PRIMARY KEY)');
+  let escaped;
+  const instance = app(db, directive, { prepare({ writes }) { escaped = writes; } });
+  await instance.start();
+  const result = await instance.dispatch({ actionId: 'purge-no-escape', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(result.ok, true);
+  assert.throws(() => escaped.insert('DomainCleanup', { id: 'late' }), /available only during erasure preparation/);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM DomainCleanup').get().count, 0);
+});
+
+test('private projection replay does not invoke erasure preparation', async () => {
+  const db = fixture(); let calls = 0;
+  const instance = app(db, directive, { prepare() { calls += 1; } });
+  await instance.start();
+  const result = await instance.dispatch({ actionId: 'purge-before-replay', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(result.ok, true); assert.equal(calls, 1);
+  assert.deepEqual(await instance.replayPrivateFactProjections(), { projected: 0 });
+  assert.equal(calls, 1);
+});
+
+test('ordinary actions cannot opt into erasure preparation', async () => {
+  const db = fixture();
+  const ordinary = workbench({ db, actions: [{
+    type: 'ordinary.action', erasure: { tables: [], prepare() {} }, authorize: () => true, handler: () => [],
+  }] });
+  await assert.rejects(ordinary.start(), /must exclude its history cursor/);
+});
 
 test('registered erasure atomically tombstones targets, retires receipts/cursors, and sanitizes retries', async () => {
   const db = fixture(); const instance = app(db, directive); await instance.start();

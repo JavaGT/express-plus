@@ -21,7 +21,7 @@ export { principal, anonymous, UnknownPrincipalTypeError, principalFrom, effectS
 export { requireUser, allowAnonymous, isGate, resolveRouteGate, routeGateFor, ROUTE_VERBS } from './route-gate.mjs';
 export { action, event, createServer, createClient, durableMutationVariant, noAdmission, noBlobAdapter, NOW } from './pipeline.mjs';
 export { durableHistory, createDurableHistoryRuntime } from './durable-history.mjs';
-export { erasureDirective, applyErasureDirective, isErasureDirective } from './erasure-directive.mjs';
+export { erasureDirective, erasureDirectivePreparation, prepareErasureDirective, applyErasureDirective, isErasureDirective, isErasureDirectivePreparation } from './erasure-directive.mjs';
 export { buildKernel, POST_COMMIT_CONSUMER_KINDS } from './kernel.mjs';
 export { createClock } from './clock.mjs';
 export { createProjectedAsyncConsumer, resolveProjectedAsyncTriggerTypes, reconcileProjectedRecovery } from './projected-async.mjs';

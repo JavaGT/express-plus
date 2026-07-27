@@ -22,7 +22,7 @@ import { decideReplay } from './replay-decision.mjs';
 import { getLog } from './log.mjs';
 import { failure, failureFromError, failureOutcome } from './outcome.mjs';
 import { principalKeyOf } from './principal.mjs';
-import { applyErasureDirective, isErasureDirective } from './erasure-directive.mjs';
+import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparation, prepareErasureDirective } from './erasure-directive.mjs';
 import { declarePostCommitEffectsInTxn } from './post-commit-effects.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
@@ -426,8 +426,11 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
       // the events it references, so a retry's dedupe check and a crash
       // recovery always see either both or neither.
       if (directive !== undefined) {
-        if (!isErasureDirective(directive)) throw new TypeError(`action '${type}' returned an invalid erasure directive`);
-        applyErasureDirective(db, directive, { scope, actionId });
+        const prepared = isErasureDirectivePreparation(directive) ? prepareErasureDirective(db, directive) : directive;
+        if (!isErasureDirective(prepared)) throw new TypeError(`action '${type}' returned an invalid erasure directive`);
+        await applyErasureDirective(db, prepared, {
+          scope, actionId, prepare: handler.erasurePrepare, tables: handler.erasurePreparationTables,
+        });
       }
       await historyCommit?.apply?.(db);
       insertReceipt(db, scope, actionId, now, result, directive === undefined

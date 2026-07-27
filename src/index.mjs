@@ -7,7 +7,7 @@ export { scope } from './scope.mjs';
 export { entity } from './entity/compile.mjs';
 export { action, event } from './pipeline.mjs';
 export { durableHistory } from './durable-history.mjs';
-export { erasureDirective } from './erasure-directive.mjs';
+export { erasureDirective, erasureDirectivePreparation } from './erasure-directive.mjs';
 export { postCommitEffect } from './post-commit-effects.mjs';
 export { authorizedRows } from './action-authorization.mjs';
 export { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';

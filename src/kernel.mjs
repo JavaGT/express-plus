@@ -53,7 +53,15 @@ function collectAppEntities(app) {
     if (typeof declaration.handler !== 'function') {
       throw new Error(`registered action '${declaration.type}' requires a handler function`);
     }
-    if (declaration.erasure === true && declaration.history?.cursor !== 'excluded') {
+    if (declaration.erasure !== undefined && declaration.erasure !== true
+      && (!declaration.erasure || typeof declaration.erasure !== 'object'
+        || Object.keys(declaration.erasure).some((key) => key !== 'prepare' && key !== 'tables')
+        || !Array.isArray(declaration.erasure.tables)
+        || declaration.erasure.tables.some((table) => typeof table !== 'string' || table.length === 0)
+        || typeof declaration.erasure.prepare !== 'function')) {
+      throw new Error(`registered action '${declaration.type}' has an invalid erasure preparation`);
+    }
+    if (declaration.erasure && declaration.history?.cursor !== 'excluded') {
       throw new Error(`erasure action '${declaration.type}' must exclude its history cursor`);
     }
     if (handlers[declaration.type]) throw new Error(`action '${declaration.type}' is already registered`);
@@ -96,7 +104,14 @@ function collectAppEntities(app) {
       };
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
-    Object.defineProperty(handler, 'erasureCapable', { value: declaration.erasure === true });
+    Object.defineProperty(handler, 'erasureCapable', { value: Boolean(declaration.erasure) });
+    Object.defineProperty(handler, 'erasurePrepare', {
+      value: declaration.erasure === true ? undefined : declaration.erasure?.prepare,
+    });
+    Object.defineProperty(handler, 'erasurePreparationTables', {
+      value: declaration.erasure && declaration.erasure !== true
+        ? Object.freeze([...declaration.erasure.tables]) : Object.freeze([]),
+    });
     Object.defineProperty(handler, 'privateFactProjection', {
       value: declaration.projections?.some((projection) => projection?.privateFact === true) ?? false,
     });
