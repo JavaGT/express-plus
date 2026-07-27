@@ -58,7 +58,7 @@ All R3 tests are in `test/annotated-text-initialization.test.mjs` after the R2 s
 - **R3 merge preserves active orphan-policy annotations and protector edges** proves an
   active `empty: 'orphan'` annotation and a protecting annotation retain their identity,
   memberships, and protecting-target edge through a split followed by merge. It creates
-  no orphan state and does not expose orphan provenance to recipients.
+  no orphan state.
 - **R2 edge splits remain no-ops before a valid R3 merge** proves offsets `0` and text
   length emit no events and leave the structural revision/frontier and block topology
   valid for a subsequent R3 merge.
