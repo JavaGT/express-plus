@@ -134,6 +134,29 @@ function v5Payload(docId, annotationId, blockId, expected) {
   };
 }
 
+function structuralExpected(db) {
+  const state = db.prepare("SELECT structure_version, family_checkpoint FROM R4Doc_body_state WHERE document_id = 'd1'").get();
+  return { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+}
+
+function v2Payload(blockId, utf16Offset, expected) {
+  return {
+    version: 2,
+    id: 'd1',
+    expected,
+    operation: { kind: 'block.split', blockId, utf16Offset },
+  };
+}
+
+function v3Payload(leftBlockId, rightBlockId, expected) {
+  return {
+    version: 3,
+    id: 'd1',
+    expected,
+    operation: { kind: 'block.merge', leftBlockId, rightBlockId },
+  };
+}
+
 test('R4 annotation.apply on full block produces no splits, creates annotation with whole-block membership', async () => {
   const { app, db, blockId, state } = await setupDoc('hello world');
   const result = await app.dispatch({
@@ -189,6 +212,107 @@ test('R4 annotation.apply persists sorted protecting targets through its sole ev
   delete replay.__workbench;
   app.entities.get('R4Doc').projection.apply({ handle: native('R4Doc', 'body', 'operated'), data: replay }, db);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation_protected_target WHERE annotation_id = 'protect-1' AND target_annotation_id = 'theme-1'").get().count, 1);
+  await app.close?.();
+});
+
+test('R3 merge preserves active orphan-policy annotations and protector edges', async (t) => {
+  let principal = { id: 'u1' };
+  const { app, db, blockId } = await setupDoc('hello world', () => principal);
+  t.after(async () => { await app.shutdown(); db.close(); });
+  const target = await app.dispatch({
+    actionId: 'merge-theme', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 11, 'merge-theme', 'theme', {}, structuralExpected(db)),
+  });
+  assert.equal(target.ok, true, target.failure?.message);
+  const comment = await app.dispatch({
+    actionId: 'merge-comment', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 11, 'merge-comment', 'comment', {}, structuralExpected(db)),
+  });
+  assert.equal(comment.ok, true, comment.failure?.message);
+  const protector = await app.dispatch({
+    actionId: 'merge-protector', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 11, 'merge-protector', 'confidential', {}, structuralExpected(db), ['merge-theme']),
+  });
+  assert.equal(protector.ok, true, protector.failure?.message);
+
+  const split = await app.dispatch({
+    actionId: 'merge-split', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v2Payload(blockId, 5, structuralExpected(db)),
+  });
+  assert.equal(split.ok, true, split.failure?.message);
+  const rightBlockId = split.events[0].data.operation.rightBlockId;
+
+  const merge = await app.dispatch({
+    actionId: 'merge-active-annotations', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v3Payload(blockId, rightBlockId, structuralExpected(db)),
+  });
+  assert.equal(merge.ok, true, merge.failure?.message);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation_orphan_state").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation WHERE id IN ('merge-comment', 'merge-protector')").get().count, 2);
+  const protectingTarget = db.prepare("SELECT annotation_id, target_annotation_id FROM R4Doc_body_annotation_protected_target").get();
+  assert.equal(protectingTarget.annotation_id, 'merge-protector');
+  assert.equal(protectingTarget.target_annotation_id, 'merge-theme');
+  for (const annotationId of ['merge-theme', 'merge-comment', 'merge-protector']) {
+    const memberships = db.prepare('SELECT block_id, ordinal FROM R4Doc_body_membership WHERE annotation_id = ?').all(annotationId);
+    assert.equal(memberships.length, 1);
+    assert.equal(memberships[0].block_id, blockId);
+    assert.equal(memberships[0].ordinal, 0);
+  }
+  const response = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(response.status, 200);
+  const ownerSerialized = await response.text();
+  principal = { id: 'u2' };
+  const deniedResponse = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(deniedResponse.status, 200);
+  const denied = await deniedResponse.json();
+  assert.deepEqual(denied.snapshot.body, {
+    kind: 'workbench.annotatedText.recipient', version: 1,
+    blocks: [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }],
+    annotations: [], memberships: [], measurements: [], capabilityHints: [],
+  });
+  const deniedSerialized = JSON.stringify(denied);
+  for (const serialized of [ownerSerialized, deniedSerialized]) {
+    for (const privateField of ['annotation_orphan_state', 'saved_quote', 'savedQuote', 'last_memberships', 'lastMemberships']) {
+      assert.equal(serialized.includes(privateField), false);
+    }
+  }
+});
+
+test('R2 edge splits remain no-ops before a valid R3 merge', async () => {
+  const { app, db, blockId } = await setupDoc('hello world');
+  const split = await app.dispatch({
+    actionId: 'edge-base-split', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v2Payload(blockId, 5, structuralExpected(db)),
+  });
+  assert.equal(split.ok, true, split.failure?.message);
+  const rightBlockId = split.events[0].data.operation.rightBlockId;
+  const beforeEdges = structuralExpected(db);
+  const beforeFamilyCheckpoint = db.prepare("SELECT family_checkpoint FROM R4Doc_body_state WHERE document_id = 'd1'").get().family_checkpoint;
+  const beforeBlocks = db.prepare("SELECT * FROM R4Doc_body_block WHERE document_id = 'd1' ORDER BY position").all();
+
+  for (const [actionId, targetBlockId, offset] of [
+    ['edge-start', blockId, 0],
+    ['edge-end', rightBlockId, 6],
+  ]) {
+    const edge = await app.dispatch({
+      actionId, type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+      payload: v2Payload(targetBlockId, offset, beforeEdges),
+    });
+    assert.equal(edge.ok, true, edge.failure?.message);
+    assert.equal(edge.events.length, 0);
+  }
+  assert.deepEqual(structuralExpected(db), beforeEdges);
+  assert.equal(db.prepare("SELECT family_checkpoint FROM R4Doc_body_state WHERE document_id = 'd1'").get().family_checkpoint, beforeFamilyCheckpoint);
+  assert.equal(JSON.stringify(db.prepare("SELECT * FROM R4Doc_body_block WHERE document_id = 'd1' ORDER BY position").all()), JSON.stringify(beforeBlocks));
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_block WHERE document_id = 'd1'").get().count, 2);
+
+  const merge = await app.dispatch({
+    actionId: 'edge-follow-on-merge', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u1' },
+    payload: v3Payload(blockId, rightBlockId, beforeEdges),
+  });
+  assert.equal(merge.ok, true, merge.failure?.message);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_block WHERE document_id = 'd1'").get().count, 1);
+  assert.equal(materializeBlock(restoreTextFamilyCheckpoint(merge.events[0].data.family), blockId), 'hello world');
   await app.close?.();
 });
 

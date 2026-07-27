@@ -53,8 +53,14 @@ All R3 tests are in `test/annotated-text-initialization.test.mjs` after the R2 s
 15. **R3 projection rejects per-side source omission when both sides have rows** — unchanged state, blocks, and measurements
 16. **R3 projection rejects invalid right-only lineage, result shape/blockId mutations, and non-JSON result payloads** — unchanged state, blocks, and measurements
 
-## Remaining Concerns
+## Closure Coverage
 
-- Merge of annotations with `orphan` empty policy and protecting annotations is not yet tested.
-- Edge splits (offset 0 or at text length) that produce zero events are not tested for R3 follow-on.
-- Measurement edit actions, annotation lifecycle actions, and orphan persistence are not yet available.
+- **R3 merge preserves active orphan-policy annotations and protector edges** proves an
+  active `empty: 'orphan'` annotation and a protecting annotation retain their identity,
+  memberships, and protecting-target edge through a split followed by merge. It creates
+  no orphan state and does not expose orphan provenance to recipients.
+- **R2 edge splits remain no-ops before a valid R3 merge** proves offsets `0` and text
+  length emit no events and leave the structural revision/frontier and block topology
+  valid for a subsequent R3 merge.
+
+Measurement edit actions and recipient delivery for orphan state remain outside R3.
