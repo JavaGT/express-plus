@@ -166,6 +166,45 @@ test('inline membership rejects a role that collides with an existing authorizat
   }), /collides with an existing/);
 });
 
+test('standalone membership rejects a role that collides with an existing authorization check', () => {
+  const Project = entity('StandaloneCollidingMembershipProject', {
+    name: text(), owner: ref('User', { role: 'owner' }),
+    members: map(ref('User'), { role: ['owner'], default: {} }),
+  });
+  assert.throws(() => membership(Project, {
+    owner: { can: [read], field: { role: 'owner' } },
+  }), /collides with an existing/);
+});
+
+test('private fact projection is bound to its declaring action when event types overlap', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE PrivateProjection (value TEXT NOT NULL)');
+  const projected = {
+    eventTypes: ['shared.private.event'], privateFact: true,
+    apply(_event, tx, { privateFact }) { tx.prepare('INSERT INTO PrivateProjection VALUES (?)').run(privateFact.after.value); },
+  };
+  const app = workbench({ db, actions: [
+    {
+      type: 'private.owner', authorize: () => true,
+      handler: () => ({ events: [{ type: 'shared.private.event', scope: 'r:1', data: {} }], privateFact: { before: {}, after: { value: 'owned' } } }),
+      projections: [projected],
+    },
+    {
+      type: 'ordinary.other', authorize: () => true,
+      handler: () => [{ type: 'shared.private.event', scope: 'r:2', data: {} }],
+    },
+  ] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+  assert.equal((await app.dispatch({ actionId: 'other', scope: 'owner:other', type: 'ordinary.other', payload: {}, principal })).ok, true);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM PrivateProjection').get().count, 0);
+  assert.equal((await app.dispatch({ actionId: 'owner', scope: 'owner:owner', type: 'private.owner', payload: {}, principal })).ok, true);
+  assert.deepEqual(db.prepare('SELECT value FROM PrivateProjection').all().map((row) => row.value), ['owned']);
+  db.prepare('DELETE FROM PrivateProjection').run();
+  assert.deepEqual(await app.replayPrivateFactProjections(), { projected: 1 });
+  assert.deepEqual(db.prepare('SELECT value FROM PrivateProjection').all().map((row) => row.value), ['owned']);
+});
+
 test('private-fact projection receives canonical fact while public durable records remain sanitized', async (t) => {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE PrivateProjection (id TEXT PRIMARY KEY, value TEXT NOT NULL)');

@@ -184,6 +184,7 @@ export function durableMutationVariant({
       for (const consumer of projectionConsumers) {
         for (const ev of finalizedEvents) {
           if (consumer.eventTypes.includes(ev.type)) {
+            if (consumer.actionType !== undefined && consumer.actionType !== type) continue;
             if (consumer.privateFact === true) {
               if (privateFact === undefined) throw new TypeError('private-fact projection requires a canonical private fact');
               consumer.apply(ev, db, Object.freeze({ privateFact }));
@@ -243,8 +244,9 @@ export function durableMutationVariant({
 
       return finalizedEvents;
     },
-    requiresPrivateFact(events) {
+    requiresPrivateFact(events, actionType) {
       return projectionConsumers.some((consumer) => consumer.privateFact === true
+        && (consumer.actionType === undefined || consumer.actionType === actionType)
         && events.some((event) => consumer.eventTypes.includes(event.type)));
     },
     async afterCommit(events, context) {
@@ -410,7 +412,7 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
         throw new TypeError(`action '${type}' cannot return an erasure directive`);
       }
 
-      const requirePrivateFact = pipeline.requiresPrivateFact?.(commit.events) ?? false;
+      const requirePrivateFact = pipeline.requiresPrivateFact?.(commit.events, type) ?? false;
       // Canonicalize and persist before any opted-in projection can observe the
       // fact. All writes remain inside this origin transaction.
       const privateFact = declarePostCommitEffectsInTxn(db, {
@@ -429,7 +431,7 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
       }
       await historyCommit?.apply?.(db);
       insertReceipt(db, scope, actionId, now, result, directive === undefined
-        ? historyCommit?.metadata
+        ? { ...historyCommit?.metadata, actionType: type }
         : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
       return result;
     });

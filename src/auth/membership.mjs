@@ -138,6 +138,17 @@ export function membership(entityRecord, config) {
 
   // Read the existing registry before overriding
   const existingRegistry = entityRecord.registry ?? {};
+  for (const checkName of Object.keys(newChecks)) {
+    // A runtime-only map-role entry is the weak face membership is intended to
+    // complete. A harvest-capable ref-role or declared check is already a full
+    // canonical authority and must never be silently replaced.
+    if (existingRegistry[checkName]?.harvest) {
+      throw new Error(
+        `entity('${entityName}') membership check '${checkName}' collides with an existing ` +
+          'ref-role or declared check; authorization checks must have one source',
+      );
+    }
+  }
   const newRegistry = Object.freeze({ ...existingRegistry, ...newChecks });
 
   // Compile the read-scope from the scope predicate (uses the new registry)

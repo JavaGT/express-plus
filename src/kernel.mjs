@@ -105,7 +105,10 @@ function collectAppEntities(app) {
       if (projection.privateFact !== undefined && projection.privateFact !== true) {
         throw new Error(`registered action '${declaration.type}' projection privateFact must be true when present`);
       }
-      projections.push(projection);
+      // Retain the declaring action identity internally. Event names are not a
+      // private-fact authority: two actions may emit the same event type, but a
+      // projection may observe only its own action's private canonical fact.
+      projections.push(Object.freeze({ ...projection, actionType: declaration.type }));
     }
     // Registered action cursor policy from declaration metadata
     // Closed keys: only 'cursor' is valid on the history object

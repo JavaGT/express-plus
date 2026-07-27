@@ -158,7 +158,9 @@ export function replayPrivateFactProjections(db, projections) {
         actionId: stored.actionId, committedAt: stored.committedAt,
         data: parseJson(stored.eventData, 'committed event data'),
       });
-      const matched = projections.filter((projection) => projection.eventTypes.includes(committed.type));
+      const matched = projections.filter((projection) =>
+        projection.eventTypes.includes(committed.type)
+        && (projection.actionType === undefined || projection.actionType === owner.actionType));
       if (matched.length === 0) continue;
       if (!row || row.committedAt !== owner.committedAt) {
         throw new TypeError('private-fact projection requires a matching durable private fact');
