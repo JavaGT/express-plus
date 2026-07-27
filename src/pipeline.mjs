@@ -432,7 +432,7 @@ async function commitEvents(db, events, {
         const prepared = isErasureDirectivePreparation(directive) ? prepareErasureDirective(db, directive) : directive;
         if (!isErasureDirective(prepared)) throw new TypeError(`action '${type}' returned an invalid erasure directive`);
         await applyErasureDirective(db, prepared, {
-          scope, actionId, actionContext: erasureActionContext, prepare: handler.erasurePrepare,
+          scope, actionId, actionContext: { ...erasureActionContext, committedAt: now }, prepare: handler.erasurePrepare,
           tables: handler.erasurePreparationTables, readTables: handler.erasurePreparationReadTables,
         });
       }

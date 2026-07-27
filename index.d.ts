@@ -733,6 +733,8 @@ export interface ErasurePreparationContext<Payload = Record<string, unknown>> {
     readonly type: string;
     readonly scope: string;
     readonly operation: 'erasure';
+    /** Canonical origin transaction commit timestamp, captured once for this dispatch. */
+    readonly committedAt: string;
     readonly payload: Payload;
     readonly principal: Pick<Principal, 'type' | 'id'>;
   }>;

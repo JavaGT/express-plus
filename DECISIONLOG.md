@@ -784,3 +784,10 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Decision:** Explicit `tables` and `readTables` declarations may name canonical application-owned tables with one leading underscore. The capability denies Workbench's package-table census case-insensitively and retains main-schema, exact-declaration, identifier, temporary shadow, view, trigger, and foreign-key guards. Package/auth/blob names remain forbidden even when declared.
 - **Why:** Applications need private lifecycle state and cleanup outboxes in the same erasure transaction; a blanket underscore ban confused naming convention with ownership. A package-owned census is narrower and remains fail-closed without encoding application table names.
 - **Rejected:** a blanket underscore reservation, which blocks valid application-owned lifecycle tables without adding protection beyond the canonical package ownership check.
+
+## 2026-07-27 — Erasure preparation exposes the origin commit timestamp transiently
+
+- **Decision:** The frozen erasure preparation `context.action` includes `committedAt`, sourced from the durable dispatch transaction's single canonical `now` value. It is the origin erasure action's commit timestamp, not a timestamp derived from targeted manifest history.
+- **Why:** Atomic lifecycle cleanup rows and outbox work need the purge dispatch time while the callback is inside the origin transaction. Reusing canonical transaction time prevents drift between domain cleanup intent, the committed event, and its receipt.
+- **Boundary:** The added field remains callback-only. It does not add context to logs, receipts, dispatch results, delivery, replay, or retry; receipt dedupe still bypasses preparation.
+- **Rejected:** deriving time from targeted receipts (historical rather than origin time) or sampling another clock in the callback (not canonical and potentially inconsistent).

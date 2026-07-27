@@ -188,7 +188,7 @@ test('package-table case variants and non-canonical underscore identifiers remai
   }
 });
 
-test('preparation receives authentic frozen action/subject context and bound equality reads only transiently', async () => {
+test('preparation receives authentic frozen action/subject context with canonical commit time and bound equality reads only transiently', async () => {
   const db = fixture();
   db.exec('CREATE TABLE DomainSource (id TEXT PRIMARY KEY, ownerId TEXT NOT NULL, secret TEXT NOT NULL)');
   db.exec('CREATE TABLE DomainCleanup (id TEXT PRIMARY KEY, targetCount INTEGER NOT NULL)');
@@ -200,10 +200,13 @@ test('preparation receives authentic frozen action/subject context and bound equ
     owningScope: scope, subject: 'artefact-1', census: directive(database).census,
   }), { readTables: ['DomainSource'], prepare({ reads, writes, context }) {
     escaped = reads; escapedContext = context; escapedAction = context.action;
+    assert.equal(Object.isFrozen(context.action), true);
+    assert.throws(() => { context.action.committedAt = 'substituted'; }, TypeError);
     payloadGetter = Object.getOwnPropertyDescriptor(escapedAction, 'payload').get;
     observed = {
       action: {
         id: context.action.id, type: context.action.type, scope: context.action.scope, operation: context.action.operation,
+        committedAt: context.action.committedAt,
         payload: { ...context.action.payload }, principal: { ...context.action.principal },
       },
       subject: { ...context.subject },
@@ -217,10 +220,14 @@ test('preparation receives authentic frozen action/subject context and bound equ
   await instance.start();
   const result = await instance.dispatch({ actionId: 'purge-context', type: 'lifecycle.purge', payload, principal: { type: 'user', id: 'actor-1' }, scope });
   assert.equal(result.ok, true);
+  const originReceipt = db.prepare('SELECT * FROM _ActionReceipt WHERE actionId = ?').get('purge-context');
+  const originEvent = db.prepare('SELECT * FROM _Log WHERE actionId = ?').get('purge-context');
   assert.deepEqual(observed, {
-    action: { id: 'purge-context', type: 'lifecycle.purge', scope, operation: 'erasure', payload, principal: { type: 'user', id: 'actor-1' } },
+    action: { id: 'purge-context', type: 'lifecycle.purge', scope, operation: 'erasure', committedAt: originReceipt.committedAt, payload, principal: { type: 'user', id: 'actor-1' } },
     subject: { owningScope: scope, id: 'artefact-1' },
   });
+  assert.equal(observed.action.committedAt, originEvent.committedAt);
+  assert.notEqual(observed.action.committedAt, '2026-07-27T00:00:00.000Z');
   assert.throws(() => escapedContext.action, /preparation|revoked/);
   assert.throws(() => Object.keys(escapedAction), /preparation|revoked/);
   assert.throws(() => payloadGetter(), /preparation|revoked/);
@@ -233,6 +240,7 @@ test('preparation receives authentic frozen action/subject context and bound equ
   assert.equal(durable.includes('payload-secret'), false);
   assert.equal(durable.includes('actor-1'), false);
   assert.equal(durable.includes('domain-secret'), false);
+  assert.equal(durable.includes('"context"'), false);
 });
 
 test('preparation action context is snapshotted before the handler can mutate its request', async () => {

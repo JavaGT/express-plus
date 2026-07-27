@@ -133,7 +133,8 @@ const purgeAction: RegisteredAction<{ rootId: string }> = {
     prepare({ context, reads }) {
       const typedContext: ErasurePreparationContext<{ rootId: string }> = context;
       const typedReads: ErasurePreparationReads = reads;
-      void [typedContext.action.payload.rootId, typedReads.find('Project', { id: context.subject.id })];
+      const committedAt: string = typedContext.action.committedAt;
+      void [committedAt, typedContext.action.payload.rootId, typedReads.find('Project', { id: context.subject.id })];
     },
   },
   handler: () => [],
