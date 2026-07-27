@@ -45,6 +45,14 @@ export const PUBLIC_API = Object.freeze({
       'createAuthClient',
     ]),
   }),
+  'workbench/annotated-text': Object.freeze({
+    default: false,
+    exact: true,
+    named: Object.freeze([
+      'annotatedText', 'annotation', 'protectingAnnotation', 'measurement',
+      'annotationAction', 'registerAnnotatedTextContract',
+    ]),
+  }),
 });
 
 const PRIVATE_ENTRYPOINTS = Object.freeze([
@@ -80,6 +88,14 @@ test('the packed package exposes the supported runtime contract', () => {
         + `  for (const symbol of contract.named) {\n`
         + `    if (!(symbol in module)) throw new Error(entrypoint + ' is missing ' + symbol);\n`
         + `  }\n`
+        + `  if (contract.exact && JSON.stringify(Object.keys(module).sort()) !== JSON.stringify([...contract.named].sort())) {\n`
+        + `    throw new Error(entrypoint + ' has an unexpected export surface');\n`
+        + `  }\n`
+        + `}\n`
+        + `const root = await import('workbench');\n`
+        + `const annotatedText = await import('workbench/annotated-text');\n`
+        + `for (const symbol of ${JSON.stringify(['annotatedText', 'annotation', 'protectingAnnotation', 'measurement', 'annotationAction', 'registerAnnotatedTextContract'])}) {\n`
+        + `  if (root[symbol] !== annotatedText[symbol]) throw new Error('workbench/annotated-text must share root binding ' + symbol);\n`
         + `}\n`
         + `for (const entrypoint of ${JSON.stringify(PRIVATE_ENTRYPOINTS)}) {\n`
         + `  try {\n`

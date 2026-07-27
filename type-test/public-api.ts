@@ -26,7 +26,23 @@ import {
   type EventsSinceResponse, type LiveDeliverySession, type LiveStore, type ScopeLiveStore, type SnapshotResponse,
   type StaleResponse, type WsEnvelope,
 } from 'workbench/client';
+import {
+  annotatedText, annotation, annotationAction, measurement, protectingAnnotation,
+  registerAnnotatedTextContract,
+  type AnnotatedTextFieldHandle, type AnnotatedTextOptions,
+} from 'workbench/annotated-text';
 import { DatabaseSync } from 'node:sqlite';
+
+const annotatedTextOptions: AnnotatedTextOptions = {
+  project: 'project', owner: 'owner', block: {},
+  annotations: [annotation('note', { actions: [annotationAction('pin')] })],
+  measurements: [measurement('wordCount', { extension: 'wordMeasurement' })],
+};
+const annotatedTextField = annotatedText(annotatedTextOptions);
+const annotatedTextHandle: AnnotatedTextFieldHandle | undefined = annotatedTextField.__value;
+const protecting = protectingAnnotation('restricted');
+registerAnnotatedTextContract('wordMeasurement', { kind: 'measurement' });
+void [annotatedTextHandle, protecting];
 
 type ProjectRow = { id: string; name: string; ownerId: string };
 const category: FailureCategory = FAILURE_CATEGORIES[0];

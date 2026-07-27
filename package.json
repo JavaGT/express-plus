@@ -17,6 +17,10 @@
 		"./server": {
 			"types": "./src/server.d.ts",
 			"default": "./src/server.mjs"
+		},
+		"./annotated-text": {
+			"types": "./annotated-text.d.ts",
+			"default": "./src/annotated-text-public.mjs"
 		}
 	},
 	"scripts": {

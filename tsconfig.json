@@ -9,5 +9,5 @@
     "checkJs": false,
     "skipLibCheck": true
   },
-  "include": ["index.d.ts", "client.d.ts", "src/server.d.ts"]
+  "include": ["index.d.ts", "client.d.ts", "annotated-text.d.ts", "src/server.d.ts"]
 }
