@@ -302,7 +302,7 @@ export interface AnnotatedTextMeasurementCombineResult {
 }
 export interface AnnotatedTextStructuralExtensionSpec {
   readonly version: 1;
-  readonly validate: (input: AnnotatedTextMeasurementValidationInput) => void;
+  readonly validate: (input: AnnotatedTextMeasurementValidationInput) => undefined;
   readonly edit: (input: AnnotatedTextMeasurementEditInput) => AnnotatedTextMeasurementEditResult;
   readonly partition: (input: AnnotatedTextMeasurementPartitionInput) => AnnotatedTextMeasurementPartitionResult;
   readonly combine: (input: AnnotatedTextMeasurementCombineInput) => AnnotatedTextMeasurementCombineResult;

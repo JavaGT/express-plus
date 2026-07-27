@@ -5,7 +5,7 @@ import workbench, {
   apiKeyPrincipalOf, createInvitationApi as createRootInvitationApi, emailSeam,
   FAILURE_CATEGORIES, failure, failureOutcome, isWorkbenchFailure, sanitizeUnexpectedFailure,
   matchRoute, noopTransport, serveStatic, sessionCookie, sessionPrincipalOf,
-  sessionTokenOf,
+  sessionTokenOf, registerAnnotatedTextStructuralExtension as registerRootAnnotatedTextStructuralExtension,
   durableHistory,
   type ActionHandle, type BatchAction, type CommittedEvent, type DispatchRequest,
   type DispatchResult, type EventHandle, type FailureCategory, type FailureOutcome,
@@ -45,9 +45,33 @@ const annotatedTextField = annotatedText(annotatedTextOptions);
 const annotatedTextHandle: AnnotatedTextFieldHandle | undefined = annotatedTextField.__value;
 const protecting = protectingAnnotation('restricted');
 registerAnnotatedTextContract('wordMeasurement', { kind: 'measurement' });
-registerAnnotatedTextStructuralExtension('wordMeasurement', {
+registerRootAnnotatedTextStructuralExtension('wordMeasurement', {
   version: 1,
   validate: function validate(_input) {},
+  edit: function edit(input) { return input; },
+  partition: function partition(input) {
+    return { version: 1, leftPayload: input.payload, rightPayload: input.payload };
+  },
+  combine: function combine(input) {
+    return { version: 1, payload: input.left?.payload ?? input.right?.payload ?? null };
+  },
+});
+registerAnnotatedTextStructuralExtension('invalidReturnMeasurement', {
+  version: 1,
+  // @ts-expect-error validators return undefined or throw
+  validate: function validate(_input) { return true; },
+  edit: function edit(input) { return input; },
+  partition: function partition(input) {
+    return { version: 1, leftPayload: input.payload, rightPayload: input.payload };
+  },
+  combine: function combine(input) {
+    return { version: 1, payload: input.left?.payload ?? input.right?.payload ?? null };
+  },
+});
+registerAnnotatedTextStructuralExtension('invalidAsyncMeasurement', {
+  version: 1,
+  // @ts-expect-error validators are synchronous
+  validate: async function validate(_input) {},
   edit: function edit(input) { return input; },
   partition: function partition(input) {
     return { version: 1, leftPayload: input.payload, rightPayload: input.payload };
