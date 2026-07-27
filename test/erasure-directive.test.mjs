@@ -94,6 +94,7 @@ test('opted-in preparation receives only the validated manifest and joins the er
   assert.deepEqual({ ...db.prepare('SELECT * FROM DomainCleanup').get() }, { id: 'cleanup', targetCount: 1 });
   assert.equal(observedActionId, 'old-action');
   assert.throws(() => escaped.actions, /preparation|revoked/);
+  assert.throws(() => Object.keys(escaped), /preparation|revoked/);
   assert.throws(() => escapedActions.length, /preparation|revoked/);
   assert.equal(JSON.stringify(first).includes('secret'), false);
   assert.equal(JSON.stringify(db.prepare('SELECT * FROM _ActionReceipt WHERE actionId = ?').get('purge-prepare')).includes('old-action'), false);

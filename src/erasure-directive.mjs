@@ -37,17 +37,24 @@ function freeze(value) {
 function expiringView(value, open, revoke, seen = new WeakMap()) {
   if (!value || typeof value !== 'object') return value;
   if (seen.has(value)) return seen.get(value);
-  // A frozen empty target lets the view stay immutable without retaining
-  // reflective keys or an array length after its preparation lifetime ends.
-  const { proxy: view, revoke: revokeView } = Proxy.revocable(Object.freeze({}), {
-    get(_target, key) {
-      open();
-      if (key === Symbol.iterator && Array.isArray(value)) {
+  const target = {};
+  seen.set(value, target);
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(target, key, {
+      enumerable: true,
+      get() { return expiringView(value[key], open, revoke, seen); },
+    });
+  }
+  if (Array.isArray(value)) {
+    Object.defineProperties(target, {
+      length: { get() { return value.length; } },
+      [Symbol.iterator]: { get() {
         return function* iterator() { for (const item of value) yield expiringView(item, open, revoke, seen); };
-      }
-      if (key === 'length' && Array.isArray(value)) return value.length;
-      return expiringView(value[key], open, revoke, seen);
-    },
+      } },
+    });
+  }
+  const { proxy: view, revoke: revokeView } = Proxy.revocable(Object.freeze(target), {
+    get(target, key, receiver) { open(); return Reflect.get(target, key, receiver); },
   });
   revoke.push(revokeView);
   seen.set(value, view);
