@@ -263,7 +263,7 @@ export function generateFrameworkDDL() {
   pendingKey TEXT PRIMARY KEY,
   blobId TEXT NOT NULL UNIQUE,
   claimTokenHash TEXT NOT NULL,
-  principalId TEXT NOT NULL,
+  principalKey TEXT NOT NULL,
   contentDigest TEXT NOT NULL,
   byteLength INTEGER NOT NULL,
   status TEXT NOT NULL,

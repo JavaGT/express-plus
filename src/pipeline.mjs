@@ -422,8 +422,9 @@ async function commitEvents(db, events, {
         scope, actionId, committedAt: now, privateFact: commit.privateFact,
         effects: commit.effects, requirePrivateFact,
       });
+      const canonicalPayload = commit.canonicalPayload ?? payload;
       const result = await pipeline.applyInTxn(db, commit.events, {
-        now, actionId, nextSeq, principal, payload, type, scope, privateFact,
+        now, actionId, nextSeq, principal, payload: canonicalPayload, type, scope, privateFact,
       });
       // The owning-stream action receipt (Wave 4.9): written atomically with
       // the events it references, so a retry's dedupe check and a crash
@@ -438,7 +439,7 @@ async function commitEvents(db, events, {
       }
       await historyCommit?.apply?.(db);
       insertReceipt(db, scope, actionId, now, result, directive === undefined
-        ? { ...historyCommit?.metadata, actionType: type }
+        ? { ...historyCommit?.metadata, actionType: type, actionData: canonicalPayload }
         : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
       return result;
     });

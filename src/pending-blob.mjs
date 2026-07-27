@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { txn } from './driver.mjs';
+import { principalKeyOf } from './principal.mjs';
 
 function failure(code) { const error = new Error(code); error.code = code; throw error; }
 function token() { return randomBytes(32).toString('base64url'); }
@@ -20,14 +21,18 @@ async function bytesOf(bytes) {
   return result;
 }
 
-function principalId(principal) {
-  if (!principal?.id) failure('UNAUTHENTICATED');
-  return principal.id;
+function principalKey(principal) {
+  const key = principalKeyOf(principal);
+  if (!key) failure('UNAUTHENTICATED');
+  return key;
 }
 
 export function declaredBlobField(field) {
-  if (!field || typeof field.actionName !== 'string' || typeof field.field !== 'string' || typeof field.validator !== 'function') {
-    throw new TypeError('declaredBlobField requires actionName, field, and validator');
+  const keys = field && typeof field === 'object' ? Object.keys(field) : [];
+  if (!field || typeof field.actionName !== 'string' || typeof field.field !== 'string'
+    || keys.some((key) => !['actionName', 'field', 'deletionActionName'].includes(key))
+    || (field.deletionActionName !== undefined && typeof field.deletionActionName !== 'string')) {
+    throw new TypeError('declaredBlobField requires actionName and field');
   }
   return Object.freeze({ ...field });
 }
@@ -40,9 +45,10 @@ export function createPendingBlobLifecycle(app, options) {
   const byActionField = new Map(fields.map((field) => [`${field.actionName}:${field.field}`, field]));
   if (byActionField.size !== fields.length) throw new TypeError('blobLifecycle fields must not contain duplicate actionName/field pairs');
   async function stage(principal, request) {
-    if (!request || typeof request.projectId !== 'string' || !request.projectId || typeof request.fileId !== 'string' || !request.fileId) throw new TypeError('projectId and fileId are required');
-    const authenticatedPrincipalId = principalId(principal);
-    const pendingKey = `${request.projectId}/${request.fileId}.pending`;
+    if (!request || typeof request.scopeId !== 'string' || !request.scopeId || typeof request.resourceId !== 'string' || !request.resourceId) throw new TypeError('scopeId and resourceId are required');
+    const authenticatedPrincipalKey = principalKey(principal);
+    if (request.scopeId.includes('/') || request.resourceId.includes('/') || request.resourceId === '.' || request.resourceId === '..') throw new TypeError('scopeId and resourceId must be single safe path segments');
+    const pendingKey = `${request.scopeId}/${request.resourceId}.pending`;
     const existing = app.db.prepare('SELECT 1 FROM _PendingBlob WHERE pendingKey = ?').get(pendingKey);
     if (existing) failure('PENDING_KEY_EXISTS');
     const bytes = await bytesOf(request.bytes);
@@ -51,26 +57,26 @@ export function createPendingBlobLifecycle(app, options) {
     const blob = app.blobs.upload({ bytes, mime: request.mediaType });
     try {
       app.db.prepare(`INSERT INTO _PendingBlob
-        (pendingKey, blobId, claimTokenHash, principalId, contentDigest, byteLength, status, createdAt)
-        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)`)
-        .run(pendingKey, blob.id, hash(claimToken), authenticatedPrincipalId, digest, bytes.length, new Date().toISOString());
+        (pendingKey, blobId, claimTokenHash, principalKey, contentDigest, byteLength, status, scopeId, createdAt)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?)`)
+        .run(pendingKey, blob.id, hash(claimToken), authenticatedPrincipalKey, digest, bytes.length, request.scopeId, new Date().toISOString());
     } catch (error) {
       try { app.blobs.discardPending(blob.id); } catch {}
       throw error;
     }
     return Object.freeze({ claim: Object.freeze({ pendingKey, claimToken }), pendingKey, byteLength: bytes.length, contentDigest: digest });
   }
-  async function validateClaim({ claim, field, actionName, actionId, authenticatedPrincipalId, scopeId, committedEventId }) {
+  async function validateClaim({ claim, field, actionName, actionId, authenticatedPrincipal, scopeId, committedEventId }) {
     if (!claim || typeof claim.pendingKey !== 'string' || typeof claim.claimToken !== 'string') failure('INVALID_PENDING_BLOB_CLAIM');
     const row = app.db.prepare('SELECT * FROM _PendingBlob WHERE pendingKey = ?').get(claim.pendingKey);
     if (!row || !timingSafeEqual(Buffer.from(hash(claim.claimToken)), Buffer.from(row.claimTokenHash))) failure('INVALID_PENDING_BLOB_CLAIM');
-    if (row.status === 'claimed' && row.actionId === actionId) return Object.freeze({ blobId: row.blobId });
-    if (row.status !== 'pending') failure('PENDING_BLOB_ALREADY_CLAIMED');
-    if (row.principalId !== authenticatedPrincipalId) failure('PENDING_BLOB_WRONG_PRINCIPAL');
     const declaration = byActionField.get(`${actionName}:${field}`);
     if (!declaration) failure('UNDECLARED_BLOB_FIELD');
-    const decision = await declaration.validator(Object.freeze({ actionName, actionId, authenticatedPrincipalId, scopeId, committedEventId, pendingKey: row.pendingKey, contentDigest: row.contentDigest, byteLength: row.byteLength }));
-    if (!decision || decision.allow !== true) failure(decision?.code ?? 'BLOB_CLAIM_DENIED');
+    if (row.principalKey !== principalKey(authenticatedPrincipal)) failure('PENDING_BLOB_WRONG_PRINCIPAL');
+    if (row.scopeId !== scopeId) failure('PENDING_BLOB_WRONG_SCOPE');
+    if (row.status === 'claimed' && row.actionId === actionId) return Object.freeze({ blobId: row.blobId });
+    if (row.status !== 'pending') failure('PENDING_BLOB_ALREADY_CLAIMED');
+    if (Date.now() - Date.parse(row.createdAt) >= options.pendingTtlMs) failure('PENDING_BLOB_EXPIRED');
     const claimed = app.db.prepare(`UPDATE _PendingBlob SET status = 'claimed', actionId = ?, committedEventId = ?, scopeId = ?, claimedAt = ?
       WHERE pendingKey = ? AND status = 'pending'`).run(actionId, committedEventId, scopeId, new Date().toISOString(), row.pendingKey);
     if (!claimed.changes) failure('PENDING_BLOB_ALREADY_CLAIMED');
@@ -79,17 +85,13 @@ export function createPendingBlobLifecycle(app, options) {
     app.blobs.adopt(app.db, row.blobId);
     return Object.freeze({ blobId: row.blobId });
   }
-  async function requestDeletion({ blobId, actionName, actionId, authenticatedPrincipalId, scopeId, committedEventId }) {
+  async function requestDeletion({ blobId, actionName, actionId, scopeId }) {
     const declaration = fields.find((field) => field.deletionActionName === actionName);
     if (!declaration) return false;
     if (typeof blobId !== 'string') failure('INVALID_CLAIMED_BLOB_REF');
     const row = app.db.prepare('SELECT * FROM _PendingBlob WHERE blobId = ?').get(blobId);
     if (!row || row.status === 'deleted') failure('BLOB_NOT_FOUND');
-    const decision = await declaration.validator(Object.freeze({
-      actionName, actionId, authenticatedPrincipalId, scopeId, committedEventId,
-      pendingKey: row.pendingKey, contentDigest: row.contentDigest, byteLength: row.byteLength,
-    }));
-    if (!decision || decision.allow !== true) failure(decision?.code ?? 'BLOB_DELETE_DENIED');
+    if (row.scopeId !== scopeId) failure('BLOB_DELETE_WRONG_SCOPE');
     if (row.status === 'delete-requested') return true;
     const changed = app.db.prepare(`UPDATE _PendingBlob SET status = 'delete-requested', deleteActionId = ?
       WHERE blobId = ? AND status IN ('claimed', 'finalized', 'recovery-failed')`).run(actionId, blobId);

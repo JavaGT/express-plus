@@ -76,31 +76,36 @@ function collectAppEntities(app) {
         const blobId = typeof blobRef === 'string' ? blobRef : blobRef?.blobId;
         await lifecycle.requestDeletion({
           blobId, actionName: declaration.type, actionId: context.actionId,
-          authenticatedPrincipalId: context.principal?.id, scopeId: context.scope,
-          committedEventId: `${context.scope}:${readSeq(context.db, context.scope) + 1}`,
+          scopeId: context.scope,
         });
       }
-      const result = await declaration.handler(context);
+      let handlerContext = context;
+      const claimedFields = [];
+      if (lifecycle) {
+        for (const field of lifecycle.fields) {
+          if (field.actionName !== declaration.type) continue;
+          const committedEventId = `${context.scope}:${readSeq(context.db, context.scope) + 1}`;
+          const { blobId } = await lifecycle.validateClaim({
+            claim: context.payload[field.field], field: field.field, actionName: declaration.type,
+            actionId: context.actionId, authenticatedPrincipal: context.principal,
+            scopeId: context.scope, committedEventId,
+          });
+          claimedFields.push({ field, blobId });
+          handlerContext = { ...handlerContext, payload: { ...handlerContext.payload, [field.field]: blobId } };
+        }
+      }
+      const result = await declaration.handler(handlerContext);
       const commit = Array.isArray(result) ? { events: result } : result;
       if (!commit || !Array.isArray(commit.events)) throw new Error(`registered action '${declaration.type}' must return an event array`);
       if (!lifecycle) return result;
-      let rewritten = commit.events;
-      for (const field of lifecycle.fields) {
-        if (field.actionName !== declaration.type || context.payload?.[field.field] === undefined) continue;
+      for (const { field, blobId } of claimedFields) {
         const owningEvents = commit.events.filter((event) => event?.scope === context.scope && event.data && Object.prototype.hasOwnProperty.call(event.data, field.field));
         if (owningEvents.length !== 1) throw new Error(`declared blob action '${declaration.type}' must emit exactly one owning event field '${field.field}' in its dispatch scope`);
-        const committedEventId = `${context.scope}:${readSeq(context.db, context.scope) + 1}`;
-        const { blobId } = await lifecycle.validateClaim({
-          claim: context.payload[field.field], field: field.field, actionName: declaration.type,
-          actionId: context.actionId, authenticatedPrincipalId: context.principal?.id,
-          scopeId: context.scope, committedEventId,
-        });
-        rewritten = rewritten.map((event) => event === owningEvents[0]
-          ? { ...event, data: { ...event.data, [field.field]: blobId } }
-          : event);
+        if (owningEvents[0].data[field.field] !== blobId) throw new Error(`declared blob action '${declaration.type}' must emit its canonical blob id in field '${field.field}'`);
       }
       return {
-        events: rewritten,
+        events: commit.events,
+        canonicalPayload: handlerContext.payload,
         ...(commit.directive === undefined ? {} : { directive: commit.directive }),
         ...(commit.privateFact === undefined ? {} : { privateFact: commit.privateFact }),
         ...(commit.effects === undefined ? {} : { effects: commit.effects }),

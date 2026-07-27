@@ -629,10 +629,7 @@ export interface WorkbenchOptions {
 export type PendingBlobKey = string & { readonly __brand: 'PendingBlobKey' };
 export type PendingBlobClaim = Readonly<{ pendingKey: PendingBlobKey; claimToken: string & { readonly __brand: 'PendingBlobClaimToken' } }>;
 export type ClaimedBlobRef = Readonly<{ blobId: string & { readonly __brand: 'ClaimedBlobId' } }>;
-export type TrustedBlobClaimContext = Readonly<{ actionName: string; actionId: string; authenticatedPrincipalId: string; scopeId: string; committedEventId: string; pendingKey: PendingBlobKey; contentDigest: string; byteLength: number }>;
-export type BlobClaimDecision = Readonly<{ allow: true }> | Readonly<{ allow: false; code: string }>;
-export type BlobClaimValidator = (context: TrustedBlobClaimContext) => Promise<BlobClaimDecision>;
-export type DeclaredBlobField = Readonly<{ actionName: string; field: string; validator: BlobClaimValidator; deletionActionName?: string }>;
+export type DeclaredBlobField = Readonly<{ actionName: string; field: string; deletionActionName?: string }>;
 export type BlobLifecycleOptions = Readonly<{ fields: readonly DeclaredBlobField[]; pendingTtlMs: number; adoptedRecoveryTtlMs: number }>;
 
 export type OperationalConsumerName = string & { readonly __brand: 'OperationalConsumerName' };
