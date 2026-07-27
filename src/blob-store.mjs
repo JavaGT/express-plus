@@ -120,6 +120,7 @@ export function createBlobStore({ root, db, bytes }) {
       'SELECT id, createdAt FROM BlobStore WHERE status = ? AND createdAt < ?',
     ).all('pending', staleDate);
     for (const row of pendingRows) {
+      if (db.prepare('SELECT 1 FROM _PendingBlob WHERE blobId = ?').get(row.id)) continue;
       remove(row.id, { pending: true });
       db.prepare('DELETE FROM BlobStore WHERE id = ? AND status = ?').run(row.id, 'pending');
       orphans++;

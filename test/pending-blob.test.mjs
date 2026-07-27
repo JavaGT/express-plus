@@ -19,7 +19,7 @@ test('pending blob staging retains Scope canonical key and immutable digest iden
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
   const stager = pendingBlobStager(app, principal({ type: 'user', id: 'u1' }));
   const staged = await stager.stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1, 2, 3]), mediaType: 'application/octet-stream' });
-  assert.equal(staged.pendingKey, 'project:p1/f1.pending');
+  assert.match(staged.pendingKey, /^project:p1\/f1\.[a-f0-9]{64}\.pending$/);
   assert.equal(staged.byteLength, 3);
   assert.match(staged.contentDigest, /^[a-f0-9]{64}$/);
   await assert.rejects(stager.stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([4]) }), /PENDING_KEY_EXISTS/);
@@ -79,7 +79,7 @@ test('a failed duplicate staging request leaves an unrelated pending blob intact
   const first = await stager.stage({ scopeId: 'project:p1', resourceId: 'first', bytes: new Uint8Array([1]) });
   await stager.stage({ scopeId: 'project:p1', resourceId: 'second', bytes: new Uint8Array([2]) });
   await assert.rejects(stager.stage({ scopeId: 'project:p1', resourceId: 'second', bytes: new Uint8Array([3]) }), /PENDING_KEY_EXISTS/);
-  assert.equal(app.db.prepare('SELECT COUNT(*) AS count FROM _PendingBlob WHERE pendingKey IN (?, ?)').get(first.pendingKey, 'project:p1/second.pending').count, 2);
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS count FROM _PendingBlob').get().count, 2);
   assert.deepEqual(app.blobs.readRange(app.db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(first.pendingKey).blobId), Buffer.from([1]));
 });
 
@@ -130,6 +130,28 @@ test('the ordinary blob reaper retains a finalized pending-blob generation', asy
   const blobId = db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
   assert.deepEqual(app.blobs.reap({ ttl: 0, blobColumns: [] }), { orphans: 0, danglers: 0 });
   assert.deepEqual(readClaimedBlob(app, blobId), Buffer.from([1]));
+});
+
+test('the ordinary blob reaper retains a staged generation until its claim expires', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({ db, blobs: { root }, blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 } });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const staged = await pendingBlobStager(app, principal({ type: 'user', id: 'u1' })).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
+  assert.deepEqual(app.blobs.reap({ ttl: -1, blobColumns: [] }), { orphans: 0, danglers: 0 });
+  assert.ok(db.prepare('SELECT 1 FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey));
+});
+
+test('principals receive independent staging slots for the same scope and resource', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({ db, blobs: { root }, blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 } });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const first = await pendingBlobStager(app, principal({ type: 'user', id: 'u1' })).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
+  const second = await pendingBlobStager(app, principal({ type: 'user', id: 'u2' })).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([2]) });
+  assert.notEqual(first.pendingKey, second.pendingKey);
 });
 
 test('claims are scope-bound and action authorization runs before claiming', async (t) => {

@@ -51,7 +51,7 @@ export function createPendingBlobLifecycle(app, options) {
     if (!request || typeof request.scopeId !== 'string' || !request.scopeId || typeof request.resourceId !== 'string' || !request.resourceId) throw new TypeError('scopeId and resourceId are required');
     const authenticatedPrincipalKey = principalKey(principal);
     if (request.scopeId.includes('/') || request.scopeId === '.' || request.scopeId === '..' || request.resourceId.includes('/') || request.resourceId === '.' || request.resourceId === '..') throw new TypeError('scopeId and resourceId must be single safe path segments');
-    const pendingKey = `${request.scopeId}/${request.resourceId}.pending`;
+    const pendingKey = `${request.scopeId}/${request.resourceId}.${hash(authenticatedPrincipalKey)}.pending`;
     const existing = app.db.prepare('SELECT 1 FROM _PendingBlob WHERE pendingKey = ?').get(pendingKey);
     if (existing) failure('PENDING_KEY_EXISTS');
     const bytes = await bytesOf(request.bytes);
@@ -85,7 +85,7 @@ export function createPendingBlobLifecycle(app, options) {
     if (!claimed.changes) failure('PENDING_BLOB_ALREADY_CLAIMED');
     // BlobStore adoption is metadata-only and shares the dispatch transaction
     // with the claim, event log, projection, and receipt.
-    app.blobs.adopt(app.db, row.blobId);
+    if (app.blobs.adopt(app.db, row.blobId).adopted !== 1) failure('BLOB_UNAVAILABLE');
     return Object.freeze({ blobId: row.blobId });
   }
   async function requestDeletion({ blobId, actionName, actionId, scopeId }) {

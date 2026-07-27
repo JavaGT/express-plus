@@ -97,7 +97,12 @@ function collectAppEntities(app) {
       const result = await declaration.handler(handlerContext);
       const commit = Array.isArray(result) ? { events: result } : result;
       if (!commit || !Array.isArray(commit.events)) throw new Error(`registered action '${declaration.type}' must return an event array`);
-      if (!lifecycle) return result;
+      if (!lifecycle) return Array.isArray(result) ? result : {
+        events: commit.events,
+        ...(commit.directive === undefined ? {} : { directive: commit.directive }),
+        ...(commit.privateFact === undefined ? {} : { privateFact: commit.privateFact }),
+        ...(commit.effects === undefined ? {} : { effects: commit.effects }),
+      };
       for (const { field, blobId } of claimedFields) {
         const owningEvents = commit.events.filter((event) => event?.scope === context.scope && event.data && Object.prototype.hasOwnProperty.call(event.data, field.field));
         if (owningEvents.length !== 1) throw new Error(`declared blob action '${declaration.type}' must emit exactly one owning event field '${field.field}' in its dispatch scope`);
