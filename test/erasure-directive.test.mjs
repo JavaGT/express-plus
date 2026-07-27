@@ -5,6 +5,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, { erasureDirective, erasureDirectivePreparation } from '../src/index.mjs';
 import { generateFrameworkDDL, prepareErasureDirective } from '../src/internal.mjs';
+import { frameworkTableNames } from '../src/server.mjs';
+import { frameworkTableNamesWithoutAuthCompile } from '../src/framework-table-names.mjs';
 
 const scope = 'Project:project-1';
 const oldData = JSON.stringify({ projectId: 'project-1', id: 'artefact-1', sensitive: 'remove-me' });
@@ -100,6 +102,90 @@ test('opted-in preparation receives only the validated manifest and joins the er
   assert.equal(JSON.stringify(db.prepare('SELECT * FROM _ActionReceipt WHERE actionId = ?').get('purge-prepare')).includes('old-action'), false);
   const retry = await instance.dispatch({ actionId: 'purge-prepare', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
   assert.equal(retry.ok, true); assert.equal(retry.deduped, true); assert.equal(calls, 1);
+});
+
+test('explicit application-owned underscore tables support atomic preparation reads, writes, and receipt retries', async () => {
+  const db = fixture();
+  db.exec('CREATE TABLE _ApplicationDeletion (id TEXT PRIMARY KEY, status TEXT NOT NULL)');
+  db.exec('CREATE TABLE _ApplicationCleanupOutbox (id TEXT PRIMARY KEY, deletionId TEXT NOT NULL)');
+  db.prepare('INSERT INTO _ApplicationDeletion VALUES (?, ?)').run('deletion-1', 'ready');
+  let calls = 0;
+  const instance = app(db, (database) => erasureDirectivePreparation({
+    owningScope: scope, subject: 'artefact-1', census: directive(database).census,
+  }), {
+    tables: ['_ApplicationCleanupOutbox'], readTables: ['_ApplicationDeletion'],
+    prepare({ reads, writes }) {
+      calls += 1;
+      const [deletion] = reads.find('_ApplicationDeletion', { id: 'deletion-1' });
+      assert.equal(deletion.status, 'ready');
+      writes.insert('_ApplicationCleanupOutbox', { id: 'cleanup-1', deletionId: deletion.id });
+    },
+  });
+  await instance.start();
+  const action = { actionId: 'purge-underscore', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope };
+  const first = await instance.dispatch(action);
+  const retry = await instance.dispatch(action);
+  assert.equal(first.ok, true); assert.equal(retry.ok, true); assert.equal(retry.deduped, true); assert.equal(calls, 1);
+  assert.deepEqual({ ...db.prepare('SELECT * FROM _ApplicationCleanupOutbox').get() }, { id: 'cleanup-1', deletionId: 'deletion-1' });
+});
+
+test('every canonical package table remains denied to declared preparation reads and writes', async () => {
+  assert.deepEqual(
+    [...frameworkTableNamesWithoutAuthCompile].map((name) => name.toLowerCase()).sort(),
+    [...frameworkTableNames].map((name) => name.toLowerCase()).sort(),
+  );
+  for (const operation of ['reads', 'writes']) {
+    for (const table of frameworkTableNames) {
+      const db = fixture();
+      const erasure = operation === 'reads'
+        ? { tables: [], readTables: [table], prepare({ reads }) { reads.find(table, { id: 'x' }); } }
+        : { tables: [table], readTables: [], prepare({ writes }) { writes.delete(table, { id: 'x' }); } };
+      const instance = app(db, directive, erasure);
+      await instance.start();
+      const result = await instance.dispatch({ actionId: `deny-${operation}-${table}`, type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+      assert.equal(result.ok, false, `${operation} ${table}`);
+      assert.ok(db.prepare('SELECT 1 FROM _ActionReceipt WHERE actionId = ?').get('old-action'), `${operation} ${table}`);
+    }
+  }
+});
+
+test('private cursor tables are denied before valid reads or writes execute', async () => {
+  for (const table of ['_ProjectedCursor', '_ConsumerCursor']) {
+    for (const operation of ['reads', 'writes']) {
+      const db = fixture();
+      if (table === '_ProjectedCursor') db.prepare('INSERT INTO _ProjectedCursor VALUES (?, ?, ?)').run('Entity', 'field', 7);
+      else db.prepare('INSERT INTO _ConsumerCursor VALUES (?, ?, ?)').run('consumer', scope, 7);
+      let completed = false;
+      const where = table === '_ProjectedCursor' ? { entity: 'Entity' } : { consumer: 'consumer' };
+      const erasure = operation === 'reads'
+        ? { tables: [], readTables: [table], prepare({ reads }) { reads.find(table, where); completed = true; } }
+        : { tables: [table], readTables: [], prepare({ writes }) { writes.delete(table, where); completed = true; } };
+      const instance = app(db, directive, erasure); await instance.start();
+      const result = await instance.dispatch({ actionId: `deny-cursor-${operation}-${table}`, type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+      assert.equal(result.ok, false); assert.equal(completed, false);
+      assert.equal(db.prepare(`SELECT lastSeq FROM ${table}`).get().lastSeq, 7);
+    }
+  }
+});
+
+test('package-table case variants and non-canonical underscore identifiers remain denied', async () => {
+  const cases = [
+    { table: '_lOg' },
+    { table: '_applicationPrivate', create: true, canonical: '_ApplicationPrivate' },
+    { table: '__ApplicationPrivate', create: true },
+    { table: '_Application Private', create: true },
+    { table: '_Application"Private', create: true },
+  ];
+  for (const entry of cases) {
+    const db = fixture();
+    if (entry.create) db.exec(`CREATE TABLE "${(entry.canonical ?? entry.table).replaceAll('"', '""')}" (id TEXT)`);
+    const instance = app(db, directive, {
+      tables: [entry.table], readTables: [], prepare({ writes }) { writes.delete(entry.table, { id: 'x' }); },
+    });
+    await instance.start();
+    const result = await instance.dispatch({ actionId: `deny-tricky-${cases.indexOf(entry)}`, type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+    assert.equal(result.ok, false, entry.table);
+  }
 });
 
 test('preparation receives authentic frozen action/subject context and bound equality reads only transiently', async () => {
@@ -263,6 +349,28 @@ test('preparation rejects allowlisted tables whose triggers could escape the cap
   assert.equal(result.ok, false);
   assert.ok(db.prepare('SELECT 1 FROM _ActionReceipt WHERE actionId = ?').get('old-action'));
   assert.equal(db.prepare('SELECT COUNT(*) count FROM DomainCleanup').get().count, 0);
+});
+
+test('preparation writes reject foreign-key escape paths in either direction', async () => {
+  const cases = [
+    {
+      name: 'outbound', table: '_ApplicationChild',
+      setup(db) { db.exec('CREATE TABLE Parent (id TEXT PRIMARY KEY); CREATE TABLE _ApplicationChild (id TEXT PRIMARY KEY, parentId TEXT REFERENCES Parent(id))'); },
+    },
+    {
+      name: 'inbound', table: '_ApplicationParent',
+      setup(db) { db.exec('CREATE TABLE _ApplicationParent (id TEXT PRIMARY KEY); CREATE TABLE Child (id TEXT PRIMARY KEY, parentId TEXT REFERENCES _ApplicationParent(id))'); },
+    },
+  ];
+  for (const entry of cases) {
+    const db = fixture(); entry.setup(db);
+    const instance = app(db, directive, {
+      tables: [entry.table], prepare({ writes }) { writes.delete(entry.table, { id: 'x' }); },
+    });
+    await instance.start();
+    const result = await instance.dispatch({ actionId: `deny-fk-${entry.name}`, type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+    assert.equal(result.ok, false, entry.name);
+  }
 });
 
 test('preparation writes cannot escape their transaction-bound callback', async () => {

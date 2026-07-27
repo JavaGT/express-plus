@@ -1,14 +1,10 @@
 import { createHash } from 'node:crypto';
+import { frameworkTableNamesWithoutAuthCompile } from './framework-table-names.mjs';
 
 const TOMBSTONE_TYPE = '$workbench.erased';
 const TOMBSTONE_ACTION_ID = '$workbench.erased';
 const TOMBSTONE_DATA = JSON.stringify({ version: 1 });
-// Named framework-owned tables that are not already excluded by the `_` rule.
-// Kept local to avoid importing the schema census, whose auth entities depend on
-// the public compile graph and would create a module-initialization cycle here.
-const PACKAGE_TABLES = new Set([
-  'blobstore', 'user', 'session', 'inbox', 'credential', 'invitation', 'apikey', 'twofactor',
-]);
+const PACKAGE_TABLES = new Set(frameworkTableNamesWithoutAuthCompile.map((name) => name.toLowerCase()));
 
 function fail(message) { throw new TypeError(`invalid erasure directive: ${message}`); }
 function text(value, name) {
@@ -96,7 +92,9 @@ function erasurePreparationCapabilities(db, writeTables, readTables) {
     const stored = db.prepare("SELECT type FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type IN ('table', 'view')").get(table);
     if (stored?.type !== 'table') fail(`application ${operation} require table '${table}'`);
     const canonical = db.prepare("SELECT name FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type = 'table'").get(table).name;
-    if (canonical.startsWith('_') || canonical.toLowerCase().startsWith('sqlite_')
+    if (canonical !== table
+      || (canonical.startsWith('_') && !/^_[A-Za-z][A-Za-z0-9_]*$/.test(canonical))
+      || canonical.toLowerCase().startsWith('sqlite_')
       || PACKAGE_TABLES.has(canonical.toLowerCase())) {
       fail(`application ${operation} cannot access undeclared table '${table}'`);
     }
