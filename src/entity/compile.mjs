@@ -97,10 +97,15 @@ export function entity(name, declaration = {}) {
   // precedence (the membership entry is a convenience shortcut, not a second path).
   let effectiveGrant = grant;
   let declaredChecks = { ...declaredChecksIn };
+  let compiledMembershipChecks = null;
   if (membershipDecl && (grant === undefined || grant === null)) {
     const membershipResult = compileMembershipAuthz(name, fields, membershipDecl);
     effectiveGrant = membershipResult.grant;
-    declaredChecks = { ...declaredChecks, ...membershipResult.checks };
+    // Membership checks are already registry entries with harvest + run faces.
+    // `declaredChecks` contains app functions which buildCheckRegistry compiles
+    // into that shape, so feeding entries through it would call an object as a
+    // function while harvesting the scope predicate.
+    compiledMembershipChecks = membershipResult.checks;
   }
 
   // ADR #7: an entity must declare a grant (explicitly via `grant:` or `membership:`,
@@ -182,6 +187,7 @@ export function entity(name, declaration = {}) {
     fields,
     grant: effectiveGrant,
     declaredChecks,
+    compiledChecks: compiledMembershipChecks,
   });
 
   // Self-handle for effects thunk resolution. The effects thunk receives a

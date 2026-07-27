@@ -148,6 +148,24 @@ test('authorizedRows binds a post-compilation membership declaration and checks 
   assert.equal(handled, 1);
 });
 
+test('inline membership compiles registry entries instead of treating them as declared check functions', () => {
+  assert.doesNotThrow(() => entity('InlineMembershipProject', {
+    name: text(),
+    owner: ref('User', { role: 'owner' }),
+    members: map(ref('User'), { role: ['viewer'], default: {} }),
+    membership: { viewer: { can: [read, subscribe], field: { role: 'viewer' } } },
+  }));
+});
+
+test('inline membership rejects a role that collides with an existing authorization check', () => {
+  assert.throws(() => entity('CollidingMembershipProject', {
+    name: text(),
+    owner: ref('User', { role: 'owner' }),
+    members: map(ref('User'), { role: ['owner'], default: {} }),
+    membership: { owner: { can: [read], field: { role: 'owner' } } },
+  }), /collides with an existing/);
+});
+
 test('private-fact projection receives canonical fact while public durable records remain sanitized', async (t) => {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE PrivateProjection (id TEXT PRIMARY KEY, value TEXT NOT NULL)');
@@ -239,6 +257,42 @@ test('private fact is withheld from ordinary projections and private projection 
   }
 });
 
+test('canonical private fact is deeply immutable and replay remains repeatable', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE PrivateProjection (id TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  let observed;
+  const app = workbench({ db, actions: [{
+    type: 'private.immutable', authorize: () => true,
+    handler: () => ({
+      events: [{ type: 'private.immutable.committed', scope: 'recipient:r1', data: {} }],
+      privateFact: { before: { nested: { value: 'before' } }, after: { id: 'row', nested: { value: 'after' } } },
+    }),
+    projections: [
+      {
+        eventTypes: ['private.immutable.committed'], privateFact: true,
+        apply(_event, _tx, { privateFact }) {
+          assert.throws(() => { privateFact.after.nested.value = 'mutated'; }, TypeError);
+        },
+      },
+      {
+        eventTypes: ['private.immutable.committed'], privateFact: true,
+        apply(_event, tx, { privateFact }) {
+          observed = privateFact.after.nested.value;
+          tx.prepare('INSERT OR REPLACE INTO PrivateProjection VALUES (?, ?)').run(privateFact.after.id, observed);
+        },
+      },
+    ],
+  }] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+
+  assert.equal((await app.dispatch({ actionId: 'private-immutable', scope: 'owner:o1', type: 'private.immutable', payload: {}, principal })).ok, true);
+  assert.equal(observed, 'after');
+  assert.deepEqual(await app.replayPrivateFactProjections(), { projected: 2 });
+  assert.deepEqual(await app.replayPrivateFactProjections(), { projected: 2 });
+  assert.deepEqual({ ...db.prepare('SELECT * FROM PrivateProjection').get() }, { id: 'row', value: 'after' });
+});
+
 test('private replay rejects duplicate receipt references transactionally', async (t) => {
   const db = new DatabaseSync(':memory:');
   db.exec('CREATE TABLE PrivateProjection (value TEXT NOT NULL)');
@@ -263,6 +317,39 @@ test('private replay rejects duplicate receipt references transactionally', asyn
 
   await assert.rejects(app.replayPrivateFactProjections(), /duplicate event reference/);
   assert.equal(db.prepare('SELECT COUNT(*) count FROM PrivateProjection').get().count, 0);
+});
+
+test('private replay validates every fact before current-projection filtering', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+  const receipt = db.prepare(
+    'INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs, historyOrder, actionData) VALUES (?, ?, ?, ?, ?, ?)',
+  );
+  const fact = db.prepare(
+    'INSERT INTO _PrivateActionFact (scope, actionId, committedAt, fact, effects) VALUES (?, ?, ?, ?, ?)',
+  );
+  const malformed = '{"after":{}}';
+
+  receipt.run('owner:none', 'none', '2026-01-01', '[]', 1, 'null');
+  fact.run('owner:none', 'none', '2026-01-01', malformed, '[]');
+  await assert.rejects(app.replayPrivateFactProjections(), /before and after/);
+
+  db.prepare('DELETE FROM _PrivateActionFact').run();
+  db.prepare('DELETE FROM _ActionReceipt').run();
+  db.prepare("INSERT INTO _Log VALUES ('recipient:r1', 1, 'unrelated.retained', '{}', 'unrelated', '2026-01-02')").run();
+  receipt.run('owner:unrelated', 'unrelated', '2026-01-02', '[{"scope":"recipient:r1","seq":1}]', 2, 'null');
+  fact.run('owner:unrelated', 'unrelated', '2026-01-02', malformed, '[]');
+  await assert.rejects(app.replayPrivateFactProjections(), /before and after/);
+
+  db.prepare('DELETE FROM _PrivateActionFact').run();
+  db.prepare('DELETE FROM _ActionReceipt').run();
+  db.prepare('DELETE FROM _Log').run();
+  db.prepare("INSERT INTO _Log VALUES ('recipient:r2', 1, 'retired.private.projection', '{}', 'retired', '2026-01-03')").run();
+  receipt.run('owner:retired', 'retired', '2026-01-03', '[{"scope":"recipient:r2","seq":1}]', 3, 'null');
+  fact.run('owner:retired', 'retired', '2026-01-03', malformed, '[]');
+  await assert.rejects(app.replayPrivateFactProjections(), /before and after/);
 });
 
 test('recipient event and ordinary receipt do not leak canonical fact or effect descriptors', async (t) => {

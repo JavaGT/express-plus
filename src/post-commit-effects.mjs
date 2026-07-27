@@ -95,11 +95,44 @@ function parseJson(value, where) {
 // One transaction covers the entire replay, and this seam performs no external I/O.
 export function replayPrivateFactProjections(db, projections) {
   const receipts = db.prepare('SELECT * FROM _ActionReceipt ORDER BY committedAt, scope, historyOrder').all();
-  const fact = db.prepare('SELECT * FROM _PrivateActionFact WHERE scope = ? AND actionId = ?');
+  const facts = db.prepare('SELECT * FROM _PrivateActionFact ORDER BY originOrder').all();
+  const receiptsByAction = new Map(receipts.map((receipt) => [`${receipt.scope}\u0000${receipt.actionId}`, receipt]));
   const event = db.prepare('SELECT * FROM _Log WHERE scope = ? AND seq = ?');
+  const validatedFacts = new Map();
+
+  // Validate every private fact before filtering by the projections currently
+  // registered in this process. Retired event types and effect-only actions are
+  // still durable security-sensitive replay input and must fail closed.
+  for (const row of facts) {
+    const key = `${row.scope}\u0000${row.actionId}`;
+    const owner = receiptsByAction.get(key);
+    if (!owner || owner.committedAt !== row.committedAt) {
+      throw new TypeError('private action fact does not match its action receipt');
+    }
+    const canonical = canonicalPrivateFact(parseJson(row.fact, 'private action fact'), true).fact;
+    const refs = parseJson(owner.eventRefs, 'action receipt eventRefs');
+    if (!Array.isArray(refs)) throw new TypeError('action receipt eventRefs must be an array');
+    const seenRefs = new Set();
+    for (const ref of refs) {
+      if (!ref || typeof ref.scope !== 'string' || !Number.isSafeInteger(ref.seq)) {
+        throw new TypeError('action receipt contains a malformed event reference');
+      }
+      const refKey = `${ref.scope}\u0000${ref.seq}`;
+      if (seenRefs.has(refKey)) throw new TypeError('action receipt contains a duplicate event reference');
+      seenRefs.add(refKey);
+      const stored = event.get(ref.scope, ref.seq);
+      if (!stored) throw new TypeError('private action fact references a missing committed event');
+      if (stored.actionId !== owner.actionId || stored.committedAt !== owner.committedAt) {
+        throw new TypeError('private action fact does not match its referenced event');
+      }
+    }
+    validatedFacts.set(key, Object.freeze({ row, canonical }));
+  }
+
   let projected = 0;
   for (const owner of receipts) {
-    const row = fact.get(owner.scope, owner.actionId);
+    const validated = validatedFacts.get(`${owner.scope}\u0000${owner.actionId}`);
+    const row = validated?.row;
     const refs = parseJson(owner.eventRefs, 'action receipt eventRefs');
     if (!Array.isArray(refs)) throw new TypeError('action receipt eventRefs must be an array');
     const seenRefs = new Set();
@@ -130,19 +163,12 @@ export function replayPrivateFactProjections(db, projections) {
       if (!row || row.committedAt !== owner.committedAt) {
         throw new TypeError('private-fact projection requires a matching durable private fact');
       }
-      const canonical = canonicalPrivateFact(parseJson(row.fact, 'private action fact'), true).fact;
       for (const projection of matched) {
-        projection.apply(committed, db, Object.freeze({ privateFact: canonical }));
+        projection.apply(committed, db, Object.freeze({ privateFact: validated.canonical }));
         projected += 1;
       }
     }
   }
-  const orphan = db.prepare(
-    `SELECT 1 FROM _PrivateActionFact fact
-     LEFT JOIN _ActionReceipt receipt ON receipt.scope = fact.scope AND receipt.actionId = fact.actionId
-     WHERE receipt.actionId IS NULL OR receipt.committedAt != fact.committedAt LIMIT 1`,
-  ).get();
-  if (orphan) throw new TypeError('private action fact does not match its action receipt');
   return { projected };
 }
 

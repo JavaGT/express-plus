@@ -14,12 +14,25 @@ function resolveGrantClauses(grant) {
   return grant;
 }
 
-export function compileEntityAuthz(name, { fields, grant, declaredChecks }) {
+export function compileEntityAuthz(name, { fields, grant, declaredChecks, compiledChecks }) {
   // Build the unified check registry — the ONE source of truth for every named
   // check, consulted by BOTH the scope→SQL compiler (harvest face) and the
   // per-row runtime evaluator (run face). Derived role checks (ref-role),
   // declared checks, and map-role names all land here; no second path.
-  const registry = buildCheckRegistry({ fields, declaredChecks, entityName: name });
+  const baseRegistry = buildCheckRegistry({ fields, declaredChecks, entityName: name });
+  for (const checkName of Object.keys(compiledChecks ?? {})) {
+    // A map role contributes only a runtime face; membership intentionally
+    // completes/replaces that weaker entry with its paired harvest+run faces.
+    // Ref-role and declared checks already have harvest faces and therefore
+    // represent a competing canonical source, which must fail closed.
+    if (baseRegistry[checkName]?.harvest) {
+      throw new Error(
+        `entity('${name}') membership check '${checkName}' collides with an existing ` +
+          'ref-role or declared check; authorization checks must have one source',
+      );
+    }
+  }
+  const registry = Object.freeze({ ...baseRegistry, ...compiledChecks });
 
   // Statically guard every runtime `.can` body (not scope predicates — those
   // compile to SQL and never run as JS). At the same time, lower the entity's
