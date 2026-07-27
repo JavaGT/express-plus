@@ -122,6 +122,42 @@ test('collectTableNamesFromDdl — ignores SQL line comments', () => {
   assert.deepStrictEqual(result, ['QuotedMarker', 'RealTable']);
 });
 
+test('collectTableNamesFromDdl — ignores SQL block comments without joining tokens', () => {
+  const result = collectTableNamesFromDdl([
+    { source: 'single-line', sql: '/* CREATE TABLE Commented (id INTEGER) */ CREATE TABLE RealTable (id INTEGER)' },
+    { source: 'multiline', sql: '/* heading\nCREATE TABLE MultilineCommented (id INTEGER)\n*/\nCREATE TABLE AfterComment (id INTEGER)' },
+    { source: 'between-tokens', sql: 'CRE/* comment */ATE TABLE JoinedPhantom (id INTEGER)' },
+  ]);
+
+  assert.deepStrictEqual(result, ['AfterComment', 'RealTable']);
+});
+
+test('collectTableNamesFromDdl — block comments end at the first closing marker', () => {
+  const result = collectTableNamesFromDdl([
+    { source: 'nested-looking', sql: '/* outer /* CREATE TABLE Hidden (id INTEGER) */ CREATE TABLE Visible (id INTEGER)' },
+  ]);
+
+  assert.deepStrictEqual(result, ['Visible']);
+});
+
+test('collectTableNamesFromDdl — preserves comment markers inside SQL quotes', () => {
+  const result = collectTableNamesFromDdl([
+    { source: 'single', sql: "SELECT '/* value */ -- value'; CREATE TABLE SingleQuotedMarker (id INTEGER)" },
+    { source: 'double', sql: 'SELECT "/* value */ -- value"; CREATE TABLE "Double/*Marker*/--Name" (id INTEGER)' },
+    { source: 'backtick', sql: 'CREATE TABLE `Backtick/*Marker*/--Name` (id INTEGER)' },
+    { source: 'bracket', sql: 'CREATE TABLE [Bracket/*Marker*/--Name] (id INTEGER)' },
+    { source: 'escaped', sql: "SELECT 'it''s /* value */', \"a\"\"--b\"; CREATE TABLE EscapedMarkers (id INTEGER)" },
+  ]);
+
+  assert.deepStrictEqual(result, [
+    'Backtick/*Marker*/--Name',
+    'Bracket/*Marker*/--Name',
+    'Double/*Marker*/--Name',
+    'EscapedMarkers',
+    'SingleQuotedMarker',
+  ]);
+});
+
 test('collectTableNamesFromDdl — rejects duplicate declarations case-insensitively', () => {
   assert.throws(
     () => collectTableNamesFromDdl([
