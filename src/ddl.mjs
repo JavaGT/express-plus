@@ -306,12 +306,13 @@ export function generateFrameworkDDL() {
   scope TEXT
 );`,
     `CREATE TABLE IF NOT EXISTS _PrivateActionFact (
+  originOrder INTEGER PRIMARY KEY AUTOINCREMENT,
   scope TEXT NOT NULL,
   actionId TEXT NOT NULL,
   committedAt TEXT NOT NULL,
   fact TEXT NOT NULL,
   effects TEXT NOT NULL,
-  PRIMARY KEY (scope, actionId)
+  UNIQUE (scope, actionId)
 );`,
     `CREATE TABLE IF NOT EXISTS _PostCommitEffect (
   declarationOrder INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -320,6 +321,7 @@ export function generateFrameworkDDL() {
   file TEXT NOT NULL,
   operation TEXT NOT NULL,
   ordinal INTEGER NOT NULL,
+  originOrder INTEGER NOT NULL,
   exclusionKey TEXT NOT NULL,
   verification TEXT NOT NULL,
   payload TEXT NOT NULL,
@@ -332,8 +334,8 @@ export function generateFrameworkDDL() {
   completedAt INTEGER,
   UNIQUE (scope, actionId, file, operation, ordinal)
 );`,
-    'CREATE INDEX IF NOT EXISTS idx__post_commit_effect_claim ON _PostCommitEffect (status, availableAt, declarationOrder);',
-    'CREATE INDEX IF NOT EXISTS idx__post_commit_effect_key_order ON _PostCommitEffect (exclusionKey, declarationOrder);',
+    'CREATE INDEX IF NOT EXISTS idx__post_commit_effect_claim ON _PostCommitEffect (status, availableAt, originOrder, ordinal);',
+    'CREATE INDEX IF NOT EXISTS idx__post_commit_effect_key_order ON _PostCommitEffect (exclusionKey, originOrder, ordinal);',
     'CREATE INDEX IF NOT EXISTS idx__job_claim ON _Job (status, enqueuedAt);',
     'CREATE INDEX IF NOT EXISTS idx__job_scope_status ON _Job (scope, status, enqueuedAt);',
     // Cursor tables for post-commit consumer tracking — declared via

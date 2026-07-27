@@ -210,3 +210,21 @@ test('fresh reconstruction derives missing pending rows without changing complet
   assert.equal(db.prepare('SELECT status FROM _PostCommitEffect WHERE ordinal = 1').get().status, 'pending');
   assert.equal(ran.io, 0);
 });
+
+test('reconstruction restores an earlier same-key effect ahead of its retained sibling', async (t) => {
+  const { app, db } = await setup(t);
+  await app.dispatch(request());
+  const retained = db.prepare('SELECT declarationOrder, originOrder FROM _PostCommitEffect WHERE ordinal = 1').get();
+  db.prepare('DELETE FROM _PostCommitEffect WHERE ordinal = 0').run();
+
+  assert.deepEqual(app.postCommitEffects.reconstruct(), { inserted: 1 });
+  const recovered = db.prepare('SELECT declarationOrder, originOrder FROM _PostCommitEffect WHERE ordinal = 0').get();
+  assert.ok(recovered.declarationOrder > retained.declarationOrder, 'reconstruction receives a later mutable row id');
+  assert.equal(recovered.originOrder, retained.originOrder, 'reconstruction restores immutable origin ordering');
+
+  const first = app.postCommitEffects.claim('first');
+  assert.equal(first.id.ordinal, 0);
+  assert.equal(app.postCommitEffects.claim('blocked'), null, 'retained sibling waits for reconstructed predecessor');
+  assert.equal(app.postCommitEffects.complete(first.id, 'first', first.fence, { verification: 'target-sha' }).accepted, true);
+  assert.equal(app.postCommitEffects.claim('second').id.ordinal, 1);
+});

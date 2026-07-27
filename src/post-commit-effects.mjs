@@ -52,17 +52,18 @@ export function declarePostCommitEffectsInTxn(db, { scope, actionId, committedAt
   }
   const factJson = json(privateFact ?? null, 'registered action privateFact');
   const effectsJson = JSON.stringify(declared);
-  db.prepare(
+  const fact = db.prepare(
     `INSERT INTO _PrivateActionFact (scope, actionId, committedAt, fact, effects)
-     VALUES (?, ?, ?, ?, ?)`,
-  ).run(scope, actionId, committedAt, factJson, effectsJson);
+     VALUES (?, ?, ?, ?, ?)
+     RETURNING originOrder`,
+  ).get(scope, actionId, committedAt, factJson, effectsJson);
   const insert = db.prepare(
     `INSERT INTO _PostCommitEffect
-      (scope, actionId, file, operation, ordinal, exclusionKey, verification, payload, declaredAt, status, fence)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+      (scope, actionId, file, operation, ordinal, originOrder, exclusionKey, verification, payload, declaredAt, status, fence)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`,
   );
   for (const effect of declared) {
-    insert.run(scope, actionId, effect.file, effect.operation, effect.ordinal, effect.key,
+    insert.run(scope, actionId, effect.file, effect.operation, effect.ordinal, fact.originOrder, effect.key,
       effect.verification, JSON.stringify(effect.payload), committedAt, STATUS_PENDING);
   }
 }
@@ -104,18 +105,19 @@ export function createPostCommitEffectRunner({ db, leaseMs = 30_000, now = () =>
        SET status = ?, workerId = ?, leaseUntil = ?, fence = fence + 1
        WHERE declarationOrder = (
          SELECT candidate.declarationOrder FROM _PostCommitEffect candidate
-         WHERE (candidate.status = ? OR (candidate.status = ? AND candidate.leaseUntil < ?))
+         WHERE (candidate.status = ? OR (candidate.status = ? AND candidate.leaseUntil <= ?))
            AND (candidate.availableAt IS NULL OR candidate.availableAt <= ?)
            AND NOT EXISTS (
              SELECT 1 FROM _PostCommitEffect earlier
              WHERE earlier.exclusionKey = candidate.exclusionKey
-               AND earlier.declarationOrder < candidate.declarationOrder
+               AND (earlier.originOrder < candidate.originOrder
+                 OR (earlier.originOrder = candidate.originOrder AND earlier.ordinal < candidate.ordinal))
                AND earlier.status != ?
            )
-         ORDER BY candidate.declarationOrder LIMIT 1
+         ORDER BY candidate.originOrder, candidate.ordinal LIMIT 1
        )
        RETURNING *`,
-    ).get(STATUS_CLAIMED, workerId, at + leaseMs, STATUS_PENDING, STATUS_CLAIMED, at + 1, at, STATUS_COMPLETED);
+    ).get(STATUS_CLAIMED, workerId, at + leaseMs, STATUS_PENDING, STATUS_CLAIMED, at, at, STATUS_COMPLETED);
     return parse(row);
   }
 
@@ -163,16 +165,16 @@ export function createPostCommitEffectRunner({ db, leaseMs = 30_000, now = () =>
   // Rebuild missing declarations from private canonical facts. Existing rows,
   // including completion/fence state, are never overwritten. This performs no I/O.
   function reconstruct() {
-    const facts = db.prepare('SELECT * FROM _PrivateActionFact ORDER BY committedAt, scope, actionId').all();
+    const facts = db.prepare('SELECT * FROM _PrivateActionFact ORDER BY originOrder').all();
     const insert = db.prepare(
       `INSERT OR IGNORE INTO _PostCommitEffect
-       (scope, actionId, file, operation, ordinal, exclusionKey, verification, payload, declaredAt, status, fence)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)`,
+       (scope, actionId, file, operation, ordinal, originOrder, exclusionKey, verification, payload, declaredAt, status, fence)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 0)`,
     );
     let inserted = 0;
     for (const fact of facts) {
       for (const effect of normalizeEffects(JSON.parse(fact.effects))) {
-        inserted += Number(insert.run(fact.scope, fact.actionId, effect.file, effect.operation, effect.ordinal,
+        inserted += Number(insert.run(fact.scope, fact.actionId, effect.file, effect.operation, effect.ordinal, fact.originOrder,
           effect.key, effect.verification, JSON.stringify(effect.payload), fact.committedAt).changes);
       }
     }
