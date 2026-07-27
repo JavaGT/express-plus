@@ -34,18 +34,23 @@ function freeze(value) {
   }
   return value;
 }
-function expiringView(value, open, seen = new WeakMap()) {
+function expiringView(value, open, revoke, seen = new WeakMap()) {
   if (!value || typeof value !== 'object') return value;
   if (seen.has(value)) return seen.get(value);
-  const view = Array.isArray(value) ? [] : {};
+  // A frozen empty target lets the view stay immutable without retaining
+  // reflective keys or an array length after its preparation lifetime ends.
+  const { proxy: view, revoke: revokeView } = Proxy.revocable(Object.freeze({}), {
+    get(_target, key) {
+      open();
+      if (key === Symbol.iterator && Array.isArray(value)) {
+        return function* iterator() { for (const item of value) yield expiringView(item, open, revoke, seen); };
+      }
+      if (key === 'length' && Array.isArray(value)) return value.length;
+      return expiringView(value[key], open, revoke, seen);
+    },
+  });
+  revoke.push(revokeView);
   seen.set(value, view);
-  for (const key of Object.keys(value)) {
-    Object.defineProperty(view, key, {
-      enumerable: true,
-      get() { open(); return expiringView(value[key], open, seen); },
-    });
-  }
-  Object.freeze(view);
   return view;
 }
 function identifier(name, label = 'identifier') {
@@ -73,6 +78,7 @@ function erasurePreparationCapabilities(db, writeTables, readTables) {
   const allowedWriteTables = new Set(writeTables);
   const allowedReadTables = new Set(readTables);
   let active = true;
+  const revoke = [];
   const open = (operation) => { if (!active) fail(`application ${operation} are available only during erasure preparation`); };
   const safeTable = (table, allowedTables, operation) => {
     applicationTable(table, allowedTables, operation);
@@ -135,8 +141,8 @@ function erasurePreparationCapabilities(db, writeTables, readTables) {
   });
   return {
     writes, reads,
-    view(value) { return expiringView(value, () => open('metadata')); },
-    close() { active = false; },
+    view(value) { return expiringView(value, () => open('metadata'), revoke); },
+    close() { active = false; for (const revokeView of revoke) revokeView(); },
   };
 }
 function pointer(value, path) {
