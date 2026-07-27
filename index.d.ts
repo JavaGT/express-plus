@@ -669,10 +669,17 @@ export type OperationalConsumer<TPayload, TFields extends object = object> = Rea
 }>;
 export function operationalConsumer<TPayload, TFields extends object>(consumer: OperationalConsumer<TPayload, TFields>): OperationalConsumer<TPayload, TFields>;
 
-export interface RegisteredProjection {
+export interface OrdinaryRegisteredProjection {
   readonly eventTypes: readonly string[];
+  readonly privateFact?: never;
   apply(event: CommittedEvent, db: WorkbenchDatabase): void;
 }
+export interface PrivateFactRegisteredProjection<PrivateFact = { readonly before: unknown; readonly after: unknown }> {
+  readonly eventTypes: readonly string[];
+  readonly privateFact: true;
+  apply(event: CommittedEvent, db: WorkbenchDatabase, context: Readonly<{ privateFact: PrivateFact }>): void;
+}
+export type RegisteredProjection = OrdinaryRegisteredProjection | PrivateFactRegisteredProjection;
 
 export interface ErasureEventTargetV1 {
   readonly scope: string;
@@ -819,6 +826,8 @@ export interface WorkbenchApp extends RouteBuilder {
   dispatch<Payload = Record<string, unknown>>(
     request: DispatchRequest<Payload>,
   ): Promise<DispatchResult>;
+  /** Rebuild explicitly private-fact projections from private facts and receipt event references. */
+  replayPrivateFactProjections(): Promise<{ projected: number }>;
   batch<Action extends BatchAction>(
     actions: readonly Action[] | BatchActionFactory<Action>,
     options?: { principal?: Principal; clientId?: string },

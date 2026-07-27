@@ -10,6 +10,12 @@ function json(value, where) {
   try { return JSON.stringify(value); } catch { throw new TypeError(`${where} must be JSON-serializable`); }
 }
 
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
+}
+
 function assertText(value, where) {
   if (typeof value !== 'string' || value.length === 0) throw new TypeError(`${where} must be a non-empty string`);
   return value;
@@ -40,18 +46,28 @@ export function postCommitEffect(input) {
   });
 }
 
-export function declarePostCommitEffectsInTxn(db, { scope, actionId, committedAt, privateFact, effects }) {
-  const declared = normalizeEffects(effects);
-  if (privateFact === undefined && declared.length === 0) return;
-  const factJson = json(privateFact ?? null, 'registered action privateFact');
-  const canonicalFact = JSON.parse(factJson);
-  if (declared.length > 0 && (
-    !canonicalFact || typeof canonicalFact !== 'object' || Array.isArray(canonicalFact)
-    || !Object.prototype.hasOwnProperty.call(canonicalFact, 'before')
-    || !Object.prototype.hasOwnProperty.call(canonicalFact, 'after')
-  )) {
-    throw new TypeError('registered action effects require a privateFact with before and after properties');
+function canonicalPrivateFact(privateFact, required) {
+  if (privateFact === undefined) {
+    if (required) throw new TypeError('private-fact projection requires a privateFact with before and after properties');
+    return undefined;
   }
+  const factJson = json(privateFact, 'registered action privateFact');
+  const fact = JSON.parse(factJson);
+  if (
+    !fact || typeof fact !== 'object' || Array.isArray(fact)
+    || !Object.prototype.hasOwnProperty.call(fact, 'before')
+    || !Object.prototype.hasOwnProperty.call(fact, 'after')
+  ) {
+    throw new TypeError('registered action privateFact must have before and after properties');
+  }
+  return { fact: deepFreeze(fact), factJson };
+}
+
+export function declarePostCommitEffectsInTxn(db, { scope, actionId, committedAt, privateFact, effects, requirePrivateFact = false }) {
+  const declared = normalizeEffects(effects);
+  const canonical = canonicalPrivateFact(privateFact, requirePrivateFact || declared.length > 0);
+  if (!canonical && declared.length === 0) return undefined;
+  const { fact: canonicalFact, factJson } = canonical;
   const effectsJson = JSON.stringify(declared);
   const fact = db.prepare(
     `INSERT INTO _PrivateActionFact (scope, actionId, committedAt, fact, effects)
@@ -67,6 +83,67 @@ export function declarePostCommitEffectsInTxn(db, { scope, actionId, committedAt
     insert.run(scope, actionId, effect.file, effect.operation, effect.ordinal, fact.originOrder, effect.key,
       effect.verification, JSON.stringify(effect.payload), committedAt, STATUS_PENDING);
   }
+  return canonicalFact;
+}
+
+function parseJson(value, where) {
+  try { return JSON.parse(value); } catch { throw new TypeError(`${where} must contain valid JSON`); }
+}
+
+// Rebuild private projections solely from the private fact and its receipt-owned
+// event references. The caller supplies only explicitly opted-in projections.
+// One transaction covers the entire replay, and this seam performs no external I/O.
+export function replayPrivateFactProjections(db, projections) {
+  const receipts = db.prepare('SELECT * FROM _ActionReceipt ORDER BY committedAt, scope, historyOrder').all();
+  const fact = db.prepare('SELECT * FROM _PrivateActionFact WHERE scope = ? AND actionId = ?');
+  const event = db.prepare('SELECT * FROM _Log WHERE scope = ? AND seq = ?');
+  let projected = 0;
+  for (const owner of receipts) {
+    const row = fact.get(owner.scope, owner.actionId);
+    const refs = parseJson(owner.eventRefs, 'action receipt eventRefs');
+    if (!Array.isArray(refs)) throw new TypeError('action receipt eventRefs must be an array');
+    const seenRefs = new Set();
+    for (const ref of refs) {
+      if (!ref || typeof ref.scope !== 'string' || !Number.isSafeInteger(ref.seq)) {
+        throw new TypeError('action receipt contains a malformed event reference');
+      }
+      const refKey = `${ref.scope}\u0000${ref.seq}`;
+      if (seenRefs.has(refKey)) throw new TypeError('action receipt contains a duplicate event reference');
+      seenRefs.add(refKey);
+      const stored = event.get(ref.scope, ref.seq);
+      // Unrelated receipts may legitimately outlive retained log rows. A
+      // private fact, however, claims these refs as replay input and must match.
+      if (!stored) {
+        if (row) throw new TypeError('private action fact references a missing committed event');
+        continue;
+      }
+      if (stored.actionId !== owner.actionId || stored.committedAt !== owner.committedAt) {
+        throw new TypeError('action receipt does not match its referenced event');
+      }
+      const committed = Object.freeze({
+        type: stored.eventType, scope: stored.scope, seq: stored.seq,
+        actionId: stored.actionId, committedAt: stored.committedAt,
+        data: parseJson(stored.eventData, 'committed event data'),
+      });
+      const matched = projections.filter((projection) => projection.eventTypes.includes(committed.type));
+      if (matched.length === 0) continue;
+      if (!row || row.committedAt !== owner.committedAt) {
+        throw new TypeError('private-fact projection requires a matching durable private fact');
+      }
+      const canonical = canonicalPrivateFact(parseJson(row.fact, 'private action fact'), true).fact;
+      for (const projection of matched) {
+        projection.apply(committed, db, Object.freeze({ privateFact: canonical }));
+        projected += 1;
+      }
+    }
+  }
+  const orphan = db.prepare(
+    `SELECT 1 FROM _PrivateActionFact fact
+     LEFT JOIN _ActionReceipt receipt ON receipt.scope = fact.scope AND receipt.actionId = fact.actionId
+     WHERE receipt.actionId IS NULL OR receipt.committedAt != fact.committedAt LIMIT 1`,
+  ).get();
+  if (orphan) throw new TypeError('private action fact does not match its action receipt');
+  return { projected };
 }
 
 function parse(row) {

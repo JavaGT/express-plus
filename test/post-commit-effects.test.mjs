@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import workbench, { authorizedRows, entity, everyone, grant, postCommitEffect, read, ref, scope, text, write } from '../src/index.mjs';
+import workbench, { authorizedRows, entity, everyone, grant, map, membership, postCommitEffect, read, ref, scope, subscribe, text, write } from '../src/index.mjs';
 
 const principal = { type: 'user', id: 'editor', attributes: {} };
 
@@ -110,6 +110,159 @@ test('authorizedRows requires the same principal capability on both project rows
   const granted = await app.dispatch({ actionId: 'granted-both', scope: 'TransferProject:source', type: action.type, payload: { source: 'source', target: 'target' }, principal });
   assert.equal(granted.ok, true);
   assert.equal(handled, 1);
+});
+
+test('authorizedRows binds a post-compilation membership declaration and checks both row subjects', async (t) => {
+  const Project = entity('MembershipTransferProject', {
+    name: text(),
+    owner: ref('User', { role: 'owner' }),
+    members: map(ref('User'), { role: ['viewer', 'editor'], default: {} }),
+  });
+  membership(Project, {
+    viewer: { can: [read, subscribe], field: { role: 'viewer' } },
+    editor: { can: [read, write, subscribe], field: { role: 'editor' } },
+  });
+  let handled = 0;
+  const action = {
+    type: 'membership.cross-project.authorized',
+    authorize: authorizedRows(({ payload }) => [
+      { entity: Project, id: payload.source, capability: write },
+      { entity: Project, id: payload.target, capability: write },
+    ]),
+    handler: () => { handled += 1; return []; },
+  };
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, entities: [Project], actions: [action] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+  db.prepare('INSERT INTO MembershipTransferProject (id, name, owner) VALUES (?, ?, ?)').run('source', 'Source', 'owner');
+  db.prepare('INSERT INTO MembershipTransferProject (id, name, owner) VALUES (?, ?, ?)').run('target', 'Target', 'owner');
+  db.prepare('INSERT INTO MembershipTransferProject_members (MembershipTransferProject_id, member_id, role) VALUES (?, ?, ?)').run('source', 'editor', 'editor');
+  db.prepare('INSERT INTO MembershipTransferProject_members (MembershipTransferProject_id, member_id, role) VALUES (?, ?, ?)').run('target', 'editor', 'viewer');
+
+  const base = { scope: 'MembershipTransferProject:source', type: action.type, payload: { source: 'source', target: 'target' }, principal };
+  assert.equal((await app.dispatch({ ...base, actionId: 'membership-denied' })).ok, false);
+  assert.equal(handled, 0);
+  db.prepare("UPDATE MembershipTransferProject_members SET role = 'editor' WHERE MembershipTransferProject_id = 'target'").run();
+  assert.equal((await app.dispatch({ ...base, actionId: 'membership-granted' })).ok, true);
+  assert.equal(handled, 1);
+});
+
+test('private-fact projection receives canonical fact while public durable records remain sanitized', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE PrivateProjection (id TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  const action = {
+    type: 'private.project', authorize: () => true,
+    handler: () => ({
+      events: [{ type: 'private.projected', scope: 'recipient:r1', data: { resync: true } }],
+      privateFact: { before: { id: 'row', value: 'before', secret: 'hidden' }, after: { id: 'row', value: 'after' } },
+    }),
+    projections: [{
+      eventTypes: ['private.projected'], privateFact: true,
+      apply(_event, tx, context) {
+        tx.prepare('INSERT OR REPLACE INTO PrivateProjection (id, value) VALUES (?, ?)').run(context.privateFact.after.id, context.privateFact.after.value);
+      },
+    }],
+  };
+  const app = workbench({ db, actions: [action] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+  const result = await app.dispatch({ actionId: 'private-project', scope: 'owner:o1', type: action.type, payload: {}, principal });
+  assert.equal(result.ok, true);
+  assert.deepEqual({ ...db.prepare('SELECT * FROM PrivateProjection').get() }, { id: 'row', value: 'after' });
+  assert.equal(JSON.stringify(db.prepare('SELECT * FROM _Log').all()).includes('hidden'), false);
+  assert.equal(JSON.stringify(db.prepare('SELECT * FROM _ActionReceipt').all()).includes('hidden'), false);
+  assert.equal(JSON.stringify(result).includes('hidden'), false);
+
+  db.prepare('DELETE FROM PrivateProjection').run();
+  assert.deepEqual(await app.replayPrivateFactProjections(), { projected: 1 });
+  assert.deepEqual({ ...db.prepare('SELECT * FROM PrivateProjection').get() }, { id: 'row', value: 'after' });
+});
+
+test('private-fact projection fails closed for missing or forged durable facts', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE PrivateProjection (id TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  const projection = {
+    eventTypes: ['private.required'], privateFact: true,
+    apply(_event, tx, context) { tx.prepare('INSERT INTO PrivateProjection VALUES (?, ?)').run(context.privateFact.after.id, context.privateFact.after.value); },
+  };
+  const app = workbench({ db, actions: [{
+    type: 'private.required', authorize: () => true,
+    handler: () => ({ events: [{ type: 'private.required', scope: 'recipient:r1', data: {} }] }),
+    projections: [projection],
+  }] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+  const missing = await app.dispatch({ actionId: 'missing-private', scope: 'owner:o1', type: 'private.required', payload: {}, principal });
+  assert.equal(missing.ok, false);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM _Log').get().c, 0);
+
+  db.prepare(`INSERT INTO _Log VALUES ('recipient:r1', 1, 'private.required', '{}', 'forged', '2026-01-01')`).run();
+  db.prepare(`INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs, historyOrder, actionData) VALUES ('owner:o1', 'forged', '2026-01-01', '[{"scope":"recipient:r1","seq":1}]', 1, 'null')`).run();
+  db.prepare(`INSERT INTO _PrivateActionFact (scope, actionId, committedAt, fact, effects) VALUES ('owner:o1', 'forged', '2026-01-01', '{"after":{"id":"row","value":"forged"}}', '[]')`).run();
+  await assert.rejects(() => app.replayPrivateFactProjections(), /before and after/);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM PrivateProjection').get().c, 0);
+});
+
+test('private fact is withheld from ordinary projections and private projection failure rolls back every origin write', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE PrivateProjection (value TEXT NOT NULL)');
+  let ordinaryArguments;
+  const app = workbench({ db, actions: [{
+    type: 'private.rollback', authorize: () => true,
+    handler: () => ({
+      events: [{ type: 'private.rollback.committed', scope: 'recipient:r1', data: {} }],
+      privateFact: { before: { secret: 'hidden' }, after: { value: 'after' } },
+    }),
+    projections: [
+      {
+        eventTypes: ['private.rollback.committed'],
+        apply(...args) { ordinaryArguments = args; },
+      },
+      {
+        eventTypes: ['private.rollback.committed'], privateFact: true,
+        apply(_event, tx, { privateFact }) {
+          tx.prepare('INSERT INTO PrivateProjection VALUES (?)').run(privateFact.after.value);
+          throw new Error('private projection failed');
+        },
+      },
+    ],
+  }] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+
+  const result = await app.dispatch({ actionId: 'private-rollback', scope: 'owner:o1', type: 'private.rollback', payload: {}, principal });
+  assert.equal(result.ok, false);
+  assert.equal(ordinaryArguments.length, 2, 'ordinary projections receive no private context argument');
+  for (const table of ['PrivateProjection', '_Log', '_PrivateActionFact', '_ActionReceipt']) {
+    assert.equal(db.prepare(`SELECT COUNT(*) count FROM ${table}`).get().count, 0);
+  }
+});
+
+test('private replay rejects duplicate receipt references transactionally', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE PrivateProjection (value TEXT NOT NULL)');
+  const app = workbench({ db, actions: [{
+    type: 'private.duplicate', authorize: () => true,
+    handler: () => ({
+      events: [{ type: 'private.duplicate.committed', scope: 'recipient:r1', data: {} }],
+      privateFact: { before: {}, after: { value: 'once' } },
+    }),
+    projections: [{
+      eventTypes: ['private.duplicate.committed'], privateFact: true,
+      apply(_event, tx, { privateFact }) {
+        tx.prepare('INSERT INTO PrivateProjection VALUES (?)').run(privateFact.after.value);
+      },
+    }],
+  }] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.dispatch({ actionId: 'duplicate', scope: 'owner:o1', type: 'private.duplicate', payload: {}, principal });
+  db.prepare('DELETE FROM PrivateProjection').run();
+  db.prepare(`UPDATE _ActionReceipt SET eventRefs = '[{"scope":"recipient:r1","seq":1},{"scope":"recipient:r1","seq":1}]'`).run();
+
+  await assert.rejects(app.replayPrivateFactProjections(), /duplicate event reference/);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM PrivateProjection').get().count, 0);
 });
 
 test('recipient event and ordinary receipt do not leak canonical fact or effect descriptors', async (t) => {

@@ -21,6 +21,8 @@ import { readSeq } from './committed-log.mjs';
 import { CRUD_CURSOR_POLICY } from './entity/crud.mjs';
 import { EventKind } from './event-handle.mjs';
 import { bindAuthorizedRows, isAuthorizedRows } from './action-authorization.mjs';
+import { replayPrivateFactProjections } from './post-commit-effects.mjs';
+import { txn } from './driver.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -99,6 +101,9 @@ function collectAppEntities(app) {
     for (const projection of declaration.projections ?? []) {
       if (!Array.isArray(projection?.eventTypes) || typeof projection.apply !== 'function') {
         throw new Error(`registered action '${declaration.type}' has an invalid projection`);
+      }
+      if (projection.privateFact !== undefined && projection.privateFact !== true) {
+        throw new Error(`registered action '${declaration.type}' projection privateFact must be true when present`);
       }
       projections.push(projection);
     }
@@ -349,6 +354,10 @@ export function buildKernel(app) {
     operationalConsumer: operational.declared.length ? operational.consumer : null,
   });
   app.postCommitConsumerDescriptors = postCommitConsumerDescriptors;
+  const privateFactProjections = projections.filter((projection) => projection.privateFact === true);
+  app.replayPrivateFactProjections = () => app.writeQueue.run(
+    () => txn(app.db, () => replayPrivateFactProjections(app.db, privateFactProjections)),
+  );
 
   const registeredActions = new Map((app.actions ?? []).map((action) => [action.type, action]));
   const annotatedEntities = new Set(

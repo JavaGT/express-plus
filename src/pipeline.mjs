@@ -141,6 +141,7 @@ export function durableMutationVariant({
       payload,
       type,
       scope,
+      privateFact,
     } = {}) {
       const finalizedEvents = [];
 
@@ -183,7 +184,12 @@ export function durableMutationVariant({
       for (const consumer of projectionConsumers) {
         for (const ev of finalizedEvents) {
           if (consumer.eventTypes.includes(ev.type)) {
-            consumer.apply(ev, db);
+            if (consumer.privateFact === true) {
+              if (privateFact === undefined) throw new TypeError('private-fact projection requires a canonical private fact');
+              consumer.apply(ev, db, Object.freeze({ privateFact }));
+            } else {
+              consumer.apply(ev, db);
+            }
           }
         }
       }
@@ -236,6 +242,10 @@ export function durableMutationVariant({
       }
 
       return finalizedEvents;
+    },
+    requiresPrivateFact(events) {
+      return projectionConsumers.some((consumer) => consumer.privateFact === true
+        && events.some((event) => consumer.eventTypes.includes(event.type)));
     },
     async afterCommit(events, context) {
       for (const consumer of postCommitConsumers) {
@@ -400,8 +410,15 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
         throw new TypeError(`action '${type}' cannot return an erasure directive`);
       }
 
+      const requirePrivateFact = pipeline.requiresPrivateFact?.(commit.events) ?? false;
+      // Canonicalize and persist before any opted-in projection can observe the
+      // fact. All writes remain inside this origin transaction.
+      const privateFact = declarePostCommitEffectsInTxn(db, {
+        scope, actionId, committedAt: now, privateFact: commit.privateFact,
+        effects: commit.effects, requirePrivateFact,
+      });
       const result = await pipeline.applyInTxn(db, commit.events, {
-        now, actionId, nextSeq, principal, payload, type, scope,
+        now, actionId, nextSeq, principal, payload, type, scope, privateFact,
       });
       // The owning-stream action receipt (Wave 4.9): written atomically with
       // the events it references, so a retry's dedupe check and a crash
@@ -411,9 +428,6 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
         applyErasureDirective(db, directive, { scope, actionId });
       }
       await historyCommit?.apply?.(db);
-      declarePostCommitEffectsInTxn(db, {
-        scope, actionId, committedAt: now, privateFact: commit.privateFact, effects: commit.effects,
-      });
       insertReceipt(db, scope, actionId, now, result, directive === undefined
         ? historyCommit?.metadata
         : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
