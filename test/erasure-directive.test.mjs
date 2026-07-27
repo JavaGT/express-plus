@@ -285,14 +285,13 @@ test('preparation action context is snapshotted before authorization can mutate 
   assert.equal(observed.action.principal.id, 'actor-1');
 });
 
-test('preparation reads reject undeclared, internal, case-variant, temp, view, triggered, and raw predicates', async () => {
+test('preparation reads reject undeclared, internal, case-variant, temp, view, and raw predicates', async () => {
   const cases = [
-    { name: 'undeclared', setup(db) { db.exec('CREATE TABLE OtherTable (id TEXT)'); }, tables: [], table: 'OtherTable', where: { id: 'x' } },
-    { name: 'internal', tables: ['_Log'], table: '_Log', where: { scope } },
-    { name: 'case variant', setup(db) { db.exec('CREATE TABLE DomainSource (id TEXT)'); }, tables: ['DomainSource'], table: 'domainsource', where: { id: 'x' } },
-    { name: 'temp shadow', setup(db) { db.exec('CREATE TABLE DomainSource (id TEXT); CREATE TEMP TABLE DomainSource (id TEXT)'); }, tables: ['DomainSource'], table: 'DomainSource', where: { id: 'x' } },
-    { name: 'view', setup(db) { db.exec('CREATE TABLE BaseTable (id TEXT); CREATE VIEW DomainSource AS SELECT * FROM BaseTable'); }, tables: ['DomainSource'], table: 'DomainSource', where: { id: 'x' } },
-    { name: 'trigger', setup(db) { db.exec('CREATE TABLE DomainSource (id TEXT); CREATE TRIGGER source_trigger AFTER INSERT ON DomainSource BEGIN SELECT 1; END'); }, tables: ['DomainSource'], table: 'DomainSource', where: { id: 'x' } },
+    { name: 'undeclared', setup(db) { db.exec('CREATE TABLE OtherTable (id TEXT); CREATE TRIGGER other_trigger AFTER INSERT ON OtherTable BEGIN SELECT 1; END'); }, tables: [], table: 'OtherTable', where: { id: 'x' } },
+    { name: 'internal', setup(db) { db.exec('CREATE TRIGGER log_trigger AFTER INSERT ON _Log BEGIN SELECT 1; END'); }, tables: ['_Log'], table: '_Log', where: { scope } },
+    { name: 'case variant', setup(db) { db.exec('CREATE TABLE DomainSource (id TEXT); CREATE TRIGGER source_trigger AFTER INSERT ON DomainSource BEGIN SELECT 1; END'); }, tables: ['DomainSource'], table: 'domainsource', where: { id: 'x' } },
+    { name: 'temp shadow', setup(db) { db.exec('CREATE TABLE DomainSource (id TEXT); CREATE TEMP TABLE DomainSource (id TEXT); CREATE TEMP TRIGGER source_shadow_trigger AFTER INSERT ON DomainSource BEGIN SELECT 1; END'); }, tables: ['DomainSource'], table: 'DomainSource', where: { id: 'x' } },
+    { name: 'view', setup(db) { db.exec('CREATE TABLE BaseTable (id TEXT); CREATE VIEW DomainSource AS SELECT * FROM BaseTable; CREATE TRIGGER source_view_trigger INSTEAD OF INSERT ON DomainSource BEGIN INSERT INTO BaseTable VALUES (NEW.id); END'); }, tables: ['DomainSource'], table: 'DomainSource', where: { id: 'x' } },
     { name: 'raw predicate', setup(db) { db.exec('CREATE TABLE DomainSource (id TEXT)'); }, tables: ['DomainSource'], table: 'DomainSource', where: 'id = 1' },
   ];
   for (const entry of cases) {
@@ -303,6 +302,37 @@ test('preparation reads reject undeclared, internal, case-variant, temp, view, t
     assert.equal(result.ok, false, entry.name);
     assert.ok(db.prepare('SELECT 1 FROM _ActionReceipt WHERE actionId = ?').get('old-action'), entry.name);
   }
+});
+
+test('preparation reads declared triggered application tables but writes cannot invoke their triggers', async () => {
+  const db = fixture();
+  db.exec(`
+    CREATE TABLE DomainSource (id TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE DomainSourceIntegrity (sourceId TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TRIGGER domain_source_integrity AFTER INSERT ON DomainSource BEGIN
+      INSERT INTO DomainSourceIntegrity (sourceId, value) VALUES (NEW.id, NEW.value);
+    END;
+    INSERT INTO DomainSource (id, value) VALUES ('source-1', 'canonical');
+  `);
+  let observed;
+  const reader = app(db, directive, {
+    tables: [], readTables: ['DomainSource'],
+    prepare({ reads }) { observed = reads.find('DomainSource', { id: 'source-1' })[0].value; },
+  });
+  await reader.start();
+  const readResult = await reader.dispatch({ actionId: 'read-triggered-app-table', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(readResult.ok, true);
+  assert.equal(observed, 'canonical');
+
+  const writer = app(db, directive, {
+    tables: ['DomainSource'], readTables: [],
+    prepare({ writes }) { writes.insert('DomainSource', { id: 'escape', value: 'must-not-run' }); },
+  });
+  await writer.start();
+  const writeResult = await writer.dispatch({ actionId: 'write-triggered-app-table', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(writeResult.ok, false);
+  assert.equal(db.prepare('SELECT 1 FROM DomainSource WHERE id = ?').get('escape'), undefined);
+  assert.equal(db.prepare('SELECT 1 FROM DomainSourceIntegrity WHERE sourceId = ?').get('escape'), undefined);
 });
 
 test('preparation failure rolls back its writes, purge event, receipt, and erasure', async () => {

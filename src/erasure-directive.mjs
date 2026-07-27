@@ -99,8 +99,8 @@ function erasurePreparationCapabilities(db, writeTables, readTables) {
       fail(`application ${operation} cannot access undeclared table '${table}'`);
     }
     const name = identifier(canonical);
-    if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical)
-      || db.prepare("SELECT 1 FROM sqlite_temp_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical)) {
+    if (operation === 'writes' && (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical)
+      || db.prepare("SELECT 1 FROM sqlite_temp_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical))) {
       fail(`application ${operation} cannot access triggered table '${table}'`);
     }
     if (operation === 'writes') {

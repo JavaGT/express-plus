@@ -775,7 +775,7 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 
 ## 2026-07-27 — Erasure preparation gets transient action identity and bounded application reads
 
-- **Decision:** The existing erasure preparation seam now receives a deeply frozen `context` sourced from the admitted action and validated directive, plus an expiring `reads.find(table, where)` capability. Read tables are independently allowlisted by `readTables`; queries are non-empty, bound equality records against real, untriggered application tables only. The callback still has no raw database or SQL authority.
+- **Decision:** The existing erasure preparation seam now receives a deeply frozen `context` sourced from the admitted action and validated directive, plus an expiring `reads.find(table, where)` capability. Read tables are independently allowlisted by `readTables`; queries are non-empty, bound equality records against real application tables only. Declared canonical main-schema application tables may be read when they have integrity triggers; writes to triggered tables remain denied. The callback still has no raw database or SQL authority.
 - **Why:** Domain cleanup intent must bind to the real purge action, principal, scope, payload/root, and transaction snapshot. Some targets can only be derived from pre-delete application rows. Keeping both inputs transaction-bound and non-persisted avoids globals, sensitive private facts, hostile-ID interpolation, and a Scope-specific policy callback.
 - **Rejected:** unbounded database reads or raw predicates (escape package/privacy boundaries), persisted preparation context (durable sensitive material), and package knowledge of application tables or entity kinds (generic runtime violation).
 
