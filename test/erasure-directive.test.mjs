@@ -45,7 +45,9 @@ function directive(db, overrides = {}) {
 }
 
 function app(db, makeDirective, erasure = true) {
-  const privilege = erasure === true ? true : { tables: erasure.tables ?? ['DomainCleanup'], ...erasure };
+  const privilege = erasure === true ? true : {
+    tables: erasure.tables ?? ['DomainCleanup'], readTables: erasure.readTables ?? [], ...erasure,
+  };
   return workbench({ db, actions: [{
     type: 'lifecycle.purge', erasure: privilege, history: { cursor: 'excluded' }, authorize: () => true,
     handler(context) {
@@ -95,6 +97,84 @@ test('opted-in preparation receives only the validated manifest and joins the er
   assert.equal(JSON.stringify(db.prepare('SELECT * FROM _ActionReceipt WHERE actionId = ?').get('purge-prepare')).includes('old-action'), false);
   const retry = await instance.dispatch({ actionId: 'purge-prepare', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
   assert.equal(retry.ok, true); assert.equal(retry.deduped, true); assert.equal(calls, 1);
+});
+
+test('preparation receives authentic frozen action/subject context and bound equality reads only transiently', async () => {
+  const db = fixture();
+  db.exec('CREATE TABLE DomainSource (id TEXT PRIMARY KEY, ownerId TEXT NOT NULL, secret TEXT NOT NULL)');
+  db.exec('CREATE TABLE DomainCleanup (id TEXT PRIMARY KEY, targetCount INTEGER NOT NULL)');
+  db.prepare('INSERT INTO DomainSource VALUES (?, ?, ?)').run("hostile' OR 1=1 --", 'owner-1', 'domain-secret');
+  db.prepare('INSERT INTO DomainSource VALUES (?, ?, ?)').run('other', 'owner-1', 'other-secret');
+  let escaped; let observed;
+  const payload = { entityKind: 'record', rootId: 'artefact-1', deletionId: 'deletion-1', marker: 'payload-secret' };
+  const instance = app(db, (database) => erasureDirectivePreparation({
+    owningScope: scope, subject: 'artefact-1', census: directive(database).census,
+  }), { readTables: ['DomainSource'], prepare({ reads, writes, context }) {
+    escaped = reads; observed = context;
+    const rows = reads.find('DomainSource', { id: "hostile' OR 1=1 --" });
+    assert.equal(rows.length, 1); assert.equal(rows[0].secret, 'domain-secret');
+    assert.equal(Object.isFrozen(rows), true); assert.equal(Object.isFrozen(rows[0]), true);
+    writes.insert('DomainCleanup', { id: context.action.payload.deletionId, targetCount: rows.length });
+  } });
+  await instance.start();
+  const result = await instance.dispatch({ actionId: 'purge-context', type: 'lifecycle.purge', payload, principal: { type: 'user', id: 'actor-1' }, scope });
+  assert.equal(result.ok, true);
+  assert.deepEqual(observed, {
+    action: { id: 'purge-context', type: 'lifecycle.purge', scope, operation: 'erasure', payload, principal: { type: 'user', id: 'actor-1' } },
+    subject: { owningScope: scope, id: 'artefact-1' },
+  });
+  assert.equal(Object.isFrozen(observed), true); assert.equal(Object.isFrozen(observed.action.payload), true);
+  assert.throws(() => escaped.find('DomainSource', { ownerId: 'owner-1' }), /available only during erasure preparation/);
+  const durable = JSON.stringify({
+    log: db.prepare('SELECT * FROM _Log WHERE actionId = ?').all('purge-context'),
+    receipt: db.prepare('SELECT * FROM _ActionReceipt WHERE actionId = ?').get('purge-context'), result,
+  });
+  assert.equal(durable.includes('payload-secret'), false);
+  assert.equal(durable.includes('actor-1'), false);
+  assert.equal(durable.includes('domain-secret'), false);
+});
+
+test('preparation action context is snapshotted before the handler can mutate its request', async () => {
+  const db = fixture(); let observed;
+  const instance = workbench({ db, actions: [{
+    type: 'lifecycle.purge', erasure: { tables: [], readTables: [], prepare({ context }) { observed = context; } },
+    history: { cursor: 'excluded' }, authorize: () => true,
+    handler(context) {
+      context.payload.rootId = 'handler-substitution';
+      context.principal.id = 'handler-substitution';
+      return { events: [{ type: 'lifecycle.purged', scope, data: { done: true } }], directive: erasureDirectivePreparation({
+        owningScope: scope, subject: 'artefact-1', census: directive(context.db).census,
+      }) };
+    },
+  }] });
+  await instance.start();
+  const result = await instance.dispatch({
+    actionId: 'purge-snapshot', type: 'lifecycle.purge', payload: { rootId: 'artefact-1' },
+    principal: { type: 'user', id: 'actor-1' }, scope,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(observed.action.payload.rootId, 'artefact-1');
+  assert.equal(observed.action.principal.id, 'actor-1');
+});
+
+test('preparation reads reject undeclared, internal, case-variant, temp, view, triggered, and raw predicates', async () => {
+  const cases = [
+    { name: 'undeclared', setup(db) { db.exec('CREATE TABLE OtherTable (id TEXT)'); }, tables: [], table: 'OtherTable', where: { id: 'x' } },
+    { name: 'internal', tables: ['_Log'], table: '_Log', where: { scope } },
+    { name: 'case variant', setup(db) { db.exec('CREATE TABLE DomainSource (id TEXT)'); }, tables: ['DomainSource'], table: 'domainsource', where: { id: 'x' } },
+    { name: 'temp shadow', setup(db) { db.exec('CREATE TABLE DomainSource (id TEXT); CREATE TEMP TABLE DomainSource (id TEXT)'); }, tables: ['DomainSource'], table: 'DomainSource', where: { id: 'x' } },
+    { name: 'view', setup(db) { db.exec('CREATE TABLE BaseTable (id TEXT); CREATE VIEW DomainSource AS SELECT * FROM BaseTable'); }, tables: ['DomainSource'], table: 'DomainSource', where: { id: 'x' } },
+    { name: 'trigger', setup(db) { db.exec('CREATE TABLE DomainSource (id TEXT); CREATE TRIGGER source_trigger AFTER INSERT ON DomainSource BEGIN SELECT 1; END'); }, tables: ['DomainSource'], table: 'DomainSource', where: { id: 'x' } },
+    { name: 'raw predicate', setup(db) { db.exec('CREATE TABLE DomainSource (id TEXT)'); }, tables: ['DomainSource'], table: 'DomainSource', where: 'id = 1' },
+  ];
+  for (const entry of cases) {
+    const db = fixture(); entry.setup?.(db);
+    const instance = app(db, directive, { tables: [], readTables: entry.tables, prepare({ reads }) { reads.find(entry.table, entry.where); } });
+    await instance.start();
+    const result = await instance.dispatch({ actionId: `reject-${entry.name}`, type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+    assert.equal(result.ok, false, entry.name);
+    assert.ok(db.prepare('SELECT 1 FROM _ActionReceipt WHERE actionId = ?').get('old-action'), entry.name);
+  }
 });
 
 test('preparation failure rolls back its writes, purge event, receipt, and erasure', async () => {
@@ -167,7 +247,7 @@ test('private projection replay does not invoke erasure preparation', async () =
 test('ordinary actions cannot opt into erasure preparation', async () => {
   const db = fixture();
   const ordinary = workbench({ db, actions: [{
-    type: 'ordinary.action', erasure: { tables: [], prepare() {} }, authorize: () => true, handler: () => [],
+    type: 'ordinary.action', erasure: { tables: [], readTables: [], prepare() {} }, authorize: () => true, handler: () => [],
   }] });
   await assert.rejects(ordinary.start(), /must exclude its history cursor/);
 });

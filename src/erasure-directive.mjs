@@ -3,8 +3,11 @@ import { createHash } from 'node:crypto';
 const TOMBSTONE_TYPE = '$workbench.erased';
 const TOMBSTONE_ACTION_ID = '$workbench.erased';
 const TOMBSTONE_DATA = JSON.stringify({ version: 1 });
+// Named framework-owned tables that are not already excluded by the `_` rule.
+// Kept local to avoid importing the schema census, whose auth entities depend on
+// the public compile graph and would create a module-initialization cycle here.
 const PACKAGE_TABLES = new Set([
-  'BlobStore', 'User', 'Session', 'Inbox', 'Credential', 'Invitation', 'ApiKey', 'TwoFactor',
+  'blobstore', 'user', 'session', 'inbox', 'credential', 'invitation', 'apikey', 'twofactor',
 ]);
 
 function fail(message) { throw new TypeError(`invalid erasure directive: ${message}`); }
@@ -35,10 +38,10 @@ function identifier(name, label = 'identifier') {
   text(name, label);
   return `"${name.replaceAll('"', '""')}"`;
 }
-function applicationTable(name, allowedTables) {
+function applicationTable(name, allowedTables, operation) {
   text(name, 'table');
   if (!allowedTables.has(name)) {
-    fail(`application writes cannot access undeclared table '${name}'`);
+    fail(`application ${operation} cannot access undeclared table '${name}'`);
   }
   return identifier(name);
 }
@@ -51,60 +54,72 @@ function columns(record, name) {
 function identifiers(entries) { return entries.map(([name]) => identifier(name, 'column')).join(', '); }
 function predicate(entries) { return entries.map(([name]) => `${identifier(name, 'column')} = ?`).join(' AND '); }
 
-/** Transaction-bound, write-only authority over application-owned tables. */
-function erasurePreparationWrites(db, tables) {
-  const allowedTables = new Set(tables);
+/** Transaction-bound authority over explicitly declared application tables. */
+function erasurePreparationCapabilities(db, writeTables, readTables) {
+  const allowedWriteTables = new Set(writeTables);
+  const allowedReadTables = new Set(readTables);
   let active = true;
-  const open = () => { if (!active) fail('application writes are available only during erasure preparation'); };
-  const safeTable = (table) => {
-    applicationTable(table, allowedTables);
+  const open = (operation) => { if (!active) fail(`application ${operation} are available only during erasure preparation`); };
+  const safeTable = (table, allowedTables, operation) => {
+    applicationTable(table, allowedTables, operation);
     if (db.prepare('SELECT 1 FROM sqlite_temp_master WHERE lower(name) = lower(?)').get(table)) {
-      fail(`application writes cannot access shadowed table '${table}'`);
+      fail(`application ${operation} cannot access shadowed table '${table}'`);
     }
     const stored = db.prepare("SELECT type FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type IN ('table', 'view')").get(table);
-    if (stored?.type !== 'table') fail(`application writes require table '${table}'`);
+    if (stored?.type !== 'table') fail(`application ${operation} require table '${table}'`);
     const canonical = db.prepare("SELECT name FROM sqlite_master WHERE name = ? COLLATE NOCASE AND type = 'table'").get(table).name;
     if (canonical.startsWith('_') || canonical.toLowerCase().startsWith('sqlite_')
-      || [...PACKAGE_TABLES].some((name) => name.toLowerCase() === canonical.toLowerCase())) {
-      fail(`application writes cannot access undeclared table '${table}'`);
+      || PACKAGE_TABLES.has(canonical.toLowerCase())) {
+      fail(`application ${operation} cannot access undeclared table '${table}'`);
     }
     const name = identifier(canonical);
     if (db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical)
       || db.prepare("SELECT 1 FROM sqlite_temp_master WHERE type = 'trigger' AND tbl_name = ? COLLATE NOCASE").get(canonical)) {
-      fail(`application writes cannot access triggered table '${table}'`);
+      fail(`application ${operation} cannot access triggered table '${table}'`);
     }
-    if (db.prepare(`PRAGMA foreign_key_list(${name})`).get()) {
-      fail(`application writes cannot access foreign-key table '${table}'`);
-    }
-    const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all();
-    for (const candidate of tables) {
-      if (db.prepare(`PRAGMA foreign_key_list(${identifier(candidate.name)})`).all().some((fk) => fk.table.toLowerCase() === canonical.toLowerCase())) {
-        fail(`application writes cannot access referenced table '${table}'`);
+    if (operation === 'writes') {
+      if (db.prepare(`PRAGMA foreign_key_list(${name})`).get()) {
+        fail(`application writes cannot access foreign-key table '${table}'`);
+      }
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all();
+      for (const candidate of tables) {
+        if (db.prepare(`PRAGMA foreign_key_list(${identifier(candidate.name)})`).all().some((fk) => fk.table.toLowerCase() === canonical.toLowerCase())) {
+          fail(`application writes cannot access referenced table '${table}'`);
+        }
       }
     }
     return `main.${name}`;
   };
   const writes = Object.freeze({
     insert(table, values) {
-      open();
+      open('writes');
       const entries = columns(values, 'values');
-      return db.prepare(`INSERT INTO ${safeTable(table)} (${identifiers(entries)}) VALUES (${entries.map(() => '?').join(', ')})`)
+      return db.prepare(`INSERT INTO ${safeTable(table, allowedWriteTables, 'writes')} (${identifiers(entries)}) VALUES (${entries.map(() => '?').join(', ')})`)
         .run(...entries.map(([, value]) => value)).changes;
     },
     update(table, values, where) {
-      open();
+      open('writes');
       const changes = columns(values, 'values'); const filters = columns(where, 'where');
-      return db.prepare(`UPDATE ${safeTable(table)} SET ${changes.map(([name]) => `${identifier(name, 'column')} = ?`).join(', ')} WHERE ${predicate(filters)}`)
+      return db.prepare(`UPDATE ${safeTable(table, allowedWriteTables, 'writes')} SET ${changes.map(([name]) => `${identifier(name, 'column')} = ?`).join(', ')} WHERE ${predicate(filters)}`)
         .run(...changes.map(([, value]) => value), ...filters.map(([, value]) => value)).changes;
     },
     delete(table, where) {
-      open();
+      open('writes');
       const filters = columns(where, 'where');
-      return db.prepare(`DELETE FROM ${safeTable(table)} WHERE ${predicate(filters)}`)
+      return db.prepare(`DELETE FROM ${safeTable(table, allowedWriteTables, 'writes')} WHERE ${predicate(filters)}`)
         .run(...filters.map(([, value]) => value)).changes;
     },
   });
-  return { writes, close() { active = false; } };
+  const reads = Object.freeze({
+    find(table, where) {
+      open('reads');
+      const filters = columns(where, 'where');
+      const rows = db.prepare(`SELECT * FROM ${safeTable(table, allowedReadTables, 'reads')} WHERE ${predicate(filters)}`)
+        .all(...filters.map(([, value]) => value));
+      return freeze(rows.map((row) => ({ ...row })));
+    },
+  });
+  return { writes, reads, close() { active = false; } };
 }
 function pointer(value, path) {
   if (path === '') return value;
@@ -241,7 +256,9 @@ export function prepareErasureDirective(db, input) {
 }
 
 /** Apply a validated directive inside an already-open durable transaction. */
-export async function applyErasureDirective(db, directive, { scope, actionId, prepare, tables = [] }) {
+export async function applyErasureDirective(db, directive, {
+  scope, actionId, actionContext, prepare, tables = [], readTables = [],
+}) {
   erasureDirective(directive);
   if (directive.owningScope !== scope) fail('owningScope must equal request scope');
   if (directive.actions.some((target) => target.scope !== scope || target.actionId === actionId)) {
@@ -277,9 +294,13 @@ export async function applyErasureDirective(db, directive, { scope, actionId, pr
   }
 
   if (prepare !== undefined) {
-    const capability = erasurePreparationWrites(db, tables);
+    const capability = erasurePreparationCapabilities(db, tables, readTables);
+    const context = freeze({
+      action: actionContext,
+      subject: { owningScope: directive.owningScope, id: directive.subject },
+    });
     try {
-      try { await prepare(Object.freeze({ writes: capability.writes, manifest: directive })); }
+      try { await prepare(Object.freeze({ writes: capability.writes, reads: capability.reads, manifest: directive, context })); }
       catch { throw new TypeError('erasure preparation failed'); }
     }
     finally { capability.close(); }

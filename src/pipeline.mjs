@@ -402,6 +402,14 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
         }
       }
 
+      // Snapshot preparation identity before application handler code can mutate
+      // its request objects. This remains ephemeral unless an erasure directive
+      // reaches the registered preparation callback below.
+      const erasureActionContext = handler?.erasurePrepare === undefined ? undefined : {
+        id: actionId, type, scope, operation: 'erasure',
+        payload: structuredClone(payload),
+        principal: { type: principal.type, id: principal.id },
+      };
       if (handler) events = await handler({ payload, principal, db, now, scope, actionId });
       const commit = Array.isArray(events) ? { events } : events;
       if (!commit || !Array.isArray(commit.events)) {
@@ -429,7 +437,8 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
         const prepared = isErasureDirectivePreparation(directive) ? prepareErasureDirective(db, directive) : directive;
         if (!isErasureDirective(prepared)) throw new TypeError(`action '${type}' returned an invalid erasure directive`);
         await applyErasureDirective(db, prepared, {
-          scope, actionId, prepare: handler.erasurePrepare, tables: handler.erasurePreparationTables,
+          scope, actionId, actionContext: erasureActionContext, prepare: handler.erasurePrepare,
+          tables: handler.erasurePreparationTables, readTables: handler.erasurePreparationReadTables,
         });
       }
       await historyCommit?.apply?.(db);

@@ -723,6 +723,21 @@ export interface ErasurePreparationWrites {
   update(table: string, values: Readonly<Record<string, unknown>>, where: Readonly<Record<string, unknown>>): number | bigint;
   delete(table: string, where: Readonly<Record<string, unknown>>): number | bigint;
 }
+export interface ErasurePreparationReads {
+  /** Read matching rows using an AND of bound equality filters. */
+  find(table: string, where: Readonly<Record<string, unknown>>): readonly Readonly<Record<string, unknown>>[];
+}
+export interface ErasurePreparationContext<Payload = Record<string, unknown>> {
+  readonly action: Readonly<{
+    readonly id: string;
+    readonly type: string;
+    readonly scope: string;
+    readonly operation: 'erasure';
+    readonly payload: Payload;
+    readonly principal: Pick<Principal, 'type' | 'id'>;
+  }>;
+  readonly subject: Readonly<{ readonly owningScope: string; readonly id: string }>;
+}
 export interface RegisteredActionCommit {
   readonly events: readonly Readonly<{ type: string; scope: string; data: unknown }>[];
   readonly directive?: ErasureDirectiveV1 | ErasureDirectivePreparationV1;
@@ -798,11 +813,17 @@ export interface RegisteredAction<
   readonly erasure?: true | Readonly<{
     /** Exact application-owned tables the preparation callback may mutate. */
     tables: readonly string[];
+    /** Exact application-owned tables the preparation callback may query. */
+    readTables?: readonly string[];
     /** Runs once inside the origin transaction, after exact manifest validation and before erasure. */
     prepare(context: Readonly<{
       /** Transaction-bound, write-only access to application-owned tables. */
       writes: ErasurePreparationWrites;
+      /** Transaction-bound equality reads over explicitly declared application tables. */
+      reads: ErasurePreparationReads;
       manifest: Readonly<ErasureDirectiveV1>;
+      /** Canonical, non-persisted identity of the originating erasure action and declared subject. */
+      context: Readonly<ErasurePreparationContext<Payload>>;
     }>): void | Promise<void>;
   }>;
 }

@@ -10,6 +10,7 @@ import workbench, {
   type ActionHandle, type BatchAction, type CommittedEvent, type DispatchRequest,
   type DispatchResult, type EventHandle, type FailureCategory, type FailureOutcome,
   type InheritDirective, type Principal, type WorkbenchFailure,
+  type ErasurePreparationContext, type ErasurePreparationReads,
   type OrdinaryRegisteredProjection, type PrivateFactRegisteredProjection,
   type RegisteredAction, type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
@@ -123,6 +124,21 @@ const scopeAwareAction: RegisteredAction = {
   authorize: () => true,
   handler: ({ scope }) => [{ type: 'Project.renamed', scope, data: {} }],
 };
+const purgeAction: RegisteredAction<{ rootId: string }> = {
+  type: 'Project.purge',
+  authorize: () => true,
+  history: { cursor: 'excluded' },
+  erasure: {
+    tables: ['CleanupOutbox'], readTables: ['Project'],
+    prepare({ context, reads }) {
+      const typedContext: ErasurePreparationContext<{ rootId: string }> = context;
+      const typedReads: ErasurePreparationReads = reads;
+      void [typedContext.action.payload.rootId, typedReads.find('Project', { id: context.subject.id })];
+    },
+  },
+  handler: () => [],
+};
+void purgeAction;
 declare const committedEvent: CommittedEvent;
 scopeAwareAction.projections?.[0]?.apply(committedEvent, db);
 // @ts-expect-error ordinary projections preserve their two-argument public contract

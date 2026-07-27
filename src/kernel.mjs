@@ -55,9 +55,12 @@ function collectAppEntities(app) {
     }
     if (declaration.erasure !== undefined && declaration.erasure !== true
       && (!declaration.erasure || typeof declaration.erasure !== 'object'
-        || Object.keys(declaration.erasure).some((key) => key !== 'prepare' && key !== 'tables')
+        || Object.keys(declaration.erasure).some((key) => !['prepare', 'tables', 'readTables'].includes(key))
         || !Array.isArray(declaration.erasure.tables)
         || declaration.erasure.tables.some((table) => typeof table !== 'string' || table.length === 0)
+        || (declaration.erasure.readTables !== undefined
+          && (!Array.isArray(declaration.erasure.readTables)
+            || declaration.erasure.readTables.some((table) => typeof table !== 'string' || table.length === 0)))
         || typeof declaration.erasure.prepare !== 'function')) {
       throw new Error(`registered action '${declaration.type}' has an invalid erasure preparation`);
     }
@@ -111,6 +114,10 @@ function collectAppEntities(app) {
     Object.defineProperty(handler, 'erasurePreparationTables', {
       value: declaration.erasure && declaration.erasure !== true
         ? Object.freeze([...declaration.erasure.tables]) : Object.freeze([]),
+    });
+    Object.defineProperty(handler, 'erasurePreparationReadTables', {
+      value: declaration.erasure && declaration.erasure !== true
+        ? Object.freeze([...(declaration.erasure.readTables ?? [])]) : Object.freeze([]),
     });
     Object.defineProperty(handler, 'privateFactProjection', {
       value: declaration.projections?.some((projection) => projection?.privateFact === true) ?? false,
