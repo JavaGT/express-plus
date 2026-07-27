@@ -439,7 +439,11 @@ async function commitEvents(db, events, {
       }
       await historyCommit?.apply?.(db);
       insertReceipt(db, scope, actionId, now, result, directive === undefined
-        ? { ...historyCommit?.metadata, actionType: type, actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData }
+        ? {
+            ...historyCommit?.metadata,
+            actionType: type ?? historyCommit?.metadata?.actionType,
+            actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData,
+          }
         : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
       return result;
     });
@@ -775,7 +779,12 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       const action = actions[actionIndex];
       try {
         const emitted = await handlers[action.type]({ payload: action.payload, principal });
-        allEmitted.push(...emitted);
+        const commit = Array.isArray(emitted) ? { events: emitted } : emitted;
+        if (!commit || !Array.isArray(commit.events) || commit.privateFact !== undefined
+          || commit.effects !== undefined || commit.directive !== undefined || commit.canonicalPayload !== undefined) {
+          throw new TypeError(`batched action '${action.type}' handler must return an event array`);
+        }
+        allEmitted.push(...commit.events);
       } catch (err) {
         return executionFailure(err, { actionId, type: action.type }, { actionIndex });
       }
@@ -789,7 +798,9 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   }
 
   const historyRuntime = history
-    ? createDurableHistoryRuntime({ db, descriptor: history, dispatch, cursorPolicy, annotatedHistory })
+    ? createDurableHistoryRuntime({
+      db, descriptor: history, dispatch, dispatchBatch, authorize, cursorPolicy, annotatedHistory,
+    })
     : undefined;
   return { dispatch, dispatchBatch, history: historyRuntime, db, log: [] };  // log is the durable _Log table; empty array for compat
 }

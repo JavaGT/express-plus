@@ -177,6 +177,11 @@ const configuredHistory = durableHistory({
         payload: committedAction.payload as Record<string, unknown>,
         scope: committedAction.scope,
       }),
+      redo: ({ action: committedAction }) => ({
+        type: committedAction.type ?? 'note.restore',
+        payload: committedAction.payload as Record<string, unknown>,
+        scope: committedAction.scope,
+      }),
     },
   },
 });

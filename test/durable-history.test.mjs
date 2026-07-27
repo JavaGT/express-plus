@@ -6,7 +6,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import { durableHistory } from '../src/index.mjs';
-import { createServer, executeFrameworkDDL } from '../src/internal.mjs';
+import workbench, { createServer, durableMutationVariant, executeFrameworkDDL } from '../src/internal.mjs';
 import { retentionPrune } from '../src/committed-log.mjs';
 
 const principal = Object.freeze({ type: 'user', id: 'u1', attributes: {} });
@@ -17,11 +17,12 @@ function historyDescriptor(authorize = () => true) {
     authorize,
     actions: {
       'document.set': {
-        inverse: ({ action }) => ({
+        inverse: ({ action, fact }) => ({
           type: 'document.set',
           scope: action.scope,
-          payload: { value: action.events[0].data.before },
+          payload: { value: fact.before, before: fact.after },
         }),
+        redo: ({ action, fact }) => ({ type: 'document.set', scope: action.scope, payload: { value: fact.after, before: fact.before } }),
       },
     },
   });
@@ -40,11 +41,12 @@ function makeServer(db, history = historyDescriptor(), cursorPolicy, annotatedHi
     annotatedHistory,
     authorize: () => true,
     handlers: {
-      'document.set': ({ payload }) => [{
-        type: 'document.changed',
-        scope,
-        data: { before: payload.before ?? null, value: payload.value },
-      }],
+      'document.set': ({ payload, scope: owningScope }) => owningScope === undefined || payload.before === undefined
+        ? [{ type: 'document.changed', scope, data: { value: payload.value } }]
+        : ({
+            events: [{ type: 'document.changed', scope, data: { value: payload.value } }],
+            privateFact: { before: payload.before ?? null, after: payload.value },
+          }),
       'Document.body.apply': ({ payload }) => [{
         type: 'Document.body.applied',
         scope,
@@ -145,6 +147,190 @@ test('undo then redo dispatch through the committed pipeline', async () => {
     (await server.history.actions({ scope, principal })).map((entry) => entry.operation),
     ['action', 'undo', 'redo'],
   );
+});
+
+test('translation receives private fact internally while public cursor and move results do not expose it', async () => {
+  const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+  let seen;
+  const history = durableHistory({ authorize: () => true, actions: {
+    'document.set': {
+      inverse: (context) => { seen = context; return { type: 'document.set', payload: { value: context.fact.before } }; },
+      redo: ({ fact }) => ({ type: 'document.set', payload: { value: fact.after } }),
+    },
+  } });
+  const server = makeServer(db, history);
+  await set(server, { actionId: 'private-a1', value: 'after', before: 'before', session: 'tab-a' });
+  const cursor = await server.history.cursor({ scope, principal, session: 'tab-a' });
+  assert.deepEqual(Object.keys(cursor).sort(), ['redo', 'revision', 'undo']);
+  const moved = await server.history.undo({ scope, principal, session: 'tab-a', actionId: 'private-u1', revision: cursor.revision });
+  assert.deepEqual(seen.fact, { before: 'before', after: 'after' });
+  assert.equal(seen.principal, principal); assert.equal(seen.session, 'tab-a');
+  assert.equal('fact' in moved, false);
+});
+
+test('application runtime exposes only cursor, undo, and redo history methods', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, history: historyDescriptor(), actions: [{
+    type: 'document.set', authorize: () => true,
+    handler: ({ payload }) => ({
+      events: [{ type: 'document.changed', scope, data: { value: payload.value } }],
+      privateFact: { before: payload.before, after: payload.value },
+    }),
+  }] });
+  app.listen(0, { principalOf: () => principal });
+  await app.ready;
+  t.after(() => { app.httpServer.close(); db.close(); });
+  assert.deepEqual(Object.keys(app.history).sort(), ['cursor', 'redo', 'undo']);
+  assert.equal('actions' in app.history, false);
+  assert.equal('events' in app.history, false);
+});
+
+test('inverse and redo may each translate to one atomic batch under one history transition', async () => {
+  const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+  const batch = ({ fact }, value) => ({ actions: [
+    { type: 'document.set', payload: { value: fact[value] } },
+    { type: 'explicit.eligible', payload: { marker: value } },
+  ] });
+  const history = durableHistory({ authorize: () => true, actions: { 'document.set': {
+    inverse: (context) => batch(context, 'before'), redo: (context) => batch(context, 'after'),
+  } } });
+  const server = makeServer(db, history);
+  await set(server, { actionId: 'batch-a1', value: 2, before: 1, session: 'tab-a' });
+  const undone = await historyMove(server, 'undo', { scope, principal, session: 'tab-a' });
+  const redone = await historyMove(server, 'redo', { scope, principal, session: 'tab-a' });
+  assert.equal(undone.ok, true); assert.equal(undone.events.length, 2);
+  assert.equal(redone.ok, true); assert.equal(redone.events.length, 2);
+  assert.deepEqual(db.prepare("SELECT actionType, operation FROM _ActionReceipt WHERE operation != 'action' ORDER BY historyOrder").all().map((row) => ({ ...row })), [
+    { actionType: '$batch', operation: 'undo' }, { actionType: '$batch', operation: 'redo' },
+  ]);
+});
+
+test('later translated batch child failure rolls back events, receipt, and cursor', async () => {
+  const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+  const history = durableHistory({ authorize: () => true, actions: { 'document.set': {
+    inverse: () => ({ actions: [
+      { type: 'document.set', payload: { value: 0 } }, { type: 'fail.late', payload: {} },
+    ] }),
+    redo: () => ({ type: 'document.set', payload: { value: 1 } }),
+  } } });
+  const server = createServer({ db, history, authorize: () => true, handlers: {
+    'document.set': ({ payload, scope: owningScope }) => owningScope === undefined
+      ? [{ type: 'document.changed', scope, data: payload }]
+      : ({ events: [{ type: 'document.changed', scope, data: payload }], privateFact: { before: 0, after: payload.value } }),
+    'fail.late': () => { throw new Error('late failure'); },
+  } });
+  await set(server, { actionId: 'rollback-a1', value: 1, before: 0, session: 'tab-a' });
+  const before = await server.history.cursor({ scope, principal, session: 'tab-a' });
+  const result = await server.history.undo({ scope, principal, session: 'tab-a', actionId: 'rollback-u1', revision: before.revision });
+  assert.equal(result.ok, false);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM _Log').get().count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM _ActionReceipt').get().count, 1);
+  assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
+});
+
+test('translated batches reject malformed children, preserve duplicate children, and fail unknown types closed', async () => {
+  for (const translated of [
+    { actions: [{ type: 'explicit.eligible', payload: {}, actionId: 'forged' }] },
+    { actions: [{ type: 'explicit.eligible', scope: 'Document:other', payload: {} }] },
+  ]) {
+    const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+    const history = durableHistory({ authorize: () => true, actions: { 'document.set': {
+      inverse: () => translated, redo: () => ({ type: 'document.set', payload: { value: 1 } }),
+    } } });
+    const server = makeServer(db, history);
+    await set(server, { actionId: 'malformed-a1', value: 1, before: 0, session: 'tab-a' });
+    await assert.rejects(historyMove(server, 'undo', { scope, principal, session: 'tab-a' }));
+    assert.equal(db.prepare('SELECT COUNT(*) count FROM _ActionReceipt').get().count, 1);
+  }
+
+  const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+  const history = durableHistory({ authorize: () => true, actions: { 'document.set': {
+    inverse: () => ({ actions: [
+      { type: 'explicit.eligible', payload: { marker: 1 } },
+      { type: 'explicit.eligible', payload: { marker: 2 } },
+    ] }),
+    redo: () => ({ type: 'document.set', payload: { value: 1 } }),
+  } } });
+  const server = makeServer(db, history);
+  await set(server, { actionId: 'duplicate-a1', value: 1, before: 0, session: 'tab-a' });
+  assert.equal((await historyMove(server, 'undo', { scope, principal, session: 'tab-a' })).events.length, 2);
+
+  const unknownDb = new DatabaseSync(':memory:'); executeFrameworkDDL(unknownDb);
+  const unknownHistory = durableHistory({ authorize: () => true, actions: { 'document.set': {
+    inverse: () => ({ actions: [{ type: 'unknown.translated', payload: {} }] }),
+    redo: () => ({ type: 'document.set', payload: { value: 1 } }),
+  } } });
+  const unknownServer = makeServer(unknownDb, unknownHistory);
+  await set(unknownServer, { actionId: 'unknown-a1', value: 1, before: 0, session: 'tab-a' });
+  const unknown = await historyMove(unknownServer, 'undo', { scope, principal, session: 'tab-a' });
+  assert.equal(unknown.failure.category, 'unknown-action');
+  assert.equal(unknownDb.prepare('SELECT COUNT(*) count FROM _ActionReceipt').get().count, 1);
+  assert.partialDeepStrictEqual(await unknownServer.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
+});
+
+test('translated batch projection failure and concurrent cursor change leave its history transition untouched', async () => {
+  const projectionDb = new DatabaseSync(':memory:'); executeFrameworkDDL(projectionDb);
+  const projectionHistory = durableHistory({ authorize: () => true, actions: { 'document.set': {
+    inverse: () => ({ actions: [{ type: 'explicit.eligible', payload: {} }] }),
+    redo: () => ({ type: 'document.set', payload: { value: 1 } }),
+  } } });
+  const projectionServer = createServer({
+    db: projectionDb,
+    history: projectionHistory,
+    authorize: () => true,
+    pipeline: durableMutationVariant({ projectionConsumers: [{
+      eventTypes: ['explicit.changed'], apply: () => { throw new Error('projection failed'); },
+    }] }),
+    handlers: {
+      'document.set': ({ payload, scope: owningScope }) => owningScope === undefined
+        ? [{ type: 'document.changed', scope, data: payload }]
+        : ({
+            events: [{ type: 'document.changed', scope, data: payload }],
+            privateFact: { before: payload.before, after: payload.value },
+          }),
+      'explicit.eligible': () => [{ type: 'explicit.changed', scope, data: {} }],
+    },
+  });
+  await set(projectionServer, { actionId: 'projection-a1', value: 1, before: 0, session: 'tab-a' });
+  const projection = await historyMove(projectionServer, 'undo', { scope, principal, session: 'tab-a' });
+  assert.equal(projection.ok, false);
+  assert.equal(projectionDb.prepare('SELECT COUNT(*) count FROM _ActionReceipt').get().count, 1);
+  assert.partialDeepStrictEqual(await projectionServer.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
+
+  const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+  let releaseTranslation;
+  const translated = new Promise((resolve) => { releaseTranslation = resolve; });
+  const history = durableHistory({ authorize: () => true, actions: { 'document.set': {
+    inverse: async () => { await translated; return { actions: [{ type: 'explicit.eligible', payload: {} }] }; },
+    redo: () => ({ type: 'document.set', payload: { value: 1 } }),
+  } } });
+  const server = makeServer(db, history);
+  await set(server, { actionId: 'concurrent-a1', value: 1, before: 0, session: 'tab-a' });
+  const cursor = await server.history.cursor({ scope, principal, session: 'tab-a' });
+  const move = server.history.undo({ scope, principal, session: 'tab-a', actionId: 'concurrent-u1', revision: cursor.revision });
+  await set(server, { actionId: 'concurrent-a2', value: 2, before: 1, session: 'tab-a' });
+  releaseTranslation();
+  const stale = await move;
+  assert.equal(stale.ok, false);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM _ActionReceipt').get().count, 2);
+  assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 2, redo: 0 });
+});
+
+test('missing or malformed private facts and translator throws fail closed', async () => {
+  for (const damage of ['missing', 'malformed', 'throws']) {
+    const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+    const history = durableHistory({ authorize: () => true, actions: { 'document.set': {
+      inverse: damage === 'throws' ? () => { throw new Error('translator failed'); } : ({ fact }) => ({ type: 'document.set', payload: { value: fact.before } }),
+      redo: ({ fact }) => ({ type: 'document.set', payload: { value: fact.after } }),
+    } } });
+    const server = makeServer(db, history);
+    await set(server, { actionId: `${damage}-a1`, value: 1, before: 0, session: 'tab-a' });
+    if (damage === 'missing') db.prepare('DELETE FROM _PrivateActionFact').run();
+    if (damage === 'malformed') db.prepare("UPDATE _PrivateActionFact SET fact = '{}'").run();
+    await assert.rejects(historyMove(server, 'undo', { scope, principal, session: 'tab-a' }));
+    assert.equal(db.prepare('SELECT COUNT(*) count FROM _ActionReceipt').get().count, 1);
+    assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
+  }
 });
 
 test('a new action after undo truncates that session redo stack', async () => {
@@ -436,7 +622,10 @@ test('history inverse rejects a translated action in another scope', async () =>
   executeFrameworkDDL(db);
   const history = durableHistory({
     authorize: () => true,
-    actions: { 'document.set': { inverse: () => ({ type: 'document.set', scope: 'Document:other', payload: { value: 0 } }) } },
+    actions: { 'document.set': {
+      inverse: () => ({ type: 'document.set', scope: 'Document:other', payload: { value: 0 } }),
+      redo: () => ({ type: 'document.set', payload: { value: 1 } }),
+    } },
   });
   const server = makeServer(db, history);
   await set(server, { actionId: 'a1', value: 1, before: 0, session: 'tab-a' });
@@ -536,7 +725,10 @@ test('history rejects an inverse translated to an annotated operation', async ()
   executeFrameworkDDL(db);
   const history = durableHistory({
     authorize: () => true,
-    actions: { 'document.set': { inverse: ({ action }) => ({ type: 'AnnotatedDoc.body.operation', scope: action.scope, payload: {} }) } },
+    actions: { 'document.set': {
+      inverse: ({ action }) => ({ type: 'AnnotatedDoc.body.operation', scope: action.scope, payload: {} }),
+      redo: ({ action }) => ({ type: 'AnnotatedDoc.body.operation', scope: action.scope, payload: {} }),
+    } },
   });
   const server = makeServer(db, history, undefined, {
     entities: new Set(['AnnotatedDoc']),
@@ -632,6 +824,15 @@ test('retention atomically retires cursor targets and redacts action payload', a
   assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 0, redo: 0 });
   assert.equal(db.prepare("SELECT actionData FROM _ActionReceipt WHERE actionId = 'old-a1'").get().actionData, null);
   assert.equal((await server.dispatch({ actionId: 'old-a1', type: 'document.set', payload: { value: 9 }, principal, scope })).deduped, true);
+});
+
+test('retention erases private facts and cursor recovery cannot resurrect a redacted target', async () => {
+  const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db); const server = makeServer(db);
+  await set(server, { actionId: 'retired-a1', value: 'after', before: 'before', session: 'tab-a' });
+  retentionPrune(db, '9999-01-01T00:00:00.000Z');
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM _PrivateActionFact').get().count, 0);
+  db.prepare('DELETE FROM _HistoryCursor').run();
+  assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 0, redo: 0 });
 });
 
 test('empty move receipt prevents the same retry id from moving later history', async () => {

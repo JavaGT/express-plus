@@ -56,6 +56,46 @@ function actionFromRow(db, row) {
   });
 }
 
+function privateFactFromReceipt(db, receipt) {
+  const row = db.prepare(
+    'SELECT committedAt, fact FROM _PrivateActionFact WHERE scope = :scope AND actionId = :actionId',
+  ).get({ scope: receipt.scope, actionId: receipt.actionId });
+  if (!row || row.committedAt !== receipt.committedAt) {
+    throw new TypeError('history action private fact is missing or erased');
+  }
+  let fact;
+  try { fact = JSON.parse(row.fact); } catch { throw new TypeError('history action private fact is malformed'); }
+  if (!fact || typeof fact !== 'object' || Array.isArray(fact)
+    || !Object.prototype.hasOwnProperty.call(fact, 'before')
+    || !Object.prototype.hasOwnProperty.call(fact, 'after')) {
+    throw new TypeError('history action private fact is malformed');
+  }
+  return Object.freeze(structuredClone(fact));
+}
+
+function translatedActions(value, operation, scope) {
+  const name = operation === 'undo' ? 'inverse' : 'redo';
+  const wrapper = value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  const actions = wrapper && Object.hasOwn(wrapper, 'actions') ? wrapper.actions : [value];
+  const allowedWrapperKeys = wrapper && Object.hasOwn(wrapper, 'actions') ? ['actions'] : ['type', 'payload', 'scope'];
+  if (!wrapper || Object.keys(wrapper).some((key) => !allowedWrapperKeys.includes(key))
+    || !Array.isArray(actions) || actions.length === 0) {
+    throw new TypeError(`durableHistory ${name} must return one action or a non-empty atomic batch`);
+  }
+  const normalized = actions.map((action, index) => {
+    if (!action || typeof action !== 'object' || Array.isArray(action)
+      || typeof action.type !== 'string' || action.type.length === 0
+      || Object.keys(action).some((key) => !['type', 'payload', 'scope'].includes(key))) {
+      throw new TypeError(`durableHistory ${name} action ${index} is malformed`);
+    }
+    if (action.scope !== undefined && action.scope !== scope) {
+      throw new TypeError(`durableHistory ${name} must keep the original history scope`);
+    }
+    return Object.freeze({ type: action.type, payload: action.payload ?? {}, scope });
+  });
+  return Object.freeze(normalized);
+}
+
 function cursorRow(db, key, receiptIsEligible = () => true) {
   const row = db.prepare(
     `SELECT past, future FROM _HistoryCursor
@@ -110,14 +150,14 @@ export function durableHistory({ authorize, actions = {} } = {}) {
   }
   for (const [type, rule] of Object.entries(actions)) {
     if (!rule || typeof rule !== 'object' || typeof rule.inverse !== 'function'
-      || (rule.redo !== undefined && typeof rule.redo !== 'function')) {
-      throw new TypeError(`durableHistory action '${type}' requires inverse and optional redo functions`);
+      || typeof rule.redo !== 'function' || Object.keys(rule).some((key) => key !== 'inverse' && key !== 'redo')) {
+      throw new TypeError(`durableHistory action '${type}' requires explicit inverse and redo functions`);
     }
   }
   return Object.freeze({ [HISTORY_DESCRIPTOR]: true, authorize, actions: Object.freeze({ ...actions }) });
 }
 
-export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPolicy, annotatedHistory = null }) {
+export function createDurableHistoryRuntime({ db, descriptor, dispatch, dispatchBatch, authorize, cursorPolicy, annotatedHistory = null }) {
   if (!db) throw new Error('durable history requires a durable database');
   if (!descriptor?.[HISTORY_DESCRIPTOR]) {
     throw new TypeError('history must be created with durableHistory(...)');
@@ -171,6 +211,9 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPo
 
   function receiptIsEligible(receipt) {
     if (receipt.operation !== 'action') return false;
+    // Retention redacts actionData while retaining the receipt for dispatch
+    // dedupe. A reconstructed cursor must not revive that retired target.
+    if (receipt.actionData == null) return false;
     if (receipt.actionType === '$batch') {
       const actions = parseJson(receipt.actionData, null);
       return Array.isArray(actions) && actions.every((action) =>
@@ -295,27 +338,28 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPo
     const action = actionFromRow(db, receipt);
     const rule = descriptor.actions[action.type];
     if (!rule) throw conflict(`history action '${action.type}' is not undoable`);
+    // Re-authorize the original canonical action before private material is
+    // loaded or supplied to application translation code.
+    if (!await authorize({ type: action.type, payload: action.payload, principal: args.principal })) throw forbidden();
+    const fact = privateFactFromReceipt(db, receipt);
     const translate = operation === 'undo' ? rule.inverse : rule.redo;
-    const translated = translate
-      ? await translate({ action, principal: args.principal, session: args.session })
-      : { type: action.type, payload: action.payload, scope: action.scope };
-    if (!translated || typeof translated.type !== 'string') {
-      throw new TypeError(`durableHistory ${operation === 'undo' ? 'inverse' : 'redo'} must return an action`);
-    }
-    if (annotatedActionTypes.has(translated.type)) throw forbidden();
-    if (translated.scope !== undefined && translated.scope !== key.scope) {
-      throw new TypeError(`durableHistory ${operation === 'undo' ? 'inverse' : 'redo'} must keep the original history scope`);
-    }
+    const translated = translatedActions(
+      await translate({ action, fact, principal: args.principal, session: args.session }), operation, key.scope,
+    );
+    if (translated.some((child) => annotatedActionTypes.has(child.type))) throw forbidden();
+    const receiptAction = translated.length === 1 ? translated[0] : null;
     const transition = {
       metadata: {
-        actionType: translated.type,
-        actionData: translated.payload,
+        actionType: receiptAction?.type ?? '$batch',
+        actionData: receiptAction?.payload ?? translated.map(({ type, payload }) => ({ type, payload })),
         principalKey: key.principalKey,
         sessionId: key.sessionId,
         operation,
       },
       async apply(dbInTxn) {
         await admitted(descriptor, { operation, scope: key.scope, session: args.session, principal: args.principal, action });
+        if (!await authorize({ type: action.type, payload: action.payload, principal: args.principal })) throw forbidden();
+        privateFactFromReceipt(dbInTxn, receipt);
         const current = cursorRow(dbInTxn, key, receiptIsEligible);
         if (!sameCursor(current, expected)) throw new Error('history cursor changed during dispatch');
         const past = [...current.past];
@@ -325,14 +369,15 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, cursorPo
         writeCursor(dbInTxn, key, { past, future });
       },
     };
-    return dispatch({
+    const request = {
       actionId: operationId,
-      type: translated.type,
-      payload: translated.payload ?? {},
       principal: args.principal,
       scope: key.scope,
       _historyCommit: transition,
-    });
+    };
+    return receiptAction
+      ? dispatch({ ...request, type: receiptAction.type, payload: receiptAction.payload })
+      : dispatchBatch({ ...request, actions: translated.map(({ type, payload }) => ({ type, payload })) });
   }
 
   return Object.freeze({

@@ -241,6 +241,7 @@ export function retentionPrune(db, cutoffIso) {
       update.run(JSON.stringify(filter(cursor.past)), JSON.stringify(filter(cursor.future)), cursor.principalKey, cursor.sessionId, cursor.scope);
     }
     db.prepare('UPDATE _ActionReceipt SET actionData = NULL WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
+    db.prepare('DELETE FROM _PrivateActionFact WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
     db.prepare('DELETE FROM _Log WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
     db.exec('COMMIT');
   } catch (error) {

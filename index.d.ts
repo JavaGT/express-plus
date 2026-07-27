@@ -917,19 +917,29 @@ export interface HistoryActionRequest<Payload = Record<string, unknown>> {
   readonly scope?: string;
 }
 
+export interface HistoryActionBatchRequest {
+  readonly actions: readonly HistoryActionRequest[];
+}
+
+export type HistoryTranslationRequest = HistoryActionRequest | HistoryActionBatchRequest;
+
 export interface DurableHistoryDescriptor {
   readonly authorize: (access: HistoryAccess) => boolean | Promise<boolean>;
   readonly actions: Readonly<Record<string, Readonly<{
     readonly inverse: (context: {
     readonly action: HistoryAction;
+    /** Canonical erasure-aware material, supplied only to server-side translation. */
+    readonly fact: Readonly<{ readonly before: unknown; readonly after: unknown }>;
     readonly principal: Principal;
     readonly session: string;
-  }) => HistoryActionRequest | Promise<HistoryActionRequest>;
-    readonly redo?: (context: {
+  }) => HistoryTranslationRequest | Promise<HistoryTranslationRequest>;
+    readonly redo: (context: {
     readonly action: HistoryAction;
+    /** Canonical erasure-aware material, supplied only to server-side translation. */
+    readonly fact: Readonly<{ readonly before: unknown; readonly after: unknown }>;
     readonly principal: Principal;
     readonly session: string;
-  }) => HistoryActionRequest | Promise<HistoryActionRequest>;
+  }) => HistoryTranslationRequest | Promise<HistoryTranslationRequest>;
   }>>>;
 }
 

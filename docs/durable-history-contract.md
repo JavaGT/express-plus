@@ -6,12 +6,18 @@ they do not execute, persist, replay, or read canonical history independently.
 ## Public declaration and runtime
 
 `durableHistory({ authorize, actions })` declares a closed action-type registry. Each registered type
-has `inverse(context)` and may have `redo(context)`; absent types are non-undoable and are skipped
+has explicit `inverse(context)` and `redo(context)`; absent types are non-undoable and are skipped
 without clearing older cursor entries. Translations return an ordinary registered action request and
-therefore use the one authorize → handler → log → projection → receipt transaction. They cannot
+therefore use the one authorize → handler → log → projection → receipt transaction, or return a
+non-empty `actions` batch committed atomically under that same receipt and cursor transition. They cannot
 change owning scope. The normal registered action authorizer and history authorizer both run again
 inside that transaction; denial, malformed translation, handler/projection failure, or stale cursor
 rolls back projection, log, receipt, and cursor together.
+
+Translation receives the authenticated principal/session, original receipt metadata, and the canonical
+private `{ before, after }` fact loaded by Workbench. The fact is erasure-aware: missing, malformed,
+retained-away, or erased material fails closed. It is never returned by public `app.history` cursor/move
+surfaces. There is no default replay when a redo declaration is absent.
 
 The public application surface is deliberately only `history.cursor`, `history.undo`, and
 `history.redo`; raw action/event payload readers are not exposed. Cursor identity is exactly
