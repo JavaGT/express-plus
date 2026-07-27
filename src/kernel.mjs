@@ -106,11 +106,14 @@ function collectAppEntities(app) {
         const claimedBlobValues = Object.values(handlerContext.claimedBlobs);
         const forbiddenEventMetadata = claimedBlobValues.flatMap((blob) => [blob.sha256, blob.md5, blob.byteLength, blob.mediaType]).filter((value) => value !== null);
         const forbiddenPrivateMetadata = claimedBlobValues.flatMap((blob) => [blob.resourceId, blob.sha256, blob.md5, blob.byteLength, blob.mediaType]).filter((value) => value !== null);
+        const attestationKeys = new Set(['resourceId', 'sha256', 'md5', 'byteLength', 'mediaType']);
         const containsAttestationMetadata = (value, forbidden, seen = new Set()) => {
           if (typeof value !== 'object' || value === null) return forbidden.some((candidate) => Object.is(candidate, value));
           if (seen.has(value)) return false;
           seen.add(value);
           if (Array.isArray(value)) return value.some((item) => containsAttestationMetadata(item, forbidden, seen));
+          const keys = Object.keys(value);
+          if (keys.includes('claimedBlobs') || keys.includes('resourceId') || keys.filter((key) => attestationKeys.has(key)).length > 1) return true;
           return Object.values(value).some((item) => containsAttestationMetadata(item, forbidden, seen));
         };
         if (containsAttestationMetadata(commit.events, forbiddenEventMetadata)
@@ -128,6 +131,20 @@ function collectAppEntities(app) {
         const owningEvents = commit.events.filter((event) => event?.scope === context.scope && event.data && Object.prototype.hasOwnProperty.call(event.data, field.field));
         if (owningEvents.length !== 1) throw new Error(`declared blob action '${declaration.type}' must emit exactly one owning event field '${field.field}' in its dispatch scope`);
         if (owningEvents[0].data[field.field] !== blobId) throw new Error(`declared blob action '${declaration.type}' must emit its canonical blob id in field '${field.field}'`);
+        for (const [metadataName, path] of Object.entries(field.canonicalEventMetadata ?? {})) {
+          let target = owningEvents[0].data;
+          for (const part of path.slice(0, -1)) {
+            if (!Object.prototype.hasOwnProperty.call(target, part) || typeof target[part] !== 'object' || target[part] === null || Array.isArray(target[part])) {
+              throw new Error(`declared blob action '${declaration.type}' canonical metadata path '${path.join('.')}' must already have an object parent`);
+            }
+            target = target[part];
+          }
+          const leaf = path.at(-1);
+          if (Object.prototype.hasOwnProperty.call(target, leaf)) {
+            throw new Error(`declared blob action '${declaration.type}' handler cannot set canonical metadata path '${path.join('.')}'`);
+          }
+          target[leaf] = handlerContext.claimedBlobs[field.field][metadataName];
+        }
       }
       return {
         events: commit.events,

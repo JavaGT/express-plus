@@ -15,7 +15,7 @@ import workbench, {
   type DeclaredClaimedBlob, type RegisteredAction, type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
 import {
-  createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredTableNames,
+  createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredBlobField, declaredTableNames,
   frameworkTableNames, readCommittedCursor,
   runMigrations, describeEntityStorage, describeSqliteStorage,
   type BlobStore, type SqliteStorageDescription,
@@ -66,6 +66,10 @@ const Project: WorkbenchEntity<ProjectRow> = entity('Project', {
 const frameworkTables: readonly string[] = frameworkTableNames;
 const projectTables: readonly string[] = declaredTableNames([Project]);
 void [frameworkTables, projectTables];
+declaredBlobField({
+  actionName: 'file.upload', field: 'blob', resourceField: 'fileId',
+  canonicalEventMetadata: { byteLength: ['file', 'size'], mediaType: ['file', 'mime'] },
+});
 // @ts-expect-error projected is a namespace; asynchronous projections use projected.async(...)
 projected({ compute: async () => 'invalid' });
 

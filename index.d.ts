@@ -631,7 +631,14 @@ export type PendingBlobClaim = Readonly<{ pendingKey: PendingBlobKey; claimToken
 export type ClaimedBlobRef = Readonly<{ blobId: string & { readonly __brand: 'ClaimedBlobId' } }>;
 export type DeclaredClaimedBlob = Readonly<{ blobId: ClaimedBlobRef['blobId']; resourceId: string; sha256: string; md5: string; byteLength: number; mediaType: string | null }>;
 export type DeclaredClaimedBlobs = Readonly<Record<string, DeclaredClaimedBlob>>;
-export type DeclaredBlobField = Readonly<{ actionName: string; field: string; resourceField: string; purgeActionName?: string }>;
+export type DeclaredBlobField = Readonly<{
+  actionName: string;
+  field: string;
+  resourceField: string;
+  purgeActionName?: string;
+  /** Package-written paths beneath the owning event's data; handlers must leave each leaf absent. */
+  canonicalEventMetadata?: Readonly<{ byteLength?: readonly string[]; mediaType?: readonly string[] }>;
+}>;
 export type BlobLifecycleOptions = Readonly<{ fields: readonly DeclaredBlobField[]; pendingTtlMs: number; adoptedRecoveryTtlMs: number }>;
 
 export type OperationalConsumerName = string & { readonly __brand: 'OperationalConsumerName' };

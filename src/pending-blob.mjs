@@ -29,13 +29,22 @@ function principalKey(principal) {
 
 export function declaredBlobField(field) {
   const keys = field && typeof field === 'object' ? Object.keys(field) : [];
+  const canonicalEventMetadata = field?.canonicalEventMetadata;
+  const metadataKeys = canonicalEventMetadata && typeof canonicalEventMetadata === 'object' ? Object.keys(canonicalEventMetadata) : [];
+  const validPath = (path) => Array.isArray(path) && path.length > 0
+    && path.every((part) => typeof part === 'string' && part.length > 0 && !['__proto__', 'prototype', 'constructor'].includes(part));
   if (!field || typeof field.actionName !== 'string' || typeof field.field !== 'string'
     || typeof field.resourceField !== 'string'
-    || keys.some((key) => !['actionName', 'field', 'resourceField', 'purgeActionName'].includes(key))
-    || (field.purgeActionName !== undefined && typeof field.purgeActionName !== 'string')) {
+    || keys.some((key) => !['actionName', 'field', 'resourceField', 'purgeActionName', 'canonicalEventMetadata'].includes(key))
+    || (field.purgeActionName !== undefined && typeof field.purgeActionName !== 'string')
+    || (canonicalEventMetadata !== undefined && (!canonicalEventMetadata || typeof canonicalEventMetadata !== 'object'
+      || metadataKeys.length === 0 || metadataKeys.some((key) => !['byteLength', 'mediaType'].includes(key))
+      || metadataKeys.some((key) => !validPath(canonicalEventMetadata[key]))))) {
     throw new TypeError('declaredBlobField requires actionName, field, and resourceField');
   }
-  return Object.freeze({ ...field });
+  return Object.freeze({ ...field, ...(canonicalEventMetadata === undefined ? {} : {
+    canonicalEventMetadata: Object.freeze(Object.fromEntries(metadataKeys.map((key) => [key, Object.freeze([...canonicalEventMetadata[key]])]))),
+  }) });
 }
 
 export function createPendingBlobLifecycle(app, options) {

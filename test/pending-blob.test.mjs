@@ -41,11 +41,14 @@ test('declared blob claims are validated and adopted atomically with the registe
       handler: ({ actionId, payload, scope, claimedBlobs }) => {
         handled.push({ actionId, blob: payload.blob });
         claimed.push(claimedBlobs.blob);
-        return [{ type: 'File.created', scope, data: { id: 'f1', blob: payload.blob } }];
+        return [{ type: 'File.created', scope, data: { id: 'f1', blob: payload.blob, file: { id: 'f1' } } }];
       },
     }],
     blobLifecycle: {
-      fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })],
+      fields: [declaredBlobField({
+        actionName: 'File.upload', field: 'blob', resourceField: 'id',
+        canonicalEventMetadata: { byteLength: ['file', 'size'], mediaType: ['file', 'mime'] },
+      })],
       pendingTtlMs: 60_000,
       adoptedRecoveryTtlMs: 1,
     },
@@ -53,17 +56,24 @@ test('declared blob claims are validated and adopted atomically with the registe
   await app.start();
   t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
   const stager = pendingBlobStager(app, principal({ type: 'user', id: 'u1' }));
-  const staged = await stager.stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([7, 8]) });
+  const staged = await stager.stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([7, 8]), mediaType: 'application/octet-stream' });
   const outcome = await app.dispatch({ actionId: 'upload-1', type: 'File.upload', scope: 'project:p1', payload: { id: 'f1', blob: staged.claim }, principal: principal({ type: 'user', id: 'u1' }) });
   assert.equal(outcome.ok, true, JSON.stringify(outcome));
   const blobId = app.db.prepare('SELECT blobId FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).blobId;
   assert.deepEqual(handled, [{ actionId: 'upload-1', blob: blobId }]);
   assert.equal(projected[0].event.data.blob, blobId, 'projections receive the canonical blob id, not a pending claim');
-  assert.deepEqual(claimed, [{ blobId, resourceId: 'f1', sha256: staged.contentDigest, md5: '31540cf0b21cd8513d3dbc7192d8cad1', byteLength: 2, mediaType: null }]);
+  assert.deepEqual(claimed, [{ blobId, resourceId: 'f1', sha256: staged.contentDigest, md5: '31540cf0b21cd8513d3dbc7192d8cad1', byteLength: 2, mediaType: 'application/octet-stream' }]);
   assert.deepEqual(projected[0].context.claimedBlobs.blob, claimed[0], 'projection receives the same transaction-bound package attestation');
+  assert.deepEqual(projected[0].event.data.file, { id: 'f1', size: 2, mime: 'application/octet-stream' }, 'projection receives replay-required package-written domain metadata');
   const persisted = app.db.prepare('SELECT eventData FROM _Log WHERE actionId = ?').get('upload-1').eventData;
-  assert.equal(JSON.parse(persisted).blob, blobId, 'the committed event never retains a pending claim token');
+  assert.deepEqual(JSON.parse(persisted), { id: 'f1', blob: blobId, file: { id: 'f1', size: 2, mime: 'application/octet-stream' } }, 'the replay fact contains only declared canonical metadata');
   assert.equal(persisted.includes(staged.claim.claimToken), false);
+  assert.equal(persisted.includes(staged.pendingKey), false);
+  assert.equal(persisted.includes(staged.contentDigest), false);
+  assert.equal(JSON.stringify(outcome).includes(staged.contentDigest), false, 'delivery-shaped dispatch output excludes private digests');
+  const receipt = app.db.prepare('SELECT actionData FROM _ActionReceipt WHERE actionId = ?').get('upload-1').actionData;
+  assert.deepEqual(JSON.parse(receipt), { id: 'f1', blob: blobId });
+  assert.equal(receipt.includes(staged.contentDigest), false);
   assert.equal(app.db.prepare('SELECT status FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).status, 'finalized');
   const duplicate = await app.dispatch({ actionId: 'upload-2', type: 'File.upload', scope: 'project:p1', payload: { id: 'f1', blob: staged.claim }, principal: principal({ type: 'user', id: 'u1' }) });
   assert.equal(duplicate.ok, false);
@@ -353,6 +363,30 @@ test('claimed blob metadata cannot be serialized through a post-commit effect', 
   assert.equal(db.prepare('SELECT status FROM _PendingBlob WHERE pendingKey = ?').get(staged.pendingKey).status, 'pending');
 });
 
+test('renaming a copied claimed digest in an event does not bypass attestation non-leakage', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db, blobs: { root },
+    actions: [{
+      type: 'File.upload', authorize: () => true,
+      handler: ({ payload, scope, claimedBlobs }) => [{ type: 'File.created', scope, data: {
+        blob: payload.blob, file: { digest: claimedBlobs.blob.sha256 },
+      } }],
+    }],
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 60_000 },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1]) });
+  const outcome = await app.dispatch({ actionId: 'renamed-leak', type: 'File.upload', scope: 'project:p1', payload: { id: 'f1', blob: staged.claim }, principal: actor });
+  assert.equal(outcome.ok, false);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'renamed-leak'").get().count, 0);
+});
+
 test('blob declarations reject policy callbacks and other unknown keys', () => {
   assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', validator: () => true }), /requires actionName, field, and resourceField/);
+  assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', canonicalEventMetadata: { sha256: ['file', 'sha256'] } }), /requires actionName, field, and resourceField/);
+  assert.throws(() => declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id', canonicalEventMetadata: { byteLength: ['file', '__proto__'] } }), /requires actionName, field, and resourceField/);
 });
