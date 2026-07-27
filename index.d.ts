@@ -919,38 +919,34 @@ export interface HistoryActionRequest<Payload = Record<string, unknown>> {
 
 export interface DurableHistoryDescriptor {
   readonly authorize: (access: HistoryAccess) => boolean | Promise<boolean>;
-  readonly inverse: (context: {
+  readonly actions: Readonly<Record<string, Readonly<{
+    readonly inverse: (context: {
     readonly action: HistoryAction;
     readonly principal: Principal;
     readonly session: string;
   }) => HistoryActionRequest | Promise<HistoryActionRequest>;
-  readonly redo?: (context: {
+    readonly redo?: (context: {
     readonly action: HistoryAction;
     readonly principal: Principal;
     readonly session: string;
   }) => HistoryActionRequest | Promise<HistoryActionRequest>;
+  }>>>;
 }
 
 export function durableHistory(options: DurableHistoryDescriptor): DurableHistoryDescriptor;
-
-export interface HistoryReadOptions {
-  readonly scope: string;
-  readonly principal: Principal;
-  readonly after?: number;
-  readonly limit?: number;
-}
 
 export interface HistorySessionOptions {
   readonly scope: string;
   readonly session: string;
   readonly principal: Principal;
-  readonly actionId?: string;
+  /** Stable retry identity. Required for mutation; omitted only by cursor reads. */
+  readonly actionId: string;
+  /** Cursor revision returned by cursor(); stale revisions fail with conflict. */
+  readonly revision: string;
 }
 
 export interface DurableHistoryRuntime {
-  actions(options: HistoryReadOptions): Promise<readonly HistoryAction[]>;
-  events(options: HistoryReadOptions): Promise<readonly CommittedEvent[]>;
-  cursor(options: HistorySessionOptions): Promise<Readonly<{ undo: number; redo: number }>>;
+  cursor(options: Omit<HistorySessionOptions, 'actionId' | 'revision'>): Promise<Readonly<{ undo: number; redo: number; revision: string }>>;
   undo(options: HistorySessionOptions): Promise<DispatchResult & { readonly empty?: boolean }>;
   redo(options: HistorySessionOptions): Promise<DispatchResult & { readonly empty?: boolean }>;
 }

@@ -229,5 +229,22 @@ export function appendEvents(db, events) {
 // retentionPrune — delete log entries older than a cutoff date. Used by the
 // log retention reaper (serve.mjs). Runs under the writeQueue mutex.
 export function retentionPrune(db, cutoffIso) {
-  db.prepare('DELETE FROM _Log WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
+  db.exec('BEGIN IMMEDIATE');
+  try {
+    const expired = new Set(db.prepare(
+      'SELECT scope, actionId FROM _ActionReceipt WHERE committedAt < :cutoff',
+    ).all({ cutoff: cutoffIso }).map((row) => `${row.scope}\u0000${row.actionId}`));
+    const cursors = db.prepare('SELECT * FROM _HistoryCursor').all();
+    const update = db.prepare('UPDATE _HistoryCursor SET past = ?, future = ? WHERE principalKey = ? AND sessionId = ? AND scope = ?');
+    for (const cursor of cursors) {
+      const filter = (json) => JSON.parse(json).filter((id) => !expired.has(`${cursor.scope}\u0000${id}`));
+      update.run(JSON.stringify(filter(cursor.past)), JSON.stringify(filter(cursor.future)), cursor.principalKey, cursor.sessionId, cursor.scope);
+    }
+    db.prepare('UPDATE _ActionReceipt SET actionData = NULL WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
+    db.prepare('DELETE FROM _Log WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
+    db.exec('COMMIT');
+  } catch (error) {
+    db.exec('ROLLBACK');
+    throw error;
+  }
 }

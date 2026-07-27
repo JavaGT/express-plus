@@ -170,11 +170,15 @@ void [scopeAwareAction, privateAction, mixedPublicProjectionSurface];
 const configuredHistory = durableHistory({
   authorize: ({ operation, scope: historyScope, principal: historyPrincipal }) =>
     operation === 'read' && historyScope.length > 0 && historyPrincipal.id !== null,
-  inverse: ({ action: committedAction }) => ({
-    type: committedAction.type ?? 'note.restore',
-    payload: committedAction.payload as Record<string, unknown>,
-    scope: committedAction.scope,
-  }),
+  actions: {
+    'Project.rename': {
+      inverse: ({ action: committedAction }) => ({
+        type: committedAction.type ?? 'note.restore',
+        payload: committedAction.payload as Record<string, unknown>,
+        scope: committedAction.scope,
+      }),
+    },
+  },
 });
 void configuredHistory;
 const batchActions: readonly BatchAction[] = [
