@@ -34,14 +34,14 @@ export const PUBLIC_API = Object.freeze({
       'createInvitationApi', 'emailSeam', 'noopTransport',
       'matchRoute', 'serveStatic', 'createJobQueue', 'createBlobStore',
       'runMigrations', 'frameworkTableNames', 'declaredTableNames',
-      'readCommittedCursor', 'createLiveDelivery',
+      'readCommittedCursor', 'createLiveDelivery', 'createLiveDeliveryHttpHandler',
     ]),
   }),
   'workbench/client': Object.freeze({
     default: false,
     named: Object.freeze([
       'LiveChannel', 'LiveList', 'WorkbenchFailureError', 'decodeResult', 'createLiveStore',
-      'createScopeLiveStore', 'createLiveDeliverySession',
+      'createScopeLiveStore', 'createLiveDeliverySession', 'createLiveDeliveryHttpSession',
       'createAuthClient',
     ]),
   }),

@@ -428,6 +428,22 @@ export function createLiveDeliverySession<Snapshot, Payload = unknown>(
   config: LiveDeliverySessionConfig<Snapshot, Payload>,
 ): LiveDeliverySession<Snapshot, Payload>;
 
+export interface LiveDeliveryHttpSessionConfig<Snapshot, Payload = unknown> {
+  baseUrl: string;
+  scope: string;
+  validateSnapshot: (snapshot: unknown) => Snapshot;
+  fold: (snapshot: Snapshot, envelope: LiveDeliveryEventEnvelope) => Snapshot;
+  optimistic?: (snapshot: Snapshot, action: { actionId: string; type: string; payload: Payload }) => Snapshot;
+  sendAction: LiveDeliverySessionConfig<Snapshot, Payload>['sendAction'];
+  fetchImpl?: typeof globalThis.fetch;
+  eventSourceFactory?: (url: string, options: EventSourceInit) => EventSource;
+  createActionId?: () => string;
+}
+
+export function createLiveDeliveryHttpSession<Snapshot, Payload = unknown>(
+  config: LiveDeliveryHttpSessionConfig<Snapshot, Payload>,
+): LiveDeliverySession<Snapshot, Payload>;
+
 // ---------------------------------------------------------------------------
 // createScopeLiveStore — composite scope projection
 // ---------------------------------------------------------------------------

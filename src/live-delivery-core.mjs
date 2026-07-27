@@ -99,6 +99,21 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     return { kind: 'snapshot', snapshot: value, cursor };
   }
 
+  function snapshot({ principal, scope }) {
+    const handle = tryParseScopeKey(scope);
+    if (!handle) throw new Error(`invalid scope '${scope}'`);
+    const entityRec = entityRecord(handle.entity);
+    const auth = reauthFor(entityRec, principal, handle);
+    if (!auth) throw deniedError(scope);
+    return auth.row;
+  }
+
+  function exceedsCatchupLimit(scope, after, limit) {
+    const row = db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE scope = :scope AND seq > :after')
+      .get({ scope, after });
+    return Number(row?.count ?? 0) > limit;
+  }
+
   function reauthFor(entityRec, principal, handle) {
     try {
       const { sql: where, params: scopeParams } = entityRec.scopeFilter(principal);
@@ -419,5 +434,5 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  return { bootstrap, catchup, subscribe, wake, close };
+  return { bootstrap, catchup, subscribe, wake, close, snapshot, exceedsCatchupLimit };
 }

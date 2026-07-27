@@ -5,7 +5,8 @@
 import { createLiveDeliveryCore } from './live-delivery-core.mjs';
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 
-export function createLiveDelivery({ db, entities, mayVerb, log = null }) {
+export function createLiveDelivery({ db, entities, mayVerb, log = null, maxCatchupEvents = 1000 }) {
+  if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   // Public delivery deliberately has no connection state. It emits only
   // recipient-hydrated lifecycle snapshots or opaque recovery controls.
   const envelopes = createLiveEnvelopeBuilder({ stateful: false });
@@ -38,10 +39,22 @@ export function createLiveDelivery({ db, entities, mayVerb, log = null }) {
         return { activate: async () => undefined };
       });
     },
-    bootstrap(input) {
-      return core.bootstrap(input);
+    bootstrap({ principal, scope, snapshot = null }) {
+      // A public bootstrap is a recipient-hydrated entity snapshot paired with
+      // its cursor by the core. Apps do not provide snapshot/projection code.
+      return core.bootstrap({
+        principal,
+        scope,
+        snapshot: snapshot ?? (({ principal: recipient, scope: snapshotScope }) => core.snapshot({ principal: recipient, scope: snapshotScope })),
+      });
     },
-    catchup(input) {
+    async catchup(input) {
+      // Never materialize an unbounded retained history merely to discover it
+      // cannot fit a transport frame. A fresh paired recipient snapshot is the
+      // canonical opaque recovery for a long gap.
+      if (core.exceedsCatchupLimit(input.scope, input.after ?? 0, maxCatchupEvents)) {
+        return this.bootstrap({ principal: input.principal, scope: input.scope });
+      }
       return core.catchup(input);
     },
     wake(scope) {

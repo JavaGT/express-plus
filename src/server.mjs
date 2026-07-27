@@ -25,6 +25,7 @@ export { defineSqliteSchema } from './sqlite-schema.mjs';
 export { describeEntityStorage, describeSqliteStorage } from './sqlite-storage-description.mjs';
 export { readSeq as readCommittedCursor } from './committed-log.mjs';
 export { createLiveDelivery } from './live-delivery-public.mjs';
+export { createLiveDeliveryHttpHandler } from './live-delivery-http.mjs';
 export { operationalConsumerAdmin } from './operational-consumer.mjs';
 export { createPostCommitEffectRunner } from './post-commit-effects.mjs';
 export { pendingBlobStager, declaredBlobField, readClaimedBlob } from './pending-blob.mjs';

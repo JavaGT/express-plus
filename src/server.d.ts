@@ -530,8 +530,9 @@ export type LiveDeliveryCatchup =
   | {
       readonly kind: 'catchup';
       readonly envelopes: readonly LiveDeliveryEnvelope[];
-      readonly cursor: number;
-    }
+    readonly cursor: number;
+  }
+  | { readonly kind: 'snapshot'; readonly snapshot: Readonly<Record<string, unknown>>; readonly cursor: number }
   | { readonly kind: 'revoked'; readonly reason?: unknown };
 
 export interface LiveDeliveryEntity {
@@ -547,6 +548,10 @@ export interface LiveDelivery {
     readonly scope: string;
     snapshot(input: { readonly principal: Principal; readonly scope: string }): Snapshot;
   }): Promise<LiveDeliveryBootstrap<Snapshot>>;
+  bootstrap(input: {
+    readonly principal: Principal;
+    readonly scope: string;
+  }): Promise<LiveDeliveryBootstrap<Readonly<Record<string, unknown>>>>;
   catchup(input: {
     readonly principal: Principal;
     readonly scope: string;
@@ -561,7 +566,15 @@ export function createLiveDelivery(options: {
   entities: ReadonlyMap<string, LiveDeliveryEntity> | ((name: string) => LiveDeliveryEntity | undefined);
   mayVerb: (entity: LiveDeliveryEntity, verb: 'subscribe', row: Record<string, unknown>, principal: Principal) => boolean | Promise<boolean>;
   log?: { error?: (channel: string, message: string, context?: Record<string, unknown>) => void } | null;
+  maxCatchupEvents?: number;
 }): LiveDelivery;
+
+export function createLiveDeliveryHttpHandler(options: {
+  delivery: LiveDelivery;
+  principalOf(request: import('node:http').IncomingMessage): Principal | Promise<Principal>;
+  path?: string;
+  maxSubscriptions?: number;
+}): (request: import('node:http').IncomingMessage, response: import('node:http').ServerResponse) => Promise<boolean>;
 
 // ---------------------------------------------------------------------------
 // Email seam factory

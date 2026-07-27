@@ -109,6 +109,19 @@ test('public live delivery pairs an authorized snapshot with its committed curso
   db.close();
 });
 
+test('public live delivery bounds catch-up with a recipient snapshot rather than raw history', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT)');
+  db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'visible');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { secret: 'raw-one' });
+  appendEvent(db, 'Note:n1', 2, 'Note.updated', { secret: 'raw-two' });
+  const live = createLiveDelivery({ db, entities: new Map([['Note', noteEntity()]]), mayVerb: async () => true, maxCatchupEvents: 1 });
+  const result = await live.catchup({ principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0 });
+  assert.deepEqual(result, { kind: 'snapshot', snapshot: { id: 'n1', title: 'visible' }, cursor: 2 });
+  db.close();
+});
+
 test('public live delivery bootstrap fails closed and rejects asynchronous snapshot readers', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);

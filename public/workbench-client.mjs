@@ -2506,6 +2506,76 @@ export function createLiveDeliverySession({
   };
 }
 
+/**
+ * Connect the package-owned recovery session to its HTTP/SSE delivery skin.
+ * Applications supply their recipient snapshot validator/fold and action
+ * sender, never event replay, cursor, or transport recovery callbacks.
+ */
+export function createLiveDeliveryHttpSession({
+  baseUrl,
+  scope,
+  validateSnapshot,
+  fold,
+  optimistic,
+  sendAction,
+  fetchImpl = globalThis.fetch,
+  eventSourceFactory = (url, options) => new EventSource(url, options),
+  createActionId,
+}) {
+  if (typeof baseUrl !== 'string' || baseUrl.length === 0) throw new TypeError('baseUrl is required');
+  if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
+  if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
+  if (typeof eventSourceFactory !== 'function') throw new TypeError('eventSourceFactory is required');
+  const endpoint = `${baseUrl.replace(/\/$/, '')}/bootstrap`;
+  const eventsEndpoint = `${baseUrl.replace(/\/$/, '')}/events`;
+
+  async function bootstrap({ after, mode }) {
+    const url = new URL(endpoint, globalThis.location?.href ?? 'http://workbench.local');
+    url.searchParams.set('scope', scope);
+    url.searchParams.set('mode', mode);
+    if (mode === 'catchup') url.searchParams.set('after', String(after));
+    const response = await fetchImpl(url.toString(), { credentials: 'include' });
+    if (response.status === 401 || response.status === 403) return { kind: 'revoked' };
+    if (!response.ok) throw new Error(`live delivery bootstrap failed with HTTP ${response.status}`);
+    const result = await response.json();
+    if (!result || typeof result !== 'object' || !['snapshot', 'catchup', 'revoked'].includes(result.kind)) {
+      throw new Error('live delivery bootstrap returned an invalid response');
+    }
+    return result;
+  }
+
+  function subscribe({ after, deliver, closed }) {
+    const url = new URL(eventsEndpoint, globalThis.location?.href ?? 'http://workbench.local');
+    url.searchParams.set('scope', scope);
+    url.searchParams.set('after', String(after));
+    const source = eventSourceFactory(url.toString(), { withCredentials: true });
+    let open = true;
+    source.onmessage = (message) => {
+      if (!open) return;
+      let envelopes;
+      try { envelopes = JSON.parse(message.data); } catch { source.close(); closed(); return; }
+      Promise.resolve(deliver(envelopes)).catch(() => { source.close(); closed(); });
+    };
+    source.onerror = () => {
+      if (!open) return;
+      open = false;
+      source.close();
+      closed();
+    };
+    return Promise.resolve({ close() { open = false; source.close(); } });
+  }
+
+  return createLiveDeliverySession({
+    bootstrap,
+    subscribe,
+    validateSnapshot,
+    fold,
+    optimistic,
+    sendAction,
+    createActionId,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // createScopeLiveStore — one validated composite snapshot + one scope cursor.
 // ---------------------------------------------------------------------------
