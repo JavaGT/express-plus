@@ -593,7 +593,7 @@ export interface ListenOptions {
 export interface WorkbenchOptions {
   db?: string | WorkbenchDatabase;
   entities?: readonly WorkbenchEntity<any>[];
-  actions?: readonly RegisteredAction[];
+  actions?: readonly RegisteredAction<any, RegisteredProjection>[];
   port?: number;
   env?: string;
   requireEnv?: readonly string[];
@@ -757,7 +757,10 @@ export interface PostCommitEffectRunner {
 }
 export function erasureDirective(input: ErasureDirectiveV1): Readonly<ErasureDirectiveV1>;
 
-export interface RegisteredAction<Payload = Record<string, unknown>> {
+export interface RegisteredAction<
+  Payload = Record<string, unknown>,
+  Projection extends RegisteredProjection = OrdinaryRegisteredProjection,
+> {
   readonly type: string;
   authorize(context: {
     type: string;
@@ -774,7 +777,7 @@ export interface RegisteredAction<Payload = Record<string, unknown>> {
     /** Exact caller-selected owning scope for this dispatch. */
     readonly scope: string;
   }): readonly Readonly<{ type: string; scope: string; data: unknown }>[] | RegisteredActionCommit | Promise<readonly Readonly<{ type: string; scope: string; data: unknown }>[] | RegisteredActionCommit>;
-  readonly projections?: readonly RegisteredProjection[];
+  readonly projections?: readonly Projection[];
   readonly history?: { readonly cursor?: 'eligible' | 'excluded' };
   /** Privileged durable-pipeline erasure directive; requires history.cursor excluded. */
   readonly erasure?: true;
@@ -794,7 +797,7 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly routes: readonly unknown[];
   readonly config: Readonly<Record<string, unknown>>;
   readonly entities: ReadonlyMap<string, BoundWorkbenchEntity<any>>;
-  readonly actions: readonly RegisteredAction[];
+  readonly actions: readonly RegisteredAction<any, RegisteredProjection>[];
   readonly log: WorkbenchLog;
   readonly clock: WorkbenchClock;
   readonly writeQueue: WriteQueue;

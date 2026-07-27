@@ -10,6 +10,7 @@ import workbench, {
   type ActionHandle, type BatchAction, type CommittedEvent, type DispatchRequest,
   type DispatchResult, type EventHandle, type FailureCategory, type FailureOutcome,
   type InheritDirective, type Principal, type WorkbenchFailure,
+  type OrdinaryRegisteredProjection, type PrivateFactRegisteredProjection,
   type RegisteredAction, type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
 import {
@@ -122,7 +123,32 @@ const scopeAwareAction: RegisteredAction = {
   authorize: () => true,
   handler: ({ scope }) => [{ type: 'Project.renamed', scope, data: {} }],
 };
-void scopeAwareAction;
+declare const committedEvent: CommittedEvent;
+scopeAwareAction.projections?.[0]?.apply(committedEvent, db);
+// @ts-expect-error ordinary projections preserve their two-argument public contract
+scopeAwareAction.projections?.[0]?.apply(committedEvent, db, { privateFact: { before: {}, after: {} } });
+
+type PrivateFact = Readonly<{ before: { value: string }; after: { value: string } }>;
+const privateProjection: PrivateFactRegisteredProjection<PrivateFact> = {
+  eventTypes: ['Project.privateRenamed'],
+  privateFact: true,
+  apply(_event, _database, { privateFact }) { void privateFact.after.value; },
+};
+const privateAction: RegisteredAction<Record<string, unknown>, typeof privateProjection> = {
+  type: 'Project.privateRename',
+  authorize: () => true,
+  handler: () => ({ events: [], privateFact: { before: {}, after: {} } }),
+  projections: [privateProjection],
+};
+// @ts-expect-error private-fact projections require their explicit private context
+privateAction.projections?.[0]?.apply(committedEvent, db);
+privateAction.projections?.[0]?.apply(committedEvent, db, {
+  privateFact: { before: { value: 'before' }, after: { value: 'after' } },
+});
+const mixedPublicProjectionSurface: readonly (OrdinaryRegisteredProjection | PrivateFactRegisteredProjection)[] = [
+  ...(scopeAwareAction.projections ?? []), privateProjection,
+];
+void [scopeAwareAction, privateAction, mixedPublicProjectionSurface];
 
 const configuredHistory = durableHistory({
   authorize: ({ operation, scope: historyScope, principal: historyPrincipal }) =>
