@@ -405,7 +405,8 @@ export interface LiveDeliverySessionConfig<Snapshot, Payload = unknown> {
     closed: () => void;
   }): Promise<LiveDeliverySubscription>;
   validateSnapshot(snapshot: unknown): Snapshot;
-  fold(snapshot: Snapshot, envelope: LiveDeliveryEventEnvelope): Snapshot;
+  /** Omit for a snapshot-only (opaque-resync) composite stream. */
+  fold?: (snapshot: Snapshot, envelope: LiveDeliveryEventEnvelope) => Snapshot;
   optimistic?: (snapshot: Snapshot, action: { actionId: string; type: string; payload: Payload }) => Snapshot;
   sendAction(action: { actionId: string; type: string; payload: Payload }): Promise<{ ok?: boolean; value?: unknown; failure?: unknown; error?: unknown } | void>;
   createActionId?: () => string;
@@ -432,7 +433,7 @@ export interface LiveDeliveryHttpSessionConfig<Snapshot, Payload = unknown> {
   baseUrl: string;
   scope: string;
   validateSnapshot: (snapshot: unknown) => Snapshot;
-  fold: (snapshot: Snapshot, envelope: LiveDeliveryEventEnvelope) => Snapshot;
+  fold?: (snapshot: Snapshot, envelope: LiveDeliveryEventEnvelope) => Snapshot;
   optimistic?: (snapshot: Snapshot, action: { actionId: string; type: string; payload: Payload }) => Snapshot;
   sendAction: LiveDeliverySessionConfig<Snapshot, Payload>['sendAction'];
   fetchImpl?: typeof globalThis.fetch;

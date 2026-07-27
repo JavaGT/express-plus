@@ -158,6 +158,43 @@ describe('LiveDeliverySession', () => {
     session.close();
   });
 
+  it('supports a snapshot-only aggregate session without an application event reducer', async () => {
+    const calls = [];
+    let delivery;
+    const session = createLiveDeliverySession({
+      validateSnapshot: (snapshot) => snapshot,
+      bootstrap: async ({ mode }) => {
+        calls.push(mode);
+        return calls.length === 1
+          ? { kind: 'snapshot', snapshot: { projects: ['old'] }, cursor: 1 }
+          : { kind: 'snapshot', snapshot: { projects: ['fresh'] }, cursor: 2 };
+      },
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      sendAction: async () => ({ ok: true }),
+    });
+    await session.ready;
+    await delivery([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]);
+    assert.deepEqual(session.snapshot, { projects: ['fresh'] });
+    assert.deepEqual(calls, ['snapshot', 'snapshot']);
+    session.close();
+  });
+
+  it('recovers instead of acknowledging an unexpected event in a snapshot-only aggregate session', async () => {
+    let delivery;
+    let snapshots = 0;
+    const session = createLiveDeliverySession({
+      validateSnapshot: (snapshot) => snapshot,
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: { version: ++snapshots }, cursor: snapshots }),
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      sendAction: async () => ({ ok: true }),
+    });
+    await session.ready;
+    await delivery([event(2, 'must-not-fold')]);
+    assert.deepEqual(session.snapshot, { version: 2 });
+    assert.equal(session.cursor, 2);
+    session.close();
+  });
+
   it('discards a stale resync snapshot when reconnect catch-up finishes first', async () => {
     const resyncRecovery = deferred();
     const resyncStarted = deferred();

@@ -2180,7 +2180,7 @@ export function createLiveDeliverySession({
   bootstrap,
   subscribe,
   validateSnapshot,
-  fold,
+  fold: configuredFold,
   optimistic = (snapshot) => snapshot,
   sendAction,
   createActionId,
@@ -2188,7 +2188,7 @@ export function createLiveDeliverySession({
   if (typeof bootstrap !== 'function') throw new TypeError('bootstrap is required');
   if (typeof subscribe !== 'function') throw new TypeError('subscribe is required');
   if (typeof validateSnapshot !== 'function') throw new TypeError('validateSnapshot is required');
-  if (typeof fold !== 'function') throw new TypeError('fold is required');
+  if (configuredFold !== undefined && typeof configuredFold !== 'function') throw new TypeError('fold must be a function');
   if (typeof sendAction !== 'function') throw new TypeError('sendAction is required');
 
   let baseSnapshot = null;
@@ -2201,6 +2201,8 @@ export function createLiveDeliverySession({
   let recoveryGeneration = 0;
   let subscription = null;
   let actionCounter = 0;
+  const snapshotOnly = configuredFold === undefined;
+  const fold = configuredFold ?? ((snapshot) => snapshot);
   let deliveryChain = Promise.resolve();
   const listeners = new Set();
   const operations = new Map();
@@ -2242,6 +2244,9 @@ export function createLiveDeliverySession({
 
   function applyEvent(envelope) {
     const { seqSpan } = normalizeEvent(envelope);
+    // A declared aggregate has no event reducer. Treat an unexpected event as
+    // an opaque recovery boundary rather than acknowledging stale state.
+    if (snapshotOnly) return { status: 'resync' };
     const decision = decideReplay(cursor, seqSpan);
     if (decision.kind === 'duplicate') return { status: 'duplicate' };
     if (decision.kind === 'gap') return { status: 'gap' };
@@ -2272,6 +2277,7 @@ export function createLiveDeliverySession({
     for (const envelope of result.envelopes) {
       if (envelope?.type === 'resync') return false;
       const applied = applyEvent(envelope);
+      if (applied.status === 'resync') return false;
       if (closed || status === 'revoked') return true;
       if (applied.status === 'gap') throw new Error('catch-up recipient envelopes are not contiguous');
     }
@@ -2330,6 +2336,15 @@ export function createLiveDeliverySession({
         continue;
       }
       const applied = applyEvent(envelope);
+      if (applied.status === 'resync') {
+        try {
+          await recover('snapshot');
+        } catch (error) {
+          if (!closed && status !== 'revoked') status = 'unavailable';
+          throw error;
+        }
+        continue;
+      }
       if (applied.status === 'gap') {
         try {
           await recover('catchup');

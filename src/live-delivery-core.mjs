@@ -87,11 +87,15 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     // Scope's single-process SQLite writer cannot interleave with this
     // synchronous materialisation/cursor pair. Async readers are forbidden so
     // callers cannot accidentally create an unpaired snapshot boundary.
+    const before = readSeq(db, scope);
     const value = snapshot({ principal, scope });
     if (value && typeof value.then === 'function') {
       throw new Error('live delivery snapshot function must be synchronous');
     }
     const cursor = readSeq(db, scope);
+    // A materializer is a synchronous read projection. Letting it commit while
+    // materializing would make its returned state and cursor incomparable.
+    if (cursor !== before) throw new Error('live delivery snapshot function must not change its committed cursor');
     // Authorization can await application policy. Recheck after the synchronous
     // snapshot/cursor pair so a revocation during the first check never returns
     // recipient state; a later committed change is caught up from this cursor.

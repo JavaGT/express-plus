@@ -63,6 +63,10 @@ export function createLiveEnvelopeBuilder({ stateful = true } = {}) {
     const entityName = handle.entity;
     const id = handle.id;
 
+    // Aggregate scope declarations have no public event reducer. Every fact,
+    // including one on the anchor itself, is an opaque snapshot boundary.
+    if (ctx.composite) return recovery(ctx, entityName, id, 'recipient-snapshot-required');
+
     // _Log rows carry storage columns such as eventType/eventData. The durable
     // payload is rebuilt below from the recipient-hydrated row, never copied.
     const loggedEvent = {
