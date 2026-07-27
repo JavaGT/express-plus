@@ -107,9 +107,13 @@ function erasurePreparationCapabilities(db, writeTables, readTables) {
       if (db.prepare(`PRAGMA foreign_key_list(${name})`).get()) {
         fail(`application writes cannot access foreign-key table '${table}'`);
       }
-      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all();
+      const tables = [
+        ...db.prepare("SELECT 'main' AS schema, name FROM sqlite_master WHERE type = 'table'").all(),
+        ...db.prepare("SELECT 'temp' AS schema, name FROM sqlite_temp_master WHERE type = 'table'").all(),
+      ];
       for (const candidate of tables) {
-        if (db.prepare(`PRAGMA foreign_key_list(${identifier(candidate.name)})`).all().some((fk) => fk.table.toLowerCase() === canonical.toLowerCase())) {
+        if (db.prepare(`PRAGMA ${candidate.schema}.foreign_key_list(${identifier(candidate.name)})`).all()
+          .some((fk) => fk.table.toLowerCase() === canonical.toLowerCase())) {
           fail(`application writes cannot access referenced table '${table}'`);
         }
       }

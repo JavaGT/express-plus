@@ -361,6 +361,10 @@ test('preparation writes reject foreign-key escape paths in either direction', a
       name: 'inbound', table: '_ApplicationParent',
       setup(db) { db.exec('CREATE TABLE _ApplicationParent (id TEXT PRIMARY KEY); CREATE TABLE Child (id TEXT PRIMARY KEY, parentId TEXT REFERENCES _ApplicationParent(id))'); },
     },
+    {
+      name: 'inbound temp', table: '_ApplicationParent',
+      setup(db) { db.exec('CREATE TABLE _ApplicationParent (id TEXT PRIMARY KEY); CREATE TEMP TABLE TempChild (id TEXT PRIMARY KEY, parentId TEXT REFERENCES _ApplicationParent(id))'); },
+    },
   ];
   for (const entry of cases) {
     const db = fixture(); entry.setup(db);

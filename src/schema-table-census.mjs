@@ -9,43 +9,12 @@ import {
   User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor,
 } from './auth/entities.mjs';
 import { MIGRATION_DDL } from './migrations.mjs';
+import { collectTableNamesFromDdl as collectNames } from './framework-table-names.mjs';
 
 const AUTH_ENTITIES = [User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor];
 
-const RE_CREATE_TABLE = /^\s*CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(.+)/im;
-
-function unquoteIdentifier(name) {
-  if (name.startsWith('"') && name.endsWith('"')) return name.slice(1, -1);
-  if (name.startsWith('`') && name.endsWith('`')) return name.slice(1, -1);
-  if (name.startsWith('[') && name.endsWith(']')) return name.slice(1, -1);
-  return name;
-}
-
-function firstToken(s) {
-  const m = s.match(/^\s*(\S+)/);
-  return m ? m[1] : '';
-}
-
 export function collectTableNamesFromDdl(entries) {
-  const seen = new Map();
-  const names = [];
-
-  for (const { source, sql } of entries) {
-    const match = sql.match(RE_CREATE_TABLE);
-    if (!match) continue;
-
-    const raw = firstToken(match[1]);
-    const name = unquoteIdentifier(raw);
-
-    const lower = name.toLowerCase();
-    if (seen.has(lower)) {
-      throw new Error(
-        `duplicate framework table declaration: ${name} (from ${seen.get(lower)} and ${source})`,
-      );
-    }
-    seen.set(lower, source);
-    names.push(name);
-  }
+  const names = collectNames(entries);
 
   return Object.freeze(
     names.sort((a, b) => {
