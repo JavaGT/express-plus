@@ -80,11 +80,11 @@ test('package deep-freezes a shallow-frozen explicit manifest', () => {
 test('opted-in preparation receives only the validated manifest and joins the erasure transaction', async () => {
   const db = fixture();
   db.exec('CREATE TABLE DomainCleanup (id TEXT PRIMARY KEY, targetCount INTEGER NOT NULL)');
-  let calls = 0; let observed;
+  let calls = 0; let escaped; let observedActionId;
   const instance = app(db, (database) => erasureDirectivePreparation({
     owningScope: scope, subject: 'artefact-1', census: directive(database).census,
   }), { prepare({ writes, manifest }) {
-    calls += 1; observed = manifest;
+    calls += 1; escaped = manifest; observedActionId = manifest.actions[0].actionId;
     writes.insert('DomainCleanup', { id: 'cleanup', targetCount: manifest.actions.length });
     return { secret: 'must not become a dispatch result' };
   } });
@@ -92,7 +92,8 @@ test('opted-in preparation receives only the validated manifest and joins the er
   const first = await instance.dispatch({ actionId: 'purge-prepare', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
   assert.equal(first.ok, true); assert.equal(calls, 1);
   assert.deepEqual({ ...db.prepare('SELECT * FROM DomainCleanup').get() }, { id: 'cleanup', targetCount: 1 });
-  assert.equal(observed.actions[0].actionId, 'old-action');
+  assert.equal(observedActionId, 'old-action');
+  assert.throws(() => escaped.actions, /available only during erasure preparation/);
   assert.equal(JSON.stringify(first).includes('secret'), false);
   assert.equal(JSON.stringify(db.prepare('SELECT * FROM _ActionReceipt WHERE actionId = ?').get('purge-prepare')).includes('old-action'), false);
   const retry = await instance.dispatch({ actionId: 'purge-prepare', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
@@ -105,12 +106,12 @@ test('preparation receives authentic frozen action/subject context and bound equ
   db.exec('CREATE TABLE DomainCleanup (id TEXT PRIMARY KEY, targetCount INTEGER NOT NULL)');
   db.prepare('INSERT INTO DomainSource VALUES (?, ?, ?)').run("hostile' OR 1=1 --", 'owner-1', 'domain-secret');
   db.prepare('INSERT INTO DomainSource VALUES (?, ?, ?)').run('other', 'owner-1', 'other-secret');
-  let escaped; let observed;
+  let escaped; let escapedContext; let observed;
   const payload = { entityKind: 'record', rootId: 'artefact-1', deletionId: 'deletion-1', marker: 'payload-secret' };
   const instance = app(db, (database) => erasureDirectivePreparation({
     owningScope: scope, subject: 'artefact-1', census: directive(database).census,
   }), { readTables: ['DomainSource'], prepare({ reads, writes, context }) {
-    escaped = reads; observed = context;
+    escaped = reads; escapedContext = context; observed = JSON.parse(JSON.stringify(context));
     const rows = reads.find('DomainSource', { id: "hostile' OR 1=1 --" });
     assert.equal(rows.length, 1); assert.equal(rows[0].secret, 'domain-secret');
     assert.equal(Object.isFrozen(rows), true); assert.equal(Object.isFrozen(rows[0]), true);
@@ -123,7 +124,7 @@ test('preparation receives authentic frozen action/subject context and bound equ
     action: { id: 'purge-context', type: 'lifecycle.purge', scope, operation: 'erasure', payload, principal: { type: 'user', id: 'actor-1' } },
     subject: { owningScope: scope, id: 'artefact-1' },
   });
-  assert.equal(Object.isFrozen(observed), true); assert.equal(Object.isFrozen(observed.action.payload), true);
+  assert.throws(() => escapedContext.action, /available only during erasure preparation/);
   assert.throws(() => escaped.find('DomainSource', { ownerId: 'owner-1' }), /available only during erasure preparation/);
   const durable = JSON.stringify({
     log: db.prepare('SELECT * FROM _Log WHERE actionId = ?').all('purge-context'),
@@ -137,7 +138,7 @@ test('preparation receives authentic frozen action/subject context and bound equ
 test('preparation action context is snapshotted before the handler can mutate its request', async () => {
   const db = fixture(); let observed;
   const instance = workbench({ db, actions: [{
-    type: 'lifecycle.purge', erasure: { tables: [], readTables: [], prepare({ context }) { observed = context; } },
+    type: 'lifecycle.purge', erasure: { tables: [], readTables: [], prepare({ context }) { observed = JSON.parse(JSON.stringify(context)); } },
     history: { cursor: 'excluded' }, authorize: () => true,
     handler(context) {
       context.payload.rootId = 'handler-substitution';
@@ -160,7 +161,7 @@ test('preparation action context is snapshotted before the handler can mutate it
 test('preparation action context is snapshotted before authorization can mutate its request', async () => {
   const db = fixture(); let observed; let authorizationCalls = 0;
   const instance = workbench({ db, actions: [{
-    type: 'lifecycle.purge', erasure: { tables: [], readTables: [], prepare({ context }) { observed = context; } },
+    type: 'lifecycle.purge', erasure: { tables: [], readTables: [], prepare({ context }) { observed = JSON.parse(JSON.stringify(context)); } },
     history: { cursor: 'excluded' },
     authorize({ payload, principal }) {
       authorizationCalls += 1;

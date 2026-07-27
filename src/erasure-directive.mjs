@@ -34,6 +34,20 @@ function freeze(value) {
   }
   return value;
 }
+function expiringView(value, open, seen = new WeakMap()) {
+  if (!value || typeof value !== 'object') return value;
+  if (seen.has(value)) return seen.get(value);
+  const view = Array.isArray(value) ? [] : {};
+  seen.set(value, view);
+  for (const key of Object.keys(value)) {
+    Object.defineProperty(view, key, {
+      enumerable: true,
+      get() { open(); return expiringView(value[key], open, seen); },
+    });
+  }
+  Object.freeze(view);
+  return view;
+}
 function identifier(name, label = 'identifier') {
   text(name, label);
   return `"${name.replaceAll('"', '""')}"`;
@@ -119,7 +133,11 @@ function erasurePreparationCapabilities(db, writeTables, readTables) {
       return freeze(rows.map((row) => ({ ...row })));
     },
   });
-  return { writes, reads, close() { active = false; } };
+  return {
+    writes, reads,
+    view(value) { return expiringView(value, () => open('metadata')); },
+    close() { active = false; },
+  };
 }
 function pointer(value, path) {
   if (path === '') return value;
@@ -300,7 +318,12 @@ export async function applyErasureDirective(db, directive, {
       subject: { owningScope: directive.owningScope, id: directive.subject },
     });
     try {
-      try { await prepare(Object.freeze({ writes: capability.writes, reads: capability.reads, manifest: directive, context })); }
+      try {
+        await prepare(Object.freeze({
+          writes: capability.writes, reads: capability.reads,
+          manifest: capability.view(directive), context: capability.view(context),
+        }));
+      }
       catch { throw new TypeError('erasure preparation failed'); }
     }
     finally { capability.close(); }
