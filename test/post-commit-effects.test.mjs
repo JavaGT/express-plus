@@ -352,6 +352,34 @@ test('private replay validates every fact before current-projection filtering', 
   await assert.rejects(app.replayPrivateFactProjections(), /before and after/);
 });
 
+test('private replay corruption rolls back projections applied earlier in the transaction', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE PrivateProjection (value TEXT NOT NULL)');
+  const app = workbench({ db, actions: [{
+    type: 'private.replay.atomic', authorize: () => true,
+    handler: () => ({
+      events: [{ type: 'private.replay.atomic.committed', scope: 'recipient:r1', data: {} }],
+      privateFact: { before: {}, after: { value: 'projected' } },
+    }),
+    projections: [{
+      eventTypes: ['private.replay.atomic.committed'], privateFact: true,
+      apply(_event, tx, { privateFact }) {
+        tx.prepare('INSERT INTO PrivateProjection VALUES (?)').run(privateFact.after.value);
+      },
+    }],
+  }] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.dispatch({ actionId: 'valid', scope: 'owner:valid', type: 'private.replay.atomic', payload: {}, principal });
+  db.prepare('DELETE FROM PrivateProjection').run();
+
+  db.prepare("INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs, historyOrder, actionData) VALUES ('owner:bad', 'bad', '9999-01-01', '[]', 99, 'null')").run();
+  db.prepare("INSERT INTO _PrivateActionFact (scope, actionId, committedAt, fact, effects) VALUES ('owner:bad', 'bad', '9999-01-01', '{\"after\":{}}', '[]')").run();
+
+  await assert.rejects(app.replayPrivateFactProjections(), /before and after/);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM PrivateProjection').get().count, 0);
+});
+
 test('recipient event and ordinary receipt do not leak canonical fact or effect descriptors', async (t) => {
   const { app, db } = await setup(t);
   await app.dispatch(request());
