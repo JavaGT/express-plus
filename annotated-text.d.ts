@@ -5,6 +5,7 @@ export {
   measurement,
   annotationAction,
   registerAnnotatedTextContract,
+  registerAnnotatedTextStructuralExtension,
 } from './index.js';
 
 export type {
@@ -17,4 +18,13 @@ export type {
   AnnotatedTextMeasurementHandle,
   AnnotatedTextCapabilityHandle,
   AnnotatedTextFieldHandle,
+  AnnotatedTextMeasurementValidationInput,
+  AnnotatedTextMeasurementEditInput,
+  AnnotatedTextMeasurementEditResult,
+  AnnotatedTextMeasurementPartitionInput,
+  AnnotatedTextMeasurementPartitionResult,
+  AnnotatedTextMeasurementCombineSide,
+  AnnotatedTextMeasurementCombineInput,
+  AnnotatedTextMeasurementCombineResult,
+  AnnotatedTextStructuralExtensionSpec,
 } from './index.js';

@@ -7,4 +7,7 @@ export {
   measurement,
   annotationAction,
 } from './field.mjs';
-export { registerAnnotatedTextContract } from './annotated-text-field.mjs';
+export {
+  registerAnnotatedTextContract,
+  registerAnnotatedTextStructuralExtension,
+} from './annotated-text-field.mjs';

@@ -31,6 +31,7 @@ import {
 import {
   annotatedText, annotation, annotationAction, measurement, protectingAnnotation,
   registerAnnotatedTextContract,
+  registerAnnotatedTextStructuralExtension,
   type AnnotatedTextFieldHandle, type AnnotatedTextOptions,
 } from 'workbench/annotated-text';
 import { DatabaseSync } from 'node:sqlite';
@@ -44,6 +45,17 @@ const annotatedTextField = annotatedText(annotatedTextOptions);
 const annotatedTextHandle: AnnotatedTextFieldHandle | undefined = annotatedTextField.__value;
 const protecting = protectingAnnotation('restricted');
 registerAnnotatedTextContract('wordMeasurement', { kind: 'measurement' });
+registerAnnotatedTextStructuralExtension('wordMeasurement', {
+  version: 1,
+  validate: function validate(_input) {},
+  edit: function edit(input) { return input; },
+  partition: function partition(input) {
+    return { version: 1, leftPayload: input.payload, rightPayload: input.payload };
+  },
+  combine: function combine(input) {
+    return { version: 1, payload: input.left?.payload ?? input.right?.payload ?? null };
+  },
+});
 void [annotatedTextHandle, protecting];
 
 type ProjectRow = { id: string; name: string; ownerId: string };

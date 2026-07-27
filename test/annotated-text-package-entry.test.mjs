@@ -14,8 +14,8 @@ import {
   annotation,
   measurement,
   registerAnnotatedTextContract,
+  registerAnnotatedTextStructuralExtension,
 } from '../src/annotated-text-public.mjs';
-import { registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
 
 const extension = 'packageEntryMeasurement';
 registerAnnotatedTextContract(extension, Object.freeze({ kind: 'measurement' }));
@@ -48,4 +48,20 @@ test('annotated-text package entry shares declarations and registry authority wi
   assert.equal(Document.fields.body.kind, 'annotatedText');
   assert.equal(Document.body.annotations.coding.annotationName, 'coding');
   assert.equal(Document.body.measurements.words.measurementName, 'words');
+});
+
+test('public structural registration remains required for measurement declarations', () => {
+  const missingExtension = 'packageEntryMissingStructuralAdapter';
+  registerAnnotatedTextContract(missingExtension, Object.freeze({ kind: 'measurement' }));
+
+  assert.throws(() => entity('PackageEntryMissingAdapterDocument', {
+    project: ref('Project'),
+    owner: ref('User'),
+    body: annotatedText({
+      project: 'project', owner: 'owner', block: {},
+      annotations: [annotation('coding')],
+      measurements: [measurement('words', { extension: missingExtension })],
+    }),
+    grant: grant(read),
+  }), /has no registered structural adapter/);
 });

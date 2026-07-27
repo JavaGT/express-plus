@@ -267,6 +267,48 @@ export function annotatedText(options: AnnotatedTextOptions): FieldDescriptor<An
 
 export function registerAnnotatedTextContract(contractName: string, contract: { readonly kind: 'measurement' | 'measurement-query' | 'annotation-action' | 'event'; readonly [key: string]: unknown }): void;
 
+export interface AnnotatedTextMeasurementValidationInput {
+  readonly version: 1;
+  readonly formatVersion: number;
+  readonly blockText: string;
+  readonly payload: unknown;
+}
+export interface AnnotatedTextMeasurementPartitionInput extends AnnotatedTextMeasurementValidationInput {
+  readonly utf16Offset: number;
+}
+export interface AnnotatedTextMeasurementPartitionResult {
+  readonly version: 1;
+  readonly leftPayload: unknown;
+  readonly rightPayload: unknown;
+}
+/** Reserved until Workbench supports structural edit orchestration. */
+export type AnnotatedTextMeasurementEditInput = unknown;
+/** Reserved until Workbench supports structural edit orchestration. */
+export type AnnotatedTextMeasurementEditResult = unknown;
+export interface AnnotatedTextMeasurementCombineSide {
+  readonly blockText: string;
+  readonly payload: unknown;
+}
+export interface AnnotatedTextMeasurementCombineInput {
+  readonly version: 1;
+  readonly formatVersion: number;
+  readonly blockText: string;
+  readonly left: AnnotatedTextMeasurementCombineSide | null;
+  readonly right: AnnotatedTextMeasurementCombineSide | null;
+}
+export interface AnnotatedTextMeasurementCombineResult {
+  readonly version: 1;
+  readonly payload: unknown;
+}
+export interface AnnotatedTextStructuralExtensionSpec {
+  readonly version: 1;
+  readonly validate: (input: AnnotatedTextMeasurementValidationInput) => void;
+  readonly edit: (input: AnnotatedTextMeasurementEditInput) => AnnotatedTextMeasurementEditResult;
+  readonly partition: (input: AnnotatedTextMeasurementPartitionInput) => AnnotatedTextMeasurementPartitionResult;
+  readonly combine: (input: AnnotatedTextMeasurementCombineInput) => AnnotatedTextMeasurementCombineResult;
+}
+export function registerAnnotatedTextStructuralExtension(extensionName: string, spec: AnnotatedTextStructuralExtensionSpec): void;
+
 export interface AnnotatedTextBlock {
   readonly id: string;
   readonly text: string;
