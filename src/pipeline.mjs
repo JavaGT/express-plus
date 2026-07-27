@@ -312,6 +312,12 @@ function executionFailure(error, context = {}, details) {
   return failureOutcome(withDetails);
 }
 
+const BATCH_HANDLER_FAILURE = Symbol('workbench.batch-handler-failure');
+
+function batchHandlerFailure(error, actionIndex) {
+  return Object.freeze({ [BATCH_HANDLER_FAILURE]: true, error, actionIndex });
+}
+
 // ── Shared dispatch-pipeline helpers ──
 //
 // The four dispatch paths (in-memory/durable × single/batch) each follow the
@@ -405,7 +411,10 @@ async function commitEvents(db, events, {
         }
       }
 
-      if (handler) events = await handler({ payload, principal, db, now, scope, actionId });
+      if (handler) events = await handler({
+        payload, principal, db, now, scope, actionId,
+        ...(historyCommit?.handlerInputs ? { history: historyCommit.handlerInputs[0] } : {}),
+      });
       const commit = Array.isArray(events) ? { events } : events;
       if (!commit || !Array.isArray(commit.events)) {
         throw new TypeError(`action '${type}' handler must return an event array`);
@@ -448,6 +457,13 @@ async function commitEvents(db, events, {
       return result;
     });
   } catch (err) {
+    if (err?.[BATCH_HANDLER_FAILURE]) {
+      return executionFailure(
+        err.error,
+        { actionId, type: payload[err.actionIndex]?.type },
+        { actionIndex: err.actionIndex },
+      );
+    }
     return executionFailure(err, { actionId });
   }
 
@@ -682,7 +698,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // Run the handler — events only, no DB writes (Fork A: entity-as-projection).
     // The handler may be sync or async.
     let emitted = null;
-    if (!handler.inTransaction) {
+    if (!handler.inTransaction && !historyCommit?.handlerInputs) {
       try {
         emitted = await handler({ payload, principal, scope });
       } catch (err) {
@@ -697,7 +713,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const now = new Date().toISOString();
     const committed = await commitEvents(db, emitted, {
       now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit,
-      handler: handler.inTransaction ? handler : null, erasureActionContext,
+      handler: handler.inTransaction || historyCommit?.handlerInputs ? handler : null, erasureActionContext,
     });
     return committed;
   }
@@ -774,25 +790,51 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // (events only, no DB writes — Fork A), so the batch runs them in order and
     // folds all events into one commitEvents pass below. Authorization runs
     // INSIDE commitEvents's txn (Wave 4.4), before applyInTxn.
-    const allEmitted = [];
-    for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
-      const action = actions[actionIndex];
-      try {
-        const emitted = await handlers[action.type]({ payload: action.payload, principal });
-        const commit = Array.isArray(emitted) ? { events: emitted } : emitted;
-        if (!commit || !Array.isArray(commit.events) || commit.privateFact !== undefined
-          || commit.effects !== undefined || commit.directive !== undefined || commit.canonicalPayload !== undefined) {
-          throw new TypeError(`batched action '${action.type}' handler must return an event array`);
+    const runHandlers = async (transactionContext) => {
+      const inTransaction = transactionContext ? {
+        db: transactionContext.db,
+        now: transactionContext.now,
+        scope: transactionContext.scope,
+        actionId: transactionContext.actionId,
+      } : {};
+      const allEmitted = [];
+      for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
+        const action = actions[actionIndex];
+        try {
+          const historyInput = historyCommit?.handlerInputs?.[actionIndex];
+          const emitted = await handlers[action.type]({
+            payload: action.payload, principal,
+            ...inTransaction,
+            ...(historyInput ? { history: historyInput } : {}),
+          });
+          const commit = Array.isArray(emitted) ? { events: emitted } : emitted;
+          if (!commit || !Array.isArray(commit.events) || commit.privateFact !== undefined
+            || commit.effects !== undefined || commit.directive !== undefined || commit.canonicalPayload !== undefined) {
+            throw new TypeError(`batched action '${action.type}' handler must return an event array`);
+          }
+          allEmitted.push(...commit.events);
+        } catch (err) {
+          throw batchHandlerFailure(err, actionIndex);
         }
-        allEmitted.push(...commit.events);
-      } catch (err) {
-        return executionFailure(err, { actionId, type: action.type }, { actionIndex });
+      }
+      return allEmitted;
+    };
+    let allEmitted = null;
+    if (!historyCommit?.handlerInputs) {
+      try { allEmitted = await runHandlers(); }
+      catch (err) {
+        return executionFailure(
+          err.error,
+          { actionId, type: actions[err.actionIndex]?.type },
+          { actionIndex: err.actionIndex },
+        );
       }
     }
 
     const now = new Date().toISOString();
     const committed = await commitEvents(db, allEmitted, {
       now, actionId, nextSeq, principal, payload: actions, pipeline, scope, authorize, historyCommit,
+      handler: historyCommit?.handlerInputs ? runHandlers : null,
     });
     return committed;
   }

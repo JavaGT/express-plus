@@ -19,6 +19,12 @@ private `{ before, after }` fact loaded by Workbench. The fact is erasure-aware:
 retained-away, or erased material fails closed. It is never returned by public `app.history` cursor/move
 surfaces. There is no default replay when a redo declaration is absent.
 
+A translated action may carry opaque `input`. Workbench binds it by batch position to that action's
+handler as `history: { operation, input }`, only while the handler runs inside the history transaction.
+Ordinary dispatches omit `history`. This input is not action payload: Workbench never supplies it to
+authorization, serializes it into the event log or receipt, or includes it in delivery or dispatch
+results. An application may derive it from the package-owned private fact but cannot persist or replay it.
+
 The public application surface is deliberately only `history.cursor`, `history.undo`, and
 `history.redo`; raw action/event payload readers are not exposed. Cursor identity is exactly
 `(owning scope, user principal type+id, Studio session)`. `cursor()` returns undo/redo counts plus an
@@ -48,5 +54,7 @@ resurrect or reveal erased material. Malformed stored cursor/history fails close
 - Deleting receipts at ordinary retention: permits an old action id to execute again.
 - History panels and undo-to-point: not required by the one-step contract and would require a wider
   payload-bearing authorization surface.
+- Putting before-images in payloads, receipts, events, or application history storage: each turns a
+  transaction-local capability into recoverable application-owned history.
 
 Fresh schemas only; there is no legacy reader, migration, compatibility adapter, or alternate engine.

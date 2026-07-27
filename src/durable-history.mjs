@@ -77,7 +77,7 @@ function translatedActions(value, operation, scope) {
   const name = operation === 'undo' ? 'inverse' : 'redo';
   const wrapper = value && typeof value === 'object' && !Array.isArray(value) ? value : null;
   const actions = wrapper && Object.hasOwn(wrapper, 'actions') ? wrapper.actions : [value];
-  const allowedWrapperKeys = wrapper && Object.hasOwn(wrapper, 'actions') ? ['actions'] : ['type', 'payload', 'scope'];
+  const allowedWrapperKeys = wrapper && Object.hasOwn(wrapper, 'actions') ? ['actions'] : ['type', 'payload', 'scope', 'input'];
   if (!wrapper || Object.keys(wrapper).some((key) => !allowedWrapperKeys.includes(key))
     || !Array.isArray(actions) || actions.length === 0) {
     throw new TypeError(`durableHistory ${name} must return one action or a non-empty atomic batch`);
@@ -85,13 +85,13 @@ function translatedActions(value, operation, scope) {
   const normalized = actions.map((action, index) => {
     if (!action || typeof action !== 'object' || Array.isArray(action)
       || typeof action.type !== 'string' || action.type.length === 0
-      || Object.keys(action).some((key) => !['type', 'payload', 'scope'].includes(key))) {
+      || Object.keys(action).some((key) => !['type', 'payload', 'scope', 'input'].includes(key))) {
       throw new TypeError(`durableHistory ${name} action ${index} is malformed`);
     }
     if (action.scope !== undefined && action.scope !== scope) {
       throw new TypeError(`durableHistory ${name} must keep the original history scope`);
     }
-    return Object.freeze({ type: action.type, payload: action.payload ?? {}, scope });
+    return Object.freeze({ type: action.type, payload: action.payload ?? {}, scope, input: action.input });
   });
   return Object.freeze(normalized);
 }
@@ -349,6 +349,10 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, dispatch
     if (translated.some((child) => annotatedActionTypes.has(child.type))) throw forbidden();
     const receiptAction = translated.length === 1 ? translated[0] : null;
     const transition = {
+      handlerInputs: Object.freeze(translated.map((child) => Object.freeze({
+        operation,
+        input: child.input,
+      }))),
       metadata: {
         actionType: receiptAction?.type ?? '$batch',
         actionData: receiptAction?.payload ?? translated.map(({ type, payload }) => ({ type, payload })),

@@ -124,6 +124,18 @@ const scopeAwareAction: RegisteredAction = {
   authorize: () => true,
   handler: ({ scope }) => [{ type: 'Project.renamed', scope, data: {} }],
 };
+const historyAwareAction: RegisteredAction<Record<string, unknown>> = {
+  type: 'Project.restoreName',
+  authorize: () => true,
+  handler: ({ history }) => {
+    if (history) {
+      const operation: 'undo' | 'redo' = history.operation;
+      const input: unknown = history.input;
+      void [operation, input];
+    }
+    return [];
+  },
+};
 const purgeAction: RegisteredAction<{ rootId: string }> = {
   type: 'Project.purge',
   authorize: () => true,
@@ -172,10 +184,11 @@ const configuredHistory = durableHistory({
     operation === 'read' && historyScope.length > 0 && historyPrincipal.id !== null,
   actions: {
     'Project.rename': {
-      inverse: ({ action: committedAction }) => ({
+      inverse: ({ action: committedAction, fact }) => ({
         type: committedAction.type ?? 'note.restore',
         payload: committedAction.payload as Record<string, unknown>,
         scope: committedAction.scope,
+        input: fact.before,
       }),
       redo: ({ action: committedAction }) => ({
         type: committedAction.type ?? 'note.restore',
@@ -185,7 +198,7 @@ const configuredHistory = durableHistory({
     },
   },
 });
-void configuredHistory;
+void [configuredHistory, historyAwareAction];
 const batchActions: readonly BatchAction[] = [
   { type: Rename.type, payload: { id: 'project-1', name: 'Research' } },
 ];

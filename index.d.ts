@@ -805,6 +805,11 @@ export interface RegisteredAction<
     now: string;
     /** Exact caller-selected owning scope for this dispatch. */
     readonly scope: string;
+    /** Present only for a Workbench-owned inverse/redo dispatch; never serialized. */
+    readonly history?: Readonly<{
+      readonly operation: 'undo' | 'redo';
+      readonly input: unknown;
+    }>;
   }): readonly Readonly<{ type: string; scope: string; data: unknown }>[] | RegisteredActionCommit | Promise<readonly Readonly<{ type: string; scope: string; data: unknown }>[] | RegisteredActionCommit>;
   readonly projections?: readonly Projection[];
   readonly history?: { readonly cursor?: 'eligible' | 'excluded' };
@@ -911,10 +916,12 @@ export interface HistoryAccess {
   readonly action?: HistoryAction;
 }
 
-export interface HistoryActionRequest<Payload = Record<string, unknown>> {
+export interface HistoryActionRequest<Payload = Record<string, unknown>, Input = unknown> {
   readonly type: string;
   readonly payload?: Payload;
   readonly scope?: string;
+  /** Opaque transaction-bound handler input. Workbench never serializes this value. */
+  readonly input?: Input;
 }
 
 export interface HistoryActionBatchRequest {

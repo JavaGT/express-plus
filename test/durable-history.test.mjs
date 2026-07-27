@@ -168,6 +168,101 @@ test('translation receives private fact internally while public cursor and move 
   assert.equal('fact' in moved, false);
 });
 
+test('translated opaque input is transaction-bound to its handler and never enters public durable material', async () => {
+  const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+  const secret = Object.freeze({ beforeImage: 'never serialize me' });
+  const seen = [];
+  const deliveries = [];
+  const history = durableHistory({ authorize: () => true, actions: {
+    'document.set': {
+      inverse: ({ fact }) => ({
+        type: 'history.restore', payload: { publicMarker: 'undo' }, input: { secret, value: fact.before },
+      }),
+      redo: ({ fact }) => ({ actions: [
+        { type: 'history.restore', payload: { publicMarker: 'redo-1' }, input: { secret, value: fact.after } },
+        { type: 'history.restore', payload: { publicMarker: 'redo-2' }, input: { secret, value: fact.after } },
+      ] }),
+    },
+  } });
+  const server = createServer({ db, history, pipeline: durableMutationVariant({
+    postCommitConsumers: [(events) => { deliveries.push(events); }],
+  }), authorize: (context) => {
+    assert.equal('history' in context, false);
+    assert.equal(JSON.stringify(context).includes('never serialize me'), false);
+    return true;
+  }, handlers: {
+    'document.set': ({ payload, scope: owningScope }) => ({
+      events: [{ type: 'document.changed', scope: owningScope, data: { value: payload.value } }],
+      privateFact: { before: payload.before, after: payload.value },
+    }),
+    'history.restore': ({ payload, history: handlerHistory, db: transactionDb }) => {
+      assert.equal(transactionDb, db);
+      seen.push({ payload, history: handlerHistory });
+      return [{ type: 'document.changed', scope, data: payload }];
+    },
+  } });
+  await set(server, { actionId: 'opaque-a1', value: 'after', before: 'before', session: 'tab-a' });
+  const undone = await historyMove(server, 'undo', { scope, principal, session: 'tab-a' });
+  assert.deepEqual(seen[0], {
+    payload: { publicMarker: 'undo' }, history: { operation: 'undo', input: { secret, value: 'before' } },
+  });
+  const redone = await historyMove(server, 'redo', { scope, principal, session: 'tab-a' });
+  assert.deepEqual(seen.slice(1).map(({ history: value }) => value), [
+    { operation: 'redo', input: { secret, value: 'after' } },
+    { operation: 'redo', input: { secret, value: 'after' } },
+  ]);
+  const retryCursor = await server.history.cursor({ scope, principal, session: 'tab-a' });
+  const retryArgs = { scope, principal, session: 'tab-a', actionId: 'opaque-retry', revision: retryCursor.revision };
+  await server.history.undo(retryArgs);
+  const callsBeforeRetry = seen.length;
+  assert.equal((await server.history.undo(retryArgs)).deduped, true);
+  assert.equal(seen.length, callsBeforeRetry);
+
+  const serialized = JSON.stringify({
+    receipts: db.prepare('SELECT * FROM _ActionReceipt').all(),
+    log: db.prepare('SELECT * FROM _Log').all(),
+    undone, redone,
+    deliveries,
+  });
+  assert.equal(serialized.includes('never serialize me'), false);
+  assert.equal(serialized.includes('beforeImage'), false);
+});
+
+test('ordinary dispatch omits history handler input', async () => {
+  const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+  let context;
+  const server = createServer({ db, authorize: () => true, handlers: {
+    ordinary: (value) => { context = value; return []; },
+  } });
+  await server.dispatch({ actionId: 'ordinary-a1', type: 'ordinary', payload: {}, principal, scope });
+  assert.equal('history' in context, false);
+});
+
+test('translated batch primitive failure keeps its child index and rolls back atomically', async () => {
+  const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+  const history = durableHistory({ authorize: () => true, actions: { 'document.set': {
+    inverse: () => ({ actions: [
+      { type: 'history.ok', input: 'first' }, { type: 'history.primitiveFailure', input: 'second' },
+    ] }),
+    redo: () => ({ type: 'history.ok' }),
+  } } });
+  const server = createServer({ db, history, authorize: () => true, handlers: {
+    'document.set': ({ payload, scope: owningScope }) => ({
+      events: [{ type: 'document.changed', scope: owningScope, data: payload }],
+      privateFact: { before: payload.before, after: payload.value },
+    }),
+    'history.ok': () => [{ type: 'document.changed', scope, data: { value: 'should roll back' } }],
+    'history.primitiveFailure': () => { throw 'primitive failure'; },
+  } });
+  await set(server, { actionId: 'primitive-a1', value: 1, before: 0, session: 'tab-a' });
+  const result = await historyMove(server, 'undo', { scope, principal, session: 'tab-a' });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.details.actionIndex, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM _Log').get().count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) count FROM _ActionReceipt').get().count, 1);
+  assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
+});
+
 test('application runtime exposes only cursor, undo, and redo history methods', async (t) => {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db, history: historyDescriptor(), actions: [{
