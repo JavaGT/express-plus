@@ -43,14 +43,15 @@ export function postCommitEffect(input) {
 export function declarePostCommitEffectsInTxn(db, { scope, actionId, committedAt, privateFact, effects }) {
   const declared = normalizeEffects(effects);
   if (privateFact === undefined && declared.length === 0) return;
+  const factJson = json(privateFact ?? null, 'registered action privateFact');
+  const canonicalFact = JSON.parse(factJson);
   if (declared.length > 0 && (
-    !privateFact || typeof privateFact !== 'object' || Array.isArray(privateFact)
-    || !Object.prototype.hasOwnProperty.call(privateFact, 'before')
-    || !Object.prototype.hasOwnProperty.call(privateFact, 'after')
+    !canonicalFact || typeof canonicalFact !== 'object' || Array.isArray(canonicalFact)
+    || !Object.prototype.hasOwnProperty.call(canonicalFact, 'before')
+    || !Object.prototype.hasOwnProperty.call(canonicalFact, 'after')
   )) {
     throw new TypeError('registered action effects require a privateFact with before and after properties');
   }
-  const factJson = json(privateFact ?? null, 'registered action privateFact');
   const effectsJson = JSON.stringify(declared);
   const fact = db.prepare(
     `INSERT INTO _PrivateActionFact (scope, actionId, committedAt, fact, effects)

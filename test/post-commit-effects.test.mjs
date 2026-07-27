@@ -198,6 +198,27 @@ test('effects require a canonical private before/after envelope', async (t) => {
   assert.equal(db.prepare('SELECT COUNT(*) c FROM _ActionReceipt').get().c, 0);
 });
 
+test('effects reject private fact keys erased by JSON serialization without persisting action state', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, actions: [{
+    type: 'undefined.fact', authorize: () => true,
+    handler: () => ({
+      events: [{ type: 'undefined.fact.committed', scope: 'project:p', data: {} }],
+      privateFact: { before: undefined, after: undefined },
+      effects: [postCommitEffect({ file: 'f', operation: 'copy', verification: 'v' })],
+    }),
+  }] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+
+  const result = await app.dispatch({ actionId: 'undefined-fact', scope: 'project:p', type: 'undefined.fact', payload: {}, principal });
+  assert.equal(result.ok, false);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM _Log').get().c, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM _PrivateActionFact').get().c, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM _PostCommitEffect').get().c, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) c FROM _ActionReceipt').get().c, 0);
+});
+
 test('fresh reconstruction derives missing pending rows without changing completed rows or running I/O', async (t) => {
   const { app, db, ran } = await setup(t);
   await app.dispatch(request());
