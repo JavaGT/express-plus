@@ -108,12 +108,13 @@ test('preparation receives authentic frozen action/subject context and bound equ
   db.exec('CREATE TABLE DomainCleanup (id TEXT PRIMARY KEY, targetCount INTEGER NOT NULL)');
   db.prepare('INSERT INTO DomainSource VALUES (?, ?, ?)').run("hostile' OR 1=1 --", 'owner-1', 'domain-secret');
   db.prepare('INSERT INTO DomainSource VALUES (?, ?, ?)').run('other', 'owner-1', 'other-secret');
-  let escaped; let escapedContext; let escapedAction; let observed;
+  let escaped; let escapedContext; let escapedAction; let escapedRow; let payloadGetter; let observed;
   const payload = { entityKind: 'record', rootId: 'artefact-1', deletionId: 'deletion-1', marker: 'payload-secret' };
   const instance = app(db, (database) => erasureDirectivePreparation({
     owningScope: scope, subject: 'artefact-1', census: directive(database).census,
   }), { readTables: ['DomainSource'], prepare({ reads, writes, context }) {
     escaped = reads; escapedContext = context; escapedAction = context.action;
+    payloadGetter = Object.getOwnPropertyDescriptor(escapedAction, 'payload').get;
     observed = {
       action: {
         id: context.action.id, type: context.action.type, scope: context.action.scope, operation: context.action.operation,
@@ -122,6 +123,7 @@ test('preparation receives authentic frozen action/subject context and bound equ
       subject: { ...context.subject },
     };
     const rows = reads.find('DomainSource', { id: "hostile' OR 1=1 --" });
+    escapedRow = rows[0];
     assert.equal(rows.length, 1); assert.equal(rows[0].secret, 'domain-secret');
     assert.equal(Object.isFrozen(rows), true); assert.equal(Object.isFrozen(rows[0]), true);
     writes.insert('DomainCleanup', { id: context.action.payload.deletionId, targetCount: rows.length });
@@ -135,6 +137,8 @@ test('preparation receives authentic frozen action/subject context and bound equ
   });
   assert.throws(() => escapedContext.action, /preparation|revoked/);
   assert.throws(() => Object.keys(escapedAction), /preparation|revoked/);
+  assert.throws(() => payloadGetter(), /preparation|revoked/);
+  assert.throws(() => escapedRow.secret, /preparation|revoked/);
   assert.throws(() => escaped.find('DomainSource', { ownerId: 'owner-1' }), /available only during erasure preparation/);
   const durable = JSON.stringify({
     log: db.prepare('SELECT * FROM _Log WHERE actionId = ?').all('purge-context'),

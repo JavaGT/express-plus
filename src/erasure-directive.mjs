@@ -42,13 +42,14 @@ function expiringView(value, open, revoke, seen = new WeakMap()) {
   for (const key of Object.keys(value)) {
     Object.defineProperty(target, key, {
       enumerable: true,
-      get() { return expiringView(value[key], open, revoke, seen); },
+      get() { open(); return expiringView(value[key], open, revoke, seen); },
     });
   }
   if (Array.isArray(value)) {
     Object.defineProperties(target, {
-      length: { get() { return value.length; } },
+      length: { get() { open(); return value.length; } },
       [Symbol.iterator]: { get() {
+        open();
         return function* iterator() { for (const item of value) yield expiringView(item, open, revoke, seen); };
       } },
     });
@@ -143,7 +144,7 @@ function erasurePreparationCapabilities(db, writeTables, readTables) {
       const filters = columns(where, 'where');
       const rows = db.prepare(`SELECT * FROM ${safeTable(table, allowedReadTables, 'reads')} WHERE ${predicate(filters)}`)
         .all(...filters.map(([, value]) => value));
-      return freeze(rows.map((row) => ({ ...row })));
+      return Object.freeze(rows.map((row) => expiringView(Object.freeze({ ...row }), () => open('reads'), revoke)));
     },
   });
   return {
