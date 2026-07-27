@@ -84,7 +84,7 @@ registerAnnotatedTextStructuralExtension('invalidAsyncMeasurement', {
 void [annotatedTextHandle, protecting];
 
 declare const projectedAnnotatedTextSnapshot: Record<string, unknown>;
-declare const compiledAnnotatedTextHandle: Record<string, unknown>;
+declare const compiledAnnotatedTextHandle: AnnotatedTextFieldHandle;
 const projectedAnnotatedText = materializeAnnotatedTextSnapshot(
   projectedAnnotatedTextSnapshot,
   compiledAnnotatedTextHandle,

@@ -3,6 +3,8 @@
 // Source of truth: public/workbench-client.mjs
 // Projection for TypeScript app authors. JS users see no change.
 
+import type { AnnotatedTextFieldHandle } from './index.js';
+
 // ---------------------------------------------------------------------------
 // LiveChannel — WebSocket transport layer
 // ---------------------------------------------------------------------------
@@ -570,5 +572,5 @@ export interface AnnotatedTextDocument {
 
 export function materializeAnnotatedTextSnapshot(
   snapshot: Record<string, unknown>,
-  declaration: Record<string, unknown>,
+  declaration: AnnotatedTextFieldHandle,
 ): AnnotatedTextDocument;
