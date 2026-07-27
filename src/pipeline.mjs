@@ -366,7 +366,10 @@ function checkDurableDedupe(db, scope, actionId) {
 // `actions` array. The two genuinely differ there, so the brace is extracted but
 // the `payload` value stays per-caller. Throws non-403 errors after rolling back;
 // Post-commit delivery can no longer turn a committed mutation into a failure.
-async function commitEvents(db, events, { now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit, handler }) {
+async function commitEvents(db, events, {
+  now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit, handler,
+  erasureActionContext,
+}) {
   let committed;
   try {
     // Wave 4.4 — Authorize INSIDE the transaction, atomic with log append,
@@ -402,14 +405,6 @@ async function commitEvents(db, events, { now, actionId, nextSeq, principal, pay
         }
       }
 
-      // Snapshot preparation identity before application handler code can mutate
-      // its request objects. This remains ephemeral unless an erasure directive
-      // reaches the registered preparation callback below.
-      const erasureActionContext = handler?.erasurePrepare === undefined ? undefined : {
-        id: actionId, type, scope, operation: 'erasure',
-        payload: structuredClone(payload),
-        principal: { type: principal.type, id: principal.id },
-      };
       if (handler) events = await handler({ payload, principal, db, now, scope, actionId });
       const commit = Array.isArray(events) ? { events } : events;
       if (!commit || !Array.isArray(commit.events)) {
@@ -630,6 +625,19 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const handler = checkHandler(handlers, type);
     if (!handler) return unknownActionOutcome(type);
 
+    // Capture admitted request identity before authorization, pre-dedupe hooks,
+    // or handlers can mutate application-owned request objects.
+    let erasureActionContext;
+    try {
+      erasureActionContext = handler.erasurePrepare === undefined ? undefined : {
+        id: actionId, type, scope, operation: 'erasure',
+        payload: structuredClone(payload),
+        principal: { type: principal.type, id: principal.id },
+      };
+    } catch (err) {
+      return executionFailure(err, { actionId, type });
+    }
+
     let historyCommit;
     try {
       historyCommit = receiptMetadata(request, request._historyCommit ?? historyRuntime?.normalCommit(request));
@@ -684,7 +692,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const now = new Date().toISOString();
     const committed = await commitEvents(db, emitted, {
       now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit,
-      handler: handler.inTransaction ? handler : null,
+      handler: handler.inTransaction ? handler : null, erasureActionContext,
     });
     return committed;
   }

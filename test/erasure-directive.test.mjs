@@ -157,6 +157,33 @@ test('preparation action context is snapshotted before the handler can mutate it
   assert.equal(observed.action.principal.id, 'actor-1');
 });
 
+test('preparation action context is snapshotted before authorization can mutate its request', async () => {
+  const db = fixture(); let observed; let authorizationCalls = 0;
+  const instance = workbench({ db, actions: [{
+    type: 'lifecycle.purge', erasure: { tables: [], readTables: [], prepare({ context }) { observed = context; } },
+    history: { cursor: 'excluded' },
+    authorize({ payload, principal }) {
+      authorizationCalls += 1;
+      payload.rootId = `authorization-substitution-${authorizationCalls}`;
+      principal.id = `authorization-substitution-${authorizationCalls}`;
+      return true;
+    },
+    handler(context) {
+      return { events: [{ type: 'lifecycle.purged', scope, data: { done: true } }], directive: erasureDirectivePreparation({
+        owningScope: scope, subject: 'artefact-1', census: directive(context.db).census,
+      }) };
+    },
+  }] });
+  await instance.start();
+  const result = await instance.dispatch({
+    actionId: 'purge-authorization-snapshot', type: 'lifecycle.purge', payload: { rootId: 'artefact-1' },
+    principal: { type: 'user', id: 'actor-1' }, scope,
+  });
+  assert.equal(result.ok, true); assert.equal(authorizationCalls, 2);
+  assert.equal(observed.action.payload.rootId, 'artefact-1');
+  assert.equal(observed.action.principal.id, 'actor-1');
+});
+
 test('preparation reads reject undeclared, internal, case-variant, temp, view, triggered, and raw predicates', async () => {
   const cases = [
     { name: 'undeclared', setup(db) { db.exec('CREATE TABLE OtherTable (id TEXT)'); }, tables: [], table: 'OtherTable', where: { id: 'x' } },
