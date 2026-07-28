@@ -18,11 +18,14 @@ function projectAction() {
   return {
     type: 'project.write',
     authorize: ({ principal, payload }) => principal.id === 'u1' && payload.authorized === true,
-    handler: ({ payload }) => [{
-      type: payload.exists ? 'Project.updated' : 'Project.created',
-      scope: `Project:${payload.id}`,
-      data: { id: payload.id, name: payload.name },
-    }],
+    handler: ({ payload }) => ({
+      events: [{
+        type: payload.exists ? 'Project.updated' : 'Project.created',
+        scope: `Project:${payload.id}`,
+        data: { id: payload.id, name: payload.name },
+      }],
+      privateFact: { before: payload.before ?? payload, after: payload },
+    }),
     projections: [{
       eventTypes: ['Project.created', 'Project.updated'],
       apply(event, tx) {
@@ -176,5 +179,52 @@ test('HTTP delivery session uses package action transport by default and retains
   const [, actionOptions] = calls.find(([, options]) => options?.method === 'POST');
   assert.deepEqual(JSON.parse(actionOptions.body), { actionId: 'action-1', type: 'project.write', payload: { name: 'one' }, scope: 'Project:p1' });
   assert.equal(calls.find(([, options]) => options?.method === 'POST')[0], 'https://example.test/workbench/actions');
+  session.close();
+});
+
+test('package history transport uses durable authorization, wakes delivery, and returns the receipt fence', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const history = (await import('../src/index.mjs')).durableHistory({ authorize: () => true, actions: {
+    'project.write': {
+      inverse: ({ fact }) => ({ type: 'project.write', payload: { ...fact.before, authorized: true, exists: true } }),
+      redo: ({ fact }) => ({ type: 'project.write', payload: { ...fact.after, authorized: true, exists: true } }),
+    },
+  } });
+  const app = workbench({ db, entities: [project()], history, actions: [projectAction()] });
+  app.attachLiveDelivery({ principalOf: () => user });
+  app.listen(0, { principalOf: () => user });
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  await app.dispatch({ actionId: 'history-seed', type: 'project.write', scope: 'Project:p1', history: { session: 'tab-a' }, principal: user,
+    payload: { id: 'p1', name: 'before', authorized: true, before: { id: 'p1', name: 'initial' } } });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const revision = (await app.history.cursor({ scope: 'Project:p1', session: 'tab-a', principal: user })).revision;
+  const response = await fetch(`${origin}/workbench/history`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+    actionId: 'history-http-undo', command: 'undo', scope: 'Project:p1', session: 'tab-a', revision,
+  }) });
+  const receipt = await response.json();
+  assert.equal(response.status, 200);
+  assert.deepEqual(Object.keys(receipt).sort(), ['actionId', 'confirmedThrough', 'ok']);
+  assert.equal(receipt.actionId, 'history-http-undo');
+  assert.equal((await fetch(`${origin}/workbench/history`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400);
+});
+
+test('HTTP delivery session reserves history commands for the package history endpoint', async () => {
+  const calls = [];
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async (url, options) => {
+      calls.push([url, options]);
+      return { ok: true, status: 200, json: async () => options?.method === 'POST'
+        ? { ok: true, actionId: 'history-action', confirmedThrough: 1 }
+        : { kind: 'snapshot', snapshot: {}, cursor: 1 } };
+    },
+    eventSourceFactory: () => ({ close() {} }), validateSnapshot: (value) => value,
+    sendAction: async () => { throw new Error('history must not use app sender'); },
+    createActionId: () => 'history-action',
+  });
+  await session.ready;
+  assert.equal((await session.history.undo({ session: 'tab-a', revision: '1:0:a:' })).ok, true);
+  assert.equal(calls.find(([, options]) => options?.method === 'POST')[0], 'https://example.test/workbench/history');
   session.close();
 });

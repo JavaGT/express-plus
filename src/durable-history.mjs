@@ -1,4 +1,5 @@
 import { eventsFromReceipt, insertReceipt, receiptFor, rowToEvent } from './committed-log.mjs';
+import { readSeq } from './cursor.mjs';
 import { parseEventType } from './event-handle.mjs';
 import { txn, upsert } from './driver.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
@@ -26,7 +27,7 @@ function principalKey(principal) {
 }
 
 function parseJson(value, fallback) {
-  return value == null ? fallback : JSON.parse(value);
+  return value == null ? fallback : typeof value === 'string' ? JSON.parse(value) : value;
 }
 
 function historyStack(value, name) {
@@ -119,6 +120,15 @@ function cursorRow(db, key, receiptIsEligible = () => true) {
     } else if (receipt.operation === 'redo') {
       const actionId = cursor.future.pop();
       if (actionId !== undefined) cursor.past.push(actionId);
+    } else if (receipt.operation === 'undoToPoint') {
+      const sourceActionIds = parseJson(receipt.actionData, {}).sourceActionIds;
+      if (!Array.isArray(sourceActionIds) || sourceActionIds.some((actionId) => typeof actionId !== 'string')) {
+        throw new TypeError('malformed undoToPoint history receipt');
+      }
+      for (const actionId of sourceActionIds) {
+        if (cursor.past.at(-1) !== actionId) throw new TypeError('undoToPoint history receipt does not match cursor');
+        cursor.future.push(cursor.past.pop());
+      }
     }
   }
   return cursor;
@@ -185,6 +195,7 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, dispatch
     if (receipt.actionType === '$batch') {
       let actions;
       try { actions = parseJson(receipt.actionData, null); } catch { return true; }
+      if (receipt.operation === 'undoToPoint' || (!Array.isArray(actions) && Array.isArray(actions?.actions))) actions = actions?.actions;
       if (!Array.isArray(actions) || actions.some((action) => !action || typeof action.type !== 'string')) return true;
       if (actions.some((action) => annotatedActionTypes.has(action.type))) return true;
     }
@@ -384,6 +395,80 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, dispatch
       : dispatchBatch({ ...request, actions: translated.map(({ type, payload }) => ({ type, payload })) });
   }
 
+  async function undoToPoint(args = {}) {
+    const key = identity(args);
+    await admitted(descriptor, { operation: 'undo', scope: key.scope, session: args.session, principal: args.principal });
+    const operationId = requireText(args.actionId, 'actionId');
+    const revisionArg = requireText(args.revision, 'revision');
+    const seq = args.seq;
+    if (!Number.isSafeInteger(seq) || seq < 0) throw new TypeError('seq must be a non-negative safe integer');
+    if (seq > readSeq(db, key.scope)) throw conflict('history sequence boundary is beyond the scope cursor');
+    const retry = receiptFor(db, key.scope, operationId);
+    if (retry) {
+      if (retry.operation !== 'undoToPoint' || retry.principalKey !== key.principalKey || retry.sessionId !== key.sessionId) {
+        throw conflict('history action id is already bound to another operation');
+      }
+      return Object.freeze({ ok: true, deduped: true, events: Object.freeze(eventsFromReceipt(db, retry, parseEventType)) });
+    }
+    const expected = cursorRow(db, key, receiptIsEligible);
+    if (revisionArg !== revision(expected)) throw conflict('history cursor is stale');
+    if (scopeContainsAnnotatedText(key.scope)) throw forbidden();
+    const sourceActionIds = [];
+    for (let index = expected.past.length - 1; index >= 0; index -= 1) {
+      const receipt = receiptFor(db, key.scope, expected.past[index]);
+      if (!receipt) throw new Error(`history action '${expected.past[index]}' is no longer retained`);
+      const refs = parseJson(receipt.eventRefs, []);
+      if (refs.some((ref) => ref.scope === key.scope && ref.seq > seq)) sourceActionIds.push(receipt.actionId);
+      else break;
+    }
+    if (sourceActionIds.length === 0) {
+      const now = new Date().toISOString();
+      await txn(db, async () => {
+        await admitted(descriptor, { operation: 'undo', scope: key.scope, session: args.session, principal: args.principal });
+        if (!sameCursor(cursorRow(db, key, receiptIsEligible), expected)) throw conflict('history cursor changed during dispatch');
+        insertReceipt(db, key.scope, operationId, now, [], {
+          actionType: '$history.empty', actionData: { version: 1, boundarySeq: seq, sourceActionIds }, principalKey: key.principalKey,
+          sessionId: key.sessionId, operation: 'undoToPoint',
+        });
+      });
+      return Object.freeze({ ok: true, deduped: false, events: [], empty: true });
+    }
+    const translated = [];
+    for (const sourceActionId of sourceActionIds) {
+      const receipt = receiptFor(db, key.scope, sourceActionId);
+      if (receiptContainsAnnotatedText(receipt)) throw forbidden();
+      const action = actionFromRow(db, receipt);
+      const rule = descriptor.actions[action.type];
+      if (!rule) throw conflict(`history action '${action.type}' is not undoable`);
+      if (!await authorize({ type: action.type, payload: action.payload, principal: args.principal })) throw forbidden();
+      const fact = privateFactFromReceipt(db, receipt);
+      const inverse = await rule.inverse({ action, fact, principal: args.principal, session: args.session });
+      translated.push(...translatedActions(inverse, 'undo', key.scope));
+    }
+    if (translated.some((child) => annotatedActionTypes.has(child.type))) throw forbidden();
+    const transition = {
+      handlerInputs: Object.freeze(translated.map((child) => Object.freeze({ operation: 'undo', input: child.input }))),
+      metadata: {
+        actionType: '$batch', actionData: { version: 1, boundarySeq: seq, sourceActionIds, actions: translated.map(({ type, payload }) => ({ type, payload })) },
+        principalKey: key.principalKey, sessionId: key.sessionId, operation: 'undoToPoint',
+      },
+      async apply(dbInTxn) {
+        await admitted(descriptor, { operation: 'undo', scope: key.scope, session: args.session, principal: args.principal });
+        for (const sourceActionId of sourceActionIds) {
+          const receipt = receiptFor(dbInTxn, key.scope, sourceActionId);
+          const action = actionFromRow(dbInTxn, receipt);
+          if (!await authorize({ type: action.type, payload: action.payload, principal: args.principal })) throw forbidden();
+          privateFactFromReceipt(dbInTxn, receipt);
+        }
+        const current = cursorRow(dbInTxn, key, receiptIsEligible);
+        if (!sameCursor(current, expected)) throw new Error('history cursor changed during dispatch');
+        writeCursor(dbInTxn, key, { past: current.past.slice(0, -sourceActionIds.length), future: [...current.future, ...sourceActionIds] });
+      },
+    };
+    return dispatchBatch({ actionId: operationId, principal: args.principal, scope: key.scope,
+      actions: translated.map(({ type, payload }) => ({ type, payload })), _historyCommit: transition });
+  }
+
   return Object.freeze({
     // Internal diagnostics only. The public application surface deliberately
     // exposes cursor/move operations, not canonical payload materialization.
@@ -392,6 +477,7 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, dispatch
     cursor,
     undo: (args) => move('undo', args),
     redo: (args) => move('redo', args),
+    undoToPoint,
     normalCommit,
   });
 }

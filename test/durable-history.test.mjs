@@ -149,6 +149,35 @@ test('undo then redo dispatch through the committed pipeline', async () => {
   );
 });
 
+test('undoToPoint atomically rewinds the current session after a scope sequence boundary', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  const history = durableHistory({ authorize: () => true, actions: {
+    'document.set': {
+      inverse: ({ fact }) => ({ type: 'explicit.eligible', payload: { marker: fact.before } }),
+      redo: ({ fact }) => ({ type: 'explicit.eligible', payload: { marker: fact.after } }),
+    },
+  } });
+  const server = makeServer(db, history);
+  await set(server, { actionId: 'point-a1', value: 1, before: 0, session: 'tab-a' });
+  await set(server, { actionId: 'point-a2', value: 2, before: 1, session: 'tab-a' });
+  await set(server, { actionId: 'point-a3', value: 3, before: 2, session: 'tab-a' });
+  const cursor = await server.history.cursor({ scope, principal, session: 'tab-a' });
+  const undone = await server.history.undoToPoint({
+    scope, principal, session: 'tab-a', actionId: 'point-undo', revision: cursor.revision, seq: 1,
+  });
+
+  assert.equal(undone.ok, true);
+  assert.deepEqual(undone.events.map((event) => event.data.marker), [2, 1]);
+  assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 2 });
+  const retry = await server.history.undoToPoint({
+    scope, principal, session: 'tab-a', actionId: 'point-undo', revision: cursor.revision, seq: 1,
+  });
+  assert.equal(retry.deduped, true);
+  assert.equal(db.prepare("SELECT operation FROM _ActionReceipt WHERE actionId = 'point-undo'").get().operation, 'undoToPoint');
+  assert.equal((await server.history.actions({ scope, principal })).length, 4);
+});
+
 test('translation receives private fact internally while public cursor and move results do not expose it', async () => {
   const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
   let seen;
@@ -275,7 +304,7 @@ test('application runtime exposes only cursor, undo, and redo history methods', 
   app.listen(0, { principalOf: () => principal });
   await app.ready;
   t.after(() => { app.httpServer.close(); db.close(); });
-  assert.deepEqual(Object.keys(app.history).sort(), ['cursor', 'redo', 'undo']);
+  assert.deepEqual(Object.keys(app.history).sort(), ['cursor', 'redo', 'undo', 'undoToPoint']);
   assert.equal('actions' in app.history, false);
   assert.equal('events' in app.history, false);
 });
@@ -832,6 +861,18 @@ test('history rejects an inverse translated to an annotated operation', async ()
   await set(server, { actionId: 'a1', value: 1, before: 0, session: 'tab-a' });
 
   await assert.rejects(historyMove(server, 'undo', { scope, principal, session: 'tab-a' }), { status: 403 });
+  assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
+});
+
+test('undoToPoint rejects an inverse translated to an annotated operation', async () => {
+  const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db);
+  const history = durableHistory({ authorize: () => true, actions: { 'document.set': {
+    inverse: () => ({ type: 'AnnotatedDoc.body.operation', payload: {} }), redo: () => ({ type: 'document.set', payload: {} }),
+  } } });
+  const server = makeServer(db, history, undefined, { entities: new Set(['AnnotatedDoc']), actionTypes: new Set(['AnnotatedDoc.body.operation']) });
+  await set(server, { actionId: 'point-annotated-a1', value: 1, before: 0, session: 'tab-a' });
+  const cursor = await server.history.cursor({ scope, principal, session: 'tab-a' });
+  await assert.rejects(server.history.undoToPoint({ scope, principal, session: 'tab-a', actionId: 'point-annotated-u1', revision: cursor.revision, seq: 0 }), { status: 403 });
   assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 1, redo: 0 });
 });
 

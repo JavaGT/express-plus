@@ -436,6 +436,16 @@ export interface LiveDeliverySession<Snapshot, Payload = unknown> {
   close(): void;
 }
 
+export interface LiveDeliveryHistorySession {
+  undo(input: { session: string; revision: string }): Promise<ScopeDispatchResult>;
+  redo(input: { session: string; revision: string }): Promise<ScopeDispatchResult>;
+  undoToPoint(input: { session: string; revision: string; seq: number }): Promise<ScopeDispatchResult>;
+}
+
+export interface LiveDeliveryHttpSession<Snapshot, Payload = unknown> extends LiveDeliverySession<Snapshot, Payload> {
+  readonly history: LiveDeliveryHistorySession;
+}
+
 export function createLiveDeliverySession<Snapshot, Payload = unknown>(
   config: LiveDeliverySessionConfig<Snapshot, Payload>,
 ): LiveDeliverySession<Snapshot, Payload>;
@@ -457,7 +467,7 @@ export interface LiveDeliveryHttpSessionConfig<Snapshot, Payload = unknown> {
 
 export function createLiveDeliveryHttpSession<Snapshot, Payload = unknown>(
   config: LiveDeliveryHttpSessionConfig<Snapshot, Payload>,
-): LiveDeliverySession<Snapshot, Payload>;
+): LiveDeliveryHttpSession<Snapshot, Payload>;
 
 // ---------------------------------------------------------------------------
 // createScopeLiveStore — composite scope projection

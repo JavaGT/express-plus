@@ -977,7 +977,7 @@ export interface HistoryAction {
   readonly payload: unknown;
   readonly principal: string | null;
   readonly session: string | null;
-  readonly operation: 'action' | 'undo' | 'redo';
+  readonly operation: 'action' | 'undo' | 'redo' | 'undoToPoint';
   readonly committedAt: string;
   readonly events: readonly CommittedEvent[];
 }
@@ -1040,6 +1040,8 @@ export interface DurableHistoryRuntime {
   cursor(options: Omit<HistorySessionOptions, 'actionId' | 'revision'>): Promise<Readonly<{ undo: number; redo: number; revision: string }>>;
   undo(options: HistorySessionOptions): Promise<DispatchResult & { readonly empty?: boolean }>;
   redo(options: HistorySessionOptions): Promise<DispatchResult & { readonly empty?: boolean }>;
+  /** Atomically undo this session's undoable entries after the scope log sequence boundary. */
+  undoToPoint(options: HistorySessionOptions & { readonly seq: number }): Promise<DispatchResult & { readonly empty?: boolean }>;
 }
 
 export const User: WorkbenchEntity;

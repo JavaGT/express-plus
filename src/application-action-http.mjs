@@ -7,6 +7,7 @@ import { failure, isWorkbenchFailure } from './outcome.mjs';
 import { sendFailure } from './http-failure.mjs';
 
 const ACTION_PATH = '/workbench/actions';
+const HISTORY_PATH = '/workbench/history';
 const MAX_STRING_LENGTH = 512;
 
 function isJsonValue(value, ancestors = new Set()) {
@@ -40,10 +41,23 @@ function validPrincipal(principal) {
     && principal.type !== 'anonymous';
 }
 
+function historyRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const { actionId, scope, session, revision, command, seq } = body;
+  const allowed = command === 'undoToPoint'
+    ? ['actionId', 'scope', 'session', 'revision', 'command', 'seq']
+    : ['actionId', 'scope', 'session', 'revision', 'command'];
+  if (Object.keys(body).length !== allowed.length || Object.keys(body).some((key) => !allowed.includes(key))) return null;
+  if (!['undo', 'redo', 'undoToPoint'].includes(command)
+    || ![actionId, scope, session, revision].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)
+    || (command === 'undoToPoint' && (!Number.isSafeInteger(seq) || seq < 0))) return null;
+  return command === 'undoToPoint' ? { actionId, scope, session, revision, seq } : { actionId, scope, session, revision };
+}
+
 /** Handle the fixed HTTP skin for application-registered actions. */
 export async function handleApplicationActionHttp(app, req, res, principalOf, sendJson) {
   const url = new URL(req.url ?? '/', 'http://workbench.local');
-  if (url.pathname !== ACTION_PATH) return false;
+  if (url.pathname !== ACTION_PATH && url.pathname !== HISTORY_PATH) return false;
   if (req.method !== 'POST') {
     sendFailure(sendJson, res, failure('invalid-input', 'method not allowed'), { status: 405 });
     return true;
@@ -59,14 +73,14 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
     }
     throw error;
   }
-  const request = actionRequest(body);
+  const request = url.pathname === HISTORY_PATH ? historyRequest(body) : actionRequest(body);
   if (!request) {
     sendFailure(sendJson, res, failure('invalid-input', 'invalid action request'));
     return true;
   }
   // Registered declarations are an explicit public mutation contract. Do not
   // let this generic transport reach generated entity CRUD kernel handlers.
-  if (!app.actions.some((action) => action.type === request.type)) {
+  if (url.pathname === ACTION_PATH && !app.actions.some((action) => action.type === request.type)) {
     sendFailure(sendJson, res, failure('unknown-action', 'action is not available'));
     return true;
   }
@@ -81,7 +95,13 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
     return true;
   }
 
-  const result = await app.dispatch({ ...request, principal });
+  if (url.pathname === HISTORY_PATH && !app.history) {
+    sendFailure(sendJson, res, failure('unknown-action', 'history is not available'));
+    return true;
+  }
+  const result = url.pathname === HISTORY_PATH
+    ? await app.history[body.command]({ ...request, principal })
+    : await app.dispatch({ ...request, principal });
   if (!result?.ok) {
     sendFailure(sendJson, res, isWorkbenchFailure(result?.failure)
       ? result.failure
@@ -97,4 +117,4 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
   return true;
 }
 
-export { ACTION_PATH };
+export { ACTION_PATH, HISTORY_PATH };

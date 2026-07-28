@@ -2623,6 +2623,7 @@ export function createLiveDeliveryHttpSession({
   // The action endpoint belongs to the configured Workbench origin, not the
   // browser document origin which may host a separate frontend application.
   const actionEndpoint = actionUrl ?? new URL('/workbench/actions', new URL(baseUrl, globalThis.location?.href ?? 'http://workbench.local')).toString();
+  const historyEndpoint = new URL('/workbench/history', new URL(baseUrl, globalThis.location?.href ?? 'http://workbench.local')).toString();
 
   async function bootstrap({ after, mode }) {
     const url = new URL(endpoint, globalThis.location?.href ?? 'http://workbench.local');
@@ -2661,11 +2662,18 @@ export function createLiveDeliveryHttpSession({
   }
 
   async function sendHttpAction(action) {
-    const response = await fetchImpl(actionEndpoint, {
+    const historyCommand = action.type === '$history.undo' ? 'undo'
+      : action.type === '$history.redo' ? 'redo'
+        : action.type === '$history.undoToPoint' ? 'undoToPoint' : null;
+    const historyPayload = action.payload;
+    const historyRequest = historyCommand && historyPayload && typeof historyPayload === 'object'
+      ? { actionId: action.actionId, command: historyCommand, ...historyPayload, scope }
+      : null;
+    const response = await fetchImpl(historyRequest ? historyEndpoint : actionEndpoint, {
       method: 'POST',
       credentials: 'include',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...action, scope }),
+      body: JSON.stringify(historyRequest ?? { ...action, scope }),
     });
     let receipt;
     try { receipt = await response.json(); } catch { throw new Error(`action dispatch failed with HTTP ${response.status}`); }
@@ -2674,15 +2682,25 @@ export function createLiveDeliveryHttpSession({
     return receipt;
   }
 
-  return createLiveDeliverySession({
+  const session = createLiveDeliverySession({
     bootstrap,
     subscribe,
     validateSnapshot,
     fold,
     optimistic,
-    sendAction: sendAction ?? sendHttpAction,
+    sendAction: (action) => action.type.startsWith('$history.')
+      ? sendHttpAction(action)
+      : (sendAction ?? sendHttpAction)(action),
     createActionId,
   });
+  // History commands use the same receipt/snapshot reconciliation path as an
+  // application action. The reserved client names never reach app actions.
+  Object.defineProperty(session, 'history', { value: Object.freeze({
+    undo: ({ session: historySession, revision }) => session.dispatch('$history.undo', { session: historySession, revision }),
+    redo: ({ session: historySession, revision }) => session.dispatch('$history.redo', { session: historySession, revision }),
+    undoToPoint: ({ session: historySession, revision, seq }) => session.dispatch('$history.undoToPoint', { session: historySession, revision, seq }),
+  }) });
+  return session;
 }
 
 // ---------------------------------------------------------------------------

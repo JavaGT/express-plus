@@ -35,6 +35,7 @@ function wireMutationSurface(app) {
     cursor: app.kernel.history.cursor,
     undo: (args) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.history.undo(args))),
     redo: (args) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.history.redo(args))),
+    undoToPoint: (args) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.history.undoToPoint(args))),
   });
   app.batch = async (actionsOrFactory, { principal, clientId } = {}) =>
     withLog(app.log, () => app.writeQueue.run(() => {
