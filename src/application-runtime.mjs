@@ -15,6 +15,7 @@ import { reconcileDurableEffects } from './durable-effects.mjs';
 import { startSimulation } from './simulate.mjs';
 import { retentionPrune } from './committed-log.mjs';
 import { getLog, withLog } from './log.mjs';
+import { installHistoryHttpDispatcher } from './application-action-http.mjs';
 
 const BLOB_REAP_INTERVAL_MS = 10 * 60_000;
 const BLOB_REAP_TTL_MS = 60 * 60_000;
@@ -37,6 +38,14 @@ function wireMutationSurface(app) {
     redo: (args) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.history.redo(args))),
     undoToPoint: (args) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.history.undoToPoint(args))),
   });
+  // The HTTP skin receives a private queued dispatcher, not a cursor capability.
+  // Reading and moving happen under one package write-queue turn.
+  if (app.kernel.history) {
+    installHistoryHttpDispatcher(app, (command, args) => withLog(app.log, () => app.writeQueue.run(async () => {
+      const cursor = await app.kernel.history.cursor(args);
+      return app.kernel.history[command]({ ...args, revision: cursor.revision });
+    })));
+  }
   app.batch = async (actionsOrFactory, { principal, clientId } = {}) =>
     withLog(app.log, () => app.writeQueue.run(() => {
       const actions = typeof actionsOrFactory === 'function'

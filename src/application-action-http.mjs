@@ -9,6 +9,11 @@ import { sendFailure } from './http-failure.mjs';
 const ACTION_PATH = '/workbench/actions';
 const HISTORY_PATH = '/workbench/history';
 const MAX_STRING_LENGTH = 512;
+const historyHttpDispatchers = new WeakMap();
+
+export function installHistoryHttpDispatcher(app, dispatch) {
+  historyHttpDispatchers.set(app, dispatch);
+}
 
 function isJsonValue(value, ancestors = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
@@ -43,15 +48,15 @@ function validPrincipal(principal) {
 
 function historyRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
-  const { actionId, scope, session, revision, command, seq } = body;
+  const { actionId, scope, session, command, seq } = body;
   const allowed = command === 'undoToPoint'
-    ? ['actionId', 'scope', 'session', 'revision', 'command', 'seq']
-    : ['actionId', 'scope', 'session', 'revision', 'command'];
+    ? ['actionId', 'scope', 'session', 'command', 'seq']
+    : ['actionId', 'scope', 'session', 'command'];
   if (Object.keys(body).length !== allowed.length || Object.keys(body).some((key) => !allowed.includes(key))) return null;
   if (!['undo', 'redo', 'undoToPoint'].includes(command)
-    || ![actionId, scope, session, revision].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)
+    || ![actionId, scope, session].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)
     || (command === 'undoToPoint' && (!Number.isSafeInteger(seq) || seq < 0))) return null;
-  return command === 'undoToPoint' ? { actionId, scope, session, revision, seq } : { actionId, scope, session, revision };
+  return command === 'undoToPoint' ? { actionId, scope, session, seq } : { actionId, scope, session };
 }
 
 /** Handle the fixed HTTP skin for application-registered actions. */
@@ -100,7 +105,7 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
     return true;
   }
   const result = url.pathname === HISTORY_PATH
-    ? await app.history[body.command]({ ...request, principal })
+    ? await historyHttpDispatchers.get(app)?.(body.command, { ...request, principal })
     : await app.dispatch({ ...request, principal });
   if (!result?.ok) {
     sendFailure(sendJson, res, isWorkbenchFailure(result?.failure)

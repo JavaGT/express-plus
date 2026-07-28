@@ -437,9 +437,10 @@ export interface LiveDeliverySession<Snapshot, Payload = unknown> {
 }
 
 export interface LiveDeliveryHistorySession {
-  undo(input: { session: string; revision: string }): Promise<ScopeDispatchResult>;
-  redo(input: { session: string; revision: string }): Promise<ScopeDispatchResult>;
-  undoToPoint(input: { session: string; revision: string; seq: number }): Promise<ScopeDispatchResult>;
+  /** Uses the package-owned authenticated session cursor. */
+  undo(input: { session: string }): Promise<ScopeDispatchResult>;
+  redo(input: { session: string }): Promise<ScopeDispatchResult>;
+  undoToPoint(input: { session: string; seq: number }): Promise<ScopeDispatchResult>;
 }
 
 export interface LiveDeliveryHttpSession<Snapshot, Payload = unknown> extends LiveDeliverySession<Snapshot, Payload> {

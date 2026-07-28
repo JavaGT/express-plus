@@ -2694,11 +2694,12 @@ export function createLiveDeliveryHttpSession({
     createActionId,
   });
   // History commands use the same receipt/snapshot reconciliation path as an
-  // application action. The reserved client names never reach app actions.
+  // application action. The server resolves this authenticated session's
+  // current cursor within its write queue; raw revisions never leave it.
   Object.defineProperty(session, 'history', { value: Object.freeze({
-    undo: ({ session: historySession, revision }) => session.dispatch('$history.undo', { session: historySession, revision }),
-    redo: ({ session: historySession, revision }) => session.dispatch('$history.redo', { session: historySession, revision }),
-    undoToPoint: ({ session: historySession, revision, seq }) => session.dispatch('$history.undoToPoint', { session: historySession, revision, seq }),
+    undo: ({ session: historySession }) => session.dispatch('$history.undo', { session: historySession }),
+    redo: ({ session: historySession }) => session.dispatch('$history.redo', { session: historySession }),
+    undoToPoint: ({ session: historySession, seq }) => session.dispatch('$history.undoToPoint', { session: historySession, seq }),
   }) });
   return session;
 }
