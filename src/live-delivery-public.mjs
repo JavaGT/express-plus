@@ -51,8 +51,12 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
         captured = Object.freeze({
           anchor: readSeq(db, scope),
           aggregate: aggregateRevision(),
-          candidate: captureSnapshot({ db, principal, anchor: declaration.anchor, id: handle.id, output: declaration.output }),
+          candidate: captureSnapshot({ db, principal, anchor: declaration.anchor, id: handle.id, output: declaration.output, tombstones: declaration.tombstones }),
         });
+      } catch {
+        // A visibility read that cannot establish absence is a denied snapshot,
+        // never a partially projected recipient view.
+        return { kind: 'revoked' };
       } finally {
         db.exec('COMMIT');
       }
@@ -81,6 +85,15 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
       const { data: _data, eventData: _eventData, ...event } = context.event;
       const handle = tryParseScopeKey(context.scope);
       return envelopes.buildEnvelope({ ...context, event, composite: !!handle && composites.has(handle.entity) });
+    },
+    scopeVisible: ({ entity, principal, scope: handle }) => {
+      const declaration = composites.get(entity.name);
+      if (!declaration?.tombstones?.some((rule) => rule.target === entity)) return true;
+      try {
+        return captureSnapshot({ db, principal, anchor: declaration.anchor, id: handle.id, output: declaration.output, tombstones: declaration.tombstones }) !== null;
+      } catch {
+        return false;
+      }
     },
     log,
   });

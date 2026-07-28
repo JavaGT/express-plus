@@ -23,8 +23,8 @@ function refOf(handle, label = 'via') {
   return handle.fieldName;
 }
 
-function declareSnapshot(anchor, { output } = {}) {
-  return node('snapshot', { anchor: entityOf(anchor), output });
+function declareSnapshot(anchor, { output, tombstones: visibility } = {}) {
+  return node('snapshot', { anchor: entityOf(anchor), output, tombstones: visibility });
 }
 
 export function object(shape) {
@@ -45,6 +45,20 @@ export function orderBy(handle, direction = 'asc') {
 export function count(entity, { via } = {}) { return node('count', { entity: entityOf(entity), via: refOf(via) }); }
 export function user({ via } = {}) { return node('user', { via: refOf(via) }); }
 
+// This is intentionally a closed visibility declaration: no callbacks, SQL, or
+// arbitrary checks can influence which recipient rows are hidden.
+export function tombstones(target, { entity, entityId, kind, state, kindValue, hidden } = {}) {
+  if (typeof kindValue !== 'string' || kindValue.length === 0) throw new TypeError('tombstones requires a literal kindValue');
+  if (!Array.isArray(hidden) || hidden.length === 0 || hidden.some((value) => typeof value !== 'string' || value.length === 0)) {
+    throw new TypeError('tombstones requires one or more literal hidden states');
+  }
+  return node('tombstones', {
+    target: entityOf(target), entity: entityOf(entity), entityId: refOf(entityId, 'tombstones entityId'),
+    kindField: refOf(kind, 'tombstones kind'), state: refOf(state, 'tombstones state'), kindValue,
+    hidden: Object.freeze([...hidden]),
+  });
+}
+
 export const snapshot = Object.freeze(Object.assign(declareSnapshot, {
-  object, one, keyed, many, select, include, orderBy, count, user,
+  object, one, keyed, many, select, include, orderBy, count, user, tombstones,
 }));

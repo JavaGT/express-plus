@@ -639,9 +639,10 @@ export interface SnapshotOrder { readonly kind: 'orderBy'; }
 export interface SnapshotOutput { readonly kind: 'object'; }
 export interface SnapshotRelation { readonly kind: 'one' | 'many' | 'keyed' | 'count'; }
 export interface SnapshotUser { readonly kind: 'user'; }
+export interface SnapshotTombstones { readonly kind: 'tombstones'; }
 export interface SnapshotDeclaration { readonly kind: 'snapshot'; readonly anchor: WorkbenchEntity; readonly output: SnapshotOutput; }
 export interface SnapshotGrammar {
-  <Row extends object>(anchor: WorkbenchEntity<Row>, options: { output: SnapshotOutput }): SnapshotDeclaration;
+  <Row extends object>(anchor: WorkbenchEntity<Row>, options: { output: SnapshotOutput; tombstones?: SnapshotTombstones }): SnapshotDeclaration;
   object(shape: Readonly<Record<string, SnapshotSelect | SnapshotRelation | SnapshotUser>>): SnapshotOutput;
   select(...fields: readonly FieldHandle[]): SnapshotSelect;
   one<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
@@ -649,6 +650,7 @@ export interface SnapshotGrammar {
   keyed<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
   count<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle }): SnapshotRelation;
   user(options: { via: FieldHandle }): SnapshotUser;
+  tombstones<Row extends object>(target: WorkbenchEntity<Row>, options: { entity: WorkbenchEntity; entityId: FieldHandle; kind: FieldHandle; state: FieldHandle; kindValue: string; hidden: readonly string[] }): SnapshotTombstones;
   include(shape: Readonly<Record<string, SnapshotSelect | SnapshotRelation>>): SnapshotOutput;
   orderBy(field: FieldHandle, direction?: 'asc' | 'desc'): SnapshotOrder;
 }
@@ -661,6 +663,7 @@ export const include: SnapshotGrammar['include'];
 export const orderBy: SnapshotGrammar['orderBy'];
 export const count: SnapshotGrammar['count'];
 export const user: SnapshotGrammar['user'];
+export const tombstones: SnapshotGrammar['tombstones'];
 
 export interface AppLiveDeliveryOptions {
   /** Uses the same authenticated principal shape as the application kernel. */

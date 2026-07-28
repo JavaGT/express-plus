@@ -58,6 +58,61 @@ test('declared relational snapshots gate every row, hide denied counts, enforce 
   db.close();
 });
 
+test('declared tombstones exclude hidden targets from every snapshot appearance and fail closed', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), body TEXT); CREATE TABLE Tombstone (id TEXT PRIMARY KEY, entityId TEXT REFERENCES Project(id), kind TEXT, state TEXT);');
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('visible', 'Visible');
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('deleted', 'Deleted');
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('pending', 'Pending');
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('restored', 'Restored');
+  db.prepare('INSERT INTO Comment VALUES (?, ?, ?)').run('c1', 'deleted', 'must not appear');
+  db.prepare('INSERT INTO Tombstone VALUES (?, ?, ?, ?)').run('t1', 'deleted', 'project', 'deleted');
+  db.prepare('INSERT INTO Tombstone VALUES (?, ?, ?, ?)').run('t2', 'pending', 'project', 'purge_pending');
+  db.prepare('INSERT INTO Tombstone VALUES (?, ?, ?, ?)').run('t3', 'restored', 'project', 'restored');
+  const ownGrant = () => [scope(() => true).can(() => grant(subscribe))];
+  const project = { name: 'Project', fields: { name: { kind: 'value', type: 'text' } }, field: { id: { fieldName: 'id' }, name: { fieldName: 'name' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const comment = { name: 'Comment', fields: { projectId: { kind: 'value', type: 'ref', target: project }, body: { kind: 'value', type: 'text' } }, field: { projectId: { fieldName: 'projectId' }, body: { fieldName: 'body' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const tombstone = { name: 'Tombstone', fields: { entityId: { kind: 'value', type: 'ref', target: project }, kind: { kind: 'value', type: 'text' }, state: { kind: 'value', type: 'text' } }, field: { entityId: { fieldName: 'entityId' }, kind: { fieldName: 'kind' }, state: { fieldName: 'state' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const declaration = snapshot(project, { tombstones: snapshot.tombstones(project, { entity: tombstone, entityId: tombstone.field.entityId, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'project', hidden: ['deleted', 'purge_pending'] }), output: snapshot.object({ name: snapshot.select(project.field.name), comments: snapshot.many(comment, { via: comment.field.projectId, select: snapshot.select(comment.field.body) }), commentCount: snapshot.count(comment, { via: comment.field.projectId }) }) });
+  const live = createLiveDelivery({ db, entities: new Map([['Project', project], ['Comment', comment], ['Tombstone', tombstone]]), mayVerb: () => true, snapshots: [declaration] });
+  for (const id of ['deleted', 'pending']) assert.deepEqual(await live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: `Project:${id}` }), { kind: 'revoked' });
+  assert.deepEqual((await live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:restored' })).snapshot, { id: 'restored', name: 'Restored', comments: [], commentCount: 0 });
+  db.exec('DROP TABLE Tombstone');
+  assert.deepEqual(await live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:visible' }), { kind: 'revoked' });
+  db.close();
+});
+
+test('declared tombstones reject malformed, duplicate, and recipient-selectable declarations', () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE Tombstone (id TEXT PRIMARY KEY, entityId TEXT REFERENCES Project(id), kind TEXT, state TEXT);');
+  const ownGrant = () => [scope(() => true).can(() => grant(subscribe))];
+  const project = { name: 'Project', fields: {}, field: { id: { fieldName: 'id' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const tombstone = { name: 'Tombstone', fields: { entityId: { kind: 'value', type: 'ref', target: project }, kind: { kind: 'value', type: 'text' }, state: { kind: 'value', type: 'text' } }, field: { entityId: { fieldName: 'entityId' }, kind: { fieldName: 'kind' }, state: { fieldName: 'state' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const visibility = () => snapshot.tombstones(project, { entity: tombstone, entityId: tombstone.field.entityId, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'project', hidden: ['deleted', 'deleted'] });
+  assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', project], ['Tombstone', tombstone]]), mayVerb: () => true, snapshots: [snapshot(project, { tombstones: visibility(), output: snapshot.object({}) })] }), /hidden/);
+  assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', project], ['Tombstone', tombstone]]), mayVerb: () => true, snapshots: [snapshot(tombstone, { tombstones: snapshot.tombstones(project, { entity: tombstone, entityId: tombstone.field.entityId, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'project', hidden: ['deleted'] }), output: snapshot.object({ state: snapshot.select(tombstone.field.state) }) })] }), /read-internal.*anchor/);
+  assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', project], ['Tombstone', tombstone]]), mayVerb: () => true, snapshots: [snapshot(project, { tombstones: snapshot.tombstones(project, { entity: tombstone, entityId: tombstone.field.entityId, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'project', hidden: ['deleted'] }), output: snapshot.object({ tombstones: snapshot.many(tombstone, { via: tombstone.field.entityId, select: snapshot.select(tombstone.field.state) }) }) })] }), /read-internal/);
+  db.close();
+});
+
+test('declared tombstones exclude their target from other aggregate outputs', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE Task (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), label TEXT); CREATE TABLE Tombstone (id TEXT PRIMARY KEY, entityId TEXT REFERENCES Task(id), kind TEXT, state TEXT);');
+  db.prepare('INSERT INTO Project VALUES (?)').run('p1');
+  db.prepare('INSERT INTO Task VALUES (?, ?, ?)').run('gone', 'p1', 'hidden task');
+  db.prepare('INSERT INTO Tombstone VALUES (?, ?, ?, ?)').run('t1', 'gone', 'task', 'deleted');
+  const ownGrant = () => [scope(() => true).can(() => grant(subscribe))];
+  const project = { name: 'Project', fields: {}, field: { id: { fieldName: 'id' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const task = { name: 'Task', fields: { projectId: { kind: 'value', type: 'ref', target: project }, label: { kind: 'value', type: 'text' } }, field: { id: { fieldName: 'id' }, projectId: { fieldName: 'projectId' }, label: { fieldName: 'label' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const tombstone = { name: 'Tombstone', fields: { entityId: { kind: 'value', type: 'ref', target: task }, kind: { kind: 'value', type: 'text' }, state: { kind: 'value', type: 'text' } }, field: { entityId: { fieldName: 'entityId' }, kind: { fieldName: 'kind' }, state: { fieldName: 'state' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const live = createLiveDelivery({ db, entities: new Map([['Project', project], ['Task', task], ['Tombstone', tombstone]]), mayVerb: () => true, snapshots: [snapshot(task, { tombstones: snapshot.tombstones(task, { entity: tombstone, entityId: tombstone.field.entityId, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'task', hidden: ['deleted', 'purge_pending'] }), output: snapshot.object({ label: snapshot.select(task.field.label) }) }), snapshot(project, { output: snapshot.object({ tasks: snapshot.many(task, { via: task.field.projectId, select: snapshot.select(task.field.label) }), taskCount: snapshot.count(task, { via: task.field.projectId }) }) })] });
+  assert.deepEqual((await live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' })).snapshot, { id: 'p1', tasks: [], taskCount: 0 });
+  db.close();
+});
+
 test('declared snapshots reject cyclic outputs and retry an asynchronous authorization revision race', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);

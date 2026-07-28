@@ -45,7 +45,7 @@ function deniedError(scope) {
   return error;
 }
 
-export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient, log = null }) {
+export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient, scopeVisible = () => true, log = null }) {
   if (!db) throw new Error('live-delivery-core: db is required');
   if (!entities) throw new Error('live-delivery-core: entities is required');
   if (!mayVerb) throw new Error('live-delivery-core: mayVerb is required');
@@ -116,6 +116,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
 
   function reauthFor(entityRec, principal, handle) {
     try {
+      if (!scopeVisible({ entity: entityRec, principal, scope: handle })) return null;
       const { sql: where, params: scopeParams } = entityRec.scopeFilter(principal);
       const raw = db.prepare(`SELECT * FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id`).get({ ...scopeParams, id: handle.id });
       if (!raw) return null;

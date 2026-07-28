@@ -87,16 +87,48 @@ function physicalForeignKey(db, from, field, target) {
   if (matching.length !== 1 || foreignKeys.filter((row) => row.from === field).length !== 1) throw new TypeError(`snapshot relation ${from.name}.${field} requires exactly one physical FOREIGN KEY to ${target.name}.id`);
 }
 
+function compileTombstones(declaration, resolveEntity) {
+  const rule = declaration.tombstones;
+  if (rule === undefined) return null;
+  if (rule?.kind !== 'tombstones') throw new TypeError('snapshot tombstones must use tombstones(...)');
+  const target = entityOf(rule.target);
+  if (target !== declaration.anchor) throw new TypeError(`snapshot tombstones target must be anchor '${declaration.anchor.name}'`);
+  if (resolveEntity(target.name) !== target) throw new TypeError(`snapshot tombstones target '${target.name}' must be registered`);
+  const entity = entityOf(rule.entity);
+  if (resolveEntity(entity.name) !== entity) throw new TypeError(`snapshot tombstone entity '${entity.name}' must be registered`);
+  const entityId = entity.fields[rule.entityId];
+  if (entityId?.kind !== 'value' || entityId.type !== 'ref' || targetName(entityId) !== target.name) {
+    throw new TypeError(`snapshot tombstones entityId must be a declared ref(${target.name})`);
+  }
+  for (const field of [rule.kindField, rule.state]) {
+    const descriptor = entity.fields[field];
+    if (descriptor?.kind !== 'value' || descriptor.type !== 'text') throw new TypeError(`snapshot tombstones field '${field}' must be a declared text field`);
+  }
+  if (typeof rule.kindValue !== 'string' || rule.kindValue.length === 0) throw new TypeError('snapshot tombstones kindValue must be a non-empty literal');
+  if (!Array.isArray(rule.hidden) || rule.hidden.length === 0 || rule.hidden.some((value) => typeof value !== 'string' || value.length === 0) || new Set(rule.hidden).size !== rule.hidden.length) {
+    throw new TypeError('snapshot tombstones hidden must contain non-empty string literals');
+  }
+  return Object.freeze({ target, entity, entityId: rule.entityId, kind: rule.kindField, state: rule.state, kindValue: rule.kindValue, hidden: Object.freeze([...rule.hidden]) });
+}
+
 export function compileSnapshots(declarations, resolveEntity, db = null) {
   if (declarations === undefined) return new Map();
   if (!Array.isArray(declarations)) throw new TypeError('snapshots must be an array');
+  const internalEntities = new Set(declarations.map((declaration) => declaration?.tombstones?.entity?.name).filter((name) => typeof name === 'string'));
   const compiled = new Map();
   for (const declaration of declarations) {
     if (declaration?.kind !== 'snapshot') throw new TypeError('snapshots accepts only snapshot(...) declarations');
     const anchor = entityOf(declaration.anchor);
+    if (internalEntities.has(anchor.name)) throw new TypeError(`snapshot tombstone entity '${anchor.name}' is read-internal and cannot be an anchor`);
     if (resolveEntity(anchor.name) !== anchor) throw new TypeError(`snapshot anchor '${anchor.name}' must be registered`);
     if (compiled.has(anchor.name)) throw new TypeError(`snapshot anchor '${anchor.name}' is declared more than once`);
     const output = compileOutput(anchor, declaration.output);
+    const tombstones = compileTombstones(declaration, resolveEntity);
+    const forbidTombstoneOutput = (branch) => branch.entries.forEach((entry) => {
+      if (entry.entity && internalEntities.has(entry.entity.name)) throw new TypeError(`snapshot tombstone entity '${entry.entity.name}' is read-internal and cannot be output`);
+      if (entry.nested) forbidTombstoneOutput(entry.nested);
+    });
+    forbidTombstoneOutput(output);
     // Every relation target must be registered, not merely structurally similar.
     const check = (branch) => branch.entries.forEach((entry) => {
       if (entry.kind === 'user') {
@@ -110,8 +142,11 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
       if (entry.nested) check(entry.nested);
     });
     check(output);
-    compiled.set(anchor.name, Object.freeze({ anchor, output }));
+    if (tombstones) physicalForeignKey(db, tombstones.entity, tombstones.entityId, tombstones.target);
+    compiled.set(anchor.name, Object.freeze({ anchor, output, tombstone: tombstones }));
   }
+  const tombstones = Object.freeze([...compiled.values()].map((declaration) => declaration.tombstone).filter(Boolean));
+  for (const [name, declaration] of compiled) compiled.set(name, Object.freeze({ ...declaration, tombstones }));
   return compiled;
 }
 
@@ -119,23 +154,41 @@ function detached(raw) {
   return Object.freeze({ ...raw });
 }
 
-function readRows(db, entity, principal, fk, value, inverse, order) {
+function readRows(db, entity, principal, fk, value, inverse, order, tombstones) {
   const filter = entity.scopeFilter(principal);
+  const rule = tombstones?.find((candidate) => entity === candidate.target);
+  const visibility = rule
+    ? ` AND NOT EXISTS (SELECT 1 FROM ${identifier(rule.entity.name, 'snapshot tombstone entity')} AS tombstone WHERE tombstone.${identifier(rule.entityId, 'snapshot tombstone entityId')} = t0.id AND tombstone.${identifier(rule.kind, 'snapshot tombstone kind')} = :snapshot_tombstone_kind AND tombstone.${identifier(rule.state, 'snapshot tombstone state')} IN (${rule.hidden.map((_, index) => `:snapshot_tombstone_hidden_${index}`).join(', ')}))`
+    : '';
   const sql = inverse
-    ? `SELECT * FROM ${identifier(entity.name, 'snapshot entity')} AS t0 WHERE (${filter.sql}) AND t0.${identifier(fk, 'snapshot foreign key')} = :snapshot_parent`
-    : `SELECT * FROM ${identifier(entity.name, 'snapshot entity')} AS t0 WHERE (${filter.sql}) AND t0.id = :snapshot_parent`;
+    ? `SELECT * FROM ${identifier(entity.name, 'snapshot entity')} AS t0 WHERE (${filter.sql}) AND t0.${identifier(fk, 'snapshot foreign key')} = :snapshot_parent${visibility}`
+    : `SELECT * FROM ${identifier(entity.name, 'snapshot entity')} AS t0 WHERE (${filter.sql}) AND t0.id = :snapshot_parent${visibility}`;
   const suffix = order ? ` ORDER BY t0.${identifier(order.field, 'snapshot order field')} ${order.direction.toUpperCase()}, t0.id ASC` : ' ORDER BY t0.id ASC';
-  return db.prepare(sql + suffix).all({ ...filter.params, snapshot_parent: value }).map(detached);
+  const params = { ...filter.params, snapshot_parent: value };
+  if (visibility) {
+    params.snapshot_tombstone_kind = rule.kindValue;
+    rule.hidden.forEach((state, index) => { params[`snapshot_tombstone_hidden_${index}`] = state; });
+  }
+  return db.prepare(sql + suffix).all(params).map(detached);
 }
 
-function readUser(db, id) {
+function readUser(db, id, tombstones) {
   try {
     const columns = db.prepare('PRAGMA table_info(User)').all().map((column) => column.name);
     for (const required of ['id', 'name', 'displayName', 'image']) {
       if (!columns.includes(required)) throw new TypeError('malformed User table');
     }
     const deleted = columns.includes('deletedAt') ? ' AND deletedAt IS NULL' : '';
-    const rows = db.prepare(`SELECT id, name, displayName, image FROM User WHERE id = :snapshot_user${deleted}`).all({ snapshot_user: id });
+    const rule = tombstones?.find((candidate) => candidate.target.name === 'User');
+    const visibility = rule
+      ? ` AND NOT EXISTS (SELECT 1 FROM ${identifier(rule.entity.name, 'snapshot tombstone entity')} AS tombstone WHERE tombstone.${identifier(rule.entityId, 'snapshot tombstone entityId')} = User.id AND tombstone.${identifier(rule.kind, 'snapshot tombstone kind')} = :snapshot_tombstone_kind AND tombstone.${identifier(rule.state, 'snapshot tombstone state')} IN (${rule.hidden.map((_, index) => `:snapshot_tombstone_hidden_${index}`).join(', ')}))`
+      : '';
+    const params = { snapshot_user: id };
+    if (rule) {
+      params.snapshot_tombstone_kind = rule.kindValue;
+      rule.hidden.forEach((state, index) => { params[`snapshot_tombstone_hidden_${index}`] = state; });
+    }
+    const rows = db.prepare(`SELECT id, name, displayName, image FROM User WHERE id = :snapshot_user${deleted}${visibility}`).all(params);
     if (rows.length === 0) return null;
     if (typeof rows[0].id !== 'string' || rows[0].id.length === 0) throw new TypeError('malformed User id');
     return detached(rows[0]);
@@ -147,22 +200,22 @@ function readUser(db, id) {
 
 // Capture only raw, scope-filtered candidates while SQLite is synchronous. No
 // authorization may await inside this read boundary.
-export function captureSnapshot({ db, principal, anchor, id, output }) {
+export function captureSnapshot({ db, principal, anchor, id, output, tombstones = null }) {
   function capture(entity, raw, branch) {
     const children = new Map();
     for (const entry of branch.entries) {
       if (entry.kind === 'select') continue;
       if (entry.kind === 'user') {
-        const user = raw[entry.fk] == null ? null : readUser(db, raw[entry.fk]);
+        const user = raw[entry.fk] == null ? null : readUser(db, raw[entry.fk], tombstones);
         children.set(entry, user ? [Object.freeze({ raw: user, children: new Map() })] : []);
         continue;
       }
-      const rows = readRows(db, entry.entity, principal, entry.fk, entry.inverse ? raw.id : raw[entry.fk], entry.inverse, entry.order);
+      const rows = readRows(db, entry.entity, principal, entry.fk, entry.inverse ? raw.id : raw[entry.fk], entry.inverse, entry.order, tombstones);
       children.set(entry, rows.map((child) => Object.freeze({ raw: child, children: entry.nested ? capture(entry.entity, child, entry.nested).children : new Map() })));
     }
     return Object.freeze({ raw, children });
   }
-  const rows = readRows(db, anchor, principal, 'id', id, false, null);
+  const rows = readRows(db, anchor, principal, 'id', id, false, null, tombstones);
   return rows.length === 1 ? capture(anchor, rows[0], output) : null;
 }
 
