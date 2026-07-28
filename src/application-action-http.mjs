@@ -72,7 +72,8 @@ function admitsApplicationHttpAction(app, request) {
     const id = request.payload?.id;
     if (typeof id !== 'string' || id.length === 0 || request.scope !== `${entity.name}:${id}`) continue;
     if (request.type === `${entity.name}.create` || request.type === `${entity.name}.annotatedText.retire`) return true;
-    if (annotatedFields.some((field) => request.type === `${entity.name}.${field}.operation`)) return true;
+    if ([6, 7].includes(request.payload?.version)
+      && annotatedFields.some((field) => request.type === `${entity.name}.${field}.operation`)) return true;
   }
   return false;
 }

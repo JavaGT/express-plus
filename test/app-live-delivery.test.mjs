@@ -220,11 +220,14 @@ test('declared annotated text owns generated HTTP admission and package delivery
   assert.equal(exported.blocks.map((block) => block.text).join(''), 'hello');
   await assert.rejects(exportAnnotatedText({ db, entity: Document, field: Document.body, documentId: 'd1', principal: { ...user, id: 'u2' } }), /owner authorization failed/);
 
+  const committedBeforeForbidden = db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE scope = ?').get('HttpAnnotatedDocument:d1').count;
   for (const forbidden of [
     { type: 'HttpAnnotatedDocument.update', scope: 'HttpAnnotatedDocument:d1', payload: { id: 'd1', project: 'p1' } },
     { type: 'HttpAnnotatedDocument.body.apply', scope: 'HttpAnnotatedDocument:d1', payload: { id: 'd1', operation: {} } },
     { type: 'HttpAnnotatedDocument.body.operation', scope: 'HttpAnnotatedDocument:other', payload: { id: 'd1', version: 99 } },
+    { type: 'HttpAnnotatedDocument.body.operation', scope: 'HttpAnnotatedDocument:d1', payload: { version: 1, id: 'd1', expected: { structuralRevision: 2, frontier: [] }, operation: { kind: 'text.apply', blockId: initialBlockId, operation: ['workbench.text', 1, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1], 1, [], ['insert', ['root'], 'raw']] } } },
   ]) assert.equal((await post(forbidden)).status, 404);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE scope = ?').get('HttpAnnotatedDocument:d1').count, committedBeforeForbidden);
 
   principal = { ...user, id: 'u2' };
   const revokedEdit = await session.insert({ mutationId: 'revoked', at: { blockId: initialBlockId, offset: 0 }, text: 'x' });
