@@ -57,6 +57,23 @@ test('HTTP delivery rejects malformed requests and enforces a stream cap', async
   } finally { server.close(); }
 });
 
+test('HTTP delivery transports aggregate cursors without widening their shape', async () => {
+  const cursor = { anchor: 3, aggregate: 7 };
+  const delivery = {
+    bootstrap: async () => ({ kind: 'snapshot', snapshot: {}, cursor }),
+    catchup: async (input) => { assert.deepEqual(input.after, cursor); return { kind: 'catchup', envelopes: [], cursor }; },
+    subscribe: async (input) => { assert.deepEqual(input.after, cursor); return { activate: async () => cursor }; },
+  };
+  const { server, baseUrl } = await serve(createLiveDeliveryHttpHandler({ delivery, principalOf: () => ({ type: 'user', id: 'u1' }) }));
+  const encoded = encodeURIComponent(JSON.stringify(cursor));
+  try {
+    assert.equal((await fetch(`${baseUrl}/bootstrap?scope=Project%3Ap1&mode=catchup&after=${encoded}`)).status, 200);
+    const controller = new AbortController();
+    assert.equal((await fetch(`${baseUrl}/events?scope=Project%3Ap1&after=${encoded}`, { signal: controller.signal })).status, 200);
+    controller.abort();
+  } finally { server.close(); }
+});
+
 test('HTTP delivery reports an initial subscription revocation as forbidden', async () => {
   const delivery = {
     bootstrap: async () => ({ kind: 'revoked' }),

@@ -64,6 +64,14 @@ export function actionReceiptTableDDL() {
 );`;
 }
 
+export function committedRevisionTableDDL() {
+  return `CREATE TABLE IF NOT EXISTS _CommittedRevision (
+   name TEXT PRIMARY KEY,
+   revision INTEGER NOT NULL
+ );
+ INSERT OR IGNORE INTO _CommittedRevision (name, revision) VALUES ('actions', 0);`;
+}
+
 export function historyCursorTableDDL() {
   return `CREATE TABLE IF NOT EXISTS _HistoryCursor (
   principalKey TEXT NOT NULL,
@@ -76,7 +84,7 @@ export function historyCursorTableDDL() {
 }
 
 export function frameworkLogDDL() {
-  return [logTableDDL(), logIndexDDL(), cursorTableDDL(), actionReceiptTableDDL(), historyCursorTableDDL()];
+  return [logTableDDL(), logIndexDDL(), cursorTableDDL(), actionReceiptTableDDL(), committedRevisionTableDDL(), historyCursorTableDDL()];
 }
 
 // ---- read ----
@@ -153,6 +161,9 @@ export function insertReceipt(db, scope, actionId, committedAt, events, metadata
     sessionId: metadata.sessionId ?? null,
     operation: metadata.operation ?? 'action',
   });
+  // This survives receipt erasure and is transactionally paired with every
+  // committed action, unlike SQLite's reusable implicit rowid.
+  db.prepare("UPDATE _CommittedRevision SET revision = revision + 1 WHERE name = 'actions'").run();
   return historyOrder;
 }
 

@@ -21,9 +21,20 @@ function scopeFrom(url) {
 function afterFrom(url) {
   const raw = url.searchParams.get('after');
   if (raw === null) return 0;
-  if (!/^(0|[1-9][0-9]*)$/.test(raw)) return null;
-  const after = Number(raw);
-  return Number.isSafeInteger(after) ? after : null;
+  if (/^(0|[1-9][0-9]*)$/.test(raw)) {
+    const after = Number(raw);
+    return Number.isSafeInteger(after) ? after : null;
+  }
+  try {
+    const cursor = JSON.parse(raw);
+    if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)
+      || !Number.isSafeInteger(cursor.anchor) || cursor.anchor < 0
+      || !Number.isSafeInteger(cursor.aggregate) || cursor.aggregate < 0
+      || Object.keys(cursor).length !== 2) return null;
+    return Object.freeze({ anchor: cursor.anchor, aggregate: cursor.aggregate });
+  } catch {
+    return null;
+  }
 }
 
 function writeJson(res, value) {

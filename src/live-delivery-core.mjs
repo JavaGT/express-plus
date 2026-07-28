@@ -84,14 +84,10 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     if (closed) throw new Error('live-delivery-core is closed');
     if (typeof snapshot !== 'function') throw new Error('live delivery bootstrap requires a snapshot function');
     if (!(await authorizeSnapshot(principal, scope))) return { kind: 'revoked' };
-    // Scope's single-process SQLite writer cannot interleave with this
-    // synchronous materialisation/cursor pair. Async readers are forbidden so
-    // callers cannot accidentally create an unpaired snapshot boundary.
+    // A materializer may await recipient authorization. If a commit interleaves,
+    // reject rather than return a snapshot/cursor pair from different states.
     const before = readSeq(db, scope);
-    const value = snapshot({ principal, scope });
-    if (value && typeof value.then === 'function') {
-      throw new Error('live delivery snapshot function must be synchronous');
-    }
+    const value = await snapshot({ principal, scope });
     const cursor = readSeq(db, scope);
     // A materializer is a synchronous read projection. Letting it commit while
     // materializing would make its returned state and cursor incomparable.
@@ -211,11 +207,12 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         if (!auth && !terminalRemoval) { revokeSub(subId); log?.error?.('live', 'reauth denied', { scope: sub.scope }); return; }
         if (auth && !(await checkMayRow(sub.entityRec, auth.row, sub.principal))) { revokeSub(subId); log?.error?.('live', 'mayRow denied', { scope: sub.scope }); return; }
         if (!sub.active) return;
-        if (events.length === 0) {
+        const resyncEnvelope = sub.resyncEnvelope;
+        if (events.length === 0 && !resyncEnvelope) {
           if (sub.dirty) continue;
           return;
         }
-        const batch = [];
+        const batch = resyncEnvelope ? [resyncEnvelope] : [];
         for (const event of deliverableEvents) {
           if (!sub.active) return;
           const ctx = Object.freeze({
@@ -253,6 +250,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
             removeSub(subId);
             throw new Error(`delivery callback threw for scope '${sub.scope}'`);
           }
+          if (resyncEnvelope && sub.resyncEnvelope === resyncEnvelope) sub.resyncEnvelope = null;
         }
         if (!sub.active) return;
         if (terminalRemoval) {
@@ -265,7 +263,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         }
         // Advance cursor past the last event we processed (even if projection
         // returned empty — the events were acknowledged).
-        sub.cursor = events[events.length - 1].seq;
+        if (events.length > 0) sub.cursor = events[events.length - 1].seq;
         if (sub.dirty) continue;
         return;
       }
@@ -385,6 +383,26 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
+  function resync(scope, envelope) {
+    if (closed) return;
+    const set = byScope.get(scope);
+    if (!set) return;
+    for (const subId of [...set]) {
+      const sub = subs.get(subId);
+      if (!sub || !sub.active) continue;
+      sub.resyncEnvelope = envelope;
+      sub.dirty = true;
+      if (!sub.paused && !sub.pending) catchUp(subId).catch(() => {});
+    }
+  }
+
+  function resyncEntity(entityName, envelopeForScope) {
+    for (const sub of [...subs.values()]) {
+      if (sub.entityRec.name !== entityName) continue;
+      resync(sub.scope, envelopeForScope(sub.scope));
+    }
+  }
+
   function close() {
     closed = true;
     for (const sub of subs.values()) {
@@ -438,5 +456,5 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  return { bootstrap, catchup, subscribe, wake, close, snapshot, exceedsCatchupLimit };
+  return { bootstrap, catchup, subscribe, wake, resync, resyncEntity, close, snapshot, exceedsCatchupLimit };
 }

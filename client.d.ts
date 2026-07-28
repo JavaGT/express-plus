@@ -387,9 +387,11 @@ export interface LiveDeliveryResyncEnvelope {
 
 export type LiveDeliveryEnvelope = LiveDeliveryEventEnvelope | LiveDeliveryResyncEnvelope;
 
+export type LiveDeliveryCursor = number | Readonly<{ anchor: number; aggregate: number }>;
+
 export type LiveDeliveryBootstrap<Snapshot> =
-  | { kind: 'snapshot'; snapshot: Snapshot; cursor: number }
-  | { kind: 'catchup'; envelopes: readonly LiveDeliveryEnvelope[]; cursor: number }
+  | { kind: 'snapshot'; snapshot: Snapshot; cursor: LiveDeliveryCursor }
+  | { kind: 'catchup'; envelopes: readonly LiveDeliveryEnvelope[]; cursor: LiveDeliveryCursor }
   | { kind: 'revoked'; reason?: unknown };
 
 export interface LiveDeliverySubscription {
@@ -407,9 +409,9 @@ export type LiveDeliveryActionReceipt =
   | { ok: false; failure?: unknown; error?: unknown };
 
 export interface LiveDeliverySessionConfig<Snapshot, Payload = unknown> {
-  bootstrap(input: { after?: number; mode: 'snapshot' | 'catchup' }): Promise<LiveDeliveryBootstrap<Snapshot>>;
+  bootstrap(input: { after?: LiveDeliveryCursor; mode: 'snapshot' | 'catchup' }): Promise<LiveDeliveryBootstrap<Snapshot>>;
   subscribe(input: {
-    after: number;
+    after: LiveDeliveryCursor;
     deliver: (envelopes: readonly LiveDeliveryEnvelope[]) => Promise<void>;
     revoke: (reason?: unknown) => void;
     closed: () => void;
@@ -425,7 +427,7 @@ export interface LiveDeliverySessionConfig<Snapshot, Payload = unknown> {
 
 export interface LiveDeliverySession<Snapshot, Payload = unknown> {
   readonly snapshot: Snapshot | null;
-  readonly cursor: number;
+  readonly cursor: LiveDeliveryCursor;
   readonly status: 'bootstrapping' | 'recovering' | 'catching-up' | 'live' | 'unavailable' | 'revoked';
   readonly ready: Promise<void>;
   dispatch(type: string, payload: Payload): Promise<ScopeDispatchResult>;

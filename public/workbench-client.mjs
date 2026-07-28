@@ -2231,7 +2231,22 @@ export function createLiveDeliverySession({
   }
 
   function assertCursor(value, label) {
-    if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${label} must be a nonnegative safe integer`);
+    if (Number.isSafeInteger(value) && value >= 0) return;
+    if (value && typeof value === 'object'
+      && Number.isSafeInteger(value.anchor) && value.anchor >= 0
+      && Number.isSafeInteger(value.aggregate) && value.aggregate >= 0
+      && Object.keys(value).length === 2) return;
+    throw new Error(`${label} must be a nonnegative cursor`);
+  }
+
+  function cursorAnchor(value) {
+    return typeof value === 'object' ? value.anchor : value;
+  }
+
+  function sameCursor(left, right) {
+    return cursorAnchor(left) === cursorAnchor(right)
+      && (typeof left === 'object') === (typeof right === 'object')
+      && (typeof left !== 'object' || left.aggregate === right.aggregate);
   }
 
   function normalizeEvent(envelope) {
@@ -2264,7 +2279,7 @@ export function createLiveDeliverySession({
     if (operation) {
       operation.echoCursor = cursor;
       if (operation.delivered
-        && (operation.confirmedCursor == null || cursor >= operation.confirmedCursor)) {
+        && (operation.confirmedCursor == null || cursorAnchor(cursor) >= operation.confirmedCursor)) {
         operations.delete(actionId);
       }
     }
@@ -2282,7 +2297,7 @@ export function createLiveDeliverySession({
         && operation.confirmedThrough != null
         && snapshotGeneration > operation.receiptSnapshotGeneration
         && receiptGenerationAtStart >= operation.receiptGeneration
-        && cursor >= operation.confirmedThrough) {
+        && cursorAnchor(cursor) >= operation.confirmedThrough) {
         operations.delete(actionId);
       }
     }
@@ -2308,10 +2323,10 @@ export function createLiveDeliverySession({
       if (closed || status === 'revoked') return true;
       if (applied.status === 'gap') throw new Error('catch-up recipient envelopes are not contiguous');
     }
-    if (result.envelopes.length === 0 && result.cursor !== initialCursor) {
+    if (result.envelopes.length === 0 && !sameCursor(result.cursor, initialCursor)) {
       throw new Error('empty catch-up cannot advance its cursor');
     }
-    if (cursor !== result.cursor) throw new Error('catch-up final cursor does not match its recipient envelopes');
+    if (!sameCursor(cursor, result.cursor)) throw new Error('catch-up final cursor does not match its recipient envelopes');
     return true;
   }
 
@@ -2337,7 +2352,7 @@ export function createLiveDeliverySession({
       // A receipt confirmation must never install a replacement snapshot that
       // predates its committed fence, even when reconnect superseded its first
       // request while it was in flight.
-      if (snapshotCursorFloor != null && result.cursor < Math.max(snapshotCursorFloor, snapshotCursorAtStart)) return;
+      if (snapshotCursorFloor != null && cursorAnchor(result.cursor) < Math.max(snapshotCursorFloor, cursorAnchor(snapshotCursorAtStart))) return;
       baseSnapshot = nextSnapshot;
       cursor = result.cursor;
       snapshotGeneration += 1;
@@ -2414,13 +2429,13 @@ export function createLiveDeliverySession({
         if (!closed
           && status !== 'revoked'
           && operations.get(operation.actionId) === operation
-          && (snapshotGeneration <= operation.receiptSnapshotGeneration || cursor < operation.confirmedThrough)) {
+          && (snapshotGeneration <= operation.receiptSnapshotGeneration || cursorAnchor(cursor) < operation.confirmedThrough)) {
           await recover('snapshot', operation.confirmedThrough);
         }
         if (!closed
           && status !== 'revoked'
           && operations.get(operation.actionId) === operation
-          && (snapshotGeneration <= operation.receiptSnapshotGeneration || cursor < operation.confirmedThrough)) {
+          && (snapshotGeneration <= operation.receiptSnapshotGeneration || cursorAnchor(cursor) < operation.confirmedThrough)) {
           throw new Error('replacement snapshot does not cover snapshot-only action receipt');
         }
       } catch (error) {
@@ -2631,7 +2646,7 @@ export function createLiveDeliveryHttpSession({
     const url = new URL(endpoint, globalThis.location?.href ?? 'http://workbench.local');
     url.searchParams.set('scope', scope);
     url.searchParams.set('mode', mode);
-    if (mode === 'catchup') url.searchParams.set('after', String(after));
+    if (mode === 'catchup') url.searchParams.set('after', typeof after === 'object' ? JSON.stringify(after) : String(after));
     const response = await fetchImpl(url.toString(), { credentials: 'include' });
     if (response.status === 401 || response.status === 403) return { kind: 'revoked' };
     if (!response.ok) throw new Error(`live delivery bootstrap failed with HTTP ${response.status}`);
@@ -2645,7 +2660,7 @@ export function createLiveDeliveryHttpSession({
   function subscribe({ after, deliver, closed }) {
     const url = new URL(eventsEndpoint, globalThis.location?.href ?? 'http://workbench.local');
     url.searchParams.set('scope', scope);
-    url.searchParams.set('after', String(after));
+    url.searchParams.set('after', typeof after === 'object' ? JSON.stringify(after) : String(after));
     const source = eventSourceFactory(url.toString(), { withCredentials: true });
     let open = true;
     source.onmessage = (message) => {

@@ -8,6 +8,7 @@ test('frameworkTableNames is a frozen, sorted, duplicate-free array of persisten
 
   const expected = [
     '_ActionReceipt',
+    '_CommittedRevision',
     '_ConsumerCursor',
     '_Cursor',
     '_DeletedRowAnchor',

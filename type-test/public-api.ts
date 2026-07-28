@@ -26,7 +26,7 @@ import {
   LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore,
   createLiveDeliverySession, createScopeLiveStore, decodeResult, materializeAnnotatedTextSnapshot,
   type AnnotatedTextBlock,
-  type EventsSinceResponse, type LiveDeliverySession, type LiveStore, type ScopeLiveStore, type SnapshotResponse,
+  type EventsSinceResponse, type LiveDeliveryCursor as ClientLiveDeliveryCursor, type LiveDeliverySession, type LiveStore, type ScopeLiveStore, type SnapshotResponse,
   type StaleResponse, type WsEnvelope,
 } from 'workbench/client';
 import {
@@ -350,7 +350,8 @@ const blobs: BlobStore = createBlobStore({ db, bytes: {} as never });
 void [job, blobs, runMigrations(db, [migration]), readCommittedCursor(db, 'Project:project-1')];
 const live: LiveDelivery = createLiveDelivery({ db, entities: new Map(), mayVerb: () => true });
 const projectAggregate: LiveDeliveryCompositeScope = {
-  snapshot: ({ anchor }) => ({ projects: [anchor] }),
+  anchor: Project,
+  members: [],
 };
 createLiveDelivery({ db, entities: new Map(), mayVerb: () => true, compositeScopes: new Map([['Project', projectAggregate]]) });
 const liveAbort = new AbortController();
@@ -438,6 +439,8 @@ const deliverySession: LiveDeliverySession<{ projects: ProjectRow[] }> = createL
   fold: (current) => current,
   sendAction: async () => ({ ok: true }),
 });
+const aggregateDeliveryCursor: ClientLiveDeliveryCursor = { anchor: 1, aggregate: 2 };
+void [aggregateDeliveryCursor, deliverySession.cursor];
 const auth = createAuthClient({ baseUrl: 'https://example.test' });
 void [list, store, scopeStore, deliverySession, auth.login('researcher', 'password'), decodeResult(new Response(null, { status: 204 }))];
 

@@ -634,13 +634,15 @@ export interface ListenOptions {
   requestLog?: boolean;
 }
 
-export interface AppLiveDeliveryCompositeScope {
-  /** Materializes an authorized aggregate from recipient-safe anchor state. */
-  snapshot(input: {
-    readonly principal: Principal;
-    readonly scope: string;
-    readonly anchor: Readonly<Record<string, unknown>>;
-  }): unknown;
+export interface AggregateMember<Row extends object = Record<string, unknown>, Anchor extends object = Record<string, unknown>> {
+  readonly entity: WorkbenchEntity<Row>;
+  readonly where: { readonly field: keyof Row; readonly fromAnchor: keyof Anchor };
+}
+
+export interface AppLiveDeliveryCompositeScope<Anchor extends object = Record<string, unknown>> {
+  /** Package-owned, recipient-authorized aggregate snapshot declaration. */
+  readonly anchor: WorkbenchEntity<Anchor>;
+  readonly members: readonly AggregateMember<any, Anchor>[];
 }
 
 export interface AppLiveDeliveryOptions {

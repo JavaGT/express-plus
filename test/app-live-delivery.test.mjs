@@ -102,12 +102,12 @@ test('application live delivery rejects duplicate and late attachment', async ()
   db.close();
 });
 
-test('application live delivery validates providers without exposing kernel callbacks', () => {
+test('application live delivery validates aggregate declarations without exposing kernel callbacks', () => {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db, entities: [project()] });
   assert.throws(
     () => app.attachLiveDelivery({ principalOf: () => user, compositeScopes: new Map([['Project', {}]]) }),
-    /synchronous snapshot function/,
+    /registered anchor entity/,
   );
   assert.equal(app._applicationLiveDelivery, undefined);
   db.close();

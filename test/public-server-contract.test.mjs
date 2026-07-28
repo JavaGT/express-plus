@@ -10,6 +10,7 @@ import {
 } from '../src/server.mjs';
 import { entity, grant, read, subscribe, text } from '../src/index.mjs';
 import { executeFrameworkDDL } from '../src/ddl.mjs';
+import { createOwnedLiveDelivery } from '../src/live-delivery-public.mjs';
 import { scope } from '../src/scope.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -86,24 +87,23 @@ test('public live delivery pairs an authorized snapshot with its committed curso
   db.prepare('INSERT INTO Project (id, name, secret) VALUES (?, ?, ?)').run('p1', 'Field notes', 'raw-secret');
   appendEvent(db, 'Project:p1', 1, 'Source.created', { name: 'raw source data' });
 
+  const entity = {
+    name: 'Project', fields: { name: { kind: 'value' } }, grant: () => [scope(() => true).can(() => grant(read, subscribe))],
+    scopeFilter: () => ({ sql: '1=1', params: {} }),
+    hydrate: (row) => ({ id: row.id, name: row.name }),
+  };
   const live = createLiveDelivery({
     db,
-    entities: new Map([['Project', {
-      name: 'Project', fields: { name: { kind: 'value' } }, grant: () => [scope(() => true).can(() => grant(read, subscribe))],
-      scopeFilter: () => ({ sql: '1=1', params: {} }),
-      hydrate: (row) => ({ id: row.id, name: row.name }),
-    }]]),
-    mayVerb: async () => true,
-    compositeScopes: new Map([['Project', {
-      snapshot: ({ principal, scope, anchor }) => ({ recipient: principal.id, scope, entities: [anchor.name] }),
-    }]]),
+    entities: new Map([['Project', entity]]),
+    mayVerb: () => true,
+    compositeScopes: new Map([['Project', { anchor: entity, members: [] }]]),
   });
   const bootstrap = await live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' });
 
   assert.deepEqual(bootstrap, {
     kind: 'snapshot',
-    snapshot: { recipient: 'u1', scope: 'Project:p1', entities: ['Field notes'] },
-    cursor: 1,
+    snapshot: { entities: { Project: { p1: { id: 'p1', name: 'Field notes' } } } },
+    cursor: { anchor: 1, aggregate: 0 },
   });
   db.close();
 });
@@ -120,21 +120,19 @@ test('composite scope delivery materializes a checked aggregate and resyncs hete
     hydrate: (row) => ({ id: row.id, name: row.name }),
   };
   const live = createLiveDelivery({
-    db, entities: new Map([['Project', entity]]), mayVerb: async () => true,
-    compositeScopes: new Map([['Project', {
-      snapshot: ({ anchor }) => ({ project: anchor, comments: [{ id: 'c1', body: 'authorized comment' }] }),
-    }]]),
+    db, entities: new Map([['Project', entity]]), mayVerb: () => true,
+    compositeScopes: new Map([['Project', { anchor: entity, members: [] }]]),
   });
 
   const bootstrap = await live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' });
   assert.deepEqual(bootstrap, {
-    kind: 'snapshot', cursor: 1,
-    snapshot: { project: { id: 'p1', name: 'Field notes' }, comments: [{ id: 'c1', body: 'authorized comment' }] },
+    kind: 'snapshot', cursor: { anchor: 1, aggregate: 0 },
+    snapshot: { entities: { Project: { p1: { id: 'p1', name: 'Field notes' } } } },
   });
   const catchup = await live.catchup({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', after: 0 });
   assert.deepEqual(catchup, {
-    kind: 'catchup', cursor: 1,
-    envelopes: [{ type: 'resync', entity: 'Project', id: 'p1', seq: 1, reason: 'recipient-snapshot-required' }],
+    kind: 'snapshot', cursor: { anchor: 1, aggregate: 0 },
+    snapshot: { entities: { Project: { p1: { id: 'p1', name: 'Field notes' } } } },
   });
   assert.equal(JSON.stringify({ bootstrap, catchup }).includes('secret'), false);
   assert.equal(JSON.stringify({ bootstrap, catchup }).includes('raw comment'), false);
@@ -142,37 +140,178 @@ test('composite scope delivery materializes a checked aggregate and resyncs hete
   appendEvent(db, 'Project:p1', 2, 'Project.updated', { secret: 'raw anchor event' });
   assert.deepEqual(
     await live.catchup({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', after: 1 }),
-    { kind: 'catchup', cursor: 2, envelopes: [{ type: 'resync', entity: 'Project', id: 'p1', seq: 2, reason: 'recipient-snapshot-required' }] },
+    { kind: 'snapshot', cursor: { anchor: 2, aggregate: 0 }, snapshot: { entities: { Project: { p1: { id: 'p1', name: 'Field notes' } } } } },
   );
   db.close();
 });
 
-test('composite scope snapshots fail closed for malformed provider output and preserve a synchronous cursor boundary', async () => {
+test('aggregate snapshots authorize and hydrate every declared member in deterministic entity/id order', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT)');
+  db.exec('CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT, body TEXT, secret TEXT, visible INTEGER)');
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('p1', 'Field notes');
+  db.prepare('INSERT INTO Comment VALUES (?, ?, ?, ?, ?)').run('c2', 'p1', 'second', 'secret', 1);
+  db.prepare('INSERT INTO Comment VALUES (?, ?, ?, ?, ?)').run('c1', 'p1', 'first', 'secret', 1);
+  db.prepare('INSERT INTO Comment VALUES (?, ?, ?, ?, ?)').run('hidden', 'p1', 'hidden', 'secret', 0);
+  const project = { name: 'Project', fields: { id: {}, name: {} }, grant: [], scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ id: row.id, name: row.name }) };
+  const comment = {
+    name: 'Comment', fields: { projectId: {}, body: {} }, grant: [],
+    scopeFilter: () => ({ sql: 't0.visible = 1', params: {} }),
+    hydrate: (row) => row.id === 'c2' ? null : ({ id: row.id, projectId: row.projectId, body: row.body }),
+  };
+  const live = createLiveDelivery({
+    db, entities: new Map([['Project', project], ['Comment', comment]]),
+    mayVerb: (_entity, _verb, row) => row.id !== 'c2' || row.id === 'p1',
+    compositeScopes: new Map([['Project', { anchor: project, members: [{ entity: comment, where: { field: 'projectId', fromAnchor: 'id' } }] }]]),
+  });
+  assert.deepEqual(await live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' }), {
+    kind: 'snapshot', cursor: { anchor: 0, aggregate: 0 },
+    snapshot: { entities: { Comment: { c1: { id: 'c1', projectId: 'p1', body: 'first' } }, Project: { p1: { id: 'p1', name: 'Field notes' } } } },
+  });
+  db.close();
+});
+
+test('aggregate bootstrap rejects a commit interleaved by asynchronous member authorization', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT)');
+  db.prepare('INSERT INTO Project VALUES (?)').run('p1');
+  db.prepare('INSERT INTO Comment VALUES (?, ?)').run('c1', 'p1');
+  const ownGrant = () => [scope(() => true).can(() => grant(subscribe))];
+  const project = { name: 'Project', fields: { id: {} }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const comment = { name: 'Comment', fields: { projectId: {} }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  let inserted = false;
+  const live = createLiveDelivery({
+    db, entities: new Map([['Project', project], ['Comment', comment]]),
+    mayVerb: async (_entity, _verb, row) => {
+      if (row.id === 'c1' && !inserted) {
+        inserted = true;
+        db.prepare("UPDATE _CommittedRevision SET revision = revision + 1 WHERE name = 'actions'").run();
+      }
+      return true;
+    },
+    compositeScopes: new Map([['Project', { anchor: project, members: [{ entity: comment, where: { field: 'projectId', fromAnchor: 'id' } }] }]]),
+  });
+  await assert.rejects(live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' }), /aggregate snapshot changed/);
+  db.close();
+});
+
+test('aggregate revision never reuses a removed receipt rowid', () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.prepare(`INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs, operation)
+    VALUES ('Project:p1', 'removed', '2026-07-28T00:00:00.000Z', '[]', 'action')`).run();
+  db.prepare("UPDATE _CommittedRevision SET revision = revision + 1 WHERE name = 'actions'").run();
+  db.prepare("DELETE FROM _ActionReceipt WHERE scope = 'Project:p1' AND actionId = 'removed'").run();
+  db.prepare(`INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs, operation)
+    VALUES ('Project:p1', 'replacement', '2026-07-28T00:00:00.000Z', '[]', 'action')`).run();
+  db.prepare("UPDATE _CommittedRevision SET revision = revision + 1 WHERE name = 'actions'").run();
+  assert.equal(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get().revision, 2);
+  db.close();
+});
+
+test('member deletion invalidates all possible old/new anchors and reauthorizes before resync delivery', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT)');
+  db.prepare('INSERT INTO Project VALUES (?)').run('old');
+  db.prepare('INSERT INTO Project VALUES (?)').run('new');
+  db.prepare('INSERT INTO Comment VALUES (?, ?)').run('c1', 'old');
+  const ownGrant = () => [scope(() => true).can(() => grant(subscribe))];
+  const project = { name: 'Project', fields: { id: {} }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const comment = { name: 'Comment', fields: { projectId: {} }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  let allowed = true;
+  const owned = createOwnedLiveDelivery({
+    db, entities: new Map([['Project', project], ['Comment', comment]]), mayVerb: () => allowed,
+    compositeScopes: new Map([['Project', { anchor: project, members: [{ entity: comment, where: { field: 'projectId', fromAnchor: 'id' } }] }]]),
+  });
+  const batches = [];
+  let revoked = 0;
+  const controllers = [new AbortController(), new AbortController()];
+  const subscriptions = await Promise.all(['old', 'new'].map((id, index) => owned.delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: `Project:${id}`, after: { anchor: 0, aggregate: 0 }, signal: controllers[index].signal,
+    deliver: async (batch) => batches.push([id, batch]), revoke: () => { revoked += 1; },
+  })));
+  await Promise.all(subscriptions.map((subscription) => subscription.activate()));
+  db.prepare('DELETE FROM Comment WHERE id = ?').run('c1');
+  await owned.consumer([{ scope: 'Comment:c1', seq: 1, type: 'Comment.removed' }]);
+  await sleep(20);
+  assert.deepEqual(batches.map(([id]) => id).sort(), ['new', 'old']);
+  batches.length = 0;
+  allowed = false;
+  await owned.consumer([{ scope: 'Comment:c1', seq: 2, type: 'Comment.updated' }]);
+  await sleep(20);
+  assert.equal(revoked, 2);
+  assert.equal(batches.length, 0);
+  controllers.forEach((controller) => controller.abort());
+  db.close();
+});
+
+test('stale aggregate subscriptions latch recovery after asynchronous admission', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.prepare('INSERT INTO Project VALUES (?)').run('p1');
+  const project = { name: 'Project', fields: { id: {} }, grant: [], scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const live = createLiveDelivery({
+    db, entities: new Map([['Project', project]]), mayVerb: async () => true,
+    compositeScopes: new Map([['Project', { anchor: project, members: [] }]]),
+  });
+  const batches = [];
+  const controller = new AbortController();
+  const subscription = await live.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', after: { anchor: 0, aggregate: 99 }, signal: controller.signal,
+    deliver: async (batch) => batches.push(batch),
+  });
+  await subscription.activate();
+  assert.deepEqual(batches, [[{ type: 'resync', entity: 'Project', id: 'p1', seq: 0, reason: 'recipient-snapshot-required' }]]);
+  controller.abort();
+  db.close();
+});
+
+test('aggregate subscriptions return the post-admission revision and resync when a member commit races admission', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT)');
+  db.prepare('INSERT INTO Project VALUES (?)').run('p1');
+  const project = { name: 'Project', fields: { id: {} }, grant: [], scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const comment = { name: 'Comment', fields: { projectId: {} }, grant: [], scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  let authorize;
+  const permission = new Promise((resolve) => { authorize = resolve; });
+  const live = createLiveDelivery({
+    db, entities: new Map([['Project', project], ['Comment', comment]]), mayVerb: async () => permission,
+    compositeScopes: new Map([['Project', { anchor: project, members: [{ entity: comment, where: { field: 'projectId', fromAnchor: 'id' } }] }]]),
+  });
+  const batches = [];
+  const controller = new AbortController();
+  const pending = live.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', after: { anchor: 0, aggregate: 0 }, signal: controller.signal,
+    deliver: async (batch) => batches.push(batch),
+  });
+  db.prepare('INSERT INTO Comment VALUES (?, ?)').run('c1', 'p1');
+  db.prepare("UPDATE _CommittedRevision SET revision = revision + 1 WHERE name = 'actions'").run();
+  authorize(true);
+  const subscription = await pending;
+  const cursor = await subscription.activate();
+  assert.deepEqual(batches, [[{ type: 'resync', entity: 'Project', id: 'p1', seq: 0, reason: 'recipient-snapshot-required' }]]);
+  assert.deepEqual(cursor, { anchor: 0, aggregate: 1 }, 'the response reports the post-admission aggregate revision while resync keeps it uncovered');
+  controller.abort();
+  db.close();
+});
+
+test('composite scope declarations reject malformed members and preserve a synchronous cursor boundary', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
   db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT)');
   db.prepare('INSERT INTO Project (id, name) VALUES (?, ?)').run('p1', 'Field notes');
   const entity = {
-    name: 'Project', fields: { name: { kind: 'value' } }, grant: [],
+    name: 'Project', fields: { id: {}, name: { kind: 'value' } }, grant: [],
     scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }),
   };
-  const malformed = createLiveDelivery({
-    db, entities: new Map([['Project', entity]]), mayVerb: async () => true,
-    compositeScopes: new Map([['Project', { snapshot: () => ({ value: undefined }) }]]),
-  });
-  await assert.rejects(malformed.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' }), /JSON value/);
-
-  const changingCursor = createLiveDelivery({
-    db, entities: new Map([['Project', entity]]), mayVerb: async () => true,
-    compositeScopes: new Map([['Project', { snapshot: () => {
-      appendEvent(db, 'Project:p1', 1, 'Comment.created', { raw: 'never exposed' });
-      return { projects: ['p1'] };
-    } }]]),
-  });
-  await assert.rejects(
-    changingCursor.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' }),
-    /must not change its committed cursor/,
-  );
+  assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', entity]]), mayVerb: () => true,
+    compositeScopes: new Map([['Project', { anchor: entity, members: [{ entity, where: { field: 'missing', fromAnchor: 'id' } }] }]]),
+  }), /undeclared cross-anchor field/);
   db.close();
 });
 
@@ -191,7 +330,7 @@ test('composite scope declarations reject malformed grammar and revoke an active
   );
   const live = createLiveDelivery({
     db, entities: new Map([['Project', entity]]), mayVerb: async () => true,
-    compositeScopes: new Map([['Project', { snapshot: ({ anchor }) => ({ project: anchor }) }]]),
+    compositeScopes: new Map([['Project', { anchor: entity, members: [] }]]),
   });
   const controller = new AbortController();
   let revoked = false;
@@ -239,11 +378,6 @@ test('public live delivery bootstrap fails closed and rejects asynchronous snaps
   );
 
   const live = createLiveDelivery({ db, entities: new Map([['Project', entity]]), mayVerb: async () => true });
-  const asynchronous = createLiveDelivery({
-    db, entities: new Map([['Project', entity]]), mayVerb: async () => true,
-    compositeScopes: new Map([['Project', { snapshot: async () => ({}) }]]),
-  });
-  await assert.rejects(asynchronous.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' }), /must be synchronous/);
   db.close();
 });
 

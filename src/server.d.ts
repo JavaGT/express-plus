@@ -512,27 +512,29 @@ export type LiveDeliveryEnvelope =
 export interface LiveDeliverySubscription {
   readonly principal: Principal;
   readonly scope: string;
-  readonly after?: number;
+  readonly after?: LiveDeliveryCursor;
   readonly signal: AbortSignal;
   readonly deliver: (batch: readonly LiveDeliveryEnvelope[]) => void | Promise<void>;
   readonly revoke?: (reason?: unknown) => void;
 }
 
 export interface LiveDeliveryActivation {
-  activate(): Promise<number | undefined>;
+  activate(): Promise<LiveDeliveryCursor | undefined>;
 }
 
+export type LiveDeliveryCursor = number | Readonly<{ anchor: number; aggregate: number }>;
+
 export type LiveDeliveryBootstrap<Snapshot = unknown> =
-  | { readonly kind: 'snapshot'; readonly snapshot: Snapshot; readonly cursor: number }
+  | { readonly kind: 'snapshot'; readonly snapshot: Snapshot; readonly cursor: LiveDeliveryCursor }
   | { readonly kind: 'revoked'; readonly reason?: unknown };
 
 export type LiveDeliveryCatchup =
   | {
       readonly kind: 'catchup';
       readonly envelopes: readonly LiveDeliveryEnvelope[];
-    readonly cursor: number;
+    readonly cursor: LiveDeliveryCursor;
   }
-  | { readonly kind: 'snapshot'; readonly snapshot: unknown; readonly cursor: number }
+  | { readonly kind: 'snapshot'; readonly snapshot: unknown; readonly cursor: LiveDeliveryCursor }
   | { readonly kind: 'revoked'; readonly reason?: unknown };
 
 export interface LiveDeliveryEntity {
@@ -542,13 +544,14 @@ export interface LiveDeliveryEntity {
   hydrate?(raw: unknown, principal: Principal): Record<string, unknown> | null | undefined;
 }
 
-export interface LiveDeliveryCompositeScope {
-  /** Materializes an authorized aggregate from recipient-safe anchor state. */
-  snapshot(input: {
-    readonly principal: Principal;
-    readonly scope: string;
-    readonly anchor: Readonly<Record<string, unknown>>;
-  }): unknown;
+export interface AggregateMember<Row extends object = Record<string, unknown>, Anchor extends object = Record<string, unknown>> {
+  readonly entity: { readonly name: string; readonly fields: Readonly<Record<string, unknown>> };
+  readonly where: { readonly field: keyof Row; readonly fromAnchor: keyof Anchor };
+}
+
+export interface LiveDeliveryCompositeScope<Anchor extends object = Record<string, unknown>> {
+  readonly anchor: { readonly name: string; readonly fields: Readonly<Record<string, unknown>> };
+  readonly members: readonly AggregateMember<any, Anchor>[];
 }
 
 export interface LiveDelivery {
@@ -559,7 +562,7 @@ export interface LiveDelivery {
   catchup(input: {
     readonly principal: Principal;
     readonly scope: string;
-    readonly after: number;
+    readonly after: LiveDeliveryCursor;
   }): Promise<LiveDeliveryCatchup>;
   subscribe(input: LiveDeliverySubscription): Promise<LiveDeliveryActivation>;
   wake(scope: string): void;
