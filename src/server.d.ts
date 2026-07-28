@@ -496,8 +496,8 @@ export type LiveDeliveryEnvelope =
         readonly type: string;
         readonly scope: string;
         readonly seq: number;
-        readonly actionId: string;
-        readonly committedAt: string;
+      readonly actionId: string;
+      readonly committedAt: string;
         readonly data: Readonly<Record<string, unknown>>;
       };
     }

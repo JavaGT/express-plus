@@ -632,6 +632,25 @@ export interface ListenOptions {
   requestLog?: boolean;
 }
 
+export interface AppLiveDeliveryCompositeScope {
+  /** Materializes an authorized aggregate from recipient-safe anchor state. */
+  snapshot(input: {
+    readonly principal: Principal;
+    readonly scope: string;
+    readonly anchor: Readonly<Record<string, unknown>>;
+  }): unknown;
+}
+
+export interface AppLiveDeliveryOptions {
+  /** Uses the same authenticated principal shape as the application kernel. */
+  principalOf(request: IncomingMessage): Principal | Promise<Principal>;
+  path?: string;
+  maxSubscriptions?: number;
+  /** Aggregate snapshots declared per anchor entity; no event or cursor access. */
+  compositeScopes?: ReadonlyMap<string, AppLiveDeliveryCompositeScope>;
+  maxCatchupEvents?: number;
+}
+
 export interface WorkbenchOptions {
   db?: string | WorkbenchDatabase;
   entities?: readonly WorkbenchEntity<any>[];
@@ -921,6 +940,8 @@ export interface WorkbenchApp extends RouteBuilder {
   static(prefix: string, directory: string): this;
   prepareSchema(): Promise<this>;
   ddl(): Promise<this>;
+  /** Attach package-owned HTTP/SSE delivery to this app before start or listen. */
+  attachLiveDelivery(options: AppLiveDeliveryOptions): this;
   start(): Promise<this>;
   onShutdown(
     name: string,

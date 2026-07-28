@@ -309,6 +309,15 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
             return handled || responseHasStarted(res);
           },
         },
+        // Application-integrated SSE delivery is package-owned: this mounted
+        // handler has no access to raw log rows or action callbacks.
+        {
+          match: () => isApp && Boolean(source._applicationLiveDelivery),
+          handle: async () => {
+            const handled = await source._applicationLiveDelivery.handler(req, res);
+            return handled || responseHasStarted(res);
+          },
+        },
         // App-declared prefix-intercept handlers — app.use(prefix, fn)
         {
           match: () => isApp && source._handlers?.length,
@@ -481,7 +490,7 @@ export function listen(app, port, optionsOrCallback = {}) {
 
   // Live Delivery is a durable _Log consumer, so a headless HTTP application
   // has no delivery seam to attach. DB-backed apps retain the single seam.
-  if (app.db) {
+  if (app.db && !app._applicationLiveDelivery) {
     app.live = createLiveDelivery(httpServer, {
       path: '/events',
       mayVerb: (entity, verb, row, principal) => mayVerb(entity, verb, row, principal),
@@ -503,7 +512,8 @@ export function listen(app, port, optionsOrCallback = {}) {
   if (app.jobs) {
     app._detachJobLive = app.jobs.onEvent((ev) => {
       if (!ev.scope) return;
-      app.live?.wake(ev.scope);
+      if (app._applicationLiveDelivery) app._applicationLiveDelivery.wake(ev.scope);
+      else app.live?.wake(ev.scope);
     });
   }
 

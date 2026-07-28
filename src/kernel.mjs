@@ -373,7 +373,7 @@ function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsu
   return [
     { name: 'blob.finalize', kind: 'durable-projection-consumer', consumer: blobFinalizeConsumer },
     { name: 'pending-blob.finalize', kind: 'durable-projection-consumer', consumer: pendingBlobConsumer },
-    { name: 'live', kind: 'live-delivery-consumer', consumer: app.live?.createConsumer?.(app) },
+    { name: 'live', kind: 'live-delivery-consumer', consumer: app._applicationLiveDelivery?.consumer ?? app.live?.createConsumer?.(app) },
     { name: 'projected.async', kind: 'durable-projection-consumer', consumer: createProjectedAsyncConsumer({ entities }) },
     { name: 'effect.durable', kind: 'durable-projection-consumer', consumer: createDurableEffectsConsumer({ durableEffectsRegistry, jobs: app.jobs }) },
     { name: 'email', kind: 'durable-projection-consumer', consumer: app._emailConsumer },

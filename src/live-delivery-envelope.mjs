@@ -41,7 +41,7 @@ function recipientLifecycleData(ctx, handle, id) {
   return data;
 }
 
-export function createLiveEnvelopeBuilder({ stateful = true } = {}) {
+export function createLiveEnvelopeBuilder({ stateful = true, includeActionId = true } = {}) {
   const deltaProjector = stateful ? createDeltaProjector() : null;
 
   /**
@@ -73,9 +73,9 @@ export function createLiveEnvelopeBuilder({ stateful = true } = {}) {
       type: ctx.event.eventType ?? ctx.event.type,
       scope: ctx.event.scope,
       seq: ctx.event.seq,
-      actionId: ctx.event.actionId,
       committedAt: ctx.event.committedAt,
     };
+    if (includeActionId) loggedEvent.actionId = ctx.event.actionId;
 
     let evHandle;
     try {

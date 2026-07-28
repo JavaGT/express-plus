@@ -44,6 +44,7 @@ import { prepareGracefulShutdown } from './lifecycle.mjs';
 import { createLog, withLog } from './log.mjs';
 import { serveStatic } from './views.mjs';
 import { authRoutes } from './auth/routes.mjs';
+import { attachApplicationLiveDelivery } from './application-live-delivery.mjs';
 import { User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor } from './auth/entities.mjs';
 import { config, resolveConfig } from './config.mjs';
 import path from 'node:path';
@@ -303,6 +304,10 @@ export default function workbench({
   app.ddl = () => app.prepareSchema();
 
   app.start = () => startApplication(app);
+  // Live delivery attaches before startup, when the kernel has not yet captured
+  // its post-commit consumers. The app owns registry and authorization wiring;
+  // callers provide only transport policy and declared aggregate snapshots.
+  app.attachLiveDelivery = (options) => attachApplicationLiveDelivery(app, options);
 
   app.listen = (portOrOptionsOrCallback, optionsOrCallback) => {
     // One listen path, Express-compatible overload:

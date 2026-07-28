@@ -45,12 +45,15 @@ function compositeScopeProviders(compositeScopes) {
   return providers;
 }
 
-export function createLiveDelivery({ db, entities, mayVerb, compositeScopes, log = null, maxCatchupEvents = 1000 }) {
+// Package-private assembly for an application-owned activation. The public
+// factory below deliberately returns only the delivery protocol; application
+// lifecycle wiring retains the committed consumer and shutdown capability.
+export function createOwnedLiveDelivery({ db, entities, mayVerb, compositeScopes, log = null, maxCatchupEvents = 1000, includeActionId = true }) {
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   const composites = compositeScopeProviders(compositeScopes);
   // Public delivery deliberately has no connection state. It emits only
   // recipient-hydrated lifecycle snapshots or opaque recovery controls.
-  const envelopes = createLiveEnvelopeBuilder({ stateful: false });
+  const envelopes = createLiveEnvelopeBuilder({ stateful: false, includeActionId });
   const core = createLiveDeliveryCore({
     db,
     entities,
@@ -65,7 +68,7 @@ export function createLiveDelivery({ db, entities, mayVerb, compositeScopes, log
     log,
   });
 
-  return {
+  const delivery = {
     // Public subscribers always acknowledge before any durable batch drains.
     subscribe(input) {
       const { paused: _paused, signal, revoke, ...subscription } = input ?? {};
@@ -115,4 +118,29 @@ export function createLiveDelivery({ db, entities, mayVerb, compositeScopes, log
       void core.wake(scope);
     },
   };
+
+  return {
+    delivery,
+    consumer: async (events) => {
+      const scopes = new Set();
+      for (const event of events) {
+        if (event?.scope) scopes.add(event.scope);
+      }
+      for (const scope of scopes) core.wake(scope);
+    },
+    close() {
+      core.close();
+    },
+  };
+}
+
+/**
+ * Direct transport-neutral delivery factory.
+ *
+ * This is for hosts that already own their entity registry and authorization
+ * kernel. Workbench applications should use app.attachLiveDelivery() instead,
+ * so the package binds delivery to the application's own authority.
+ */
+export function createLiveDelivery(options) {
+  return createOwnedLiveDelivery(options).delivery;
 }
