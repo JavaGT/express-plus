@@ -2609,6 +2609,7 @@ export function createLiveDeliveryHttpSession({
   fold,
   optimistic,
   sendAction,
+  actionUrl,
   fetchImpl = globalThis.fetch,
   eventSourceFactory = (url, options) => new EventSource(url, options),
   createActionId,
@@ -2619,6 +2620,9 @@ export function createLiveDeliveryHttpSession({
   if (typeof eventSourceFactory !== 'function') throw new TypeError('eventSourceFactory is required');
   const endpoint = `${baseUrl.replace(/\/$/, '')}/bootstrap`;
   const eventsEndpoint = `${baseUrl.replace(/\/$/, '')}/events`;
+  // The action endpoint belongs to the configured Workbench origin, not the
+  // browser document origin which may host a separate frontend application.
+  const actionEndpoint = actionUrl ?? new URL('/workbench/actions', new URL(baseUrl, globalThis.location?.href ?? 'http://workbench.local')).toString();
 
   async function bootstrap({ after, mode }) {
     const url = new URL(endpoint, globalThis.location?.href ?? 'http://workbench.local');
@@ -2656,13 +2660,27 @@ export function createLiveDeliveryHttpSession({
     return Promise.resolve({ close() { open = false; source.close(); } });
   }
 
+  async function sendHttpAction(action) {
+    const response = await fetchImpl(actionEndpoint, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...action, scope }),
+    });
+    let receipt;
+    try { receipt = await response.json(); } catch { throw new Error(`action dispatch failed with HTTP ${response.status}`); }
+    if (!response.ok) return receipt?.ok === false ? receipt : { ok: false, failure: receipt };
+    if (!receipt || receipt.ok !== true) throw new Error('action dispatch returned an invalid receipt');
+    return receipt;
+  }
+
   return createLiveDeliverySession({
     bootstrap,
     subscribe,
     validateSnapshot,
     fold,
     optimistic,
-    sendAction,
+    sendAction: sendAction ?? sendHttpAction,
     createActionId,
   });
 }

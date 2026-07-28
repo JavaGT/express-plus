@@ -446,7 +446,10 @@ export interface LiveDeliveryHttpSessionConfig<Snapshot, Payload = unknown> {
   validateSnapshot: (snapshot: unknown) => Snapshot;
   fold?: (snapshot: Snapshot, envelope: LiveDeliveryEventEnvelope) => Snapshot;
   optimistic?: (snapshot: Snapshot, action: { actionId: string; type: string; payload: Payload }) => Snapshot;
-  sendAction: LiveDeliverySessionConfig<Snapshot, Payload>['sendAction'];
+  /** Override the package-owned POST /workbench/actions transport. */
+  sendAction?: LiveDeliverySessionConfig<Snapshot, Payload>['sendAction'];
+  /** Absolute action endpoint; defaults to /workbench/actions on this origin. */
+  actionUrl?: string;
   fetchImpl?: typeof globalThis.fetch;
   eventSourceFactory?: (url: string, options: EventSourceInit) => EventSource;
   createActionId?: () => string;

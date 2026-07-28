@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, { entity, grant, read, subscribe, text } from '../src/index.mjs';
+import { createLiveDeliveryHttpSession } from '../public/workbench-client.mjs';
 
 const user = { type: 'user', id: 'u1', attributes: {} };
 
@@ -107,4 +108,73 @@ test('application live delivery validates providers without exposing kernel call
   );
   assert.equal(app._applicationLiveDelivery, undefined);
   db.close();
+});
+
+test('package action transport dispatches registered actions, wakes delivery, and returns opaque receipt fences', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, entities: [project()], actions: [projectAction()] });
+  app.attachLiveDelivery({ principalOf: () => user });
+  app.listen(0, { principalOf: () => user });
+  await app.ready;
+  t.after(async () => {
+    app.httpServer.closeAllConnections?.();
+    await app.shutdown();
+    db.close();
+  });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  await app.dispatch({ actionId: 'seed-project', type: 'project.write', scope: 'Project:p1', payload: { id: 'p1', name: 'before', authorized: true }, principal: user });
+  const stream = await fetch(`${origin}/live-delivery/events?scope=Project%3Ap1&after=1`);
+  const reader = stream.body.getReader();
+  await reader.read();
+
+  const request = { actionId: 'http-update', scope: 'Project:p1', type: 'project.write', payload: { id: 'p1', name: 'one', exists: true, authorized: true } };
+  const response = await fetch(`${origin}/workbench/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request),
+  });
+  const receipt = await response.json();
+  assert.deepEqual(receipt, { ok: true, actionId: 'http-update', confirmedThrough: 2 });
+  const [envelope] = await nextSseJson(reader);
+  assert.equal(envelope.event.type, 'Project.updated');
+  assert.equal(JSON.stringify(envelope).includes('http-update'), false);
+
+  const duplicate = await fetch(`${origin}/workbench/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request),
+  }).then((res) => res.json());
+  assert.deepEqual(duplicate, receipt, 'durable action ids return the canonical receipt fence');
+  await reader.cancel();
+});
+
+test('package action transport rejects unauthenticated, unauthorized, malformed, and non-registered requests', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, entities: [project()], actions: [projectAction()] });
+  app.listen(0, { principalOf: (request) => request.headers['x-user'] ? user : { type: 'anonymous', id: 'anonymous' } });
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  const endpoint = `http://127.0.0.1:${app.httpServer.address().port}/workbench/actions`;
+  const post = (body, headers = {}) => fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(body) });
+  assert.equal((await post({ actionId: 'a', scope: 'Project:p1', type: 'project.write', payload: {}, principal: user })).status, 400);
+  assert.equal((await post({ actionId: 'a', scope: 'Project:p1', type: 'project.write', payload: {} })).status, 403);
+  assert.equal((await post({ actionId: 'a', scope: 'Project:p1', type: 'Project.create', payload: {} }, { 'x-user': 'u1' })).status, 404);
+  assert.equal((await post({ actionId: 'a', scope: 'Project:p1', type: 'project.write', payload: { id: 'p1', authorized: false } }, { 'x-user': 'u1' })).status, 403);
+  assert.equal((await fetch(endpoint, { method: 'GET' })).status, 405);
+});
+
+test('HTTP delivery session uses package action transport by default and retains explicit senders', async () => {
+  const calls = [];
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async (url, options) => {
+      calls.push([url, options]);
+      if (options?.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: 1 }) };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: {}, cursor: 1 }) };
+    },
+    eventSourceFactory: () => ({ close() {} }), validateSnapshot: (value) => value,
+    createActionId: () => 'action-1',
+  });
+  await session.ready;
+  assert.equal((await session.dispatch('project.write', { name: 'one' })).ok, true);
+  const [, actionOptions] = calls.find(([, options]) => options?.method === 'POST');
+  assert.deepEqual(JSON.parse(actionOptions.body), { actionId: 'action-1', type: 'project.write', payload: { name: 'one' }, scope: 'Project:p1' });
+  assert.equal(calls.find(([, options]) => options?.method === 'POST')[0], 'https://example.test/workbench/actions');
+  session.close();
 });

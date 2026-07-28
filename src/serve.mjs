@@ -37,6 +37,7 @@ import { dispatchCrud } from './http-crud-dispatch.mjs';
 import { failure } from './outcome.mjs';
 import { sendFailure } from './http-failure.mjs';
 import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute, handleClientSdkRoute } from './http-framework-routes.mjs';
+import { handleApplicationActionHttp } from './application-action-http.mjs';
 
 // Framework-owned snapshot + resync endpoints (spec #1, D6/D7). NOT mounted
 // `makeHandlerRes(nodeRes, onEnd)` wraps a node response in the Express-style
@@ -308,6 +309,13 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
             const handled = await handleJobRoute(source, req, res);
             return handled || responseHasStarted(res);
           },
+        },
+        // Generic registered-action transport. This is intentionally before
+        // application handlers so entity mutation authority stays in the
+        // package-owned registered-action kernel.
+        {
+          match: () => isApp,
+          handle: async () => handleApplicationActionHttp(source, req, res, principalOf, sendJson),
         },
         // Application-integrated SSE delivery is package-owned: this mounted
         // handler has no access to raw log rows or action callbacks.
