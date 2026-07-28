@@ -87,11 +87,15 @@ function hasSqlKeyword(sql, keyword) {
   return false;
 }
 
+function hasUnsupportedTableClause(sql) {
+  return ['CHECK', 'COLLATE', 'CONFLICT', 'DEFERRABLE', 'MATCH', 'STRICT', 'WITHOUT'].some((keyword) => hasSqlKeyword(sql, keyword));
+}
+
 export function validateSchemaOwnedEntityTable(db, entity, declaration) {
   const master = db.prepare("SELECT type, sql FROM sqlite_schema WHERE lower(name) = lower(?)").all(declaration.name);
   if (master.length !== 1 || master[0].type !== 'table') fail(entity, 'must exist as a real table');
   if (/^CREATE\s+VIRTUAL\s+TABLE/i.test(master[0].sql ?? '')) fail(entity, 'must not be virtual');
-  if (hasSqlKeyword(master[0].sql ?? '', 'CHECK')) fail(entity, 'must not contain CHECK constraints');
+  if (hasUnsupportedTableClause(master[0].sql ?? '')) fail(entity, 'must not contain unsupported constraints or table options');
   const temp = db.prepare("SELECT type FROM sqlite_temp_schema WHERE lower(name) = lower(?)").all(declaration.name);
   if (temp.length > 0) fail(entity, 'must not have a TEMP shadow');
   for (const schema of ['sqlite_schema', 'sqlite_temp_schema']) {
