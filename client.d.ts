@@ -392,7 +392,8 @@ export type LiveDeliveryCursor = number | Readonly<{ anchor: number; aggregate: 
 export type LiveDeliveryBootstrap<Snapshot> =
   | { kind: 'snapshot'; snapshot: Snapshot; cursor: LiveDeliveryCursor }
   | { kind: 'catchup'; envelopes: readonly LiveDeliveryEnvelope[]; cursor: LiveDeliveryCursor }
-  | { kind: 'revoked'; reason?: unknown };
+  | { kind: 'revoked'; reason?: unknown }
+  | { kind: 'retry' };
 
 export interface LiveDeliverySubscription {
   close?: () => void;

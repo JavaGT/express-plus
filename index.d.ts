@@ -634,24 +634,38 @@ export interface ListenOptions {
   requestLog?: boolean;
 }
 
-export interface AggregateMember<Row extends object = Record<string, unknown>, Anchor extends object = Record<string, unknown>> {
-  readonly entity: WorkbenchEntity<Row>;
-  readonly where: { readonly field: keyof Row; readonly fromAnchor: keyof Anchor };
+export interface SnapshotSelect { readonly kind: 'select'; }
+export interface SnapshotOrder { readonly kind: 'orderBy'; }
+export interface SnapshotOutput { readonly kind: 'object'; }
+export interface SnapshotRelation { readonly kind: 'one' | 'many' | 'keyed' | 'count'; }
+export interface SnapshotDeclaration { readonly kind: 'snapshot'; readonly anchor: WorkbenchEntity; readonly output: SnapshotOutput; }
+export interface SnapshotGrammar {
+  <Row extends object>(anchor: WorkbenchEntity<Row>, options: { output: SnapshotOutput }): SnapshotDeclaration;
+  object(shape: Readonly<Record<string, SnapshotSelect | SnapshotRelation>>): SnapshotOutput;
+  select(...fields: readonly FieldHandle[]): SnapshotSelect;
+  one<Row extends object>(entity: WorkbenchEntity<Row>, options: { select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
+  many<Row extends object>(entity: WorkbenchEntity<Row>, options: { select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
+  keyed<Row extends object>(entity: WorkbenchEntity<Row>, options: { select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
+  count<Row extends object>(entity: WorkbenchEntity<Row>): SnapshotRelation;
+  include(shape: Readonly<Record<string, SnapshotSelect | SnapshotRelation>>): SnapshotOutput;
+  orderBy(field: FieldHandle, direction?: 'asc' | 'desc'): SnapshotOrder;
 }
-
-export interface AppLiveDeliveryCompositeScope<Anchor extends object = Record<string, unknown>> {
-  /** Package-owned, recipient-authorized aggregate snapshot declaration. */
-  readonly anchor: WorkbenchEntity<Anchor>;
-  readonly members: readonly AggregateMember<any, Anchor>[];
-}
+export const snapshot: SnapshotGrammar;
+export const object: SnapshotGrammar['object'];
+export const one: SnapshotGrammar['one'];
+export const keyed: SnapshotGrammar['keyed'];
+export const select: SnapshotGrammar['select'];
+export const include: SnapshotGrammar['include'];
+export const orderBy: SnapshotGrammar['orderBy'];
+export const count: SnapshotGrammar['count'];
 
 export interface AppLiveDeliveryOptions {
   /** Uses the same authenticated principal shape as the application kernel. */
   principalOf(request: IncomingMessage): Principal | Promise<Principal>;
   path?: string;
   maxSubscriptions?: number;
-  /** Aggregate snapshots declared per anchor entity; no event or cursor access. */
-  compositeScopes?: ReadonlyMap<string, AppLiveDeliveryCompositeScope>;
+  /** Constrained relational snapshots; no event, SQL, or callback access. */
+  snapshots?: readonly SnapshotDeclaration[];
   maxCatchupEvents?: number;
 }
 

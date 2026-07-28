@@ -10,7 +10,7 @@ export function attachApplicationLiveDelivery(app, {
   principalOf,
   path = '/live-delivery',
   maxSubscriptions = 100,
-  compositeScopes,
+  snapshots,
   maxCatchupEvents,
 } = {}) {
   if (app._startPromise || app._startupMode || app._transportAttached) {
@@ -23,7 +23,7 @@ export function attachApplicationLiveDelivery(app, {
     db: app.db,
     entities: (name) => app.entities.get(name),
     mayVerb: (entity, verb, row, principal) => mayVerb(entity, verb, row, principal),
-    compositeScopes,
+    snapshots,
     log: app.log,
     maxCatchupEvents,
     includeActionId: false,

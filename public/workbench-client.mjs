@@ -2345,6 +2345,9 @@ export function createLiveDeliverySession({
       revoke(result.reason);
       return;
     }
+    if (result.kind === 'retry') {
+      return recover('snapshot', snapshotCursorFloor);
+    }
     if (result.kind === 'snapshot') {
       assertCursor(result.cursor, 'snapshot cursor');
       const nextSnapshot = validateSnapshot(result.snapshot);

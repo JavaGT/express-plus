@@ -4,8 +4,9 @@
 
 import { createLiveDeliveryCore } from './live-delivery-core.mjs';
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
-import { mayRow } from './row-grant.mjs';
-import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
+import { tryParseScopeKey } from './scope-handle.mjs';
+import { readSeq } from './committed-log.mjs';
+import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
 
 function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
@@ -31,69 +32,41 @@ function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
   return Object.freeze(copy);
 }
 
-function aggregateScopes(compositeScopes, resolveEntity) {
-  if (compositeScopes === undefined) return new Map();
-  if (!(compositeScopes instanceof Map)) throw new TypeError('compositeScopes must be a Map');
-  const scopes = new Map();
-  for (const [entity, declaration] of compositeScopes) {
-    // Reuse the package scope grammar rather than accepting a second spelling.
-    scopeOf(entity, 'declaration');
-    const anchor = declaration?.anchor;
-    if (!anchor || anchor.name !== entity || resolveEntity(entity) !== anchor) {
-      throw new TypeError(`composite scope '${entity}' requires its registered anchor entity`);
-    }
-    if (!Array.isArray(declaration.members)) throw new TypeError(`composite scope '${entity}' requires members`);
-    const members = declaration.members.map((member, index) => {
-      const target = member?.entity;
-      const where = member?.where;
-      if (!target || resolveEntity(target.name) !== target) throw new TypeError(`composite scope '${entity}' member ${index} must declare a registered entity`);
-      if (!where || typeof where.field !== 'string' || typeof where.fromAnchor !== 'string') throw new TypeError(`composite scope '${entity}' member ${index} requires where.field and where.fromAnchor`);
-      if (!(where.field in target.fields) || !(where.fromAnchor in anchor.fields)) throw new TypeError(`composite scope '${entity}' member ${index} has an undeclared cross-anchor field`);
-      return { entity: target, where };
-    });
-    scopes.set(entity, { anchor, members });
-  }
-  return scopes;
-}
-
 // Package-private assembly for an application-owned activation. The public
 // factory below deliberately returns only the delivery protocol; application
 // lifecycle wiring retains the committed consumer and shutdown capability.
-export function createOwnedLiveDelivery({ db, entities, mayVerb, compositeScopes, log = null, maxCatchupEvents = 1000, includeActionId = true }) {
+export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log = null, maxCatchupEvents = 1000, includeActionId = true }) {
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   const resolveEntity = typeof entities === 'function' ? entities : (name) => entities.get(name);
-  const composites = aggregateScopes(compositeScopes, resolveEntity);
+  const composites = compileSnapshots(snapshots, resolveEntity);
   const aggregateRevision = () => Number(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get().revision);
   async function aggregateSnapshot({ principal, scope, declaration }) {
-    const rows = new Map();
-    const add = (entity, row) => {
-      const id = String(row.id);
-      let byId = rows.get(entity.name);
-      if (!byId) rows.set(entity.name, byId = new Map());
-      byId.set(id, jsonSnapshot(row, `aggregate.${entity.name}.${id}`));
-    };
-    const anchor = core.snapshot({ principal, scope });
-    add(declaration.anchor, anchor);
-    for (const member of declaration.members) {
-      const { sql, params } = member.entity.scopeFilter(principal);
-      const rawRows = db.prepare(`SELECT * FROM ${member.entity.name} AS t0 WHERE ${sql} AND t0.${member.where.field} = :aggregate_anchor ORDER BY t0.id`)
-        .all({ ...params, aggregate_anchor: anchor[member.where.fromAnchor] });
-      for (const raw of rawRows) {
-        if ('hydrate' in member.entity && typeof member.entity.hydrate !== 'function') continue;
-        const row = typeof member.entity.hydrate === 'function' ? member.entity.hydrate(raw, principal) : raw;
-        if (row === null || row === undefined) continue;
-        // scopeFilter is necessary but a member still needs its subscribe grant.
-        // This synchronous boolean form is the same entity grant used by delivery.
-        const permitted = await mayRow(member.entity, 'subscribe', row, principal, mayVerb);
-        if (!permitted) continue;
-        add(member.entity, row);
+    const handle = tryParseScopeKey(scope);
+    // No transaction crosses authorization awaits. Each attempt detaches a
+    // complete candidate graph and its two committed fences before authorizing.
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      let captured;
+      db.exec('BEGIN');
+      try {
+        captured = Object.freeze({
+          anchor: readSeq(db, scope),
+          aggregate: aggregateRevision(),
+          candidate: captureSnapshot({ db, principal, anchor: declaration.anchor, id: handle.id, output: declaration.output }),
+        });
+      } finally {
+        db.exec('COMMIT');
       }
+      if (!captured.candidate) return { kind: 'revoked' };
+      const authorization = await authorizeSnapshot({ principal, anchor: declaration.anchor, candidate: captured.candidate, mayVerb });
+      if (!authorization.anchorAllowed) return { kind: 'revoked' };
+      const value = jsonSnapshot(projectSnapshot({ anchor: declaration.anchor, candidate: captured.candidate, output: declaration.output, authorized: authorization.authorized }));
+      if (readSeq(db, scope) === captured.anchor && aggregateRevision() === captured.aggregate) {
+        return Object.freeze({ kind: 'snapshot', snapshot: value, cursor: Object.freeze({ anchor: captured.anchor, aggregate: captured.aggregate }) });
+      }
+      await Promise.resolve();
     }
-    const entities = {};
-    for (const name of [...rows.keys()].sort()) {
-      entities[name] = Object.freeze(Object.fromEntries([...rows.get(name).entries()].sort(([a], [b]) => a.localeCompare(b))));
-    }
-    return Object.freeze({ entities: Object.freeze(entities) });
+    // The caller receives only an opaque recovery result, never an unstable pair.
+    return { kind: 'retry' };
   }
   // Public delivery deliberately has no connection state. It emits only
   // recipient-hydrated lifecycle snapshots or opaque recovery controls.
@@ -157,25 +130,17 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, compositeScopes
     async bootstrap({ principal, scope }) {
       // The declaration is selected by the package scope grammar, before the
       // core pairs its synchronous result with the committed cursor.
-      let pairedRevision;
+      const handle = tryParseScopeKey(scope);
+      const aggregate = handle && composites.get(handle.entity);
+      if (aggregate) return aggregateSnapshot({ principal, scope, declaration: aggregate });
       const result = await core.bootstrap({
         principal,
         scope,
         snapshot: ({ principal: recipient, scope: snapshotScope }) => {
-          const handle = tryParseScopeKey(snapshotScope);
-          const declaration = handle && composites.get(handle.entity);
-          if (!declaration) return core.snapshot({ principal: recipient, scope: snapshotScope });
-          const before = aggregateRevision();
-          return aggregateSnapshot({ principal: recipient, scope: snapshotScope, declaration }).then((value) => {
-            pairedRevision = aggregateRevision();
-            if (pairedRevision !== before) throw new Error('aggregate snapshot changed while materializing');
-            return value;
-          });
+          return core.snapshot({ principal: recipient, scope: snapshotScope });
         },
       });
-      const handle = tryParseScopeKey(scope);
-      if (result.kind !== 'snapshot' || !handle || !composites.has(handle.entity)) return result;
-      return { ...result, cursor: Object.freeze({ anchor: result.cursor, aggregate: pairedRevision }) };
+       return result;
     },
     async catchup(input) {
       const handle = tryParseScopeKey(input.scope);
@@ -186,6 +151,11 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, compositeScopes
           return this.bootstrap({ principal: input.principal, scope: input.scope });
         }
         const result = await core.catchup({ ...input, after: cursor.anchor });
+        // Core admission awaits authorization. Never return an anchor catch-up
+        // paired with the aggregate revision observed before that await.
+        if (aggregateRevision() !== cursor.aggregate) {
+          return this.bootstrap({ principal: input.principal, scope: input.scope });
+        }
         return result.kind === 'revoked' ? result : { ...result, cursor: Object.freeze({ anchor: result.cursor, aggregate: cursor.aggregate }) };
       }
       // Never materialize an unbounded retained history merely to discover it
@@ -215,7 +185,9 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, compositeScopes
         const handle = tryParseScopeKey(event?.scope);
         if (!handle) continue;
         for (const [anchorName, declaration] of composites) {
-          if (declaration.members.some((member) => member.entity.name === handle.entity)) invalidatedAnchors.add(anchorName);
+          // Declaration-wide resync is deliberately conservative: it covers
+          // deletes and reparenting without retaining pre-image state.
+          if (declaration.output) invalidatedAnchors.add(anchorName);
         }
       }
       // Member events invalidate every live aggregate of that declaration. The

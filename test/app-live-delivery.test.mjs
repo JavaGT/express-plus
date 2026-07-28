@@ -106,8 +106,8 @@ test('application live delivery validates aggregate declarations without exposin
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db, entities: [project()] });
   assert.throws(
-    () => app.attachLiveDelivery({ principalOf: () => user, compositeScopes: new Map([['Project', {}]]) }),
-    /registered anchor entity/,
+    () => app.attachLiveDelivery({ principalOf: () => user, snapshots: [{}] }),
+    /snapshots accepts only/,
   );
   assert.equal(app._applicationLiveDelivery, undefined);
   db.close();

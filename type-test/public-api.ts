@@ -19,7 +19,7 @@ import {
   frameworkTableNames, readCommittedCursor,
   runMigrations, describeEntityStorage, describeSqliteStorage,
   type BlobStore, type SqliteStorageDescription,
-  type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type LiveDeliveryBootstrap, type LiveDeliveryCatchup, type LiveDeliveryCompositeScope, type LiveDeliveryEnvelope as ServerLiveDeliveryEnvelope, type Migration, type UserPrincipal,
+  type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type LiveDeliveryBootstrap, type LiveDeliveryCatchup, type LiveDeliveryEnvelope as ServerLiveDeliveryEnvelope, type Migration, type UserPrincipal,
   type WorkbenchDatabase,
 } from 'workbench/server';
 import {
@@ -349,11 +349,7 @@ const job: JobRow = queue.enqueue({ kind: 'index', payload: { projectId: 'projec
 const blobs: BlobStore = createBlobStore({ db, bytes: {} as never });
 void [job, blobs, runMigrations(db, [migration]), readCommittedCursor(db, 'Project:project-1')];
 const live: LiveDelivery = createLiveDelivery({ db, entities: new Map(), mayVerb: () => true });
-const projectAggregate: LiveDeliveryCompositeScope = {
-  anchor: Project,
-  members: [],
-};
-createLiveDelivery({ db, entities: new Map(), mayVerb: () => true, compositeScopes: new Map([['Project', projectAggregate]]) });
+createLiveDelivery({ db, entities: new Map(), mayVerb: () => true, snapshots: [] });
 const liveAbort = new AbortController();
 const liveBootstrap: Promise<LiveDeliveryBootstrap> = live.bootstrap({
   principal: request.principal,

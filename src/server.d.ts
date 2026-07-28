@@ -526,7 +526,8 @@ export type LiveDeliveryCursor = number | Readonly<{ anchor: number; aggregate: 
 
 export type LiveDeliveryBootstrap<Snapshot = unknown> =
   | { readonly kind: 'snapshot'; readonly snapshot: Snapshot; readonly cursor: LiveDeliveryCursor }
-  | { readonly kind: 'revoked'; readonly reason?: unknown };
+  | { readonly kind: 'revoked'; readonly reason?: unknown }
+  | { readonly kind: 'retry' };
 
 export type LiveDeliveryCatchup =
   | {
@@ -535,7 +536,8 @@ export type LiveDeliveryCatchup =
     readonly cursor: LiveDeliveryCursor;
   }
   | { readonly kind: 'snapshot'; readonly snapshot: unknown; readonly cursor: LiveDeliveryCursor }
-  | { readonly kind: 'revoked'; readonly reason?: unknown };
+  | { readonly kind: 'revoked'; readonly reason?: unknown }
+  | { readonly kind: 'retry' };
 
 export interface LiveDeliveryEntity {
   readonly name: string;
@@ -544,15 +546,7 @@ export interface LiveDeliveryEntity {
   hydrate?(raw: unknown, principal: Principal): Record<string, unknown> | null | undefined;
 }
 
-export interface AggregateMember<Row extends object = Record<string, unknown>, Anchor extends object = Record<string, unknown>> {
-  readonly entity: { readonly name: string; readonly fields: Readonly<Record<string, unknown>> };
-  readonly where: { readonly field: keyof Row; readonly fromAnchor: keyof Anchor };
-}
-
-export interface LiveDeliveryCompositeScope<Anchor extends object = Record<string, unknown>> {
-  readonly anchor: { readonly name: string; readonly fields: Readonly<Record<string, unknown>> };
-  readonly members: readonly AggregateMember<any, Anchor>[];
-}
+export interface LiveDeliverySnapshot { readonly kind: 'snapshot'; readonly anchor: LiveDeliveryEntity; readonly output: object; }
 
 export interface LiveDelivery {
   bootstrap(input: {
@@ -572,8 +566,8 @@ export function createLiveDelivery(options: {
   db: WorkbenchDatabase;
   entities: ReadonlyMap<string, LiveDeliveryEntity> | ((name: string) => LiveDeliveryEntity | undefined);
   mayVerb: (entity: LiveDeliveryEntity, verb: 'subscribe', row: Record<string, unknown>, principal: Principal) => boolean | Promise<boolean>;
-  /** Aggregate snapshots registered per anchor entity; delivery stays opaque. */
-  compositeScopes?: ReadonlyMap<string, LiveDeliveryCompositeScope>;
+  /** Package-owned constrained relational snapshot declarations. */
+  snapshots?: readonly LiveDeliverySnapshot[];
   log?: { error?: (channel: string, message: string, context?: Record<string, unknown>) => void } | null;
   maxCatchupEvents?: number;
 }): LiveDelivery;
