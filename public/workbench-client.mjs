@@ -15,6 +15,7 @@
 import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } from './workbench-annotated-text.mjs';
 import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { materializeAnnotatedTextSnapshot } from './workbench-annotated-text-snapshot.mjs';
+import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { materializeAnnotatedTextSnapshot };
 
 // --- BEGIN GENERATED from src/replay-decision.mjs (keep in sync; zero-import) ---
@@ -2720,6 +2721,47 @@ export function createLiveDeliveryHttpSession({
     redo: () => session.dispatch('$history.redo', { session: historySession }),
   }) });
   return session;
+}
+
+/**
+ * A document-bound annotated-text session. The document context owns scope,
+ * action grammar, and the opaque recipient basis; callers only name edits.
+ */
+export function createAnnotatedTextHttpSession({ baseUrl, context, historySession, fetchImpl, eventSourceFactory, createActionId }) {
+  if (!context || typeof context !== 'object' || typeof context.documentId !== 'string' || context.documentId.length === 0) {
+    throw new TypeError('annotated text context requires a documentId');
+  }
+  const { entity, field, documentId } = context;
+  const scope = `${entity?.name}:${documentId}`;
+  const session = createLiveDeliveryHttpSession({
+    baseUrl,
+    scope,
+    historySession,
+    fetchImpl,
+    eventSourceFactory,
+    createActionId,
+    validateSnapshot(snapshot) {
+      if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('annotated text delivery snapshot must be an object');
+      return materializeAnnotatedTextSnapshot(snapshot[field?.fieldName], field);
+    },
+  });
+  async function dispatch(command) {
+    const document = session.snapshot;
+    if (!document) throw new ClientClosedError('Annotated text document is unavailable');
+    const action = annotatedTextAction(entity, field, { ...command, id: documentId, basis: document.basis });
+    if (action.scope !== scope) throw new Error('annotated text action escaped its document context');
+    return session.dispatch(action.type, action.payload);
+  }
+  return Object.freeze({
+    get document() { return session.snapshot; },
+    get status() { return session.status; },
+    get ready() { return session.ready; },
+    insert({ mutationId, at, text }) { return dispatch({ kind: 'text.insert', mutationId, at, text }); },
+    delete({ mutationId, from, to }) { return dispatch({ kind: 'text.delete', mutationId, from, to }); },
+    reconnect: () => session.reconnect(),
+    subscribe: (listener) => session.subscribe(listener),
+    close: () => session.close(),
+  });
 }
 
 // ---------------------------------------------------------------------------

@@ -74,8 +74,8 @@ test('db-backed app serves the annotated-text snapshot module', async (t) => {
 test('db-backed app serves every relative module imported by the browser SDK', async (t) => {
   const origin = await bootDb(t);
   const body = await (await fetch(`${origin}/workbench.mjs`)).text();
-  for (const dependency of body.matchAll(/from '(\.\/[^']+)'/g)) {
-    assert.equal((await fetch(`${origin}/${dependency[1].slice(2)}`)).status, 200, dependency[1]);
+  for (const dependency of body.matchAll(/from '([^']+)'/g)) {
+    assert.equal((await fetch(new URL(dependency[1], `${origin}/workbench.mjs`))).status, 200, dependency[1]);
   }
 });
 

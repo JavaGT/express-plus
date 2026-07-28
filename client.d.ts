@@ -3,7 +3,7 @@
 // Source of truth: public/workbench-client.mjs
 // Projection for TypeScript app authors. JS users see no change.
 
-import type { AnnotatedTextFieldHandle } from './index.js';
+import type { AnnotatedTextFieldHandle, AnnotatedTextPosition, WorkbenchEntity } from './index.js';
 
 // ---------------------------------------------------------------------------
 // LiveChannel — WebSocket transport layer
@@ -622,3 +622,35 @@ export function materializeAnnotatedTextSnapshot(
   snapshot: Record<string, unknown>,
   declaration: AnnotatedTextFieldHandle,
 ): AnnotatedTextDocument;
+
+// ---------------------------------------------------------------------------
+// createAnnotatedTextHttpSession — document-bound typed authoring
+// ---------------------------------------------------------------------------
+
+export interface AnnotatedTextAuthoringContext {
+  readonly entity: WorkbenchEntity;
+  readonly field: AnnotatedTextFieldHandle;
+  readonly documentId: string;
+}
+
+export interface AnnotatedTextHttpSessionConfig {
+  readonly baseUrl: string;
+  readonly context: AnnotatedTextAuthoringContext;
+  readonly historySession: string;
+  readonly fetchImpl?: typeof globalThis.fetch;
+  readonly eventSourceFactory?: (url: string, options: EventSourceInit) => EventSource;
+  readonly createActionId?: () => string;
+}
+
+export interface AnnotatedTextHttpSession {
+  readonly document: AnnotatedTextDocument | null;
+  readonly status: LiveDeliverySession<AnnotatedTextDocument>['status'];
+  readonly ready: Promise<void>;
+  insert(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition; readonly text: string }): Promise<ScopeDispatchResult>;
+  delete(input: { readonly mutationId: string; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
+  reconnect(): Promise<void>;
+  subscribe(listener: (document: AnnotatedTextDocument | null) => void): () => void;
+  close(): void;
+}
+
+export function createAnnotatedTextHttpSession(config: AnnotatedTextHttpSessionConfig): AnnotatedTextHttpSession;

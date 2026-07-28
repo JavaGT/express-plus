@@ -7,6 +7,7 @@ import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 import { readSeq } from './committed-log.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
+import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 
 function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
@@ -149,8 +150,12 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
       const result = await core.bootstrap({
         principal,
         scope,
-        snapshot: ({ principal: recipient, scope: snapshotScope }) => {
-          return core.snapshot({ principal: recipient, scope: snapshotScope });
+      snapshot: ({ principal: recipient, scope: snapshotScope }) => {
+          const row = core.snapshot({ principal: recipient, scope: snapshotScope });
+          const direct = tryParseScopeKey(snapshotScope);
+          const entity = direct && resolveEntity(direct.entity);
+          if (!entity || !hasAnnotatedTextFields(entity)) return row;
+          return projectEntitySnapshot({ db, entity, row, principal: recipient });
         },
       });
        return result;
