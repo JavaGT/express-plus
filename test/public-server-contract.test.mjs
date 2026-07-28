@@ -138,6 +138,7 @@ test('composite scope delivery materializes a checked aggregate and resyncs hete
   });
   assert.equal(JSON.stringify({ bootstrap, catchup }).includes('secret'), false);
   assert.equal(JSON.stringify({ bootstrap, catchup }).includes('raw comment'), false);
+  assert.equal(JSON.stringify({ bootstrap, catchup }).includes('action-1'), false);
   appendEvent(db, 'Project:p1', 2, 'Project.updated', { secret: 'raw anchor event' });
   assert.deepEqual(
     await live.catchup({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', after: 1 }),

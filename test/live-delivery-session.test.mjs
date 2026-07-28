@@ -73,6 +73,89 @@ describe('LiveDeliverySession', () => {
     session.close();
   });
 
+  it('requires a replacement snapshot after a delayed snapshot-only receipt', async () => {
+    const receipt = deferred();
+    let delivery;
+    let snapshots = 0;
+    const session = createLiveDeliverySession({
+      validateSnapshot: (snapshot) => snapshot,
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: { version: ++snapshots }, cursor: snapshots === 1 ? 1 : 3 }),
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+      sendAction: () => receipt.promise,
+      createActionId: () => 'own-composite-action',
+    });
+    await session.ready;
+    const dispatched = session.dispatch('Project.rename', {});
+    await delivery([{ type: 'resync', seq: 3, reason: 'recipient-snapshot-required' }]);
+    assert.equal(session.pendingCount(), 1);
+
+    receipt.resolve({ ok: true, actionId: 'own-composite-action', confirmedThrough: 3 });
+    assert.equal((await dispatched).ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(snapshots, 3);
+    assert.equal(session.pendingCount(), 0);
+    assert.deepEqual(session.snapshot, { version: 3 });
+    session.close();
+  });
+
+  it('fails closed when a snapshot-only receipt cannot identify its submitted action', async () => {
+    const session = createLiveDeliverySession({
+      validateSnapshot: (snapshot) => snapshot,
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: {}, cursor: 1 }),
+      subscribe: async () => ({ close() {} }),
+      optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+      sendAction: async () => ({ ok: true, actionId: 'another-action', confirmedThrough: 2 }),
+      createActionId: () => 'own-composite-action',
+    });
+    await session.ready;
+    const result = await session.dispatch('Project.rename', {});
+    assert.equal(result.ok, false);
+    assert.equal(session.pendingCount(), 0);
+    assert.deepEqual(session.snapshot, {});
+    session.close();
+  });
+
+  it('fails closed when a snapshot-only receipt has no confirmation fence', async () => {
+    const session = createLiveDeliverySession({
+      validateSnapshot: (snapshot) => snapshot,
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: {}, cursor: 1 }),
+      subscribe: async () => ({ close() {} }),
+      optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+      sendAction: async () => ({ ok: true }),
+      createActionId: () => 'own-composite-action',
+    });
+    await session.ready;
+    const result = await session.dispatch('Project.rename', {});
+    assert.equal(result.ok, false);
+    assert.equal(session.pendingCount(), 0);
+    assert.deepEqual(session.snapshot, {});
+    session.close();
+  });
+
+  it('drops a delivered snapshot-only overlay when its required replacement snapshot fails', async () => {
+    let snapshots = 0;
+    const session = createLiveDeliverySession({
+      validateSnapshot: (snapshot) => snapshot,
+      bootstrap: async () => {
+        snapshots += 1;
+        if (snapshots === 1) return { kind: 'snapshot', snapshot: {}, cursor: 2 };
+        throw new Error('offline');
+      },
+      subscribe: async () => ({ close() {} }),
+      optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+      sendAction: async () => ({ ok: true, actionId: 'own-composite-action', confirmedThrough: 2 }),
+      createActionId: () => 'own-composite-action',
+    });
+    await session.ready;
+    assert.equal((await session.dispatch('Project.rename', {})).ok, true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(session.status, 'unavailable');
+    assert.equal(session.pendingCount(), 0);
+    assert.deepEqual(session.snapshot, {});
+    session.close();
+  });
+
   it('does not dispatch an optimistic action before the snapshot cursor is confirmed', async () => {
     const boot = deferred();
     const { session } = setup({ bootstrap: () => boot.promise });
@@ -176,6 +259,83 @@ describe('LiveDeliverySession', () => {
     await delivery([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]);
     assert.deepEqual(session.snapshot, { projects: ['fresh'] });
     assert.deepEqual(calls, ['snapshot', 'snapshot']);
+    session.close();
+  });
+
+  it('settles a snapshot-only action only when its positive receipt fence is covered by an authorized snapshot', async () => {
+    const receipt = deferred();
+    let delivery;
+    let snapshots = 0;
+    const session = createLiveDeliverySession({
+      validateSnapshot: (snapshot) => snapshot,
+      bootstrap: async () => {
+        snapshots += 1;
+        return snapshots === 1
+          ? { kind: 'snapshot', snapshot: { projects: ['old'] }, cursor: 1 }
+          : { kind: 'snapshot', snapshot: { projects: ['fresh'] }, cursor: 3 };
+      },
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      optimistic: (snapshot, action) => ({ projects: [...snapshot.projects, `pending:${action.payload.name}`] }),
+      sendAction: () => receipt.promise,
+      createActionId: () => 'own-composite-action',
+    });
+    await session.ready;
+    const dispatched = session.dispatch('Project.rename', { name: 'fresh' });
+    assert.deepEqual(session.snapshot, { projects: ['old', 'pending:fresh'] });
+
+    // Opaque controls do not identify or settle actions before a receipt.
+    await delivery([{ type: 'resync', seq: 3, reason: 'recipient-snapshot-required' }]);
+    assert.deepEqual(session.snapshot, { projects: ['fresh', 'pending:fresh'] });
+    assert.equal(session.pendingCount(), 1);
+
+    receipt.resolve({ ok: true, actionId: 'own-composite-action', confirmedThrough: 3 });
+    assert.equal((await dispatched).ok, true);
+    assert.deepEqual(session.snapshot, { projects: ['fresh'] });
+    assert.equal(session.pendingCount(), 0);
+    session.close();
+  });
+
+  it('does not settle a snapshot-only action from an unrelated or insufficient cursor fence', async () => {
+    let delivery;
+    let snapshots = 0;
+    const session = createLiveDeliverySession({
+      validateSnapshot: (snapshot) => snapshot,
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: { version: ++snapshots }, cursor: snapshots }),
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+      sendAction: async () => ({ ok: true, actionId: 'own-composite-action', confirmedThrough: 3 }),
+      createActionId: () => 'own-composite-action',
+    });
+    await session.ready;
+    await session.dispatch('Project.rename', {});
+    await delivery([{ type: 'resync', seq: 99, reason: 'recipient-snapshot-required' }]);
+
+    assert.equal(session.cursor, 2);
+    assert.equal(session.pendingCount(), 1);
+    assert.deepEqual(session.snapshot, { version: 2, pending: true });
+    session.close();
+  });
+
+  it('does not confirm a snapshot-only action when its sender rejects after a later recovery', async () => {
+    const receipt = deferred();
+    let delivery;
+    let snapshots = 0;
+    const session = createLiveDeliverySession({
+      validateSnapshot: (snapshot) => snapshot,
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: { version: ++snapshots }, cursor: snapshots === 1 ? 1 : 4 }),
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+      sendAction: () => receipt.promise,
+      createActionId: () => 'own-composite-action',
+    });
+    await session.ready;
+    const dispatched = session.dispatch('Project.rename', {});
+    await delivery([{ type: 'resync', seq: 4, reason: 'recipient-snapshot-required' }]);
+    receipt.resolve({ ok: false, failure: new Error('denied') });
+
+    assert.equal((await dispatched).ok, false);
+    assert.equal(session.pendingCount(), 0);
+    assert.deepEqual(session.snapshot, { version: 2 });
     session.close();
   });
 

@@ -102,6 +102,35 @@ test('HTTP session delegates duplicate, gap and opaque resync recovery to the pa
   session.close();
 });
 
+test('HTTP snapshot-only session settles a sender receipt through opaque SSE recovery without exposing action identity', async () => {
+  const sources = [];
+  let snapshots = 0;
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async () => ({ ok: true, status: 200, json: async () => ({
+      kind: 'snapshot', snapshot: { version: ++snapshots }, cursor: snapshots === 1 ? 1 : 2,
+    }) }),
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+    validateSnapshot: (value) => value,
+    optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+    sendAction: async () => ({ ok: true, actionId: 'private-action-id', confirmedThrough: 2 }),
+    createActionId: () => 'private-action-id',
+  });
+  await session.ready;
+  await session.dispatch('Project.rename', {});
+  assert.equal(session.pendingCount(), 1);
+  sources[0].onmessage({ data: JSON.stringify([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]) });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(session.snapshot, { version: 2 });
+  assert.equal(session.pendingCount(), 0);
+  session.close();
+});
+
 test('HTTP session reserves revocation for authorization responses', async () => {
   for (const [status, expected] of [[403, 'revoked'], [503, 'unavailable']]) {
     const session = createLiveDeliveryHttpSession({

@@ -396,6 +396,16 @@ export interface LiveDeliverySubscription {
   close?: () => void;
 }
 
+/**
+ * A composite action is settled only after its positive receipt fence is
+ * covered by an authorized replacement snapshot. This never appears in live
+ * envelopes, which remain opaque recipient-safe recovery controls.
+ */
+export type LiveDeliveryActionReceipt =
+  | { ok?: true; value?: unknown; cursor?: number; seq?: number }
+  | { ok?: true; value?: unknown; actionId: string; confirmedThrough: number }
+  | { ok: false; failure?: unknown; error?: unknown };
+
 export interface LiveDeliverySessionConfig<Snapshot, Payload = unknown> {
   bootstrap(input: { after?: number; mode: 'snapshot' | 'catchup' }): Promise<LiveDeliveryBootstrap<Snapshot>>;
   subscribe(input: {
@@ -408,7 +418,8 @@ export interface LiveDeliverySessionConfig<Snapshot, Payload = unknown> {
   /** Omit for a snapshot-only (opaque-resync) composite stream. */
   fold?: (snapshot: Snapshot, envelope: LiveDeliveryEventEnvelope) => Snapshot;
   optimistic?: (snapshot: Snapshot, action: { actionId: string; type: string; payload: Payload }) => Snapshot;
-  sendAction(action: { actionId: string; type: string; payload: Payload }): Promise<{ ok?: boolean; value?: unknown; failure?: unknown; error?: unknown } | void>;
+  /** Snapshot-only sessions require `{ actionId, confirmedThrough }` on success. */
+  sendAction(action: { actionId: string; type: string; payload: Payload }): Promise<LiveDeliveryActionReceipt | void>;
   createActionId?: () => string;
 }
 

@@ -2199,6 +2199,7 @@ export function createLiveDeliverySession({
   let reconnecting = false;
   let connectionGeneration = 0;
   let recoveryGeneration = 0;
+  let snapshotGeneration = 0;
   let subscription = null;
   let actionCounter = 0;
   const snapshotOnly = configuredFold === undefined;
@@ -2270,6 +2271,21 @@ export function createLiveDeliverySession({
     return { status: operation ? 'confirmed' : 'applied' };
   }
 
+  function settleSnapshotConfirmations() {
+    // Composite streams intentionally do not disclose event identity. A
+    // positive sender receipt plus an authorized replacement snapshot is the
+    // package-owned equivalent of a direct-stream action echo.
+    if (!snapshotOnly) return;
+    for (const [actionId, operation] of operations) {
+      if (operation.delivered
+        && operation.confirmedThrough != null
+        && snapshotGeneration > operation.receiptSnapshotGeneration
+        && cursor >= operation.confirmedThrough) {
+        operations.delete(actionId);
+      }
+    }
+  }
+
   async function applyCatchup(result) {
     if (!Array.isArray(result.envelopes)) throw new Error('catch-up is missing recipient envelopes');
     assertCursor(result.cursor, 'catch-up cursor');
@@ -2307,6 +2323,8 @@ export function createLiveDeliverySession({
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       baseSnapshot = nextSnapshot;
       cursor = result.cursor;
+      snapshotGeneration += 1;
+      settleSnapshotConfirmations();
       publish();
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       status = 'live';
@@ -2439,7 +2457,7 @@ export function createLiveDeliverySession({
     const action = { actionId, type, payload };
     const operation = {
       opId: actionId, actionId, action, status: 'pending', error: null,
-      delivered: false, confirmedCursor: null, echoCursor: null,
+      delivered: false, confirmedCursor: null, confirmedThrough: null, receiptSnapshotGeneration: null, echoCursor: null,
     };
     if (closed || status !== 'live') {
       return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery is unavailable') };
@@ -2464,9 +2482,30 @@ export function createLiveDeliverySession({
         }
         throw receipt.failure ?? receipt.error ?? receipt;
       }
+      const confirmedThrough = receipt?.confirmedThrough;
+      if (snapshotOnly && (!Number.isSafeInteger(confirmedThrough) || confirmedThrough < 0 || receipt?.actionId !== actionId)) {
+        throw new Error('snapshot-only action receipt must confirm its actionId through a nonnegative cursor');
+      }
       operation.delivered = true;
       const confirmedCursor = receipt?.cursor ?? receipt?.seq;
       if (Number.isSafeInteger(confirmedCursor) && confirmedCursor >= 0) operation.confirmedCursor = confirmedCursor;
+      if (Number.isSafeInteger(confirmedThrough) && confirmedThrough >= 0) operation.confirmedThrough = confirmedThrough;
+      operation.receiptSnapshotGeneration = snapshotGeneration;
+      settleSnapshotConfirmations();
+      // A delayed receipt can arrive after an earlier recovery. Require a
+      // replacement snapshot observed after the receipt before removing the
+      // optimistic action, even when that earlier cursor already covered it.
+      if (snapshotOnly && operation.confirmedThrough != null && cursor >= operation.confirmedThrough) {
+        void recover('snapshot').catch(() => {
+          if (!closed && status !== 'revoked') {
+            status = 'unavailable';
+            // Do not keep a committed-looking optimistic overlay when the
+            // authoritative post-receipt replacement snapshot is unavailable.
+            if (operations.get(actionId) === operation) operations.delete(actionId);
+            publish();
+          }
+        });
+      }
       if (operation.echoCursor != null
         && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
         operations.delete(actionId);
