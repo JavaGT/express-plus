@@ -438,9 +438,8 @@ export interface LiveDeliverySession<Snapshot, Payload = unknown> {
 
 export interface LiveDeliveryHistorySession {
   /** Uses the package-owned authenticated session cursor. */
-  undo(input: { session: string }): Promise<ScopeDispatchResult>;
-  redo(input: { session: string }): Promise<ScopeDispatchResult>;
-  undoToPoint(input: { session: string; seq: number }): Promise<ScopeDispatchResult>;
+  undo(input?: { session?: string }): Promise<ScopeDispatchResult>;
+  redo(input?: { session?: string }): Promise<ScopeDispatchResult>;
 }
 
 export interface LiveDeliveryHttpSession<Snapshot, Payload = unknown> extends LiveDeliverySession<Snapshot, Payload> {
@@ -461,6 +460,8 @@ export interface LiveDeliveryHttpSessionConfig<Snapshot, Payload = unknown> {
   sendAction?: LiveDeliverySessionConfig<Snapshot, Payload>['sendAction'];
   /** Absolute action endpoint; defaults to /workbench/actions on this origin. */
   actionUrl?: string;
+  /** Binds ordinary actions and one-step history moves to one durable session cursor. */
+  historySession?: string;
   fetchImpl?: typeof globalThis.fetch;
   eventSourceFactory?: (url: string, options: EventSourceInit) => EventSource;
   createActionId?: () => string;

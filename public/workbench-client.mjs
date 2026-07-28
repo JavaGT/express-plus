@@ -2610,6 +2610,7 @@ export function createLiveDeliveryHttpSession({
   optimistic,
   sendAction,
   actionUrl,
+  historySession,
   fetchImpl = globalThis.fetch,
   eventSourceFactory = (url, options) => new EventSource(url, options),
   createActionId,
@@ -2618,6 +2619,7 @@ export function createLiveDeliveryHttpSession({
   if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
   if (typeof eventSourceFactory !== 'function') throw new TypeError('eventSourceFactory is required');
+  if (historySession !== undefined && (typeof historySession !== 'string' || historySession.length === 0)) throw new TypeError('historySession must be a non-empty string');
   const endpoint = `${baseUrl.replace(/\/$/, '')}/bootstrap`;
   const eventsEndpoint = `${baseUrl.replace(/\/$/, '')}/events`;
   // The action endpoint belongs to the configured Workbench origin, not the
@@ -2663,8 +2665,7 @@ export function createLiveDeliveryHttpSession({
 
   async function sendHttpAction(action) {
     const historyCommand = action.type === '$history.undo' ? 'undo'
-      : action.type === '$history.redo' ? 'redo'
-        : action.type === '$history.undoToPoint' ? 'undoToPoint' : null;
+      : action.type === '$history.redo' ? 'redo' : null;
     const historyPayload = action.payload;
     const historyRequest = historyCommand && historyPayload && typeof historyPayload === 'object'
       ? { actionId: action.actionId, command: historyCommand, ...historyPayload, scope }
@@ -2673,7 +2674,7 @@ export function createLiveDeliveryHttpSession({
       method: 'POST',
       credentials: 'include',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(historyRequest ?? { ...action, scope }),
+      body: JSON.stringify(historyRequest ?? { ...action, scope, ...(historySession === undefined ? {} : { clientId: historySession }) }),
     });
     let receipt;
     try { receipt = await response.json(); } catch { throw new Error(`action dispatch failed with HTTP ${response.status}`); }
@@ -2697,9 +2698,8 @@ export function createLiveDeliveryHttpSession({
   // application action. The server resolves this authenticated session's
   // current cursor within its write queue; raw revisions never leave it.
   Object.defineProperty(session, 'history', { value: Object.freeze({
-    undo: ({ session: historySession }) => session.dispatch('$history.undo', { session: historySession }),
-    redo: ({ session: historySession }) => session.dispatch('$history.redo', { session: historySession }),
-    undoToPoint: ({ session: historySession, seq }) => session.dispatch('$history.undoToPoint', { session: historySession, seq }),
+    undo: ({ session: requestedSession } = {}) => session.dispatch('$history.undo', { session: requestedSession ?? historySession }),
+    redo: ({ session: requestedSession } = {}) => session.dispatch('$history.redo', { session: requestedSession ?? historySession }),
   }) });
   return session;
 }

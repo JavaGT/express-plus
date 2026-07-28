@@ -130,7 +130,7 @@ test('package action transport dispatches registered actions, wakes delivery, an
   const reader = stream.body.getReader();
   await reader.read();
 
-  const request = { actionId: 'http-update', scope: 'Project:p1', type: 'project.write', payload: { id: 'p1', name: 'one', exists: true, authorized: true } };
+  const request = { actionId: 'http-update', scope: 'Project:p1', type: 'project.write', payload: { id: 'p1', name: 'one', exists: true, authorized: true }, clientId: 'tab-a' };
   const response = await fetch(`${origin}/workbench/actions`, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(request),
   });
@@ -172,12 +172,12 @@ test('HTTP delivery session uses package action transport by default and retains
       return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: {}, cursor: 1 }) };
     },
     eventSourceFactory: () => ({ close() {} }), validateSnapshot: (value) => value,
-    createActionId: () => 'action-1',
+    createActionId: () => 'action-1', historySession: 'tab-a',
   });
   await session.ready;
   assert.equal((await session.dispatch('project.write', { name: 'one' })).ok, true);
   const [, actionOptions] = calls.find(([, options]) => options?.method === 'POST');
-  assert.deepEqual(JSON.parse(actionOptions.body), { actionId: 'action-1', type: 'project.write', payload: { name: 'one' }, scope: 'Project:p1' });
+  assert.deepEqual(JSON.parse(actionOptions.body), { actionId: 'action-1', type: 'project.write', payload: { name: 'one' }, scope: 'Project:p1', clientId: 'tab-a' });
   assert.equal(calls.find(([, options]) => options?.method === 'POST')[0], 'https://example.test/workbench/actions');
   session.close();
 });
@@ -197,13 +197,21 @@ test('package history transport uses durable authorization, wakes delivery, and 
   t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
   assert.equal('_historyHttp' in app, false);
   assert.equal('undoCurrent' in app.kernel.history, false);
-  await app.dispatch({ actionId: 'history-seed', type: 'project.write', scope: 'Project:p1', history: { session: 'tab-a' }, principal: user,
-    payload: { id: 'p1', name: 'before', authorized: true, before: { id: 'p1', name: 'initial' } } });
   const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const actionEndpoint = `${origin}/workbench/actions`;
   const historyEndpoint = `${origin}/workbench/history`;
+  const postAction = (body) => fetch(actionEndpoint, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
   const postHistory = (body) => fetch(historyEndpoint, {
     method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
   });
+  const action = await postAction({
+    actionId: 'history-seed', type: 'project.write', scope: 'Project:p1', clientId: 'tab-a',
+    payload: { id: 'p1', name: 'before', authorized: true, before: { id: 'p1', name: 'initial' } },
+  });
+  assert.equal(action.status, 200);
+  assert.partialDeepStrictEqual(await app.history.cursor({ scope: 'Project:p1', session: 'tab-a', principal: user }), { undo: 1, redo: 0 });
   // A browser cannot inject an old, forged, or cross-session cursor into the
   // package-owned HTTP contract.
   assert.equal((await postHistory({
@@ -214,8 +222,9 @@ test('package history transport uses durable authorization, wakes delivery, and 
   assert.equal(response.status, 200);
   assert.deepEqual(Object.keys(receipt).sort(), ['actionId', 'confirmedThrough', 'ok']);
   assert.equal(receipt.actionId, 'history-http-undo');
+  assert.equal(db.prepare('SELECT name FROM Project WHERE id = ?').get('p1').name, 'initial');
   assert.equal((await postHistory({ actionId: 'history-http-redo', command: 'redo', scope: 'Project:p1', session: 'tab-a' })).status, 200);
-  assert.equal((await postHistory({ actionId: 'history-http-point', command: 'undoToPoint', scope: 'Project:p1', session: 'tab-a', seq: 1 })).status, 200);
+  assert.equal((await postHistory({ actionId: 'history-http-point', command: 'undoToPoint', scope: 'Project:p1', session: 'tab-a', seq: 1 })).status, 400);
   assert.partialDeepStrictEqual(await app.history.cursor({ scope: 'Project:p1', session: 'tab-a', principal: user }), { undo: 1, redo: 0 });
   assert.equal((await postHistory({})).status, 400);
 });
@@ -232,10 +241,12 @@ test('HTTP delivery session reserves history commands for the package history en
     },
     eventSourceFactory: () => ({ close() {} }), validateSnapshot: (value) => value,
     sendAction: async () => { throw new Error('history must not use app sender'); },
-    createActionId: () => 'history-action',
+    createActionId: () => 'history-action', historySession: 'tab-a',
   });
   await session.ready;
-  assert.equal((await session.history.undo({ session: 'tab-a' })).ok, true);
-  assert.equal(calls.find(([, options]) => options?.method === 'POST')[0], 'https://example.test/workbench/history');
+  assert.equal((await session.history.undo()).ok, true);
+  const [historyUrl, historyOptions] = calls.find(([, options]) => options?.method === 'POST');
+  assert.equal(historyUrl, 'https://example.test/workbench/history');
+  assert.deepEqual(JSON.parse(historyOptions.body), { actionId: 'history-action', command: 'undo', scope: 'Project:p1', session: 'tab-a' });
   session.close();
 });

@@ -31,11 +31,12 @@ function isJsonValue(value, ancestors = new Set()) {
 function actionRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const keys = Object.keys(body);
-  if (keys.length !== 4 || keys.some((key) => !['actionId', 'scope', 'type', 'payload'].includes(key))) return null;
-  const { actionId, scope, type, payload } = body;
+  if ((keys.length !== 4 && keys.length !== 5) || keys.some((key) => !['actionId', 'scope', 'type', 'payload', 'clientId'].includes(key))) return null;
+  const { actionId, scope, type, payload, clientId } = body;
   if (![actionId, scope, type].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)) return null;
+  if (clientId !== undefined && (typeof clientId !== 'string' || clientId.length === 0 || clientId.length > MAX_STRING_LENGTH)) return null;
   if (!isJsonValue(payload)) return null;
-  return { actionId, scope, type, payload };
+  return { actionId, scope, type, payload, ...(clientId === undefined ? {} : { clientId }) };
 }
 
 function validPrincipal(principal) {
@@ -48,15 +49,12 @@ function validPrincipal(principal) {
 
 function historyRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
-  const { actionId, scope, session, command, seq } = body;
-  const allowed = command === 'undoToPoint'
-    ? ['actionId', 'scope', 'session', 'command', 'seq']
-    : ['actionId', 'scope', 'session', 'command'];
+  const { actionId, scope, session, command } = body;
+  const allowed = ['actionId', 'scope', 'session', 'command'];
   if (Object.keys(body).length !== allowed.length || Object.keys(body).some((key) => !allowed.includes(key))) return null;
-  if (!['undo', 'redo', 'undoToPoint'].includes(command)
-    || ![actionId, scope, session].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)
-    || (command === 'undoToPoint' && (!Number.isSafeInteger(seq) || seq < 0))) return null;
-  return command === 'undoToPoint' ? { actionId, scope, session, seq } : { actionId, scope, session };
+  if (!['undo', 'redo'].includes(command)
+    || ![actionId, scope, session].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)) return null;
+  return { actionId, scope, session };
 }
 
 /** Handle the fixed HTTP skin for application-registered actions. */
@@ -106,7 +104,7 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
   }
   const result = url.pathname === HISTORY_PATH
     ? await historyHttpDispatchers.get(app)?.(body.command, { ...request, principal })
-    : await app.dispatch({ ...request, principal });
+    : await app.dispatch({ ...request, principal, ...(request.clientId === undefined ? {} : { history: { session: request.clientId } }) });
   if (!result?.ok) {
     sendFailure(sendJson, res, isWorkbenchFailure(result?.failure)
       ? result.failure

@@ -36,7 +36,6 @@ function wireMutationSurface(app) {
     cursor: app.kernel.history.cursor,
     undo: (args) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.history.undo(args))),
     redo: (args) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.history.redo(args))),
-    undoToPoint: (args) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.history.undoToPoint(args))),
   });
   // The HTTP skin receives a private queued dispatcher, not a cursor capability.
   // Reading and moving happen under one package write-queue turn.

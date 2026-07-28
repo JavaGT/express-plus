@@ -304,7 +304,7 @@ test('application runtime exposes only cursor, undo, and redo history methods', 
   app.listen(0, { principalOf: () => principal });
   await app.ready;
   t.after(() => { app.httpServer.close(); db.close(); });
-  assert.deepEqual(Object.keys(app.history).sort(), ['cursor', 'redo', 'undo', 'undoToPoint']);
+  assert.deepEqual(Object.keys(app.history).sort(), ['cursor', 'redo', 'undo']);
   assert.equal('actions' in app.history, false);
   assert.equal('events' in app.history, false);
 });
