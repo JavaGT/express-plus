@@ -201,6 +201,17 @@ function validateColumnList(columns, knownColumns, label) {
 
 export function defineSqliteSchema(spec) {
   validateSpec(spec);
+  const tables = Object.freeze(spec.tables.map((table) => Object.freeze({
+    ...table,
+    columns: Object.freeze(table.columns.map((column) => Object.freeze({ ...column }))),
+    foreignKeys: Object.freeze((table.foreignKeys ?? []).map((foreignKey) => Object.freeze({
+      ...foreignKey,
+      columns: Object.freeze([...foreignKey.columns]),
+      references: Object.freeze({ ...foreignKey.references, columns: Object.freeze([...foreignKey.references.columns]) }),
+    }))),
+    indexes: Object.freeze((table.indexes ?? []).map((index) => Object.freeze({ ...index, columns: Object.freeze([...index.columns]) }))),
+    ...(table.primaryKey === undefined ? {} : { primaryKey: Object.freeze([...table.primaryKey]) }),
+  })));
   const tableDdl = spec.tables.map(compileTable);
   const indexDdl = spec.tables.flatMap((table) => (table.indexes ?? []).map((index) => compileIndex(table.name, index)));
   const ddl = [...tableDdl, ...indexDdl];
@@ -210,6 +221,8 @@ export function defineSqliteSchema(spec) {
   return Object.freeze({
     name: spec.name,
     tableNames: Object.freeze(tableNames),
+    tables,
+    migrations: Object.freeze(migrations),
     ddl: Object.freeze(ddl),
     prepare(db, options) {
       if (tableDdl.length > 0) {
@@ -222,8 +235,8 @@ export function defineSqliteSchema(spec) {
           throw error;
         }
       }
-      runMigrations(db, migrations, options);
-      if (indexDdl.length > 0) {
+      if (!options?.skipMigrations) runMigrations(db, migrations, options);
+      if (!options?.skipIndexes && indexDdl.length > 0) {
         begin(db);
         try {
           for (const sql of indexDdl) db.exec(sql);

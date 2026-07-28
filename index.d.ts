@@ -671,6 +671,8 @@ export interface AppLiveDeliveryOptions {
 
 export interface WorkbenchOptions {
   db?: string | WorkbenchDatabase;
+  /** Declares physical SQLite tables. Named entity main tables are never generated. */
+  schema?: import('./src/server.js').SqliteSchemaResult;
   entities?: readonly WorkbenchEntity<any>[];
   actions?: readonly RegisteredAction<any, RegisteredProjection>[];
   port?: number;

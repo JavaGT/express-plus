@@ -33,8 +33,10 @@ import {
   validateMaintenanceOptions,
 } from './application-runtime.mjs';
 import { wrapDriver } from './driver.mjs';
-import { executeDDL, executeFrameworkDDL } from './ddl.mjs';
+import { executeDDL, executeFrameworkDDL, generateSideTableDDL } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
+import { validateSchemaOwnedEntityTable } from './schema-entity-validation.mjs';
+import { frameworkTableNames, declaredTableNames } from './schema-table-census.mjs';
 import { createBlobStore } from './blob-store.mjs';
 import { createJobQueue } from './job-queue.mjs';
 import { createPostCommitEffectRunner } from './post-commit-effects.mjs';
@@ -79,6 +81,7 @@ export function router(options = {}) {
 // chain.
 export default function workbench({
   db,
+  schema,
   entities = [],
   actions = [],
   blobs: blobOpts,
@@ -127,6 +130,16 @@ export default function workbench({
   // One construction path: a bare-string app gets the same treatment as a
   // pre-built handle. (seam-review §2.1, priority #7.)
   if (db) db = wrapDriver(db);
+
+  if (schema !== undefined && (!schema || typeof schema.prepare !== 'function' || !Array.isArray(schema.tables))) {
+    throw new TypeError('schema must be a SqliteSchemaResult');
+  }
+  const allMigrations = [...(schema?.migrations ?? []), ...migrations].sort((a, b) => a.version - b.version);
+  for (let index = 1; index < allMigrations.length; index += 1) {
+    if (allMigrations[index - 1].version === allMigrations[index].version) {
+      throw new Error(`duplicate migration version ${allMigrations[index].version} across schema and application migrations`);
+    }
+  }
 
   const declarationsByName = new Map();
   const bindingsByDeclaration = new Map();
@@ -285,17 +298,43 @@ export default function workbench({
         executeFrameworkDDL(app.db);
         await app.resolveRoutes();
         registryLocked = true;
+        const schemaTables = new Map((schema?.tables ?? []).map((table) => [table.name.toLowerCase(), table]));
+        const entityMainTables = new Set([...app.entities.values()].map((entity) => entity.name.toLowerCase()));
+        const generatedTables = new Set(declaredTableNames([...app.entities.values()]).map((name) => name.toLowerCase()));
+        for (const table of schema?.tables ?? []) {
+          const name = table.name.toLowerCase();
+          if (frameworkTableNames.some((frameworkName) => frameworkName.toLowerCase() === name)) {
+            throw new Error(`schema table "${table.name}" conflicts with a framework table`);
+          }
+          if (generatedTables.has(name) && !entityMainTables.has(name)) {
+            throw new Error(`schema table "${table.name}" conflicts with a generated entity side table`);
+          }
+        }
+        // A declared migration may bring an existing table up to the declared
+        // shape, so defer schema indexes and the exact physical check until it
+        // has run. Tables must exist before generated supporting tables.
+        if (schema) schema.prepare(app.db, { skipMigrations: true, skipIndexes: true });
         const seen = new Set();
         for (const entity of app.entities.values()) {
           if (!seen.has(entity.name)) {
             seen.add(entity.name);
-            executeDDL(entity, app.db);
+            const declaration = schemaTables.get(entity.name.toLowerCase());
+            if (declaration) {
+              for (const sql of generateSideTableDDL(entity)) app.db.exec(sql);
+            } else {
+              executeDDL(entity, app.db);
+            }
           }
         }
         // Migrations run last, pre-traffic, after every entity table exists. Each
         // is its own transaction (DDL + meta-version bump atomic). Runs only when
         // declared — an app with no migrations is untouched (no _Migration table).
-        if (app.migrations?.length) runMigrations(app.db, app.migrations);
+        if (allMigrations.length) runMigrations(app.db, allMigrations);
+        if (schema) schema.prepare(app.db, { skipMigrations: true });
+        for (const entity of app.entities.values()) {
+          const declaration = schemaTables.get(entity.name.toLowerCase());
+          if (declaration) validateSchemaOwnedEntityTable(app.db, entity, declaration);
+        }
         return app;
       })();
     }

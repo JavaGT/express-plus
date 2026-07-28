@@ -163,8 +163,24 @@ export function generateDDL(entity) {
   for (const [name, descriptor] of Object.entries(fields)) {
     assertSupportedField(entity.name, name, descriptor);
   }
-
   statements.push(mainTableDDL(entity));
+  statements.push(...generateSideTableDDL(entity));
+
+  // Preserve the documented main-table/side-table ordering. Indexes are
+  // independent trailing statements, which also keeps generated migrations
+  // stable for callers that inspect the table statements by position.
+  statements.push(...scheduleIndexDDL(entity));
+
+  return statements;
+}
+
+// Supporting tables are independent physical storage. A caller that owns the
+// entity's main table may still let Workbench own these tables, but never its
+// main-table indexes (those belong to the declaring schema too).
+export function generateSideTableDDL(entity) {
+  const statements = [];
+  const { fields } = entity;
+  if (!fields) return statements;
 
   for (const [name, descriptor] of Object.entries(fields)) {
     if (descriptor.kind === 'store') {
@@ -185,11 +201,6 @@ export function generateDDL(entity) {
       statements.push(...annotatedTextDDL(entity.name, name, descriptor, fields));
     }
   }
-
-  // Preserve the documented main-table/side-table ordering. Indexes are
-  // independent trailing statements, which also keeps generated migrations
-  // stable for callers that inspect the table statements by position.
-  statements.push(...scheduleIndexDDL(entity));
 
   return statements;
 }

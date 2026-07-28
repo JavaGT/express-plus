@@ -46,6 +46,7 @@ final transport choice: create a fresh app if HTTP is needed later.
 | Option | Purpose |
 | --- | --- |
 | `db` | Engage SQLite persistence; framework runs entity + framework DDL |
+| `schema` | `defineSqliteSchema()` result. It owns each named entity main table; Workbench verifies its exact physical shape, generates only unowned supporting tables, and runs migrations afterward. |
 | `jobs` | Engage job-queue substrate (`sharedSecret` required) |
 | `blobs` | Blob store root for binary fields / `POST /blobs` |
 | `migrations` | Versioned schema migrations at startup |

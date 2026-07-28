@@ -276,6 +276,9 @@ export interface TableDeclaration {
 export interface SqliteSchemaResult {
   readonly name: string;
   readonly tableNames: readonly string[];
+  /** Immutable declarations used to verify schema-owned entity tables at startup. */
+  readonly tables: readonly Readonly<TableDeclaration>[];
+  readonly migrations: readonly Migration[];
   readonly ddl: readonly string[];
   prepare(db: WorkbenchDatabase, options?: { now?: () => string }): void;
 }
