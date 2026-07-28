@@ -38,7 +38,7 @@ function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
 export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log = null, maxCatchupEvents = 1000, includeActionId = true }) {
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   const resolveEntity = typeof entities === 'function' ? entities : (name) => entities.get(name);
-  const composites = compileSnapshots(snapshots, resolveEntity);
+  const composites = compileSnapshots(snapshots, resolveEntity, db);
   const aggregateRevision = () => Number(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get().revision);
   async function aggregateSnapshot({ principal, scope, declaration }) {
     const handle = tryParseScopeKey(scope);

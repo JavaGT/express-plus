@@ -18,6 +18,11 @@ function fieldsOf(handles) {
   return Object.freeze(fields);
 }
 
+function refOf(handle, label = 'via') {
+  if (!handle || typeof handle.fieldName !== 'string') throw new TypeError(`${label} requires a ref field handle`);
+  return handle.fieldName;
+}
+
 function declareSnapshot(anchor, { output } = {}) {
   return node('snapshot', { anchor: entityOf(anchor), output });
 }
@@ -27,9 +32,9 @@ export function object(shape) {
   return node('object', { shape: Object.freeze({ ...shape }) });
 }
 
-export function one(entity, options = {}) { return node('one', { entity: entityOf(entity), ...options }); }
-export function many(entity, options = {}) { return node('many', { entity: entityOf(entity), ...options }); }
-export function keyed(entity, options = {}) { return node('keyed', { entity: entityOf(entity), ...options }); }
+export function one(entity, { via, ...options } = {}) { return node('one', { entity: entityOf(entity), via: refOf(via), ...options }); }
+export function many(entity, { via, ...options } = {}) { return node('many', { entity: entityOf(entity), via: refOf(via), ...options }); }
+export function keyed(entity, { via, ...options } = {}) { return node('keyed', { entity: entityOf(entity), via: refOf(via), ...options }); }
 export function select(...handles) { return node('select', { fields: fieldsOf(handles) }); }
 export function include(shape) { return object(shape); }
 export function orderBy(handle, direction = 'asc') {
@@ -37,8 +42,9 @@ export function orderBy(handle, direction = 'asc') {
   if (direction !== 'asc' && direction !== 'desc') throw new TypeError("orderBy direction must be 'asc' or 'desc'");
   return node('orderBy', { field: handle.fieldName, direction });
 }
-export function count(entity) { return node('count', { entity: entityOf(entity) }); }
+export function count(entity, { via } = {}) { return node('count', { entity: entityOf(entity), via: refOf(via) }); }
+export function user({ via } = {}) { return node('user', { via: refOf(via) }); }
 
 export const snapshot = Object.freeze(Object.assign(declareSnapshot, {
-  object, one, keyed, many, select, include, orderBy, count,
+  object, one, keyed, many, select, include, orderBy, count, user,
 }));

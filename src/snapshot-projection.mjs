@@ -23,13 +23,14 @@ function targetName(descriptor) {
   return typeof target === 'string' ? target : target?.name;
 }
 
-function relation(from, to, inverse) {
-  const candidates = Object.entries(inverse ? to.fields : from.fields)
-    .filter(([, descriptor]) => descriptor?.kind === 'value' && descriptor.type === 'ref' && targetName(descriptor) === (inverse ? from.name : to.name));
-  if (candidates.length !== 1) {
-    throw new TypeError(`snapshot relation ${from.name} -> ${to.name} requires exactly one declared ref() foreign key`);
+function relation(from, to, inverse, via) {
+  const owner = inverse ? to : from;
+  const target = inverse ? from : to;
+  const descriptor = owner.fields[via];
+  if (descriptor?.kind !== 'value' || descriptor.type !== 'ref' || targetName(descriptor) !== target.name) {
+    throw new TypeError(`snapshot relation ${from.name} -> ${to.name} via '${via}' must be a declared ref(${target.name})`);
   }
-  return candidates[0][0];
+  return via;
 }
 
 function outputFor(node) {
@@ -52,10 +53,16 @@ function compileOutput(entity, output, ancestors = new Set()) {
       entries.push(Object.freeze({ key, kind: 'select', fields: value.fields }));
       continue;
     }
-    if (!['one', 'many', 'keyed', 'count'].includes(value?.kind)) throw new TypeError(`snapshot output '${key}' must use select, one, many, keyed, or count`);
+    if (value?.kind === 'user') {
+      const descriptor = entity.fields[value.via];
+      if (descriptor?.kind !== 'value' || descriptor.type !== 'ref' || targetName(descriptor) !== 'User') throw new TypeError(`snapshot user '${key}' via '${value?.via}' must be a declared ref(User)`);
+      entries.push(Object.freeze({ key, kind: 'user', fk: value.via }));
+      continue;
+    }
+    if (!['one', 'many', 'keyed', 'count'].includes(value?.kind)) throw new TypeError(`snapshot output '${key}' must use select, one, many, keyed, count, or user`);
     const child = entityOf(value.entity);
     const inverse = value.kind !== 'one';
-    const fk = relation(entity, child, inverse);
+    const fk = relation(entity, child, inverse, value.via);
     const selectNode = value.select ?? value.output;
     const nested = value.include ?? value.output;
     const selected = selectNode?.kind === 'select' ? selectNode.fields : null;
@@ -73,7 +80,14 @@ function compileOutput(entity, output, ancestors = new Set()) {
   return Object.freeze({ entity, entries: Object.freeze(entries) });
 }
 
-export function compileSnapshots(declarations, resolveEntity) {
+function physicalForeignKey(db, from, field, target) {
+  if (!db) return;
+  const foreignKeys = db.prepare(`PRAGMA foreign_key_list(${identifier(from.name, 'snapshot entity')})`).all();
+  const matching = foreignKeys.filter((row) => row.from === field && row.table === target.name && row.to === 'id');
+  if (matching.length !== 1 || foreignKeys.filter((row) => row.from === field).length !== 1) throw new TypeError(`snapshot relation ${from.name}.${field} requires exactly one physical FOREIGN KEY to ${target.name}.id`);
+}
+
+export function compileSnapshots(declarations, resolveEntity, db = null) {
   if (declarations === undefined) return new Map();
   if (!Array.isArray(declarations)) throw new TypeError('snapshots must be an array');
   const compiled = new Map();
@@ -85,7 +99,14 @@ export function compileSnapshots(declarations, resolveEntity) {
     const output = compileOutput(anchor, declaration.output);
     // Every relation target must be registered, not merely structurally similar.
     const check = (branch) => branch.entries.forEach((entry) => {
+      if (entry.kind === 'user') {
+        const User = resolveEntity('User');
+        if (!User) throw new TypeError('snapshot user requires registered User entity');
+        physicalForeignKey(db, branch.entity, entry.fk, User);
+        return;
+      }
       if (entry.entity && resolveEntity(entry.entity.name) !== entry.entity) throw new TypeError(`snapshot entity '${entry.entity.name}' must be registered`);
+      if (entry.entity) physicalForeignKey(db, entry.inverse ? entry.entity : branch.entity, entry.fk, entry.inverse ? branch.entity : entry.entity);
       if (entry.nested) check(entry.nested);
     });
     check(output);
@@ -107,6 +128,23 @@ function readRows(db, entity, principal, fk, value, inverse, order) {
   return db.prepare(sql + suffix).all({ ...filter.params, snapshot_parent: value }).map(detached);
 }
 
+function readUser(db, id) {
+  try {
+    const columns = db.prepare('PRAGMA table_info(User)').all().map((column) => column.name);
+    for (const required of ['id', 'name', 'displayName', 'image']) {
+      if (!columns.includes(required)) throw new TypeError('malformed User table');
+    }
+    const deleted = columns.includes('deletedAt') ? ' AND deletedAt IS NULL' : '';
+    const rows = db.prepare(`SELECT id, name, displayName, image FROM User WHERE id = :snapshot_user${deleted}`).all({ snapshot_user: id });
+    if (rows.length === 0) return null;
+    if (typeof rows[0].id !== 'string' || rows[0].id.length === 0) throw new TypeError('malformed User id');
+    return detached(rows[0]);
+  } catch {
+    // A malformed User table makes the entire recipient snapshot unsafe.
+    throw new TypeError('snapshot User table must provide id, name, displayName, and image');
+  }
+}
+
 // Capture only raw, scope-filtered candidates while SQLite is synchronous. No
 // authorization may await inside this read boundary.
 export function captureSnapshot({ db, principal, anchor, id, output }) {
@@ -114,6 +152,11 @@ export function captureSnapshot({ db, principal, anchor, id, output }) {
     const children = new Map();
     for (const entry of branch.entries) {
       if (entry.kind === 'select') continue;
+      if (entry.kind === 'user') {
+        const user = raw[entry.fk] == null ? null : readUser(db, raw[entry.fk]);
+        children.set(entry, user ? [Object.freeze({ raw: user, children: new Map() })] : []);
+        continue;
+      }
       const rows = readRows(db, entry.entity, principal, entry.fk, entry.inverse ? raw.id : raw[entry.fk], entry.inverse, entry.order);
       children.set(entry, rows.map((child) => Object.freeze({ raw: child, children: entry.nested ? capture(entry.entity, child, entry.nested).children : new Map() })));
     }
@@ -132,6 +175,7 @@ export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb 
       const allowed = row != null && await mayRow(entity, 'subscribe', row, principal, mayVerb);
       if (allowed) authorized.set(node, row);
       for (const [entry, children] of node.children) {
+        if (entry.kind === 'user') continue;
         for (const child of children) await authorize(entry.entity, child);
       }
       return allowed;
@@ -152,6 +196,15 @@ export function projectSnapshot({ anchor, candidate, output, authorized }) {
     if (selected) Object.assign(result, Object.fromEntries(selected.fields.map((field) => [field, current[field]])));
     for (const entry of branch.entries) {
       if (entry.kind === 'select') continue;
+      if (entry.kind === 'user') {
+        const user = node.children.get(entry)?.[0]?.raw;
+        result[entry.key] = user ? Object.freeze({
+          id: user.id,
+          name: typeof user.name === 'string' ? user.name : typeof user.displayName === 'string' ? user.displayName : null,
+          image: typeof user.image === 'string' ? user.image : null,
+        }) : null;
+        continue;
+      }
       const rows = [];
       for (const child of node.children.get(entry) ?? []) {
         const projected = project(entry.entity, child, entry.nested ?? { entries: entry.selected ? [{ kind: 'select', fields: entry.selected }] : [] });

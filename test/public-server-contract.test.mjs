@@ -36,7 +36,7 @@ function noteEntity() {
 test('declared relational snapshots gate every row, hide denied counts, enforce ref joins and deterministic ties', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT, body TEXT, rank INTEGER, visible INTEGER);');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), body TEXT, rank INTEGER, visible INTEGER);');
   db.prepare('INSERT INTO Project VALUES (?, ?)').run('p1', 'One');
   db.prepare('INSERT INTO Project VALUES (?, ?)').run('p2', 'Two');
   for (const row of [['c2', 'p1', 'second', 1, 1], ['c1', 'p1', 'first', 1, 1], ['hidden', 'p1', 'hidden', 0, 0], ['injected', 'p2', 'other project', 0, 1]]) db.prepare('INSERT INTO Comment VALUES (?, ?, ?, ?, ?)').run(...row);
@@ -45,8 +45,8 @@ test('declared relational snapshots gate every row, hide denied counts, enforce 
   const comment = { name: 'Comment', fields: { projectId: { kind: 'value', type: 'ref', target: project }, body: { kind: 'value', type: 'text' }, rank: { kind: 'value', type: 'number' } }, field: { id: { fieldName: 'id' }, projectId: { fieldName: 'projectId' }, body: { fieldName: 'body' }, rank: { fieldName: 'rank' } }, grant: ownGrant, scopeFilter: () => ({ sql: 't0.visible = 1', params: {} }), hydrate: (row) => ({ id: row.id, projectId: row.projectId, body: row.body, rank: row.rank }) };
   const declaration = snapshot(project, { output: snapshot.object({
     name: snapshot.select(project.field.name),
-    comments: snapshot.many(comment, { select: snapshot.select(comment.field.body, comment.field.rank), orderBy: snapshot.orderBy(comment.field.rank) }),
-    visibleCount: snapshot.count(comment),
+    comments: snapshot.many(comment, { via: comment.field.projectId, select: snapshot.select(comment.field.body, comment.field.rank), orderBy: snapshot.orderBy(comment.field.rank) }),
+    visibleCount: snapshot.count(comment, { via: comment.field.projectId }),
   }) });
   const live = createLiveDelivery({ db, entities: new Map([['Project', project], ['Comment', comment]]), mayVerb: (_entity, _verb, row) => row.id !== 'c2', snapshots: [declaration] });
   const result = await live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' });
@@ -54,27 +54,53 @@ test('declared relational snapshots gate every row, hide denied counts, enforce 
   assert.deepEqual(result.cursor, { anchor: 0, aggregate: 0 });
   assert.equal(JSON.stringify(result).includes('hidden'), false);
   assert.equal(JSON.stringify(result).includes('injected'), false);
-  assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', project], ['Comment', comment]]), mayVerb: () => true, snapshots: [snapshot(project, { output: snapshot.object({ nope: snapshot.many(project, { select: snapshot.select(project.field.name) }) }) })] }), /requires exactly one declared ref/);
+  assert.throws(() => snapshot.many(project, { select: snapshot.select(project.field.name) }), /via requires/);
   db.close();
 });
 
 test('declared snapshots reject cyclic outputs and retry an asynchronous authorization revision race', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT);');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id));');
   db.prepare('INSERT INTO Project VALUES (?)').run('p1');
   const ownGrant = () => [scope(() => true).can(() => grant(subscribe))];
   const project = { name: 'Project', fields: {}, field: { id: { fieldName: 'id' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ id: row.id }) };
   const comment = { name: 'Comment', fields: { projectId: { kind: 'value', type: 'ref', target: project } }, field: { id: { fieldName: 'id' }, projectId: { fieldName: 'projectId' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ id: row.id, projectId: row.projectId }) };
-  const output = snapshot.object({ comments: snapshot.many(comment, { include: snapshot.object({ project: snapshot.one(project, { include: snapshot.object({}) }) }) }) });
+  const output = snapshot.object({ comments: snapshot.many(comment, { via: comment.field.projectId, include: snapshot.object({ project: snapshot.one(project, { via: comment.field.projectId, include: snapshot.object({}) }) }) }) });
   assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', project], ['Comment', comment]]), mayVerb: () => true, snapshots: [snapshot(project, { output })] }), /cyclic/);
-  const declaration = snapshot(project, { output: snapshot.object({ comments: snapshot.many(comment, { select: snapshot.select(comment.field.projectId) }) }) });
+  const declaration = snapshot(project, { output: snapshot.object({ comments: snapshot.many(comment, { via: comment.field.projectId, select: snapshot.select(comment.field.projectId) }) }) });
   db.prepare('INSERT INTO Comment VALUES (?, ?)').run('c1', 'p1');
   let raced = false;
   const live = createLiveDelivery({ db, entities: new Map([['Project', project], ['Comment', comment]]), mayVerb: async (_entity, _verb, row) => { if (row.id === 'c1' && !raced) { raced = true; db.prepare("UPDATE _CommittedRevision SET revision = revision + 1 WHERE name = 'actions'").run(); } return true; }, snapshots: [declaration] });
   assert.deepEqual(await live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' }), {
     kind: 'snapshot', snapshot: { id: 'p1', comments: [{ id: 'c1', projectId: 'p1' }] }, cursor: { anchor: 0, aggregate: 1 },
   });
+  db.close();
+});
+
+test('declared snapshots require physical ref foreign keys and expose only terminal User presentation fields', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`
+    CREATE TABLE User (id TEXT PRIMARY KEY, name TEXT, displayName TEXT, image TEXT, password TEXT, deletedAt TEXT);
+    CREATE TABLE Project (id TEXT PRIMARY KEY, ownerId TEXT REFERENCES User(id));
+  `);
+  db.prepare('INSERT INTO User VALUES (?, ?, ?, ?, ?, ?)').run('u1', null, 'Ada', 'https://example.test/ada.png', 'secret', null);
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('p1', 'u1');
+  const ownGrant = () => [scope(() => true).can(() => grant(subscribe))];
+  const User = { name: 'User', fields: { name: { kind: 'value', type: 'text' }, displayName: { kind: 'value', type: 'text' }, image: { kind: 'value', type: 'text' } }, field: {}, grant: ownGrant, scopeFilter: () => ({ sql: '0=1', params: {} }), hydrate: () => null };
+  const project = { name: 'Project', fields: { ownerId: { kind: 'value', type: 'ref', target: User } }, field: { ownerId: { fieldName: 'ownerId' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const declaration = snapshot(project, { output: snapshot.object({ owner: snapshot.user({ via: project.field.ownerId }) }) });
+  const live = createLiveDelivery({ db, entities: new Map([['Project', project], ['User', User]]), mayVerb: () => true, snapshots: [declaration] });
+  const result = await live.bootstrap({ principal: { type: 'user', id: 'other' }, scope: 'Project:p1' });
+  assert.deepEqual(result.snapshot, { id: 'p1', owner: { id: 'u1', name: 'Ada', image: 'https://example.test/ada.png' } });
+  assert.equal(JSON.stringify(result).includes('secret'), false);
+  db.prepare('UPDATE User SET deletedAt = ? WHERE id = ?').run('2026-07-28T00:00:00.000Z', 'u1');
+  assert.deepEqual((await live.bootstrap({ principal: { type: 'user', id: 'other' }, scope: 'Project:p1' })).snapshot, { id: 'p1', owner: null });
+
+  db.exec('CREATE TABLE Broken (id TEXT PRIMARY KEY, projectId TEXT);');
+  const broken = { name: 'Broken', fields: { projectId: { kind: 'value', type: 'ref', target: project } }, field: { projectId: { fieldName: 'projectId' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', project], ['Broken', broken], ['User', User]]), mayVerb: () => true, snapshots: [snapshot(project, { output: snapshot.object({ children: snapshot.many(broken, { via: broken.field.projectId, select: snapshot.select(broken.field.projectId) }) }) })] }), /physical FOREIGN KEY/);
   db.close();
 });
 

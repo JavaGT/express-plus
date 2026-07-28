@@ -11,13 +11,13 @@ import { scope } from '../src/scope.mjs';
 function setup(mayVerb) {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT, body TEXT);');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), body TEXT);');
   db.prepare('INSERT INTO Project VALUES (?, ?)').run('p1', 'one');
   db.prepare('INSERT INTO Comment VALUES (?, ?, ?)').run('c1', 'p1', 'visible');
   const permitted = () => [scope(() => true).can(() => grant(subscribe))];
   const project = { name: 'Project', fields: { name: { kind: 'value', type: 'text' } }, field: { name: { fieldName: 'name' } }, grant: permitted, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
   const comment = { name: 'Comment', fields: { projectId: { kind: 'value', type: 'ref', target: project }, body: { kind: 'value', type: 'text' } }, field: { projectId: { fieldName: 'projectId' }, body: { fieldName: 'body' } }, grant: permitted, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
-  const declaration = snapshot(project, { output: snapshot.object({ name: snapshot.select(project.field.name), comments: snapshot.many(comment, { select: snapshot.select(comment.field.body) }) }) });
+  const declaration = snapshot(project, { output: snapshot.object({ name: snapshot.select(project.field.name), comments: snapshot.many(comment, { via: comment.field.projectId, select: snapshot.select(comment.field.body) }) }) });
   return { db, live: createLiveDelivery({ db, entities: new Map([['Project', project], ['Comment', comment]]), mayVerb, snapshots: [declaration] }) };
 }
 
