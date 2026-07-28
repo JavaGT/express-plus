@@ -97,8 +97,16 @@ function compileTombstones(declaration, resolveEntity) {
   const entity = entityOf(rule.entity);
   if (resolveEntity(entity.name) !== entity) throw new TypeError(`snapshot tombstone entity '${entity.name}' must be registered`);
   const entityId = entity.fields[rule.entityId];
-  if (entityId?.kind !== 'value' || entityId.type !== 'ref' || targetName(entityId) !== target.name) {
-    throw new TypeError(`snapshot tombstones entityId must be a declared ref(${target.name})`);
+  if (rule.scopeId === undefined) {
+    if (entityId?.kind !== 'value' || entityId.type !== 'ref' || targetName(entityId) !== target.name) {
+      throw new TypeError(`snapshot tombstones entityId must be a declared ref(${target.name})`);
+    }
+  } else {
+    if (entityId?.kind !== 'value' || entityId.type !== 'text') throw new TypeError('snapshot polymorphic tombstones entityId must be a declared text field');
+    const scopeId = entity.fields[rule.scopeId];
+    if (scopeId?.kind !== 'value' || scopeId.type !== 'ref' || targetName(scopeId) !== target.name) {
+      throw new TypeError(`snapshot polymorphic tombstones scopeId must be a declared ref(${target.name})`);
+    }
   }
   for (const field of [rule.kindField, rule.state]) {
     const descriptor = entity.fields[field];
@@ -108,7 +116,7 @@ function compileTombstones(declaration, resolveEntity) {
   if (!Array.isArray(rule.hidden) || rule.hidden.length === 0 || rule.hidden.some((value) => typeof value !== 'string' || value.length === 0) || new Set(rule.hidden).size !== rule.hidden.length) {
     throw new TypeError('snapshot tombstones hidden must contain non-empty string literals');
   }
-  return Object.freeze({ target, entity, entityId: rule.entityId, kind: rule.kindField, state: rule.state, kindValue: rule.kindValue, hidden: Object.freeze([...rule.hidden]) });
+  return Object.freeze({ target, entity, entityId: rule.entityId, scopeId: rule.scopeId ?? null, kind: rule.kindField, state: rule.state, kindValue: rule.kindValue, hidden: Object.freeze([...rule.hidden]) });
 }
 
 export function compileSnapshots(declarations, resolveEntity, db = null) {
@@ -142,7 +150,7 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
       if (entry.nested) check(entry.nested);
     });
     check(output);
-    if (tombstones) physicalForeignKey(db, tombstones.entity, tombstones.entityId, tombstones.target);
+    if (tombstones) physicalForeignKey(db, tombstones.entity, tombstones.scopeId ?? tombstones.entityId, tombstones.target);
     compiled.set(anchor.name, Object.freeze({ anchor, output, tombstone: tombstones }));
   }
   const tombstones = Object.freeze([...compiled.values()].map((declaration) => declaration.tombstone).filter(Boolean));
@@ -157,8 +165,9 @@ function detached(raw) {
 function readRows(db, entity, principal, fk, value, inverse, order, tombstones) {
   const filter = entity.scopeFilter(principal);
   const rule = tombstones?.find((candidate) => entity === candidate.target);
+  const scopeVisibility = rule?.scopeId ? ` AND tombstone.${identifier(rule.scopeId, 'snapshot tombstone scopeId')} = t0.id` : '';
   const visibility = rule
-    ? ` AND NOT EXISTS (SELECT 1 FROM ${identifier(rule.entity.name, 'snapshot tombstone entity')} AS tombstone WHERE tombstone.${identifier(rule.entityId, 'snapshot tombstone entityId')} = t0.id AND tombstone.${identifier(rule.kind, 'snapshot tombstone kind')} = :snapshot_tombstone_kind AND tombstone.${identifier(rule.state, 'snapshot tombstone state')} IN (${rule.hidden.map((_, index) => `:snapshot_tombstone_hidden_${index}`).join(', ')}))`
+    ? ` AND NOT EXISTS (SELECT 1 FROM ${identifier(rule.entity.name, 'snapshot tombstone entity')} AS tombstone WHERE tombstone.${identifier(rule.entityId, 'snapshot tombstone entityId')} = t0.id${scopeVisibility} AND tombstone.${identifier(rule.kind, 'snapshot tombstone kind')} = :snapshot_tombstone_kind AND tombstone.${identifier(rule.state, 'snapshot tombstone state')} IN (${rule.hidden.map((_, index) => `:snapshot_tombstone_hidden_${index}`).join(', ')}))`
     : '';
   const sql = inverse
     ? `SELECT * FROM ${identifier(entity.name, 'snapshot entity')} AS t0 WHERE (${filter.sql}) AND t0.${identifier(fk, 'snapshot foreign key')} = :snapshot_parent${visibility}`
@@ -180,8 +189,9 @@ function readUser(db, id, tombstones) {
     }
     const deleted = columns.includes('deletedAt') ? ' AND deletedAt IS NULL' : '';
     const rule = tombstones?.find((candidate) => candidate.target.name === 'User');
+    const scopeVisibility = rule?.scopeId ? ` AND tombstone.${identifier(rule.scopeId, 'snapshot tombstone scopeId')} = User.id` : '';
     const visibility = rule
-      ? ` AND NOT EXISTS (SELECT 1 FROM ${identifier(rule.entity.name, 'snapshot tombstone entity')} AS tombstone WHERE tombstone.${identifier(rule.entityId, 'snapshot tombstone entityId')} = User.id AND tombstone.${identifier(rule.kind, 'snapshot tombstone kind')} = :snapshot_tombstone_kind AND tombstone.${identifier(rule.state, 'snapshot tombstone state')} IN (${rule.hidden.map((_, index) => `:snapshot_tombstone_hidden_${index}`).join(', ')}))`
+      ? ` AND NOT EXISTS (SELECT 1 FROM ${identifier(rule.entity.name, 'snapshot tombstone entity')} AS tombstone WHERE tombstone.${identifier(rule.entityId, 'snapshot tombstone entityId')} = User.id${scopeVisibility} AND tombstone.${identifier(rule.kind, 'snapshot tombstone kind')} = :snapshot_tombstone_kind AND tombstone.${identifier(rule.state, 'snapshot tombstone state')} IN (${rule.hidden.map((_, index) => `:snapshot_tombstone_hidden_${index}`).join(', ')}))`
       : '';
     const params = { snapshot_user: id };
     if (rule) {
