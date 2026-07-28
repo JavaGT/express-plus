@@ -248,5 +248,9 @@ test('HTTP delivery session reserves history commands for the package history en
   const [historyUrl, historyOptions] = calls.find(([, options]) => options?.method === 'POST');
   assert.equal(historyUrl, 'https://example.test/workbench/history');
   assert.deepEqual(JSON.parse(historyOptions.body), { actionId: 'history-action', command: 'undo', scope: 'Project:p1', session: 'tab-a' });
+  await session.history.redo();
+  assert.deepEqual(JSON.parse(calls.filter(([, options]) => options?.method === 'POST').at(-1)[1].body), {
+    actionId: 'history-action', command: 'redo', scope: 'Project:p1', session: 'tab-a',
+  });
   session.close();
 });

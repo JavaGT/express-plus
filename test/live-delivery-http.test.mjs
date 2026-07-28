@@ -90,6 +90,7 @@ test('HTTP session delegates duplicate, gap and opaque resync recovery to the pa
     validateSnapshot: (value) => value,
     fold: (snapshot, envelope) => ({ values: [...snapshot.values, envelope.event.data] }),
     sendAction: async () => ({ ok: true }),
+    historySession: 'tab-a',
   });
   await session.ready;
   sources[0].onmessage({ data: JSON.stringify([{ type: 'event', seq: 3, event: { type: 'update', data: 3 } }]) });
@@ -119,6 +120,7 @@ test('HTTP snapshot-only session settles a sender receipt through opaque SSE rec
     optimistic: (snapshot) => ({ ...snapshot, pending: true }),
     sendAction: async () => ({ ok: true, actionId: 'private-action-id', confirmedThrough: 2 }),
     createActionId: () => 'private-action-id',
+    historySession: 'tab-a',
   });
   await session.ready;
   await session.dispatch('Project.rename', {});
@@ -142,6 +144,7 @@ test('HTTP session reserves revocation for authorization responses', async () =>
       validateSnapshot: (value) => value,
       fold: (snapshot) => snapshot,
       sendAction: async () => ({ ok: true }),
+      historySession: 'tab-a',
     });
     if (status === 503) await assert.rejects(session.ready, /HTTP 503/);
     else await session.ready;
@@ -160,6 +163,7 @@ test('HTTP session includes credentials for both bootstrap and SSE', async () =>
     validateSnapshot: (value) => value,
     fold: (snapshot) => snapshot,
     sendAction: async () => ({ ok: true }),
+    historySession: 'tab-a',
   });
   await session.ready;
   assert.equal(fetchOptions.credentials, 'include');

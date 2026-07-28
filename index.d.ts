@@ -977,7 +977,7 @@ export interface HistoryAction {
   readonly payload: unknown;
   readonly principal: string | null;
   readonly session: string | null;
-  readonly operation: 'action' | 'undo' | 'redo' | 'undoToPoint';
+  readonly operation: 'action' | 'undo' | 'redo';
   readonly committedAt: string;
   readonly events: readonly CommittedEvent[];
 }

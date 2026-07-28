@@ -2619,7 +2619,7 @@ export function createLiveDeliveryHttpSession({
   if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl is required');
   if (typeof eventSourceFactory !== 'function') throw new TypeError('eventSourceFactory is required');
-  if (historySession !== undefined && (typeof historySession !== 'string' || historySession.length === 0)) throw new TypeError('historySession must be a non-empty string');
+  if (typeof historySession !== 'string' || historySession.length === 0) throw new TypeError('historySession is required');
   const endpoint = `${baseUrl.replace(/\/$/, '')}/bootstrap`;
   const eventsEndpoint = `${baseUrl.replace(/\/$/, '')}/events`;
   // The action endpoint belongs to the configured Workbench origin, not the
@@ -2674,7 +2674,7 @@ export function createLiveDeliveryHttpSession({
       method: 'POST',
       credentials: 'include',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(historyRequest ?? { ...action, scope, ...(historySession === undefined ? {} : { clientId: historySession }) }),
+      body: JSON.stringify(historyRequest ?? { ...action, scope, clientId: historySession }),
     });
     let receipt;
     try { receipt = await response.json(); } catch { throw new Error(`action dispatch failed with HTTP ${response.status}`); }
@@ -2698,8 +2698,8 @@ export function createLiveDeliveryHttpSession({
   // application action. The server resolves this authenticated session's
   // current cursor within its write queue; raw revisions never leave it.
   Object.defineProperty(session, 'history', { value: Object.freeze({
-    undo: ({ session: requestedSession } = {}) => session.dispatch('$history.undo', { session: requestedSession ?? historySession }),
-    redo: ({ session: requestedSession } = {}) => session.dispatch('$history.redo', { session: requestedSession ?? historySession }),
+    undo: () => session.dispatch('$history.undo', { session: historySession }),
+    redo: () => session.dispatch('$history.redo', { session: historySession }),
   }) });
   return session;
 }
