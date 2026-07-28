@@ -2,10 +2,19 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, grant, read, subscribe, text } from '../src/index.mjs';
-import { createLiveDeliveryHttpSession } from '../public/workbench-client.mjs';
+import workbench, {
+  annotatedText, annotatedTextCreateAction, annotatedTextRetireAction, annotation,
+  entity, everyone, exportAnnotatedText,
+  grant, measurement, read, ref, registerAnnotatedTextContract, scope, subscribe, text, write,
+} from '../src/index.mjs';
+import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
+import { createAnnotatedTextHttpSession, createLiveDeliveryHttpSession } from '../public/workbench-client.mjs';
 
 const user = { type: 'user', id: 'u1', attributes: {} };
+registerAnnotatedTextContract('httpDeliveryMeasurement', Object.freeze({ kind: 'measurement' }));
+registerAnnotatedTextStructuralExtension('httpDeliveryMeasurement', Object.freeze({
+  version: 1, validate() {}, edit() {}, partition() {}, combine() {},
+}));
 
 function project() {
   return entity('Project', {
@@ -160,6 +169,70 @@ test('package action transport rejects unauthenticated, unauthorized, malformed,
   assert.equal((await post({ actionId: 'a', scope: 'Project:p1', type: 'Project.create', payload: {} }, { 'x-user': 'u1' })).status, 404);
   assert.equal((await post({ actionId: 'a', scope: 'Project:p1', type: 'project.write', payload: { id: 'p1', authorized: false } }, { 'x-user': 'u1' })).status, 403);
   assert.equal((await fetch(endpoint, { method: 'GET' })).status, 405);
+});
+
+test('declared annotated text owns generated HTTP admission and package delivery recovery', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO Project VALUES (\'p1\'); INSERT INTO User VALUES (\'u1\'); INSERT INTO User VALUES (\'u2\')');
+  const Document = entity('HttpAnnotatedDocument', {
+    project: ref('Project'), owner: ref('User', { role: 'owner' }),
+    body: annotatedText({ project: 'project', owner: 'owner', annotations: [annotation('note')], measurements: [measurement('words', { extension: 'httpDeliveryMeasurement' })] }),
+    grant: [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  executeDDL(Document, db);
+  let principal = user;
+  const principalOf = (request) => request.headers['x-anonymous'] ? { type: 'anonymous', id: 'anonymous' } : principal;
+  const app = workbench({ db, entities: [Document] });
+  app.attachLiveDelivery({ principalOf });
+  app.listen(0, { principalOf });
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const post = (action, headers = {}) => fetch(`${origin}/workbench/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify({ actionId: action.payload?.version ? `op-${action.payload.mutationId}` : `action-${action.type}`, ...action, clientId: 'tab-a' }),
+  });
+
+  const create = annotatedTextCreateAction(Document, { id: 'd1', project: 'p1', owner: 'u1' });
+  assert.equal((await post(create, { 'x-anonymous': '1' })).status, 403);
+  assert.equal((await post(create)).status, 200);
+  const initialBlockId = db.prepare('SELECT id FROM HttpAnnotatedDocument_body_block WHERE document_id = ?').get('d1').id;
+
+  const sources = [];
+  let actionNumber = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: `${origin}/live-delivery`, context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => `typed-${++actionNumber}`,
+    eventSourceFactory: () => { const source = { close() {}, onmessage: null, onerror: null }; sources.push(source); return source; },
+  });
+  await session.ready;
+  assert.equal(session.document.blocks[0].id, initialBlockId);
+  assert.equal((await session.insert({ mutationId: 'insert-1', at: { blockId: initialBlockId, offset: 0 }, text: 'hello' })).ok, true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(session.document.blocks[0].text, 'hello', 'committed receipt recovers through recipient snapshot ingest');
+  assert.equal((await session.split({ mutationId: 'split-1', at: { blockId: initialBlockId, offset: 2 } })).ok, true);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(session.document.blocks.length, 2);
+  assert.equal('dispatch' in session, false);
+
+  const exported = await exportAnnotatedText({ db, entity: Document, field: Document.body, documentId: 'd1', principal });
+  assert.equal(exported.blocks.map((block) => block.text).join(''), 'hello');
+  await assert.rejects(exportAnnotatedText({ db, entity: Document, field: Document.body, documentId: 'd1', principal: { ...user, id: 'u2' } }), /owner authorization failed/);
+
+  for (const forbidden of [
+    { type: 'HttpAnnotatedDocument.update', scope: 'HttpAnnotatedDocument:d1', payload: { id: 'd1', project: 'p1' } },
+    { type: 'HttpAnnotatedDocument.body.apply', scope: 'HttpAnnotatedDocument:d1', payload: { id: 'd1', operation: {} } },
+    { type: 'HttpAnnotatedDocument.body.operation', scope: 'HttpAnnotatedDocument:other', payload: { id: 'd1', version: 99 } },
+  ]) assert.equal((await post(forbidden)).status, 404);
+
+  principal = { ...user, id: 'u2' };
+  const revokedEdit = await session.insert({ mutationId: 'revoked', at: { blockId: initialBlockId, offset: 0 }, text: 'x' });
+  assert.equal(revokedEdit.ok, false);
+  principal = user;
+  assert.equal((await post(annotatedTextRetireAction(Document, 'd1'))).status, 200);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM HttpAnnotatedDocument_body_retired WHERE document_id = ?').get('d1').count, 1);
+  session.close();
 });
 
 test('HTTP delivery session uses package action transport by default and retains explicit senders', async () => {

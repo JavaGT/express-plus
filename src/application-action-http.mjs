@@ -57,6 +57,26 @@ function historyRequest(body) {
   return { actionId, scope, session };
 }
 
+function admitsApplicationHttpAction(app, request) {
+  if (app.actions.some((action) => action.type === request.type)) return true;
+
+  // Generated entity handlers are not a public mutation catalog. Annotated
+  // text is the one generated browser grammar: derive its exact closed set from
+  // registered declarations, and bind lifecycle requests to their document
+  // scope rather than recognizing action-name prefixes.
+  for (const entity of app.entities.values()) {
+    const annotatedFields = Object.entries(entity.fields)
+      .filter(([, field]) => field.kind === 'annotatedText')
+      .map(([name]) => name);
+    if (annotatedFields.length === 0) continue;
+    const id = request.payload?.id;
+    if (typeof id !== 'string' || id.length === 0 || request.scope !== `${entity.name}:${id}`) continue;
+    if (request.type === `${entity.name}.create` || request.type === `${entity.name}.annotatedText.retire`) return true;
+    if (annotatedFields.some((field) => request.type === `${entity.name}.${field}.operation`)) return true;
+  }
+  return false;
+}
+
 /** Handle the fixed HTTP skin for application-registered actions. */
 export async function handleApplicationActionHttp(app, req, res, principalOf, sendJson) {
   const url = new URL(req.url ?? '/', 'http://workbench.local');
@@ -83,7 +103,7 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
   }
   // Registered declarations are an explicit public mutation contract. Do not
   // let this generic transport reach generated entity CRUD kernel handlers.
-  if (url.pathname === ACTION_PATH && !app.actions.some((action) => action.type === request.type)) {
+  if (url.pathname === ACTION_PATH && !admitsApplicationHttpAction(app, request)) {
     sendFailure(sendJson, res, failure('unknown-action', 'action is not available'));
     return true;
   }
