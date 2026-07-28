@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { test } from 'node:test';
 
-import workbench, { authorizedRows, entity, everyone, grant, map, membership, postCommitEffect, read, ref, scope, subscribe, text, write } from '../src/index.mjs';
+import workbench, { admin, authorizedRows, entity, everyone, grant, map, membership, postCommitEffect, read, ref, scope, subscribe, text, write } from '../src/index.mjs';
 
 const principal = { type: 'user', id: 'editor', attributes: {} };
 
@@ -145,6 +145,79 @@ test('authorizedRows binds a post-compilation membership declaration and checks 
   assert.equal(handled, 0);
   db.prepare("UPDATE MembershipTransferProject_members SET role = 'editor' WHERE MembershipTransferProject_id = 'target'").run();
   assert.equal((await app.dispatch({ ...base, actionId: 'membership-granted' })).ok, true);
+  assert.equal(handled, 1);
+});
+
+test('authorizedRows requires an explicit admin grant on every selected row and fails closed for malformed requirements', async (t) => {
+  const Project = entity('AdminAuthorizedRowsProject', {
+    name: text(),
+    owner: ref('User', { role: 'owner' }),
+    grant: () => [scope(() => everyone()).can(async ({ is }) =>
+      (await is.owner()) ? grant(read, write, subscribe, admin) : grant(read, write, subscribe))],
+  });
+  const NoAdminProject = entity('NoAdminAuthorizedRowsProject', {
+    name: text(),
+    owner: ref('User', { role: 'owner' }),
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  const ScopeOnlyProject = entity('ScopeOnlyAdminAuthorizedRowsProject', {
+    name: text(),
+    grant: () => [scope(() => everyone())],
+  });
+  const ScopedAdminProject = entity('ScopedAdminAuthorizedRowsProject', {
+    name: text(),
+    owner: ref('User', { role: 'owner' }),
+    grant: () => [scope(({ is }) => is.owner()).can(() => grant(read, write, subscribe, admin))],
+  });
+  let handled = 0;
+  const action = {
+    type: 'admin.cross-project.authorized',
+    authorize: authorizedRows(({ payload }) => [
+      { entity: Project, id: payload.source, capability: admin },
+      { entity: Project, id: payload.target, capability: admin },
+    ]),
+    handler: () => { handled += 1; return []; },
+  };
+  const noAdminAction = {
+    type: 'admin.absent.authorized',
+    authorize: authorizedRows(() => [{ entity: NoAdminProject, id: 'without-admin', capability: admin }]),
+    handler: () => { handled += 1; return []; },
+  };
+  const malformedAction = {
+    type: 'admin.malformed.authorized',
+    authorize: authorizedRows(() => [{ entity: Project, id: 'source', capability: { capability: 'admin' } }]),
+    handler: () => { handled += 1; return []; },
+  };
+  const scopeOnlyAction = {
+    type: 'admin.scope-only.authorized',
+    authorize: authorizedRows(() => [{ entity: ScopeOnlyProject, id: 'scope-only', capability: admin }]),
+    handler: () => { handled += 1; return []; },
+  };
+  const outOfScopeAction = {
+    type: 'admin.out-of-scope.authorized',
+    authorize: authorizedRows(() => [{ entity: ScopedAdminProject, id: 'outside-scope', capability: admin }]),
+    handler: () => { handled += 1; return []; },
+  };
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, entities: [Project, NoAdminProject, ScopeOnlyProject, ScopedAdminProject], actions: [action, noAdminAction, malformedAction, scopeOnlyAction, outOfScopeAction] });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); });
+  db.prepare('INSERT INTO AdminAuthorizedRowsProject (id, name, owner) VALUES (?, ?, ?)').run('source', 'Source', 'editor');
+  db.prepare('INSERT INTO AdminAuthorizedRowsProject (id, name, owner) VALUES (?, ?, ?)').run('target', 'Target', 'other');
+  db.prepare('INSERT INTO NoAdminAuthorizedRowsProject (id, name, owner) VALUES (?, ?, ?)').run('without-admin', 'No admin', 'editor');
+  db.prepare('INSERT INTO ScopeOnlyAdminAuthorizedRowsProject (id, name) VALUES (?, ?)').run('scope-only', 'Scope only');
+  db.prepare('INSERT INTO ScopedAdminAuthorizedRowsProject (id, name, owner) VALUES (?, ?, ?)').run('outside-scope', 'Outside scope', 'other');
+
+  const base = { scope: 'AdminAuthorizedRowsProject:source', type: action.type, payload: { source: 'source', target: 'target' }, principal };
+  assert.equal((await app.dispatch({ ...base, actionId: 'admin-cross-row-denied' })).ok, false, 'admin on one row does not authorize another row');
+  assert.equal((await app.dispatch({ actionId: 'admin-absent-denied', scope: 'NoAdminAuthorizedRowsProject:without-admin', type: noAdminAction.type, payload: {}, principal })).ok, false, 'write does not imply admin');
+  assert.equal((await app.dispatch({ actionId: 'admin-malformed-denied', scope: 'AdminAuthorizedRowsProject:source', type: malformedAction.type, payload: {}, principal })).ok, false, 'lookalike capability token is rejected');
+  assert.equal((await app.dispatch({ actionId: 'admin-scope-only-denied', scope: 'ScopeOnlyAdminAuthorizedRowsProject:scope-only', type: scopeOnlyAction.type, payload: {}, principal })).ok, false, 'scope visibility does not imply admin');
+  assert.equal((await app.dispatch({ actionId: 'admin-out-of-scope-denied', scope: 'ScopedAdminAuthorizedRowsProject:outside-scope', type: outOfScopeAction.type, payload: {}, principal })).ok, false, 'an explicit admin grant outside the declared read scope is rejected');
+  assert.equal(handled, 0);
+
+  db.prepare("UPDATE AdminAuthorizedRowsProject SET owner = 'editor' WHERE id = 'target'").run();
+  assert.equal((await app.dispatch({ ...base, actionId: 'admin-both-rows-granted' })).ok, true, 'explicit admin grants on both rows authorize the action');
   assert.equal(handled, 1);
 });
 

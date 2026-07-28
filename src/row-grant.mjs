@@ -6,7 +6,7 @@
 //
 //   - the SQL scope (scope-sql.mjs / bindReadScope) — which rows are VISIBLE; and
 //   - the `.can` capability body — given a visible row, which capabilities
-//     (read / write / subscribe) the principal holds on it.
+//     (read / write / subscribe / admin) the principal holds on it.
 //
 // This module runs the `.can` half. It builds the entity's `is` checks bound to a
 // concrete { row, principal }, runs the grant clause's `.can` body through the
@@ -16,7 +16,7 @@
 // the grant runs every verb.
 
 import { check, resolveDecision } from './check.mjs';
-import { read, write, subscribe } from './grant.mjs';
+import { read, write, subscribe, admin } from './grant.mjs';
 import { getLog } from './log.mjs';
 import { isRuntimeGrantClause } from './scope.mjs';
 
@@ -123,6 +123,7 @@ const VERB_CAPABILITY = Object.freeze({
   update: write,
   remove: write,
   subscribe,
+  admin,
 });
 
 // True iff the entity's grant carries its OWN `.can` body (a scope(...).can(fn)
@@ -166,8 +167,9 @@ export async function mayVerb(entityRecord, verb, row, principal) {
 //   - Inherit directive → load the parent row through the declared FK and recurse
 //     into the parent's mayRow decision, so inherited visibility and inherited
 //     capabilities stay one concept.
-//   - Scope-only grant → return true (admit): the read-scope alone decided
-//     visibility, and this layer has no `.can` body to run.
+//   - Scope-only grant → return true (admit) for existing transport verbs: the
+//     read-scope alone decided visibility. `admin` is not a transport default;
+//     it requires an explicit `.can` capability grant.
 //   - Own `.can` grant → run mayVerb inside a try/catch and fail CLOSED on throw
 //     (return false). A thrown `.can` body is a server bug; fail-closed denies
 //     rather than leaking the row.
@@ -205,7 +207,7 @@ export async function mayRow(entityRecord, verb, row, principal, authz = mayVerb
       const parentRecord = resolveInheritedParent(entityRecord, inherited);
       return await mayRow(parentRecord, verb, parentRow, principal, authz);
     }
-    if (!hasOwnCanGrant(entityRecord)) return true;
+    if (!hasOwnCanGrant(entityRecord)) return verb !== 'admin';
     return await authz(entityRecord, verb, row, principal);
   } catch {
     return false;

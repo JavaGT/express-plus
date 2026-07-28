@@ -1,7 +1,7 @@
 import workbench, {
   action, event, entity, text, date, ref, projected, computed, ephemeral, inherit, log, state,
   schedule, tick,
-  principal, read, write, grant, membership, parseCookies, SESSION_COOKIE,
+  admin, authorizedRows, principal, read, write, grant, membership, parseCookies, SESSION_COOKIE,
   apiKeyPrincipalOf, createInvitationApi as createRootInvitationApi, emailSeam,
   FAILURE_CATEGORIES, failure, failureOutcome, isWorkbenchFailure, sanitizeUnexpectedFailure,
   matchRoute, noopTransport, serveStatic, sessionCookie, sessionPrincipalOf,
@@ -202,6 +202,27 @@ const scopeAwareAction: RegisteredAction = {
   authorize: () => true,
   handler: ({ scope }) => [{ type: 'Project.renamed', scope, data: {} }],
 };
+const adminAuthorizedAction: RegisteredAction<{ projectId: string }> = {
+  type: 'Project.admin',
+  authorize: authorizedRows(({ payload }) => [{ entity: Project, id: payload.projectId, capability: admin }]),
+  handler: ({ scope }) => [{ type: 'Project.administered', scope, data: {} }],
+};
+void adminAuthorizedAction;
+const forgedAdminAuthorizedAction: RegisteredAction<{ projectId: string }> = {
+  type: 'Project.forgedAdmin',
+  // @ts-expect-error authorizedRows requires the exported admin singleton, not a structural lookalike
+  authorize: authorizedRows(({ payload }) => [{ entity: Project, id: payload.projectId, capability: { capability: 'admin' } }]),
+  handler: ({ scope }) => [{ type: 'Project.forgedAdministered', scope, data: {} }],
+};
+void forgedAdminAuthorizedAction;
+const clonedAdmin = { ...admin };
+const clonedAdminAuthorizedAction: RegisteredAction<{ projectId: string }> = {
+  type: 'Project.clonedAdmin',
+  // @ts-expect-error authorizedRows requires the admin singleton, not a clone
+  authorize: authorizedRows(({ payload }) => [{ entity: Project, id: payload.projectId, capability: clonedAdmin }]),
+  handler: ({ scope }) => [{ type: 'Project.clonedAdministered', scope, data: {} }],
+};
+void clonedAdminAuthorizedAction;
 const claimedBlobAction: RegisteredAction<{ id: string; blob: unknown }> = {
   type: 'File.upload',
   authorize: () => true,

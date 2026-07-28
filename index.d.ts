@@ -402,13 +402,15 @@ export const raster: { crdt(options?: Readonly<Record<string, unknown>>): FieldD
 export const polyline: { crdt(options?: Readonly<Record<string, unknown>>): FieldDescriptor<unknown> };
 export function vector(dimensions: number, options?: FieldOptions<number[]>): FieldDescriptor<number[]>;
 
-export interface Capability {
-  readonly capability: string;
+declare class CapabilityToken<Name extends string> {
+  readonly capability: Name;
+  #brand: Name;
 }
-export const read: Capability;
-export const write: Capability;
-export const subscribe: Capability;
-export const admin: Capability;
+export type Capability<Name extends string = string> = CapabilityToken<Name>;
+export const read: Capability<'read'>;
+export const write: Capability<'write'>;
+export const subscribe: Capability<'subscribe'>;
+export const admin: Capability<'admin'>;
 export interface OwnerFieldFactory {
   (): FieldDescriptor<string>;
   only(): readonly ScopeClause[];
@@ -822,9 +824,9 @@ export interface PostCommitEffectDeclaration {
 }
 export function postCommitEffect(input: PostCommitEffectDeclaration): Readonly<PostCommitEffectDeclaration>;
 export interface AuthorizedRowRequirement {
-  readonly entity: string | WorkbenchEntity;
+  readonly entity: string | WorkbenchEntity<any>;
   readonly id: string;
-  readonly capability: typeof read | typeof write | typeof subscribe;
+  readonly capability: typeof read | typeof write | typeof subscribe | typeof admin;
 }
 export function authorizedRows<Payload = Record<string, unknown>>(
   resolve: (context: { payload: Payload; principal: Principal }) => readonly AuthorizedRowRequirement[] | Promise<readonly AuthorizedRowRequirement[]>,
