@@ -443,7 +443,7 @@ async function commitEvents(db, events, {
       // the events it references, so a retry's dedupe check and a crash
       // recovery always see either both or neither.
       if (directive !== undefined) {
-        const prepared = isErasureDirectivePreparation(directive) ? prepareErasureDirective(db, directive) : directive;
+        const prepared = isErasureDirectivePreparation(directive) ? prepareErasureDirective(db, directive, { excludeActionId: actionId }) : directive;
         if (!isErasureDirective(prepared)) throw new TypeError(`action '${type}' returned an invalid erasure directive`);
         await applyErasureDirective(db, prepared, {
           scope, actionId, actionContext: { ...erasureActionContext, committedAt: now }, prepare: handler.erasurePrepare,
@@ -453,10 +453,10 @@ async function commitEvents(db, events, {
       await historyCommit?.apply?.(db);
       insertReceipt(db, scope, actionId, now, result, directive === undefined
         ? {
-            ...historyCommit?.metadata,
-            actionType: type ?? historyCommit?.metadata?.actionType,
-            actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData,
-          }
+          ...historyCommit?.metadata,
+          actionType: type ?? historyCommit?.metadata?.actionType,
+          actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData,
+        }
         : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
       return result;
     });

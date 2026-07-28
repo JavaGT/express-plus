@@ -8,6 +8,8 @@ export {
   registerAnnotatedTextStructuralExtension,
   annotatedTextAction,
   annotatedTextCreateAction,
+  annotatedTextRetireAction,
+  exportAnnotatedText,
 } from './index.js';
 
 export type {
@@ -31,4 +33,5 @@ export type {
   AnnotatedTextStructuralExtensionSpec,
   AnnotatedTextOperationCommand,
   AnnotatedTextActionRequest,
+  AnnotatedTextCanonicalDocument,
 } from './index.js';

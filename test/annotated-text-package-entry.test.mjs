@@ -17,6 +17,7 @@ import {
   registerAnnotatedTextStructuralExtension,
   annotatedTextAction,
   annotatedTextCreateAction,
+  annotatedTextRetireAction,
 } from '../src/annotated-text-public.mjs';
 
 const extension = 'packageEntryMeasurement';
@@ -69,6 +70,12 @@ test('public action grammar validates field handles and emits closed generated a
 
   assert.deepEqual(annotatedTextCreateAction(Document, { id: 'doc-1', project: 'p1', owner: 'u1' }), {
     type: 'PackageActionDocument.create', scope: 'PackageActionDocument:doc-1', payload: { id: 'doc-1', project: 'p1', owner: 'u1' },
+  });
+  assert.deepEqual(annotatedTextAction(Document, Document.body, { kind: 'block.split', id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-1', at: { blockId: 'block-1', offset: 1 } }).payload, {
+    version: 7, id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-1', edit: { kind: 'block.split', at: { blockId: 'block-1', offset: 1 } },
+  });
+  assert.deepEqual(annotatedTextRetireAction(Document, 'doc-1'), {
+    type: 'PackageActionDocument.annotatedText.retire', scope: 'PackageActionDocument:doc-1', payload: { id: 'doc-1' },
   });
   assert.throws(() => annotatedTextCreateAction(Document, { project: 'p1' }), /non-empty id/);
 });

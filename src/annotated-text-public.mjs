@@ -14,4 +14,6 @@ export {
 export {
   annotatedTextAction,
   annotatedTextCreateAction,
+  annotatedTextRetireAction,
 } from './annotated-text-action.mjs';
+export { exportAnnotatedText } from './annotated-text-snapshot.mjs';

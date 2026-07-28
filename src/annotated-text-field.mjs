@@ -552,7 +552,9 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
   const measurement = `${prefix}_measurement`;
   const state = `${prefix}_state`;
   const basis = `${prefix}_basis`;
+  const retired = `${prefix}_retired`;
   const statements = [
+    `CREATE TABLE IF NOT EXISTS ${retired} (\n  document_id TEXT PRIMARY KEY,\n  generation TEXT NOT NULL,\n  retired_at TEXT NOT NULL\n);`,
     `CREATE TABLE IF NOT EXISTS ${state} (\n  document_id TEXT PRIMARY KEY,\n  structure_version INTEGER NOT NULL CHECK (structure_version >= 0),\n  family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
     `CREATE TABLE IF NOT EXISTS ${basis} (\n  token TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  principal_id TEXT NOT NULL,\n  structural_revision INTEGER NOT NULL CHECK (structural_revision >= 1),\n  family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)),\n  visible_blocks TEXT NOT NULL CHECK (json_valid(visible_blocks)),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_basis_recipient ON ${basis} (document_id, principal_id);`,

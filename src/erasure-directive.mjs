@@ -241,11 +241,11 @@ function matchesSubject(data, rule, subject) {
   return matches;
 }
 
-function censusTargets(db, { owningScope, subject, census }) {
+function censusTargets(db, { owningScope, subject, census }, excludeActionId = null) {
   const actionRules = ruleMap(census.rules, 'action');
   const eventRules = ruleMap(census.rules, 'event');
-  const receipts = db.prepare('SELECT * FROM _ActionReceipt WHERE scope = ? ORDER BY historyOrder').all(owningScope);
-  const rows = db.prepare('SELECT * FROM _Log WHERE scope = ? ORDER BY seq').all(owningScope);
+  const receipts = db.prepare('SELECT * FROM _ActionReceipt WHERE scope = ? ORDER BY historyOrder').all(owningScope).filter((receipt) => receipt.actionId !== excludeActionId);
+  const rows = db.prepare('SELECT * FROM _Log WHERE scope = ? ORDER BY seq').all(owningScope).filter((row) => row.actionId !== excludeActionId);
   const targetIds = new Set();
   for (const receipt of receipts) {
     const rule = actionRules.get(receipt.actionType);
@@ -261,12 +261,12 @@ function censusTargets(db, { owningScope, subject, census }) {
 }
 
 /** Prepare an exact package-owned manifest from the current transaction snapshot. */
-export function prepareErasureDirective(db, input) {
+export function prepareErasureDirective(db, input, { excludeActionId = null } = {}) {
   const declared = isErasureDirectivePreparation(input)
     ? { owningScope: input.owningScope, subject: input.subject, census: input.census }
     : input;
   erasureDirectivePreparation(declared);
-  const { receipts, rows, targetIds } = censusTargets(db, declared);
+  const { receipts, rows, targetIds } = censusTargets(db, declared, excludeActionId);
   if (targetIds.size === 0) fail('structural census found no targets');
   const rowByKey = new Map(rows.map((row) => [`${row.scope}:${row.seq}`, row]));
   const actions = receipts.filter((receipt) => targetIds.has(receipt.actionId)).map((receipt) => {
@@ -299,7 +299,9 @@ export async function applyErasureDirective(db, directive, {
     fail('targets must remain in the owning scope and cannot include the purge action');
   }
 
-  const { receipts, rows, targetIds: computedTargets } = censusTargets(db, directive);
+  // The retiring action's events are in this transaction but deliberately not
+  // part of its historical erasure manifest.
+  const { receipts, rows, targetIds: computedTargets } = censusTargets(db, directive, actionId);
   const targetById = new Map();
   for (const target of directive.actions) {
     if (targetById.has(target.actionId)) fail(`duplicate target action '${target.actionId}'`);

@@ -81,9 +81,10 @@ test('DDL generates correct table count and names', () => {
   const tables = ddl.filter(s => s.startsWith('CREATE TABLE'));
   const indexes = ddl.filter(s => s.startsWith('CREATE INDEX') || s.startsWith('CREATE UNIQUE INDEX'));
 
-  assert.equal(tables.length, 9);
+  assert.equal(tables.length, 11);
   assert.ok(tables.some(s => s.includes('Doc_body_block')));
   assert.ok(tables.some(s => s.includes('Doc_body_state')));
+  assert.ok(tables.some(s => s.includes('Doc_body_retired')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_highlight')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_tag')));
@@ -91,7 +92,7 @@ test('DDL generates correct table count and names', () => {
   assert.ok(tables.some(s => s.includes('Doc_body_measurement')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_orphan_state')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_protected_target')));
-  assert.equal(indexes.length, 7);
+  assert.equal(indexes.length, 8);
 });
 
 test('block table has correct columns, constraints, and FKs', () => {

@@ -13,7 +13,7 @@ import { validateMaterializedField, validateMutation, ValidationError, deseriali
 import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { assertFrontier, assertWellFormedText, canonicalTextOp, frontierDominates } from '../annotated-text.mjs';
-import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint, textOperationForOffsetEdit } from '../annotated-text-family.mjs';
+import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint, projectEndpointToBlockOffset, textOperationForOffsetEdit } from '../annotated-text-family.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
@@ -23,6 +23,7 @@ import { assertR2BlockSplitPayload, frozenJsonSnapshot } from '../annotated-text
 import { assertR3BlockMergePayload, canonicalJsonEqual } from '../annotated-text-r3.mjs';
 import { assertR4AnnotationApplyPayload } from '../annotated-text-r4.mjs';
 import { assertR5AnnotationDetachPayload } from '../annotated-text-r5.mjs';
+import { erasureDirectivePreparation } from '../erasure-directive.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 
@@ -58,7 +59,7 @@ export function assertAnnotatedTextOperationPayload(name, fieldName, payload) {
 
 function assertAnnotatedTextOffsetEditPayload(name, fieldName, payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 5 ||
-      payload.version !== 6 || typeof payload.id !== 'string' || payload.id.length === 0 ||
+      (payload.version !== 6 && payload.version !== 7) || typeof payload.id !== 'string' || payload.id.length === 0 ||
       typeof payload.basis !== 'string' || payload.basis.length === 0 || typeof payload.mutationId !== 'string' || payload.mutationId.length === 0 ||
       !payload.edit || typeof payload.edit !== 'object' || Array.isArray(payload.edit)) {
     throw new ValidationError(`${name}.${fieldName}.operation requires version 6 { id, basis, mutationId, edit }`);
@@ -76,10 +77,18 @@ function assertAnnotatedTextOffsetEditPayload(name, fieldName, payload) {
     edit = Object.freeze({ kind: 'text.insert', at: position(payload.edit.at, 'insert position'), text: payload.edit.text });
   } else if (payload.edit.kind === 'text.delete' && Object.keys(payload.edit).length === 3) {
     edit = Object.freeze({ kind: 'text.delete', from: position(payload.edit.from, 'delete start'), to: position(payload.edit.to, 'delete end') });
+  } else if (payload.version === 7 && payload.edit.kind === 'block.split' && Object.keys(payload.edit).length === 2) {
+    edit = Object.freeze({ kind: 'block.split', at: position(payload.edit.at, 'split position') });
+  } else if (payload.version === 7 && payload.edit.kind === 'block.merge' && Object.keys(payload.edit).length === 3 && typeof payload.edit.leftBlockId === 'string' && payload.edit.leftBlockId && typeof payload.edit.rightBlockId === 'string' && payload.edit.rightBlockId) {
+    edit = Object.freeze({ kind: 'block.merge', leftBlockId: payload.edit.leftBlockId, rightBlockId: payload.edit.rightBlockId });
+  } else if (payload.version === 7 && payload.edit.kind === 'annotation.apply' && Object.keys(payload.edit).length === 4 && payload.edit.annotation && typeof payload.edit.annotation === 'object') {
+    edit = Object.freeze({ kind: 'annotation.apply', annotation: frozenJsonSnapshot(payload.edit.annotation), from: position(payload.edit.from, 'annotation start'), to: position(payload.edit.to, 'annotation end') });
+  } else if (payload.version === 7 && payload.edit.kind === 'annotation.detach' && Object.keys(payload.edit).length === 3 && typeof payload.edit.annotationId === 'string' && payload.edit.annotationId && typeof payload.edit.blockId === 'string' && payload.edit.blockId) {
+    edit = Object.freeze({ kind: 'annotation.detach', annotationId: payload.edit.annotationId, blockId: payload.edit.blockId });
   } else {
-    throw new ValidationError(`${name}.${fieldName}.operation edit must be text.insert or text.delete`);
+    throw new ValidationError(`${name}.${fieldName}.operation edit is not supported`);
   }
-  return Object.freeze({ version: 6, id: payload.id, basis: payload.basis, mutationId: payload.mutationId, edit });
+  return Object.freeze({ version: payload.version, id: payload.id, basis: payload.basis, mutationId: payload.mutationId, edit });
 }
 
 function ownerFieldOf(entity) {
@@ -308,6 +317,37 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     },
   };
   const cursorPolicy = {};
+  const annotatedEntries = Object.entries(fields).filter(([, descriptor]) => descriptor.kind === 'annotatedText');
+  if (annotatedEntries.length > 0) {
+    const retirementType = `${name}.annotatedText.retire`;
+    const retirementHandler = async ({ payload, principal, db, scope }) => {
+      if (!payload || Object.keys(payload).length !== 1 || typeof payload.id !== 'string' || !payload.id || scope !== scopeOf(name, payload.id).key) throw new ValidationError(`${retirementType} requires document-scoped { id }`);
+      const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
+      if (!row || principal?.id == null || annotatedEntries.some(([, descriptor]) => String(row[descriptor.owner]) !== String(principal.id))) throw Object.assign(new Error('forbidden'), { status: 403 });
+      const censusRows = db.prepare('SELECT DISTINCT actionType AS type FROM _ActionReceipt WHERE scope = ?').all(scope);
+      const censusEvents = db.prepare('SELECT DISTINCT eventType AS type FROM _Log WHERE scope = ?').all(scope);
+      const hasErasureTargets = db.prepare("SELECT 1 FROM _ActionReceipt WHERE scope = ? AND json_extract(actionData, '$.id') = ? LIMIT 1").get(scope, payload.id);
+      const generation = randomUUID();
+      const events = annotatedEntries.map(([fieldName]) => {
+        const handle = eventHandles.native(name, fieldName, 'retired');
+        return { handle, type: handle.type, scope, data: Object.freeze({ version: 1, id: payload.id, generation, retiredAt: new Date().toISOString() }) };
+      });
+      const removed = { handle: verbs.removed.handle, type: verbs.removed.type, scope, data: { id: payload.id } };
+      const commit = {
+        events: [...events, removed],
+      };
+      if (hasErasureTargets) commit.directive = erasureDirectivePreparation({ owningScope: scope, subject: payload.id, census: { version: 1, rules: [
+          ...censusRows.map(({ type }) => ({ kind: 'action', type, disposition: 'target', identityPointers: ['/id'] })),
+          ...censusEvents.map(({ type }) => ({ kind: 'event', type, disposition: 'target', identityPointers: ['/id'] })),
+          ...events.map(({ type }) => ({ kind: 'event', type, disposition: 'retain', identityPointers: [] })),
+          { kind: 'event', type: verbs.removed.type, disposition: 'retain', identityPointers: [] },
+        ] } });
+      return commit;
+    };
+    Object.defineProperties(retirementHandler, { inTransaction: { value: true }, batchForbidden: { value: true }, erasureCapable: { value: true } });
+    handlers[retirementType] = retirementHandler;
+    cursorPolicy[retirementType] = 'excluded';
+  }
 
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind !== 'crdt' || descriptor.type !== 'text') continue;
@@ -353,15 +393,17 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     };
 
     const r1Handler = async ({ payload, db, scope, principal }) => {
-      if (payload.version === 6) {
+      if (payload.version === 6 || payload.version === 7) {
         const command = assertAnnotatedTextOffsetEditPayload(name, fieldName, payload);
         const documentScope = scopeOf(name, command.id).key;
         if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
         const basis = db.prepare(`SELECT structural_revision, family_checkpoint, visible_blocks FROM ${prefix}_basis WHERE token = ? AND document_id = ? AND principal_id = ?`).get(command.basis, command.id, principal?.id ?? '');
         if (!basis) throw new ValidationError(`${name}.${fieldName}.operation basis is unavailable`);
         const visibleBlocks = new Set(JSON.parse(basis.visible_blocks));
-        if (!visibleBlocks.has(command.edit.kind === 'text.insert' ? command.edit.at.blockId : command.edit.from.blockId) ||
-            (command.edit.kind === 'text.delete' && !visibleBlocks.has(command.edit.to.blockId))) {
+        const referencedBlocks = command.edit.kind === 'text.insert' || command.edit.kind === 'block.split' ? [command.edit.at.blockId]
+          : command.edit.kind === 'text.delete' || command.edit.kind === 'annotation.apply' ? [command.edit.from.blockId, command.edit.to.blockId]
+            : command.edit.kind === 'block.merge' ? [command.edit.leftBlockId, command.edit.rightBlockId] : [command.edit.blockId];
+        if (referencedBlocks.some((blockId) => !visibleBlocks.has(blockId))) {
           throw new ValidationError(`${name}.${fieldName}.operation basis does not permit the requested block`);
         }
         const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
@@ -370,14 +412,30 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         await authorizeFieldOp(record, fieldName, write, row, principal);
         const currentRecipient = await projectAnnotatedTextSnapshot({ db, entity: record, row, principal, fieldName, descriptor, mintBasis: false });
         const currentVisible = new Set(currentRecipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id));
-        if (!currentVisible.has(command.edit.kind === 'text.insert' ? command.edit.at.blockId : command.edit.from.blockId) ||
-            (command.edit.kind === 'text.delete' && !currentVisible.has(command.edit.to.blockId))) {
+        if (referencedBlocks.some((blockId) => !currentVisible.has(blockId))) {
           throw new ValidationError(`${name}.${fieldName}.operation is not currently visible to this recipient`);
         }
         if (state.structure_version !== basis.structural_revision) throw new ValidationError(`${name}.${fieldName}.operation conflicts with the basis structural revision`);
         const basedFamily = restoreTextFamilyCheckpoint(JSON.parse(basis.family_checkpoint));
         const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
         if (!frontierDominates(family.checkpoint.frontier, basedFamily.checkpoint.frontier)) throw new ValidationError(`${name}.${fieldName}.operation basis is not dominated by current state`);
+        if (command.version === 7 && command.edit.kind !== 'text.insert' && command.edit.kind !== 'text.delete') {
+          const expected = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
+          const offset = (point) => {
+            const endpoint = resolvePositionToEndpoint(basedFamily, point.blockId, point.offset, basedFamily.checkpoint.frontier);
+            // The anchor/affinity names the semantic basis position. Current
+            // projection evaluates that stable point in the dominated family;
+            // only its observation frontier advances.
+            return projectEndpointToBlockOffset(family, point.blockId, Object.freeze({ ...endpoint, basisFrontier: family.checkpoint.frontier }));
+          };
+          if (command.edit.kind === 'block.split') return r2Handler({ payload: { version: 2, id: command.id, expected, operation: { kind: 'block.split', blockId: command.edit.at.blockId, utf16Offset: offset(command.edit.at) } }, db, scope });
+          if (command.edit.kind === 'block.merge') return r3Handler({ payload: { version: 3, id: command.id, expected, operation: command.edit }, db, scope });
+          if (command.edit.kind === 'annotation.apply') {
+            if (command.edit.from.blockId !== command.edit.to.blockId) throw new ValidationError(`${name}.${fieldName}.operation annotation range must remain in one block`);
+            return r4Handler({ payload: { version: 4, id: command.id, expected, operation: { kind: 'annotation.apply', annotation: command.edit.annotation, selection: { blockId: command.edit.from.blockId, startUtf16Offset: offset(command.edit.from), endUtf16Offset: offset(command.edit.to) } } }, db, scope });
+          }
+          return r5Handler({ payload: { version: 5, id: command.id, expected, operation: command.edit }, db, scope });
+        }
         const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${command.id}\u0000${principal?.id ?? ''}\u0000${command.mutationId}`).digest('hex').slice(0, 32);
         const lamport = Math.max(0, ...Object.values(basedFamily.checkpoint.elements).map((element) => element.lamport)) + 1;
         let operation;
@@ -1255,7 +1313,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     };
 
     const handler = ({ payload, db, scope, principal }) => {
-      if (payload.version === 1 || payload.version === 6) return r1Handler({ payload, db, scope, principal });
+      if (payload.version === 1 || payload.version === 6 || payload.version === 7) return r1Handler({ payload, db, scope, principal });
       if (payload.version === 2) return r2Handler({ payload, db, scope });
       if (payload.version === 3) return r3Handler({ payload, db, scope });
       if (payload.version === 4) return r4Handler({ payload, db, scope });
@@ -1263,7 +1321,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', { value: true });
-    Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope }) => payload.version === 6
+    Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope }) => payload.version === 6 || payload.version === 7
       ? (() => {
         const command = assertAnnotatedTextOffsetEditPayload(name, fieldName, payload);
         const documentScope = scopeOf(name, command.id).key;

@@ -7,6 +7,7 @@ import workbench, {
   grant, read, ref, scope, write,
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension,
 } from '../src/internal.mjs';
+import { exportAnnotatedText } from '../src/index.mjs';
 import { materializeBlock, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from '../src/annotated-text-family.mjs';
 import { native } from '../src/event-handle.mjs';
 import { frozenJsonSnapshot } from '../src/annotated-text-r2.mjs';
@@ -633,6 +634,26 @@ test('HTTP replay returns an opaque terminal disposition after annotated-text de
   db.prepare('DELETE FROM _Log WHERE scope = ? AND seq = 1').run('R4Doc:d1');
   const pruned = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/events-since/R4Doc/d1?cursor=0`, { signal: AbortSignal.timeout(5_000) });
   assert.deepEqual(await pruned.json(), { resync: 'deleted', seq: 3 });
+});
+
+test('owner canonical export is complete and retirement erases history behind a durable reuse fence', async () => {
+  const { app, db, blockId } = await setupDoc('retired secret');
+  const exported = await exportAnnotatedText({ db, entity: r4Doc(), field: r4Doc().body, documentId: 'd1', principal: { id: 'u1' } });
+  assert.deepEqual(exported.blocks, [{ id: blockId, text: 'retired secret', fields: { reviewed: true }, annotationIds: [] }]);
+  assert.deepEqual(exported.capabilities, []);
+  await assert.rejects(exportAnnotatedText({ db, entity: r4Doc(), field: r4Doc().body, documentId: 'd1', principal: { id: 'u2' } }), /owner authorization failed/);
+
+  const retired = await app.dispatch({
+    actionId: 'retire-d1', type: 'R4Doc.annotatedText.retire', scope: 'R4Doc:d1', principal: { id: 'u1' }, payload: { id: 'd1' },
+  });
+  assert.equal(retired.ok, true, retired.failure?.message);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_retired WHERE document_id = 'd1'").get().count, 1);
+  await assert.rejects(exportAnnotatedText({ db, entity: r4Doc(), field: r4Doc().body, documentId: 'd1', principal: { id: 'u1' } }));
+  const reused = await app.dispatch({
+    actionId: 'reuse-d1', type: 'R4Doc.create', scope: 'R4Doc:d1', principal: { id: 'u1' }, payload: { id: 'd1', project: 'p1', owner: 'u1' },
+  });
+  assert.equal(reused.ok, false);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc WHERE id = 'd1'").get().count, 0);
 });
 
 test('R4 annotation.apply rejects target IDs on ordinary, standalone, and wrong-family protectors', async () => {

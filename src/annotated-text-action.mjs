@@ -41,9 +41,8 @@ export function annotatedTextAction(entity, field, command) {
       typeof command.mutationId !== 'string' || command.mutationId.length === 0) {
     throw new Error('annotatedTextAction: command requires a non-empty basis and mutationId');
   }
-  if (command.kind !== 'text.insert' && command.kind !== 'text.delete') {
-    throw new Error(`annotatedTextAction: command kind must be text.insert or text.delete, got '${String(command.kind)}'`);
-  }
+  const kinds = new Set(['text.insert', 'text.delete', 'block.split', 'block.merge', 'annotation.apply', 'annotation.detach']);
+  if (!kinds.has(command.kind)) throw new Error(`annotatedTextAction: unsupported command kind '${String(command.kind)}'`);
   const position = (value, label) => {
     if (!value || typeof value !== 'object' || Array.isArray(value) ||
         typeof value.blockId !== 'string' || value.blockId.length === 0 ||
@@ -52,18 +51,43 @@ export function annotatedTextAction(entity, field, command) {
     }
     return { blockId: value.blockId, offset: value.offset };
   };
-  const edit = command.kind === 'text.insert'
-    ? (() => {
+  let edit;
+  if (command.kind === 'text.insert') {
+    edit = (() => {
       if (typeof command.text !== 'string' || command.text.length === 0) throw new Error('annotatedTextAction: inserted text must be non-empty');
       return { kind: command.kind, at: position(command.at, 'at'), text: command.text };
-    })()
-    : { kind: command.kind, from: position(command.from, 'from'), to: position(command.to, 'to') };
-  const payload = deepFreeze({ version: 6, id: command.id, basis: command.basis, mutationId: command.mutationId, edit });
+    })();
+  } else if (command.kind === 'text.delete') {
+    edit = { kind: command.kind, from: position(command.from, 'from'), to: position(command.to, 'to') };
+  } else if (command.kind === 'block.split') {
+    edit = { kind: command.kind, at: position(command.at, 'at') };
+  } else if (command.kind === 'block.merge') {
+    if (typeof command.leftBlockId !== 'string' || !command.leftBlockId || typeof command.rightBlockId !== 'string' || !command.rightBlockId) {
+      throw new Error('annotatedTextAction: block.merge requires leftBlockId and rightBlockId');
+    }
+    edit = { kind: command.kind, leftBlockId: command.leftBlockId, rightBlockId: command.rightBlockId };
+  } else if (command.kind === 'annotation.apply') {
+    if (!command.annotation || typeof command.annotation !== 'object' || Array.isArray(command.annotation)) throw new Error('annotatedTextAction: annotation.apply requires annotation');
+    edit = { kind: command.kind, annotation: command.annotation, from: position(command.from, 'from'), to: position(command.to, 'to') };
+  } else {
+    if (typeof command.annotationId !== 'string' || !command.annotationId || typeof command.blockId !== 'string' || !command.blockId) {
+      throw new Error('annotatedTextAction: annotation.detach requires annotationId and blockId');
+    }
+    edit = { kind: command.kind, annotationId: command.annotationId, blockId: command.blockId };
+  }
+  const payload = deepFreeze({ version: command.kind === 'text.insert' || command.kind === 'text.delete' ? 6 : 7, id: command.id, basis: command.basis, mutationId: command.mutationId, edit });
 
   const scope = `${entity.name}:${command.id}`;
   const type = `${entity.name}.${fieldName}.operation`;
 
   return deepFreeze({ type, scope, payload });
+}
+
+export function annotatedTextRetireAction(entity, documentId) {
+  if (!entity || typeof entity.name !== 'string' || !entity.name || typeof documentId !== 'string' || !documentId) {
+    throw new Error('annotatedTextRetireAction: entity and non-empty documentId are required');
+  }
+  return deepFreeze({ type: `${entity.name}.annotatedText.retire`, scope: `${entity.name}:${documentId}`, payload: { id: documentId } });
 }
 
 export function annotatedTextCreateAction(entity, payload) {

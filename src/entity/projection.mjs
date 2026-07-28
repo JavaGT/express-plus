@@ -1364,7 +1364,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         .map(([fieldName]) => eventHandle.native(name, fieldName, 'applied').type),
       ...Object.entries(fields)
         .filter(([, descriptor]) => descriptor.kind === 'annotatedText')
-        .map(([fieldName]) => eventHandle.native(name, fieldName, 'operated').type),
+        .flatMap(([fieldName]) => [eventHandle.native(name, fieldName, 'operated').type, eventHandle.native(name, fieldName, 'retired').type]),
       ...sideTableStrategyEntries.flatMap(({ strategy, fields: strategyFields }) =>
         strategy.eventTypes(name, strategyFields)),
     ],
@@ -1374,6 +1374,16 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
       if (handle?.brand !== 'event-handle' || handle.entity !== name) return;
       for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
         if (strategy.projectionApply({ entityName: name, fieldEntries: strategyFields, handle, event, db })) return;
+      }
+      if (handle.kind === eventHandle.EventKind.native && handle.nativeName === 'retired') {
+        const descriptor = fields[handle.field];
+        if (descriptor?.kind !== 'annotatedText') return;
+        const data = event.data;
+        if (!data || data.version !== 1 || typeof data.id !== 'string' || !data.id || typeof data.generation !== 'string' || !data.generation || typeof data.retiredAt !== 'string') throw new Error(`${name}.${handle.field}.retired has invalid facts`);
+        const existing = db.prepare(`SELECT generation FROM ${name}_${handle.field}_retired WHERE document_id = ?`).get(data.id);
+        if (existing && existing.generation !== data.generation) throw new Error(`${name}.${handle.field}.retired generation conflicts`);
+        db.prepare(`INSERT OR IGNORE INTO ${name}_${handle.field}_retired (document_id, generation, retired_at) VALUES (?, ?, ?)`).run(data.id, data.generation, data.retiredAt);
+        return;
       }
       if (applyAnnotatedTextOperation({ name, fields, handle, event, db })) return;
       if (handle.kind === eventHandle.EventKind.native && handle.nativeName === 'applied') {
@@ -1391,6 +1401,11 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         return;
       }
       if (handle.kind === eventHandle.EventKind.created) {
+        for (const [fieldName, descriptor] of Object.entries(fields)) {
+          if (descriptor.kind === 'annotatedText' && db.prepare(`SELECT 1 FROM ${name}_${fieldName}_retired WHERE document_id = ?`).get(event.data?.id)) {
+            throw new Error(`${name}.${fieldName} document id is permanently retired`);
+          }
+        }
         const row = {};
         for (const [key, value] of Object.entries(event.data ?? {})) {
           if (key === '__workbench') continue;

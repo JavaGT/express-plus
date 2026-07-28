@@ -1592,6 +1592,39 @@ test('public offset authoring converges same-basis inserts and deletes in either
   assert.deepEqual(await apply(['left', 'right'], 'ABC', deletes), await apply(['right', 'left'], 'ABC', deletes));
 });
 
+test('public structural grammar resolves a basis position across concurrent text and supports split, merge, apply, and detach', async () => {
+  const { app, db } = await appFor();
+  const created = await app.dispatch({ actionId: 'structural-create', type: 'InitDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'abcd' }] } }, principal: { id: 'u1' } });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  const before = db.prepare("SELECT structure_version, family_checkpoint FROM InitDoc_body_state WHERE document_id = 'd1'").get();
+  db.prepare('INSERT INTO InitDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('structural-basis', 'd1', 'u1', before.structure_version, before.family_checkpoint, JSON.stringify([blockId]));
+  db.prepare('INSERT INTO InitDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('concurrent-basis', 'd1', 'u2', before.structure_version, before.family_checkpoint, JSON.stringify([blockId]));
+  assert.equal((await app.dispatch({ actionId: 'concurrent-text', principal: { id: 'u2' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'text.insert', id: 'd1', basis: 'concurrent-basis', mutationId: 'concurrent', at: { blockId, offset: 2 }, text: 'X' }) })).ok, true);
+  const split = await app.dispatch({ actionId: 'basis-split', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'block.split', id: 'd1', basis: 'structural-basis', mutationId: 'split', at: { blockId, offset: 2 } }) });
+  assert.equal(split.ok, true, split.failure?.message);
+  const rightBlockId = split.events[0].data.operation.rightBlockId;
+  let family = restoreTextFamilyCheckpoint(JSON.parse(db.prepare("SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = 'd1'").get().family_checkpoint));
+  assert.equal(family.blocks.map((block) => materializeBlock(family, block.id)).join(''), 'abXcd');
+
+  const mintBasis = (token) => {
+    const state = db.prepare("SELECT structure_version, family_checkpoint FROM InitDoc_body_state WHERE document_id = 'd1'").get();
+    db.prepare('INSERT INTO InitDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(document_id, principal_id) DO UPDATE SET token=excluded.token, structural_revision=excluded.structural_revision, family_checkpoint=excluded.family_checkpoint, visible_blocks=excluded.visible_blocks')
+      .run(token, 'd1', 'u1', state.structure_version, state.family_checkpoint, JSON.stringify([blockId, rightBlockId]));
+  };
+  mintBasis('apply-basis');
+  assert.equal((await app.dispatch({ actionId: 'basis-apply', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'annotation.apply', id: 'd1', basis: 'apply-basis', mutationId: 'apply', annotation: { id: 'note-1', family: 'note', fields: {} }, from: { blockId, offset: 0 }, to: { blockId, offset: 2 } }) })).ok, true);
+  mintBasis('detach-basis');
+  assert.equal((await app.dispatch({ actionId: 'basis-detach', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'annotation.detach', id: 'd1', basis: 'detach-basis', mutationId: 'detach', annotationId: 'note-1', blockId }) })).ok, true);
+  mintBasis('merge-basis');
+  assert.equal((await app.dispatch({ actionId: 'basis-merge', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'block.merge', id: 'd1', basis: 'merge-basis', mutationId: 'merge', leftBlockId: blockId, rightBlockId }) })).ok, true);
+  family = restoreTextFamilyCheckpoint(JSON.parse(db.prepare("SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = 'd1'").get().family_checkpoint));
+  assert.equal(family.blocks.length, 1);
+  assert.equal(materializeBlock(family, blockId), 'abXcd');
+  await app.close?.();
+});
+
 test('public offset authoring rejects invalid UTF-16 boundaries from its basis', async () => {
   const { app, db } = await appFor();
   const created = await app.dispatch({ actionId: 'unicode-create', type: 'InitDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'a😀b' }] } }, principal: { id: 'u1' } });

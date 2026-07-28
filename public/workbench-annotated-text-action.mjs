@@ -27,10 +27,21 @@ export function annotatedTextAction(entity, field, command) {
     edit = Object.freeze({ kind: command.kind, at: position(command.at, 'insert position'), text: command.text });
   } else if (command.kind === 'text.delete') {
     edit = Object.freeze({ kind: command.kind, from: position(command.from, 'delete start'), to: position(command.to, 'delete end') });
-  } else throw new TypeError('annotated text action kind must be text.insert or text.delete');
+  } else if (command.kind === 'block.split') {
+    edit = Object.freeze({ kind: command.kind, at: position(command.at, 'split position') });
+  } else if (command.kind === 'block.merge') {
+    if (typeof command.leftBlockId !== 'string' || command.leftBlockId.length === 0 || typeof command.rightBlockId !== 'string' || command.rightBlockId.length === 0) throw new TypeError('block merge requires left and right block IDs');
+    edit = Object.freeze({ kind: command.kind, leftBlockId: command.leftBlockId, rightBlockId: command.rightBlockId });
+  } else if (command.kind === 'annotation.apply') {
+    if (!command.annotation || typeof command.annotation !== 'object' || Array.isArray(command.annotation)) throw new TypeError('annotation apply requires an annotation');
+    edit = Object.freeze({ kind: command.kind, annotation: command.annotation, from: position(command.from, 'annotation start'), to: position(command.to, 'annotation end') });
+  } else if (command.kind === 'annotation.detach') {
+    if (typeof command.annotationId !== 'string' || command.annotationId.length === 0 || typeof command.blockId !== 'string' || command.blockId.length === 0) throw new TypeError('annotation detach requires annotation and block IDs');
+    edit = Object.freeze({ kind: command.kind, annotationId: command.annotationId, blockId: command.blockId });
+  } else throw new TypeError(`unsupported annotated text action kind '${String(command.kind)}'`);
   return Object.freeze({
     type: `${entity.name}.${field.fieldName}.operation`,
     scope: `${entity.name}:${command.id}`,
-    payload: Object.freeze({ version: 6, id: command.id, basis: command.basis, mutationId: command.mutationId, edit }),
+    payload: Object.freeze({ version: command.kind === 'text.insert' || command.kind === 'text.delete' ? 6 : 7, id: command.id, basis: command.basis, mutationId: command.mutationId, edit }),
   });
 }

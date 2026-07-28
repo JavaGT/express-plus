@@ -328,9 +328,17 @@ export interface AnnotatedTextDeleteCommand extends AnnotatedTextCommandBase {
   readonly from: AnnotatedTextPosition;
   readonly to: AnnotatedTextPosition;
 }
+export interface AnnotatedTextSplitCommand extends AnnotatedTextCommandBase { readonly kind: 'block.split'; readonly at: AnnotatedTextPosition; }
+export interface AnnotatedTextMergeCommand extends AnnotatedTextCommandBase { readonly kind: 'block.merge'; readonly leftBlockId: string; readonly rightBlockId: string; }
+export interface AnnotatedTextApplyAnnotationCommand extends AnnotatedTextCommandBase { readonly kind: 'annotation.apply'; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition; }
+export interface AnnotatedTextDetachAnnotationCommand extends AnnotatedTextCommandBase { readonly kind: 'annotation.detach'; readonly annotationId: string; readonly blockId: string; }
 export type AnnotatedTextOperationCommand =
   | AnnotatedTextInsertCommand
-  | AnnotatedTextDeleteCommand;
+  | AnnotatedTextDeleteCommand
+  | AnnotatedTextSplitCommand
+  | AnnotatedTextMergeCommand
+  | AnnotatedTextApplyAnnotationCommand
+  | AnnotatedTextDetachAnnotationCommand;
 export interface AnnotatedTextActionRequest<Payload = unknown> {
   readonly type: string;
   readonly scope: string;
@@ -345,6 +353,7 @@ export function annotatedTextCreateAction<Payload extends Readonly<Record<string
   entity: WorkbenchEntity,
   payload: Payload,
 ): AnnotatedTextActionRequest<Payload>;
+export function annotatedTextRetireAction(entity: WorkbenchEntity, documentId: string): AnnotatedTextActionRequest<{ readonly id: string }>;
 
 export interface AnnotatedTextBlock {
   readonly id: string;
@@ -377,6 +386,15 @@ export interface AnnotatedTextDocument {
   readonly measurements: readonly AnnotatedTextMeasurement[];
   readonly capabilities: readonly string[] | null;
 }
+export interface AnnotatedTextCanonicalDocument {
+  readonly kind: 'workbench.annotatedText.canonical'; readonly version: 1;
+  readonly blocks: readonly AnnotatedTextBlock[];
+  readonly annotations: readonly (AnnotatedTextAnnotation & { readonly protectedTargetIds?: readonly string[] })[];
+  readonly memberships: readonly AnnotatedTextMembership[];
+  readonly measurements: readonly AnnotatedTextMeasurement[];
+  readonly capabilities: readonly [];
+}
+export function exportAnnotatedText(input: { readonly db: WorkbenchDatabase; readonly entity: WorkbenchEntity; readonly field: AnnotatedTextFieldHandle; readonly documentId: string; readonly principal: Principal }): Promise<AnnotatedTextCanonicalDocument>;
 export function boolean(options?: FieldOptions<boolean>): FieldDescriptor<boolean>;
 export function date(options?: FieldOptions<Date | number | string>): FieldDescriptor<Date>;
 export function number(options?: FieldOptions<number>): FieldDescriptor<number>;

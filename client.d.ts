@@ -648,6 +648,10 @@ export interface AnnotatedTextHttpSession {
   readonly ready: Promise<void>;
   insert(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition; readonly text: string }): Promise<ScopeDispatchResult>;
   delete(input: { readonly mutationId: string; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
+  split(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
+  merge(input: { readonly mutationId: string; readonly leftBlockId: string; readonly rightBlockId: string }): Promise<ScopeDispatchResult>;
+  applyAnnotation(input: { readonly mutationId: string; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
+  detachAnnotation(input: { readonly mutationId: string; readonly annotationId: string; readonly blockId: string }): Promise<ScopeDispatchResult>;
   reconnect(): Promise<void>;
   subscribe(listener: (document: AnnotatedTextDocument | null) => void): () => void;
   close(): void;

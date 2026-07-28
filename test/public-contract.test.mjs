@@ -51,7 +51,7 @@ export const PUBLIC_API = Object.freeze({
     named: Object.freeze([
        'annotatedText', 'annotation', 'protectingAnnotation', 'measurement',
        'annotationAction', 'registerAnnotatedTextContract',
-       'registerAnnotatedTextStructuralExtension', 'annotatedTextAction', 'annotatedTextCreateAction',
+       'registerAnnotatedTextStructuralExtension', 'annotatedTextAction', 'annotatedTextCreateAction', 'annotatedTextRetireAction', 'exportAnnotatedText',
     ]),
   }),
 });
@@ -95,7 +95,7 @@ test('the packed package exposes the supported runtime contract', () => {
         + `}\n`
         + `const root = await import('workbench');\n`
         + `const annotatedText = await import('workbench/annotated-text');\n`
-        + `for (const symbol of ${JSON.stringify(['annotatedText', 'annotation', 'protectingAnnotation', 'measurement', 'annotationAction', 'registerAnnotatedTextContract', 'registerAnnotatedTextStructuralExtension', 'annotatedTextAction', 'annotatedTextCreateAction'])}) {\n`
+        + `for (const symbol of ${JSON.stringify(['annotatedText', 'annotation', 'protectingAnnotation', 'measurement', 'annotationAction', 'registerAnnotatedTextContract', 'registerAnnotatedTextStructuralExtension', 'annotatedTextAction', 'annotatedTextCreateAction', 'annotatedTextRetireAction', 'exportAnnotatedText'])}) {\n`
         + `  if (root[symbol] !== annotatedText[symbol]) throw new Error('workbench/annotated-text must share root binding ' + symbol);\n`
         + `}\n`
         + `for (const entrypoint of ${JSON.stringify(PRIVATE_ENTRYPOINTS)}) {\n`

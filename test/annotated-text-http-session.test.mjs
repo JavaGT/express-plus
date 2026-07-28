@@ -85,3 +85,17 @@ test('document session fails closed on revoked bootstrap and exposes no raw disp
   assert.equal('dispatch' in session, false);
   session.close();
 });
+
+test('document session exposes structural grammar without canonical revision or frontier payloads', async () => {
+  const { session, requests } = setup();
+  await session.ready;
+  await session.split({ mutationId: 'split-1', at: { blockId: 'block-1', offset: 2 } });
+  await session.applyAnnotation({ mutationId: 'ann-1', annotation: { id: 'a1', family: 'note', fields: {} }, from: { blockId: 'block-1', offset: 0 }, to: { blockId: 'block-1', offset: 2 } });
+  for (const request of requests) {
+    assert.equal(request.payload.version, 7);
+    assert.equal(request.payload.basis, 'basis-1');
+    assert.equal('expected' in request.payload, false);
+    assert.equal(JSON.stringify(request).includes('frontier'), false);
+  }
+  session.close();
+});
