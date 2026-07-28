@@ -125,8 +125,10 @@ test('HTTP snapshot-only session settles a sender receipt through opaque SSE rec
   assert.equal(session.pendingCount(), 1);
   sources[0].onmessage({ data: JSON.stringify([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]) });
   await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.deepEqual(session.snapshot, { version: 2 });
+  // The receipt itself always requires its own authorized replacement snapshot.
+  assert.deepEqual(session.snapshot, { version: 3 });
   assert.equal(session.pendingCount(), 0);
   session.close();
 });
