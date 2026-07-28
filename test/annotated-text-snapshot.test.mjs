@@ -35,7 +35,7 @@ function declaration() {
 
 function snapshot() {
   return {
-    kind: 'workbench.annotatedText.recipient', version: 1,
+    kind: 'workbench.annotatedText.recipient', version: 1, basis: 'opaque-basis',
     blocks: [{ kind: 'visible', id: 'block-1', text: 'Hello', fields: {}, annotationIds: ['annotation-1'] }],
     annotations: [{ id: 'annotation-1', family: 'coding', fields: {} }],
     memberships: [{ annotationId: 'annotation-1', blockId: 'block-1', ordinal: 0 }],
@@ -50,7 +50,7 @@ test('materializes a compiled annotated-text snapshot into public immutable shap
   });
   const document = materializeAnnotatedTextSnapshot(snapshot(), Doc.body);
   assert.deepEqual(document, {
-    kind: 'workbench.annotatedText.recipient', version: 1,
+    kind: 'workbench.annotatedText.recipient', version: 1, basis: 'opaque-basis',
     blocks: [{ kind: 'visible', id: 'block-1', text: 'Hello', fields: {}, annotationIds: ['annotation-1'] }],
     annotations: [{ id: 'annotation-1', family: 'coding', fields: {} }],
     memberships: [{ annotationId: 'annotation-1', blockId: 'block-1', ordinal: 0 }],

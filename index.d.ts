@@ -309,6 +309,43 @@ export interface AnnotatedTextStructuralExtensionSpec {
 }
 export function registerAnnotatedTextStructuralExtension(extensionName: string, spec: AnnotatedTextStructuralExtensionSpec): void;
 
+export interface AnnotatedTextPosition {
+  readonly blockId: string;
+  readonly offset: number;
+}
+interface AnnotatedTextCommandBase {
+  readonly id: string;
+  readonly basis: string;
+  readonly mutationId: string;
+}
+export interface AnnotatedTextInsertCommand extends AnnotatedTextCommandBase {
+  readonly kind: 'text.insert';
+  readonly at: AnnotatedTextPosition;
+  readonly text: string;
+}
+export interface AnnotatedTextDeleteCommand extends AnnotatedTextCommandBase {
+  readonly kind: 'text.delete';
+  readonly from: AnnotatedTextPosition;
+  readonly to: AnnotatedTextPosition;
+}
+export type AnnotatedTextOperationCommand =
+  | AnnotatedTextInsertCommand
+  | AnnotatedTextDeleteCommand;
+export interface AnnotatedTextActionRequest<Payload = unknown> {
+  readonly type: string;
+  readonly scope: string;
+  readonly payload: Payload;
+}
+export function annotatedTextAction(
+  entity: WorkbenchEntity,
+  field: AnnotatedTextFieldHandle,
+  command: AnnotatedTextOperationCommand,
+): AnnotatedTextActionRequest;
+export function annotatedTextCreateAction<Payload extends Readonly<Record<string, unknown>> & { readonly id: string }>(
+  entity: WorkbenchEntity,
+  payload: Payload,
+): AnnotatedTextActionRequest<Payload>;
+
 export interface AnnotatedTextBlock {
   readonly id: string;
   readonly text: string;

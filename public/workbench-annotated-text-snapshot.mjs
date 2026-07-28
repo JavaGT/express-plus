@@ -30,6 +30,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
   if (snapshot.kind !== 'workbench.annotatedText.recipient' || snapshot.version !== 1) {
     fail('kind', 'must be a version 1 recipient projection');
   }
+  if (typeof snapshot.basis !== 'string' || snapshot.basis.length === 0) fail('basis', 'must be a non-empty opaque basis token');
   if (typeof handle !== 'object' || handle === null) {
     fail('', 'handle must be a non-null object');
   }
@@ -238,6 +239,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
   return Object.freeze({
     kind: 'workbench.annotatedText.recipient',
     version: 1,
+    basis: snapshot.basis,
     blocks: Object.freeze(blocks),
     annotations: Object.freeze(annotations),
     memberships: Object.freeze(memberships),

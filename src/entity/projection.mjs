@@ -2,7 +2,7 @@ import { getLog } from '../log.mjs';
 import { serializeField, flattenStruct, resolveStrategy, deserializeField } from '../field-strategy.mjs';
 import * as eventHandle from '../event-handle.mjs';
 import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
-import { applyTextOp, assertUtf16Offset, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
+import { applyTextOp, assertUtf16Offset, assertWellFormedText, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
 import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, resolvePositionToEndpoint } from '../annotated-text-family.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata } from '../annotated-text-field.mjs';
@@ -35,43 +35,73 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
   const metadata = event.data?.__workbench?.annotatedText;
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind !== 'annotatedText') continue;
-    const initialBlockId = metadata?.[fieldName]?.initialBlockId;
-    if (typeof initialBlockId !== 'string' || initialBlockId.length === 0) {
+    const imported = metadata?.[fieldName];
+    const initialBlockId = imported?.initialBlockId;
+    if (!imported || imported.version !== 1 || typeof imported.actor !== 'string' || !/^[0-9a-f]{32}$/.test(imported.actor) ||
+        !Array.isArray(imported.blocks) || imported.blocks.length === 0 || typeof initialBlockId !== 'string' || initialBlockId.length === 0 ||
+        imported.blocks[0]?.id !== initialBlockId) {
       throw new Error(`${name}.${fieldName} created event is missing initial block metadata`);
     }
     const prefix = `${name}_${fieldName}`;
-    const checkpoint = JSON.stringify(textFamilyCheckpoint(
-      createTextFamily(row.id, textCheckpoint(createTextState()), initialBlockId),
-    ));
+    let textState = createTextState();
+    const fullText = imported.blocks.map((block, index) => {
+      if (!block || typeof block !== 'object' || Array.isArray(block) ||
+          (Object.keys(block).length !== 3 && Object.keys(block).length !== 4) ||
+          typeof block.id !== 'string' || block.id.length === 0 || typeof block.text !== 'string' ||
+          (block.fields !== null && (!block.fields || typeof block.fields !== 'object' || Array.isArray(block.fields)))) {
+        throw new Error(`${name}.${fieldName} created event has invalid imported block ${index}`);
+      }
+      assertWellFormedText(block.text);
+      if (imported.blocks.length > 1 && block.text.length === 0) throw new Error(`${name}.${fieldName} created event has an empty imported block`);
+      return block.text;
+    }).join('');
+    if (fullText.length > 0) {
+      textState = applyTextOp(textState, ['workbench.text', 1, [imported.actor, 1], 1, [], ['insert', ['root'], fullText]]);
+    }
+    let family = createTextFamily(row.id, textCheckpoint(textState), initialBlockId);
+    let currentBlockId = initialBlockId;
+    for (let index = 0; index < imported.blocks.length - 1; index++) {
+      const split = splitBlock(family, currentBlockId, imported.blocks[index + 1].id, imported.blocks[index].text.length);
+      if (split.type !== 'split') throw new Error(`${name}.${fieldName} created event import did not produce a block split`);
+      family = split.family;
+      currentBlockId = imported.blocks[index + 1].id;
+    }
+    const checkpoint = JSON.stringify(textFamilyCheckpoint(family));
     const state = db.prepare(`SELECT * FROM ${prefix}_state WHERE document_id = ?`).get(row.id);
     const blocks = db.prepare(`SELECT * FROM ${prefix}_block WHERE document_id = ?`).all(row.id);
     if (state || blocks.length > 0) {
       const expected = state
         && state.structure_version === 1
         && state.family_checkpoint === checkpoint
-        && blocks.length === 1
-        && blocks[0].id === initialBlockId
-        && blocks[0].position === INITIAL_BLOCK_POSITION
-        && blocks[0].epoch === 1
-        && blocks[0].structure_version === 1;
+        && blocks.length === imported.blocks.length
+        && blocks.every((block, index) => block.id === imported.blocks[index].id && block.position === deriveBlockPosition(index) && block.epoch === 1 && block.structure_version === 1);
       if (!expected) throw new Error(`${name}.${fieldName} created projection conflicts with existing initialization`);
       continue;
     }
     db.prepare(`INSERT INTO ${prefix}_state (document_id, structure_version, family_checkpoint) VALUES (?, 1, ?)`)
       .run(row.id, checkpoint);
-    const block = {
-      id: initialBlockId,
-      document_id: row.id,
-      project_id: row[descriptor.project],
-      owner_id: row[descriptor.owner],
-      position: INITIAL_BLOCK_POSITION,
-      epoch: 1,
-      structure_version: 1,
-      ...defaultBlockCells(descriptor),
-    };
-    const columns = Object.keys(block);
-    db.prepare(`INSERT INTO ${prefix}_block (${columns.join(', ')}) VALUES (${columns.map((column) => `:${column}`).join(', ')})`)
-      .run(block);
+    for (let index = 0; index < imported.blocks.length; index++) {
+      const importedBlock = imported.blocks[index];
+      const cells = importedBlock.fields === null ? defaultBlockCells(descriptor) : {};
+      if (importedBlock.fields !== null) {
+        const declared = Object.keys(descriptor.block ?? {});
+        if (Object.keys(importedBlock.fields).length !== declared.length || Object.keys(importedBlock.fields).some((key) => !declared.includes(key))) {
+          throw new Error(`${name}.${fieldName} created event imported block fields disagree with declaration`);
+        }
+        for (const key of declared) {
+          const field = descriptor.block[key];
+          const strategy = resolveStrategy(field.kind);
+          const validation = strategy.validate(importedBlock.fields[key], field);
+          if (validation !== true || (typeof field.validate === 'function' && field.validate(importedBlock.fields[key]) !== true)) {
+            throw new Error(`${name}.${fieldName} created event imported block field '${key}' failed validation`);
+          }
+          cells[key] = serializeField(field, importedBlock.fields[key]);
+        }
+      }
+      const block = { id: importedBlock.id, document_id: row.id, project_id: row[descriptor.project], owner_id: row[descriptor.owner], position: deriveBlockPosition(index), epoch: 1, structure_version: 1, ...cells };
+      const columns = Object.keys(block);
+      db.prepare(`INSERT INTO ${prefix}_block (${columns.join(', ')}) VALUES (${columns.map((column) => `:${column}`).join(', ')})`).run(block);
+    }
   }
 }
 

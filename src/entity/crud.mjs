@@ -8,14 +8,17 @@
 // etc.) are delegated to the side-table strategy, keeping the CRUD generator
 // focused on the entity-row lifecycle.
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { validateMaterializedField, validateMutation, ValidationError, deserializeField, resolveStrategy } from '../field-strategy.mjs';
 import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
-import { canonicalTextOp } from '../annotated-text.mjs';
-import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint } from '../annotated-text-family.mjs';
+import { assertFrontier, assertWellFormedText, canonicalTextOp, frontierDominates } from '../annotated-text.mjs';
+import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint, textOperationForOffsetEdit } from '../annotated-text-family.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
+import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
+import { authorizeFieldOp } from '../strategy/index.mjs';
+import { write } from '../grant.mjs';
 import { assertR2BlockSplitPayload, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
 import { assertR3BlockMergePayload, canonicalJsonEqual } from '../annotated-text-r3.mjs';
 import { assertR4AnnotationApplyPayload } from '../annotated-text-r4.mjs';
@@ -23,7 +26,7 @@ import { assertR5AnnotationDetachPayload } from '../annotated-text-r5.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 
-function assertAnnotatedTextOperationPayload(name, fieldName, payload) {
+export function assertAnnotatedTextOperationPayload(name, fieldName, payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       Object.keys(payload).length !== 4 ||
       !Object.hasOwn(payload, 'version') || !Object.hasOwn(payload, 'id') ||
@@ -53,6 +56,32 @@ function assertAnnotatedTextOperationPayload(name, fieldName, payload) {
   });
 }
 
+function assertAnnotatedTextOffsetEditPayload(name, fieldName, payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 5 ||
+      payload.version !== 6 || typeof payload.id !== 'string' || payload.id.length === 0 ||
+      typeof payload.basis !== 'string' || payload.basis.length === 0 || typeof payload.mutationId !== 'string' || payload.mutationId.length === 0 ||
+      !payload.edit || typeof payload.edit !== 'object' || Array.isArray(payload.edit)) {
+    throw new ValidationError(`${name}.${fieldName}.operation requires version 6 { id, basis, mutationId, edit }`);
+  }
+  const position = (value, label) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 2 ||
+        typeof value.blockId !== 'string' || value.blockId.length === 0 || !Number.isSafeInteger(value.offset) || value.offset < 0) {
+      throw new ValidationError(`${name}.${fieldName}.operation ${label} requires { blockId, offset }`);
+    }
+    return Object.freeze({ blockId: value.blockId, offset: value.offset });
+  };
+  let edit;
+  if (payload.edit.kind === 'text.insert' && Object.keys(payload.edit).length === 3 && typeof payload.edit.text === 'string' && payload.edit.text.length > 0) {
+    try { assertWellFormedText(payload.edit.text); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation inserted text ${error.message}`); }
+    edit = Object.freeze({ kind: 'text.insert', at: position(payload.edit.at, 'insert position'), text: payload.edit.text });
+  } else if (payload.edit.kind === 'text.delete' && Object.keys(payload.edit).length === 3) {
+    edit = Object.freeze({ kind: 'text.delete', from: position(payload.edit.from, 'delete start'), to: position(payload.edit.to, 'delete end') });
+  } else {
+    throw new ValidationError(`${name}.${fieldName}.operation edit must be text.insert or text.delete`);
+  }
+  return Object.freeze({ version: 6, id: payload.id, basis: payload.basis, mutationId: payload.mutationId, edit });
+}
+
 function ownerFieldOf(entity) {
   for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
     if (descriptor.type === 'ref' && descriptor.role && descriptor.readonly) {
@@ -65,6 +94,77 @@ function ownerFieldOf(entity) {
 function materializeDefault(defaultValue) {
   const value = typeof defaultValue === 'function' ? defaultValue() : defaultValue;
   return value !== null && typeof value === 'object' ? structuredClone(value) : value;
+}
+
+function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new ValidationError(`${name}.${fieldName} annotated-text import must be a non-array object`);
+  }
+  const allowed = new Set(['version', 'blocks']);
+  for (const key of Object.keys(value)) {
+    if (!allowed.has(key)) throw new ValidationError(`${name}.${fieldName} annotated-text import has unknown key '${key}'`);
+  }
+  if (value.version !== 1) throw new ValidationError(`${name}.${fieldName} annotated-text import requires version 1`);
+  const { blocks } = value;
+  if (!Array.isArray(blocks) || blocks.length === 0) throw new ValidationError(`${name}.${fieldName} annotated-text import must have a non-empty blocks array`);
+  for (const key of Object.keys(blocks)) {
+    if (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= blocks.length) {
+      throw new ValidationError(`${name}.${fieldName} annotated-text import blocks has an extra property`);
+    }
+  }
+  const blockFieldNames = descriptor.block ? Object.keys(descriptor.block) : [];
+  const canonicalBlocks = [];
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    if (!block || typeof block !== 'object' || Array.isArray(block)) {
+      throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] must be a non-array object`);
+    }
+    const allowedBlock = new Set(['text', 'fields']);
+    for (const key of Object.keys(block)) {
+      if (!allowedBlock.has(key)) throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] has unknown key '${key}'`);
+    }
+    try { assertWellFormedText(block.text); } catch (error) {
+      throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].text ${error.message}`);
+    }
+    if (blocks.length > 1 && block.text.length === 0) {
+      throw new ValidationError(`${name}.${fieldName} annotated-text import multi-block array has an empty text block`);
+    }
+    if (block.fields !== undefined) {
+      if (!block.fields || typeof block.fields !== 'object' || Array.isArray(block.fields)) {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].fields must be a non-array object or omitted`);
+      }
+      for (const fieldName of Object.keys(block.fields)) {
+        if (!blockFieldNames.includes(fieldName)) {
+          throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].fields has unknown field '${fieldName}'`);
+        }
+      }
+    }
+    const fields = {};
+    for (const declaredName of blockFieldNames) {
+      const fieldDescriptor = descriptor.block[declaredName];
+      let fieldValue;
+      if (Object.hasOwn(block.fields ?? {}, declaredName)) {
+        fieldValue = block.fields[declaredName];
+      } else if (fieldDescriptor.default !== undefined) {
+        fieldValue = materializeDefault(fieldDescriptor.default);
+      } else if (fieldDescriptor.nullable || fieldDescriptor.optional) {
+        fieldValue = null;
+      } else {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].fields is missing required field '${declaredName}'`);
+      }
+      const strategy = resolveStrategy(fieldDescriptor.kind);
+      const validation = strategy.validate(fieldValue, fieldDescriptor);
+      if (validation !== true) {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].fields.${declaredName}: ${validation}`);
+      }
+      if (typeof fieldDescriptor.validate === 'function' && fieldDescriptor.validate(fieldValue) !== true) {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].fields.${declaredName} failed declared validation`);
+      }
+      fields[declaredName] = fieldValue;
+    }
+    canonicalBlocks.push(Object.freeze({ id: randomUUID(), text: block.text, fields: Object.freeze(fields) }));
+  }
+  return Object.freeze({ version: 1, actor: randomUUID().replaceAll('-', ''), blocks: Object.freeze(canonicalBlocks) });
 }
 
 export function materializeCreateDefaults(record, payload) {
@@ -88,9 +188,11 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         throw new ValidationError(`${name}.__workbench is reserved for framework event metadata`);
       }
       const { id: requestedId, ...fieldsPayload } = payload;
+      const annotatedImports = {};
       for (const [fieldName, descriptor] of Object.entries(fields)) {
         if (descriptor.kind === 'annotatedText' && Object.hasOwn(fieldsPayload, fieldName)) {
-          throw new ValidationError(`${name}.${fieldName} is an annotated-text field and cannot be set through create payloads`);
+          annotatedImports[fieldName] = assertAnnotatedTextImportPayload(name, fieldName, descriptor, fieldsPayload[fieldName]);
+          delete fieldsPayload[fieldName];
         }
         if (descriptor.kind === 'crdt' && descriptor.type === 'text' && fieldName in fieldsPayload) {
           throw new ValidationError(`${name}.${fieldName} accepts native operations only; create the row then dispatch ${name}.${fieldName}.apply`);
@@ -106,7 +208,14 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       const annotatedText = Object.fromEntries(
         Object.entries(fields)
           .filter(([, descriptor]) => descriptor.kind === 'annotatedText')
-          .map(([fieldName]) => [fieldName, Object.freeze({ initialBlockId: randomUUID() })]),
+          .map(([fieldName]) => {
+            const value = annotatedImports[fieldName] ?? Object.freeze({
+            version: 1,
+            actor: randomUUID().replaceAll('-', ''),
+            blocks: Object.freeze([Object.freeze({ id: randomUUID(), text: '', fields: null })]),
+            });
+            return [fieldName, Object.freeze({ ...value, initialBlockId: value.blocks[0].id })];
+          }),
       );
       if (Object.keys(annotatedText).length > 0) {
         data.__workbench = Object.freeze({ annotatedText: Object.freeze(annotatedText) });
@@ -243,15 +352,59 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       return command;
     };
 
-    const r1Handler = ({ payload, db, scope }) => {
+    const r1Handler = async ({ payload, db, scope, principal }) => {
+      if (payload.version === 6) {
+        const command = assertAnnotatedTextOffsetEditPayload(name, fieldName, payload);
+        const documentScope = scopeOf(name, command.id).key;
+        if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
+        const basis = db.prepare(`SELECT structural_revision, family_checkpoint, visible_blocks FROM ${prefix}_basis WHERE token = ? AND document_id = ? AND principal_id = ?`).get(command.basis, command.id, principal?.id ?? '');
+        if (!basis) throw new ValidationError(`${name}.${fieldName}.operation basis is unavailable`);
+        const visibleBlocks = new Set(JSON.parse(basis.visible_blocks));
+        if (!visibleBlocks.has(command.edit.kind === 'text.insert' ? command.edit.at.blockId : command.edit.from.blockId) ||
+            (command.edit.kind === 'text.delete' && !visibleBlocks.has(command.edit.to.blockId))) {
+          throw new ValidationError(`${name}.${fieldName}.operation basis does not permit the requested block`);
+        }
+        const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
+        if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+        const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(command.id);
+        await authorizeFieldOp(record, fieldName, write, row, principal);
+        const currentRecipient = await projectAnnotatedTextSnapshot({ db, entity: record, row, principal, fieldName, descriptor, mintBasis: false });
+        const currentVisible = new Set(currentRecipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id));
+        if (!currentVisible.has(command.edit.kind === 'text.insert' ? command.edit.at.blockId : command.edit.from.blockId) ||
+            (command.edit.kind === 'text.delete' && !currentVisible.has(command.edit.to.blockId))) {
+          throw new ValidationError(`${name}.${fieldName}.operation is not currently visible to this recipient`);
+        }
+        if (state.structure_version !== basis.structural_revision) throw new ValidationError(`${name}.${fieldName}.operation conflicts with the basis structural revision`);
+        const basedFamily = restoreTextFamilyCheckpoint(JSON.parse(basis.family_checkpoint));
+        const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+        if (!frontierDominates(family.checkpoint.frontier, basedFamily.checkpoint.frontier)) throw new ValidationError(`${name}.${fieldName}.operation basis is not dominated by current state`);
+        const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${command.id}\u0000${principal?.id ?? ''}\u0000${command.mutationId}`).digest('hex').slice(0, 32);
+        const lamport = Math.max(0, ...Object.values(basedFamily.checkpoint.elements).map((element) => element.lamport)) + 1;
+        let operation;
+        try { operation = textOperationForOffsetEdit(basedFamily, command.edit, actor, lamport); } catch (error) {
+          throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+        }
+        let nextFamily;
+        try { nextFamily = applyTextOperationToBlock(family, command.edit.kind === 'text.insert' ? command.edit.at.blockId : command.edit.from.blockId, operation); } catch (error) {
+          throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+        }
+        const handle = eventHandles.native(name, fieldName, 'operated');
+        return [{ handle, type: handle.type, scope: documentScope, data: Object.freeze({ version: 1, id: command.id, before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }), operation: Object.freeze({ kind: 'text.apply', blockId: command.edit.kind === 'text.insert' ? command.edit.at.blockId : command.edit.from.blockId, operation }), after: Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier }), family: textFamilyCheckpoint(nextFamily) }) }];
+      }
       const command = assertDocumentScope({ payload, scope });
       const documentScope = scopeOf(name, command.id).key;
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
       if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
-      if (state.structure_version !== command.expected.structuralRevision ||
-          JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(command.expected.frontier)) {
-        throw new ValidationError(`${name}.${fieldName}.operation conflicts with the current structural revision or frontier`);
+      if (state.structure_version !== command.expected.structuralRevision) {
+        throw new ValidationError(`${name}.${fieldName}.operation conflicts with the current structural revision`);
+      }
+      const expectedFrontier = assertFrontier(command.expected.frontier);
+      if (!frontierDominates(family.checkpoint.frontier, expectedFrontier)) {
+        throw new ValidationError(`${name}.${fieldName}.operation frontier is not dominated by current state`);
+      }
+      if (JSON.stringify(command.operation.operation[4]) !== JSON.stringify(expectedFrontier)) {
+        throw new ValidationError(`${name}.${fieldName}.operation dependencies do not match expected frontier`);
       }
       let nextFamily;
       try {
@@ -1101,8 +1254,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       }];
     };
 
-    const handler = ({ payload, db, scope }) => {
-      if (payload.version === 1) return r1Handler({ payload, db, scope });
+    const handler = ({ payload, db, scope, principal }) => {
+      if (payload.version === 1 || payload.version === 6) return r1Handler({ payload, db, scope, principal });
       if (payload.version === 2) return r2Handler({ payload, db, scope });
       if (payload.version === 3) return r3Handler({ payload, db, scope });
       if (payload.version === 4) return r4Handler({ payload, db, scope });
@@ -1110,7 +1263,14 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', { value: true });
-    Object.defineProperty(handler, 'preDedupe', { value: assertDocumentScope });
+    Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope }) => payload.version === 6
+      ? (() => {
+        const command = assertAnnotatedTextOffsetEditPayload(name, fieldName, payload);
+        const documentScope = scopeOf(name, command.id).key;
+        if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
+        return command;
+      })()
+      : assertDocumentScope({ payload, scope }) });
     handlers[operationType] = handler;
     cursorPolicy[operationType] = 'excluded';
   }

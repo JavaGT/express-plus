@@ -10,6 +10,7 @@ import workbench, {
 import { applyTextOperationToBlock, mergeBlocks, restoreTextFamilyCheckpoint, textFamilyCheckpoint, materializeBlock, splitBlock } from '../src/annotated-text-family.mjs';
 import { native } from '../src/event-handle.mjs';
 import { frozenJsonSnapshot } from '../src/annotated-text-r2.mjs';
+import { annotatedTextAction } from '../src/annotated-text-public.mjs';
 
 const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const INSERT_HELLO = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello']];
@@ -136,7 +137,7 @@ test('annotated text create atomically initializes one canonical empty family an
   const block = db.prepare('SELECT * FROM InitDoc_body_block WHERE document_id = ?').get('d1');
   assert.equal(state.structure_version, 1);
   assert.equal(block.id, blockId);
-  assert.equal(block.position, 'a0');
+  assert.equal(block.position, '0000000000000');
   assert.equal(block.epoch, 1);
   assert.equal(block.structure_version, 1);
   assert.equal(block.reviewed, 1);
@@ -144,6 +145,51 @@ test('annotated text create atomically initializes one canonical empty family an
   assert.equal(family.id, 'd1');
   assert.deepEqual(family.blocks, [{ id: blockId, elementKeys: [] }]);
   assert.ok(!Object.hasOwn(db.prepare('SELECT * FROM InitDoc WHERE id = ?').get('d1'), '__workbench'));
+});
+
+test('annotated text create imports a validated multi-block CRDT family atomically', async () => {
+  const { app, db } = await appFor();
+  const result = await app.dispatch({
+    actionId: 'import', type: 'InitDoc.create', principal: { id: 'u1' },
+    payload: { id: 'imported', project: 'p1', owner: 'u1', body: { version: 1, blocks: [
+      { text: 'hello', fields: { reviewed: false } },
+      { text: ' 🌍' },
+    ] } },
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  const blocks = db.prepare("SELECT * FROM InitDoc_body_block WHERE document_id = 'imported' ORDER BY position").all();
+  assert.equal(blocks.length, 2);
+  assert.deepEqual(blocks.map((block) => block.reviewed), [0, 1]);
+  const family = restoreTextFamilyCheckpoint(JSON.parse(db.prepare("SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = 'imported'").get().family_checkpoint));
+  assert.deepEqual(family.blocks.map((block) => materializeBlock(family, block.id)), ['hello', ' 🌍']);
+  const retry = await app.dispatch({ actionId: 'import', type: 'InitDoc.create', principal: { id: 'u1' }, payload: { id: 'imported', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'different' }] } } });
+  assert.equal(retry.ok, true);
+  assert.equal(retry.deduped, true);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'import'").get().count, 1);
+  await app.close?.();
+});
+
+test('annotated text import rejects malformed Unicode and empty multi-block topology', async () => {
+  const { app } = await appFor();
+  for (const [actionId, blocks, pattern] of [
+    ['bad-unicode', [{ text: '\uD800' }], /unpaired high surrogate/],
+    ['bad-empty', [{ text: 'one' }, { text: '' }], /empty text block/],
+  ]) {
+    const result = await app.dispatch({ actionId, type: 'InitDoc.create', principal: { id: 'u1' }, payload: { id: actionId, project: 'p1', owner: 'u1', body: { version: 1, blocks } } });
+    assert.equal(result.ok, false);
+    assert.match(result.failure?.message ?? '', pattern);
+  }
+  await app.close?.();
+});
+
+test('annotated text import persists more than 36 blocks in declared order', async () => {
+  const { app, db } = await appFor();
+  const blocks = Array.from({ length: 38 }, (_, index) => ({ text: String.fromCharCode(65 + index) }));
+  const result = await app.dispatch({ actionId: 'many-blocks', type: 'InitDoc.create', principal: { id: 'u1' }, payload: { id: 'many', project: 'p1', owner: 'u1', body: { version: 1, blocks } } });
+  assert.equal(result.ok, true, result.failure?.message);
+  const rows = db.prepare("SELECT position FROM InitDoc_body_block WHERE document_id = 'many' ORDER BY position").all();
+  assert.deepEqual(rows.map((row) => row.position), blocks.map((_, index) => index.toString(36).padStart(13, '0')));
+  await app.close?.();
 });
 
 test('annotated text field and framework metadata are rejected from generic payloads', async () => {
@@ -1510,5 +1556,88 @@ test('R3 projection rejects invalid right-only measurement lineage and result pa
     assert.equal(JSON.stringify(db.prepare('SELECT * FROM InitDoc_body_measurement ORDER BY id').all()), JSON.stringify(originalMeasurements));
   }
 
+  await app.close?.();
+});
+
+test('public offset authoring converges same-basis inserts and deletes in either arrival order', async () => {
+  async function apply(order, importedText, edits) {
+    const { app, db } = await appFor();
+    const created = await app.dispatch({ actionId: `create-${order[0]}-${importedText}`, type: 'InitDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: importedText }] } }, principal: { id: 'u1' } });
+    const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+    const basis = db.prepare('SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint;
+    for (const name of Object.keys(edits)) db.prepare('INSERT INTO InitDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, 1, ?, ?)').run(`basis-${name}`, 'd1', `${name}-user`, basis, JSON.stringify([blockId]));
+    for (const name of order) {
+      const edit = edits[name];
+      const command = edit.kind === 'text.insert'
+        ? { ...edit, at: { ...edit.at, blockId }, id: 'd1', basis: `basis-${name}`, mutationId: name }
+        : { ...edit, from: { ...edit.from, blockId }, to: { ...edit.to, blockId }, id: 'd1', basis: `basis-${name}`, mutationId: name };
+      const authored = annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, command);
+      const result = await app.dispatch({ actionId: `${importedText}-${name}`, principal: { id: `${name}-user` }, ...authored });
+      assert.equal(result.ok, true, result.failure?.message);
+    }
+    const family = restoreTextFamilyCheckpoint(JSON.parse(db.prepare('SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint));
+    const value = materializeBlock(family, blockId);
+    await app.close?.();
+    return value;
+  }
+  const inserts = {
+    left: { kind: 'text.insert', at: { offset: 0 }, text: 'A' },
+    right: { kind: 'text.insert', at: { offset: 0 }, text: 'B' },
+  };
+  const deletes = {
+    left: { kind: 'text.delete', from: { offset: 0 }, to: { offset: 1 } },
+    right: { kind: 'text.delete', from: { offset: 2 }, to: { offset: 3 } },
+  };
+  assert.deepEqual(await apply(['left', 'right'], '', inserts), await apply(['right', 'left'], '', inserts));
+  assert.deepEqual(await apply(['left', 'right'], 'ABC', deletes), await apply(['right', 'left'], 'ABC', deletes));
+});
+
+test('public offset authoring rejects invalid UTF-16 boundaries from its basis', async () => {
+  const { app, db } = await appFor();
+  const created = await app.dispatch({ actionId: 'unicode-create', type: 'InitDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'a😀b' }] } }, principal: { id: 'u1' } });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  const basis = db.prepare('SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint;
+  db.prepare('INSERT INTO InitDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, 1, ?, ?)').run('unicode-basis', 'd1', 'u1', basis, JSON.stringify([blockId]));
+  const authored = annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'text.insert', id: 'd1', basis: 'unicode-basis', mutationId: 'bad-offset', at: { blockId, offset: 2 }, text: 'x' });
+  const result = await app.dispatch({ actionId: 'unicode-edit', principal: { id: 'u1' }, ...authored });
+  assert.equal(result.ok, false);
+  assert.match(result.failure?.message ?? '', /splits a surrogate pair/);
+  await app.close?.();
+});
+
+test('public offset authoring enforces annotated-text field write policy', async () => {
+  const db = new DatabaseSync(':memory:');
+  const LockedDoc = entity('LockedDoc', {
+    project: ref('Project'), owner: ref('User'),
+    body: annotatedText({ project: 'project', owner: 'owner', annotations: [annotation('note')], measurements: [measurement('source', { extension: 'sourceInit' })] }).can(() => grant(read)),
+    grant: [scope(() => everyone()).can(() => grant(read, write))],
+  });
+  executeFrameworkDDL(db); db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE User (id TEXT PRIMARY KEY);'); db.exec("INSERT INTO Project VALUES ('p1'); INSERT INTO User VALUES ('u1');"); executeDDL(LockedDoc, db);
+  const app = workbench({ db, entities: [LockedDoc] }); app.start(); await app.ready;
+  const created = await app.dispatch({ actionId: 'locked-create', type: 'LockedDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' } });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  const basis = db.prepare('SELECT family_checkpoint FROM LockedDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint;
+  db.prepare('INSERT INTO LockedDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, 1, ?, ?)').run('locked-basis', 'd1', 'u1', basis, JSON.stringify([blockId]));
+  const authored = annotatedTextAction(LockedDoc, LockedDoc.body, { kind: 'text.insert', id: 'd1', basis: 'locked-basis', mutationId: 'locked-edit', at: { blockId, offset: 0 }, text: 'x' });
+  const denied = await app.dispatch({ actionId: 'locked-edit', principal: { id: 'u1' }, ...authored });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.failure?.category, 'denied');
+  await app.close?.();
+});
+
+test('R1 rejects a future basis frontier and receipt replay stays idempotent', async () => {
+  const { app, db } = await appFor();
+  const created = await app.dispatch({ actionId: 'basis-create', type: 'InitDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' } });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  const operation = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'A']];
+  const request = { actionId: 'basis-insert', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' }, payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation } } };
+  assert.equal((await app.dispatch(request)).ok, true);
+  const replay = await app.dispatch(request);
+  assert.equal(replay.ok, true);
+  assert.equal(replay.deduped, true);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'basis-insert'").get().count, 1);
+  const future = await app.dispatch({ ...request, actionId: 'basis-future', payload: { ...request.payload, expected: { structuralRevision: 1, frontier: [['bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1]] }, operation: { ...request.payload.operation, operation: ['workbench.text', 1, ['bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 2], 2, [['bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 1]], ['insert', ['root'], 'B']] } } });
+  assert.equal(future.ok, false);
+  assert.match(future.failure?.message ?? '', /not dominated/);
   await app.close?.();
 });

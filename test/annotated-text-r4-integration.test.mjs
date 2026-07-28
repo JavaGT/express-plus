@@ -265,8 +265,8 @@ test('R3 merge preserves active orphan-policy annotations and protector edges', 
   const deniedResponse = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(deniedResponse.status, 200);
   const denied = await deniedResponse.json();
-  assert.deepEqual(denied.snapshot.body, {
-    kind: 'workbench.annotatedText.recipient', version: 1,
+  assert.deepEqual({ ...denied.snapshot.body, basis: typeof denied.snapshot.body.basis }, {
+    kind: 'workbench.annotatedText.recipient', version: 1, basis: 'string',
     blocks: [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }],
     annotations: [], memberships: [], measurements: [], capabilityHints: [],
   });
@@ -472,13 +472,18 @@ test('HTTP snapshot projects protected annotated text for each recipient before 
   const owner = await ownerResponse.json();
   assert.equal(owner.snapshot.body.blocks[0].kind, 'visible');
   assert.equal(owner.snapshot.body.blocks[0].text, 'hello world');
+  const ownerBasis = owner.snapshot.body.basis;
+  const refreshedOwner = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  const refreshedOwnerBasis = (await refreshedOwner.json()).snapshot.body.basis;
+  assert.notEqual(refreshedOwnerBasis, ownerBasis);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_basis WHERE document_id = 'd1' AND principal_id = 'u1'").get().count, 1);
 
   principal = { id: 'u2' };
   const response = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(response.status, 200);
   const recipient = await response.json();
-  assert.deepEqual(recipient.snapshot.body, {
-    kind: 'workbench.annotatedText.recipient', version: 1,
+  assert.deepEqual({ ...recipient.snapshot.body, basis: typeof recipient.snapshot.body.basis }, {
+    kind: 'workbench.annotatedText.recipient', version: 1, basis: 'string',
     blocks: [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }],
     annotations: [], memberships: [], measurements: [], capabilityHints: [],
   });
@@ -500,6 +505,32 @@ test('HTTP snapshot projects protected annotated text for each recipient before 
   const aggregate = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot?scope=project:p1`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(aggregate.status, 403, 'custom aggregate snapshots cannot bypass annotated-text recipient projection');
   assert.equal((await aggregate.text()).includes('canonical aggregate fallback'), false);
+});
+
+test('a recipient basis cannot edit a block after current protection hides it', async (t) => {
+  let principal = { id: 'u2' };
+  const { app, db, blockId, state } = await setupDoc('secret', () => principal, {
+    protectingAccess: async ({ is }) => (await is.owner()) ? grant(read) : grant(),
+  });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const snapshot = await fetch(`${origin}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
+  const basis = (await snapshot.json()).snapshot.body.basis;
+  assert.equal(typeof basis, 'string');
+
+  principal = { id: 'u1' };
+  const expected = { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier };
+  assert.equal((await app.dispatch({ actionId: 'basis-theme', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal, payload: v4Payload('d1', blockId, 0, 6, 'basis-theme', 'theme', {}, expected) })).ok, true);
+  assert.equal((await app.dispatch({ actionId: 'basis-protect', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal, payload: v4Payload('d1', blockId, 0, 6, 'basis-protect', 'confidential', {}, expected, ['basis-theme']) })).ok, true);
+
+  const before = db.prepare('SELECT family_checkpoint FROM R4Doc_body_state WHERE document_id = ?').get('d1').family_checkpoint;
+  const denied = await app.dispatch({
+    actionId: 'basis-revoked-edit', type: 'R4Doc.body.operation', scope: 'R4Doc:d1', principal: { id: 'u2' },
+    payload: { version: 6, id: 'd1', basis, mutationId: 'basis-revoked-edit', edit: { kind: 'text.insert', at: { blockId, offset: 0 }, text: 'x' } },
+  });
+  assert.equal(denied.ok, false);
+  assert.match(denied.failure?.message ?? '', /not currently visible/);
+  assert.equal(db.prepare('SELECT family_checkpoint FROM R4Doc_body_state WHERE document_id = ?').get('d1').family_checkpoint, before);
 });
 
 test('HTTP snapshot fails closed on malformed state and throwing protector access', async (t) => {

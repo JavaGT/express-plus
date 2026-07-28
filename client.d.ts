@@ -609,6 +609,8 @@ export interface AnnotatedTextMeasurement {
 export interface AnnotatedTextDocument {
   readonly kind: 'workbench.annotatedText.recipient';
   readonly version: 1;
+  /** Opaque recipient-bound reference for semantic offset edits. */
+  readonly basis: string;
   readonly blocks: readonly AnnotatedTextBlock[];
   readonly annotations: readonly AnnotatedTextAnnotation[];
   readonly memberships: readonly AnnotatedTextMembership[];

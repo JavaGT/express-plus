@@ -1,17 +1,18 @@
 import { deserializeField } from './field-strategy.mjs';
-import { materializeBlock, restoreTextFamilyCheckpoint } from './annotated-text-family.mjs';
+import { materializeBlock, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from './annotated-text-family.mjs';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 import { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
 import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.mjs';
 import { protectingAnnotationCapabilities } from './row-grant.mjs';
 import { read } from './grant.mjs';
+import { randomUUID } from 'node:crypto';
 
 function fail(message) { throw new Error(`annotated-text snapshot: ${message}`); }
 
 // Reads only Workbench-owned annotated-text relations and projects them before
 // an HTTP snapshot is serialized. Any malformed state or access failure throws;
 // callers deny the entire snapshot rather than falling back to canonical facts.
-async function projectAnnotatedText({ db, entity, row, principal, fieldName, descriptor, caret = null, presence = null }) {
+async function projectAnnotatedText({ db, entity, row, principal, fieldName, descriptor, caret = null, presence = null, mintBasis = true }) {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail(`field '${fieldName}' is not compiled`);
   const prefix = `${entity.name}_${fieldName}`;
@@ -70,9 +71,17 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     protectors.push({ protectorId: annotation.id, outcome: decision.capabilities.includes(read) ? 'allow' : 'deny' });
   }
   const decisions = { version: 1, protectors, capabilityHints: [] };
-  return caret === null
+  const recipient = caret === null
     ? projectAnnotatedTextForRecipient(canonical, descriptor, decisions)
     : projectAnnotatedTextCaretForRecipient(canonical, descriptor, decisions, caret, presence);
+  if (caret !== null || !mintBasis) return recipient;
+  const token = randomUUID();
+  const visibleBlocks = recipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id);
+  // A recipient has one current basis per document. A fresh snapshot supersedes
+  // the prior coordinate frame while keeping storage bounded by recipients.
+  db.prepare(`INSERT INTO ${prefix}_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(document_id, principal_id) DO UPDATE SET token = excluded.token, structural_revision = excluded.structural_revision, family_checkpoint = excluded.family_checkpoint, visible_blocks = excluded.visible_blocks`)
+    .run(token, row.id, principal?.id ?? '', db.prepare(`SELECT structure_version FROM ${prefix}_state WHERE document_id = ?`).get(row.id).structure_version, JSON.stringify(textFamilyCheckpoint(family)), JSON.stringify(visibleBlocks));
+  return Object.freeze({ ...recipient, basis: token });
 }
 
 export async function projectAnnotatedTextSnapshot(input) {

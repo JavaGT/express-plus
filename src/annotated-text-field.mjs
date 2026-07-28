@@ -551,8 +551,11 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
   const membership = `${prefix}_membership`;
   const measurement = `${prefix}_measurement`;
   const state = `${prefix}_state`;
+  const basis = `${prefix}_basis`;
   const statements = [
     `CREATE TABLE IF NOT EXISTS ${state} (\n  document_id TEXT PRIMARY KEY,\n  structure_version INTEGER NOT NULL CHECK (structure_version >= 0),\n  family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
+    `CREATE TABLE IF NOT EXISTS ${basis} (\n  token TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  principal_id TEXT NOT NULL,\n  structural_revision INTEGER NOT NULL CHECK (structural_revision >= 1),\n  family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)),\n  visible_blocks TEXT NOT NULL CHECK (json_valid(visible_blocks)),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_basis_recipient ON ${basis} (document_id, principal_id);`,
     `CREATE TABLE IF NOT EXISTS ${block} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  owner_id TEXT NOT NULL,\n  position TEXT NOT NULL,\n  epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0),\n  structure_version INTEGER NOT NULL DEFAULT 1 CHECK (structure_version > 0)${blockFields.length ? `,\n  ${extensionColumns(descriptor.block, blockFields).join(',\n  ')}` : ''},\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE,\n  FOREIGN KEY (project_id) REFERENCES ${projectTarget}(id) ON DELETE CASCADE,\n  FOREIGN KEY (owner_id) REFERENCES ${ownerTarget}(id) ON DELETE CASCADE\n);`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_block_order ON ${block} (document_id, position);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_block_project ON ${block} (project_id, document_id, position, id);`,

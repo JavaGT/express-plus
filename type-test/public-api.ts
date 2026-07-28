@@ -31,6 +31,7 @@ import {
 } from 'workbench/client';
 import {
   annotatedText, annotation, annotationAction, measurement, protectingAnnotation,
+  annotatedTextAction, annotatedTextCreateAction,
   registerAnnotatedTextContract,
   registerAnnotatedTextStructuralExtension,
   type AnnotatedTextFieldHandle, type AnnotatedTextOptions,
@@ -83,6 +84,16 @@ registerAnnotatedTextStructuralExtension('invalidAsyncMeasurement', {
 });
 void [annotatedTextHandle, protecting];
 
+declare const annotatedTextEntity: WorkbenchEntity;
+declare const requiredAnnotatedTextHandle: AnnotatedTextFieldHandle;
+annotatedTextCreateAction(annotatedTextEntity, { id: 'document-1' });
+annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, {
+  kind: 'text.insert', id: 'document-1', basis: 'opaque-basis', mutationId: 'insert-1',
+  at: { blockId: 'block-1', offset: 1 }, text: 'x',
+});
+// @ts-expect-error public edits require an opaque recipient basis
+annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'text.insert', id: 'document-1', mutationId: 'insert-1', at: { blockId: 'block-1', offset: 1 }, text: 'x' });
+
 declare const projectedAnnotatedTextSnapshot: Record<string, unknown>;
 declare const compiledAnnotatedTextHandle: AnnotatedTextFieldHandle;
 const projectedAnnotatedText = materializeAnnotatedTextSnapshot(
@@ -90,6 +101,8 @@ const projectedAnnotatedText = materializeAnnotatedTextSnapshot(
   compiledAnnotatedTextHandle,
 );
 const projectedKind: 'workbench.annotatedText.recipient' = projectedAnnotatedText.kind;
+const projectedBasis: string = projectedAnnotatedText.basis;
+void projectedBasis;
 for (const block of projectedAnnotatedText.blocks) {
   const blockId: string = block.id;
   if (block.kind === 'restricted') {

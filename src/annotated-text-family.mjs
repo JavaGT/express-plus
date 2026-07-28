@@ -589,3 +589,38 @@ export function applyTextOperationToBlock(family, blockId, operation) {
     blocks: newBlocks,
   });
 }
+
+export function textOperationForOffsetEdit(family, edit, actor, lamport) {
+  const basis = family.checkpoint.frontier;
+  const op = [actor, 1];
+  if (edit.kind === 'text.insert') {
+    const block = family.blocks.find((candidate) => candidate.id === edit.at.blockId);
+    if (!block) fail(`block not found: ${edit.at.blockId}`);
+    const text = materializeBlock(family, edit.at.blockId);
+    assertUtf16Offset(text, edit.at.offset);
+    const anchor = text.length === 0 && block.elementKeys.length === 0 && family.blocks[0].id === edit.at.blockId && edit.at.offset === 0
+      ? ['root']
+      : resolvePositionToEndpoint(family, edit.at.blockId, edit.at.offset, basis).point[1];
+    return canonicalTextOp(['workbench.text', 1, op, lamport, basis, ['insert', anchor, edit.text]]);
+  }
+  if (edit.kind !== 'text.delete' || edit.from.blockId !== edit.to.blockId) fail('delete endpoints must name the same block');
+  const text = materializeBlock(family, edit.from.blockId);
+  assertUtf16Offset(text, edit.from.offset);
+  assertUtf16Offset(text, edit.to.offset);
+  if (edit.from.offset >= edit.to.offset) fail('delete range must be non-empty and forward');
+  const owned = new Set(family.blocks.find((block) => block.id === edit.from.blockId)?.elementKeys ?? []);
+  const spans = [];
+  let offset = 0;
+  for (const [, element] of rgaTraversal(family.checkpoint)) {
+    if (!owned.has(elementKey(element.op, element.ordinal)) || element.deletedBy.length) continue;
+    const next = offset + element.scalar.length;
+    if (offset >= edit.from.offset && next <= edit.to.offset) {
+      const prior = spans.at(-1);
+      if (prior && prior[0][0] === element.op[0] && prior[0][1] === element.op[1] && prior[1] + prior[2] === element.ordinal) prior[2] += 1;
+      else spans.push([[...element.op], element.ordinal, 1]);
+    }
+    offset = next;
+  }
+  if (offset !== text.length || spans.length === 0) fail('delete range cannot be resolved');
+  return canonicalTextOp(['workbench.text', 1, op, lamport, basis, ['delete', spans]]);
+}

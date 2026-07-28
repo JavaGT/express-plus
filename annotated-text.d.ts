@@ -6,6 +6,8 @@ export {
   annotationAction,
   registerAnnotatedTextContract,
   registerAnnotatedTextStructuralExtension,
+  annotatedTextAction,
+  annotatedTextCreateAction,
 } from './index.js';
 
 export type {
@@ -27,4 +29,6 @@ export type {
   AnnotatedTextMeasurementCombineInput,
   AnnotatedTextMeasurementCombineResult,
   AnnotatedTextStructuralExtensionSpec,
+  AnnotatedTextOperationCommand,
+  AnnotatedTextActionRequest,
 } from './index.js';

@@ -11,3 +11,7 @@ export {
   registerAnnotatedTextContract,
   registerAnnotatedTextStructuralExtension,
 } from './annotated-text-field.mjs';
+export {
+  annotatedTextAction,
+  annotatedTextCreateAction,
+} from './annotated-text-action.mjs';
