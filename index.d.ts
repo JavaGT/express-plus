@@ -650,7 +650,7 @@ export interface SnapshotGrammar {
   keyed<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
   count<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle }): SnapshotRelation;
   user(options: { via: FieldHandle }): SnapshotUser;
-  tombstones<Row extends object>(target: WorkbenchEntity<Row>, options: { entity: WorkbenchEntity; entityId: FieldHandle; scopeId?: FieldHandle; kind: FieldHandle; state: FieldHandle; kindValue: string; hidden: readonly string[] }): SnapshotTombstones;
+  tombstones<Row extends object>(target: WorkbenchEntity<Row>, options: { entity: WorkbenchEntity; entityId: FieldHandle; scopeId?: FieldHandle; terminalScope?: WorkbenchEntity; kind: FieldHandle; state: FieldHandle; kindValue: string; hidden: readonly string[] }): SnapshotTombstones;
   include(shape: Readonly<Record<string, SnapshotSelect | SnapshotRelation>>): SnapshotOutput;
   orderBy(field: FieldHandle, direction?: 'asc' | 'desc'): SnapshotOrder;
 }

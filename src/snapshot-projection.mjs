@@ -80,11 +80,12 @@ function compileOutput(entity, output, ancestors = new Set()) {
   return Object.freeze({ entity, entries: Object.freeze(entries) });
 }
 
-function physicalForeignKey(db, from, field, target) {
+function physicalForeignKey(db, from, field, target, { retainTarget = false } = {}) {
   if (!db) return;
   const foreignKeys = db.prepare(`PRAGMA foreign_key_list(${identifier(from.name, 'snapshot entity')})`).all();
   const matching = foreignKeys.filter((row) => row.from === field && row.table === target.name && row.to === 'id');
   if (matching.length !== 1 || foreignKeys.filter((row) => row.from === field).length !== 1) throw new TypeError(`snapshot relation ${from.name}.${field} requires exactly one physical FOREIGN KEY to ${target.name}.id`);
+  if (retainTarget && !['RESTRICT', 'NO ACTION'].includes(matching[0].on_delete)) throw new TypeError(`snapshot terminal tombstone scope ${from.name}.${field} FOREIGN KEY must use ON DELETE RESTRICT or NO ACTION`);
 }
 
 function compileTombstones(declaration, resolveEntity) {
@@ -97,6 +98,12 @@ function compileTombstones(declaration, resolveEntity) {
   const entity = entityOf(rule.entity);
   if (resolveEntity(entity.name) !== entity) throw new TypeError(`snapshot tombstone entity '${entity.name}' must be registered`);
   const entityId = entity.fields[rule.entityId];
+  const terminalScope = rule.terminalScope === undefined ? null : entityOf(rule.terminalScope);
+  if (terminalScope) {
+    if (resolveEntity(terminalScope.name) !== terminalScope) throw new TypeError(`snapshot terminal tombstone scope '${terminalScope.name}' must be registered`);
+    if (Object.keys(terminalScope.fields).length !== 0) throw new TypeError('snapshot terminal tombstone scope must be an identity-only entity');
+    if (rule.scopeId === undefined) throw new TypeError('snapshot terminal tombstone scope requires scopeId');
+  }
   if (rule.scopeId === undefined) {
     if (entityId?.kind !== 'value' || entityId.type !== 'ref' || targetName(entityId) !== target.name) {
       throw new TypeError(`snapshot tombstones entityId must be a declared ref(${target.name})`);
@@ -104,8 +111,9 @@ function compileTombstones(declaration, resolveEntity) {
   } else {
     if (entityId?.kind !== 'value' || entityId.type !== 'text') throw new TypeError('snapshot polymorphic tombstones entityId must be a declared text field');
     const scopeId = entity.fields[rule.scopeId];
-    if (scopeId?.kind !== 'value' || scopeId.type !== 'ref' || targetName(scopeId) !== target.name) {
-      throw new TypeError(`snapshot polymorphic tombstones scopeId must be a declared ref(${target.name})`);
+    const scopeTarget = terminalScope ?? target;
+    if (scopeId?.kind !== 'value' || scopeId.type !== 'ref' || targetName(scopeId) !== scopeTarget.name) {
+      throw new TypeError(`snapshot polymorphic tombstones scopeId must be a declared ref(${scopeTarget.name})`);
     }
   }
   for (const field of [rule.kindField, rule.state]) {
@@ -116,13 +124,13 @@ function compileTombstones(declaration, resolveEntity) {
   if (!Array.isArray(rule.hidden) || rule.hidden.length === 0 || rule.hidden.some((value) => typeof value !== 'string' || value.length === 0) || new Set(rule.hidden).size !== rule.hidden.length) {
     throw new TypeError('snapshot tombstones hidden must contain non-empty string literals');
   }
-  return Object.freeze({ target, entity, entityId: rule.entityId, scopeId: rule.scopeId ?? null, kind: rule.kindField, state: rule.state, kindValue: rule.kindValue, hidden: Object.freeze([...rule.hidden]) });
+  return Object.freeze({ target, entity, entityId: rule.entityId, scopeId: rule.scopeId ?? null, terminalScope, kind: rule.kindField, state: rule.state, kindValue: rule.kindValue, hidden: Object.freeze([...rule.hidden]) });
 }
 
 export function compileSnapshots(declarations, resolveEntity, db = null) {
   if (declarations === undefined) return new Map();
   if (!Array.isArray(declarations)) throw new TypeError('snapshots must be an array');
-  const internalEntities = new Set(declarations.map((declaration) => declaration?.tombstones?.entity?.name).filter((name) => typeof name === 'string'));
+  const internalEntities = new Set(declarations.flatMap((declaration) => [declaration?.tombstones?.entity?.name, declaration?.tombstones?.terminalScope?.name]).filter((name) => typeof name === 'string'));
   const compiled = new Map();
   for (const declaration of declarations) {
     if (declaration?.kind !== 'snapshot') throw new TypeError('snapshots accepts only snapshot(...) declarations');
@@ -150,7 +158,7 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
       if (entry.nested) check(entry.nested);
     });
     check(output);
-    if (tombstones) physicalForeignKey(db, tombstones.entity, tombstones.scopeId ?? tombstones.entityId, tombstones.target);
+    if (tombstones) physicalForeignKey(db, tombstones.entity, tombstones.scopeId ?? tombstones.entityId, tombstones.terminalScope ?? tombstones.target, { retainTarget: Boolean(tombstones.terminalScope) });
     compiled.set(anchor.name, Object.freeze({ anchor, output, tombstone: tombstones }));
   }
   const tombstones = Object.freeze([...compiled.values()].map((declaration) => declaration.tombstone).filter(Boolean));

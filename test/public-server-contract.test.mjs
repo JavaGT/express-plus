@@ -101,6 +101,35 @@ test('project-scoped polymorphic tombstones hide only the matching project kind'
   db.close();
 });
 
+test('identity-only terminal tombstone scopes retain an enforced FK after target erasure', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('PRAGMA foreign_keys = ON; CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT); CREATE TABLE ProjectErasureIdentity (id TEXT PRIMARY KEY); CREATE TABLE Tombstone (id TEXT PRIMARY KEY, projectId TEXT REFERENCES ProjectErasureIdentity(id) ON DELETE RESTRICT, entityId TEXT, kind TEXT, state TEXT);');
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('p1', 'Sensitive project');
+  db.prepare('INSERT INTO ProjectErasureIdentity VALUES (?)').run('p1');
+  db.prepare('INSERT INTO Tombstone VALUES (?, ?, ?, ?, ?)').run('t1', 'p1', 'p1', 'project', 'deleted');
+  const ownGrant = () => [scope(() => true).can(() => grant(subscribe))];
+  const project = { name: 'Project', fields: { name: { kind: 'value', type: 'text' } }, field: { name: { fieldName: 'name' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const terminalScope = { name: 'ProjectErasureIdentity', fields: {}, field: { id: { fieldName: 'id' } }, grant: ownGrant, scopeFilter: () => ({ sql: '0=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const tombstone = { name: 'Tombstone', fields: { projectId: { kind: 'value', type: 'ref', target: terminalScope }, entityId: { kind: 'value', type: 'text' }, kind: { kind: 'value', type: 'text' }, state: { kind: 'value', type: 'text' } }, field: { projectId: { fieldName: 'projectId' }, entityId: { fieldName: 'entityId' }, kind: { fieldName: 'kind' }, state: { fieldName: 'state' } }, grant: ownGrant, scopeFilter: () => ({ sql: '0=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const declaration = snapshot(project, { tombstones: snapshot.tombstones(project, { entity: tombstone, entityId: tombstone.field.entityId, scopeId: tombstone.field.projectId, terminalScope, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'project', hidden: ['deleted'] }), output: snapshot.object({ name: snapshot.select(project.field.name) }) });
+  const live = createLiveDelivery({ db, entities: new Map([['Project', project], ['ProjectErasureIdentity', terminalScope], ['Tombstone', tombstone]]), mayVerb: () => true, snapshots: [declaration] });
+  assert.deepEqual(await live.bootstrap({ principal: { type: 'user', id: 'u1' }, scope: 'Project:p1' }), { kind: 'revoked' });
+  db.prepare('DELETE FROM Project WHERE id = ?').run('p1');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM Tombstone WHERE projectId = ?').get('p1').count, 1);
+  assert.equal(db.prepare('PRAGMA foreign_key_check').all().length, 0);
+  assert.throws(() => db.prepare('DELETE FROM ProjectErasureIdentity WHERE id = ?').run('p1'), /FOREIGN KEY/);
+  const payloadScope = { ...terminalScope, fields: { label: { kind: 'value', type: 'text' } } };
+  const payloadTombstone = { ...tombstone, fields: { ...tombstone.fields, projectId: { kind: 'value', type: 'ref', target: payloadScope } } };
+  const unsafeDeclaration = snapshot(project, { tombstones: snapshot.tombstones(project, { entity: payloadTombstone, entityId: tombstone.field.entityId, scopeId: tombstone.field.projectId, terminalScope: payloadScope, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'project', hidden: ['deleted'] }), output: snapshot.object({}) });
+  assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', project], ['ProjectErasureIdentity', payloadScope], ['Tombstone', payloadTombstone]]), mayVerb: () => true, snapshots: [unsafeDeclaration] }), /identity-only/);
+  db.exec('CREATE TABLE CascadeTombstone (id TEXT PRIMARY KEY, projectId TEXT REFERENCES ProjectErasureIdentity(id) ON DELETE CASCADE, entityId TEXT, kind TEXT, state TEXT);');
+  const cascadeTombstone = { ...tombstone, name: 'CascadeTombstone' };
+  const cascadeDeclaration = snapshot(project, { tombstones: snapshot.tombstones(project, { entity: cascadeTombstone, entityId: cascadeTombstone.field.entityId, scopeId: cascadeTombstone.field.projectId, terminalScope, kind: cascadeTombstone.field.kind, state: cascadeTombstone.field.state, kindValue: 'project', hidden: ['deleted'] }), output: snapshot.object({}) });
+  assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', project], ['ProjectErasureIdentity', terminalScope], ['CascadeTombstone', cascadeTombstone]]), mayVerb: () => true, snapshots: [cascadeDeclaration] }), /ON DELETE RESTRICT or NO ACTION/);
+  db.close();
+});
+
 test('declared tombstones reject malformed, duplicate, and recipient-selectable declarations', () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
