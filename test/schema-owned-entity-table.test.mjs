@@ -80,6 +80,8 @@ test('schema-owned entity table validation rejects undeclared write and identity
     'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY ON CONFLICT REPLACE, title TEXT NOT NULL, score REAL)',
     'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY, title TEXT NOT NULL ON CONFLICT IGNORE, score REAL)',
     'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY COLLATE NOCASE, title TEXT NOT NULL, score REAL)',
+    'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY DESC, title TEXT NOT NULL, score REAL)',
+    'CREATE TABLE SchemaNote (id TEXT, title TEXT NOT NULL, score REAL, PRIMARY KEY (id DESC))',
     'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY, title TEXT NOT NULL, score REAL, FOREIGN KEY (title) REFERENCES SchemaNote(id) DEFERRABLE INITIALLY DEFERRED)',
     'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY, title TEXT NOT NULL, score REAL, FOREIGN KEY (title) REFERENCES SchemaNote(id) MATCH FULL)',
     'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY, title TEXT NOT NULL, score REAL) STRICT',

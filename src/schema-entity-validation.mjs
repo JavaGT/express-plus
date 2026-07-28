@@ -88,7 +88,7 @@ function hasSqlKeyword(sql, keyword) {
 }
 
 function hasUnsupportedTableClause(sql) {
-  return ['CHECK', 'COLLATE', 'CONFLICT', 'DEFERRABLE', 'MATCH', 'STRICT', 'WITHOUT'].some((keyword) => hasSqlKeyword(sql, keyword));
+  return ['ASC', 'CHECK', 'COLLATE', 'CONFLICT', 'DEFERRABLE', 'DESC', 'MATCH', 'STRICT', 'WITHOUT'].some((keyword) => hasSqlKeyword(sql, keyword));
 }
 
 export function validateSchemaOwnedEntityTable(db, entity, declaration) {
