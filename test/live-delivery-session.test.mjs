@@ -486,6 +486,34 @@ describe('LiveDeliverySession', () => {
     session.close();
   });
 
+  it('drops a snapshot-only optimistic overlay when opaque SSE recovery fails', async () => {
+    const held = deferred();
+    let delivery;
+    let calls = 0;
+    const session = createLiveDeliverySession({
+      validateSnapshot: (snapshot) => snapshot,
+      bootstrap: async () => {
+        calls += 1;
+        if (calls === 1) return { kind: 'snapshot', snapshot: { version: 1 }, cursor: 1 };
+        throw new Error('offline');
+      },
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+      sendAction: () => held.promise,
+      createActionId: () => 'own-composite-action',
+    });
+    await session.ready;
+    void session.dispatch('Project.rename', {});
+    assert.deepEqual(session.snapshot, { version: 1, pending: true });
+    await assert.rejects(delivery([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]), /offline/);
+
+    assert.equal(session.status, 'unavailable');
+    assert.equal(session.pendingCount(), 0);
+    assert.deepEqual(session.snapshot, { version: 1 });
+    held.resolve({ ok: false, failure: new Error('offline') });
+    session.close();
+  });
+
   it('does not rematerialize state when access is revoked during resync recovery', async () => {
     const recovery = deferred();
     let calls = 0;

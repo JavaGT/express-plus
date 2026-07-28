@@ -2286,6 +2286,15 @@ export function createLiveDeliverySession({
     }
   }
 
+  function becomeUnavailable() {
+    if (closed || status === 'revoked') return;
+    status = 'unavailable';
+    // An opaque aggregate can only be reconciled by its replacement snapshot.
+    // Once that recovery fails, no optimistic projection is safe to retain.
+    if (snapshotOnly) operations.clear();
+    publish();
+  }
+
   async function applyCatchup(result) {
     if (!Array.isArray(result.envelopes)) throw new Error('catch-up is missing recipient envelopes');
     assertCursor(result.cursor, 'catch-up cursor');
@@ -2348,7 +2357,7 @@ export function createLiveDeliverySession({
         try {
           await recover('snapshot');
         } catch (error) {
-          if (!closed && status !== 'revoked') status = 'unavailable';
+          becomeUnavailable();
           throw error;
         }
         continue;
@@ -2358,7 +2367,7 @@ export function createLiveDeliverySession({
         try {
           await recover('snapshot');
         } catch (error) {
-          if (!closed && status !== 'revoked') status = 'unavailable';
+          becomeUnavailable();
           throw error;
         }
         continue;
