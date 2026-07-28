@@ -43,10 +43,55 @@ function canonicalForeignKey(foreignKey) {
   ]);
 }
 
+function isIdentifierCharacter(character) {
+  return character !== '' && (character.codePointAt(0) > 0x7f || /[A-Z0-9_$]/i.test(character));
+}
+
+function hasSqlKeyword(sql, keyword) {
+  for (let index = 0; index < sql.length; index += 1) {
+    const character = sql[index];
+    if (character === "'" || character === '"' || character === '`') {
+      const quote = character;
+      index += 1;
+      while (index < sql.length) {
+        if (sql[index] === quote) {
+          if (sql[index + 1] === quote) index += 1;
+          else break;
+        }
+        index += 1;
+      }
+      if (index === sql.length) return true;
+      continue;
+    }
+    if (character === '[') {
+      index = sql.indexOf(']', index + 1);
+      if (index < 0) return true;
+      continue;
+    }
+    if (character === '-' && sql[index + 1] === '-') {
+      const newline = sql.slice(index + 2).search(/[\r\n]/);
+      if (newline < 0) return false;
+      index += newline + 1;
+      continue;
+    }
+    if (character === '/' && sql[index + 1] === '*') {
+      index = sql.indexOf('*/', index + 2);
+      if (index < 0) return true;
+      index += 1;
+      continue;
+    }
+    if (sql.slice(index, index + keyword.length).toUpperCase() === keyword
+      && !isIdentifierCharacter(sql[index - 1] ?? '')
+      && !isIdentifierCharacter(sql[index + keyword.length] ?? '')) return true;
+  }
+  return false;
+}
+
 export function validateSchemaOwnedEntityTable(db, entity, declaration) {
   const master = db.prepare("SELECT type, sql FROM sqlite_schema WHERE lower(name) = lower(?)").all(declaration.name);
   if (master.length !== 1 || master[0].type !== 'table') fail(entity, 'must exist as a real table');
   if (/^CREATE\s+VIRTUAL\s+TABLE/i.test(master[0].sql ?? '')) fail(entity, 'must not be virtual');
+  if (hasSqlKeyword(master[0].sql ?? '', 'CHECK')) fail(entity, 'must not contain CHECK constraints');
   const temp = db.prepare("SELECT type FROM sqlite_temp_schema WHERE lower(name) = lower(?)").all(declaration.name);
   if (temp.length > 0) fail(entity, 'must not have a TEMP shadow');
   for (const schema of ['sqlite_schema', 'sqlite_temp_schema']) {

@@ -15,6 +15,17 @@ function noteSchema(columns = [
   return defineSqliteSchema({ name: 'schema-note', tables: [{ name: 'SchemaNote', columns }] });
 }
 
+async function rejectsHostileTable(sql, message) {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec(sql);
+    const app = workbench({ db, schema: noteSchema(), entities: [Note] });
+    await assert.rejects(app.prepareSchema(), message);
+  } finally {
+    db.close();
+  }
+}
+
 test('schema owns an entity main table while Workbench generates only framework storage', async () => {
   const db = new DatabaseSync(':memory:');
   try {
@@ -55,6 +66,97 @@ test('schema-owned entity table validation rejects write-altering triggers', asy
   } finally {
     db.close();
   }
+});
+
+test('schema-owned entity table validation rejects undeclared CHECK constraints', async () => {
+  await rejectsHostileTable(
+    'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY, title TEXT NOT NULL CHECK(length(title) < 4), score REAL)',
+    /must not contain CHECK constraints/i,
+  );
+});
+
+test('schema-owned entity table validation does not mistake quoted CHECK text for a constraint', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    const schema = noteSchema([
+      { name: 'id', type: 'text', primaryKey: true },
+      { name: 'title', type: 'text', notNull: true, default: "it's CHECK" },
+      { name: 'score', type: 'real' },
+    ]);
+    const app = workbench({ db, schema, entities: [Note] });
+    await app.prepareSchema();
+  } finally {
+    db.close();
+  }
+});
+
+test('schema-owned entity table validation does not mistake commented CHECK text for a constraint', async () => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('CREATE TABLE SchemaNote (id TEXT PRIMARY KEY, title TEXT NOT NULL /* CHECK(length(title) < 4) */, score REAL)');
+    const app = workbench({ db, schema: noteSchema(), entities: [Note] });
+    await app.prepareSchema();
+  } finally {
+    db.close();
+  }
+});
+
+test('schema-owned entity table validation rejects virtual tables and TEMP shadows', async () => {
+  await rejectsHostileTable(
+    'CREATE VIRTUAL TABLE SchemaNote USING fts5(id, title, score)',
+    /must not be virtual/i,
+  );
+
+  const db = new DatabaseSync(':memory:');
+  try {
+    const schema = noteSchema();
+    schema.prepare(db);
+    db.exec('CREATE TEMP TABLE SchemaNote (id TEXT PRIMARY KEY, title TEXT NOT NULL, score REAL)');
+    const app = workbench({ db, schema, entities: [Note] });
+    await assert.rejects(app.prepareSchema(), /must not have a TEMP shadow/i);
+  } finally {
+    db.close();
+  }
+});
+
+test('schema-owned entity table validation rejects generated columns', async () => {
+  await rejectsHostileTable(
+    'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY, title TEXT NOT NULL, score REAL, title_length INTEGER GENERATED ALWAYS AS (length(title)) STORED)',
+    /hidden or generated columns/i,
+  );
+});
+
+test('schema-owned entity table validation rejects unexpected indexes', async () => {
+  for (const sql of [
+    'CREATE UNIQUE INDEX SchemaNote_unique_title ON SchemaNote(title)',
+    'CREATE INDEX SchemaNote_partial_title ON SchemaNote(title) WHERE score IS NOT NULL',
+    'CREATE INDEX SchemaNote_expression_title ON SchemaNote(lower(title))',
+  ]) {
+    const db = new DatabaseSync(':memory:');
+    try {
+      const schema = noteSchema();
+      schema.prepare(db);
+      db.exec(sql);
+      const app = workbench({ db, schema, entities: [Note] });
+      await assert.rejects(app.prepareSchema(), /unexpected index/i);
+    } finally {
+      db.close();
+    }
+  }
+});
+
+test('schema-owned entity table validation rejects table-level UNIQUE constraints', async () => {
+  await rejectsHostileTable(
+    'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY, title TEXT NOT NULL, score REAL, UNIQUE(title))',
+    /unexpected index/i,
+  );
+});
+
+test('schema-owned entity table validation rejects foreign key mismatches', async () => {
+  await rejectsHostileTable(
+    'CREATE TABLE SchemaNote (id TEXT PRIMARY KEY, title TEXT NOT NULL, score REAL, FOREIGN KEY (title) REFERENCES SchemaNote(id))',
+    /foreign keys do not match/i,
+  );
 });
 
 test('schema-owned entity table validation runs after migrations', async () => {
