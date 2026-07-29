@@ -182,10 +182,17 @@ export function durableMutationVariant({
       appendEvents(db, finalizedEvents);
 
       // Projection consumers — materialize entity rows from events.
+      // Registered-action projections pin actionType to the declaring action.
+      // Batch commits use type '$batch'; admit a projection when its action is
+      // one of the submitted batch members (same event-type filter still applies).
+      const batchActionTypes = type === '$batch' && Array.isArray(payload)
+        ? new Set(payload.map((action) => action?.type).filter((value) => typeof value === 'string'))
+        : null;
       for (const consumer of projectionConsumers) {
         for (const ev of finalizedEvents) {
           if (consumer.eventTypes.includes(ev.type)) {
-            if (consumer.actionType !== undefined && consumer.actionType !== type) continue;
+            if (consumer.actionType !== undefined && consumer.actionType !== type
+              && !(batchActionTypes?.has(consumer.actionType))) continue;
             if (consumer.privateFact === true) {
               if (privateFact === undefined) throw new TypeError('private-fact projection requires a canonical private fact');
               consumer.apply(ev, db, Object.freeze({ privateFact, ...(claimedBlobs ? { claimedBlobs } : {}) }));
@@ -812,13 +819,19 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // (events only, no DB writes — Fork A), so the batch runs them in order and
     // folds all events into one commitEvents pass below. Authorization runs
     // INSIDE commitEvents's txn (Wave 4.4), before applyInTxn.
+    //
+    // Registered actions mark `inTransaction` so they receive db/now/scope inside
+    // the write brace — same contract as single `dispatch`. Running them early
+    // without that context made scope-checked handlers fail as Internal error.
     const runHandlers = async (transactionContext) => {
-      const inTransaction = transactionContext ? {
-        db: transactionContext.db,
-        now: transactionContext.now,
-        scope: transactionContext.scope,
-        actionId: transactionContext.actionId,
-      } : {};
+      const handlerContext = transactionContext?.db
+        ? {
+          db: transactionContext.db,
+          now: transactionContext.now,
+          scope: transactionContext.scope,
+          actionId: transactionContext.actionId,
+        }
+        : { scope };
       const allEmitted = [];
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
         const action = actions[actionIndex];
@@ -826,7 +839,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
           const historyInput = historyCommit?.handlerInputs?.[actionIndex];
           const emitted = await handlers[action.type]({
             payload: action.payload, principal,
-            ...inTransaction,
+            ...handlerContext,
             ...(historyInput ? { history: historyInput } : {}),
           });
           const commit = Array.isArray(emitted) ? { events: emitted } : emitted;
@@ -839,11 +852,14 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
           throw batchHandlerFailure(err, actionIndex);
         }
       }
-      return allEmitted;
+      // Receipt identity is the submitted batch envelope (Wave 4.9), not just events.
+      return { events: allEmitted, canonicalPayload: actions };
     };
-    let allEmitted = null;
-    if (!historyCommit?.handlerInputs) {
-      try { allEmitted = await runHandlers(); }
+    const runInTxn = Boolean(historyCommit?.handlerInputs)
+      || actions.some((action) => handlers[action.type].inTransaction);
+    let batchCommit = null;
+    if (!runInTxn) {
+      try { batchCommit = await runHandlers(); }
       catch (err) {
         return executionFailure(
           err.error,
@@ -856,10 +872,9 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     const now = new Date().toISOString();
     // The receipt binds the entire submitted envelope, not merely its emitted
     // events. A retry must prove it is the same batch before deduping.
-    const batchCommit = allEmitted === null ? null : { events: allEmitted, canonicalPayload: actions };
     const committed = await commitEvents(db, batchCommit, {
       now, actionId, nextSeq, principal, payload: actions, pipeline, scope, type: '$batch', authorize, historyCommit,
-      handler: historyCommit?.handlerInputs ? runHandlers : null,
+      handler: runInTxn ? runHandlers : null,
     });
     return committed;
   }

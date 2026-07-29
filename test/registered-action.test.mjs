@@ -80,6 +80,41 @@ test('registered action handler receives the exact caller-selected owning scope'
   assert.equal(receivedScope, 'project:distinct-scope');
 });
 
+test('registered action batch handler receives owning scope, now, and db like single dispatch', async () => {
+  let received = null;
+  const scopeChecked = (db) => {
+    const declaration = sourceAction(db);
+    return {
+      ...declaration,
+      handler: (context) => {
+        received = {
+          scope: context.scope,
+          now: context.now,
+          hasDb: context.db != null && typeof context.db.prepare === 'function',
+        };
+        if (context.scope !== 'project:batch-scope') throw new Error('Source fact scope is invalid.');
+        return declaration.handler(context);
+      },
+    };
+  };
+  const { app, db } = await appWith(scopeChecked);
+  const result = await app.batch([{
+    type: 'source.create', payload: { id: 's-batch', projectId: 'p1', name: 'Batch Interview' },
+  }], {
+    principal: { type: 'user', id: 'u1', attributes: {} }, scope: 'project:batch-scope',
+  });
+
+  assert.equal(result.ok, true, 'batch must not fail scope-checked registered actions');
+  assert.equal(received?.scope, 'project:batch-scope');
+  assert.equal(typeof received?.now, 'string');
+  assert.equal(received?.hasDb, true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM Source').get().count, 1, 'registered projections must apply under $batch');
+  assert.equal(db.prepare('SELECT id FROM Source').get().id, 's-batch');
+  assert.equal(db.prepare('SELECT name FROM Source').get().name, 'Batch Interview');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE scope = 'project:batch-scope'").get().count, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE eventType = 'source.created'").get().count, 1);
+});
+
 test('registered action receipt commits immutable request attribution', async () => {
   const { app, db } = await appWith(sourceAction);
   const request = {
