@@ -591,3 +591,60 @@ export function emailSeam(options?: {
 }): EmailSeam;
 
 export const noopTransport: EmailTransport;
+
+// ---------------------------------------------------------------------------
+// History-read façade
+// ---------------------------------------------------------------------------
+
+export type RecipientProjectedEvent = Readonly<Record<string, unknown>>;
+
+export interface ReadCommittedHistoryOptions {
+  scope: string;
+  principal: Principal;
+  sinceSeq?: number;
+  limit?: number;
+}
+
+export interface ReadCommittedHistoryResult {
+  events: readonly RecipientProjectedEvent[];
+  hasMore: boolean;
+}
+
+export interface ReceiptMetadata {
+  scope: string;
+  actionId: string;
+  committedAt: string;
+  eventRefs: readonly { scope: string; seq: number }[];
+  actionType: string | null;
+  operation: string;
+}
+
+export interface HistoryReader {
+  readCommittedHistory(options: ReadCommittedHistoryOptions): Promise<ReadCommittedHistoryResult>;
+  readReceipt(options: { scope: string; actionId: string; principal: Principal }): Promise<ReceiptMetadata | null>;
+}
+
+export type ProjectRecipientContext = Readonly<{
+  entity: LiveDeliveryEntity;
+  event: Readonly<Record<string, unknown>>;
+  principal: Principal;
+  row: Record<string, unknown>;
+  scope: string;
+}>;
+
+export type ProjectRecipient = (context: ProjectRecipientContext) => readonly RecipientProjectedEvent[];
+
+export type ScopeVisibleCheck = (context: Readonly<{
+  entity: LiveDeliveryEntity;
+  principal: Principal;
+  scope: Readonly<{ entity: string; id: string }>;
+}>) => boolean;
+
+export function createHistoryReader(options: {
+  db: WorkbenchDatabase;
+  entities: ReadonlyMap<string, LiveDeliveryEntity> | ((name: string) => LiveDeliveryEntity | undefined);
+  mayVerb: (entity: LiveDeliveryEntity, verb: string, row: Record<string, unknown>, principal: Principal) => boolean | Promise<boolean>;
+  annotatedHistory?: { entities?: Set<string>; actionTypes?: Set<string> } | null;
+  projectRecipient: ProjectRecipient;
+  scopeVisible?: ScopeVisibleCheck;
+}): HistoryReader;

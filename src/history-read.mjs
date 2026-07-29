@@ -1,0 +1,125 @@
+import { parseEventType } from './event-handle.mjs';
+import { rowToEvent } from './committed-log.mjs';
+import { mayRow } from './row-grant.mjs';
+import { tryParseScopeKey } from './scope-handle.mjs';
+import { hasAnnotatedTextFields } from './entity-snapshot-projection.mjs';
+import { publicEvent } from './event-delivery.mjs';
+
+function forbidden() {
+  const error = new Error('history.forbidden');
+  error.code = 'history.forbidden';
+  error.status = 403;
+  return error;
+}
+
+function reauthFor(entityRec, principal, handle, db, scopeVisible) {
+  try {
+    if (!scopeVisible({ entity: entityRec, principal, scope: handle })) return null;
+    const { sql: where, params: scopeParams } = entityRec.scopeFilter(principal);
+    const raw = db.prepare(`SELECT * FROM ${entityRec.name} AS t0 WHERE ${where} AND t0.id = :id`).get({ ...scopeParams, id: handle.id });
+    if (!raw) return null;
+    if ('hydrate' in entityRec && typeof entityRec.hydrate !== 'function') return null;
+    const row = typeof entityRec.hydrate === 'function' ? entityRec.hydrate(raw, principal) : raw;
+    if (row === null || row === undefined) return null;
+    return { row };
+  } catch {
+    return null;
+  }
+}
+
+export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = null, projectRecipient, scopeVisible = () => true }) {
+  if (!db) throw new Error('history reader requires a database');
+  if (!entities) throw new Error('history reader requires an entity registry');
+  if (typeof mayVerb !== 'function') throw new Error('history reader requires a mayVerb function');
+  if (typeof projectRecipient !== 'function') throw new Error('history reader requires a projectRecipient function');
+
+  const resolveEntity = typeof entities === 'function' ? entities : (name) => entities.get(name);
+  const denyEntities = annotatedHistory?.entities ?? new Set();
+
+  function isAnnotatedScope(scope, entityRec) {
+    if (!entityRec) {
+      const handle = tryParseScopeKey(scope);
+      if (!handle) return false;
+      entityRec = resolveEntity(handle.entity);
+    }
+    if (!entityRec) return false;
+    if (denyEntities.has(entityRec.name)) return true;
+    return hasAnnotatedTextFields(entityRec);
+  }
+
+  async function authorize(scope, principal) {
+    if (isAnnotatedScope(scope)) throw forbidden();
+    const handle = tryParseScopeKey(scope);
+    if (!handle) throw forbidden();
+    const entityRec = resolveEntity(handle.entity);
+    if (!entityRec) throw forbidden();
+    const auth = reauthFor(entityRec, principal, handle, db, scopeVisible);
+    if (!auth) throw forbidden();
+    if (!(await mayRow(entityRec, 'subscribe', auth.row, principal, mayVerb))) {
+      throw forbidden();
+    }
+    return { entityRec, row: auth.row };
+  }
+
+  async function readCommittedHistory({ scope, principal, sinceSeq = 0, limit = 100 } = {}) {
+    if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
+    if (!principal || principal.id == null) throw forbidden();
+    if (!Number.isSafeInteger(sinceSeq) || sinceSeq < 0) throw new TypeError('sinceSeq must be a non-negative integer');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new TypeError('limit must be an integer from 1 to 1000');
+
+    const { entityRec, row } = await authorize(scope, principal);
+
+    const effectiveLimit = limit + 1;
+    const rows = db.prepare(
+      'SELECT * FROM _Log WHERE scope = :scope AND seq > :sinceSeq ORDER BY seq LIMIT :limit',
+    ).all({ scope, sinceSeq, limit: effectiveLimit });
+
+    const hasMore = rows.length > limit;
+    if (hasMore) rows.pop();
+
+    const events = rows.map((row) => rowToEvent(row, parseEventType));
+    const projected = [];
+    for (const event of events) {
+      const safe = publicEvent(event);
+      const ctx = Object.freeze({
+        entity: entityRec,
+        event: Object.freeze({ ...safe }),
+        principal,
+        row,
+        scope,
+      });
+      const result = projectRecipient(ctx);
+      if (!Array.isArray(result)) {
+        throw new Error(`projectRecipient must return an array for scope '${scope}' seq ${event.seq}`);
+      }
+      projected.push(...result);
+    }
+
+    return { events: Object.freeze(projected), hasMore };
+  }
+
+  async function readReceipt({ scope, actionId, principal }) {
+    if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
+    if (typeof actionId !== 'string' || actionId.length === 0) throw new TypeError('actionId is required');
+    if (!principal || principal.id == null) throw forbidden();
+
+    await authorize(scope, principal);
+
+    const row = db.prepare(
+      'SELECT scope, actionId, committedAt, eventRefs, actionType, operation FROM _ActionReceipt WHERE scope = :scope AND actionId = :actionId',
+    ).get({ scope, actionId });
+
+    if (!row) return null;
+
+    return {
+      scope: row.scope,
+      actionId: row.actionId,
+      committedAt: row.committedAt,
+      eventRefs: JSON.parse(row.eventRefs),
+      actionType: row.actionType,
+      operation: row.operation,
+    };
+  }
+
+  return Object.freeze({ readCommittedHistory, readReceipt });
+}

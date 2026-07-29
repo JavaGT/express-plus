@@ -29,3 +29,4 @@ export { createLiveDeliveryHttpHandler } from './live-delivery-http.mjs';
 export { operationalConsumerAdmin } from './operational-consumer.mjs';
 export { createPostCommitEffectRunner } from './post-commit-effects.mjs';
 export { pendingBlobStager, declaredBlobField, readClaimedBlob } from './pending-blob.mjs';
+export { createHistoryReader } from './history-read.mjs';
