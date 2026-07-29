@@ -26,7 +26,15 @@ export { describeEntityStorage, describeSqliteStorage } from './sqlite-storage-d
 export { readSeq as readCommittedCursor } from './committed-log.mjs';
 export { createLiveDelivery } from './live-delivery-public.mjs';
 export { createLiveDeliveryHttpHandler } from './live-delivery-http.mjs';
+// App-safe operational consumer admin — inspect and retry terminal failures.
+// Consumers are registered via `workbench({ operationalConsumers: [...] })` and
+// reconciled automatically. See `defineOperationalEvent` / `operationalConsumer`
+// in the root package for declaration.
 export { operationalConsumerAdmin } from './operational-consumer.mjs';
+// Advanced: creates a runner for post-commit effects declared via
+// `postCommitEffect()` in action handlers. In normal app usage the runner is
+// auto-created at `app.postCommitEffects` when a database is configured; this
+// export is for custom wiring only.
 export { createPostCommitEffectRunner } from './post-commit-effects.mjs';
 export { pendingBlobStager, declaredBlobField, readClaimedBlob } from './pending-blob.mjs';
 export { createHistoryReader } from './history-read.mjs';

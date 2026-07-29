@@ -18,9 +18,10 @@ import {
   createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredBlobField, declaredTableNames,
   frameworkTableNames, readCommittedCursor,
   runMigrations, describeEntityStorage, describeSqliteStorage,
+  operationalConsumerAdmin, createPostCommitEffectRunner,
   type BlobStore, type SqliteStorageDescription,
   type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type LiveDeliveryBootstrap, type LiveDeliveryCatchup, type LiveDeliveryEnvelope as ServerLiveDeliveryEnvelope, type Migration, type UserPrincipal,
-  type WorkbenchDatabase,
+  type WorkbenchDatabase, type OperationalConsumerAdmin, type OperationalFailure, type PostCommitEffectRunner,
 } from 'workbench/server';
 import {
   LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore,
@@ -361,6 +362,11 @@ const AuditedChild = entity('AuditedChild', {
 });
 void AuditedChild;
 
+const pceRunner: PostCommitEffectRunner = createPostCommitEffectRunner({ db });
+void pceRunner;
+const consumerAdmin: OperationalConsumerAdmin = operationalConsumerAdmin(app);
+const adminFailures: Promise<readonly OperationalFailure[]> = consumerAdmin.listFailures('test' as unknown as import('workbench').OperationalConsumerName);
+void adminFailures;
 const queue: JobQueue = createJobQueue({ db, sharedSecret: 'secret' });
 const job: JobRow = queue.enqueue({ kind: 'index', payload: { projectId: 'project-1' } });
 const blobs: BlobStore = createBlobStore({ db, bytes: {} as never });
