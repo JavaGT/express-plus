@@ -1,6 +1,7 @@
 // Declared relational recipient snapshots. The grammar carries entities and
 // field handles, so callers cannot smuggle SQL, tables, or callbacks into live
 // delivery.
+import { isSnapshotFieldHandle } from './scope-sql.mjs';
 
 function node(kind, value = {}) { return Object.freeze({ kind, ...value }); }
 
@@ -42,7 +43,17 @@ export function orderBy(handle, direction = 'asc') {
   if (direction !== 'asc' && direction !== 'desc') throw new TypeError("orderBy direction must be 'asc' or 'desc'");
   return node('orderBy', { field: handle.fieldName, direction });
 }
-export function count(entity, { via } = {}) { return node('count', { entity: entityOf(entity), via: refOf(via) }); }
+export function count(entity, { via, ...options } = {}) { return node('count', { entity: entityOf(entity), via: refOf(via), ...options }); }
+// A required related row is a closed candidate filter, never a projected join.
+export function related(childRef, { via } = {}) {
+  if (!isSnapshotFieldHandle(childRef) || !isSnapshotFieldHandle(via)) {
+    throw new TypeError('related requires declared field handles');
+  }
+  return node('related', {
+    childRef: refOf(childRef, 'related childRef'), via: refOf(via, 'related via'),
+    childEntity: childRef?.entityName, parentEntity: via?.entityName,
+  });
+}
 export function user({ via } = {}) { return node('user', { via: refOf(via) }); }
 
 // This is intentionally a closed visibility declaration: no callbacks, SQL, or
@@ -62,5 +73,5 @@ export function tombstones(target, { entity, entityId, scopeId, terminalScope, k
 }
 
 export const snapshot = Object.freeze(Object.assign(declareSnapshot, {
-  object, one, keyed, many, select, include, orderBy, count, user, tombstones,
+  object, one, keyed, many, select, include, orderBy, count, related, user, tombstones,
 }));

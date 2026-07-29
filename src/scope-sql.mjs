@@ -46,6 +46,9 @@ export const PRINCIPAL_ID_TOKEN = Symbol('principalId');
 // rebindable principalAttrToken param" from a literal value. Mirror of
 // PRINCIPAL_ID_TOKEN for the link-identity axis.
 export const PRINCIPAL_ATTR_TOKEN = Symbol('principalAttrToken');
+// Module-private provenance for closed declaration grammar handles.
+const SNAPSHOT_FIELD_HANDLES = new WeakSet();
+export const isSnapshotFieldHandle = (handle) => SNAPSHOT_FIELD_HANDLES.has(handle);
 
 // A typed load-time failure, sibling to UnawaitedCheckError. Raised when a scope
 // predicate cannot be lowered to SQL.
@@ -152,6 +155,7 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
     };
     return {
       fieldName: name,
+      entityName,
       is: () => fail(),
       in: () => fail(),
       isNull: () => fail(),
@@ -173,7 +177,7 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
           `compared as a whole — compare one of its sub-cells (e.g. ${String(name)}.token)`,
       );
     };
-    const handle = { fieldName: name, is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
+    const handle = { fieldName: name, entityName, is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
     for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells)) {
       handle[cellName] = fieldHandle(structCellColumn(name, cellName), cellDescriptor);
     }
@@ -327,6 +331,7 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   }
   const handle = {
     fieldName: name,
+    entityName,
     // .is(undefined) is the deliberate FALSE value (never IS NULL); .is(v) mints
     // a literal-valued equality. The literal is baked in its SERIALIZED
     // (stored-cell) form via the field's strategy — a boolean becomes 1/0, a
@@ -413,6 +418,7 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
     };
   }
 
+  SNAPSHOT_FIELD_HANDLES.add(handle);
   if (descriptor.type !== 'ref' || descriptor.role || typeof resolveEntity !== 'function') {
     return handle;
   }

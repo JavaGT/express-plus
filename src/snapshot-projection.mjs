@@ -72,6 +72,7 @@ function compileOutput(entity, output, ancestors = new Set()) {
       continue;
     }
     if (!['one', 'many', 'keyed', 'count'].includes(value?.kind)) throw new TypeError(`snapshot output '${key}' must use select, one, many, keyed, count, or user`);
+    if (value.kind === 'one' && value.require !== undefined) throw new TypeError(`snapshot relation '${key}' cannot use require on one`);
     const child = entityOf(value.entity);
     const inverse = value.kind !== 'one';
     const fk = relation(entity, child, inverse, value.via);
@@ -86,7 +87,34 @@ function compileOutput(entity, output, ancestors = new Set()) {
       if (order?.kind !== 'orderBy') throw new TypeError(`snapshot relation '${key}' orderBy must use orderBy(...)`);
       scalar(child, order.field);
     }
-    entries.push(Object.freeze({ key, kind: value.kind, entity: child, fk, inverse, selected, nested: nestedCompiled, order: order ?? null }));
+    const required = value.require;
+    let require = null;
+    if (required !== undefined) {
+      if (!required || required.kind !== 'related' || Object.keys(required).length !== 5
+        || typeof required.childRef !== 'string' || typeof required.via !== 'string') {
+        throw new TypeError(`snapshot relation '${key}' require must use related(childRef, { via })`);
+      }
+      const childRef = child.fields[required.childRef];
+      if (required.childEntity !== child.name) {
+        throw new TypeError(`snapshot relation '${key}' related childRef must belong to ${child.name}`);
+      }
+      if (childRef?.kind !== 'value' || childRef.type !== 'ref') {
+        throw new TypeError(`snapshot relation '${key}' related childRef must belong to ${child.name} and be a declared ref`);
+      }
+      const related = typeof childRef.target === 'string' ? null : childRef.target;
+      if (!related || typeof related.name !== 'string' || !related.fields) {
+        throw new TypeError(`snapshot relation '${key}' related childRef must target a declared entity`);
+      }
+      const parentRef = related.fields[required.via];
+      if (required.parentEntity !== related.name) {
+        throw new TypeError(`snapshot relation '${key}' related via must belong to ${related.name}`);
+      }
+      if (parentRef?.kind !== 'value' || parentRef.type !== 'ref' || targetName(parentRef) !== entity.name) {
+        throw new TypeError(`snapshot relation '${key}' related via must belong to ${related.name} and be a declared ref(${entity.name})`);
+      }
+      require = Object.freeze({ entity: related, childRef: required.childRef, fk: required.via });
+    }
+    entries.push(Object.freeze({ key, kind: value.kind, entity: child, fk, inverse, selected, nested: nestedCompiled, order: order ?? null, require }));
   }
   ancestors.delete(entity);
   return Object.freeze({ entity, entries: Object.freeze(entries) });
@@ -147,6 +175,7 @@ function bindOutput(branch, resolveEntity) {
       return Object.freeze({
         ...entry,
         entity: boundEntity(entry.entity, resolveEntity),
+        require: entry.require ? Object.freeze({ ...entry.require, entity: boundEntity(entry.require.entity, resolveEntity) }) : null,
         nested: entry.nested ? bindOutput(entry.nested, resolveEntity) : null,
       });
     })),
@@ -194,6 +223,11 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
       }
       if (entry.entity && !isRegisteredEntity(entry.entity, resolveEntity)) throw new TypeError(`snapshot entity '${entry.entity.name}' must be registered`);
       if (entry.entity) physicalForeignKey(db, entry.inverse ? entry.entity : branch.entity, entry.fk, entry.inverse ? branch.entity : entry.entity);
+      if (entry.require) {
+        if (!isRegisteredEntity(entry.require.entity, resolveEntity)) throw new TypeError(`snapshot related entity '${entry.require.entity.name}' must be registered`);
+        physicalForeignKey(db, entry.entity, entry.require.childRef, entry.require.entity);
+        physicalForeignKey(db, entry.require.entity, entry.require.fk, branch.entity);
+      }
       if (entry.nested) check(entry.nested);
     });
     check(output);
@@ -268,7 +302,18 @@ export function captureSnapshot({ db, principal, anchor, id, output, tombstones 
         continue;
       }
       const rows = readRows(db, entry.entity, principal, entry.fk, entry.inverse ? raw.id : raw[entry.fk], entry.inverse, entry.order, tombstones);
-      children.set(entry, rows.map((child) => Object.freeze({ raw: child, children: entry.nested ? capture(entry.entity, child, entry.nested).children : new Map() })));
+      children.set(entry, rows.map((child) => {
+        let required = null;
+        if (entry.require) {
+          required = false;
+          const related = readRows(db, entry.require.entity, principal, 'id', child[entry.require.childRef], false, null, tombstones);
+          // The related row must be co-owned by this exact branch parent.
+          if (related.length === 1 && related[0][entry.require.fk] === raw.id) {
+            required = Object.freeze({ entity: entry.require.entity, raw: related[0], children: new Map() });
+          }
+        }
+        return Object.freeze({ raw: child, required, children: entry.nested ? capture(entry.entity, child, entry.nested).children : new Map() });
+      }));
     }
     return Object.freeze({ raw, children });
   }
@@ -278,20 +323,29 @@ export function captureSnapshot({ db, principal, anchor, id, output, tombstones 
 
 export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb }) {
   const authorized = new WeakMap();
+  const rowAuthorization = new Map();
   async function authorize(entity, node) {
     try {
-      if ('hydrate' in entity && typeof entity.hydrate !== 'function') return false;
-      // Capture freezes detached SQL rows so the authorization fence cannot
-      // mutate the candidate graph. Entity hydrate still deserializes in place
-      // (members handles, stored codecs), so hand it a mutable copy.
-      const row = typeof entity.hydrate === 'function' ? entity.hydrate({ ...node.raw }, principal) : node.raw;
-      const allowed = row != null && await mayRow(entity, 'subscribe', row, principal, mayVerb);
-      if (allowed) authorized.set(node, row);
+      let entityRows = rowAuthorization.get(entity);
+      if (!entityRows) rowAuthorization.set(entity, entityRows = new Map());
+      let decision = entityRows.get(node.raw.id);
+      if (!decision) {
+        if ('hydrate' in entity && typeof entity.hydrate !== 'function') return false;
+        // Capture freezes detached SQL rows so the authorization fence cannot
+        // mutate the candidate graph. Entity hydrate still deserializes in place
+        // (members handles, stored codecs), so hand it a mutable copy.
+        const row = typeof entity.hydrate === 'function' ? entity.hydrate({ ...node.raw }, principal) : node.raw;
+        decision = Object.freeze({ row, allowed: row != null && await mayRow(entity, 'subscribe', row, principal, mayVerb) });
+        entityRows.set(node.raw.id, decision);
+      }
+      let requiredAllowed = node.required !== false;
+      if (node.required && requiredAllowed) requiredAllowed = await authorize(node.required.entity, node.required);
+      if (decision.allowed && requiredAllowed) authorized.set(node, decision.row);
       for (const [entry, children] of node.children) {
         if (entry.kind === 'user') continue;
         for (const child of children) await authorize(entry.entity, child);
       }
-      return allowed;
+      return decision.allowed && requiredAllowed;
     } catch {
       return false;
     }

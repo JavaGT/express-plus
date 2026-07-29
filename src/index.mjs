@@ -35,7 +35,7 @@ export { sessionCookie, sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf, p
 export { inc, dec, self, many, effect } from './effect-compiler.mjs';
 export { schedule, tick, simulate } from './schedule.mjs';
 export { membership } from './auth/membership.mjs';
-export { snapshot, object, one, keyed, select, include, orderBy, count, user, tombstones } from './snapshot.mjs';
+export { snapshot, object, one, keyed, select, include, orderBy, count, related, user, tombstones } from './snapshot.mjs';
 export { createInvitationApi } from './auth/invitation.mjs';
 export { emailSeam, noopTransport } from './email-seam.mjs';
 export { defineOperationalEvent, operationalConsumer } from './operational-consumer.mjs';

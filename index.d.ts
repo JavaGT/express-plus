@@ -720,6 +720,7 @@ export interface SnapshotSelect { readonly kind: 'select'; }
 export interface SnapshotOrder { readonly kind: 'orderBy'; }
 export interface SnapshotOutput { readonly kind: 'object'; }
 export interface SnapshotRelation { readonly kind: 'one' | 'many' | 'keyed' | 'count'; }
+export interface SnapshotRelated { readonly kind: 'related'; }
 export interface SnapshotUser { readonly kind: 'user'; }
 export interface SnapshotTombstones { readonly kind: 'tombstones'; }
 export interface SnapshotDeclaration { readonly kind: 'snapshot'; readonly anchor: WorkbenchEntity; readonly output: SnapshotOutput; }
@@ -728,9 +729,10 @@ export interface SnapshotGrammar {
   object(shape: Readonly<Record<string, SnapshotSelect | SnapshotRelation | SnapshotUser>>): SnapshotOutput;
   select(...fields: readonly FieldHandle[]): SnapshotSelect;
   one<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
-  many<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
-  keyed<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
-  count<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle }): SnapshotRelation;
+  many<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; require?: SnapshotRelated; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
+  keyed<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; require?: SnapshotRelated; select?: SnapshotSelect; include?: SnapshotOutput; output?: SnapshotSelect | SnapshotOutput; orderBy?: SnapshotOrder }): SnapshotRelation;
+  count<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; require?: SnapshotRelated }): SnapshotRelation;
+  related(childRef: FieldHandle, options: { via: FieldHandle }): SnapshotRelated;
   user(options: { via: FieldHandle }): SnapshotUser;
   tombstones<Row extends object>(target: WorkbenchEntity<Row>, options: { entity: WorkbenchEntity; entityId: FieldHandle; scopeId?: FieldHandle; terminalScope?: WorkbenchEntity; kind: FieldHandle; state: FieldHandle; kindValue: string; hidden: readonly string[] }): SnapshotTombstones;
   include(shape: Readonly<Record<string, SnapshotSelect | SnapshotRelation>>): SnapshotOutput;
@@ -744,6 +746,7 @@ export const select: SnapshotGrammar['select'];
 export const include: SnapshotGrammar['include'];
 export const orderBy: SnapshotGrammar['orderBy'];
 export const count: SnapshotGrammar['count'];
+export const related: SnapshotGrammar['related'];
 export const user: SnapshotGrammar['user'];
 export const tombstones: SnapshotGrammar['tombstones'];
 
