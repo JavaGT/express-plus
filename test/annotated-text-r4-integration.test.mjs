@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   annotatedText, annotation, boolean, number, text, entity, everyone, executeDDL, executeFrameworkDDL, measurement, protectingAnnotation,
-  grant, read, ref, scope, write,
+  admin, deny, grant, read, ref, scope, write,
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension,
 } from '../src/internal.mjs';
 import { exportAnnotatedText } from '../src/index.mjs';
@@ -74,13 +74,17 @@ function r4Doc({
 
 async function appFor(db = new DatabaseSync(':memory:'), principalId = null, options) {
   const R4Doc = r4Doc(options);
+  const Project = entity('Project', {
+    owner: ref('User', { role: 'owner' }),
+    grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, admin) : deny('not project owner'))],
+  });
   executeFrameworkDDL(db);
-  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
-  db.exec("INSERT INTO Project (id) VALUES ('p1')");
   db.exec("INSERT INTO User (id) VALUES ('u1')");
+  executeDDL(Project, db);
+  db.exec("INSERT INTO Project (id, owner) VALUES ('p1', 'u1')");
   executeDDL(R4Doc, db);
-  const app = workbench({ db, entities: [R4Doc] });
+  const app = workbench({ db, entities: [Project, R4Doc] });
   if (principalId !== null) app.listen(0, { principalOf: () => typeof principalId === 'function' ? principalId() : ({ id: principalId }) });
   else app.start();
   await app.ready;
@@ -638,17 +642,18 @@ test('HTTP replay returns an opaque terminal disposition after annotated-text de
 
 test('owner canonical export is complete and retirement erases history behind a durable reuse fence', async () => {
   const { app, db, blockId } = await setupDoc('retired secret');
-  const exported = await exportAnnotatedText({ db, entity: r4Doc(), field: r4Doc().body, documentId: 'd1', principal: { id: 'u1' } });
+  const exportRequest = { app, entity: r4Doc(), field: r4Doc().body, documentId: 'd1', expectedOwningScope: { entity: app.entities.get('Project'), id: 'p1' } };
+  const exported = await exportAnnotatedText({ ...exportRequest, principal: { id: 'u1' } });
   assert.deepEqual(exported.blocks, [{ id: blockId, text: 'retired secret', fields: { reviewed: true }, annotationIds: [] }]);
   assert.deepEqual(exported.capabilities, []);
-  await assert.rejects(exportAnnotatedText({ db, entity: r4Doc(), field: r4Doc().body, documentId: 'd1', principal: { id: 'u2' } }), /owner authorization failed/);
+  await assert.rejects(exportAnnotatedText({ ...exportRequest, principal: { id: 'u2' } }), /owning scope admin authorization failed/);
 
   const retired = await app.dispatch({
     actionId: 'retire-d1', type: 'R4Doc.annotatedText.retire', scope: 'Project:p1', principal: { id: 'u1' }, payload: { id: 'd1' },
   });
   assert.equal(retired.ok, true, retired.failure?.message);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_retired WHERE document_id = 'd1'").get().count, 1);
-  await assert.rejects(exportAnnotatedText({ db, entity: r4Doc(), field: r4Doc().body, documentId: 'd1', principal: { id: 'u1' } }));
+  await assert.rejects(exportAnnotatedText({ ...exportRequest, principal: { id: 'u1' } }));
   const reused = await app.dispatch({
     actionId: 'reuse-d1', type: 'R4Doc.create', scope: 'Project:p1', principal: { id: 'u1' }, payload: { id: 'd1', project: 'p1', owner: 'u1' },
   });

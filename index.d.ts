@@ -393,7 +393,18 @@ export interface AnnotatedTextCanonicalDocument {
   readonly measurements: readonly AnnotatedTextMeasurement[];
   readonly capabilities: readonly [];
 }
-export function exportAnnotatedText(input: { readonly db: WorkbenchDatabase; readonly entity: WorkbenchEntity; readonly field: AnnotatedTextFieldHandle; readonly documentId: string; readonly principal: Principal }): Promise<AnnotatedTextCanonicalDocument>;
+export interface AnnotatedTextExpectedOwningScope {
+  readonly entity: WorkbenchEntity;
+  readonly id: string;
+}
+export function exportAnnotatedText(input: {
+  readonly app: WorkbenchApp;
+  readonly entity: WorkbenchEntity;
+  readonly field: AnnotatedTextFieldHandle;
+  readonly documentId: string;
+  readonly expectedOwningScope: AnnotatedTextExpectedOwningScope;
+  readonly principal: Principal;
+}): Promise<AnnotatedTextCanonicalDocument>;
 export function boolean(options?: FieldOptions<boolean>): FieldDescriptor<boolean>;
 export function date(options?: FieldOptions<Date | number | string>): FieldDescriptor<Date>;
 export function number(options?: FieldOptions<number>): FieldDescriptor<number>;

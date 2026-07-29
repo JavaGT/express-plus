@@ -34,4 +34,5 @@ export type {
   AnnotatedTextOperationCommand,
   AnnotatedTextActionRequest,
   AnnotatedTextCanonicalDocument,
+  AnnotatedTextExpectedOwningScope,
 } from './index.js';

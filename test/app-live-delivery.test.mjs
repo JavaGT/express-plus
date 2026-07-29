@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotatedTextCreateAction, annotatedTextRetireAction, annotation,
   deny, entity, everyone, exportAnnotatedText,
-  grant, measurement, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write,
+  admin, grant, measurement, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write,
 } from '../src/index.mjs';
 import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
 import { createAnnotatedTextHttpSession, createLiveDeliveryHttpSession } from '../public/workbench-client.mjs';
@@ -246,7 +246,7 @@ test('package batch transport admits only registered actions and returns one dur
 test('declared annotated text owns generated HTTP admission and package delivery recovery', async (t) => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO Project VALUES (\'p1\'); INSERT INTO User VALUES (\'u1\'); INSERT INTO User VALUES (\'u2\')');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, owner TEXT); CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO Project VALUES (\'p1\', \'u1\'); INSERT INTO User VALUES (\'u1\'); INSERT INTO User VALUES (\'u2\')');
   const Document = entity('HttpAnnotatedDocument', {
     project: ref('Project'), owner: ref('User', { role: 'owner' }),
     body: annotatedText({ project: 'project', owner: 'owner', annotations: [annotation('note')], measurements: [measurement('words', { extension: 'httpDeliveryMeasurement' })] }),
@@ -256,7 +256,8 @@ test('declared annotated text owns generated HTTP admission and package delivery
   let principal = user;
   const principalOf = (request) => request.headers['x-anonymous'] ? { type: 'anonymous', id: 'anonymous' } : principal;
   const Project = entity('Project', {
-    grant: [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+    owner: ref('User', { role: 'owner' }),
+    grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not project owner'))],
   });
   const app = workbench({ db, entities: [Project, Document] });
   app.attachLiveDelivery({ principalOf });
@@ -291,9 +292,10 @@ test('declared annotated text owns generated HTTP admission and package delivery
   assert.equal(session.document.blocks.length, 2);
   assert.equal('dispatch' in session, false);
 
-  const exported = await exportAnnotatedText({ db, entity: Document, field: Document.body, documentId: 'd1', principal });
+  const exportRequest = { app, entity: Document, field: Document.body, documentId: 'd1', expectedOwningScope: { entity: Project, id: 'p1' } };
+  const exported = await exportAnnotatedText({ ...exportRequest, principal });
   assert.equal(exported.blocks.map((block) => block.text).join(''), 'hello');
-  await assert.rejects(exportAnnotatedText({ db, entity: Document, field: Document.body, documentId: 'd1', principal: { ...user, id: 'u2' } }), /owner authorization failed/);
+  await assert.rejects(exportAnnotatedText({ ...exportRequest, principal: { ...user, id: 'u2' } }), /owning scope admin authorization failed/);
 
   const committedBeforeForbidden = db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE scope = ?').get('Project:p1').count;
   for (const forbidden of [

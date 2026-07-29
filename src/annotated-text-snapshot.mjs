@@ -1,9 +1,9 @@
 import { deserializeField } from './field-strategy.mjs';
 import { materializeBlock, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from './annotated-text-family.mjs';
-import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
+import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
 import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.mjs';
-import { protectingAnnotationCapabilities } from './row-grant.mjs';
+import { mayRow, protectingAnnotationCapabilities } from './row-grant.mjs';
 import { read } from './grant.mjs';
 import { randomUUID } from 'node:crypto';
 
@@ -92,14 +92,35 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   return Object.freeze({ ...recipient, basis: token });
 }
 
-/** Owner-authorized, package-assembled canonical export. Never projects through a recipient view. */
-export async function exportAnnotatedText({ db, entity, field, documentId, principal }) {
-  if (!db || !entity || !field || typeof documentId !== 'string' || !documentId) fail('export requires db, entity, field, and documentId');
+/** Owning-scope-admin-authorized package canonical export. Never projects through a recipient view. */
+export async function exportAnnotatedText({ app, entity, field, documentId, expectedOwningScope, principal }) {
+  const db = app?.db;
+  if (!db || !app?.entities || !entity || !field || typeof documentId !== 'string' || !documentId) {
+    fail('export requires app, entity, field, and documentId');
+  }
+  if (!expectedOwningScope || typeof expectedOwningScope !== 'object' ||
+      typeof expectedOwningScope.entity?.name !== 'string' ||
+      typeof expectedOwningScope.id !== 'string' || !expectedOwningScope.id) {
+    fail('export requires an expectedOwningScope with a declared entity and non-empty id');
+  }
+  const registeredEntity = app.entities.get(entity.name);
+  if (!registeredEntity) fail('export entity is not registered with the application');
+  entity = registeredEntity;
   const fieldName = field.fieldName;
   const descriptor = entity.fields?.[fieldName];
   if (!descriptor || descriptor.kind !== 'annotatedText') fail('export field is not annotatedText');
   const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(documentId);
-  if (!row || principal?.id == null || String(row[descriptor.owner]) !== String(principal.id)) fail('owner authorization failed');
+  if (!row) fail('document is missing');
+  const owningScope = resolveAnnotatedTextOwningScope(descriptor, entity.fields, row);
+  if (owningScope.entity !== expectedOwningScope.entity.name || owningScope.id !== expectedOwningScope.id) {
+    fail('expected owning scope does not match document');
+  }
+  const scopeEntity = app.entities.get(owningScope.entity);
+  if (!scopeEntity) fail('declared owning scope entity is not registered with the application');
+  const scopeRow = db.prepare(`SELECT * FROM ${scopeEntity.name} WHERE id = ?`).get(owningScope.id);
+  if (!scopeRow || !await mayRow(scopeEntity, 'admin', scopeRow, principal)) {
+    fail('owning scope admin authorization failed');
+  }
   const prefix = `${entity.name}_${fieldName}`;
   if (db.prepare(`SELECT 1 FROM ${prefix}_retired WHERE document_id = ?`).get(documentId)) fail('document is retired');
   const state = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(documentId);
