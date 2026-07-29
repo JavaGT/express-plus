@@ -16,7 +16,7 @@ function setup({ mayVerb = () => true, relatedScope = () => ({ sql: 't0.visible 
     CREATE TABLE Project (id TEXT PRIMARY KEY);
     CREATE TABLE Codebook (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), visible INTEGER);
     CREATE TABLE Code (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), codebookId TEXT REFERENCES Codebook(id), label TEXT);
-    CREATE TABLE Tombstone (id TEXT PRIMARY KEY, entityId TEXT REFERENCES Codebook(id), kind TEXT, state TEXT);
+    CREATE TABLE Tombstone (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), entityId TEXT, kind TEXT, state TEXT);
   `);
   for (const id of ['p1', 'p2']) db.prepare('INSERT INTO Project VALUES (?)').run(id);
   for (const row of [['ok', 'p1', 1], ['cross', 'p2', 1], ['scoped', 'p1', 0], ['deleted', 'p1', 1]]) {
@@ -25,19 +25,20 @@ function setup({ mayVerb = () => true, relatedScope = () => ({ sql: 't0.visible 
   for (const row of [['ok', 'p1', 'ok', 'ok'], ['cross', 'p1', 'cross', 'cross'], ['scoped', 'p1', 'scoped', 'scoped'], ['deleted', 'p1', 'deleted', 'deleted'], ['missing', 'p1', null, 'missing']]) {
     db.prepare('INSERT INTO Code VALUES (?, ?, ?, ?)').run(...row);
   }
-  db.prepare('INSERT INTO Tombstone VALUES (?, ?, ?, ?)').run('t1', 'deleted', 'codebook', 'deleted');
+  db.prepare('INSERT INTO Tombstone VALUES (?, ?, ?, ?, ?)').run('t1', 'p1', 'deleted', 'codebook', 'deleted');
+  db.prepare('INSERT INTO Tombstone VALUES (?, ?, ?, ?, ?)').run('t2', 'p2', 'ok', 'codebook', 'deleted');
   const permitted = () => [scope(() => everyone()).can(() => grant(subscribe))];
   const project = entity('Project', { grant: permitted });
   const codebook = entity('Codebook', { projectId: ref(project), visible: text(), grant: permitted });
   const code = entity('Code', { projectId: ref(project), codebookId: ref(codebook), label: text(), grant: permitted });
-  const tombstone = entity('Tombstone', { entityId: ref(codebook), kind: text(), state: text(), grant: permitted });
+  const tombstone = entity('Tombstone', { projectId: ref(project), entityId: text(), kind: text(), state: text(), grant: permitted });
   const bound = (declaration, scopeFilter, hydrate) => ({ ...declaration, declaration, scopeFilter, hydrate });
   const projectBound = bound(project, () => ({ sql: '1=1', params: {} }), (row) => ({ ...row }));
   const codebookBound = bound(codebook, relatedScope, relatedHydrate);
   const codeBound = bound(code, () => ({ sql: '1=1', params: {} }), (row) => ({ ...row }));
   const tombstoneBound = bound(tombstone, () => ({ sql: '1=1', params: {} }), (row) => ({ ...row }));
   const required = snapshot.related(code.field.codebookId, { via: codebook.field.projectId });
-  const visibility = snapshot.tombstones(codebook, { entity: tombstone, entityId: tombstone.field.entityId, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'codebook', hidden: ['deleted'] });
+  const visibility = snapshot.tombstones(codebook, { entity: tombstone, entityId: tombstone.field.entityId, scopeId: tombstone.field.projectId, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'codebook', hidden: ['deleted'] });
   const output = snapshot.object({
     codes: snapshot.many(code, { via: code.field.projectId, require: required, select: snapshot.select(code.field.label) }),
     keyed: snapshot.keyed(code, { via: code.field.projectId, require: required, select: snapshot.select(code.field.label) }),

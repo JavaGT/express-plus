@@ -131,6 +131,28 @@ test('identity-only terminal tombstone scopes retain an enforced FK after target
   db.close();
 });
 
+test('scoped polymorphic User tombstones use the User owner scope in user projections', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Organization (id TEXT PRIMARY KEY); CREATE TABLE User (id TEXT PRIMARY KEY, organizationId TEXT REFERENCES Organization(id), name TEXT, displayName TEXT, image TEXT); CREATE TABLE Project (id TEXT PRIMARY KEY, ownerId TEXT REFERENCES User(id)); CREATE TABLE Tombstone (id TEXT PRIMARY KEY, organizationId TEXT REFERENCES Organization(id), entityId TEXT, kind TEXT, state TEXT);');
+  db.prepare('INSERT INTO Organization VALUES (?)').run('o1');
+  db.prepare('INSERT INTO Organization VALUES (?)').run('o2');
+  db.prepare('INSERT INTO User VALUES (?, ?, ?, ?, ?)').run('u1', 'o1', 'Ada', 'Ada', null);
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('p1', 'u1');
+  db.prepare('INSERT INTO Tombstone VALUES (?, ?, ?, ?, ?)').run('wrong-scope', 'o2', 'u1', 'user', 'deleted');
+  const ownGrant = () => [scope(() => true).can(() => grant(subscribe))];
+  const organization = { name: 'Organization', fields: {}, field: { id: { fieldName: 'id' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const User = { name: 'User', fields: { organizationId: { kind: 'value', type: 'ref', target: organization }, name: { kind: 'value', type: 'text' }, displayName: { kind: 'value', type: 'text' }, image: { kind: 'value', type: 'text' } }, field: { organizationId: { fieldName: 'organizationId' }, name: { fieldName: 'name' }, displayName: { fieldName: 'displayName' }, image: { fieldName: 'image' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const project = { name: 'Project', fields: { ownerId: { kind: 'value', type: 'ref', target: User } }, field: { ownerId: { fieldName: 'ownerId' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const tombstone = { name: 'Tombstone', fields: { organizationId: { kind: 'value', type: 'ref', target: organization }, entityId: { kind: 'value', type: 'text' }, kind: { kind: 'value', type: 'text' }, state: { kind: 'value', type: 'text' } }, field: { organizationId: { fieldName: 'organizationId' }, entityId: { fieldName: 'entityId' }, kind: { fieldName: 'kind' }, state: { fieldName: 'state' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const visibility = snapshot.tombstones(User, { entity: tombstone, entityId: tombstone.field.entityId, scopeId: tombstone.field.organizationId, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'user', hidden: ['deleted'] });
+  const live = createLiveDelivery({ db, entities: new Map([['Organization', organization], ['User', User], ['Project', project], ['Tombstone', tombstone]]), mayVerb: () => true, snapshots: [snapshot(User, { tombstones: visibility, output: snapshot.object({}) }), snapshot(project, { output: snapshot.object({ owner: snapshot.user({ via: project.field.ownerId }) }) })] });
+  assert.deepEqual((await live.bootstrap({ principal: { type: 'user', id: 'other' }, scope: 'Project:p1' })).snapshot.owner, { id: 'u1', name: 'Ada', image: null });
+  db.prepare('UPDATE Tombstone SET organizationId = ? WHERE id = ?').run('o1', 'wrong-scope');
+  assert.equal((await live.bootstrap({ principal: { type: 'user', id: 'other' }, scope: 'Project:p1' })).snapshot.owner, null);
+  db.close();
+});
+
 test('declared tombstones reject malformed, duplicate, and recipient-selectable declarations', () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
