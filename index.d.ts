@@ -1036,7 +1036,7 @@ export interface WorkbenchApp extends RouteBuilder {
   replayPrivateFactProjections(): Promise<{ projected: number }>;
   batch<Action extends BatchAction>(
     actions: readonly Action[] | BatchActionFactory<Action>,
-    options?: { principal?: Principal; clientId?: string },
+    options?: { principal?: Principal; clientId?: string; scope?: string },
   ): Promise<DispatchResult>;
   listen(): this;
   listen(callback: () => void): this;

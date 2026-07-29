@@ -15,7 +15,7 @@ import { reconcileDurableEffects } from './durable-effects.mjs';
 import { startSimulation } from './simulate.mjs';
 import { retentionPrune } from './committed-log.mjs';
 import { getLog, withLog } from './log.mjs';
-import { installHistoryHttpDispatcher } from './application-action-http.mjs';
+import { installBatchHttpDispatcher, installHistoryHttpDispatcher } from './application-action-http.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 
 const BLOB_REAP_INTERVAL_MS = 10 * 60_000;
@@ -46,6 +46,8 @@ function wireMutationSurface(app) {
       return app.kernel.history[command]({ ...args, revision: cursor.revision });
     })));
   }
+  const dispatchBatch = (request) => withLog(app.log, () => app.writeQueue.run(() => app.kernel.dispatchBatch(request)));
+  installBatchHttpDispatcher(app, dispatchBatch);
   app.batch = async (actionsOrFactory, { principal, clientId, scope } = {}) =>
     withLog(app.log, () => app.writeQueue.run(() => {
       const actions = typeof actionsOrFactory === 'function'

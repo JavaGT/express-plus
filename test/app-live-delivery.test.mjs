@@ -171,6 +171,42 @@ test('package action transport rejects unauthenticated, unauthorized, malformed,
   assert.equal((await fetch(endpoint, { method: 'GET' })).status, 405);
 });
 
+test('package batch transport admits only registered actions and returns one durable receipt', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const batchAction = {
+    ...projectAction(),
+    type: 'project.batchWrite',
+    handler: ({ payload }) => [{
+      type: 'Project.created', scope: `Project:${payload.id}`, data: { id: payload.id, name: payload.name },
+    }],
+  };
+  const app = workbench({ db, entities: [project()], actions: [batchAction] });
+  app.listen(0, { principalOf: () => user });
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  const endpoint = `http://127.0.0.1:${app.httpServer.address().port}/workbench/actions/batch`;
+  const request = {
+    actionId: 'http-batch', scope: 'Project:p1', clientId: 'tab-a', actions: [{
+      type: 'project.batchWrite', payload: { id: 'p1', name: 'one', authorized: true },
+    }],
+  };
+  const post = (body) => fetch(endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  const first = await post(request);
+  assert.equal(first.status, 200);
+  assert.deepEqual(await first.json(), { ok: true, actionId: 'http-batch', confirmedThrough: 1 });
+  const retry = await post(request);
+  assert.equal(retry.status, 200);
+  assert.deepEqual(await retry.json(), { ok: true, actionId: 'http-batch', confirmedThrough: 1 });
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt').get().count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, 1);
+  assert.equal((await post({ ...request, actions: [{ type: 'project.batchWrite', payload: { id: 'p1', name: 'two', authorized: true } }] })).status, 409);
+  assert.equal((await post({ ...request, actionId: 'generated', actions: [{ type: 'Project.create', payload: {} }] })).status, 404);
+  assert.equal((await post({ ...request, actionId: 'forged', cursor: 1 })).status, 400);
+});
+
 test('declared annotated text owns generated HTTP admission and package delivery recovery', async (t) => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
@@ -258,6 +294,28 @@ test('HTTP delivery session uses package action transport by default and retains
   const [, actionOptions] = calls.find(([, options]) => options?.method === 'POST');
   assert.deepEqual(JSON.parse(actionOptions.body), { actionId: 'action-1', type: 'project.write', payload: { name: 'one' }, scope: 'Project:p1', clientId: 'tab-a' });
   assert.equal(calls.find(([, options]) => options?.method === 'POST')[0], 'https://example.test/workbench/actions');
+  session.close();
+});
+
+test('HTTP delivery session posts its package-owned batch envelope to the fixed batch endpoint', async () => {
+  const calls = [];
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async (url, options) => {
+      calls.push([url, options]);
+      if (options?.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true, actionId: 'batch-1', confirmedThrough: 1 }) };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: {}, cursor: 1 }) };
+    },
+    eventSourceFactory: () => ({ close() {} }), validateSnapshot: (value) => value,
+    createActionId: () => 'batch-1', historySession: 'tab-a',
+  });
+  await session.ready;
+  assert.equal((await session.batch([{ type: 'project.write', payload: { name: 'one' } }])).ok, true);
+  const [url, options] = calls.find(([, options]) => options?.method === 'POST');
+  assert.equal(url, 'https://example.test/workbench/actions/batch');
+  assert.deepEqual(JSON.parse(options.body), {
+    actionId: 'batch-1', actions: [{ type: 'project.write', payload: { name: 'one' } }], scope: 'Project:p1', clientId: 'tab-a',
+  });
   session.close();
 });
 

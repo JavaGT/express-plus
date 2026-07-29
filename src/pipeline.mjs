@@ -375,6 +375,15 @@ function checkDurableDedupe(db, scope, actionId) {
   return successOutcome(eventsFromReceipt(db, receipt, parseEventType), true);
 }
 
+function checkDurableBatchDedupe(db, scope, actionId, actions) {
+  const receipt = receiptFor(db, scope, actionId);
+  if (!receipt) return null;
+  if (receipt.actionType !== '$batch' || receipt.actionData !== JSON.stringify(actions)) {
+    return failureOutcome(failure('conflict', 'Action ID is already committed for a different batch.'));
+  }
+  return successOutcome(eventsFromReceipt(db, receipt, parseEventType), true);
+}
+
 // commitEvents — the durable transaction brace shared by `dispatch` and
 // `dispatchBatch`: BEGIN IMMEDIATE → durable variant applyInTxn → COMMIT →
 // post-commit fan-out, with ROLLBACK on execution error. Expected failures are
@@ -796,7 +805,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
     // Dedupe the whole batch by its owning-stream action receipt (Wave 4.9) —
     // same (scope, actionId) identity as `dispatch`, one grammar for both.
-    const dedupe = checkDurableDedupe(db, scope, actionId);
+    const dedupe = checkDurableBatchDedupe(db, scope, actionId, actions);
     if (dedupe) return dedupe;
 
     // Run every handler, concatenating their emitted events. Handlers are pure
@@ -845,8 +854,11 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     }
 
     const now = new Date().toISOString();
-    const committed = await commitEvents(db, allEmitted, {
-      now, actionId, nextSeq, principal, payload: actions, pipeline, scope, authorize, historyCommit,
+    // The receipt binds the entire submitted envelope, not merely its emitted
+    // events. A retry must prove it is the same batch before deduping.
+    const batchCommit = allEmitted === null ? null : { events: allEmitted, canonicalPayload: actions };
+    const committed = await commitEvents(db, batchCommit, {
+      now, actionId, nextSeq, principal, payload: actions, pipeline, scope, type: '$batch', authorize, historyCommit,
       handler: historyCommit?.handlerInputs ? runHandlers : null,
     });
     return committed;

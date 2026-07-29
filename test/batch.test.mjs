@@ -123,6 +123,19 @@ test('re-sending the same actionId is a dedupe (returns the committed events)', 
   assert.equal(retry.events[0].type, 'BatchNote.created');
 });
 
+test('a reused batch actionId with different actions is rejected instead of aliasing the receipt', async (t) => {
+  const { app, db } = await setup(t, ownedNote(), alice);
+  const first = [{ type: 'BatchNote.create', payload: { body: 'first' } }];
+  const conflicting = [{ type: 'BatchNote.create', payload: { body: 'conflict' } }];
+
+  assert.equal((await app.kernel.dispatchBatch({ actionId: 'browser-id', actions: first, principal: alice, scope: 'project:p1' })).ok, true);
+  const retry = await app.kernel.dispatchBatch({ actionId: 'browser-id', actions: conflicting, principal: alice, scope: 'project:p1' });
+
+  assert.equal(retry.ok, false);
+  assert.equal(retry.failure.category, 'conflict');
+  assert.deepEqual(db.prepare('SELECT body FROM BatchNote').all().map((row) => row.body), ['first']);
+});
+
 test('batch spans multiple entity types in one composed commit', async (t) => {
   const db = new DatabaseSync(':memory:');
   const app = workbench({ db });

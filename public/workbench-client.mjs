@@ -2184,6 +2184,7 @@ export function createLiveDeliverySession({
   fold: configuredFold,
   optimistic = (snapshot) => snapshot,
   sendAction,
+  sendBatch,
   createActionId,
 }) {
   if (typeof bootstrap !== 'function') throw new TypeError('bootstrap is required');
@@ -2191,6 +2192,7 @@ export function createLiveDeliverySession({
   if (typeof validateSnapshot !== 'function') throw new TypeError('validateSnapshot is required');
   if (configuredFold !== undefined && typeof configuredFold !== 'function') throw new TypeError('fold must be a function');
   if (typeof sendAction !== 'function') throw new TypeError('sendAction is required');
+  if (sendBatch !== undefined && typeof sendBatch !== 'function') throw new TypeError('sendBatch must be a function');
 
   let baseSnapshot = null;
   let visibleSnapshot = null;
@@ -2216,11 +2218,19 @@ export function createLiveDeliverySession({
     return `delivery_op_${++actionCounter}`;
   }
 
+  function freezeClone(value) {
+    if (!value || typeof value !== 'object') return value;
+    for (const child of Object.values(value)) freezeClone(child);
+    return Object.freeze(value);
+  }
+
   function publish() {
     if (closed || baseSnapshot === null) return;
     let projected = baseSnapshot;
     for (const operation of operations.values()) {
-      if (operation.status === 'pending') projected = optimistic(projected, operation.action);
+      if (operation.status === 'pending') {
+        for (const action of operation.actions ?? [operation.action]) projected = optimistic(projected, action);
+      }
       // Application callbacks may synchronously trigger terminal revocation.
       // Never publish a projection that was computed before that transition.
       if (closed || status === 'revoked' || baseSnapshot === null) return;
@@ -2589,6 +2599,85 @@ export function createLiveDeliverySession({
     }
   }
 
+  async function submitBatch(operation) {
+    try {
+      const receipt = await sendBatch(operation.batch);
+      if (receipt?.ok === false) {
+        if (operation.echoCursor != null) {
+          operations.delete(operation.actionId);
+          publish();
+          return { ok: true, status: 'committed', opId: operation.actionId };
+        }
+        operations.delete(operation.actionId);
+        operation.status = 'failed';
+        operation.error = receipt.failure ?? receipt.error ?? receipt;
+        publish();
+        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, failure: operation.error };
+      }
+      if (!receipt || receipt.ok !== true || receipt.actionId !== operation.actionId) {
+        throw new Error('batch dispatch returned an invalid receipt');
+      }
+      const confirmedThrough = receipt.confirmedThrough;
+      if (snapshotOnly && (!Number.isSafeInteger(confirmedThrough) || confirmedThrough < 0)) {
+        throw new Error('snapshot-only batch receipt must confirm through a nonnegative cursor');
+      }
+      operation.delivered = true;
+      const confirmedCursor = receipt?.cursor ?? receipt?.seq;
+      if (Number.isSafeInteger(confirmedCursor) && confirmedCursor >= 0) operation.confirmedCursor = confirmedCursor;
+      if (Number.isSafeInteger(confirmedThrough) && confirmedThrough >= 0) operation.confirmedThrough = confirmedThrough;
+      operation.receiptGeneration = ++receiptGeneration;
+      operation.receiptSnapshotGeneration = snapshotGeneration;
+      settleSnapshotConfirmations(receiptGeneration);
+      if (snapshotOnly) recoverReceiptSnapshot(operation);
+      if (operation.echoCursor != null && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) operations.delete(operation.actionId);
+      publish();
+      return { ok: true, status: 'committed', opId: operation.actionId, value: receipt?.value };
+    } catch (error) {
+      if (status === 'revoked') {
+        operations.delete(operation.actionId);
+        publish();
+        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, failure: new ClientClosedError('Live delivery access was revoked') };
+      }
+      if (operation.echoCursor != null) {
+        operations.delete(operation.actionId);
+        publish();
+        return { ok: true, status: 'committed', opId: operation.actionId };
+      }
+      // A transport exception cannot prove rollback. Retain the one package-owned
+      // envelope and optimistic placeholder so retry can resend its action ID.
+      operation.deliveryError = error;
+      return { ok: false, status: 'outcome-unknown', opId: operation.actionId, deliveryError: { message: String(error?.message ?? error) } };
+    }
+  }
+
+  async function batch(actions) {
+    const actionId = nextActionId();
+    if (!Array.isArray(actions) || actions.length === 0 || actions.some((action) => !action
+      || typeof action.type !== 'string'
+      || Object.keys(action).length !== 2
+      || !isJsonValue(action.payload))) {
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new TypeError('batch requires a non-empty action array') };
+    }
+    if (typeof sendBatch !== 'function') return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new TypeError('sendBatch is required') };
+    if (closed || status !== 'live') return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery is unavailable') };
+    const retainedActions = freezeClone(structuredClone(actions));
+    const batchEnvelope = Object.freeze({ actionId, actions: retainedActions });
+    const operation = { opId: actionId, actionId, batch: batchEnvelope, actions: retainedActions, status: 'pending', error: null, delivered: false, confirmedCursor: null, echoCursor: null };
+    operations.set(actionId, operation);
+    publish();
+    if (closed || status !== 'live') {
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery is unavailable') };
+    }
+    return submitBatch(operation);
+  }
+
+  async function retry(opId) {
+    const operation = operations.get(opId);
+    if (!operation?.batch || !operation.deliveryError) return { ok: false, status: 'failed-rolled-back', opId, failure: new TypeError('batch is not awaiting transport retry') };
+    operation.deliveryError = null;
+    return submitBatch(operation);
+  }
+
   const ready = start();
   ready.catch(() => {});
 
@@ -2598,8 +2687,18 @@ export function createLiveDeliverySession({
     get status() { return status; },
     get ready() { return ready; },
     dispatch,
+    batch,
+    retry,
     reconnect,
-    operations() { return [...operations.values()]; },
+    operations() {
+      return [...operations.values()].map((operation) => Object.freeze({
+        opId: operation.opId,
+        actionId: operation.actionId,
+        ...(operation.action ? { action: Object.freeze(structuredClone(operation.action)) } : {}),
+        status: operation.status,
+        error: operation.error,
+      }));
+    },
     pendingCount() { return [...operations.values()].filter((operation) => operation.status === 'pending').length; },
     subscribe(listener) {
       listeners.add(listener);
@@ -2611,6 +2710,7 @@ export function createLiveDeliverySession({
       closed = true;
       subscription?.close?.();
       subscription = null;
+      operations.clear();
       listeners.clear();
     },
   };
@@ -2628,6 +2728,7 @@ export function createLiveDeliveryHttpSession({
   fold,
   optimistic,
   sendAction,
+  sendBatch,
   actionUrl,
   historySession,
   fetchImpl = globalThis.fetch,
@@ -2645,6 +2746,7 @@ export function createLiveDeliveryHttpSession({
   // The action endpoint belongs to the configured Workbench origin, not the
   // browser document origin which may host a separate frontend application.
   const actionEndpoint = actionUrl ?? new URL('/workbench/actions', new URL(baseUrl, globalThis.location?.href ?? 'http://workbench.local')).toString();
+  const batchActionEndpoint = new URL('/workbench/actions/batch', new URL(baseUrl, globalThis.location?.href ?? 'http://workbench.local')).toString();
   const historyEndpoint = new URL('/workbench/history', new URL(baseUrl, globalThis.location?.href ?? 'http://workbench.local')).toString();
 
   async function bootstrap({ after, mode }) {
@@ -2705,6 +2807,18 @@ export function createLiveDeliveryHttpSession({
     return receipt;
   }
 
+  async function sendHttpBatch(batch) {
+    const response = await fetchImpl(batchActionEndpoint, {
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ ...batch, scope, clientId: historySession }),
+    });
+    let receipt;
+    try { receipt = await response.json(); } catch { throw new Error(`batch dispatch failed with HTTP ${response.status}`); }
+    if (!response.ok) return receipt?.ok === false ? receipt : { ok: false, failure: receipt };
+    if (!receipt || receipt.ok !== true || receipt.actionId !== batch.actionId) throw new Error('batch dispatch returned an invalid receipt');
+    return receipt;
+  }
+
   const session = createLiveDeliverySession({
     bootstrap,
     subscribe,
@@ -2714,6 +2828,7 @@ export function createLiveDeliveryHttpSession({
     sendAction: (action) => action.type.startsWith('$history.')
       ? sendHttpAction(action)
       : (sendAction ?? sendHttpAction)(action),
+    sendBatch: sendBatch ?? sendHttpBatch,
     createActionId,
   });
   // History commands use the same receipt/snapshot reconciliation path as an

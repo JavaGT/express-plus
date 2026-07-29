@@ -73,6 +73,87 @@ describe('LiveDeliverySession', () => {
     session.close();
   });
 
+  it('reuses one package-owned batch action ID after an uncertain transport result', async () => {
+    const sent = [];
+    let attempts = 0;
+    let delivery;
+    const batchSession = createLiveDeliverySession({
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: { values: [] }, cursor: 1 }),
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      validateSnapshot: (snapshot) => snapshot,
+      fold: (snapshot, envelope) => ({ values: [...snapshot.values, envelope.event.data.value] }),
+      optimistic: (snapshot, action) => ({ values: [...snapshot.values, `pending:${action.payload.value}`] }),
+      sendAction: async () => ({ ok: true }),
+      sendBatch: async (batch) => {
+        sent.push(batch);
+        attempts += 1;
+        if (attempts === 1) throw new TypeError('network response lost');
+        return { ok: true, actionId: batch.actionId, cursor: 2 };
+      },
+      createActionId: () => 'batch-action-1',
+    });
+    await batchSession.ready;
+
+    const actions = [
+      { type: 'Value.add', payload: { value: 'one' } },
+      { type: 'Value.add', payload: { value: 'two' } },
+    ];
+    const first = await batchSession.batch(actions);
+    assert.deepEqual(first, {
+      ok: false, status: 'outcome-unknown', opId: 'batch-action-1',
+      deliveryError: { message: 'network response lost' },
+    });
+    assert.equal(batchSession.pendingCount(), 1);
+    assert.deepEqual(batchSession.snapshot, { values: ['pending:one', 'pending:two'] });
+    actions[0].payload.value = 'changed-after-send';
+    const publicOperation = batchSession.operations()[0];
+    assert.equal('batch' in publicOperation, false);
+    assert.equal('actions' in publicOperation, false);
+
+    const retry = await batchSession.retry('batch-action-1');
+    assert.equal(retry.ok, true);
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0], sent[1], 'the package retains and resends the same frozen batch envelope');
+    assert.equal(sent[1].actionId, 'batch-action-1');
+    assert.equal(sent[1].actions[0].payload.value, 'one');
+    assert.equal(Object.isFrozen(sent[1].actions[0].payload), true);
+
+    await delivery([event(2, 'committed', 'batch-action-1')]);
+    assert.equal(batchSession.pendingCount(), 0);
+    assert.deepEqual(batchSession.snapshot, { values: ['committed'] });
+    batchSession.close();
+  });
+
+  it('rejects non-JSON batch payloads before retaining an envelope', async () => {
+    const session = createLiveDeliverySession({
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: {}, cursor: 1 }),
+      subscribe: async () => ({ close() {} }), validateSnapshot: (snapshot) => snapshot,
+      sendAction: async () => ({ ok: true }), sendBatch: async () => ({ ok: true }),
+    });
+    await session.ready;
+    const result = await session.batch([{ type: 'Value.add', payload: new Map() }]);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'failed-rolled-back');
+    assert.equal(session.pendingCount(), 0);
+    session.close();
+  });
+
+  it('does not transmit a batch after its optimistic projection revokes delivery', async () => {
+    let revoke;
+    let sent = 0;
+    const session = createLiveDeliverySession({
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: {}, cursor: 1 }),
+      subscribe: async ({ revoke: revokeDelivery }) => { revoke = revokeDelivery; return { close() {} }; },
+      validateSnapshot: (snapshot) => snapshot,
+      optimistic: (snapshot) => { revoke({ code: 'access-revoked' }); return snapshot; },
+      sendAction: async () => ({ ok: true }), sendBatch: async () => { sent += 1; return { ok: true }; },
+    });
+    await session.ready;
+    const result = await session.batch([{ type: 'Value.add', payload: {} }]);
+    assert.equal(result.ok, false);
+    assert.equal(sent, 0);
+  });
+
   it('requires a replacement snapshot after a delayed snapshot-only receipt', async () => {
     const receipt = deferred();
     let delivery;

@@ -423,7 +423,18 @@ export interface LiveDeliverySessionConfig<Snapshot, Payload = unknown> {
   optimistic?: (snapshot: Snapshot, action: { actionId: string; type: string; payload: Payload }) => Snapshot;
   /** Snapshot-only sessions require `{ actionId, confirmedThrough }` on success. */
   sendAction(action: { actionId: string; type: string; payload: Payload }): Promise<LiveDeliveryActionReceipt | void>;
+  sendBatch?(batch: LiveDeliveryBatchEnvelope<Payload>): Promise<LiveDeliveryActionReceipt | void>;
   createActionId?: () => string;
+}
+
+export interface LiveDeliveryBatchAction<Payload = unknown> {
+  type: string;
+  payload: Payload;
+}
+
+export interface LiveDeliveryBatchEnvelope<Payload = unknown> {
+  actionId: string;
+  actions: readonly LiveDeliveryBatchAction<Payload>[];
 }
 
 export interface LiveDeliverySession<Snapshot, Payload = unknown> {
@@ -432,8 +443,10 @@ export interface LiveDeliverySession<Snapshot, Payload = unknown> {
   readonly status: 'bootstrapping' | 'recovering' | 'catching-up' | 'live' | 'unavailable' | 'revoked';
   readonly ready: Promise<void>;
   dispatch(type: string, payload: Payload): Promise<ScopeDispatchResult>;
+  batch(actions: readonly LiveDeliveryBatchAction<Payload>[]): Promise<ScopeDispatchResult | { ok: false; status: 'outcome-unknown'; opId: string; deliveryError: { message: string } }>;
+  retry(opId: string): Promise<ScopeDispatchResult>;
   reconnect(): Promise<void>;
-  operations(): Array<{ opId: string; actionId: string; action: { actionId: string; type: string; payload: Payload }; status: 'pending'; error: unknown }>;
+  operations(): Array<{ opId: string; actionId: string; action?: { actionId: string; type: string; payload: Payload }; status: 'pending'; error: unknown }>;
   pendingCount(): number;
   subscribe(listener: (snapshot: Snapshot | null) => void): () => void;
   close(): void;
@@ -461,6 +474,7 @@ export interface LiveDeliveryHttpSessionConfig<Snapshot, Payload = unknown> {
   optimistic?: (snapshot: Snapshot, action: { actionId: string; type: string; payload: Payload }) => Snapshot;
   /** Override the package-owned POST /workbench/actions transport. */
   sendAction?: LiveDeliverySessionConfig<Snapshot, Payload>['sendAction'];
+  sendBatch?: LiveDeliverySessionConfig<Snapshot, Payload>['sendBatch'];
   /** Absolute action endpoint; defaults to /workbench/actions on this origin. */
   actionUrl?: string;
   /** Binds ordinary actions and one-step history moves to one durable session cursor. */

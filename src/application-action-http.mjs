@@ -8,12 +8,18 @@ import { sendFailure } from './http-failure.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 
 const ACTION_PATH = '/workbench/actions';
+const BATCH_ACTION_PATH = '/workbench/actions/batch';
 const HISTORY_PATH = '/workbench/history';
 const MAX_STRING_LENGTH = 512;
 const historyHttpDispatchers = new WeakMap();
+const batchHttpDispatchers = new WeakMap();
 
 export function installHistoryHttpDispatcher(app, dispatch) {
   historyHttpDispatchers.set(app, dispatch);
+}
+
+export function installBatchHttpDispatcher(app, dispatch) {
+  batchHttpDispatchers.set(app, dispatch);
 }
 
 function isJsonValue(value, ancestors = new Set()) {
@@ -39,6 +45,21 @@ function actionRequest(body) {
   if (clientId !== undefined && (typeof clientId !== 'string' || clientId.length === 0 || clientId.length > MAX_STRING_LENGTH)) return null;
   if (!isJsonValue(payload)) return null;
   return { actionId, ...(scope === undefined ? {} : { scope }), type, payload, ...(clientId === undefined ? {} : { clientId }) };
+}
+
+function batchActionRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  const keys = Object.keys(body);
+  if (keys.length < 3 || keys.length > 4 || keys.some((key) => !['actionId', 'scope', 'actions', 'clientId'].includes(key))) return null;
+  const { actionId, scope, actions, clientId } = body;
+  if (typeof actionId !== 'string' || actionId.length === 0 || actionId.length > MAX_STRING_LENGTH) return null;
+  if (typeof scope !== 'string' || scope.length === 0 || scope.length > MAX_STRING_LENGTH) return null;
+  if (clientId !== undefined && (typeof clientId !== 'string' || clientId.length === 0 || clientId.length > MAX_STRING_LENGTH)) return null;
+  if (!Array.isArray(actions) || actions.length === 0 || actions.some((action) => {
+    if (!action || typeof action !== 'object' || Array.isArray(action) || Object.keys(action).length !== 2) return true;
+    return typeof action.type !== 'string' || action.type.length === 0 || action.type.length > MAX_STRING_LENGTH || !isJsonValue(action.payload);
+  })) return null;
+  return { actionId, scope, actions, ...(clientId === undefined ? {} : { clientId }) };
 }
 
 function validPrincipal(principal) {
@@ -92,7 +113,7 @@ function admitsApplicationHttpAction(app, request) {
 /** Handle the fixed HTTP skin for application-registered actions. */
 export async function handleApplicationActionHttp(app, req, res, principalOf, sendJson) {
   const url = new URL(req.url ?? '/', 'http://workbench.local');
-  if (url.pathname !== ACTION_PATH && url.pathname !== HISTORY_PATH) return false;
+  if (url.pathname !== ACTION_PATH && url.pathname !== BATCH_ACTION_PATH && url.pathname !== HISTORY_PATH) return false;
   if (req.method !== 'POST') {
     sendFailure(sendJson, res, failure('invalid-input', 'method not allowed'), { status: 405 });
     return true;
@@ -108,7 +129,8 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
     }
     throw error;
   }
-  const request = url.pathname === HISTORY_PATH ? historyRequest(body) : actionRequest(body);
+  const request = url.pathname === HISTORY_PATH ? historyRequest(body)
+    : url.pathname === BATCH_ACTION_PATH ? batchActionRequest(body) : actionRequest(body);
   if (!request) {
     sendFailure(sendJson, res, failure('invalid-input', 'invalid action request'));
     return true;
@@ -117,6 +139,10 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
   // let this generic transport reach generated entity CRUD kernel handlers.
   if (url.pathname === ACTION_PATH && !admitsApplicationHttpAction(app, request)) {
     sendFailure(sendJson, res, failure('unknown-action', 'action is not available'));
+    return true;
+  }
+  if (url.pathname === BATCH_ACTION_PATH && request.actions.some((action) => !app.actions.some((declared) => declared.type === action.type))) {
+    sendFailure(sendJson, res, failure('unknown-action', 'batch action is not available'));
     return true;
   }
 
@@ -136,7 +162,9 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
   }
   const result = url.pathname === HISTORY_PATH
     ? await historyHttpDispatchers.get(app)?.(body.command, { ...request, principal })
-    : await app.dispatch({ ...request, principal, ...(request.clientId === undefined ? {} : { history: { session: request.clientId } }) });
+    : url.pathname === BATCH_ACTION_PATH
+      ? await batchHttpDispatchers.get(app)?.({ ...request, principal, ...(request.clientId === undefined ? {} : { history: { session: request.clientId } }) })
+      : await app.dispatch({ ...request, principal, ...(request.clientId === undefined ? {} : { history: { session: request.clientId } }) });
   if (!result?.ok) {
     sendFailure(sendJson, res, isWorkbenchFailure(result?.failure)
       ? result.failure
@@ -152,4 +180,4 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
   return true;
 }
 
-export { ACTION_PATH, HISTORY_PATH };
+export { ACTION_PATH, BATCH_ACTION_PATH, HISTORY_PATH };
