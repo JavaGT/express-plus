@@ -246,7 +246,7 @@ test('package batch transport admits only registered actions and returns one dur
 test('declared annotated text owns generated HTTP admission and package delivery recovery', async (t) => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
-  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, owner TEXT); CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO Project VALUES (\'p1\', \'u1\'); INSERT INTO User VALUES (\'u1\'); INSERT INTO User VALUES (\'u2\')');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, owner TEXT); CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO Project VALUES (\'p1\', \'u1\'), (\'p2\', \'u2\'); INSERT INTO User VALUES (\'u1\'); INSERT INTO User VALUES (\'u2\')');
   const Document = entity('HttpAnnotatedDocument', {
     project: ref('Project'), owner: ref('User', { role: 'owner' }),
     body: annotatedText({ project: 'project', owner: 'owner', annotations: [annotation('note')], measurements: [measurement('words', { extension: 'httpDeliveryMeasurement' })] }),
@@ -270,9 +270,12 @@ test('declared annotated text owns generated HTTP admission and package delivery
     body: JSON.stringify({ actionId: action.payload?.version ? `op-${action.payload.mutationId}` : `action-${action.type}`, ...action, clientId: 'tab-a' }),
   });
 
-  const create = annotatedTextCreateAction(Document, { id: 'd1', project: 'p1', owner: 'u1' });
+  const create = annotatedTextCreateAction(Document, Document.body, { id: 'd1', projectId: 'p1', ownerId: 'u1' });
   assert.equal((await post(create, { 'x-anonymous': '1' })).status, 403);
   assert.equal((await post(create)).status, 200);
+  const spoofedProject = annotatedTextCreateAction(Document, Document.body, { id: 'forbidden-project', projectId: 'p2', ownerId: 'u1' });
+  assert.equal((await post(spoofedProject)).status, 403, 'declared project ownership, not caller-supplied document ownership, authorizes create');
+  assert.equal(db.prepare('SELECT 1 FROM HttpAnnotatedDocument WHERE id = ?').get('forbidden-project'), undefined);
   const initialBlockId = db.prepare('SELECT id FROM HttpAnnotatedDocument_body_block WHERE document_id = ?').get('d1').id;
 
   const sources = [];

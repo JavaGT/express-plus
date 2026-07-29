@@ -1,3 +1,7 @@
+import { assertWellFormedText } from './annotated-text.mjs';
+import { resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';
+import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
+
 function validateEntityAndField(entity, field) {
   if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
     throw new Error('annotatedTextAction: entity must be a non-null object');
@@ -89,26 +93,82 @@ export function annotatedTextRetireAction(entity, documentId) {
   return deepFreeze({ type: `${entity.name}.annotatedText.retire`, payload: { id: documentId } });
 }
 
-export function annotatedTextCreateAction(entity, payload) {
+export function annotatedTextCreateAction(entity, field, input) {
   if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
     throw new Error('annotatedTextCreateAction: entity must be a non-null object');
   }
   if (typeof entity.name !== 'string' || entity.name.length === 0) {
     throw new Error('annotatedTextCreateAction: entity name must be a non-empty string');
   }
-  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
-    throw new Error('annotatedTextCreateAction: payload must be a non-null object');
+  const fieldName = validateEntityAndField(entity, field);
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    throw new Error('annotatedTextCreateAction: input must be a non-null object');
   }
-  if (typeof payload.id !== 'string' || payload.id.length === 0) {
+  const inputKeys = Object.keys(input);
+  if (inputKeys.some((key) => !['id', 'projectId', 'ownerId', 'fields', 'source'].includes(key))) {
+    throw new Error('annotatedTextCreateAction: input has unknown keys');
+  }
+  if (typeof input.id !== 'string' || input.id.length === 0) {
     throw new Error('annotatedTextCreateAction: create payload must include a non-empty id');
   }
-
-  const descriptor = Object.values(entity.fields ?? {}).find((field) => field.kind === 'annotatedText');
-  const projectField = descriptor?.project;
-  const target = entity.fields?.[projectField]?.target;
-  const projectTarget = typeof target === 'string' ? target : target?.name;
-  if (typeof projectTarget !== 'string' || !projectTarget || payload[projectField] == null || payload[projectField] === '') {
-    throw new Error('annotatedTextCreateAction: payload must include its declared project ref');
+  const descriptor = entity.fields[fieldName];
+  const projectField = descriptor.project;
+  const ownerField = descriptor.owner;
+  if (typeof input.projectId !== 'string' || input.projectId.length === 0 || typeof input.ownerId !== 'string' || input.ownerId.length === 0) {
+    throw new Error('annotatedTextCreateAction: input requires non-empty projectId and ownerId');
+  }
+  if (input.fields !== undefined && (!input.fields || typeof input.fields !== 'object' || Array.isArray(input.fields))) throw new Error('annotatedTextCreateAction: fields must be a non-array object');
+  const fields = input.fields ?? {};
+  for (const key of Object.keys(fields)) {
+    if (!Object.hasOwn(entity.fields, key) || entity.fields[key]?.kind === 'annotatedText' || key === projectField || key === ownerField) throw new Error(`annotatedTextCreateAction: fields cannot include '${key}'`);
+  }
+  const payload = { id: input.id, [projectField]: input.projectId, [ownerField]: input.ownerId, ...structuredClone(fields) };
+  if (input.source !== undefined) {
+    const source = input.source;
+    if (!source || typeof source !== 'object' || Array.isArray(source) ||
+        Object.keys(source).length !== 1 || !Array.isArray(source.blocks) || source.blocks.length === 0) {
+      throw new Error('annotatedTextCreateAction: source requires exactly non-empty blocks');
+    }
+    const blocks = source.blocks.map((block, index) => {
+      if (!block || typeof block !== 'object' || Array.isArray(block) ||
+          Object.keys(block).some((key) => !['text', 'fields', 'measurements'].includes(key)) || typeof block.text !== 'string') {
+        throw new Error(`annotatedTextCreateAction: source block ${index} is invalid`);
+      }
+      try { assertWellFormedText(block.text); } catch (error) { throw new Error(`annotatedTextCreateAction: source block ${index} text ${error.message}`); }
+      if (block.text.length === 0) throw new Error('annotatedTextCreateAction: source has an empty block');
+      if (block.fields !== undefined && (!block.fields || typeof block.fields !== 'object' || Array.isArray(block.fields))) {
+        throw new Error(`annotatedTextCreateAction: source block ${index} fields must be a non-array object`);
+      }
+      if (block.measurements !== undefined && !Array.isArray(block.measurements)) {
+        throw new Error(`annotatedTextCreateAction: source block ${index} measurements must be an array`);
+      }
+      const families = new Set();
+      const measurements = (block.measurements ?? []).map((measurement, measurementIndex) => {
+        if (!measurement || typeof measurement !== 'object' || Array.isArray(measurement) ||
+            Object.keys(measurement).length !== 2 || typeof measurement.family !== 'string' || !Object.hasOwn(measurement, 'payload')) {
+          throw new Error(`annotatedTextCreateAction: source block ${index} measurement ${measurementIndex} is invalid`);
+        }
+        if (families.has(measurement.family)) throw new Error(`annotatedTextCreateAction: source block ${index} has duplicate measurement family '${measurement.family}'`);
+        families.add(measurement.family);
+        const config = descriptor.measurements.find((entry) => entry.measurementName === measurement.family);
+        const extension = config && resolveDeclarationMeasurementExtension(config);
+        if (!config || !extension) throw new Error(`annotatedTextCreateAction: source measurement family '${measurement.family}' is not declared`);
+        let measurementPayload;
+        try {
+          measurementPayload = frozenJsonSnapshot(measurement.payload);
+          if (extension.validate(Object.freeze({ version: 1, formatVersion: config.formatVersion, blockText: block.text, payload: measurementPayload })) !== undefined) throw new Error('validator returned a value');
+        } catch {
+          throw new Error(`annotatedTextCreateAction: source measurement '${measurement.family}' failed validation`);
+        }
+        return { family: measurement.family, payload: measurementPayload };
+      });
+      return {
+        text: block.text,
+        ...(block.fields === undefined ? {} : { fields: structuredClone(block.fields) }),
+        ...(block.measurements === undefined ? {} : { measurements }),
+      };
+    });
+    payload[fieldName] = { version: 1, blocks };
   }
   const type = `${entity.name}.create`;
 

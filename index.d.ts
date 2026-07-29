@@ -348,10 +348,27 @@ export function annotatedTextAction(
   field: AnnotatedTextFieldHandle,
   command: AnnotatedTextOperationCommand,
 ): AnnotatedTextActionRequest;
-export function annotatedTextCreateAction<Payload extends Readonly<Record<string, unknown>> & { readonly id: string }>(
+export interface AnnotatedTextCreateSourceMeasurement {
+  readonly family: string;
+  readonly payload: unknown;
+}
+export interface AnnotatedTextCreateSourceBlock {
+  readonly text: string;
+  readonly fields?: Readonly<Record<string, unknown>>;
+  readonly measurements?: readonly AnnotatedTextCreateSourceMeasurement[];
+}
+export interface AnnotatedTextCreateInput {
+  readonly id: string;
+  readonly projectId: string;
+  readonly ownerId: string;
+  readonly fields?: Readonly<Record<string, unknown>>;
+  readonly source?: { readonly blocks: readonly AnnotatedTextCreateSourceBlock[] };
+}
+export function annotatedTextCreateAction(
   entity: WorkbenchEntity,
-  payload: Payload,
-): AnnotatedTextActionRequest<Payload>;
+  field: AnnotatedTextFieldHandle,
+  input: AnnotatedTextCreateInput,
+): AnnotatedTextActionRequest;
 export function annotatedTextRetireAction(entity: WorkbenchEntity, documentId: string): AnnotatedTextActionRequest<{ readonly id: string }>;
 
 export interface AnnotatedTextBlock {

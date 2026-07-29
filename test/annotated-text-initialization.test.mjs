@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import workbench, {
   annotatedText, annotation, boolean, entity, everyone, executeDDL, executeFrameworkDDL, measurement,
@@ -10,7 +13,8 @@ import workbench, {
 import { applyTextOperationToBlock, mergeBlocks, restoreTextFamilyCheckpoint, textFamilyCheckpoint, materializeBlock, splitBlock } from '../src/annotated-text-family.mjs';
 import { native } from '../src/event-handle.mjs';
 import { frozenJsonSnapshot } from '../src/annotated-text-r2.mjs';
-import { annotatedTextAction } from '../src/annotated-text-public.mjs';
+import { annotatedTextAction, annotatedTextCreateAction } from '../src/annotated-text-public.mjs';
+import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
 
 const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const INSERT_HELLO = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello']];
@@ -44,6 +48,25 @@ registerAnnotatedTextStructuralExtension('sourceInit', Object.freeze({
     if (input.right !== null) return Object.freeze({ version: 1, payload: input.right.payload });
     return Object.freeze({ version: 1, payload: null });
   },
+}));
+
+registerAnnotatedTextContract('sourceRangeInit', Object.freeze({ kind: 'measurement' }));
+registerAnnotatedTextStructuralExtension('sourceRangeInit', Object.freeze({
+  version: 1,
+  validate: function validate({ blockText, payload }) {
+    if (!payload || !Array.isArray(payload.ranges)) throw new Error('ranges required');
+    let previous = -1;
+    for (const range of payload.ranges) {
+      if (!range || !Number.isSafeInteger(range.start) || !Number.isSafeInteger(range.end) ||
+          range.start < 0 || range.start >= range.end || range.end > blockText.length || range.start < previous ||
+          (range.start > 0 && blockText.charCodeAt(range.start) >= 0xdc00 && blockText.charCodeAt(range.start) <= 0xdfff) ||
+          (range.end > 0 && blockText.charCodeAt(range.end) >= 0xdc00 && blockText.charCodeAt(range.end) <= 0xdfff)) throw new Error('invalid UTF-16 range');
+      previous = range.start;
+    }
+  },
+  edit: function edit(input) { return input; },
+  partition: function partition(input) { return { version: 1, leftPayload: input.payload, rightPayload: input.payload }; },
+  combine: function combine(input) { return { version: 1, payload: input.left?.payload ?? input.right?.payload ?? { ranges: [] } }; },
 }));
 
 function doc() {
@@ -119,7 +142,7 @@ async function appFor(db = new DatabaseSync(':memory:')) {
   const app = workbench({ db, entities: [InitDoc] });
   app.start();
   await app.ready;
-  return { app, db };
+  return { app, db, InitDoc };
 }
 
 test('annotated text create atomically initializes one canonical empty family and block', async () => {
@@ -147,14 +170,77 @@ test('annotated text create atomically initializes one canonical empty family an
   assert.ok(!Object.hasOwn(db.prepare('SELECT * FROM InitDoc WHERE id = ?').get('d1'), '__workbench'));
 });
 
-test('annotated text create imports a validated multi-block CRDT family atomically', async () => {
+test('annotated text create imports declared measurements with generated identities and rejects invalid imports atomically', async () => {
   const { app, db } = await appFor();
+  const source = { version: 1, blocks: [
+    { text: 'hello', measurements: [{ family: 'source', payload: { text: 'hello', offset: 0 } }] },
+    { text: 'world' },
+  ] };
+  const created = await app.dispatch({ actionId: 'measurement-create', type: 'InitDoc.create', scope: 'Project:p1', principal: { id: 'u1' }, payload: { id: 'measured', project: 'p1', owner: 'u1', body: source } });
+  assert.equal(created.ok, true, created.failure?.message);
+  const rows = db.prepare('SELECT id, family, format_version, payload FROM InitDoc_body_measurement WHERE block_id IN (SELECT id FROM InitDoc_body_block WHERE document_id = ?)').all('measured');
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].family, 'source');
+  assert.equal(rows[0].format_version, 1);
+  assert.deepEqual(JSON.parse(rows[0].payload), { text: 'hello', offset: 0 });
+  assert.notEqual(rows[0].id, '');
+  const rejected = await app.dispatch({ actionId: 'measurement-invalid', type: 'InitDoc.create', scope: 'Project:p1', principal: { id: 'u1' }, payload: { id: 'bad-measured', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'x', measurements: [{ family: 'source', payload: {} }, { family: 'source', payload: {} }] }] } } });
+  assert.equal(rejected.ok, false);
+  assert.equal(db.prepare('SELECT 1 FROM InitDoc WHERE id = ?').get('bad-measured'), undefined);
+  await app.close?.();
+});
+
+test('typed source import rejects invalid UTF-16 measurement offsets, reversed ranges, and ordering before any write', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec("CREATE TABLE Project (id TEXT PRIMARY KEY); CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO Project VALUES ('p1'); INSERT INTO User VALUES ('u1')");
+  const RangeDoc = entity('RangeInitDoc', {
+    project: ref('Project'), owner: ref('User'),
+    body: annotatedText({ project: 'project', owner: 'owner', block: {}, annotations: [annotation('note')], measurements: [measurement('ranges', { extension: 'sourceRangeInit' })] }),
+    grant: [scope(() => everyone()).can(() => grant(read, write))],
+  });
+  executeDDL(RangeDoc, db);
+  const app = workbench({ db, entities: [RangeDoc] });
+  await app.start();
+  const valid = annotatedTextCreateAction(RangeDoc, RangeDoc.body, {
+    id: 'valid', projectId: 'p1', ownerId: 'u1',
+    source: { blocks: [{ text: 'A😀B', measurements: [{ family: 'ranges', payload: { ranges: [{ start: 1, end: 3 }] } }] }] },
+  });
+  assert.equal((await app.dispatch({ actionId: 'valid', principal: { id: 'u1' }, ...valid })).ok, true);
+  const beforeEditPayload = db.prepare("SELECT payload FROM RangeInitDoc_body_measurement WHERE family = 'ranges'").get().payload;
+  const row = db.prepare("SELECT * FROM RangeInitDoc WHERE id = 'valid'").get();
+  const snapshot = await projectAnnotatedTextSnapshot({ db, entity: RangeDoc, row, principal: { id: 'u1' }, fieldName: 'body', descriptor: RangeDoc.fields.body });
+  const blockId = snapshot.blocks[0].id;
+  const edited = await app.dispatch({ actionId: 'human-edit', principal: { id: 'u1' }, ...annotatedTextAction(RangeDoc, RangeDoc.body, {
+    kind: 'text.insert', id: 'valid', basis: snapshot.basis, mutationId: 'human-edit', at: { blockId, offset: 0 }, text: 'x',
+  }) });
+  assert.equal(edited.ok, true, edited.failure?.message);
+  assert.equal(db.prepare("SELECT payload FROM RangeInitDoc_body_measurement WHERE family = 'ranges'").get().payload, beforeEditPayload, 'human text edits do not overwrite immutable source provenance');
+  for (const [id, ranges] of [
+    ['past-end', [{ start: 0, end: 5 }]],
+    ['surrogate', [{ start: 2, end: 3 }]],
+    ['reversed', [{ start: 3, end: 1 }]],
+    ['unordered', [{ start: 3, end: 4 }, { start: 0, end: 1 }]],
+  ]) {
+    assert.throws(() => annotatedTextCreateAction(RangeDoc, RangeDoc.body, {
+      id, projectId: 'p1', ownerId: 'u1', source: { blocks: [{ text: 'A😀B', measurements: [{ family: 'ranges', payload: { ranges } }] }] },
+    }), /failed validation/);
+    const raw = await app.dispatch({ actionId: id, type: 'RangeInitDoc.create', principal: { id: 'u1' }, payload: { id, project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'A😀B', measurements: [{ family: 'ranges', payload: { ranges } }] }] } } });
+    assert.equal(raw.ok, false);
+    assert.equal(db.prepare('SELECT 1 FROM RangeInitDoc WHERE id = ?').get(id), undefined);
+  }
+  await app.shutdown();
+  db.close();
+});
+
+test('annotated text create imports a validated multi-block CRDT family atomically', async () => {
+  const { app, db, InitDoc } = await appFor();
   const result = await app.dispatch({
-    actionId: 'import', type: 'InitDoc.create', principal: { id: 'u1' },
-    payload: { id: 'imported', project: 'p1', owner: 'u1', body: { version: 1, blocks: [
-      { text: 'hello', fields: { reviewed: false } },
+    actionId: 'import', principal: { id: 'u1' },
+    ...annotatedTextCreateAction(InitDoc, InitDoc.body, { id: 'imported', projectId: 'p1', ownerId: 'u1', source: { blocks: [
+      { text: 'hello', fields: { reviewed: false }, measurements: [{ family: 'source', payload: { provider: 'local', originalToken: 'hello' } }] },
       { text: ' 🌍' },
-    ] } },
+    ] } }),
   });
   assert.equal(result.ok, true, result.failure?.message);
   const blocks = db.prepare("SELECT * FROM InitDoc_body_block WHERE document_id = 'imported' ORDER BY position").all();
@@ -162,17 +248,52 @@ test('annotated text create imports a validated multi-block CRDT family atomical
   assert.deepEqual(blocks.map((block) => block.reviewed), [0, 1]);
   const family = restoreTextFamilyCheckpoint(JSON.parse(db.prepare("SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = 'imported'").get().family_checkpoint));
   assert.deepEqual(family.blocks.map((block) => materializeBlock(family, block.id)), ['hello', ' 🌍']);
-  const retry = await app.dispatch({ actionId: 'import', type: 'InitDoc.create', principal: { id: 'u1' }, payload: { id: 'imported', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'different' }] } } });
+  const importedMeasurement = db.prepare("SELECT * FROM InitDoc_body_measurement WHERE family = 'source'").get();
+  assert.ok(importedMeasurement);
+  const retry = await app.dispatch({ actionId: 'import', principal: { id: 'u1' }, ...annotatedTextCreateAction(InitDoc, InitDoc.body, { id: 'imported', projectId: 'p1', ownerId: 'u1', source: { blocks: [{ text: 'different', measurements: [{ family: 'source', payload: { provider: 'changed' } }] }] } }) });
   assert.equal(retry.ok, true);
   assert.equal(retry.deduped, true);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'import'").get().count, 1);
+  assert.deepEqual(db.prepare("SELECT * FROM InitDoc_body_measurement WHERE family = 'source'").get(), importedMeasurement);
   await app.close?.();
+});
+
+test('source-imported blocks and measurements survive application and SQLite restart', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'workbench-source-import-'));
+  const filename = join(directory, 'restart.sqlite');
+  try {
+    let db = new DatabaseSync(filename);
+    let setup = await appFor(db);
+    const created = await setup.app.dispatch({ actionId: 'restart-import', type: 'InitDoc.create', principal: { id: 'u1' }, payload: {
+      id: 'restart', project: 'p1', owner: 'u1', body: { version: 1, blocks: [
+        { text: 'first', measurements: [{ family: 'source', payload: { provider: 'local', originalToken: 'first' } }] },
+        { text: 'second' },
+      ] },
+    } });
+    assert.equal(created.ok, true, created.failure?.message);
+    await setup.app.shutdown();
+    db.close();
+
+    db = new DatabaseSync(filename);
+    const InitDoc = doc();
+    setup = { app: workbench({ db, entities: [InitDoc] }), db };
+    await setup.app.start();
+    const row = db.prepare("SELECT * FROM InitDoc WHERE id = 'restart'").get();
+    const snapshot = await projectAnnotatedTextSnapshot({ db, entity: InitDoc, row, principal: { id: 'u1' }, fieldName: 'body', descriptor: InitDoc.fields.body });
+    assert.deepEqual(snapshot.blocks.filter((block) => block.kind === 'visible').map((block) => block.text), ['first', 'second']);
+    assert.equal(snapshot.measurements.length, 1);
+    await setup.app.shutdown();
+    db.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
 });
 
 test('annotated text import rejects malformed Unicode and empty multi-block topology', async () => {
   const { app } = await appFor();
   for (const [actionId, blocks, pattern] of [
     ['bad-unicode', [{ text: '\uD800' }], /unpaired high surrogate/],
+    ['bad-single-empty', [{ text: '' }], /empty text block/],
     ['bad-empty', [{ text: 'one' }, { text: '' }], /empty text block/],
   ]) {
     const result = await app.dispatch({ actionId, type: 'InitDoc.create', principal: { id: 'u1' }, payload: { id: actionId, project: 'p1', owner: 'u1', body: { version: 1, blocks } } });
@@ -1561,7 +1682,7 @@ test('R3 projection rejects invalid right-only measurement lineage and result pa
 test('public offset authoring converges same-basis inserts and deletes in either arrival order', async () => {
   async function apply(order, importedText, edits) {
     const { app, db } = await appFor();
-    const created = await app.dispatch({ actionId: `create-${order[0]}-${importedText}`, type: 'InitDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: importedText }] } }, principal: { id: 'u1' } });
+    const created = await app.dispatch({ actionId: `create-${order[0]}-${importedText}`, type: 'InitDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1', ...(importedText === '' ? {} : { body: { version: 1, blocks: [{ text: importedText }] } }) }, principal: { id: 'u1' } });
     const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
     const basis = db.prepare('SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint;
     for (const name of Object.keys(edits)) db.prepare('INSERT INTO InitDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, 1, ?, ?)').run(`basis-${name}`, 'd1', `${name}-user`, basis, JSON.stringify([blockId]));

@@ -791,3 +791,9 @@ Architecture-review program deepenings 2–4 (Schedule was #1, already merged).
 - **Why:** Atomic lifecycle cleanup rows and outbox work need the purge dispatch time while the callback is inside the origin transaction. Reusing canonical transaction time prevents drift between domain cleanup intent, the committed event, and its receipt.
 - **Boundary:** The added field remains callback-only. It does not add context to logs, receipts, dispatch results, delivery, replay, or retry; receipt dedupe still bypasses preparation.
 - **Rejected:** deriving time from targeted receipts (historical rather than origin time) or sampling another clock in the callback (not canonical and potentially inconsistent).
+
+## 2026-07-29 — AT-R9 typed annotated-text source creation grammar
+
+- **Decision:** `annotatedTextCreateAction(entity, field, input)` is the public source-creation grammar for annotated text. It takes the declared annotated-text field plus explicit `id`, `projectId`, and `ownerId`; optional source blocks may carry declared block fields and one JSON measurement payload per declared family. It does not accept raw canonical document state, caller-chosen block/measurement identities or format versions, annotation geometry, or arbitrary document ownership fields.
+- **Why:** creation must bind ownership and import validation to the selected declaration before dispatch, while the package remains the sole owner of canonical CRDT state and generated durable identities. This closes the former generic create-payload escape hatch rather than preserving it as a compatibility path.
+- **Consequences:** source text and measurement payloads are validated before writes and revalidated from the durable event during projection; imported measurements survive restart and ordinary text edits without becoming mutable source input. Empty source blocks and undeclared/duplicate measurement families fail closed.

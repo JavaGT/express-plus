@@ -86,7 +86,11 @@ void [annotatedTextHandle, protecting];
 
 declare const annotatedTextEntity: WorkbenchEntity;
 declare const requiredAnnotatedTextHandle: AnnotatedTextFieldHandle;
-annotatedTextCreateAction(annotatedTextEntity, { id: 'document-1' });
+annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, { id: 'document-1', projectId: 'project-1', ownerId: 'owner-1' });
+// @ts-expect-error source import does not admit annotation geometry in R9
+annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, { id: 'document-1', projectId: 'project-1', ownerId: 'owner-1', source: { blocks: [{ text: 'hello', annotations: [] }] } });
+// @ts-expect-error package generates measurement identities and format versions
+annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, { id: 'document-1', projectId: 'project-1', ownerId: 'owner-1', source: { blocks: [{ text: 'hello', measurements: [{ id: 'raw-id', family: 'wordCount', formatVersion: 1, payload: {} }] }] } });
 annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, {
   kind: 'text.insert', id: 'document-1', basis: 'opaque-basis', mutationId: 'insert-1',
   at: { blockId: 'block-1', offset: 1 }, text: 'x',

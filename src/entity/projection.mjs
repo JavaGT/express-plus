@@ -5,7 +5,7 @@ import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
 import { applyTextOp, assertUtf16Offset, assertWellFormedText, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
 import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, resolvePositionToEndpoint } from '../annotated-text-family.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
-import { getAnnotatedTextCompiledMetadata } from '../annotated-text-field.mjs';
+import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { deriveBlockPosition, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
 
 const INITIAL_BLOCK_POSITION = 'a0';
@@ -46,13 +46,14 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
     let textState = createTextState();
     const fullText = imported.blocks.map((block, index) => {
       if (!block || typeof block !== 'object' || Array.isArray(block) ||
-          (Object.keys(block).length !== 3 && Object.keys(block).length !== 4) ||
+          (Object.keys(block).length < 3 || Object.keys(block).length > 5) ||
           typeof block.id !== 'string' || block.id.length === 0 || typeof block.text !== 'string' ||
           (block.fields !== null && (!block.fields || typeof block.fields !== 'object' || Array.isArray(block.fields)))) {
         throw new Error(`${name}.${fieldName} created event has invalid imported block ${index}`);
       }
+      for (const key of Object.keys(block)) if (!['id', 'text', 'fields', 'measurements'].includes(key)) throw new Error(`${name}.${fieldName} created event has unknown imported block key '${key}'`);
       assertWellFormedText(block.text);
-      if (imported.blocks.length > 1 && block.text.length === 0) throw new Error(`${name}.${fieldName} created event has an empty imported block`);
+      if (block.text.length === 0 && imported.blocks.some((candidate) => candidate.fields !== null)) throw new Error(`${name}.${fieldName} created event has an empty imported block`);
       return block.text;
     }).join('');
     if (fullText.length > 0) {
@@ -101,6 +102,21 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
       const block = { id: importedBlock.id, document_id: row.id, project_id: row[descriptor.project], owner_id: row[descriptor.owner], position: deriveBlockPosition(index), epoch: 1, structure_version: 1, ...cells };
       const columns = Object.keys(block);
       db.prepare(`INSERT INTO ${prefix}_block (${columns.join(', ')}) VALUES (${columns.map((column) => `:${column}`).join(', ')})`).run(block);
+      const importedMeasurements = importedBlock.measurements ?? [];
+      if (!Array.isArray(importedMeasurements)) throw new Error(`${name}.${fieldName} created event imported measurements are invalid`);
+      const families = new Set();
+      for (const measurement of importedMeasurements) {
+        if (!measurement || typeof measurement !== 'object' || Object.keys(measurement).length !== 4 || typeof measurement.id !== 'string' || typeof measurement.family !== 'string' || !Number.isSafeInteger(measurement.formatVersion) || !Object.hasOwn(measurement, 'payload')) throw new Error(`${name}.${fieldName} created event imported measurement is invalid`);
+        if (families.has(measurement.family)) throw new Error(`${name}.${fieldName} created event has duplicate measurement family`);
+        families.add(measurement.family);
+        const config = descriptor.measurements.find((entry) => entry.measurementName === measurement.family);
+        const extension = config && resolveDeclarationMeasurementExtension(config);
+        if (!config || measurement.formatVersion !== config.formatVersion || !extension) throw new Error(`${name}.${fieldName} created event measurement declaration mismatch`);
+        let payload;
+        try { payload = frozenJsonSnapshot(measurement.payload); } catch { throw new Error(`${name}.${fieldName} created event measurement payload is not JSON`); }
+        try { if (extension.validate({ version: 1, formatVersion: config.formatVersion, blockText: importedBlock.text, payload }) !== undefined) throw new Error('returned a value'); } catch { throw new Error(`${name}.${fieldName} created event measurement validation failed`); }
+        db.prepare(`INSERT INTO ${prefix}_measurement (id, block_id, family, format_version, payload) VALUES (?, ?, ?, ?, ?)`).run(measurement.id, importedBlock.id, measurement.family, config.formatVersion, JSON.stringify(payload));
+      }
     }
   }
 }

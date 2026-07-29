@@ -57,6 +57,7 @@ test('public action grammar validates field handles and emits closed generated a
   const Document = entity('PackageActionDocument', {
     project: ref('Project'), owner: ref('User'),
     body: annotatedText({ project: 'project', owner: 'owner', block: {}, annotations: [annotation('coding')], measurements: [measurement('words', { extension })] }),
+    summary: annotatedText({ project: 'project', owner: 'owner', block: {}, annotations: [annotation('coding')], measurements: [measurement('words', { extension })] }),
     grant: grant(read),
   });
   const request = annotatedTextAction(Document, Document.body, { kind: 'text.insert', id: 'doc-1', basis: 'opaque-basis', mutationId: 'insert-1', at: { blockId: 'block-1', offset: 0 }, text: 'hello' });
@@ -68,7 +69,7 @@ test('public action grammar validates field handles and emits closed generated a
   assert.throws(() => annotatedTextAction(Document, Document.project, { kind: 'text.insert', id: 'doc-1', basis: 'opaque-basis', mutationId: 'insert-1', at: { blockId: 'block-1', offset: 0 }, text: 'hello' }), /not an annotatedText field/);
   assert.deepEqual(annotatedTextAction(Document, Document.body, { kind: 'text.delete', id: 'doc-1', basis: 'opaque-basis', mutationId: 'delete-1', from: { blockId: 'block-1', offset: 0 }, to: { blockId: 'block-1', offset: 1 } }).payload.edit, { kind: 'text.delete', from: { blockId: 'block-1', offset: 0 }, to: { blockId: 'block-1', offset: 1 } });
 
-  assert.deepEqual(annotatedTextCreateAction(Document, { id: 'doc-1', project: 'p1', owner: 'u1' }), {
+  assert.deepEqual(annotatedTextCreateAction(Document, Document.body, { id: 'doc-1', projectId: 'p1', ownerId: 'u1' }), {
     type: 'PackageActionDocument.create', payload: { id: 'doc-1', project: 'p1', owner: 'u1' },
   });
   assert.deepEqual(annotatedTextAction(Document, Document.body, { kind: 'block.split', id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-1', at: { blockId: 'block-1', offset: 1 } }).payload, {
@@ -77,7 +78,9 @@ test('public action grammar validates field handles and emits closed generated a
   assert.deepEqual(annotatedTextRetireAction(Document, 'doc-1'), {
     type: 'PackageActionDocument.annotatedText.retire', payload: { id: 'doc-1' },
   });
-  assert.throws(() => annotatedTextCreateAction(Document, { project: 'p1' }), /non-empty id/);
+  assert.throws(() => annotatedTextCreateAction(Document, Document.body, { projectId: 'p1', ownerId: 'u1' }), /non-empty id/);
+  assert.throws(() => annotatedTextCreateAction(Document, Document.body, { id: 'blank-source', projectId: 'p1', ownerId: 'u1', source: { blocks: [{ text: '' }] } }), /empty block/);
+  assert.throws(() => annotatedTextCreateAction(Document, Document.body, { id: 'second-field', projectId: 'p1', ownerId: 'u1', fields: { summary: { version: 1, blocks: [{ text: 'bypass' }] } } }), /cannot include 'summary'/);
 });
 
 test('public structural registration remains required for measurement declarations', () => {

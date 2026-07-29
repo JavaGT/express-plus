@@ -128,15 +128,15 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
     if (!block || typeof block !== 'object' || Array.isArray(block)) {
       throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] must be a non-array object`);
     }
-    const allowedBlock = new Set(['text', 'fields']);
+    const allowedBlock = new Set(['text', 'fields', 'measurements']);
     for (const key of Object.keys(block)) {
       if (!allowedBlock.has(key)) throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] has unknown key '${key}'`);
     }
     try { assertWellFormedText(block.text); } catch (error) {
       throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].text ${error.message}`);
     }
-    if (blocks.length > 1 && block.text.length === 0) {
-      throw new ValidationError(`${name}.${fieldName} annotated-text import multi-block array has an empty text block`);
+    if (block.text.length === 0) {
+      throw new ValidationError(`${name}.${fieldName} annotated-text import has an empty text block`);
     }
     if (block.fields !== undefined) {
       if (!block.fields || typeof block.fields !== 'object' || Array.isArray(block.fields)) {
@@ -171,7 +171,31 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
       }
       fields[declaredName] = fieldValue;
     }
-    canonicalBlocks.push(Object.freeze({ id: randomUUID(), text: block.text, fields: Object.freeze(fields) }));
+    const measurements = [];
+    if (block.measurements !== undefined) {
+      if (!Array.isArray(block.measurements)) throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].measurements must be an array`);
+      const families = new Set();
+      for (let j = 0; j < block.measurements.length; j++) {
+        const measurement = block.measurements[j];
+        if (!measurement || typeof measurement !== 'object' || Array.isArray(measurement) || Object.keys(measurement).length !== 2 || typeof measurement.family !== 'string' || !Object.hasOwn(measurement, 'payload')) {
+          throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].measurements[${j}] has invalid shape`);
+        }
+        if (families.has(measurement.family)) throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] has duplicate measurement family '${measurement.family}'`);
+        families.add(measurement.family);
+        const config = descriptor.measurements.find((entry) => entry.measurementName === measurement.family);
+        if (!config) throw new ValidationError(`${name}.${fieldName} annotated-text import has unknown measurement family '${measurement.family}'`);
+        let payload;
+        try { payload = frozenJsonSnapshot(measurement.payload); } catch { throw new ValidationError(`${name}.${fieldName} annotated-text import measurement payload is not JSON`); }
+        const extension = resolveDeclarationMeasurementExtension(config);
+        if (!extension) throw new ValidationError(`${name}.${fieldName} annotated-text import has no structural adapter for measurement '${measurement.family}'`);
+        try {
+          const result = extension.validate(Object.freeze({ version: 1, formatVersion: config.formatVersion, blockText: block.text, payload }));
+          if (result !== undefined) throw new Error('validate returned a value');
+        } catch { throw new ValidationError(`${name}.${fieldName} annotated-text import measurement '${measurement.family}' failed validation`); }
+        measurements.push(Object.freeze({ id: randomUUID(), family: measurement.family, formatVersion: config.formatVersion, payload }));
+      }
+    }
+    canonicalBlocks.push(Object.freeze({ id: randomUUID(), text: block.text, fields: Object.freeze(fields), measurements: Object.freeze(measurements) }));
   }
   return Object.freeze({ version: 1, actor: randomUUID().replaceAll('-', ''), blocks: Object.freeze(canonicalBlocks) });
 }

@@ -8,6 +8,7 @@ import workbench, {
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, scope, write,
 } from '../src/index.mjs';
 import { executeDDL, executeFrameworkDDL } from '../src/internal.mjs';
+import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
 
 const principal = (id) => ({ type: 'user', id, attributes: {} });
 registerAnnotatedTextContract('exportAuthorizationMeasurement', Object.freeze({ kind: 'measurement' }));
@@ -53,9 +54,12 @@ test('canonical export is bound to the declared owning Project and its current a
     actionId: 'create-editor-owned-transcript',
     principal: principal('project-owner'),
     scope: 'ExportProject:p1',
-    ...annotatedTextCreateAction(Transcript, {
-      id: 'd1', project: 'p1', owner: 'editor',
-      body: { version: 1, blocks: [{ text: 'canonical text' }] },
+    ...annotatedTextCreateAction(Transcript, Transcript.body, {
+      id: 'd1', projectId: 'p1', ownerId: 'editor',
+      source: { blocks: [
+        { text: 'canonical ', measurements: [{ family: 'words', payload: { provider: 'local', originalToken: 'canonical', start: 0, end: 9 } }] },
+        { text: 'text' },
+      ] },
     }),
   });
   assert.equal(created.ok, true, created.failure?.message);
@@ -67,8 +71,19 @@ test('canonical export is bound to the declared owning Project and its current a
   const exported = await exportAnnotatedText({ ...request, principal: principal('project-owner') });
   assert.equal(exported.kind, 'workbench.annotatedText.canonical');
   assert.equal(exported.blocks.map((block) => block.text).join(''), 'canonical text');
+  assert.equal(exported.blocks.length, 2);
+  assert.deepEqual(exported.measurements.map(({ family, payload }) => ({ family, payload })), [
+    { family: 'words', payload: { provider: 'local', originalToken: 'canonical', start: 0, end: 9 } },
+  ]);
   assert.equal(JSON.stringify(exported).includes('checkpoint'), false);
   assert.equal(JSON.stringify(exported).includes('operation'), false);
+
+  const recipient = await projectAnnotatedTextSnapshot({
+    db, entity: Transcript, row: db.prepare('SELECT * FROM ExportTranscript WHERE id = ?').get('d1'),
+    principal: principal('editor'), fieldName: 'body', descriptor: Transcript.fields.body,
+  });
+  assert.deepEqual(recipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.text), ['canonical ', 'text']);
+  assert.equal(recipient.measurements.length, 1);
 
   await assert.rejects(exportAnnotatedText({ ...request, principal: principal('editor') }), /owning scope admin authorization failed/);
   await assert.rejects(exportAnnotatedText({ ...request, principal: principal('outsider') }), /owning scope admin authorization failed/);

@@ -35,4 +35,7 @@ export type {
   AnnotatedTextActionRequest,
   AnnotatedTextCanonicalDocument,
   AnnotatedTextExpectedOwningScope,
+  AnnotatedTextCreateInput,
+  AnnotatedTextCreateSourceBlock,
+  AnnotatedTextCreateSourceMeasurement,
 } from './index.js';
