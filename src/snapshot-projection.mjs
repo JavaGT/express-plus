@@ -212,7 +212,7 @@ function detached(raw) {
 function readRows(db, entity, principal, fk, value, inverse, order, tombstones) {
   const filter = entity.scopeFilter(principal);
   const rule = tombstones?.find((candidate) => entity === candidate.target);
-  const scopeVisibility = rule?.scopeId ? ` AND tombstone.${identifier(rule.scopeId, 'snapshot tombstone scopeId')} = t0.id` : '';
+  const scopeVisibility = rule?.scopeId ? ` AND tombstone.${identifier(rule.scopeId, 'snapshot tombstone scopeId')} = :snapshot_parent` : '';
   const visibility = rule
     ? ` AND NOT EXISTS (SELECT 1 FROM ${identifier(rule.entity.name, 'snapshot tombstone entity')} AS tombstone WHERE tombstone.${identifier(rule.entityId, 'snapshot tombstone entityId')} = t0.id${scopeVisibility} AND tombstone.${identifier(rule.kind, 'snapshot tombstone kind')} = :snapshot_tombstone_kind AND tombstone.${identifier(rule.state, 'snapshot tombstone state')} IN (${rule.hidden.map((_, index) => `:snapshot_tombstone_hidden_${index}`).join(', ')}))`
     : '';
