@@ -351,11 +351,20 @@ function authorizedOrDenied(result, details) {
   return null;
 }
 
-// In-memory dedupe: returns successOutcome when the actionId was already
-// dispatched, or null for a fresh action.
-function checkInMemoryDedupe(dispatched, actionId) {
-  if (!dispatched.has(actionId)) return null;
-  return successOutcome(dispatched.get(actionId), true);
+// In-memory dedupe mirrors the durable `(scope, actionId)` receipt identity.
+function checkInMemoryDedupe(dispatched, scope, actionId) {
+  const scoped = dispatched.get(scope);
+  if (!scoped?.has(actionId)) return null;
+  return successOutcome(scoped.get(actionId), true);
+}
+
+function recordInMemoryDispatch(dispatched, scope, actionId, events) {
+  let scoped = dispatched.get(scope);
+  if (!scoped) {
+    scoped = new Map();
+    dispatched.set(scope, scoped);
+  }
+  scoped.set(actionId, events);
 }
 
 // Durable dedupe: returns successOutcome when the actionId receipt exists,
@@ -521,7 +530,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   if (!db) {
     const log = [];                 // append-only event log
     const sequences = new Map();    // scope → last assigned sequence number
-    const dispatched = new Map();   // action id → the events it produced (dedupe)
+    const dispatched = new Map();   // owning scope → action id → events (dedupe)
 
     function nextSeq(scope) {
       const seq = (sequences.get(scope) ?? 0) + 1;
@@ -553,7 +562,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
       // Idempotent dedupe: a re-sent action returns its stored events without
       // re-running the handler — no duplicate state change (SPEC §7).
-      const dedupe = checkInMemoryDedupe(dispatched, actionId);
+      const dedupe = checkInMemoryDedupe(dispatched, scope, actionId);
       if (dedupe) return dedupe;
 
       // Run the handler, then assign each emitted event a per-scope monotonic
@@ -568,11 +577,11 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       }
       for (const e of events) log.push(e);
 
-      dispatched.set(actionId, events);
+      recordInMemoryDispatch(dispatched, scope, actionId, events);
       return successOutcome(events);
     }
 
-    function dispatchBatch({ actionId, actions = [], principal }) {
+    function dispatchBatch({ actionId, actions = [], principal, scope = '' }) {
       if (actions.length === 0) return successOutcome([]);
       const missingIdx = checkHandlers(handlers, actions);
       if (missingIdx !== -1) {
@@ -605,7 +614,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
         const denied = authorizedOrDenied(authorized, { actionIndex });
         if (denied) return denied;
       }
-      const dedupe = checkInMemoryDedupe(dispatched, actionId);
+      const dedupe = checkInMemoryDedupe(dispatched, scope, actionId);
       if (dedupe) return dedupe;
       const allEmitted = [];
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
@@ -624,7 +633,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
         return executionFailure(err, { actionId });
       }
       for (const e of events) log.push(e);
-      dispatched.set(actionId, events);
+      recordInMemoryDispatch(dispatched, scope, actionId, events);
       return successOutcome(events);
     }
 

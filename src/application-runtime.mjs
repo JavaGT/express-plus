@@ -46,7 +46,7 @@ function wireMutationSurface(app) {
       return app.kernel.history[command]({ ...args, revision: cursor.revision });
     })));
   }
-  app.batch = async (actionsOrFactory, { principal, clientId } = {}) =>
+  app.batch = async (actionsOrFactory, { principal, clientId, scope } = {}) =>
     withLog(app.log, () => app.writeQueue.run(() => {
       const actions = typeof actionsOrFactory === 'function'
         ? actionsOrFactory()
@@ -57,7 +57,7 @@ function wireMutationSurface(app) {
       if (!Array.isArray(actions)) {
         throw new TypeError('app.batch requires an action array or synchronous action-array factory');
       }
-      return app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal, clientId });
+      return app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal, clientId, scope });
     }));
   return dispatch;
 }

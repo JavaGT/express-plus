@@ -105,6 +105,21 @@ test('empty batch returns the exact success outcome', () => {
   });
 });
 
+test('in-memory batches dedupe by owning scope and action ID', () => {
+  const server = createServer({
+    handlers: { 'note.create': ({ payload }) => [{ ...event, data: { id: payload.id } }] },
+    authorize: () => true,
+  });
+  const batch = (scope, id) => server.dispatchBatch({
+    actionId: 'shared', actions: [{ type: 'note.create', payload: { id } }],
+    principal: { id: 'user-1' }, scope,
+  });
+
+  assert.equal(batch('project:one', 'one').deduped, false);
+  assert.equal(batch('project:two', 'two').deduped, false, 'another owning stream is independent');
+  assert.equal(batch('project:one', 'ignored').deduped, true, 'the same owning stream recovers its receipt');
+});
+
 test('post-commit failure cannot turn a committed mutation into a reported failure', async () => {
   const db = new DatabaseSync(':memory:');
   for (const sql of generateFrameworkDDL()) db.exec(sql);

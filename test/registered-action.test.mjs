@@ -147,6 +147,30 @@ test('registered action batch commits request attribution once', async () => {
   assert.equal(receipt.sessionId, 'session-1');
 });
 
+test('registered action batch owns its receipt and delivery cursor in the caller-selected project stream', async () => {
+  const { app, db } = await appWith(sourceAction);
+
+  const actions = [{
+    type: 'source.create', payload: { id: 's1', projectId: 'p1', name: 'Interview' },
+  }];
+  const result = await app.batch(actions, {
+    principal: { type: 'user', id: 'u1', attributes: {} }, scope: 'project:receipt-owner',
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.events.map((event) => event.scope), ['project:p1'], 'delivery remains on the emitted project stream');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE scope = 'project:receipt-owner'").get().count, 1, 'the receipt belongs to the caller-selected owning stream');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE scope = ''").get().count, 0);
+  assert.equal(readCommittedCursor(db, 'project:p1'), 1);
+
+  const retry = await app.kernel.dispatchBatch({
+    actionId: result.events[0].actionId, actions,
+    principal: { type: 'user', id: 'u1', attributes: {} }, scope: 'project:receipt-owner',
+  });
+  assert.equal(retry.deduped, true, 'the project-owned receipt recovers the committed batch');
+  assert.equal(readCommittedCursor(db, 'project:p1'), 1, 'receipt recovery does not redeliver or advance the project cursor');
+});
+
 test('registered action authorization denies before handler and projection', async () => {
   let handled = false;
   const denied = (db) => {
