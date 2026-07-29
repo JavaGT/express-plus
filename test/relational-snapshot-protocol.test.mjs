@@ -63,3 +63,105 @@ test('aggregate catch-up bootstraps when admission observes a newer aggregate re
   });
   db.close();
 });
+
+test('relational snapshot authorizes when entity hydrate mutates the row in place', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT); CREATE TABLE Comment (id TEXT PRIMARY KEY, projectId TEXT REFERENCES Project(id), body TEXT);');
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('p1', 'one');
+  db.prepare('INSERT INTO Comment VALUES (?, ?, ?)').run('c1', 'p1', 'visible');
+  const permitted = () => [scope(() => true).can(() => grant(subscribe))];
+  // Mirror the real entity hydrator: deserialize by mutating the supplied row.
+  // A frozen capture candidate must not fail closed here.
+  const inPlaceHydrate = (row) => {
+    row._hydrated = true;
+    return row;
+  };
+  const project = {
+    name: 'Project',
+    fields: { name: { kind: 'value', type: 'text' } },
+    field: { name: { fieldName: 'name' } },
+    grant: permitted,
+    scopeFilter: () => ({ sql: '1=1', params: {} }),
+    hydrate: inPlaceHydrate,
+  };
+  const comment = {
+    name: 'Comment',
+    fields: {
+      projectId: { kind: 'value', type: 'ref', target: project },
+      body: { kind: 'value', type: 'text' },
+    },
+    field: { projectId: { fieldName: 'projectId' }, body: { fieldName: 'body' } },
+    grant: permitted,
+    scopeFilter: () => ({ sql: '1=1', params: {} }),
+    hydrate: inPlaceHydrate,
+  };
+  const declaration = snapshot(project, {
+    output: snapshot.object({
+      name: snapshot.select(project.field.name),
+      comments: snapshot.many(comment, {
+        via: comment.field.projectId,
+        select: snapshot.select(comment.field.body),
+      }),
+    }),
+  });
+  const live = createLiveDelivery({
+    db,
+    entities: new Map([
+      ['Project', project],
+      ['Comment', comment],
+    ]),
+    mayVerb: async () => true,
+    snapshots: [declaration],
+  });
+  const result = await live.bootstrap({ principal: {}, scope: 'Project:p1' });
+  assert.equal(result.kind, 'snapshot');
+  assert.deepEqual(result.snapshot, {
+    id: 'p1',
+    name: 'one',
+    comments: [{ id: 'c1', body: 'visible' }],
+  });
+  db.close();
+});
+
+test('relational snapshot binds declaration entities to application runtime before authorize', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT);');
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('p1', 'one');
+  const permitted = () => [scope(() => true).can(() => grant(subscribe))];
+  // Unbound declaration (what app authors write) — no hydrate / runtime.db.
+  const projectDeclaration = {
+    name: 'Project',
+    fields: { name: { kind: 'value', type: 'text' } },
+    field: { name: { fieldName: 'name' } },
+    grant: permitted,
+    scopeFilter: () => ({ sql: '1=1', params: {} }),
+  };
+  // Application-bound entity: hydrate + membership checks need runtime.db.
+  const projectBound = {
+    ...projectDeclaration,
+    declaration: projectDeclaration,
+    runtime: { db },
+    hydrate: (row) => {
+      row._hydrated = true;
+      return row;
+    },
+  };
+  const declaration = snapshot(projectDeclaration, {
+    output: snapshot.object({ name: snapshot.select(projectDeclaration.field.name) }),
+  });
+  const live = createLiveDelivery({
+    db,
+    entities: (name, entity) => {
+      if (entity === projectDeclaration || name === 'Project') return projectBound;
+      return null;
+    },
+    mayVerb: async (_entity, _verb, row) => row?._hydrated === true,
+    snapshots: [declaration],
+  });
+  const result = await live.bootstrap({ principal: {}, scope: 'Project:p1' });
+  assert.equal(result.kind, 'snapshot');
+  assert.deepEqual(result.snapshot, { id: 'p1', name: 'one' });
+  db.close();
+});

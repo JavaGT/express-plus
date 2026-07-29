@@ -10,6 +10,13 @@ function isRegisteredEntity(entity, resolveEntity) {
   return registered === entity || registered?.declaration === entity;
 }
 
+/** Prefer the application-bound entity (runtime db + hydrate) over the unbound declaration. */
+function boundEntity(entity, resolveEntity) {
+  const registered = resolveEntity(entity.name, entity);
+  if (registered === entity || registered?.declaration === entity) return registered;
+  throw new TypeError(`snapshot entity '${entity.name}' must be registered`);
+}
+
 function identifier(name, label) {
   if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new TypeError(`${label} must be a SQL identifier`);
   return name;
@@ -132,6 +139,30 @@ function compileTombstones(declaration, resolveEntity) {
   return Object.freeze({ target, entity, entityId: rule.entityId, scopeId: rule.scopeId ?? null, terminalScope, kind: rule.kindField, state: rule.state, kindValue: rule.kindValue, hidden: Object.freeze([...rule.hidden]) });
 }
 
+function bindOutput(branch, resolveEntity) {
+  return Object.freeze({
+    entity: boundEntity(branch.entity, resolveEntity),
+    entries: Object.freeze(branch.entries.map((entry) => {
+      if (entry.kind === 'select' || entry.kind === 'user') return entry;
+      return Object.freeze({
+        ...entry,
+        entity: boundEntity(entry.entity, resolveEntity),
+        nested: entry.nested ? bindOutput(entry.nested, resolveEntity) : null,
+      });
+    })),
+  });
+}
+
+function bindTombstone(rule, resolveEntity) {
+  if (!rule) return null;
+  return Object.freeze({
+    ...rule,
+    target: boundEntity(rule.target, resolveEntity),
+    entity: boundEntity(rule.entity, resolveEntity),
+    terminalScope: rule.terminalScope ? boundEntity(rule.terminalScope, resolveEntity) : null,
+  });
+}
+
 export function compileSnapshots(declarations, resolveEntity, db = null) {
   if (declarations === undefined) return new Map();
   if (!Array.isArray(declarations)) throw new TypeError('snapshots must be an array');
@@ -139,12 +170,15 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
   const compiled = new Map();
   for (const declaration of declarations) {
     if (declaration?.kind !== 'snapshot') throw new TypeError('snapshots accepts only snapshot(...) declarations');
-    const anchor = entityOf(declaration.anchor);
-    if (internalEntities.has(anchor.name)) throw new TypeError(`snapshot tombstone entity '${anchor.name}' is read-internal and cannot be an anchor`);
-    if (!isRegisteredEntity(anchor, resolveEntity)) throw new TypeError(`snapshot anchor '${anchor.name}' must be registered`);
-    if (compiled.has(anchor.name)) throw new TypeError(`snapshot anchor '${anchor.name}' is declared more than once`);
-    const output = compileOutput(anchor, declaration.output);
-    const tombstones = compileTombstones(declaration, resolveEntity);
+    const declaredAnchor = entityOf(declaration.anchor);
+    if (internalEntities.has(declaredAnchor.name)) throw new TypeError(`snapshot tombstone entity '${declaredAnchor.name}' is read-internal and cannot be an anchor`);
+    if (!isRegisteredEntity(declaredAnchor, resolveEntity)) throw new TypeError(`snapshot anchor '${declaredAnchor.name}' must be registered`);
+    if (compiled.has(declaredAnchor.name)) throw new TypeError(`snapshot anchor '${declaredAnchor.name}' is declared more than once`);
+    // Authorization and hydrate need the application-bound entity (runtime.db),
+    // not the unbound declaration the app author wrote. Resolve once at compile.
+    const anchor = boundEntity(declaredAnchor, resolveEntity);
+    const output = bindOutput(compileOutput(declaredAnchor, declaration.output), resolveEntity);
+    const tombstones = bindTombstone(compileTombstones(declaration, resolveEntity), resolveEntity);
     const forbidTombstoneOutput = (branch) => branch.entries.forEach((entry) => {
       if (entry.entity && internalEntities.has(entry.entity.name)) throw new TypeError(`snapshot tombstone entity '${entry.entity.name}' is read-internal and cannot be output`);
       if (entry.nested) forbidTombstoneOutput(entry.nested);
@@ -247,7 +281,10 @@ export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb 
   async function authorize(entity, node) {
     try {
       if ('hydrate' in entity && typeof entity.hydrate !== 'function') return false;
-      const row = typeof entity.hydrate === 'function' ? entity.hydrate(node.raw, principal) : node.raw;
+      // Capture freezes detached SQL rows so the authorization fence cannot
+      // mutate the candidate graph. Entity hydrate still deserializes in place
+      // (members handles, stored codecs), so hand it a mutable copy.
+      const row = typeof entity.hydrate === 'function' ? entity.hydrate({ ...node.raw }, principal) : node.raw;
       const allowed = row != null && await mayRow(entity, 'subscribe', row, principal, mayVerb);
       if (allowed) authorized.set(node, row);
       for (const [entry, children] of node.children) {
