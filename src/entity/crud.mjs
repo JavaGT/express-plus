@@ -325,8 +325,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
   const cursorPolicy = {};
   const annotatedEntries = Object.entries(fields).filter(([, descriptor]) => descriptor.kind === 'annotatedText');
   if (annotatedEntries.length > 0) {
-    Object.defineProperties(handlers[`${name}.update`], { inTransaction: { value: true } });
-    Object.defineProperties(handlers[`${name}.remove`], { inTransaction: { value: true } });
+    for (const type of [`${name}.create`, `${name}.update`, `${name}.remove`]) {
+      Object.defineProperties(handlers[type], { inTransaction: { value: true }, batchForbidden: { value: true } });
+    }
   }
   if (annotatedEntries.length > 0) {
     const retirementType = `${name}.annotatedText.retire`;

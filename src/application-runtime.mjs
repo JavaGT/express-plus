@@ -62,6 +62,7 @@ function wireMutationSurface(app) {
   return dispatch;
 }
 
+
 function bindAnnotatedTextScope(app, args) {
   if (!args?.type || !args?.payload || typeof args.payload !== 'object') return args;
   const entity = [...app.entities.values()].find((candidate) => args.type.startsWith(`${candidate.name}.`));
