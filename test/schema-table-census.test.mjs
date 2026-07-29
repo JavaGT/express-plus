@@ -1,7 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { frameworkTableNames, collectTableNamesFromDdl } from '../src/schema-table-census.mjs';
+import {
+  assertNoFrameworkTableSql,
+  collectTableNamesFromDdl,
+  frameworkTableNames,
+} from '../src/schema-table-census.mjs';
 
 test('frameworkTableNames is a frozen, sorted, duplicate-free array of persistent framework tables', () => {
   assert.ok(Array.isArray(frameworkTableNames), 'frameworkTableNames must be an array');
@@ -206,4 +210,28 @@ test('collectTableNamesFromDdl — sorts underscore-prefixed first, then lexical
   ]);
 
   assert.deepStrictEqual(result, ['_Alpha', '_Zebra', 'Alpha', 'Beta']);
+});
+
+test('assertNoFrameworkTableSql rejects framework table references', () => {
+  assert.throws(() => assertNoFrameworkTableSql('SELECT * FROM _Log'), /framework table _Log/);
+  assert.throws(() => assertNoFrameworkTableSql('SELECT * FROM "_Cursor"'), /framework table _Cursor/);
+  assert.throws(() => assertNoFrameworkTableSql('UPDATE `_ActionReceipt` SET actionId = 1'), /framework table _ActionReceipt/);
+  assert.throws(() => assertNoFrameworkTableSql('INSERT INTO User (id) VALUES (1)'), /framework table User/);
+  assert.throws(() => assertNoFrameworkTableSql('SELECT * FROM Note JOIN _Log ON 1'), /framework table _Log/);
+  assert.throws(
+    () => assertNoFrameworkTableSql('SELECT * FROM Note /* keep */ , _PrivateActionFact'),
+    /framework table _PrivateActionFact/,
+  );
+});
+
+test('assertNoFrameworkTableSql allows app tables and ignores comments/strings', () => {
+  assert.doesNotThrow(() => assertNoFrameworkTableSql('SELECT * FROM Note WHERE title = ?'));
+  assert.doesNotThrow(() => assertNoFrameworkTableSql('SELECT * FROM Project p JOIN Artefact a ON a.projectId = p.id'));
+  assert.doesNotThrow(() => assertNoFrameworkTableSql("-- SELECT * FROM _Log\nSELECT 1"));
+  assert.doesNotThrow(() => assertNoFrameworkTableSql("SELECT '_Log' AS marker FROM Note"));
+  assert.doesNotThrow(() => assertNoFrameworkTableSql('SELECT * FROM (SELECT 1 AS id) AS nested'));
+});
+
+test('assertNoFrameworkTableSql requires a string', () => {
+  assert.throws(() => assertNoFrameworkTableSql(null), /sql must be a string/);
 });

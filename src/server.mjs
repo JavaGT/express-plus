@@ -15,7 +15,12 @@ export {
   createInvitationApi,
 } from './auth/invitation.mjs';
 export { emailSeam, noopTransport } from './email-seam.mjs';
-export { frameworkTableNames, declaredTableNames } from './schema-table-census.mjs';
+export {
+  frameworkTableNames,
+  declaredTableNames,
+  // App-lint helper: fail closed when SQL names a framework-owned table.
+  assertNoFrameworkTableSql,
+} from './schema-table-census.mjs';
 export { matchRoute } from './http-route-match.mjs';
 export { serveStatic } from './views.mjs';
 export { createJobQueue } from './job-queue.mjs';

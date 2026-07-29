@@ -56,6 +56,9 @@ export function declaredTableNames(
   entities: readonly WorkbenchEntity<any>[],
 ): readonly string[];
 
+/** Reject SQL that references a framework-owned table (FROM/JOIN/INTO/UPDATE/TABLE/USING). */
+export function assertNoFrameworkTableSql(sql: string): void;
+
 // ---------------------------------------------------------------------------
 // Job types — both raw rows and the parsed runtime shape
 // ---------------------------------------------------------------------------

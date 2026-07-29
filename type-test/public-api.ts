@@ -15,7 +15,7 @@ import workbench, {
   type DeclaredClaimedBlob, type RegisteredAction, type WorkbenchApp, type WorkbenchEntity, type WriteQueue,
 } from 'workbench';
 import {
-  createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredBlobField, declaredTableNames,
+  assertNoFrameworkTableSql, createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredBlobField, declaredTableNames,
   frameworkTableNames, readCommittedCursor,
   runMigrations, describeEntityStorage, describeSqliteStorage,
   operationalConsumerAdmin, createPostCommitEffectRunner,
@@ -157,6 +157,7 @@ const Project: WorkbenchEntity<ProjectRow> = entity('Project', {
 });
 const frameworkTables: readonly string[] = frameworkTableNames;
 const projectTables: readonly string[] = declaredTableNames([Project]);
+assertNoFrameworkTableSql('SELECT id FROM Project');
 void [frameworkTables, projectTables];
 declaredBlobField({
   actionName: 'file.upload', field: 'blob', resourceField: 'fileId',

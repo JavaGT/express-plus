@@ -34,6 +34,7 @@ export const PUBLIC_API = Object.freeze({
       'createInvitationApi', 'emailSeam', 'noopTransport',
       'matchRoute', 'serveStatic', 'createJobQueue', 'createBlobStore',
       'runMigrations', 'frameworkTableNames', 'declaredTableNames',
+      'assertNoFrameworkTableSql',
       'readCommittedCursor', 'createLiveDelivery', 'createLiveDeliveryHttpHandler',
     ]),
   }),
@@ -58,6 +59,13 @@ export const PUBLIC_API = Object.freeze({
 
 const PRIVATE_ENTRYPOINTS = Object.freeze([
   'workbench/internal',
+  'workbench/src/committed-log.mjs',
+  'workbench/src/history-read.mjs',
+  'workbench/src/post-commit-effects.mjs',
+  'workbench/src/operational-consumer.mjs',
+  'workbench/src/durable-history.mjs',
+  'workbench/src/pipeline.mjs',
+  'workbench/src/driver.mjs',
 ]);
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -106,7 +114,18 @@ test('the packed package exposes the supported runtime contract', () => {
         + `    throw error;\n`
         + `  }\n`
         + `  throw new Error(entrypoint + ' must not be exported');\n`
-        + `}\n`,
+        + `}\n`
+        + `const server = await import('workbench/server');\n`
+        + `if (typeof server.assertNoFrameworkTableSql !== 'function') {\n`
+        + `  throw new Error('workbench/server must export assertNoFrameworkTableSql');\n`
+        + `}\n`
+        + `try {\n`
+        + `  server.assertNoFrameworkTableSql('SELECT * FROM _Log');\n`
+        + `  throw new Error('assertNoFrameworkTableSql must reject framework tables');\n`
+        + `} catch (error) {\n`
+        + `  if (!String(error?.message || error).includes('framework table')) throw error;\n`
+        + `}\n`
+        + `server.assertNoFrameworkTableSql('SELECT * FROM Note');\n`,
     );
 
     let failure = null;

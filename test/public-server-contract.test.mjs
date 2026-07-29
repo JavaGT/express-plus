@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  assertNoFrameworkTableSql,
   createLiveDelivery,
   declaredTableNames,
   frameworkTableNames,
@@ -234,6 +235,9 @@ test('server exposes immutable framework and declaration table censuses', () => 
   assert.ok(Object.isFrozen(frameworkTableNames));
   assert.ok(frameworkTableNames.includes('_Log'));
   assert.deepEqual(declaredTableNames([Widget]), ['Widget']);
+  assert.equal(typeof assertNoFrameworkTableSql, 'function');
+  assert.throws(() => assertNoFrameworkTableSql('DELETE FROM _Log'), /framework table _Log/);
+  assert.doesNotThrow(() => assertNoFrameworkTableSql('SELECT id FROM Widget'));
 });
 
 test('server exposes the transport-neutral live delivery factory', () => {

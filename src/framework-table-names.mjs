@@ -13,7 +13,7 @@ function unquoteIdentifier(name) {
   return name;
 }
 
-function stripSqlComments(sql) {
+export function stripSqlComments(sql) {
   let result = '';
   let quote = null;
   for (let index = 0; index < sql.length; index += 1) {
