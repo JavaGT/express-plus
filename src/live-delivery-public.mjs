@@ -8,6 +8,7 @@ import { tryParseScopeKey } from './scope-handle.mjs';
 import { readSeq } from './committed-log.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
+import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 
 function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
@@ -100,6 +101,29 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
   });
 
   const delivery = {
+    resolveAnnotatedTextDocument({ entity: entityName, field: fieldName, documentId }) {
+      const entity = resolveEntity(entityName);
+      const descriptor = entity?.fields?.[fieldName];
+      if (!entity || descriptor?.kind !== 'annotatedText' || typeof documentId !== 'string' || !documentId) return null;
+      const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(documentId);
+      if (!row) return null;
+      return Object.freeze({ scope: resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key, entity, row, fieldName, descriptor, documentId });
+    },
+    async authorizeAnnotatedTextDocument(document, principal) {
+      const project = tryParseScopeKey(document.scope);
+      const projectEntity = project && resolveEntity(project.entity);
+      if (projectEntity) {
+        const projectScope = projectEntity.scopeFilter(principal);
+        const projectRow = db.prepare(`SELECT * FROM ${projectEntity.name} AS t0 WHERE ${projectScope.sql} AND t0.id = :id`)
+          .get({ ...projectScope.params, id: project.id });
+        if (!projectRow || !(await mayVerb(projectEntity, 'subscribe', projectRow, principal))) return null;
+      }
+      const { sql, params } = document.entity.scopeFilter(principal);
+      const row = db.prepare(`SELECT * FROM ${document.entity.name} AS t0 WHERE ${sql} AND t0.id = :id`)
+        .get({ ...params, id: document.documentId });
+      if (!row || !(await mayVerb(document.entity, 'subscribe', row, principal))) return null;
+      return row;
+    },
     // Public subscribers always acknowledge before any durable batch drains.
     subscribe(input) {
       const { paused: _paused, signal, revoke, ...subscription } = input ?? {};
@@ -114,7 +138,16 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
       const supplied = subscription.after;
       const after = declaration && supplied && typeof supplied === 'object' ? supplied.anchor : supplied;
       let recoveryQueued = false;
-      const activation = core.subscribe({ ...subscription, after, signal, paused: true, revoke }).catch((error) => {
+      const authorizeDocument = input.document
+        ? this.authorizeAnnotatedTextDocument(input.document, subscription.principal).then((row) => {
+          if (!row) {
+            revoke?.();
+            return { activate: async () => undefined };
+          }
+          return core.subscribe({ ...subscription, after, signal, paused: true, revoke });
+        })
+        : core.subscribe({ ...subscription, after, signal, paused: true, revoke });
+      const activation = Promise.resolve(authorizeDocument).then((value) => value).catch((error) => {
         if (error?.code !== 'live-delivery-revoked') throw error;
         revoke?.();
         return { activate: async () => undefined };
@@ -141,7 +174,16 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
         },
       }));
     },
-    async bootstrap({ principal, scope }) {
+    async bootstrap({ principal, scope, document = null }) {
+      if (document) {
+        if (document.scope !== scope) return { kind: 'revoked' };
+        const row = await this.authorizeAnnotatedTextDocument(document, principal);
+        if (!row) return { kind: 'revoked' };
+        const before = readSeq(db, scope);
+        const snapshot = await projectEntitySnapshot({ db, entity: document.entity, row, principal });
+        if (readSeq(db, scope) !== before) return { kind: 'retry' };
+        return Object.freeze({ kind: 'snapshot', snapshot, cursor: before });
+      }
       // The declaration is selected by the package scope grammar, before the
       // core pairs its synchronous result with the committed cursor.
       const handle = tryParseScopeKey(scope);
@@ -161,6 +203,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
        return result;
     },
     async catchup(input) {
+      if (input.document) return this.bootstrap({ principal: input.principal, scope: input.scope, document: input.document });
       const handle = tryParseScopeKey(input.scope);
       const declaration = handle && composites.get(handle.entity);
       if (declaration) {

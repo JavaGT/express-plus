@@ -15,7 +15,7 @@ import * as eventHandles from '../event-handle.mjs';
 import { assertFrontier, assertWellFormedText, canonicalTextOp, frontierDominates } from '../annotated-text.mjs';
 import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint, projectEndpointToBlockOffset, textOperationForOffsetEdit } from '../annotated-text-family.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
-import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
+import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
 import { authorizeFieldOp } from '../strategy/index.mjs';
 import { write } from '../grant.mjs';
@@ -232,11 +232,13 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       return [{
         handle: verbs.created.handle,
         type: verbs.created.type,
-        scope: scopeOf(name, id).key,
+        scope: Object.values(fields).some((descriptor) => descriptor.kind === 'annotatedText')
+          ? resolveAnnotatedTextOwningScope(Object.values(fields).find((descriptor) => descriptor.kind === 'annotatedText'), fields, data).key
+          : scopeOf(name, id).key,
         data,
       }];
     },
-    [`${name}.update`]: ({ payload, principal: _p }) => {
+    [`${name}.update`]: ({ payload, principal: _p, db }) => {
       const { id, ...rest } = payload;
       if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
       if (Object.keys(rest).length === 0) {
@@ -301,17 +303,21 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       return [{
         handle: verbs.updated.handle,
         type: verbs.updated.type,
-        scope: scopeOf(name, id).key,
+        scope: annotatedEntries.length > 0
+          ? resolveAnnotatedTextOwningScope(annotatedEntries[0][1], fields, db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id) ?? {}).key
+          : scopeOf(name, id).key,
         data,
         ...(stateTransitions.length > 0 ? { _stateTransitions: stateTransitions } : {}),
       }];
     },
-    [`${name}.remove`]: ({ payload, principal: _p }) => {
+    [`${name}.remove`]: ({ payload, principal: _p, db }) => {
       if (!payload.id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
       return [{
         handle: verbs.removed.handle,
         type: verbs.removed.type,
-        scope: scopeOf(name, payload.id).key,
+        scope: annotatedEntries.length > 0
+          ? resolveAnnotatedTextOwningScope(annotatedEntries[0][1], fields, db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id) ?? {}).key
+          : scopeOf(name, payload.id).key,
         data: { id: payload.id },
       }];
     },
@@ -319,28 +325,34 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
   const cursorPolicy = {};
   const annotatedEntries = Object.entries(fields).filter(([, descriptor]) => descriptor.kind === 'annotatedText');
   if (annotatedEntries.length > 0) {
+    Object.defineProperties(handlers[`${name}.update`], { inTransaction: { value: true } });
+    Object.defineProperties(handlers[`${name}.remove`], { inTransaction: { value: true } });
+  }
+  if (annotatedEntries.length > 0) {
     const retirementType = `${name}.annotatedText.retire`;
     const retirementHandler = async ({ payload, principal, db, scope }) => {
-      if (!payload || Object.keys(payload).length !== 1 || typeof payload.id !== 'string' || !payload.id || scope !== scopeOf(name, payload.id).key) throw new ValidationError(`${retirementType} requires document-scoped { id }`);
+      if (!payload || Object.keys(payload).length !== 1 || typeof payload.id !== 'string' || !payload.id) throw new ValidationError(`${retirementType} requires { id }`);
       const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
+      const owningScope = row && resolveAnnotatedTextOwningScope(annotatedEntries[0][1], fields, row).key;
+      if (!row || scope !== owningScope) throw new ValidationError(`${retirementType} requires its declared project scope`);
       if (!row || principal?.id == null || annotatedEntries.some(([, descriptor]) => String(row[descriptor.owner]) !== String(principal.id))) throw Object.assign(new Error('forbidden'), { status: 403 });
-      const censusRows = db.prepare('SELECT DISTINCT actionType AS type FROM _ActionReceipt WHERE scope = ?').all(scope);
-      const censusEvents = db.prepare('SELECT DISTINCT eventType AS type FROM _Log WHERE scope = ?').all(scope);
+      const targetActionTypes = new Set([`${name}.create`, `${name}.update`, `${name}.remove`, ...annotatedEntries.map(([fieldName]) => `${name}.${fieldName}.operation`)]);
+      const targetEventTypes = new Set([verbs.created.type, verbs.updated.type, verbs.removed.type, ...annotatedEntries.map(([fieldName]) => eventHandles.native(name, fieldName, 'operated').type)]);
+      const censusRows = db.prepare('SELECT DISTINCT actionType AS type FROM _ActionReceipt WHERE scope = ?').all(owningScope);
+      const censusEvents = db.prepare('SELECT DISTINCT eventType AS type FROM _Log WHERE scope = ?').all(owningScope);
       const hasErasureTargets = db.prepare("SELECT 1 FROM _ActionReceipt WHERE scope = ? AND json_extract(actionData, '$.id') = ? LIMIT 1").get(scope, payload.id);
       const generation = randomUUID();
       const events = annotatedEntries.map(([fieldName]) => {
         const handle = eventHandles.native(name, fieldName, 'retired');
-        return { handle, type: handle.type, scope, data: Object.freeze({ version: 1, id: payload.id, generation, retiredAt: new Date().toISOString() }) };
+        return { handle, type: handle.type, scope: owningScope, data: Object.freeze({ version: 1, id: payload.id, generation, retiredAt: new Date().toISOString() }) };
       });
-      const removed = { handle: verbs.removed.handle, type: verbs.removed.type, scope, data: { id: payload.id } };
+      const removed = { handle: verbs.removed.handle, type: verbs.removed.type, scope: owningScope, data: { id: payload.id } };
       const commit = {
         events: [...events, removed],
       };
-      if (hasErasureTargets) commit.directive = erasureDirectivePreparation({ owningScope: scope, subject: payload.id, census: { version: 1, rules: [
-          ...censusRows.map(({ type }) => ({ kind: 'action', type, disposition: 'target', identityPointers: ['/id'] })),
-          ...censusEvents.map(({ type }) => ({ kind: 'event', type, disposition: 'target', identityPointers: ['/id'] })),
-          ...events.map(({ type }) => ({ kind: 'event', type, disposition: 'retain', identityPointers: [] })),
-          { kind: 'event', type: verbs.removed.type, disposition: 'retain', identityPointers: [] },
+      if (hasErasureTargets) commit.directive = erasureDirectivePreparation({ owningScope, subject: payload.id, census: { version: 1, rules: [
+          ...censusRows.map(({ type }) => ({ kind: 'action', type, disposition: targetActionTypes.has(type) ? 'target' : 'retain', identityPointers: targetActionTypes.has(type) ? ['/id'] : [] })),
+          ...censusEvents.map(({ type }) => ({ kind: 'event', type, disposition: targetEventTypes.has(type) ? 'target' : 'retain', identityPointers: targetEventTypes.has(type) ? ['/id'] : [] })),
         ] } });
       return commit;
     };
@@ -369,8 +381,13 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
     const measurementConfigs = compiledMeta?.measurementConfigs ?? {};
     const measurementFamilyList = compiledMeta?.measurementFamilyList ?? [];
+    const owningDocumentScope = (db, id) => {
+      const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id);
+      if (!row) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+      return resolveAnnotatedTextOwningScope(descriptor, fields, row).key;
+    };
 
-    const assertDocumentScope = ({ payload, scope }) => {
+    const assertDocumentScope = ({ payload, scope, db }) => {
       let command;
       if (payload.version === 1) {
         command = assertAnnotatedTextOperationPayload(name, fieldName, payload);
@@ -385,7 +402,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       } else {
         throw new ValidationError(`${name}.${fieldName}.operation requires version 1, 2, 3, 4, or 5`);
       }
-      const documentScope = scopeOf(name, command.id).key;
+      const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(command.id);
+      if (!row) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+      const documentScope = resolveAnnotatedTextOwningScope(descriptor, fields, row).key;
       if (scope !== documentScope) {
         throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
       }
@@ -395,7 +414,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     const r1Handler = async ({ payload, db, scope, principal }) => {
       if (payload.version === 6 || payload.version === 7) {
         const command = assertAnnotatedTextOffsetEditPayload(name, fieldName, payload);
-        const documentScope = scopeOf(name, command.id).key;
+        const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(command.id);
+        if (!row) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+        const documentScope = resolveAnnotatedTextOwningScope(descriptor, fields, row).key;
         if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
         const basis = db.prepare(`SELECT structural_revision, family_checkpoint, visible_blocks FROM ${prefix}_basis WHERE token = ? AND document_id = ? AND principal_id = ?`).get(command.basis, command.id, principal?.id ?? '');
         if (!basis) throw new ValidationError(`${name}.${fieldName}.operation basis is unavailable`);
@@ -408,7 +429,6 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         }
         const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
         if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
-        const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(command.id);
         await authorizeFieldOp(record, fieldName, write, row, principal);
         const currentRecipient = await projectAnnotatedTextSnapshot({ db, entity: record, row, principal, fieldName, descriptor, mintBasis: false });
         const currentVisible = new Set(currentRecipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id));
@@ -449,8 +469,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         const handle = eventHandles.native(name, fieldName, 'operated');
         return [{ handle, type: handle.type, scope: documentScope, data: Object.freeze({ version: 1, id: command.id, before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }), operation: Object.freeze({ kind: 'text.apply', blockId: command.edit.kind === 'text.insert' ? command.edit.at.blockId : command.edit.from.blockId, operation }), after: Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier }), family: textFamilyCheckpoint(nextFamily) }) }];
       }
-      const command = assertDocumentScope({ payload, scope });
-      const documentScope = scopeOf(name, command.id).key;
+      const command = assertDocumentScope({ payload, scope, db });
+      const documentScope = owningDocumentScope(db, command.id);
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
       if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
@@ -487,8 +507,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     };
 
     const r2Handler = ({ payload, db, scope }) => {
-      const command = assertDocumentScope({ payload, scope });
-      const documentScope = scopeOf(name, command.id).key;
+      const command = assertDocumentScope({ payload, scope, db });
+      const documentScope = owningDocumentScope(db, command.id);
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
       if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
@@ -706,8 +726,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     };
 
     const r3Handler = ({ payload, db, scope }) => {
-      const command = assertDocumentScope({ payload, scope });
-      const documentScope = scopeOf(name, command.id).key;
+      const command = assertDocumentScope({ payload, scope, db });
+      const documentScope = owningDocumentScope(db, command.id);
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
       if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
@@ -933,8 +953,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     };
 
     const r4Handler = ({ payload, db, scope }) => {
-      const command = assertDocumentScope({ payload, scope });
-      const documentScope = scopeOf(name, command.id).key;
+      const command = assertDocumentScope({ payload, scope, db });
+      const documentScope = owningDocumentScope(db, command.id);
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
       if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
@@ -1234,8 +1254,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     };
 
     const r5Handler = ({ payload, db, scope }) => {
-      const command = assertDocumentScope({ payload, scope });
-      const documentScope = scopeOf(name, command.id).key;
+      const command = assertDocumentScope({ payload, scope, db });
+      const documentScope = owningDocumentScope(db, command.id);
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
       if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
@@ -1321,14 +1341,14 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', { value: true });
-    Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope }) => payload.version === 6 || payload.version === 7
+    Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope, db }) => payload.version === 6 || payload.version === 7
       ? (() => {
         const command = assertAnnotatedTextOffsetEditPayload(name, fieldName, payload);
-        const documentScope = scopeOf(name, command.id).key;
+        const documentScope = owningDocumentScope(db, command.id);
         if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
         return command;
       })()
-      : assertDocumentScope({ payload, scope }) });
+      : assertDocumentScope({ payload, scope, db }) });
     handlers[operationType] = handler;
     cursorPolicy[operationType] = 'excluded';
   }

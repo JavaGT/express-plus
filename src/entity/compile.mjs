@@ -171,6 +171,13 @@ export function entity(name, declaration = {}) {
     }
   }
 
+  const annotatedOwningRefs = new Set(Object.values(fields)
+    .filter((descriptor) => descriptor?.kind === 'annotatedText')
+    .map((descriptor) => descriptor.project));
+  if (annotatedOwningRefs.size > 1) {
+    throw new Error(`entity('${name}') annotatedText fields must share one owning project ref`);
+  }
+
   const caretCells = new Set();
   for (const [, descriptor] of Object.entries(fields)) {
     if (descriptor.kind !== 'annotatedText') continue;

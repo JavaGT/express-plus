@@ -239,7 +239,7 @@ test('annotated-text operation commits one canonical family fact and rejects a s
   });
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
   const result = await app.dispatch({
-    actionId: 'operation', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'operation', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: {
       version: 1,
       id: 'd1',
@@ -262,7 +262,7 @@ test('annotated-text operation commits one canonical family fact and rejects a s
   assert.equal(state.structure_version, 1);
   assert.equal(db.prepare('SELECT structure_version FROM InitDoc_body_block WHERE id = ?').get(blockId).structure_version, 1);
   const second = await app.dispatch({
-    actionId: 'operation-two', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'operation-two', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: {
       version: 1,
       id: 'd1',
@@ -274,7 +274,7 @@ test('annotated-text operation commits one canonical family fact and rejects a s
   assert.deepEqual(second.events[0].data.before, { structuralRevision: 1, frontier: [[A, 1]] });
   assert.deepEqual(second.events[0].data.after, { structuralRevision: 1, frontier: [[A, 2]] });
   const retry = await app.dispatch({
-    actionId: 'operation', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'operation', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: {
       version: 1,
       id: 'd1',
@@ -287,7 +287,7 @@ test('annotated-text operation commits one canonical family fact and rejects a s
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE eventType = 'InitDoc.body.operated'").get().count, 2);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = ?').get('operation').count, 1);
   const stale = await app.dispatch({
-    actionId: 'stale', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'stale', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: {
       version: 1,
       id: 'd1',
@@ -312,7 +312,7 @@ test('annotated-text operation rejects malformed and causally unready commands w
     ['malformed', { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO }, extra: true }],
     ['unready', { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['insert', ['root'], 'x']] } }],
   ]) {
-    const result = await app.dispatch({ actionId, type: 'InitDoc.body.operation', scope: 'InitDoc:d1', payload, principal: { id: 'u1' } });
+    const result = await app.dispatch({ actionId, type: 'InitDoc.body.operation', scope: 'Project:p1', payload, principal: { id: 'u1' } });
     assert.equal(result.ok, false);
     assert.equal(result.failure.category, 'invalid-input');
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE actionId = ?').get(actionId).count, 0);
@@ -374,7 +374,7 @@ test('annotated-text projection rejects a canonical family fact that does not ma
   await app.close?.();
 });
 
-test('annotated-text operation requires its document scope for receipt ownership', async () => {
+test('annotated-text operation derives its project scope for receipt ownership', async () => {
   const { app, db } = await appFor();
   const created = await app.dispatch({
     actionId: 'create', type: 'InitDoc.create',
@@ -390,12 +390,12 @@ test('annotated-text operation requires its document scope for receipt ownership
       operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO },
     },
   });
-  assert.equal(result.ok, false);
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = ?').get('wrong-scope').count, 0);
+  assert.equal(result.ok, true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _ActionReceipt WHERE scope = ? AND actionId = ?').get('Project:p1', 'wrong-scope').count, 1);
   await app.close?.();
 });
 
-test('annotated-text operation validates document scope before returning a colliding receipt', async () => {
+test('annotated-text operation derives scope before returning a colliding receipt', async () => {
   const { app, db } = await appFor();
   const created = await app.dispatch({
     actionId: 'create', type: 'InitDoc.create',
@@ -416,8 +416,7 @@ test('annotated-text operation validates document scope before returning a colli
       operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO },
     },
   });
-  assert.equal(result.ok, false);
-  assert.equal(result.failure.category, 'invalid-input');
+  assert.equal(result.ok, true);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE actionId = ?').get('collides').count, 1);
   await app.close?.();
 });
@@ -451,13 +450,13 @@ test('R2 block.split emits one changed v2 event and projection produces two bloc
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   const op1 = await app.dispatch({
-    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
   assert.equal(op1.ok, true);
 
   const op2 = await app.dispatch({
-    actionId: 'op2', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op2', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'text.apply', blockId, operation: INSERT_WORLD } },
   });
   assert.equal(op2.ok, true);
@@ -466,7 +465,7 @@ test('R2 block.split emits one changed v2 event and projection produces two bloc
   assert.equal(blockText.length, 1);
 
   const split = await app.dispatch({
-    actionId: 'split', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'split', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 2]] }, operation: { kind: 'block.split', blockId, utf16Offset: 5 } },
   });
   assert.equal(split.ok, true);
@@ -514,13 +513,13 @@ test('R2 block.split at offset 0 or text.length returns zero events', async () =
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   const op1 = await app.dispatch({
-    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
   assert.equal(op1.ok, true);
 
   const atStart = await app.dispatch({
-    actionId: 'at-start', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'at-start', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 0 } },
   });
   assert.equal(atStart.ok, true);
@@ -528,7 +527,7 @@ test('R2 block.split at offset 0 or text.length returns zero events', async () =
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'at-start'").get().count, 0);
 
   const atEnd = await app.dispatch({
-    actionId: 'at-end', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'at-end', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 5 } },
   });
   assert.equal(atEnd.ok, true);
@@ -549,20 +548,20 @@ test('R2 block.split zero-event retry is idempotent via existing receipt', async
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   const op1 = await app.dispatch({
-    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
   assert.equal(op1.ok, true);
 
   const first = await app.dispatch({
-    actionId: 'zero-retry', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'zero-retry', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 0 } },
   });
   assert.equal(first.ok, true);
   assert.equal(first.events.length, 0);
 
   const retry = await app.dispatch({
-    actionId: 'zero-retry', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'zero-retry', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 0 } },
   });
   assert.equal(retry.ok, true);
@@ -581,20 +580,20 @@ test('R2 block.split rejects invalid payload and stale structural revision', asy
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   const op1 = await app.dispatch({
-    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
   assert.equal(op1.ok, true);
 
   const invalid = await app.dispatch({
-    actionId: 'invalid', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'invalid', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId: 'nonexistent', utf16Offset: 3 } },
   });
   assert.equal(invalid.ok, false);
   assert.equal(invalid.failure.category, 'invalid-input');
 
   const stale = await app.dispatch({
-    actionId: 'stale', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'stale', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 3 } },
   });
   assert.equal(stale.ok, false);
@@ -604,8 +603,8 @@ test('R2 block.split rejects invalid payload and stale structural revision', asy
     actionId: 'wrong-scope', type: 'InitDoc.body.operation', scope: 'InitDoc:other', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 3 } },
   });
-  assert.equal(wrongScope.ok, false);
-  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE eventType = 'InitDoc.body.operated'").get().count, 1);
+  assert.equal(wrongScope.ok, true);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE eventType = 'InitDoc.body.operated'").get().count, 2);
 
   await app.close?.();
 });
@@ -619,13 +618,13 @@ test('R2 block.split with membership expansion produces canonical rows', async (
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   const op1 = await app.dispatch({
-    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
   assert.equal(op1.ok, true);
 
   const op2 = await app.dispatch({
-    actionId: 'op2', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op2', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'text.apply', blockId, operation: INSERT_WORLD } },
   });
   assert.equal(op2.ok, true);
@@ -638,7 +637,7 @@ test('R2 block.split with membership expansion produces canonical rows', async (
     .run(annId, blockId, JSON.stringify({ point: ['point', ['root'], 'left'], basisFrontier: [] }), JSON.stringify({ point: ['point', ['element', [[A, 2], 1]], 'right'], basisFrontier: [[A, 2]] }));
 
   const split = await app.dispatch({
-    actionId: 'split', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'split', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 2]] }, operation: { kind: 'block.split', blockId, utf16Offset: 5 } },
   });
   assert.equal(split.ok, true);
@@ -665,7 +664,7 @@ test('R2 block.split with measurement partition produces measurement facts', asy
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   const op1 = await app.dispatch({
-    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
   assert.equal(op1.ok, true);
@@ -675,7 +674,7 @@ test('R2 block.split with measurement partition produces measurement facts', asy
   db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES (?, ?, 'source', 1, ?)`).run(measId, blockId, measPayload);
 
   const split = await app.dispatch({
-    actionId: 'split', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'split', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 2 } },
   });
   assert.equal(split.ok, true);
@@ -742,7 +741,7 @@ test('R2 block.split with failing measurement adapter rolls back', async () => {
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   const op1 = await app.dispatch({
-    actionId: 'op1', type: 'FailingDoc.body.operation', scope: 'FailingDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'FailingDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
   assert.equal(op1.ok, true);
@@ -750,7 +749,7 @@ test('R2 block.split with failing measurement adapter rolls back', async () => {
   db.prepare(`INSERT INTO FailingDoc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', ?, 'failing', 1, '{}')`).run(blockId);
 
   const split = await app.dispatch({
-    actionId: 'split', type: 'FailingDoc.body.operation', scope: 'FailingDoc:d1', principal: { id: 'u1' },
+    actionId: 'split', type: 'FailingDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 2 } },
   });
   assert.equal(split.ok, false);
@@ -815,7 +814,7 @@ test('R2 block.split with non-deterministic measurement partition rolls back', a
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   const op1 = await app.dispatch({
-    actionId: 'op1', type: 'NonDetDoc.body.operation', scope: 'NonDetDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'NonDetDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
   assert.equal(op1.ok, true);
@@ -823,7 +822,7 @@ test('R2 block.split with non-deterministic measurement partition rolls back', a
   db.prepare(`INSERT INTO NonDetDoc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', ?, 'nonDet', 1, '{}')`).run(blockId);
 
   const split = await app.dispatch({
-    actionId: 'split', type: 'NonDetDoc.body.operation', scope: 'NonDetDoc:d1', principal: { id: 'u1' },
+    actionId: 'split', type: 'NonDetDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 2 } },
   });
   assert.equal(split.ok, false);
@@ -843,13 +842,13 @@ test('R2 v2 event with substituted memberships is rejected with no partial rows'
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   const op1 = await app.dispatch({
-    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
   assert.equal(op1.ok, true);
 
   const op2 = await app.dispatch({
-    actionId: 'op2', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op2', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'text.apply', blockId, operation: INSERT_WORLD } },
   });
   assert.equal(op2.ok, true);
@@ -894,7 +893,7 @@ test('R2 projection rejects a fabricated right block epoch', async () => {
   });
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
   await app.dispatch({
-    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
 
@@ -929,7 +928,7 @@ test('R1 text.apply still works after R2 code is present', async () => {
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   const result = await app.dispatch({
-    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
   assert.equal(result.ok, true);
@@ -968,14 +967,14 @@ function setupR3Doc(app) {
 
 function setupR3Split(app, blockId) {
   return app.dispatch({
-    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
 }
 
 function setupR3Split2(app, blockId) {
   return app.dispatch({
-    actionId: 'op2', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'op2', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'text.apply', blockId, operation: INSERT_WORLD } },
   });
 }
@@ -986,7 +985,7 @@ async function setupR3Mergable(app, db) {
   await setupR3Split(app, blockId);
   await setupR3Split2(app, blockId);
   const split = await app.dispatch({
-    actionId: 'split', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'split', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 2]] }, operation: { kind: 'block.split', blockId, utf16Offset: 5 } },
   });
   const rightBlockId = split.events[0].data.operation.rightBlockId;
@@ -999,7 +998,7 @@ test('R3 successful block.merge produces one v3 event, left identity survives, r
   const { blockId, rightBlockId } = await setupR3Mergable(app, db);
 
   const merge = await app.dispatch({
-    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
   });
   assert.equal(merge.ok, true);
@@ -1035,9 +1034,9 @@ test('R3 merge receipt retry dedupes without duplicate rows', async () => {
   const { blockId, rightBlockId } = await setupR3Mergable(app, db);
 
   const payload = { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } };
-  const first = await app.dispatch({ actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' }, payload });
+  const first = await app.dispatch({ actionId: 'merge', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' }, payload });
   assert.equal(first.ok, true);
-  const retry = await app.dispatch({ actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' }, payload });
+  const retry = await app.dispatch({ actionId: 'merge', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' }, payload });
   assert.equal(retry.ok, true);
   assert.equal(retry.deduped, true);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE eventType = 'InitDoc.body.operated' AND actionId = 'merge'").get().count, 1);
@@ -1053,7 +1052,7 @@ test('R3 merge rejects stale structural revision', async () => {
   const { blockId, rightBlockId } = await setupR3Mergable(app, db);
 
   const result = await app.dispatch({
-    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 3, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
   });
   assert.equal(result.ok, false);
@@ -1070,7 +1069,7 @@ test('R3 merge rejects non-adjacent blocks', async () => {
   const otherBlockId = 'dddddddddddddddddddddddddddddddd';
 
   const result = await app.dispatch({
-    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: otherBlockId, rightBlockId } },
   });
   assert.equal(result.ok, false);
@@ -1091,7 +1090,7 @@ test('R3 merge rejects mismatched block memberships', async () => {
     .run(annId, blockId, JSON.stringify({ point: ['point', ['root'], 'left'], basisFrontier: [] }), JSON.stringify({ point: ['point', ['element', [[A, 2], 1]], 'right'], basisFrontier: [[A, 2]] }));
 
   const result = await app.dispatch({
-    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
   });
   assert.equal(result.ok, false);
@@ -1111,14 +1110,14 @@ test('R3 merge with both-present measurements retains correct ID and rehomes saf
   db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES (?, ?, 'source', 1, ?)`).run(measId, blockId, JSON.stringify({ source: 'test', text: 'hello', offset: 0 }));
 
   const split = await app.dispatch({
-    actionId: 'split', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'split', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 2 } },
   });
   assert.equal(split.ok, true);
   const rightBlockId = split.events[0].data.operation.rightBlockId;
 
   const merge = await app.dispatch({
-    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 1]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
   });
   assert.equal(merge.ok, true);
@@ -1142,7 +1141,7 @@ test('R3 merge with left-only measurement retains correct ID and rehomes safely'
   db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES (?, ?, 'source', 1, ?)`).run(measId, blockId, JSON.stringify({ source: 'test', text: 'helloworld', offset: 0 }));
 
   const merge = await app.dispatch({
-    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
   });
   assert.equal(merge.ok, true);
@@ -1165,7 +1164,7 @@ test('R3 merge with right-only measurement retains correct ID and rehomes safely
   db.prepare(`INSERT INTO InitDoc_body_measurement (id, block_id, family, format_version, payload) VALUES (?, ?, 'source', 1, ?)`).run(measId, rightBlockId, JSON.stringify({ source: 'test', text: 'helloworld', offset: 0 }));
 
   const merge = await app.dispatch({
-    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
   });
   assert.equal(merge.ok, true);
@@ -1226,14 +1225,14 @@ test('R3 merge combine invoked exactly twice with frozen non-identical input/pay
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   await app.dispatch({
-    actionId: 'op1', type: 'CcDoc.body.operation', scope: 'CcDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'CcDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
 
   db.prepare(`INSERT INTO CcDoc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', ?, 'cc', 1, '{}')`).run(blockId);
 
   const split = await app.dispatch({
-    actionId: 'split', type: 'CcDoc.body.operation', scope: 'CcDoc:d1', principal: { id: 'u1' },
+    actionId: 'split', type: 'CcDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 2 } },
   });
   assert.equal(split.ok, true);
@@ -1241,7 +1240,7 @@ test('R3 merge combine invoked exactly twice with frozen non-identical input/pay
 
   combineCalls.length = 0;
   const merge = await app.dispatch({
-    actionId: 'merge', type: 'CcDoc.body.operation', scope: 'CcDoc:d1', principal: { id: 'u1' },
+    actionId: 'merge', type: 'CcDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 1]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
   });
   assert.equal(merge.ok, true);
@@ -1301,14 +1300,14 @@ test('R3 merge nondeterministic combine rolls back', async () => {
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
 
   await app.dispatch({
-    actionId: 'op1', type: 'NdDoc.body.operation', scope: 'NdDoc:d1', principal: { id: 'u1' },
+    actionId: 'op1', type: 'NdDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation: INSERT_HELLO } },
   });
 
   db.prepare(`INSERT INTO NdDoc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', ?, 'nd', 1, '{}')`).run(blockId);
 
   const split = await app.dispatch({
-    actionId: 'split', type: 'NdDoc.body.operation', scope: 'NdDoc:d1', principal: { id: 'u1' },
+    actionId: 'split', type: 'NdDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 2, id: 'd1', expected: { structuralRevision: 1, frontier: [[A, 1]] }, operation: { kind: 'block.split', blockId, utf16Offset: 2 } },
   });
   assert.equal(split.ok, true);
@@ -1316,7 +1315,7 @@ test('R3 merge nondeterministic combine rolls back', async () => {
 
   callCount = 0;
   const merge = await app.dispatch({
-    actionId: 'merge', type: 'NdDoc.body.operation', scope: 'NdDoc:d1', principal: { id: 'u1' },
+    actionId: 'merge', type: 'NdDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 1]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
   });
   assert.equal(merge.ok, false);
@@ -1332,7 +1331,7 @@ test('R3 projection valid event applies even if combine is changed to throw afte
   const { blockId, rightBlockId } = await setupR3Mergable(app, db);
 
   const merge = await app.dispatch({
-    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' },
+    actionId: 'merge', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 3, id: 'd1', expected: { structuralRevision: 2, frontier: [[A, 2]] }, operation: { kind: 'block.merge', leftBlockId: blockId, rightBlockId } },
   });
   assert.equal(merge.ok, true);
@@ -1572,7 +1571,7 @@ test('public offset authoring converges same-basis inserts and deletes in either
         ? { ...edit, at: { ...edit.at, blockId }, id: 'd1', basis: `basis-${name}`, mutationId: name }
         : { ...edit, from: { ...edit.from, blockId }, to: { ...edit.to, blockId }, id: 'd1', basis: `basis-${name}`, mutationId: name };
       const authored = annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, command);
-      const result = await app.dispatch({ actionId: `${importedText}-${name}`, principal: { id: `${name}-user` }, ...authored });
+      const result = await app.dispatch({ actionId: `${importedText}-${name}`, principal: { id: `${name}-user` }, ...authored, scope: 'Project:p1' });
       assert.equal(result.ok, true, result.failure?.message);
     }
     const family = restoreTextFamilyCheckpoint(JSON.parse(db.prepare('SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint));
@@ -1601,8 +1600,8 @@ test('public structural grammar resolves a basis position across concurrent text
     .run('structural-basis', 'd1', 'u1', before.structure_version, before.family_checkpoint, JSON.stringify([blockId]));
   db.prepare('INSERT INTO InitDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, ?, ?, ?)')
     .run('concurrent-basis', 'd1', 'u2', before.structure_version, before.family_checkpoint, JSON.stringify([blockId]));
-  assert.equal((await app.dispatch({ actionId: 'concurrent-text', principal: { id: 'u2' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'text.insert', id: 'd1', basis: 'concurrent-basis', mutationId: 'concurrent', at: { blockId, offset: 2 }, text: 'X' }) })).ok, true);
-  const split = await app.dispatch({ actionId: 'basis-split', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'block.split', id: 'd1', basis: 'structural-basis', mutationId: 'split', at: { blockId, offset: 2 } }) });
+  assert.equal((await app.dispatch({ actionId: 'concurrent-text', principal: { id: 'u2' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'text.insert', id: 'd1', basis: 'concurrent-basis', mutationId: 'concurrent', at: { blockId, offset: 2 }, text: 'X' }), scope: 'Project:p1' })).ok, true);
+  const split = await app.dispatch({ actionId: 'basis-split', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'block.split', id: 'd1', basis: 'structural-basis', mutationId: 'split', at: { blockId, offset: 2 } }), scope: 'Project:p1' });
   assert.equal(split.ok, true, split.failure?.message);
   const rightBlockId = split.events[0].data.operation.rightBlockId;
   let family = restoreTextFamilyCheckpoint(JSON.parse(db.prepare("SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = 'd1'").get().family_checkpoint));
@@ -1614,11 +1613,11 @@ test('public structural grammar resolves a basis position across concurrent text
       .run(token, 'd1', 'u1', state.structure_version, state.family_checkpoint, JSON.stringify([blockId, rightBlockId]));
   };
   mintBasis('apply-basis');
-  assert.equal((await app.dispatch({ actionId: 'basis-apply', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'annotation.apply', id: 'd1', basis: 'apply-basis', mutationId: 'apply', annotation: { id: 'note-1', family: 'note', fields: {} }, from: { blockId, offset: 0 }, to: { blockId, offset: 2 } }) })).ok, true);
+  assert.equal((await app.dispatch({ actionId: 'basis-apply', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'annotation.apply', id: 'd1', basis: 'apply-basis', mutationId: 'apply', annotation: { id: 'note-1', family: 'note', fields: {} }, from: { blockId, offset: 0 }, to: { blockId, offset: 2 } }), scope: 'Project:p1' })).ok, true);
   mintBasis('detach-basis');
-  assert.equal((await app.dispatch({ actionId: 'basis-detach', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'annotation.detach', id: 'd1', basis: 'detach-basis', mutationId: 'detach', annotationId: 'note-1', blockId }) })).ok, true);
+  assert.equal((await app.dispatch({ actionId: 'basis-detach', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'annotation.detach', id: 'd1', basis: 'detach-basis', mutationId: 'detach', annotationId: 'note-1', blockId }), scope: 'Project:p1' })).ok, true);
   mintBasis('merge-basis');
-  assert.equal((await app.dispatch({ actionId: 'basis-merge', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'block.merge', id: 'd1', basis: 'merge-basis', mutationId: 'merge', leftBlockId: blockId, rightBlockId }) })).ok, true);
+  assert.equal((await app.dispatch({ actionId: 'basis-merge', principal: { id: 'u1' }, ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'block.merge', id: 'd1', basis: 'merge-basis', mutationId: 'merge', leftBlockId: blockId, rightBlockId }), scope: 'Project:p1' })).ok, true);
   family = restoreTextFamilyCheckpoint(JSON.parse(db.prepare("SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = 'd1'").get().family_checkpoint));
   assert.equal(family.blocks.length, 1);
   assert.equal(materializeBlock(family, blockId), 'abXcd');
@@ -1632,7 +1631,7 @@ test('public offset authoring rejects invalid UTF-16 boundaries from its basis',
   const basis = db.prepare('SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint;
   db.prepare('INSERT INTO InitDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, 1, ?, ?)').run('unicode-basis', 'd1', 'u1', basis, JSON.stringify([blockId]));
   const authored = annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, { kind: 'text.insert', id: 'd1', basis: 'unicode-basis', mutationId: 'bad-offset', at: { blockId, offset: 2 }, text: 'x' });
-  const result = await app.dispatch({ actionId: 'unicode-edit', principal: { id: 'u1' }, ...authored });
+  const result = await app.dispatch({ actionId: 'unicode-edit', principal: { id: 'u1' }, ...authored, scope: 'Project:p1' });
   assert.equal(result.ok, false);
   assert.match(result.failure?.message ?? '', /splits a surrogate pair/);
   await app.close?.();
@@ -1652,7 +1651,7 @@ test('public offset authoring enforces annotated-text field write policy', async
   const basis = db.prepare('SELECT family_checkpoint FROM LockedDoc_body_state WHERE document_id = ?').get('d1').family_checkpoint;
   db.prepare('INSERT INTO LockedDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, 1, ?, ?)').run('locked-basis', 'd1', 'u1', basis, JSON.stringify([blockId]));
   const authored = annotatedTextAction(LockedDoc, LockedDoc.body, { kind: 'text.insert', id: 'd1', basis: 'locked-basis', mutationId: 'locked-edit', at: { blockId, offset: 0 }, text: 'x' });
-  const denied = await app.dispatch({ actionId: 'locked-edit', principal: { id: 'u1' }, ...authored });
+  const denied = await app.dispatch({ actionId: 'locked-edit', principal: { id: 'u1' }, ...authored, scope: 'Project:p1' });
   assert.equal(denied.ok, false);
   assert.equal(denied.failure?.category, 'denied');
   await app.close?.();
@@ -1663,7 +1662,7 @@ test('R1 rejects a future basis frontier and receipt replay stays idempotent', a
   const created = await app.dispatch({ actionId: 'basis-create', type: 'InitDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1' }, principal: { id: 'u1' } });
   const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
   const operation = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'A']];
-  const request = { actionId: 'basis-insert', type: 'InitDoc.body.operation', scope: 'InitDoc:d1', principal: { id: 'u1' }, payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation } } };
+  const request = { actionId: 'basis-insert', type: 'InitDoc.body.operation', scope: 'Project:p1', principal: { id: 'u1' }, payload: { version: 1, id: 'd1', expected: { structuralRevision: 1, frontier: [] }, operation: { kind: 'text.apply', blockId, operation } } };
   assert.equal((await app.dispatch(request)).ok, true);
   const replay = await app.dispatch(request);
   assert.equal(replay.ok, true);

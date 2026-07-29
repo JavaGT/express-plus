@@ -684,7 +684,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     if (denied) return denied;
 
     try {
-      handler.preDedupe?.({ payload, principal, scope });
+      handler.preDedupe?.({ payload, principal, scope, db });
     } catch (err) {
       return executionFailure(err, { actionId, type });
     }

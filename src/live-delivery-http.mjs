@@ -71,7 +71,12 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
     }
     const scope = scopeFrom(url);
     const after = afterFrom(url);
-    if (!scope || after === null) {
+    const documentIdentity = url.searchParams.has('documentId') ? {
+      entity: url.searchParams.get('entity'), field: url.searchParams.get('field'), documentId: url.searchParams.get('documentId'),
+    } : null;
+    const document = documentIdentity ? delivery.resolveAnnotatedTextDocument?.(documentIdentity) : null;
+    const effectiveScope = document?.scope ?? scope;
+    if (!effectiveScope || after === null || (documentIdentity && (!document || (scope !== null && scope !== effectiveScope)))) {
       reject(res, 400, 'invalid live delivery request');
       return true;
     }
@@ -85,15 +90,15 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
         const mode = url.searchParams.get('mode');
         if (mode === 'snapshot') {
           // The delivery seam creates the snapshot from its recipient-hydrated row.
-          const result = await delivery.bootstrap({ principal, scope });
+          const result = await delivery.bootstrap({ principal, scope: effectiveScope, document });
           writeJson(res, result);
         } else if (mode === 'catchup') {
-          const result = await delivery.catchup({ principal, scope, after });
+          const result = await delivery.catchup({ principal, scope: effectiveScope, after, document });
           // A small event count can still contain a large recipient envelope.
           // Replace oversized replay with the same paired opaque recovery.
           const encoded = JSON.stringify(result);
           writeJson(res, Buffer.byteLength(encoded) > JSON_LIMIT
-            ? await delivery.bootstrap({ principal, scope })
+            ? await delivery.bootstrap({ principal, scope: effectiveScope, document })
             : result);
         } else {
           reject(res, 400, 'invalid live delivery mode');
@@ -119,7 +124,8 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
       let revoked = false;
       const activation = await delivery.subscribe({
         principal,
-        scope,
+        scope: effectiveScope,
+        document,
         after,
         signal: controller.signal,
         revoke: () => { revoked = true; release(); if (res.headersSent && !res.writableEnded) res.end(); },

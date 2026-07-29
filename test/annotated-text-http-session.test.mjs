@@ -57,7 +57,7 @@ test('document session bootstraps recipient snapshot and derives typed insert fr
   assert.equal(session.document.basis, 'basis-1');
   assert.equal((await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 1 }, text: 'x' })).ok, true);
   assert.deepEqual(requests[0], {
-    actionId: 'action-1', scope: 'LiveDocument:d1', clientId: 'tab-a', type: 'LiveDocument.body.operation',
+    actionId: 'action-1', clientId: 'tab-a', type: 'LiveDocument.body.operation',
     payload: { version: 6, id: 'd1', basis: 'basis-1', mutationId: 'm1', edit: { kind: 'text.insert', at: { blockId: 'block-1', offset: 1 }, text: 'x' } },
   });
   session.close();

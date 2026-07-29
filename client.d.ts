@@ -468,6 +468,8 @@ export interface LiveDeliveryHttpSessionConfig<Snapshot, Payload = unknown> {
   fetchImpl?: typeof globalThis.fetch;
   eventSourceFactory?: (url: string, options: EventSourceInit) => EventSource;
   createActionId?: () => string;
+  /** Package-owned entity identity used to derive a server-side scope. */
+  requestIdentity?: Readonly<Record<string, string>> | null;
 }
 
 export function createLiveDeliveryHttpSession<Snapshot, Payload = unknown>(

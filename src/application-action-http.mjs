@@ -5,6 +5,7 @@ import { readSeq } from './cursor.mjs';
 import { BodyError, readRequestBody } from './http-body.mjs';
 import { failure, isWorkbenchFailure } from './outcome.mjs';
 import { sendFailure } from './http-failure.mjs';
+import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 
 const ACTION_PATH = '/workbench/actions';
 const HISTORY_PATH = '/workbench/history';
@@ -31,12 +32,13 @@ function isJsonValue(value, ancestors = new Set()) {
 function actionRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const keys = Object.keys(body);
-  if ((keys.length !== 4 && keys.length !== 5) || keys.some((key) => !['actionId', 'scope', 'type', 'payload', 'clientId'].includes(key))) return null;
+  if (keys.length < 3 || keys.length > 5 || keys.some((key) => !['actionId', 'scope', 'type', 'payload', 'clientId'].includes(key))) return null;
   const { actionId, scope, type, payload, clientId } = body;
-  if (![actionId, scope, type].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)) return null;
+  if (![actionId, type].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)) return null;
+  if (scope !== undefined && (typeof scope !== 'string' || scope.length === 0 || scope.length > MAX_STRING_LENGTH)) return null;
   if (clientId !== undefined && (typeof clientId !== 'string' || clientId.length === 0 || clientId.length > MAX_STRING_LENGTH)) return null;
   if (!isJsonValue(payload)) return null;
-  return { actionId, scope, type, payload, ...(clientId === undefined ? {} : { clientId }) };
+  return { actionId, ...(scope === undefined ? {} : { scope }), type, payload, ...(clientId === undefined ? {} : { clientId }) };
 }
 
 function validPrincipal(principal) {
@@ -65,12 +67,21 @@ function admitsApplicationHttpAction(app, request) {
   // registered declarations, and bind lifecycle requests to their document
   // scope rather than recognizing action-name prefixes.
   for (const entity of app.entities.values()) {
-    const annotatedFields = Object.entries(entity.fields)
-      .filter(([, field]) => field.kind === 'annotatedText')
-      .map(([name]) => name);
+    const annotatedEntries = Object.entries(entity.fields).filter(([, field]) => field.kind === 'annotatedText');
+    const annotatedFields = annotatedEntries.map(([name]) => name);
     if (annotatedFields.length === 0) continue;
     const id = request.payload?.id;
-    if (typeof id !== 'string' || id.length === 0 || request.scope !== `${entity.name}:${id}`) continue;
+    if (typeof id !== 'string' || id.length === 0) continue;
+    let owningScope;
+    if (request.type === `${entity.name}.create`) {
+      try { owningScope = resolveAnnotatedTextOwningScope(annotatedEntries[0][1], entity.fields, request.payload).key; } catch { return false; }
+    } else {
+      const row = app.db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id);
+      if (!row) return false;
+      owningScope = resolveAnnotatedTextOwningScope(annotatedEntries[0][1], entity.fields, row).key;
+    }
+    if (request.scope !== undefined) return false;
+    request.scope = owningScope;
     if (request.type === `${entity.name}.create` || request.type === `${entity.name}.annotatedText.retire`) return true;
     if ([6, 7].includes(request.payload?.version)
       && annotatedFields.some((field) => request.type === `${entity.name}.${field}.operation`)) return true;

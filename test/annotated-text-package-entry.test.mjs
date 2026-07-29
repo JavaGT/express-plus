@@ -61,7 +61,7 @@ test('public action grammar validates field handles and emits closed generated a
   });
   const request = annotatedTextAction(Document, Document.body, { kind: 'text.insert', id: 'doc-1', basis: 'opaque-basis', mutationId: 'insert-1', at: { blockId: 'block-1', offset: 0 }, text: 'hello' });
   assert.equal(request.type, 'PackageActionDocument.body.operation');
-  assert.equal(request.scope, 'PackageActionDocument:doc-1');
+  assert.equal('scope' in request, false);
   assert.equal(request.payload.version, 6);
   assert.ok(Object.isFrozen(request));
   assert.ok(Object.isFrozen(request.payload));
@@ -69,13 +69,13 @@ test('public action grammar validates field handles and emits closed generated a
   assert.deepEqual(annotatedTextAction(Document, Document.body, { kind: 'text.delete', id: 'doc-1', basis: 'opaque-basis', mutationId: 'delete-1', from: { blockId: 'block-1', offset: 0 }, to: { blockId: 'block-1', offset: 1 } }).payload.edit, { kind: 'text.delete', from: { blockId: 'block-1', offset: 0 }, to: { blockId: 'block-1', offset: 1 } });
 
   assert.deepEqual(annotatedTextCreateAction(Document, { id: 'doc-1', project: 'p1', owner: 'u1' }), {
-    type: 'PackageActionDocument.create', scope: 'PackageActionDocument:doc-1', payload: { id: 'doc-1', project: 'p1', owner: 'u1' },
+    type: 'PackageActionDocument.create', payload: { id: 'doc-1', project: 'p1', owner: 'u1' },
   });
   assert.deepEqual(annotatedTextAction(Document, Document.body, { kind: 'block.split', id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-1', at: { blockId: 'block-1', offset: 1 } }).payload, {
     version: 7, id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-1', edit: { kind: 'block.split', at: { blockId: 'block-1', offset: 1 } },
   });
   assert.deepEqual(annotatedTextRetireAction(Document, 'doc-1'), {
-    type: 'PackageActionDocument.annotatedText.retire', scope: 'PackageActionDocument:doc-1', payload: { id: 'doc-1' },
+    type: 'PackageActionDocument.annotatedText.retire', payload: { id: 'doc-1' },
   });
   assert.throws(() => annotatedTextCreateAction(Document, { project: 'p1' }), /non-empty id/);
 });

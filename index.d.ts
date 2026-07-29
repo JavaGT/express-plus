@@ -341,7 +341,6 @@ export type AnnotatedTextOperationCommand =
   | AnnotatedTextDetachAnnotationCommand;
 export interface AnnotatedTextActionRequest<Payload = unknown> {
   readonly type: string;
-  readonly scope: string;
   readonly payload: Payload;
 }
 export function annotatedTextAction(

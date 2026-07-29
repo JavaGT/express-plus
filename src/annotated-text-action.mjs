@@ -77,17 +77,16 @@ export function annotatedTextAction(entity, field, command) {
   }
   const payload = deepFreeze({ version: command.kind === 'text.insert' || command.kind === 'text.delete' ? 6 : 7, id: command.id, basis: command.basis, mutationId: command.mutationId, edit });
 
-  const scope = `${entity.name}:${command.id}`;
   const type = `${entity.name}.${fieldName}.operation`;
 
-  return deepFreeze({ type, scope, payload });
+  return deepFreeze({ type, payload });
 }
 
 export function annotatedTextRetireAction(entity, documentId) {
   if (!entity || typeof entity.name !== 'string' || !entity.name || typeof documentId !== 'string' || !documentId) {
     throw new Error('annotatedTextRetireAction: entity and non-empty documentId are required');
   }
-  return deepFreeze({ type: `${entity.name}.annotatedText.retire`, scope: `${entity.name}:${documentId}`, payload: { id: documentId } });
+  return deepFreeze({ type: `${entity.name}.annotatedText.retire`, payload: { id: documentId } });
 }
 
 export function annotatedTextCreateAction(entity, payload) {
@@ -104,8 +103,14 @@ export function annotatedTextCreateAction(entity, payload) {
     throw new Error('annotatedTextCreateAction: create payload must include a non-empty id');
   }
 
-  const scope = `${entity.name}:${payload.id}`;
+  const descriptor = Object.values(entity.fields ?? {}).find((field) => field.kind === 'annotatedText');
+  const projectField = descriptor?.project;
+  const target = entity.fields?.[projectField]?.target;
+  const projectTarget = typeof target === 'string' ? target : target?.name;
+  if (typeof projectTarget !== 'string' || !projectTarget || payload[projectField] == null || payload[projectField] === '') {
+    throw new Error('annotatedTextCreateAction: payload must include its declared project ref');
+  }
   const type = `${entity.name}.create`;
 
-  return deepFreeze({ type, scope, payload });
+  return deepFreeze({ type, payload });
 }

@@ -21,6 +21,7 @@ import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.mjs';
 import { publicEvent } from './event-delivery.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
+import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 
 function reject(res, status, message, details) {
   const workbenchFailure = failureForHttpError({ status, message, details });
@@ -61,10 +62,15 @@ export async function handleResyncRoute(app, req, res, principal) {
   const [, entityName, id] = seg;
   const entity = app.entities.get(entityName);
   if (!entity) { reject(res, 404, 'not found'); return true; }
-  const scopeKey = scopeOf(entityName, id).key;
+  const row = hasAnnotatedTextFields(entity) ? app.db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id) : null;
+  const annotatedEntry = Object.entries(entity.fields).find(([, field]) => field.kind === 'annotatedText');
+  const [, descriptor] = annotatedEntry ?? [];
+  const retiredScope = !row && descriptor && app.db.prepare("SELECT scope FROM _Log WHERE json_extract(eventData, '$.id') = ? ORDER BY rowid DESC LIMIT 1")
+    .get(id)?.scope;
+  const scopeKey = descriptor ? (row ? resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key : retiredScope ?? scopeOf(entityName, id).key) : scopeOf(entityName, id).key;
   if (isSnapshot) return snapshotRoute(app, entity, id, scopeKey, principal, res);
   const cursor = Number(url.searchParams.get('cursor') ?? 0);
-  return eventsSinceRoute(app, entity, scopeKey, principal, res, cursor);
+  return eventsSinceRoute(app, entity, scopeKey, id, principal, res, cursor);
 }
 
 async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
@@ -222,15 +228,14 @@ async function authorizeScope(app, scope, principal) {
   };
 }
 
-async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
+async function eventsSinceRoute(app, entity, scopeKey, documentId, principal, res, cursor) {
   // events-since authorizes against the CURRENT row, falling back to the
   // deleted-row history anchor when the row is gone (Wave 3.7 Contract 1): an
   // owner who held read+subscribe at the moment of deletion can still resync
   // the tail of that scope's history (its own `Note.removed` event included).
   // Fail closed either way: an out-of-scope or genuinely-nonexistent row, or
   // a deleted row the principal never held a grant on, yields 404.
-  const id = tryParseScopeKey(scopeKey)?.id;
-  const auth = await authorizeRow(app, entity, 'read', id, principal, null, { allowDeletedAnchor: true });
+  const auth = await authorizeRow(app, entity, 'read', documentId, principal, null, { allowDeletedAnchor: true });
   if (auth.status) {
     reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;
@@ -240,7 +245,8 @@ async function eventsSinceRoute(app, entity, scopeKey, principal, res, cursor) {
   // replay of the canonical events that preceded deletion. This wins over
   // retention because a stale response would demand an impossible snapshot.
   if (auth.historical && hasAnnotatedTextFields(entity)) {
-    sendJson(res, 200, { resync: 'deleted', seq: readSeq(app.db, scopeKey) });
+    const last = app.db.prepare('SELECT MAX(seq) AS seq FROM _Log WHERE scope = ?').get(scopeKey)?.seq ?? 0;
+    sendJson(res, 200, { resync: 'deleted', seq: Math.max(readSeq(app.db, scopeKey), last) });
     return true;
   }
   const minSeq = minSeqForScope(app.db, scopeKey);

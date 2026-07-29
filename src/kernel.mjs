@@ -20,6 +20,7 @@ import { createPendingBlobLifecycle } from './pending-blob.mjs';
 import { readSeq } from './committed-log.mjs';
 import { CRUD_CURSOR_POLICY } from './entity/crud.mjs';
 import { EventKind } from './event-handle.mjs';
+import { tryParseScopeKey } from './scope-handle.mjs';
 import { bindAuthorizedRows, isAuthorizedRows } from './action-authorization.mjs';
 import { replayPrivateFactProjections } from './post-commit-effects.mjs';
 import { txn } from './driver.mjs';
@@ -248,6 +249,19 @@ function buildDurableAdmission(app) {
     if (!row) return false;
     return mayRow(entity, verb, row, principal);
   }
+  async function admitsAnnotatedProject({ entityName, verb, principal, event }) {
+    const entity = app.entities?.get(entityName);
+    const descriptor = entity && Object.values(entity.fields).find((field) => field.kind === 'annotatedText');
+    if (!descriptor) return true;
+    const project = tryParseScopeKey(event?.scope);
+    const projectEntity = project && app.entities?.get(project.entity);
+    // Declarations may target an externally-owned project table. When that
+    // declaration is registered, it is the package authorization boundary.
+    if (!projectEntity) return true;
+    let row = null;
+    try { row = projectEntity.findById(project.id, principal); } catch { row = null; }
+    return !!row && mayRow(projectEntity, verb, row, principal);
+  }
 
   return {
     async beforeProjection({ entityName, verb, principal, event, payload, db: hookDb, now }) {
@@ -290,7 +304,8 @@ function buildDurableAdmission(app) {
         return granted;
       }
       if (verb === 'update') {
-        const granted = await admitsExistingRow({ entityName, verb, principal, event });
+        const granted = await admitsExistingRow({ entityName, verb, principal, event })
+          && await admitsAnnotatedProject({ entityName, verb, principal, event });
         if (granted) {
           rearmChangedScheduleReceipts({
             entity: app.entities?.get(entityName),
@@ -301,7 +316,7 @@ function buildDurableAdmission(app) {
         }
         return granted;
       }
-      return true;
+      return admitsAnnotatedProject({ entityName, verb, principal, event });
     },
     async afterProjection({ entityName, verb, principal, event, db: hookDb }) {
       if (registeredEventTypes.has(event?.type)) return true;
@@ -317,8 +332,9 @@ function buildDurableAdmission(app) {
           db: hookDb ?? app.db,
         });
       }
-      if (verb !== 'create') return true;
-      return admitsExistingRow({ entityName, verb, principal, event });
+      if (verb !== 'create') return admitsAnnotatedProject({ entityName, verb, principal, event });
+      return (await admitsExistingRow({ entityName, verb, principal, event }))
+        && await admitsAnnotatedProject({ entityName, verb, principal, event });
     },
   };
 }

@@ -16,6 +16,7 @@ import { startSimulation } from './simulate.mjs';
 import { retentionPrune } from './committed-log.mjs';
 import { getLog, withLog } from './log.mjs';
 import { installHistoryHttpDispatcher } from './application-action-http.mjs';
+import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 
 const BLOB_REAP_INTERVAL_MS = 10 * 60_000;
 const BLOB_REAP_TTL_MS = 60 * 60_000;
@@ -30,7 +31,7 @@ function installRuntimeShutdown(app) {
 
 function wireMutationSurface(app) {
   const dispatch = (args) =>
-    withLog(app.log, () => app.writeQueue.run(() => app.kernel.dispatch(args)));
+    withLog(app.log, () => app.writeQueue.run(() => app.kernel.dispatch(bindAnnotatedTextScope(app, args))));
   app.dispatch = dispatch;
   app.history = app.kernel.history && Object.freeze({
     cursor: app.kernel.history.cursor,
@@ -59,6 +60,23 @@ function wireMutationSurface(app) {
       return app.kernel.dispatchBatch({ actionId: randomUUID(), actions, principal, clientId });
     }));
   return dispatch;
+}
+
+function bindAnnotatedTextScope(app, args) {
+  if (!args?.type || !args?.payload || typeof args.payload !== 'object') return args;
+  const entity = [...app.entities.values()].find((candidate) => args.type.startsWith(`${candidate.name}.`));
+  const descriptor = entity && Object.values(entity.fields).find((field) => field.kind === 'annotatedText');
+  if (!descriptor) return args;
+  const operationType = Object.entries(entity.fields).find(([, field]) => field.kind === 'annotatedText');
+  if (args.type !== `${entity.name}.create` && args.type !== `${entity.name}.update` && args.type !== `${entity.name}.remove`
+    && args.type !== `${entity.name}.annotatedText.retire` && args.type !== `${entity.name}.${operationType[0]}.operation`) return args;
+  const id = args.payload.id;
+  if (typeof id !== 'string' || !id) return args;
+  const row = args.type === `${entity.name}.create`
+    ? args.payload
+    : app.db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id);
+  if (!row) return args;
+  return { ...args, scope: resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key };
 }
 
 function engageMaintenance(app, log) {

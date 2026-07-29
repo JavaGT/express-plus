@@ -2633,6 +2633,7 @@ export function createLiveDeliveryHttpSession({
   fetchImpl = globalThis.fetch,
   eventSourceFactory = (url, options) => new EventSource(url, options),
   createActionId,
+  requestIdentity = null,
 }) {
   if (typeof baseUrl !== 'string' || baseUrl.length === 0) throw new TypeError('baseUrl is required');
   if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
@@ -2648,7 +2649,8 @@ export function createLiveDeliveryHttpSession({
 
   async function bootstrap({ after, mode }) {
     const url = new URL(endpoint, globalThis.location?.href ?? 'http://workbench.local');
-    url.searchParams.set('scope', scope);
+    if (!requestIdentity) url.searchParams.set('scope', scope);
+    for (const [key, value] of Object.entries(requestIdentity ?? {})) url.searchParams.set(key, value);
     url.searchParams.set('mode', mode);
     if (mode === 'catchup') url.searchParams.set('after', typeof after === 'object' ? JSON.stringify(after) : String(after));
     const response = await fetchImpl(url.toString(), { credentials: 'include' });
@@ -2663,7 +2665,8 @@ export function createLiveDeliveryHttpSession({
 
   function subscribe({ after, deliver, closed }) {
     const url = new URL(eventsEndpoint, globalThis.location?.href ?? 'http://workbench.local');
-    url.searchParams.set('scope', scope);
+    if (!requestIdentity) url.searchParams.set('scope', scope);
+    for (const [key, value] of Object.entries(requestIdentity ?? {})) url.searchParams.set(key, value);
     url.searchParams.set('after', typeof after === 'object' ? JSON.stringify(after) : String(after));
     const source = eventSourceFactory(url.toString(), { withCredentials: true });
     let open = true;
@@ -2693,7 +2696,7 @@ export function createLiveDeliveryHttpSession({
       method: 'POST',
       credentials: 'include',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(historyRequest ?? { ...action, scope, clientId: historySession }),
+      body: JSON.stringify(historyRequest ?? { ...action, ...(requestIdentity ? {} : { scope }), clientId: historySession }),
     });
     let receipt;
     try { receipt = await response.json(); } catch { throw new Error(`action dispatch failed with HTTP ${response.status}`); }
@@ -2732,7 +2735,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     throw new TypeError('annotated text context requires a documentId');
   }
   const { entity, field, documentId } = context;
-  const scope = `${entity?.name}:${documentId}`;
+  if (typeof entity?.name !== 'string' || typeof field?.fieldName !== 'string' || entity.fields?.[field.fieldName]?.kind !== 'annotatedText') {
+    throw new TypeError('annotated text context requires declared entity and field handles');
+  }
+  const scope = `annotated-text:${documentId}`;
   const session = createLiveDeliveryHttpSession({
     baseUrl,
     scope,
@@ -2740,6 +2746,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     fetchImpl,
     eventSourceFactory,
     createActionId,
+    requestIdentity: { entity: entity.name, field: field.fieldName, documentId },
     validateSnapshot(snapshot) {
       if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('annotated text delivery snapshot must be an object');
       return materializeAnnotatedTextSnapshot(snapshot[field?.fieldName], field);
@@ -2749,7 +2756,6 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     const document = session.snapshot;
     if (!document) throw new ClientClosedError('Annotated text document is unavailable');
     const action = annotatedTextAction(entity, field, { ...command, id: documentId, basis: document.basis });
-    if (action.scope !== scope) throw new Error('annotated text action escaped its document context');
     return session.dispatch(action.type, action.payload);
   }
   return Object.freeze({

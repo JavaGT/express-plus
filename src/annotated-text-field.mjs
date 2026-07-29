@@ -13,6 +13,29 @@ const RESERVED_ANNOTATION_FAMILIES = new Set(['orphan_state']);
 // -- Compiled metadata storage (WeakMap keyed on descriptor) --
 const compiledMeta = new WeakMap();
 
+export function resolveAnnotatedTextOwningScope(descriptor, fields, row) {
+  if (!descriptor || descriptor.kind !== 'annotatedText') {
+    throw new Error('resolveAnnotatedTextOwningScope requires an annotatedText descriptor');
+  }
+  const projectField = descriptor.project;
+  if (typeof projectField !== 'string' || !fields[projectField]) {
+    throw new Error('annotatedText descriptor missing a valid project ref field');
+  }
+  const projectDesc = fields[projectField];
+  if (projectDesc.kind !== 'value' || projectDesc.type !== 'ref') {
+    throw new Error('annotatedText descriptor project field must be a ref');
+  }
+  const projectTarget = targetName(projectDesc);
+  if (!projectTarget) {
+    throw new Error('annotatedText descriptor project ref field must have a target');
+  }
+  const projectId = row[projectField];
+  if (projectId == null || projectId === '') {
+    throw new Error('annotatedText owning project ref is null or empty');
+  }
+  return { entity: projectTarget, id: String(projectId), key: `${projectTarget}:${projectId}` };
+}
+
 export function getAnnotatedTextCompiledMetadata(descriptor) {
   return compiledMeta.get(descriptor) ?? null;
 }
@@ -484,6 +507,9 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     fail(entity, field, 'annotations', 'protecting annotations must share one placeholder');
   }
 
+  const projectTarget = targetName(fields[descriptor.project]);
+  const projectField = descriptor.project;
+
   const compiled = {
     blockFields,
     families,
@@ -493,6 +519,8 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     capabilities: descriptor.capabilities ? Object.freeze({ ...descriptor.capabilities }) : null,
     protectingFamilies: Object.freeze({ ...protectingFamilies }),
     restrictedPlaceholder: protectingPlaceholders[0] ?? null,
+    projectField,
+    projectTarget,
     // Create frozen typed runtime static handles
     annotationHandles: Object.freeze(
       Object.fromEntries([...annotationNames].map(n => {
