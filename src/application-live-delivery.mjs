@@ -21,7 +21,7 @@ export function attachApplicationLiveDelivery(app, {
 
   const owned = createOwnedLiveDelivery({
     db: app.db,
-    entities: (name) => app.entities.get(name),
+    entities: (name, declaration) => declaration === undefined ? app.entities.get(name) : app.entity(declaration),
     mayVerb: (entity, verb, row, principal) => mayVerb(entity, verb, row, principal),
     snapshots,
     log: app.log,

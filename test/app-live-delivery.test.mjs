@@ -4,8 +4,8 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   annotatedText, annotatedTextCreateAction, annotatedTextRetireAction, annotation,
-  entity, everyone, exportAnnotatedText,
-  grant, measurement, read, ref, registerAnnotatedTextContract, scope, subscribe, text, write,
+  deny, entity, everyone, exportAnnotatedText,
+  grant, measurement, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write,
 } from '../src/index.mjs';
 import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
 import { createAnnotatedTextHttpSession, createLiveDeliveryHttpSession } from '../public/workbench-client.mjs';
@@ -120,6 +120,42 @@ test('application live delivery validates aggregate declarations without exposin
   );
   assert.equal(app._applicationLiveDelivery, undefined);
   db.close();
+});
+
+test('application live delivery accepts its declared snapshot identity and rejects foreign same-name anchors', async (t) => {
+  const Project = entity('OwnedSnapshotProject', {
+    name: text(),
+    ownerId: text(),
+    checks: { owner: ({ entity: row, principal }) => row.ownerId === principal.id },
+    grant: () => [scope(() => everyone()).can(async ({ is }) => (
+      await is.owner() ? grant(read, subscribe) : deny('not owner')
+    ))],
+  });
+  const declaration = snapshot(Project, { output: object({ name: select(Project.field.name) }) });
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, entities: [Project] });
+
+  app.attachLiveDelivery({
+    principalOf: (request) => ({ type: 'user', id: request.headers['x-user'] ?? 'u1', attributes: {} }),
+    snapshots: [declaration],
+  });
+  app.listen(0);
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  app.entity(Project).insert({ id: 'p1', name: 'Visible', ownerId: 'u1' });
+
+  const endpoint = `http://127.0.0.1:${app.httpServer.address().port}/live-delivery/bootstrap?scope=OwnedSnapshotProject%3Ap1&mode=snapshot`;
+  const allowed = await fetch(endpoint, { headers: { 'x-user': 'u1' } }).then((response) => response.json());
+  assert.deepEqual(allowed.snapshot, { id: 'p1', name: 'Visible' }, 'bootstrap remains recipient-projected');
+  assert.equal((await fetch(endpoint, { headers: { 'x-user': 'u2' } }).then((response) => response.json())).kind, 'revoked');
+
+  const foreign = entity('OwnedSnapshotProject', { name: text(), ownerId: text(), grant: () => grant(read, subscribe) });
+  const foreignApp = workbench({ db: new DatabaseSync(':memory:'), entities: [Project] });
+  assert.throws(
+    () => foreignApp.attachLiveDelivery({ principalOf: () => user, snapshots: [snapshot(foreign, { output: object({ name: select(foreign.field.name) }) })] }),
+    /already registered with a different declaration|must be registered/,
+  );
+  foreignApp.db.close();
 });
 
 test('package action transport dispatches registered actions, wakes delivery, and returns opaque receipt fences', async (t) => {

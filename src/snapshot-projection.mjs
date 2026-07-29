@@ -5,6 +5,11 @@ function entityOf(value) {
   return value;
 }
 
+function isRegisteredEntity(entity, resolveEntity) {
+  const registered = resolveEntity(entity.name, entity);
+  return registered === entity || registered?.declaration === entity;
+}
+
 function identifier(name, label) {
   if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new TypeError(`${label} must be a SQL identifier`);
   return name;
@@ -94,13 +99,13 @@ function compileTombstones(declaration, resolveEntity) {
   if (rule?.kind !== 'tombstones') throw new TypeError('snapshot tombstones must use tombstones(...)');
   const target = entityOf(rule.target);
   if (target !== declaration.anchor) throw new TypeError(`snapshot tombstones target must be anchor '${declaration.anchor.name}'`);
-  if (resolveEntity(target.name) !== target) throw new TypeError(`snapshot tombstones target '${target.name}' must be registered`);
+  if (!isRegisteredEntity(target, resolveEntity)) throw new TypeError(`snapshot tombstones target '${target.name}' must be registered`);
   const entity = entityOf(rule.entity);
-  if (resolveEntity(entity.name) !== entity) throw new TypeError(`snapshot tombstone entity '${entity.name}' must be registered`);
+  if (!isRegisteredEntity(entity, resolveEntity)) throw new TypeError(`snapshot tombstone entity '${entity.name}' must be registered`);
   const entityId = entity.fields[rule.entityId];
   const terminalScope = rule.terminalScope === undefined ? null : entityOf(rule.terminalScope);
   if (terminalScope) {
-    if (resolveEntity(terminalScope.name) !== terminalScope) throw new TypeError(`snapshot terminal tombstone scope '${terminalScope.name}' must be registered`);
+    if (!isRegisteredEntity(terminalScope, resolveEntity)) throw new TypeError(`snapshot terminal tombstone scope '${terminalScope.name}' must be registered`);
     if (Object.keys(terminalScope.fields).length !== 0) throw new TypeError('snapshot terminal tombstone scope must be an identity-only entity');
     if (rule.scopeId === undefined) throw new TypeError('snapshot terminal tombstone scope requires scopeId');
   }
@@ -136,7 +141,7 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
     if (declaration?.kind !== 'snapshot') throw new TypeError('snapshots accepts only snapshot(...) declarations');
     const anchor = entityOf(declaration.anchor);
     if (internalEntities.has(anchor.name)) throw new TypeError(`snapshot tombstone entity '${anchor.name}' is read-internal and cannot be an anchor`);
-    if (resolveEntity(anchor.name) !== anchor) throw new TypeError(`snapshot anchor '${anchor.name}' must be registered`);
+    if (!isRegisteredEntity(anchor, resolveEntity)) throw new TypeError(`snapshot anchor '${anchor.name}' must be registered`);
     if (compiled.has(anchor.name)) throw new TypeError(`snapshot anchor '${anchor.name}' is declared more than once`);
     const output = compileOutput(anchor, declaration.output);
     const tombstones = compileTombstones(declaration, resolveEntity);
@@ -153,7 +158,7 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
         physicalForeignKey(db, branch.entity, entry.fk, User);
         return;
       }
-      if (entry.entity && resolveEntity(entry.entity.name) !== entry.entity) throw new TypeError(`snapshot entity '${entry.entity.name}' must be registered`);
+      if (entry.entity && !isRegisteredEntity(entry.entity, resolveEntity)) throw new TypeError(`snapshot entity '${entry.entity.name}' must be registered`);
       if (entry.entity) physicalForeignKey(db, entry.inverse ? entry.entity : branch.entity, entry.fk, entry.inverse ? branch.entity : entry.entity);
       if (entry.nested) check(entry.nested);
     });
