@@ -2602,6 +2602,9 @@ export function createLiveDeliverySession({
   async function submitBatch(operation) {
     try {
       const receipt = await sendBatch(operation.batch);
+      if (status === 'revoked') {
+        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, failure: new ClientClosedError('Live delivery access was revoked') };
+      }
       if (receipt?.ok === false) {
         if (operation.echoCursor != null) {
           operations.delete(operation.actionId);

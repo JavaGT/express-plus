@@ -664,6 +664,32 @@ describe('LiveDeliverySession', () => {
     assert.equal((await dispatch).ok, false);
   });
 
+  it('returns rolled back when a deferred batch succeeds after access is revoked', async () => {
+    const held = deferred();
+    let revoke;
+    const session = createLiveDeliverySession({
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: { values: [] }, cursor: 1 }),
+      subscribe: async ({ revoke: revokeDelivery }) => { revoke = revokeDelivery; return { close() {} }; },
+      validateSnapshot: (snapshot) => snapshot,
+      optimistic: (snapshot, action) => ({ values: [...snapshot.values, `pending:${action.payload.value}`] }),
+      sendAction: async () => ({ ok: true }),
+      sendBatch: () => held.promise,
+      createActionId: () => 'deferred-batch-action',
+    });
+    await session.ready;
+    const batch = session.batch([{ type: 'Value.add', payload: { value: 'own' } }]);
+    assert.equal(session.pendingCount(), 1);
+
+    revoke({ code: 'access-revoked' });
+    assert.equal(session.status, 'revoked');
+    assert.equal(session.pendingCount(), 0);
+    held.resolve({ ok: true, actionId: 'deferred-batch-action', cursor: 2 });
+
+    const result = await batch;
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'failed-rolled-back');
+  });
+
   it('does not report a delivered echo as rolled back when its request fails late', async () => {
     const held = deferred();
     const { session, deliver } = setup({ sendAction: () => held.promise });
