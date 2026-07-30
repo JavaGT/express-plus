@@ -525,8 +525,8 @@ export function entity(name, declaration = {}) {
         if (typeof createPolicy === 'function') {
           return createPolicy(payload, { insert, mintToken });
         }
-        validateMutation(bound, payload);
-        return insert(materializeCreateDefaults(bound, payload));
+        const validated = validateMutation(bound, payload);
+        return insert(materializeCreateDefaults(bound, validated));
       };
       boundRecord.insert = insert;
       boundRecord.delete = (id) => {

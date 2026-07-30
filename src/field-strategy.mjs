@@ -498,8 +498,8 @@ export function verifyHash(candidate, stored) {
 // structural strategy check, then its declared `validate` (if any). The first
 // failure throws a ValidationError naming `Entity.field` + the reason; a payload
 // key that is not a declared field fails closed. Fields absent from the payload
-// are untouched (partial update). Returns the payload unchanged on success so the
-// stage composes left-to-right in the pipeline.
+// are untouched (partial update). Returns a canonicalized payload on success so
+// the stage composes left-to-right in the pipeline.
 //
 // Field-option ownership by SEAM (the smallest seam that can decide the rule):
 //  - `readonly` is an untrusted-payload rule: a client may not set/change the
@@ -512,6 +512,9 @@ export function verifyHash(candidate, stored) {
 //  - `default` is materialization, not validation — it belongs to the write/apply
 //    path (Phase 2), never to this accept/reject seam.
 function validateFieldValue(entityName, key, descriptor, value) {
+  if (descriptor.type === 'text' && typeof descriptor.canonicalize === 'function' && value !== null && value !== undefined) {
+    value = descriptor.canonicalize(value);
+  }
   if (descriptor.required === true && (value === null || value === undefined)) {
     throw new ValidationError(
       `${entityName}.${key} is required and may not be cleared (set to null).`,
@@ -542,6 +545,7 @@ export function validateMaterializedField(entityRecord, key, value) {
 
 export function validateMutation(entityRecord, payload) {
   const { name, fields } = entityRecord;
+  const transformed = { ...payload };
   for (const [key, value] of Object.entries(payload)) {
     const descriptor = fields[key];
     if (!descriptor) {
@@ -580,7 +584,7 @@ export function validateMutation(entityRecord, payload) {
 
     // required: the payload may not explicitly CLEAR a required field. (Whether a
     // required field is present at all on create is the write path's concern.)
-    validateFieldValue(name, key, descriptor, value);
+    transformed[key] = validateFieldValue(name, key, descriptor, value);
   }
-  return payload;
+  return transformed;
 }

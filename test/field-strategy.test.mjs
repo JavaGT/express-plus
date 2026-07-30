@@ -92,6 +92,19 @@ test('validateMutation passes a well-formed payload through untouched', () => {
   assert.deepEqual(validateMutation(Article, payload), payload);
 });
 
+test('validateMutation canonicalizes text before declared validation', () => {
+  const Article = entity('CanonicalArticle', {
+    title: text({
+      canonicalize: (value) => value.trim(),
+      validate: (value) => value.length > 0 || 'title must not be blank',
+    }),
+    grant: () => [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  assert.deepEqual(validateMutation(Article, { title: '  hello  ' }), { title: 'hello' });
+  assert.throws(() => validateMutation(Article, { title: '   ' }), /title must not be blank/);
+  assert.equal(validateMutation(makeArticle(), { title: 'hello' }).title, 'hello');
+});
+
 test('validateMutation throws ValidationError naming the field path + reason on a declared-validate reject', () => {
   const Article = makeArticle();
   assert.throws(

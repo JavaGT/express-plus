@@ -205,7 +205,7 @@ export function materializeCreateDefaults(record, payload) {
   for (const [fieldName, descriptor] of Object.entries(record.fields)) {
     if (!(fieldName in data) && descriptor.default !== undefined) {
       data[fieldName] = materializeDefault(descriptor.default);
-      validateMaterializedField(record, fieldName, data[fieldName]);
+      data[fieldName] = validateMaterializedField(record, fieldName, data[fieldName]);
     }
   }
   return data;
@@ -231,12 +231,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
           throw new ValidationError(`${name}.${fieldName} accepts native operations only; create the row then dispatch ${name}.${fieldName}.apply`);
         }
       }
-      validateMutation(record, fieldsPayload);
+      const validatedFields = validateMutation(record, fieldsPayload);
       if (requestedId !== undefined && (typeof requestedId !== 'string' || requestedId.length === 0)) {
         throw new ValidationError(`${name}.id: expected a non-empty text id`);
       }
       const id = requestedId ?? randomUUID();
-      const data = materializeCreateDefaults(record, { ...fieldsPayload, id });
+      const data = materializeCreateDefaults(record, { ...validatedFields, id });
       if (ownerField) data[ownerField] = principal?.id;
       const annotatedText = Object.fromEntries(
         Object.entries(fields)
@@ -276,7 +276,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
           throw new ValidationError(`${name}.${fieldName} is immutable: a client may set it on create but may not change it.`);
         }
       }
-      validateMutation(record, rest);
+      const validatedFields = validateMutation(record, rest);
       const stateTransitions = [];
       // Transition guard: for every state field in the payload, pre-read the
       // current row and verify the move is in the declared transition graph.
@@ -284,7 +284,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       // errors before transition errors (clearer diagnostic order).
       for (const [fieldName, descriptor] of Object.entries(fields)) {
         if (descriptor.kind !== 'state') continue;
-        if (!(fieldName in rest)) continue;
+        if (!(fieldName in validatedFields)) continue;
         let current;
         try {
           // findById is installed by installEntityQueries on the record before
@@ -302,25 +302,25 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         if (!current || current[fieldName] == null) {
           throw Object.assign(
             new ValidationError(
-              `${name}.${fieldName}: illegal transition (no current state) -> ${rest[fieldName]}`,
+              `${name}.${fieldName}: illegal transition (no current state) -> ${validatedFields[fieldName]}`,
             ),
             { status: 400 },
           );
         }
         const currentValue = current[fieldName];
-        if (currentValue === rest[fieldName]) continue; // no-op, skip check
+        if (currentValue === validatedFields[fieldName]) continue; // no-op, skip check
         const legalTargets = descriptor.transitions[currentValue];
-        if (!legalTargets || !legalTargets.includes(rest[fieldName])) {
+        if (!legalTargets || !legalTargets.includes(validatedFields[fieldName])) {
           throw Object.assign(
             new ValidationError(
-              `${name}.${fieldName}: illegal transition ${currentValue} -> ${rest[fieldName]}`,
+              `${name}.${fieldName}: illegal transition ${currentValue} -> ${validatedFields[fieldName]}`,
             ),
             { status: 400 },
           );
         }
-        stateTransitions.push({ fieldName, from: currentValue, to: rest[fieldName] });
+        stateTransitions.push({ fieldName, from: currentValue, to: validatedFields[fieldName] });
       }
-      const data = { ...rest, id };
+      const data = { ...validatedFields, id };
       for (const [fieldName, descriptor] of Object.entries(fields)) {
         if (descriptor.touch) data[fieldName] = new Date();
       }

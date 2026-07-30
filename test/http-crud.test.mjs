@@ -34,6 +34,18 @@ function ownedNote() {
   });
 }
 
+function canonicalNote() {
+  return entity('CanonicalNote', {
+    body: text({ canonicalize: (value) => value.trim() }),
+    owner: ref('User', { role: 'owner', readonly: true }),
+    grant: () => [
+      scope(({ is }) => is.owner()).can(async ({ is }) =>
+        (await is.owner()) ? grant(read, write, subscribe) : grant(read),
+      ),
+    ],
+  });
+}
+
 // A public-read Post: everyone may SEE every row (SQL scope everyone()), but only
 // the owner may write/remove (the .can capability axis, distinct from visibility).
 function publicPost() {
@@ -120,6 +132,28 @@ test('create inserts a row owned by the principal and 201s', async (t) => {
   assert.equal(created.owner, 'alice');
   const stored = db.prepare('SELECT owner FROM Note WHERE id = ?').get(created.id);
   assert.equal(stored.owner, 'alice');
+});
+
+test('generated CRUD stores canonicalized text on create and update', async (t) => {
+  const db = seed('CREATE TABLE CanonicalNote (id TEXT PRIMARY KEY, body TEXT, owner TEXT)');
+  const a = await serve(t, db, canonicalNote(), '/canonical-notes', alice);
+  const created = await fetch(`${a.origin}/canonical-notes`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body: '  created  ' }),
+  });
+  assert.equal(created.status, 201);
+  const row = await created.json();
+  assert.equal(row.body, 'created');
+  assert.equal(db.prepare('SELECT body FROM CanonicalNote WHERE id = ?').get(row.id).body, 'created');
+
+  const updated = await fetch(`${a.origin}/canonical-notes/${row.id}`, {
+    method: 'PATCH',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ body: '  updated  ' }),
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(db.prepare('SELECT body FROM CanonicalNote WHERE id = ?').get(row.id).body, 'updated');
 });
 
 test('create rejects a readonly field set by the client (400)', async (t) => {

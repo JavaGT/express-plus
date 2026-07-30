@@ -30,7 +30,10 @@ function makeDescriptor(props) {
 // `value` kind — a single stored value with whole-value diff. The default
 // mechanism (the bare kind is the sensible default per the naming rule).
 export function text(options = {}) {
-  const { oneOf, validate, indexed, ...rest } = options;
+  const { oneOf, validate, canonicalize, indexed, ...rest } = options;
+  if (canonicalize !== undefined && typeof canonicalize !== 'function') {
+    throw new Error('text({ canonicalize }) requires a function');
+  }
   if (indexed !== undefined && indexed !== 'fts') {
     throw new Error(`text({ indexed }) only supports 'fts', got ${JSON.stringify(indexed)}`);
   }
@@ -48,11 +51,12 @@ export function text(options = {}) {
         if (!allowed.has(v)) return `expected one of [${values.join(', ')}]`;
         return typeof validate === 'function' ? validate(v) : true;
       },
+      ...(canonicalize ? { canonicalize } : {}),
       ...(indexed ? { indexed } : {}),
       ...rest,
     });
   }
-  return makeDescriptor({ kind: 'value', type: 'text', validate, ...(indexed ? { indexed } : {}), ...rest });
+  return makeDescriptor({ kind: 'value', type: 'text', validate, ...(canonicalize ? { canonicalize } : {}), ...(indexed ? { indexed } : {}), ...rest });
 }
 
 export function annotatedText(options = {}) {

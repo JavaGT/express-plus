@@ -175,6 +175,7 @@ export type FieldOptions<Value = unknown> = Readonly<{
   touch?: boolean;
   default?: Value | (() => Value);
   validate?: (value: Value) => true | string;
+  canonicalize?: (value: Value) => Value;
   oneOf?: readonly Value[];
   indexed?: string;
   role?: string | readonly string[];
