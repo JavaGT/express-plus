@@ -24,6 +24,7 @@ import { tryParseScopeKey } from './scope-handle.mjs';
 import { bindAuthorizedRows, isAuthorizedRows } from './action-authorization.mjs';
 import { replayPrivateFactProjections } from './post-commit-effects.mjs';
 import { txn } from './driver.mjs';
+import { installRemovalCascades } from './entity/removal-cascade.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -422,6 +423,7 @@ export function buildKernel(app) {
       projections.push(entity.projection);
     }
   }
+  installRemovalCascades(entities);
   app.entities = entities;
 
   const effectsRegistry = buildEffects(entities);

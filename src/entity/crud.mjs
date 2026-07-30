@@ -371,8 +371,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }
       return result;
     },
-    [`${name}.remove`]: ({ payload, principal: _p, db }) => {
+    [`${name}.remove`]: ({ payload, principal, db }) => {
       if (!payload.id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
+      if (record.removalCascade) {
+        return record.removalCascade(payload.id, principal, db)
+          .then((rows) => rows.map(({ entity, id }) => entity.removedEvent(id, db)));
+      }
       return [{
         handle: verbs.removed.handle,
         type: verbs.removed.type,

@@ -44,7 +44,8 @@ import { createCrudHandlers, materializeCreateDefaults } from './crud.mjs';
 import { installEntityQueries } from './query.mjs';
 import { validateScheduleTrigger, autoStateScheduleTrigger, stateEffectEntries, assertSqlIdentifier, mintToken } from './schedule-compile.mjs';
 import { validateAnnotatedTextDeclaration } from '../annotated-text-field.mjs';
-import { getAnnotatedTextCompiledMetadata } from '../annotated-text-field.mjs';
+import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from '../annotated-text-field.mjs';
+import { scopeOf } from '../scope-handle.mjs';
 
 // Reserved top-level declaration slots. Every other key on the declaration is a
 // field descriptor. A field name that collides with a reserved slot is a
@@ -404,6 +405,15 @@ export function entity(name, declaration = {}) {
     updated: event(eventHandle.updated(name), (state, { data }) => ({ ...state, ...data })),
     remove: action(`${name}.remove`),
     removed: event(eventHandle.removed(name), (state) => ({ ...state, _removed: true })),
+  });
+
+  record.removedEvent = (id, db) => ({
+    handle: record.verbs.removed.handle,
+    type: record.verbs.removed.type,
+    scope: Object.values(fields).some((descriptor) => descriptor.kind === 'annotatedText')
+      ? resolveAnnotatedTextOwningScope(Object.values(fields).find((descriptor) => descriptor.kind === 'annotatedText'), fields, db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id) ?? {}).key
+      : scopeOf(name, id).key,
+    data: { id },
   });
 
   record.projection = createEntityProjection({
