@@ -164,18 +164,58 @@ test('conditional generated create restores an exact private row and excludes or
   assert.deepEqual(fact.after, { ...db.prepare('SELECT * FROM CreatedNote WHERE id = ?').get('created-1') });
   assert.equal(JSON.stringify(db.prepare("SELECT eventData FROM _Log WHERE actionId = 'created-create'").get()).includes('"after"'), false);
   assert.equal(JSON.stringify(db.prepare("SELECT * FROM _ActionReceipt WHERE actionId = 'created-create'").get()).includes('"after"'), false);
-  assert.equal((await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).undo, 1);
+  const afterCreate = await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session });
+  assert.equal(afterCreate.undo, 1);
+  assert.equal(afterCreate.redo, 0);
 
-  const undo = await app.history.undo({ scope: 'CreatedNote:created-1', principal: user, session, actionId: 'created-undo', revision: (await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).revision });
+  const undo = await app.history.undo({ scope: 'CreatedNote:created-1', principal: user, session, actionId: 'created-undo', revision: afterCreate.revision });
   assert.equal(undo.ok, true);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM CreatedNote WHERE id = ?').get('created-1').count, 0);
-  const redo = await app.history.redo({ scope: 'CreatedNote:created-1', principal: user, session, actionId: 'created-redo', revision: (await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).revision });
+  const afterUndo = await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session });
+  assert.partialDeepStrictEqual(afterUndo, { undo: 0, redo: 1 });
+  assert.notEqual(afterUndo.revision, afterCreate.revision);
+  assert.equal(db.prepare("SELECT actionType FROM _ActionReceipt WHERE actionId = 'created-undo'").get().actionType, 'CreatedNote.remove');
+  const redo = await app.history.redo({ scope: 'CreatedNote:created-1', principal: user, session, actionId: 'created-redo', revision: afterUndo.revision });
   assert.equal(redo.ok, true);
   assert.deepEqual({ ...db.prepare('SELECT * FROM CreatedNote WHERE id = ?').get('created-1') }, fact.after);
+  const afterRedo = await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session });
+  assert.partialDeepStrictEqual(afterRedo, { undo: 1, redo: 0 });
 
-  const remove = await app.dispatch({ actionId: 'created-remove', type: 'CreatedNote.remove', payload: { id: 'created-1' }, principal: user, scope: 'CreatedNote:created-1', history: { session } });
+  const beforeRemove = afterRedo;
+  const remove = await app.dispatch({ actionId: 'created-remove', type: 'CreatedNote.remove', payload: {
+    id: 'created-1', before: { id: 'created-1', body: 'spoofed preimage' }, after: { id: 'created-1' }, history: { operation: 'undo', input: { expected: fact.after, replacement: null } },
+  }, principal: user, scope: 'CreatedNote:created-1', history: { session } });
   assert.equal(remove.ok, true);
-  assert.equal((await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).undo, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'created-remove'").get().count, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = 'created-remove'").get().count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM CreatedNote WHERE id = ?').get('created-1').count, 0);
+  assert.deepEqual(JSON.parse(db.prepare('SELECT row FROM _DeletedRowAnchor WHERE entity = ? AND id = ?').get('CreatedNote', 'created-1').row), fact.after);
+  assert.deepEqual(await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session }), beforeRemove);
+});
+
+test('conditional create redo reauthorizes private provenance after its row is undone', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Created = createHistoryDeclaration('CreatedRedoDenied');
+  const app = workbench({ db, entities: [Created], history: history() });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  await app.dispatch({
+    actionId: 'redo-denied-create', type: 'CreatedRedoDenied.create',
+    payload: { id: 'created-1', body: 'secret', projectId: 'p1' }, principal: user,
+    scope: 'CreatedRedoDenied:created-1', history: { session },
+  });
+  const created = await app.history.cursor({ scope: 'CreatedRedoDenied:created-1', principal: user, session });
+  assert.equal((await app.history.undo({ scope: 'CreatedRedoDenied:created-1', principal: user, session, actionId: 'redo-denied-undo', revision: created.revision })).ok, true);
+  app.entities.get('CreatedRedoDenied').grant = () => [scope(() => everyone()).can(() => deny('revoked'))];
+  const before = await app.history.cursor({ scope: 'CreatedRedoDenied:created-1', principal: user, session });
+  await assert.rejects(
+    () => app.history.redo({ scope: 'CreatedRedoDenied:created-1', principal: user, session, actionId: 'redo-denied-redo', revision: before.revision }),
+    /forbidden/,
+  );
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM CreatedRedoDenied WHERE id = ?').get('created-1').count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'redo-denied-redo'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = 'redo-denied-redo'").get().count, 0);
+  assert.deepEqual(await app.history.cursor({ scope: 'CreatedRedoDenied:created-1', principal: user, session }), before);
 });
 
 test('ordinary generated remove admits the target row before durable writes', async (t) => {
@@ -185,15 +225,22 @@ test('ordinary generated remove admits the target row before durable writes', as
   t.after(async () => { await app.shutdown(); db.close(); });
   await app.start();
   await app.dispatch({ actionId: 'remove-admission-create', type: 'CreatedRemoveAdmission.create', payload: { id: 'created-1', body: 'secret', projectId: 'p1' }, principal: user });
+  const beforeDenied = await app.history.cursor({ scope: 'CreatedRemoveAdmission:created-1', principal: user, session });
   app.entities.get('CreatedRemoveAdmission').grant = () => [scope(() => everyone()).can(() => deny('revoked'))];
-  const denied = await app.dispatch({ actionId: 'remove-admission-denied', type: 'CreatedRemoveAdmission.remove', payload: { id: 'created-1' }, principal: user });
+  const denied = await app.dispatch({ actionId: 'remove-admission-denied', type: 'CreatedRemoveAdmission.remove', payload: {
+    id: 'created-1', before: { id: 'created-1', body: 'spoof' }, history: { operation: 'undo' },
+  }, principal: user, scope: 'CreatedRemoveAdmission:created-1', history: { session } });
   assert.equal(denied.ok, false);
   assert.equal(denied.failure.category, 'denied');
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM CreatedRemoveAdmission WHERE id = ?').get('created-1').count, 1);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'remove-admission-denied'").get().count, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = 'remove-admission-denied'").get().count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _DeletedRowAnchor WHERE entity = ? AND id = ?').get('CreatedRemoveAdmission', 'created-1').count, 0);
+  assert.deepEqual(await app.history.cursor({ scope: 'CreatedRemoveAdmission:created-1', principal: user, session }), beforeDenied);
   app.entities.get('CreatedRemoveAdmission').grant = () => grant(read, write, subscribe);
-  assert.equal((await app.dispatch({ actionId: 'remove-admission-allowed', type: 'CreatedRemoveAdmission.remove', payload: { id: 'created-1' }, principal: user })).ok, true);
+  const allowed = await app.dispatch({ actionId: 'remove-admission-allowed', type: 'CreatedRemoveAdmission.remove', payload: { id: 'created-1' }, principal: user, scope: 'CreatedRemoveAdmission:created-1', history: { session } });
+  assert.equal(allowed.ok, true);
+  assert.deepEqual(await app.history.cursor({ scope: 'CreatedRemoveAdmission:created-1', principal: user, session }), beforeDenied);
 });
 
 test('conditional generated create rolls stale lifecycle history back and fails closed for erased facts', async (t) => {
@@ -210,9 +257,17 @@ test('conditional generated create rolls stale lifecycle history back and fails 
   assert.equal(stale.failure.category, 'conflict');
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'conflict-undo'").get().count, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = 'conflict-undo'").get().count, 0);
+  assert.deepEqual(await app.history.cursor({ scope: 'CreatedConflict:created-1', principal: user, session }), cursor);
+  assert.equal(db.prepare('SELECT body FROM CreatedConflict WHERE id = ?').get('created-1').body, 'changed');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _PrivateActionFact WHERE actionId = 'conflict-create'").get().count, 1);
   db.prepare("DELETE FROM _PrivateActionFact WHERE actionId = 'conflict-create'").run();
   const erasedCursor = await app.history.cursor({ scope: 'CreatedConflict:created-1', principal: user, session });
   await assert.rejects(() => app.history.undo({ scope: 'CreatedConflict:created-1', principal: user, session, actionId: 'erased-undo', revision: erasedCursor.revision }), /missing or erased/);
+  assert.deepEqual(await app.history.cursor({ scope: 'CreatedConflict:created-1', principal: user, session }), erasedCursor);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'erased-undo'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = 'erased-undo'").get().count, 0);
+  assert.equal(db.prepare('SELECT body FROM CreatedConflict WHERE id = ?').get('created-1').body, 'changed');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _PrivateActionFact WHERE actionId = 'conflict-create'").get().count, 0);
 });
 
 test('conditional generated create reauthorizes the current row before private fact access', async (t) => {
@@ -226,6 +281,9 @@ test('conditional generated create reauthorizes the current row before private f
   const cursor = await app.history.cursor({ scope: 'CreatedDenied:created-1', principal: user, session });
   await assert.rejects(() => app.history.undo({ scope: 'CreatedDenied:created-1', principal: user, session, actionId: 'denied-undo', revision: cursor.revision }), /forbidden/);
   assert.equal(db.prepare('SELECT body FROM CreatedDenied WHERE id = ?').get('created-1').body, 'secret');
+  assert.deepEqual(await app.history.cursor({ scope: 'CreatedDenied:created-1', principal: user, session }), cursor);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'denied-undo'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = 'denied-undo'").get().count, 0);
 });
 
 test('conditional generated create records projected defaults for omitted optional fields', async (t) => {
