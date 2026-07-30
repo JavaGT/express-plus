@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   assertNoFrameworkTableSql,
+  claimedBlobLifecycle,
   createLiveDelivery,
   declaredTableNames,
   frameworkTableNames,
@@ -14,6 +15,10 @@ import { executeFrameworkDDL } from '../src/ddl.mjs';
 import { scope } from '../src/scope.mjs';
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+test('server exports the claimed blob lifecycle facade', () => {
+  assert.equal(typeof claimedBlobLifecycle, 'function');
+});
 
 function appendEvent(db, scope, seq, type, data = {}) {
   db.prepare(`

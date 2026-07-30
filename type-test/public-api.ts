@@ -18,10 +18,10 @@ import {
   assertNoFrameworkTableSql, createBlobStore, createInvitationApi, createJobQueue, createLiveDelivery, declaredBlobField, declaredTableNames,
   frameworkTableNames, readCommittedCursor,
   runMigrations, describeEntityStorage, describeSqliteStorage,
-  operationalConsumerAdmin, createPostCommitEffectRunner,
+  claimedBlobLifecycle, operationalConsumerAdmin, createPostCommitEffectRunner,
   type BlobStore, type SqliteStorageDescription,
   type Invitation, type JobQueue, type JobRow, type LiveDelivery, type LiveDeliveryActivation, type LiveDeliveryBootstrap, type LiveDeliveryCatchup, type LiveDeliveryEnvelope as ServerLiveDeliveryEnvelope, type Migration, type UserPrincipal,
-  type WorkbenchDatabase, type OperationalConsumerAdmin, type OperationalFailure, type PostCommitEffectRunner,
+  type ClaimedBlobLifecycle, type ClaimedBlobLifecycleState, type WorkbenchDatabase, type OperationalConsumerAdmin, type OperationalFailure, type PostCommitEffectRunner,
 } from 'workbench/server';
 import {
   LiveChannel, LiveList, WorkbenchFailureError, createAuthClient, createLiveStore,
@@ -38,6 +38,11 @@ import {
   type AnnotatedTextFieldHandle, type AnnotatedTextOptions,
 } from 'workbench/annotated-text';
 import { DatabaseSync } from 'node:sqlite';
+
+declare const claimedBlobApp: WorkbenchApp;
+const claimedBlobApi: ClaimedBlobLifecycle = claimedBlobLifecycle(claimedBlobApp);
+const claimedBlobState: ClaimedBlobLifecycleState = claimedBlobApi.inspect('blob-1');
+if (claimedBlobState.kind === 'available') claimedBlobState.readRange([0, 1]);
 
 const annotatedTextOptions: AnnotatedTextOptions = {
   project: 'project', owner: 'owner', block: {},

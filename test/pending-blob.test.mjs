@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import workbench, { principal } from '../src/index.mjs';
-import { pendingBlobStager, declaredBlobField, readClaimedBlob } from '../src/server.mjs';
+import { pendingBlobStager, declaredBlobField, readClaimedBlob, claimedBlobLifecycle } from '../src/server.mjs';
 
 test('pending blob staging retains Scope canonical key and immutable digest identity', async (t) => {
   const db = new DatabaseSync(':memory:');
@@ -23,6 +23,43 @@ test('pending blob staging retains Scope canonical key and immutable digest iden
   assert.equal(staged.byteLength, 3);
   assert.match(staged.contentDigest, /^[a-f0-9]{64}$/);
   await assert.rejects(stager.stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([4]) }), /PENDING_KEY_EXISTS/);
+});
+
+test('claimed blob lifecycle exposes pending, available, failed, and missing states', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const root = mkdtempSync(path.join(tmpdir(), 'workbench-pending-'));
+  const app = workbench({
+    db,
+    blobs: { root },
+    blobLifecycle: { fields: [declaredBlobField({ actionName: 'File.upload', field: 'blob', resourceField: 'id' })], pendingTtlMs: 60_000, adoptedRecoveryTtlMs: 0 },
+  });
+  await app.start();
+  t.after(async () => { await app.shutdown(); db.close(); rmSync(root, { recursive: true, force: true }); });
+  const facade = claimedBlobLifecycle(app);
+  const actor = principal({ type: 'user', id: 'u1' });
+  const staged = await pendingBlobStager(app, actor).stage({ scopeId: 'project:p1', resourceId: 'f1', bytes: new Uint8Array([1, 2, 3]) });
+  const claimed = await app.pendingBlobLifecycle.validateClaim({
+    claim: staged.claim,
+    field: 'blob',
+    resourceId: 'f1',
+    actionName: 'File.upload',
+    actionId: 'upload-1',
+    authenticatedPrincipal: actor,
+    scopeId: 'project:p1',
+    committedEventId: 'event-1',
+  });
+  const blobId = claimed.blobId;
+  assert.deepEqual(facade.inspect(blobId), { kind: 'pending' });
+  await Promise.all([facade.reconcile(), facade.reconcile()]);
+  const available = facade.inspect(blobId);
+  assert.equal(available.kind, 'available');
+  assert.deepEqual(available.readRange(), Buffer.from([1, 2, 3]));
+  assert.deepEqual(available.readRange([1, 3]), Buffer.from([2, 3]));
+
+  writeFileSync(app.blobs.pathFor(blobId), Buffer.from([9]));
+  assert.deepEqual(facade.inspect(blobId), { kind: 'failed' });
+  db.prepare('DELETE FROM _PendingBlob WHERE blobId = ?').run(blobId);
+  assert.deepEqual(facade.inspect(blobId), { kind: 'missing' });
 });
 
 test('declared blob claims are validated and adopted atomically with the registered action', async (t) => {

@@ -160,23 +160,29 @@ export function createPendingBlobLifecycle(app, options) {
       }
     });
   }
-  function readClaimed(blobId) {
+  function readClaimed(blobId, range) {
     const row = app.db.prepare("SELECT * FROM _PendingBlob WHERE blobId = ? AND status IN ('claimed', 'finalized')").get(blobId);
     if (!row) failure('BLOB_UNAVAILABLE');
+    let bytes;
     try {
-      const bytes = app.blobs.readRange(blobId);
+      bytes = app.blobs.readRange(blobId);
       if (bytes.length !== row.byteLength || createHash('sha256').update(bytes).digest('hex') !== row.contentDigest) throw new Error('BLOB_UNAVAILABLE');
-      return bytes;
     } catch (error) {
       markRecoveryFailure(row, error);
       failure('BLOB_UNAVAILABLE');
     }
+    return range === undefined ? bytes : app.blobs.readRange(blobId, range);
+  }
+  function status(blobId) {
+    const row = app.db.prepare('SELECT status FROM _PendingBlob WHERE blobId = ?').get(blobId);
+    return row?.status ?? null;
   }
   return Object.freeze({
     stage,
     validateClaim,
     requestDeletion,
     readClaimed,
+    status,
     reconcile,
     reap,
     // Finalization is package-owned post-commit work. Reconciliation scans the
@@ -196,4 +202,30 @@ export function pendingBlobStager(workbench, authenticatedPrincipal) {
 export function readClaimedBlob(workbench, blobId) {
   if (!workbench.pendingBlobLifecycle) throw new Error('blobLifecycle is not configured');
   return workbench.pendingBlobLifecycle.readClaimed(blobId);
+}
+
+export function claimedBlobLifecycle(workbench) {
+  const lifecycle = workbench?.pendingBlobLifecycle;
+  if (!lifecycle) throw new Error('blobLifecycle is not configured');
+
+  function inspect(blobId) {
+    const status = lifecycle.status(blobId);
+    if (status === null || status === 'deleted') return Object.freeze({ kind: 'missing' });
+    if (status === 'recovery-failed') return Object.freeze({ kind: 'failed' });
+    if (status !== 'finalized') return Object.freeze({ kind: 'pending' });
+    try {
+      lifecycle.readClaimed(blobId);
+      return Object.freeze({
+        kind: 'available',
+        readRange: (range) => lifecycle.readClaimed(blobId, range),
+      });
+    } catch {
+      return Object.freeze({ kind: 'failed' });
+    }
+  }
+
+  return Object.freeze({
+    inspect,
+    reconcile: () => workbench.writeQueue.run(() => lifecycle.reconcile()),
+  });
 }

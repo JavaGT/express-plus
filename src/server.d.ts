@@ -43,6 +43,16 @@ export type StagedPendingBlob = Readonly<{ claim: PendingBlobClaim; pendingKey: 
 export interface PendingBlobStager { stage(request: StagePendingBlobRequest): Promise<StagedPendingBlob>; }
 export function pendingBlobStager(workbench: import('../index.d.ts').WorkbenchApp, authenticatedPrincipal: Principal): PendingBlobStager;
 export function readClaimedBlob(workbench: import('../index.d.ts').WorkbenchApp, blobId: ClaimedBlobRef['blobId']): Buffer;
+export type ClaimedBlobLifecycleState =
+  | Readonly<{ kind: 'available'; readRange(range?: readonly [number, number]): Buffer }>
+  | Readonly<{ kind: 'pending' }>
+  | Readonly<{ kind: 'failed' }>
+  | Readonly<{ kind: 'missing' }>;
+export interface ClaimedBlobLifecycle {
+  inspect(blobId: string): ClaimedBlobLifecycleState;
+  reconcile(): Promise<void>;
+}
+export function claimedBlobLifecycle(workbench: import('../index.d.ts').WorkbenchApp): ClaimedBlobLifecycle;
 export type DeclaredBlobField = import('../index.d.ts').DeclaredBlobField;
 export function declaredBlobField(field: DeclaredBlobField): DeclaredBlobField;
 
