@@ -24,6 +24,11 @@ parent ID, and that related row passes its ordinary recipient `scopeFilter` and
 projected. A missing, deleted, unauthorized, malformed, or authorization-error
 related row excludes the child.
 
+The first required relation for an entity establishes an entity-wide exposure
+invariant. Every other snapshot path exposing that entity must carry the same
+requirement. The entity cannot be a standalone snapshot anchor because that path
+has no trusted aggregate parent against which to prove co-ownership.
+
 The compiler must prove from registered declarations and physical foreign keys
 that `childRef` belongs to the candidate entity and is exactly one `ref(Related.id)`,
 and that `parentRef` belongs to that Related entity and is exactly one ref to the

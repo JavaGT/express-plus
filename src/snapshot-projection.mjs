@@ -157,16 +157,33 @@ function compileTombstones(declaration, resolveEntity) {
     if (terminalScope && targetName(scopeId) !== terminalScope.name) throw new TypeError(`snapshot polymorphic tombstones scopeId must be a declared ref(${terminalScope.name})`);
     scopeTarget = terminalScope ?? entityOf(scopeId.target);
     if (!isRegisteredEntity(scopeTarget, resolveEntity)) throw new TypeError(`snapshot tombstone scope '${scopeTarget.name}' must be registered`);
-    // A terminal identity preserves the declared owner scope, not necessarily
-    // the target's identity. A same-named target field explicitly identifies
-    // that owner; identity-root targets have no such field and use their id.
-    const terminalOwner = terminalScope && Object.hasOwn(target.fields, rule.scopeId)
-      ? [[rule.scopeId, target.fields[rule.scopeId]]]
-      : null;
-    if (terminalOwner && (terminalOwner[0][1]?.kind !== 'value' || terminalOwner[0][1].type !== 'ref')) {
-      throw new TypeError(`snapshot tombstone target '${target.name}' owner scope '${rule.scopeId}' must be a declared ref`);
+    // Terminal roots use their identity. Owned targets must name their owner
+    // reference explicitly; a coincidentally same-named scalar is not authority.
+    const sameNamedOwner = target.fields[rule.scopeId];
+    const compatibleOwner = terminalScope && sameNamedOwner?.kind === 'value' && sameNamedOwner.type === 'ref'
+      ? rule.scopeId
+      : undefined;
+    const explicitOwner = rule.targetScopeId ?? compatibleOwner;
+    if (rule.targetScopeId !== undefined && !terminalScope) {
+      throw new TypeError('snapshot tombstone targetScopeId is only valid with terminalScope');
     }
-    const ownerFields = terminalOwner ? [rule.scopeId] : terminalScope || scopeTarget === target ? ['id'] : Object.entries(target.fields)
+    if (explicitOwner !== undefined) {
+      const owner = target.fields[explicitOwner];
+      if (rule.targetScopeEntity !== target.name) {
+        throw new TypeError(`snapshot tombstone target owner scope must belong to ${target.name}`);
+      }
+      if (owner?.kind !== 'value' || owner.type !== 'ref') {
+        throw new TypeError(`snapshot tombstone target '${target.name}' owner scope '${explicitOwner}' must be a declared ref`);
+      }
+      const declaredOwnerScope = rule.targetScope === undefined ? null : entityOf(rule.targetScope);
+      if (rule.targetScopeId !== undefined && !declaredOwnerScope) {
+        throw new TypeError('snapshot tombstone targetScopeId requires targetScope');
+      }
+      if (declaredOwnerScope && (!isRegisteredEntity(declaredOwnerScope, resolveEntity) || targetName(owner) !== declaredOwnerScope.name)) {
+        throw new TypeError(`snapshot tombstone target '${target.name}' owner scope '${explicitOwner}' must reference registered ${declaredOwnerScope.name}`);
+      }
+    }
+    const ownerFields = explicitOwner ? [explicitOwner] : terminalScope || scopeTarget === target ? ['id'] : Object.entries(target.fields)
       .filter(([, field]) => field?.kind === 'value' && field.type === 'ref' && targetName(field) === scopeTarget.name)
       .map(([name]) => name);
     if (ownerFields.length !== 1) throw new TypeError(`snapshot tombstone target '${target.name}' must have exactly one declared ref(${scopeTarget.name}) owner scope`);
@@ -251,6 +268,44 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
     if (tombstones) physicalForeignKey(db, tombstones.entity, tombstones.scopeId ?? tombstones.entityId, tombstones.scopeTarget ?? tombstones.target, { retainTarget: Boolean(tombstones.terminalScope) });
     compiled.set(anchor.name, Object.freeze({ anchor, output, tombstone: tombstones }));
   }
+  // A related-row requirement is an entity exposure invariant, not a property
+  // of one convenient aggregate path. Once declared for an entity, every
+  // projection path must carry the identical requirement and that entity cannot
+  // be requested as a standalone anchor (where no trusted parent exists).
+  const requiredEntities = new Map();
+  const requirementKey = (entry) => entry.require
+    ? `${entry.fk}\u0000${entry.require.entity.name}\u0000${entry.require.childRef}\u0000${entry.require.fk}`
+    : null;
+  const visitEntries = (branch, visit) => branch.entries.forEach((entry) => {
+    if (entry.entity) visit(entry);
+    if (entry.nested) visitEntries(entry.nested, visit);
+  });
+  for (const declaration of compiled.values()) visitEntries(declaration.output, (entry) => {
+    if (!entry.require) return;
+    const key = requirementKey(entry);
+    const prior = requiredEntities.get(entry.entity.name);
+    if (prior && prior !== key) throw new TypeError(`snapshot entity '${entry.entity.name}' declares conflicting required relations`);
+    requiredEntities.set(entry.entity.name, key);
+  });
+  for (const [name, declaration] of compiled) {
+    if (requiredEntities.has(name)) throw new TypeError(`snapshot entity '${name}' has a required relation and cannot be a standalone anchor`);
+    visitEntries(declaration.output, (entry) => {
+      const required = requiredEntities.get(entry.entity.name);
+      if (required && requirementKey(entry) !== required) {
+        throw new TypeError(`snapshot entity '${entry.entity.name}' must use its declared required relation on every exposure path`);
+      }
+    });
+    const rejectRequiredUsers = (branch) => branch.entries.forEach((entry) => {
+      if (entry.kind === 'user' && requiredEntities.has('User')) {
+        throw new TypeError("snapshot entity 'User' must use its declared required relation on every exposure path");
+      }
+      if (entry.nested) rejectRequiredUsers(entry.nested);
+    });
+    rejectRequiredUsers(declaration.output);
+  }
+  Object.defineProperty(compiled, 'requiredEntities', {
+    value: Object.freeze(new Set(requiredEntities.keys())), enumerable: false,
+  });
   const tombstones = Object.freeze([...compiled.values()].map((declaration) => declaration.tombstone).filter(Boolean));
   for (const [name, declaration] of compiled) compiled.set(name, Object.freeze({ ...declaration, tombstones }));
   return compiled;

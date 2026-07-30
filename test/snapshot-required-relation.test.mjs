@@ -44,7 +44,7 @@ function setup({ mayVerb = () => true, relatedScope = () => ({ sql: 't0.visible 
   const codeBound = bound(code, () => ({ sql: '1=1', params: {} }), (row) => ({ ...row }));
   const tombstoneBound = bound(tombstone, () => ({ sql: '1=1', params: {} }), (row) => ({ ...row }));
   const required = snapshot.related(code.field.codebookId, { via: codebook.field.projectId });
-  const visibility = snapshot.tombstones(codebook, { entity: tombstone, entityId: tombstone.field.entityId, scopeId: tombstone.field.projectId, terminalScope, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'codebook', hidden: ['deleted'] });
+  const visibility = snapshot.tombstones(codebook, { entity: tombstone, entityId: tombstone.field.entityId, scopeId: tombstone.field.projectId, targetScopeId: codebook.field.projectId, targetScope: project, terminalScope, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'codebook', hidden: ['deleted'] });
   const output = snapshot.object({
     codes: snapshot.many(code, { via: code.field.projectId, require: required, select: snapshot.select(code.field.label) }),
     keyed: snapshot.keyed(code, { via: code.field.projectId, require: required, select: snapshot.select(code.field.label) }),
@@ -119,5 +119,38 @@ test('required relation declaration rejects open grammar, one, wrong handles, un
   const brokenBound = { ...broken, declaration: broken, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
   const withBroken = (name, declaration) => declaration === broken || name === 'Broken' ? brokenBound : entities(name, declaration);
   assert.throws(() => createLiveDelivery({ db, entities: withBroken, mayVerb: () => true, snapshots: [snapshot(project, { output: snapshot.object({ codes: snapshot.many(broken, { via: broken.field.projectId, require: snapshot.related(broken.field.codebookId, { via: codebook.field.projectId }), select: snapshot.select(broken.field.label) }) }) })] }), /physical FOREIGN KEY/);
+  db.close();
+});
+
+test('a required relation constrains every exposure path and forbids standalone anchors', () => {
+  const { db, project, code, required, entities } = setup();
+  const secured = snapshot.many(code, { via: code.field.projectId, require: required, select: snapshot.select(code.field.label) });
+  const unsecured = snapshot.many(code, { via: code.field.projectId, select: snapshot.select(code.field.label) });
+  assert.throws(() => createLiveDelivery({
+    db, entities, mayVerb: () => true,
+    snapshots: [
+      snapshot(project, { output: snapshot.object({ secured, unsecured }) }),
+    ],
+  }), /must use its declared required relation on every exposure path/);
+  assert.throws(() => createLiveDelivery({
+    db, entities, mayVerb: () => true,
+    snapshots: [
+      snapshot(project, { output: snapshot.object({ secured }) }),
+      snapshot(code, { output: snapshot.object({ label: snapshot.select(code.field.label) }) }),
+    ],
+  }), /cannot be a standalone anchor/);
+  db.close();
+});
+
+test('a required relation denies undeclared direct bootstrap, catch-up, and subscription', async () => {
+  const { db, live } = setup();
+  assert.deepEqual(await live.bootstrap({ principal: {}, scope: 'Code:ok' }), { kind: 'revoked' });
+  assert.deepEqual(await live.catchup({ principal: {}, scope: 'Code:ok', after: 0 }), { kind: 'revoked' });
+  let revoked = false;
+  const controller = new AbortController();
+  const subscription = await live.subscribe({ principal: {}, scope: 'Code:ok', after: 0, signal: controller.signal, revoke: () => { revoked = true; } });
+  assert.equal(revoked, true);
+  assert.equal(await subscription.activate(), undefined);
+  controller.abort();
   db.close();
 });

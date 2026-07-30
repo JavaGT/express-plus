@@ -58,7 +58,7 @@ export function user({ via } = {}) { return node('user', { via: refOf(via) }); }
 
 // This is intentionally a closed visibility declaration: no callbacks, SQL, or
 // arbitrary checks can influence which recipient rows are hidden.
-export function tombstones(target, { entity, entityId, scopeId, terminalScope, kind, state, kindValue, hidden } = {}) {
+export function tombstones(target, { entity, entityId, scopeId, targetScopeId, targetScope, terminalScope, kind, state, kindValue, hidden } = {}) {
   if (typeof kindValue !== 'string' || kindValue.length === 0) throw new TypeError('tombstones requires a literal kindValue');
   if (!Array.isArray(hidden) || hidden.length === 0 || hidden.some((value) => typeof value !== 'string' || value.length === 0)) {
     throw new TypeError('tombstones requires one or more literal hidden states');
@@ -66,6 +66,9 @@ export function tombstones(target, { entity, entityId, scopeId, terminalScope, k
   return node('tombstones', {
     target: entityOf(target), entity: entityOf(entity), entityId: refOf(entityId, 'tombstones entityId'),
     scopeId: scopeId === undefined ? undefined : refOf(scopeId, 'tombstones scopeId'),
+    targetScopeId: targetScopeId === undefined ? undefined : refOf(targetScopeId, 'tombstones targetScopeId'),
+    targetScopeEntity: targetScopeId?.entityName,
+    targetScope: targetScope === undefined ? undefined : entityOf(targetScope),
     terminalScope: terminalScope === undefined ? undefined : entityOf(terminalScope),
     kindField: refOf(kind, 'tombstones kind'), state: refOf(state, 'tombstones state'), kindValue,
     hidden: Object.freeze([...hidden]),

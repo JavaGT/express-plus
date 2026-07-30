@@ -14,10 +14,11 @@ permanent-erasure contract physically removes that target may instead declare
   `NO ACTION`.
 - The terminal identity and tombstone entity are read-internal and cannot be a
   snapshot anchor or output relation.
-- Snapshot matching compares the opaque scope identity to the target's declared
-  owner reference with the same field name as `scopeId` (for example,
-  `Codebook.projectId`). Identity-root targets without that field compare their
-  own `id`. A same-named target field must be a declared ref; malformed owner
+- Snapshot matching compares the opaque scope identity to the target's `id` for
+  identity roots. An owned target explicitly declares `targetScopeId` and its
+  `targetScope` entity (for example, `Codebook.projectId` and `Project`); the
+  field must be a declared ref to that registered entity. A coincidentally
+  same-named scalar is never inferred as ownership. Malformed explicit owner
   declarations fail closed. The application must create the terminal identity
   before its first tombstone and retain it while tombstones refer to it.
 - A terminal identity contains no authorization state or erased payload. It is

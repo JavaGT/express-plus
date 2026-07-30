@@ -734,7 +734,7 @@ export interface SnapshotGrammar {
   count<Row extends object>(entity: WorkbenchEntity<Row>, options: { via: FieldHandle; require?: SnapshotRelated }): SnapshotRelation;
   related(childRef: FieldHandle, options: { via: FieldHandle }): SnapshotRelated;
   user(options: { via: FieldHandle }): SnapshotUser;
-  tombstones<Row extends object>(target: WorkbenchEntity<Row>, options: { entity: WorkbenchEntity; entityId: FieldHandle; scopeId?: FieldHandle; terminalScope?: WorkbenchEntity; kind: FieldHandle; state: FieldHandle; kindValue: string; hidden: readonly string[] }): SnapshotTombstones;
+  tombstones<Row extends object>(target: WorkbenchEntity<Row>, options: { entity: WorkbenchEntity; entityId: FieldHandle; scopeId?: FieldHandle; targetScopeId?: FieldHandle; targetScope?: WorkbenchEntity; terminalScope?: WorkbenchEntity; kind: FieldHandle; state: FieldHandle; kindValue: string; hidden: readonly string[] }): SnapshotTombstones;
   include(shape: Readonly<Record<string, SnapshotSelect | SnapshotRelation>>): SnapshotOutput;
   orderBy(field: FieldHandle, direction?: 'asc' | 'desc'): SnapshotOrder;
 }
