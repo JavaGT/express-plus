@@ -38,7 +38,7 @@ function collectAppEntities(app) {
   const entities = new Map(app.entities ?? []);
   for (const entity of entities.values()) {
     Object.assign(handlers, entity.crudHandlers);
-    projections.push(entity.projection);
+    projections.push(...(entity.projections ?? [entity.projection]));
     // Generated handler policy is explicit metadata, never inferred from names.
     for (const [actionType, policy] of Object.entries(entity.crudHandlers?.[CRUD_CURSOR_POLICY] ?? {})) {
       cursorPolicy.set(actionType, policy);
@@ -399,6 +399,10 @@ function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsu
 
 export function buildKernel(app) {
   const { handlers, projections, entities, cursorPolicy } = collectAppEntities(app);
+  const generatedHistoryActions = {};
+  for (const entity of entities.values()) {
+    if (entity.historyActionRule) generatedHistoryActions[`${entity.name}.update`] = entity.historyActionRule;
+  }
   const sessionEntity = entities.get(Session.name);
   if (sessionEntity && app._sessionSchedule) {
     Object.defineProperty(sessionEntity, 'schedule', {
@@ -449,7 +453,7 @@ export function buildKernel(app) {
     operationalConsumer: operational.declared.length ? operational.consumer : null,
   });
   app.postCommitConsumerDescriptors = postCommitConsumerDescriptors;
-  const privateFactProjections = projections.filter((projection) => projection.privateFact === true);
+  const privateFactProjections = projections.filter((projection) => projection.privateFact === true && projection.replay !== false);
   app.replayPrivateFactProjections = () => app.writeQueue.run(
     () => txn(app.db, () => replayPrivateFactProjections(app.db, privateFactProjections)),
   );
@@ -472,7 +476,15 @@ export function buildKernel(app) {
     handlers,
     authorize: (context) => {
       const declaration = registeredActions.get(context.type);
-      if (!declaration) return true;
+      if (!declaration) {
+        const [entityName, verb] = String(context.type).split('.');
+        const entity = verb === 'update' ? app.entities?.get(entityName) : null;
+        if (!entity?.conditionalHistory) return true;
+        const id = context.payload?.id;
+        if (typeof id !== 'string' || id.length === 0) return false;
+        const row = entity.findById(id, context.principal);
+        return !!row && mayRow(entity, 'update', row, context.principal);
+      }
       const authorize = isAuthorizedRows(declaration.authorize)
         ? bindAuthorizedRows(declaration.authorize, app)
         : declaration.authorize;
@@ -480,6 +492,7 @@ export function buildKernel(app) {
     },
     db: app.db,
     history: app._history,
+    historyActions: generatedHistoryActions,
     cursorPolicy,
     annotatedHistory: Object.freeze({ entities: annotatedEntities, actionTypes: annotatedActionTypes }),
     pipeline: durableMutationVariant({

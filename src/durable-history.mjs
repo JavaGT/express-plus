@@ -167,7 +167,7 @@ export function durableHistory({ authorize, actions = {} } = {}) {
   return Object.freeze({ [HISTORY_DESCRIPTOR]: true, authorize, actions: Object.freeze({ ...actions }) });
 }
 
-export function createDurableHistoryRuntime({ db, descriptor, dispatch, dispatchBatch, authorize, cursorPolicy, annotatedHistory = null }) {
+export function createDurableHistoryRuntime({ db, descriptor, generatedActions = {}, dispatch, dispatchBatch, authorize, cursorPolicy, annotatedHistory = null }) {
   if (!db) throw new Error('durable history requires a durable database');
   if (!descriptor?.[HISTORY_DESCRIPTOR]) {
     throw new TypeError('history must be created with durableHistory(...)');
@@ -182,7 +182,19 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, dispatch
       }
     }
   }
+  if (!generatedActions || typeof generatedActions !== 'object' || Array.isArray(generatedActions)) {
+    throw new TypeError('generated history actions must be an object');
+  }
+  for (const [type, rule] of Object.entries(generatedActions)) {
+    if (!rule || typeof rule !== 'object' || typeof rule.inverse !== 'function' || typeof rule.redo !== 'function') {
+      throw new TypeError(`generated history action '${type}' is invalid`);
+    }
+    if (descriptor.actions[type]) {
+      throw new Error(`generated history action '${type}' cannot also declare a durableHistory rule`);
+    }
+  }
   const resolvedPolicy = cursorPolicy ?? new Map();
+  const rules = Object.freeze({ ...generatedActions, ...descriptor.actions });
   const annotatedEntities = annotatedHistory?.entities ?? new Set();
   const annotatedActionTypes = annotatedHistory?.actionTypes ?? new Set();
 
@@ -216,7 +228,7 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, dispatch
   }
 
   function cursorPolicyFor(type) {
-    if (!descriptor.actions[type]) return 'excluded';
+    if (!rules[type]) return 'excluded';
     return resolvedPolicy.get(type) ?? 'eligible';
   }
 
@@ -347,7 +359,7 @@ export function createDurableHistoryRuntime({ db, descriptor, dispatch, dispatch
     if (!receipt) throw new Error(`history action '${targetId}' is no longer retained`);
     if (receiptContainsAnnotatedText(receipt)) throw forbidden();
     const action = actionFromRow(db, receipt);
-    const rule = descriptor.actions[action.type];
+    const rule = rules[action.type];
     if (!rule) throw conflict(`history action '${action.type}' is not undoable`);
     // Re-authorize the original canonical action before private material is
     // loaded or supplied to application translation code.

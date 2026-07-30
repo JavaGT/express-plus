@@ -39,7 +39,7 @@ import { effectEntries, validateEffectDeclaration } from '../effect-compiler.mjs
 import { triggerList } from '../schedule.mjs';
 import { compileMembershipAuthz } from '../auth/membership.mjs';
 import { collectSideTableStrategies } from '../side-table-strategy.mjs';
-import { createEntityProjection } from './projection.mjs';
+import { createEntityProjection, createConditionalHistoryProjection } from './projection.mjs';
 import { createCrudHandlers, materializeCreateDefaults } from './crud.mjs';
 import { installEntityQueries } from './query.mjs';
 import { validateScheduleTrigger, autoStateScheduleTrigger, stateEffectEntries, assertSqlIdentifier, mintToken } from './schedule-compile.mjs';
@@ -52,7 +52,7 @@ import { getAnnotatedTextCompiledMetadata } from '../annotated-text-field.mjs';
 // compiler owns, which silently drops the field (fail closed).
 const RESERVED_DECLARATION_SLOTS = new Set([
   'fields', 'grant', 'checks', 'routes', 'create', 'effects', 'admitsEffects',
-  'schedule', 'simulation', 'gate', 'on', 'membership', 'field',
+  'schedule', 'simulation', 'gate', 'on', 'membership', 'field', 'history',
 ]);
 
 function looksLikeFieldDescriptor(value) {
@@ -77,7 +77,11 @@ export function entity(name, declaration = {}) {
     }
   }
 
-  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {} } = declaration;
+  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl } = declaration;
+  if (historyDecl !== undefined && (typeof historyDecl !== 'object' || historyDecl === null || Array.isArray(historyDecl) || Object.keys(historyDecl).some((key) => key !== 'update') || (historyDecl.update !== undefined && historyDecl.update !== 'conditional'))) {
+    throw new Error(`entity('${name}') history must be { update: 'conditional' }`);
+  }
+  const conditionalHistory = historyDecl?.update === 'conditional';
 
   // The entity name becomes a table name interpolated into SQL — validate first.
   assertSqlIdentifier('entity', name);
@@ -294,6 +298,9 @@ export function entity(name, declaration = {}) {
   // computed.stored fields: run in-transaction in the projection's apply handler.
   const storedComputedFields = Object.entries(fields)
     .filter(([, d]) => d.kind === 'computed' && d.mode === 'stored');
+  if (conditionalHistory && storedComputedFields.length > 0) {
+    throw new Error(`entity('${name}') conditional update history does not support stored computed fields`);
+  }
 
   // The route gate is the FIRST default-on auth layer (SPEC §6.2, ADR #20). It
   // lives ON the entity declaration next to `grant` — one authorization story —
@@ -338,6 +345,7 @@ export function entity(name, declaration = {}) {
     simulation,
     projectedAsyncFields: Object.freeze(projectedAsyncFields),
     storedComputedFields: Object.freeze(storedComputedFields),
+    conditionalHistory,
   };
 
   const sideTableStrategyEntries = collectSideTableStrategies(fields);
@@ -404,7 +412,11 @@ export function entity(name, declaration = {}) {
     verbs: record.verbs,
     storedComputedFields,
     sideTableStrategyEntries,
+    conditionalHistory,
   });
+  record.projections = conditionalHistory
+    ? Object.freeze([record.projection, createConditionalHistoryProjection({ name, verbs: record.verbs })])
+    : Object.freeze([record.projection]);
 
   record.generateDDL = () => generateDDL(record);
 
@@ -532,7 +544,11 @@ export function entity(name, declaration = {}) {
       boundRecord.delete = (id) => {
         requireDb().prepare(`DELETE FROM ${name} WHERE id = :id`).run({ id });
       };
-      boundRecord.crudHandlers = createCrudHandlers({ record: bound, sideTableStrategyEntries });
+      boundRecord.crudHandlers = createCrudHandlers({ record: bound, sideTableStrategyEntries, conditionalHistory });
+      if (conditionalHistory) boundRecord.historyActionRule = Object.freeze({
+        inverse: ({ action, fact }) => ({ type: `${name}.update`, payload: { id: action.payload.id }, input: { expected: fact.after, replacement: fact.before } }),
+        redo: ({ action, fact }) => ({ type: `${name}.update`, payload: { id: action.payload.id }, input: { expected: fact.before, replacement: fact.after } }),
+      });
       return bound;
     },
   });

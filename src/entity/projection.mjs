@@ -1369,7 +1369,7 @@ function buildProjectedComputeRow(storedRow, fields) {
   return row;
 }
 
-export function createEntityProjection({ name, fields, verbs, storedComputedFields, sideTableStrategyEntries }) {
+export function createEntityProjection({ name, fields, verbs, storedComputedFields, sideTableStrategyEntries, conditionalHistory = false }) {
   return Object.freeze({
     eventTypes: [
       verbs.created.type,
@@ -1460,6 +1460,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
           getLog().debug('dispatch', `${name}.created`, { id: row.id ?? event.data?.id });
         }
       } else if (handle.kind === eventHandle.EventKind.updated) {
+        if (conditionalHistory) return;
         const { id, ...data } = event.data ?? {};
         if (!id) return;
         const updates = [];
@@ -1513,6 +1514,41 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         if (existingRow) captureDeletedRowAnchor(db, name, id, existingRow, event.committedAt);
         db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
         getLog().debug('dispatch', `${name}.removed`, { id });
+      }
+    },
+  });
+}
+
+export function createConditionalHistoryProjection({ name, verbs }) {
+  return Object.freeze({
+    actionType: `${name}.update`,
+    eventTypes: [verbs.updated.type],
+    privateFact: true,
+    replay: false,
+    apply: (event, db, { privateFact }) => {
+      const before = privateFact?.before;
+      const after = privateFact?.after;
+      if (!before || !after || before.id !== after.id || event.data?.id !== before.id) throw new Error(`${name}.update private fact is invalid`);
+      const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
+      if (columns.some((column) => !Object.hasOwn(before, column) || !Object.hasOwn(after, column))) throw new Error(`${name}.update private fact is incomplete`);
+      const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(before.id);
+      if (!current) throw Object.assign(new Error(`${name} ${before.id} not found`), { status: 404 });
+      if (!columns.every((column) => Object.is(current[column], before[column]))) throw Object.assign(new Error(`${name} update conflicts`), { status: 409 });
+      const params = {};
+      const assignments = columns.filter((column) => column !== 'id').map((column) => {
+        params[`after_${column}`] = after[column];
+        return `${column} = :after_${column}`;
+      });
+      const preimage = columns.map((column) => {
+        params[`before_${column}`] = before[column];
+        return `${column} IS :before_${column}`;
+      });
+      const result = db.prepare(`UPDATE ${name} SET ${assignments.join(', ')} WHERE ${preimage.join(' AND ')}`).run(params);
+      if (Number(result.changes) !== 1) {
+        if (!db.prepare(`SELECT 1 FROM ${name} WHERE id = ?`).get(before.id)) {
+          throw Object.assign(new Error(`${name} ${before.id} not found`), { status: 404 });
+        }
+        throw Object.assign(new Error(`${name} update conflicts`), { status: 409 });
       }
     },
   });
