@@ -128,6 +128,28 @@ test('identity-only terminal tombstone scopes retain an enforced FK after target
   const cascadeTombstone = { ...tombstone, name: 'CascadeTombstone' };
   const cascadeDeclaration = snapshot(project, { tombstones: snapshot.tombstones(project, { entity: cascadeTombstone, entityId: cascadeTombstone.field.entityId, scopeId: cascadeTombstone.field.projectId, terminalScope, kind: cascadeTombstone.field.kind, state: cascadeTombstone.field.state, kindValue: 'project', hidden: ['deleted'] }), output: snapshot.object({}) });
   assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', project], ['ProjectErasureIdentity', terminalScope], ['CascadeTombstone', cascadeTombstone]]), mayVerb: () => true, snapshots: [cascadeDeclaration] }), /ON DELETE RESTRICT or NO ACTION/);
+  const malformedProject = { ...project, fields: { ...project.fields, projectId: { kind: 'value', type: 'text' } } };
+  const malformedOwnerDeclaration = snapshot(malformedProject, { tombstones: snapshot.tombstones(malformedProject, { entity: tombstone, entityId: tombstone.field.entityId, scopeId: tombstone.field.projectId, terminalScope, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'project', hidden: ['deleted'] }), output: snapshot.object({}) });
+  assert.throws(() => createLiveDelivery({ db, entities: new Map([['Project', malformedProject], ['ProjectErasureIdentity', terminalScope], ['Tombstone', tombstone]]), mayVerb: () => true, snapshots: [malformedOwnerDeclaration] }), /owner scope 'projectId'.*declared ref/);
+  db.close();
+});
+
+test('terminal self-owner User tombstones compare the retained scope to User.id', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY, name TEXT, displayName TEXT, image TEXT); CREATE TABLE UserErasureIdentity (id TEXT PRIMARY KEY); CREATE TABLE Project (id TEXT PRIMARY KEY, ownerId TEXT REFERENCES User(id)); CREATE TABLE Tombstone (id TEXT PRIMARY KEY, userId TEXT REFERENCES UserErasureIdentity(id) ON DELETE RESTRICT, entityId TEXT, kind TEXT, state TEXT);');
+  db.prepare('INSERT INTO User VALUES (?, ?, ?, ?)').run('u1', 'Ada', 'Ada', null);
+  db.prepare('INSERT INTO UserErasureIdentity VALUES (?)').run('u1');
+  db.prepare('INSERT INTO Project VALUES (?, ?)').run('p1', 'u1');
+  db.prepare('INSERT INTO Tombstone VALUES (?, ?, ?, ?, ?)').run('t1', 'u1', 'u1', 'user', 'deleted');
+  const ownGrant = () => [scope(() => true).can(() => grant(subscribe))];
+  const User = { name: 'User', fields: { name: { kind: 'value', type: 'text' }, displayName: { kind: 'value', type: 'text' }, image: { kind: 'value', type: 'text' } }, field: {}, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const terminalScope = { name: 'UserErasureIdentity', fields: {}, field: { id: { fieldName: 'id' } }, grant: ownGrant, scopeFilter: () => ({ sql: '0=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const project = { name: 'Project', fields: { ownerId: { kind: 'value', type: 'ref', target: User } }, field: { ownerId: { fieldName: 'ownerId' } }, grant: ownGrant, scopeFilter: () => ({ sql: '1=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const tombstone = { name: 'Tombstone', fields: { userId: { kind: 'value', type: 'ref', target: terminalScope }, entityId: { kind: 'value', type: 'text' }, kind: { kind: 'value', type: 'text' }, state: { kind: 'value', type: 'text' } }, field: { userId: { fieldName: 'userId' }, entityId: { fieldName: 'entityId' }, kind: { fieldName: 'kind' }, state: { fieldName: 'state' } }, grant: ownGrant, scopeFilter: () => ({ sql: '0=1', params: {} }), hydrate: (row) => ({ ...row }) };
+  const visibility = snapshot.tombstones(User, { entity: tombstone, entityId: tombstone.field.entityId, scopeId: tombstone.field.userId, terminalScope, kind: tombstone.field.kind, state: tombstone.field.state, kindValue: 'user', hidden: ['deleted'] });
+  const live = createLiveDelivery({ db, entities: new Map([['User', User], ['UserErasureIdentity', terminalScope], ['Project', project], ['Tombstone', tombstone]]), mayVerb: () => true, snapshots: [snapshot(User, { tombstones: visibility, output: snapshot.object({}) }), snapshot(project, { output: snapshot.object({ owner: snapshot.user({ via: project.field.ownerId }) }) })] });
+  assert.equal((await live.bootstrap({ principal: { type: 'user', id: 'other' }, scope: 'Project:p1' })).snapshot.owner, null);
   db.close();
 });
 

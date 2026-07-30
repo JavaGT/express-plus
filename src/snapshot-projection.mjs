@@ -157,8 +157,16 @@ function compileTombstones(declaration, resolveEntity) {
     if (terminalScope && targetName(scopeId) !== terminalScope.name) throw new TypeError(`snapshot polymorphic tombstones scopeId must be a declared ref(${terminalScope.name})`);
     scopeTarget = terminalScope ?? entityOf(scopeId.target);
     if (!isRegisteredEntity(scopeTarget, resolveEntity)) throw new TypeError(`snapshot tombstone scope '${scopeTarget.name}' must be registered`);
-    // A terminal identity survives target erasure, so its key is always target.id.
-    const ownerFields = terminalScope || scopeTarget === target ? ['id'] : Object.entries(target.fields)
+    // A terminal identity preserves the declared owner scope, not necessarily
+    // the target's identity. A same-named target field explicitly identifies
+    // that owner; identity-root targets have no such field and use their id.
+    const terminalOwner = terminalScope && Object.hasOwn(target.fields, rule.scopeId)
+      ? [[rule.scopeId, target.fields[rule.scopeId]]]
+      : null;
+    if (terminalOwner && (terminalOwner[0][1]?.kind !== 'value' || terminalOwner[0][1].type !== 'ref')) {
+      throw new TypeError(`snapshot tombstone target '${target.name}' owner scope '${rule.scopeId}' must be a declared ref`);
+    }
+    const ownerFields = terminalOwner ? [rule.scopeId] : terminalScope || scopeTarget === target ? ['id'] : Object.entries(target.fields)
       .filter(([, field]) => field?.kind === 'value' && field.type === 'ref' && targetName(field) === scopeTarget.name)
       .map(([name]) => name);
     if (ownerFields.length !== 1) throw new TypeError(`snapshot tombstone target '${target.name}' must have exactly one declared ref(${scopeTarget.name}) owner scope`);
