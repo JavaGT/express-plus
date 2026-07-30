@@ -73,6 +73,77 @@ describe('LiveDeliverySession', () => {
     session.close();
   });
 
+  it('settles a committed receipt only after its authoritative echo is folded', async () => {
+    const { session, deliver } = setup();
+    await session.ready;
+
+    const dispatched = await session.dispatch('Value.add', { value: 'own' });
+    let settled = false;
+    void dispatched.settlement.wait().then(() => { settled = true; });
+    await Promise.resolve();
+    assert.equal(settled, false);
+
+    await deliver([event(2, 'unrelated', 'other-action')]);
+    await Promise.resolve();
+    assert.equal(settled, false);
+    await deliver([event(3, 'own', dispatched.opId)]);
+    assert.deepEqual(await dispatched.settlement.wait(), { opId: dispatched.opId, status: 'reconciled' });
+    assert.deepEqual(session.snapshot, { values: ['unrelated', 'own'] });
+    session.close();
+  });
+
+  it('settles immediately when delivery arrives before its sender receipt', async () => {
+    const receipt = deferred();
+    const { session, deliver } = setup({ sendAction: () => receipt.promise });
+    await session.ready;
+
+    const dispatch = session.dispatch('Value.add', { value: 'own' });
+    await deliver([event(2, 'own', 'own-action')]);
+    receipt.resolve({ ok: true, cursor: 2 });
+    const dispatched = await dispatch;
+    assert.deepEqual(await dispatched.settlement.wait(), { opId: 'own-action', status: 'reconciled' });
+    session.close();
+  });
+
+  it('cancels only one settlement waiter without changing the committed operation', async () => {
+    const { session, deliver } = setup();
+    await session.ready;
+    const dispatched = await session.dispatch('Value.add', { value: 'own' });
+    const controller = new AbortController();
+    const cancelled = dispatched.settlement.wait({ signal: controller.signal });
+    controller.abort();
+    assert.deepEqual(await cancelled, { opId: dispatched.opId, status: 'cancelled' });
+    assert.equal(session.pendingCount(), 1);
+
+    await deliver([event(2, 'own', dispatched.opId)]);
+    assert.deepEqual(await dispatched.settlement.wait(), { opId: dispatched.opId, status: 'reconciled' });
+    session.close();
+  });
+
+  it('releases unsettled receipt waiters when access is revoked or the session closes', async () => {
+    const revokedReceipt = deferred();
+    const revoked = setup({ sendAction: () => revokedReceipt.promise });
+    await revoked.session.ready;
+    const pendingRevocation = revoked.session.dispatch('Value.add', { value: 'own' });
+    await Promise.resolve();
+    const revocationSettlement = revoked.session.operations()[0];
+    revoked.revoke({ code: 'access-revoked' });
+    revokedReceipt.resolve({ ok: true });
+    const revokedResult = await pendingRevocation;
+    assert.equal(revokedResult.settlement.opId, revocationSettlement.opId);
+    assert.deepEqual(await revokedResult.settlement.wait(), { opId: revocationSettlement.opId, status: 'revoked' });
+
+    const closeReceipt = deferred();
+    const closed = setup({ sendAction: () => closeReceipt.promise });
+    await closed.session.ready;
+    const pendingClose = closed.session.dispatch('Value.add', { value: 'own' });
+    await Promise.resolve();
+    closed.session.close();
+    closeReceipt.resolve({ ok: true });
+    const closedResult = await pendingClose;
+    assert.deepEqual(await closedResult.settlement.wait(), { opId: closedResult.opId, status: 'closed' });
+  });
+
   it('reuses one package-owned batch action ID after an uncertain transport result', async () => {
     const sent = [];
     let attempts = 0;
@@ -99,10 +170,10 @@ describe('LiveDeliverySession', () => {
       { type: 'Value.add', payload: { value: 'two' } },
     ];
     const first = await batchSession.batch(actions);
-    assert.deepEqual(first, {
-      ok: false, status: 'outcome-unknown', opId: 'batch-action-1',
-      deliveryError: { message: 'network response lost' },
-    });
+    assert.equal(first.ok, false);
+    assert.equal(first.status, 'outcome-unknown');
+    assert.equal(first.opId, 'batch-action-1');
+    assert.deepEqual(first.deliveryError, { message: 'network response lost' });
     assert.equal(batchSession.pendingCount(), 1);
     assert.deepEqual(batchSession.snapshot, { values: ['pending:one', 'pending:two'] });
     actions[0].payload.value = 'changed-after-send';
@@ -112,6 +183,7 @@ describe('LiveDeliverySession', () => {
 
     const retry = await batchSession.retry('batch-action-1');
     assert.equal(retry.ok, true);
+    assert.equal(retry.settlement, first.settlement);
     assert.equal(sent.length, 2);
     assert.equal(sent[0], sent[1], 'the package retains and resends the same frozen batch envelope');
     assert.equal(sent[1].actionId, 'batch-action-1');
@@ -121,6 +193,7 @@ describe('LiveDeliverySession', () => {
     await delivery([event(2, 'committed', 'batch-action-1')]);
     assert.equal(batchSession.pendingCount(), 0);
     assert.deepEqual(batchSession.snapshot, { values: ['committed'] });
+    assert.deepEqual(await first.settlement.wait(), { opId: 'batch-action-1', status: 'reconciled' });
     batchSession.close();
   });
 
@@ -251,7 +324,7 @@ describe('LiveDeliverySession', () => {
       createActionId: () => 'own-composite-action',
     });
     await session.ready;
-    await session.dispatch('Project.rename', {});
+    const dispatched = await session.dispatch('Project.rename', {});
     const reconnect = session.reconnect();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -261,6 +334,7 @@ describe('LiveDeliverySession', () => {
     assert.deepEqual(calls, ['snapshot', 'catchup', 'snapshot']);
     assert.equal(session.pendingCount(), 0);
     assert.deepEqual(session.snapshot, { version: 3 });
+    assert.deepEqual(await dispatched.settlement.wait(), { opId: dispatched.opId, status: 'reconciled' });
     session.close();
   });
 
@@ -331,7 +405,7 @@ describe('LiveDeliverySession', () => {
       createActionId: () => 'own-composite-action',
     });
     await session.ready;
-    await session.dispatch('Project.rename', {});
+    const dispatched = await session.dispatch('Project.rename', {});
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -339,6 +413,7 @@ describe('LiveDeliverySession', () => {
     assert.equal(session.cursor, 10);
     assert.equal(session.pendingCount(), 0);
     assert.deepEqual(session.snapshot, { version: 1 });
+    assert.deepEqual(await dispatched.settlement.wait(), { opId: dispatched.opId, status: 'unavailable' });
     session.close();
   });
 

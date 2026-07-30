@@ -2212,6 +2212,42 @@ export function createLiveDeliverySession({
   const listeners = new Set();
   const operations = new Map();
 
+  function createSettlement(operation) {
+    const waiters = new Set();
+    operation.settlement = Object.freeze({
+      opId: operation.opId,
+      wait({ signal } = {}) {
+        if (operation.settlementOutcome) return Promise.resolve(operation.settlementOutcome);
+        if (signal?.aborted) return Promise.resolve({ opId: operation.opId, status: 'cancelled' });
+        return new Promise((resolve) => {
+          const waiter = { resolve, signal, cancel: null };
+          const cancel = () => {
+            waiters.delete(waiter);
+            signal.removeEventListener('abort', cancel);
+            resolve({ opId: operation.opId, status: 'cancelled' });
+          };
+          waiter.cancel = cancel;
+          if (signal) signal.addEventListener('abort', cancel, { once: true });
+          waiters.add(waiter);
+        });
+      },
+    });
+    operation.resolveSettlement = (outcome) => {
+      if (operation.settlementOutcome) return;
+      operation.settlementOutcome = Object.freeze({ opId: operation.opId, ...outcome });
+      for (const waiter of waiters) {
+        if (waiter.signal) waiter.signal.removeEventListener('abort', waiter.cancel);
+        waiter.resolve(operation.settlementOutcome);
+      }
+      waiters.clear();
+    };
+    return operation.settlement;
+  }
+
+  function settleOperation(operation, outcome) {
+    operation.resolveSettlement?.(outcome);
+  }
+
   function nextActionId() {
     if (createActionId) return createActionId();
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
@@ -2291,6 +2327,7 @@ export function createLiveDeliverySession({
       operation.echoCursor = cursor;
       if (operation.delivered
         && (operation.confirmedCursor == null || cursorAnchor(cursor) >= operation.confirmedCursor)) {
+        settleOperation(operation, { status: 'reconciled' });
         operations.delete(actionId);
       }
     }
@@ -2309,6 +2346,7 @@ export function createLiveDeliverySession({
         && snapshotGeneration > operation.receiptSnapshotGeneration
         && receiptGenerationAtStart >= operation.receiptGeneration
         && cursorAnchor(cursor) >= operation.confirmedThrough) {
+        settleOperation(operation, { status: 'reconciled' });
         operations.delete(actionId);
       }
     }
@@ -2319,7 +2357,8 @@ export function createLiveDeliverySession({
     status = 'unavailable';
     // An opaque aggregate can only be reconciled by its replacement snapshot.
     // Once that recovery fails, no optimistic projection is safe to retain.
-    if (snapshotOnly) operations.clear();
+    for (const operation of operations.values()) settleOperation(operation, { status: 'unavailable' });
+    operations.clear();
     publish();
   }
 
@@ -2413,13 +2452,13 @@ export function createLiveDeliverySession({
         try {
           await recover('catchup');
         } catch (error) {
-          if (!closed && status !== 'revoked') status = 'unavailable';
+          if (!closed && status !== 'revoked') becomeUnavailable();
           throw error;
         }
         if (closed || status === 'revoked' || generation !== connectionGeneration) return;
         const replayed = applyEvent(envelope);
         if (replayed.status === 'gap') {
-          if (!closed && status !== 'revoked') status = 'unavailable';
+          if (!closed && status !== 'revoked') becomeUnavailable();
           throw new Error('delivery remains gapped after catch-up');
         }
       }
@@ -2498,7 +2537,7 @@ export function createLiveDeliverySession({
       await recover('catchup');
       if (!closed && status !== 'revoked') await connect();
     } catch (error) {
-      if (!closed && status !== 'revoked') status = 'unavailable';
+      if (!closed && status !== 'revoked') becomeUnavailable();
       throw error;
     } finally {
       reconnecting = false;
@@ -2510,6 +2549,7 @@ export function createLiveDeliverySession({
     status = 'revoked';
     baseSnapshot = null;
     visibleSnapshot = null;
+    for (const operation of operations.values()) settleOperation(operation, { status: 'revoked' });
     operations.clear();
     subscription?.close?.();
     subscription = null;
@@ -2523,7 +2563,7 @@ export function createLiveDeliverySession({
       await recover('snapshot');
       if (!closed && status !== 'revoked') await connect();
     } catch (error) {
-      if (!closed && status !== 'revoked') status = 'unavailable';
+      if (!closed && status !== 'revoked') becomeUnavailable();
       throw error;
     }
   }
@@ -2535,18 +2575,22 @@ export function createLiveDeliverySession({
       opId: actionId, actionId, action, status: 'pending', error: null,
       delivered: false, confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null,
     };
+    const settlement = createSettlement(operation);
     if (closed || status !== 'live') {
-      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery is unavailable') };
+      settleOperation(operation, { status: closed ? 'closed' : 'unavailable' });
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     operations.set(actionId, operation);
     publish();
     if (closed || status !== 'live') {
-      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery is unavailable') };
+      settleOperation(operation, { status: closed ? 'closed' : 'unavailable' });
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     try {
       const receipt = await sendAction(action);
       if (status === 'revoked') {
-        return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery access was revoked') };
+        settleOperation(operation, { status: 'revoked' });
+        return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery access was revoked') };
       }
       if (receipt?.ok === false) {
         // The matching committed envelope is authoritative when a request
@@ -2554,7 +2598,8 @@ export function createLiveDeliverySession({
         if (operation.echoCursor != null) {
           operations.delete(actionId);
           publish();
-          return { ok: true, status: 'committed', opId: actionId };
+          settleOperation(operation, { status: 'reconciled' });
+          return { ok: true, status: 'committed', opId: actionId, settlement };
         }
         throw receipt.failure ?? receipt.error ?? receipt;
       }
@@ -2574,28 +2619,32 @@ export function createLiveDeliverySession({
       if (snapshotOnly) recoverReceiptSnapshot(operation);
       if (operation.echoCursor != null
         && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
+        settleOperation(operation, { status: 'reconciled' });
         operations.delete(actionId);
       }
       publish();
-      return { ok: true, status: 'committed', opId: actionId, value: receipt?.value };
+      return { ok: true, status: 'committed', opId: actionId, settlement, value: receipt?.value };
     } catch (error) {
       if (status === 'revoked') {
-        return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery access was revoked') };
+        settleOperation(operation, { status: 'revoked' });
+        return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery access was revoked') };
       }
       // A delivery echo proves the action reached the committed recipient
       // stream even when its request promise fails after that point.
       if (operation.echoCursor != null) {
+        settleOperation(operation, { status: 'reconciled' });
         operations.delete(actionId);
         publish();
-        return { ok: true, status: 'committed', opId: actionId };
+        return { ok: true, status: 'committed', opId: actionId, settlement };
       }
       if (operations.get(actionId) === operation) {
         operations.delete(actionId);
         operation.status = 'failed';
         operation.error = error;
+        settleOperation(operation, { status: 'failed', error });
         publish();
       }
-      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: error };
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: error };
     }
   }
 
@@ -2603,19 +2652,22 @@ export function createLiveDeliverySession({
     try {
       const receipt = await sendBatch(operation.batch);
       if (status === 'revoked') {
-        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, failure: new ClientClosedError('Live delivery access was revoked') };
+        settleOperation(operation, { status: 'revoked' });
+        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery access was revoked') };
       }
       if (receipt?.ok === false) {
         if (operation.echoCursor != null) {
+          settleOperation(operation, { status: 'reconciled' });
           operations.delete(operation.actionId);
           publish();
-          return { ok: true, status: 'committed', opId: operation.actionId };
+          return { ok: true, status: 'committed', opId: operation.actionId, settlement: operation.settlement };
         }
         operations.delete(operation.actionId);
         operation.status = 'failed';
         operation.error = receipt.failure ?? receipt.error ?? receipt;
+        settleOperation(operation, { status: 'failed', error: operation.error });
         publish();
-        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, failure: operation.error };
+        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure: operation.error };
       }
       if (!receipt || receipt.ok !== true || receipt.actionId !== operation.actionId) {
         throw new Error('batch dispatch returned an invalid receipt');
@@ -2632,51 +2684,74 @@ export function createLiveDeliverySession({
       operation.receiptSnapshotGeneration = snapshotGeneration;
       settleSnapshotConfirmations(receiptGeneration);
       if (snapshotOnly) recoverReceiptSnapshot(operation);
-      if (operation.echoCursor != null && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) operations.delete(operation.actionId);
+      if (operation.echoCursor != null && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
+        settleOperation(operation, { status: 'reconciled' });
+        operations.delete(operation.actionId);
+      }
       publish();
-      return { ok: true, status: 'committed', opId: operation.actionId, value: receipt?.value };
+      return { ok: true, status: 'committed', opId: operation.actionId, settlement: operation.settlement, value: receipt?.value };
     } catch (error) {
       if (status === 'revoked') {
+        settleOperation(operation, { status: 'revoked' });
         operations.delete(operation.actionId);
         publish();
-        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, failure: new ClientClosedError('Live delivery access was revoked') };
+        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery access was revoked') };
       }
       if (operation.echoCursor != null) {
+        settleOperation(operation, { status: 'reconciled' });
         operations.delete(operation.actionId);
         publish();
-        return { ok: true, status: 'committed', opId: operation.actionId };
+        return { ok: true, status: 'committed', opId: operation.actionId, settlement: operation.settlement };
       }
       // A transport exception cannot prove rollback. Retain the one package-owned
       // envelope and optimistic placeholder so retry can resend its action ID.
       operation.deliveryError = error;
-      return { ok: false, status: 'outcome-unknown', opId: operation.actionId, deliveryError: { message: String(error?.message ?? error) } };
+      return { ok: false, status: 'outcome-unknown', opId: operation.actionId, settlement: operation.settlement, deliveryError: { message: String(error?.message ?? error) } };
     }
   }
 
   async function batch(actions) {
     const actionId = nextActionId();
+    const rejectedOperation = { opId: actionId };
+    const rejectedSettlement = createSettlement(rejectedOperation);
     if (!Array.isArray(actions) || actions.length === 0 || actions.some((action) => !action
       || typeof action.type !== 'string'
       || Object.keys(action).length !== 2
       || !isJsonValue(action.payload))) {
-      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new TypeError('batch requires a non-empty action array') };
+      settleOperation(rejectedOperation, { status: 'failed', error: new TypeError('batch requires a non-empty action array') });
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement: rejectedSettlement, failure: new TypeError('batch requires a non-empty action array') };
     }
-    if (typeof sendBatch !== 'function') return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new TypeError('sendBatch is required') };
-    if (closed || status !== 'live') return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery is unavailable') };
+    if (typeof sendBatch !== 'function') {
+      const failure = new TypeError('sendBatch is required');
+      settleOperation(rejectedOperation, { status: 'failed', error: failure });
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement: rejectedSettlement, failure };
+    }
+    if (closed || status !== 'live') {
+      settleOperation(rejectedOperation, { status: closed ? 'closed' : 'unavailable' });
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement: rejectedSettlement, failure: new ClientClosedError('Live delivery is unavailable') };
+    }
     const retainedActions = freezeClone(structuredClone(actions));
     const batchEnvelope = Object.freeze({ actionId, actions: retainedActions });
-    const operation = { opId: actionId, actionId, batch: batchEnvelope, actions: retainedActions, status: 'pending', error: null, delivered: false, confirmedCursor: null, echoCursor: null };
+    const operation = { opId: actionId, actionId, batch: batchEnvelope, actions: retainedActions, status: 'pending', error: null, delivered: false, confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null };
+    createSettlement(operation);
     operations.set(actionId, operation);
     publish();
     if (closed || status !== 'live') {
-      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: new ClientClosedError('Live delivery is unavailable') };
+      settleOperation(operation, { status: closed ? 'closed' : 'unavailable' });
+      return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     return submitBatch(operation);
   }
 
   async function retry(opId) {
     const operation = operations.get(opId);
-    if (!operation?.batch || !operation.deliveryError) return { ok: false, status: 'failed-rolled-back', opId, failure: new TypeError('batch is not awaiting transport retry') };
+    if (!operation?.batch || !operation.deliveryError) {
+      const rejectedOperation = { opId };
+      const settlement = createSettlement(rejectedOperation);
+      const failure = new TypeError('batch is not awaiting transport retry');
+      settleOperation(rejectedOperation, { status: 'failed', error: failure });
+      return { ok: false, status: 'failed-rolled-back', opId, settlement, failure };
+    }
     operation.deliveryError = null;
     return submitBatch(operation);
   }
@@ -2713,6 +2788,7 @@ export function createLiveDeliverySession({
       closed = true;
       subscription?.close?.();
       subscription = null;
+      for (const operation of operations.values()) settleOperation(operation, { status: 'closed' });
       operations.clear();
       listeners.clear();
     },

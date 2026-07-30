@@ -409,6 +409,21 @@ export type LiveDeliveryActionReceipt =
   | { ok?: true; value?: unknown; actionId: string; confirmedThrough: number }
   | { ok: false; failure?: unknown; error?: unknown };
 
+export type LiveDeliverySettlement = {
+  readonly opId: string;
+  wait(options?: { signal?: AbortSignal }): Promise<
+    | { opId: string; status: 'reconciled' }
+    | { opId: string; status: 'unavailable' | 'revoked' | 'closed' }
+    | { opId: string; status: 'failed'; error: unknown }
+    | { opId: string; status: 'cancelled' }
+  >;
+};
+
+export type LiveDeliveryDispatchResult =
+  | { ok: true; status: 'committed'; opId: string; settlement: LiveDeliverySettlement; value?: unknown }
+  | { ok: false; status: 'failed-rolled-back'; opId: string; settlement: LiveDeliverySettlement; failure: unknown }
+  | { ok: false; status: 'outcome-unknown'; opId: string; settlement: LiveDeliverySettlement; deliveryError: { message: string } };
+
 export interface LiveDeliverySessionConfig<Snapshot, Payload = unknown> {
   bootstrap(input: { after?: LiveDeliveryCursor; mode: 'snapshot' | 'catchup' }): Promise<LiveDeliveryBootstrap<Snapshot>>;
   subscribe(input: {
@@ -442,9 +457,9 @@ export interface LiveDeliverySession<Snapshot, Payload = unknown> {
   readonly cursor: LiveDeliveryCursor;
   readonly status: 'bootstrapping' | 'recovering' | 'catching-up' | 'live' | 'unavailable' | 'revoked';
   readonly ready: Promise<void>;
-  dispatch(type: string, payload: Payload): Promise<ScopeDispatchResult>;
-  batch(actions: readonly LiveDeliveryBatchAction<Payload>[]): Promise<ScopeDispatchResult | { ok: false; status: 'outcome-unknown'; opId: string; deliveryError: { message: string } }>;
-  retry(opId: string): Promise<ScopeDispatchResult>;
+  dispatch(type: string, payload: Payload): Promise<LiveDeliveryDispatchResult>;
+  batch(actions: readonly LiveDeliveryBatchAction<Payload>[]): Promise<LiveDeliveryDispatchResult>;
+  retry(opId: string): Promise<LiveDeliveryDispatchResult>;
   reconnect(): Promise<void>;
   operations(): Array<{ opId: string; actionId: string; action?: { actionId: string; type: string; payload: Payload }; status: 'pending'; error: unknown }>;
   pendingCount(): number;
