@@ -39,7 +39,7 @@ import { effectEntries, validateEffectDeclaration } from '../effect-compiler.mjs
 import { triggerList } from '../schedule.mjs';
 import { compileMembershipAuthz } from '../auth/membership.mjs';
 import { collectSideTableStrategies } from '../side-table-strategy.mjs';
-import { createEntityProjection, createConditionalHistoryProjection } from './projection.mjs';
+import { createEntityProjection, createConditionalHistoryProjection, createConditionalCreateHistoryProjection } from './projection.mjs';
 import { createCrudHandlers, materializeCreateDefaults } from './crud.mjs';
 import { installEntityQueries } from './query.mjs';
 import { validateScheduleTrigger, autoStateScheduleTrigger, stateEffectEntries, assertSqlIdentifier, mintToken } from './schedule-compile.mjs';
@@ -79,10 +79,11 @@ export function entity(name, declaration = {}) {
   }
 
   const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl } = declaration;
-  if (historyDecl !== undefined && (typeof historyDecl !== 'object' || historyDecl === null || Array.isArray(historyDecl) || Object.keys(historyDecl).some((key) => key !== 'update') || (historyDecl.update !== undefined && historyDecl.update !== 'conditional'))) {
-    throw new Error(`entity('${name}') history must be { update: 'conditional' }`);
+  if (historyDecl !== undefined && (typeof historyDecl !== 'object' || historyDecl === null || Array.isArray(historyDecl) || Object.keys(historyDecl).some((key) => key !== 'update' && key !== 'create') || ['update', 'create'].some((key) => historyDecl[key] !== undefined && historyDecl[key] !== 'conditional'))) {
+    throw new Error(`entity('${name}') history must be { create?: 'conditional', update?: 'conditional' }`);
   }
   const conditionalHistory = historyDecl?.update === 'conditional';
+  const conditionalCreateHistory = historyDecl?.create === 'conditional';
 
   // The entity name becomes a table name interpolated into SQL — validate first.
   assertSqlIdentifier('entity', name);
@@ -347,9 +348,13 @@ export function entity(name, declaration = {}) {
     projectedAsyncFields: Object.freeze(projectedAsyncFields),
     storedComputedFields: Object.freeze(storedComputedFields),
     conditionalHistory,
+    conditionalCreateHistory,
   };
 
   const sideTableStrategyEntries = collectSideTableStrategies(fields);
+  if (conditionalCreateHistory && (sideTableStrategyEntries.length > 0 || storedComputedFields.length > 0 || Object.values(fields).some((descriptor) => descriptor.kind === 'annotatedText' || descriptor.kind === 'crdt' || descriptor.kind === 'struct' || descriptor.kind === 'hash'))) {
+    throw new Error(`entity('${name}') conditional create history supports only replayable stored value fields`);
+  }
 
   function createEntityHydrator({ record, entityName, fields, sideTableStrategyEntries, runtime }) {
     // Keep the long-standing public contract: callers may ignore this return
@@ -423,10 +428,13 @@ export function entity(name, declaration = {}) {
     storedComputedFields,
     sideTableStrategyEntries,
     conditionalHistory,
+    conditionalCreateHistory,
   });
-  record.projections = conditionalHistory
-    ? Object.freeze([record.projection, createConditionalHistoryProjection({ name, verbs: record.verbs })])
-    : Object.freeze([record.projection]);
+  record.projections = Object.freeze([
+    record.projection,
+    ...(conditionalHistory ? [createConditionalHistoryProjection({ name, verbs: record.verbs })] : []),
+    ...(conditionalCreateHistory ? createConditionalCreateHistoryProjection({ name, verbs: record.verbs }) : []),
+  ]);
 
   record.generateDDL = () => generateDDL(record);
 
@@ -554,10 +562,14 @@ export function entity(name, declaration = {}) {
       boundRecord.delete = (id) => {
         requireDb().prepare(`DELETE FROM ${name} WHERE id = :id`).run({ id });
       };
-      boundRecord.crudHandlers = createCrudHandlers({ record: bound, sideTableStrategyEntries, conditionalHistory });
+      boundRecord.crudHandlers = createCrudHandlers({ record: bound, sideTableStrategyEntries, conditionalHistory, conditionalCreateHistory });
       if (conditionalHistory) boundRecord.historyActionRule = Object.freeze({
         inverse: ({ action, fact }) => ({ type: `${name}.update`, payload: { id: action.payload.id }, input: { expected: fact.after, replacement: fact.before } }),
         redo: ({ action, fact }) => ({ type: `${name}.update`, payload: { id: action.payload.id }, input: { expected: fact.before, replacement: fact.after } }),
+      });
+      if (conditionalCreateHistory) boundRecord.createHistoryActionRule = Object.freeze({
+        inverse: ({ action, fact }) => ({ type: `${name}.remove`, payload: { id: action.payload.id }, input: { expected: fact.after, replacement: null } }),
+        redo: ({ action, fact }) => ({ type: `${name}.create`, payload: { id: action.payload.id }, input: { expected: null, replacement: fact.after } }),
       });
       return bound;
     },

@@ -1369,7 +1369,7 @@ function buildProjectedComputeRow(storedRow, fields) {
   return row;
 }
 
-export function createEntityProjection({ name, fields, verbs, storedComputedFields, sideTableStrategyEntries, conditionalHistory = false }) {
+export function createEntityProjection({ name, fields, verbs, storedComputedFields, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }) {
   return Object.freeze({
     eventTypes: [
       verbs.created.type,
@@ -1506,6 +1506,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
           getLog().debug('dispatch', `${name}.updated`, { id: params.id });
         }
       } else if (handle.kind === eventHandle.EventKind.removed) {
+        if (conditionalCreateHistory) return;
         const id = event.data?.id;
         // Capture the deleted-row history anchor BEFORE the delete, in the
         // same projection-consumer call (same transaction as the DELETE) —
@@ -1552,4 +1553,44 @@ export function createConditionalHistoryProjection({ name, verbs }) {
       }
     },
   });
+}
+
+export function createConditionalCreateHistoryProjection({ name, verbs }) {
+  const apply = (event, db, { privateFact }) => {
+    const { before, after } = privateFact ?? {};
+    const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
+    if (event.type === verbs.created.type) {
+      if (before !== null || !after || after.id !== event.data?.id) throw new Error(`${name}.create private fact is invalid`);
+      const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(after.id);
+      if (!current) throw Object.assign(new Error(`${name}.create projection conflicts`), { status: 409 });
+      if (Object.keys(after).length === 1) {
+        db.prepare('UPDATE _PrivateActionFact SET fact = ? WHERE actionId = ? AND scope = ?')
+          .run(JSON.stringify({ before: null, after: current }), event.actionId, event.scope);
+      } else if (Object.keys(after).length !== columns.length || columns.some((column) => !Object.hasOwn(after, column)) || !columns.every((column) => Object.is(current[column], after[column]))) {
+        throw Object.assign(new Error(`${name}.create projection conflicts`), { status: 409 });
+      }
+    } else {
+      if (!before || after !== null || before.id !== event.data?.id || Object.keys(before).length !== columns.length || columns.some((column) => !Object.hasOwn(before, column))) throw new Error(`${name}.remove private fact is invalid`);
+      const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(before.id);
+      if (!current) throw Object.assign(new Error(`${name} ${before.id} not found`), { status: 404 });
+      if (!columns.every((column) => Object.is(current[column], before[column]))) throw Object.assign(new Error(`${name} remove conflicts`), { status: 409 });
+      captureDeletedRowAnchor(db, name, before.id, current, event.committedAt);
+      const predicates = columns.map((column) => `${column} IS :${column}`);
+      const result = db.prepare(`DELETE FROM ${name} WHERE ${predicates.join(' AND ')}`).run(before);
+      if (Number(result.changes) !== 1) throw Object.assign(new Error(`${name} remove conflicts`), { status: 409 });
+    }
+  };
+  return Object.freeze([Object.freeze({
+    actionType: `${name}.create`,
+    eventTypes: [verbs.created.type],
+    privateFact: true,
+    replay: false,
+    apply,
+  }), Object.freeze({
+    actionType: `${name}.remove`,
+    eventTypes: [verbs.removed.type],
+    privateFact: true,
+    replay: false,
+    apply,
+  })]);
 }

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { computed, deny, durableHistory, entity, everyone, grant, principal, read, scope, subscribe, text, write } from '../src/index.mjs';
+import workbench, { computed, date, deny, durableHistory, entity, everyone, grant, hash, principal, read, scope, subscribe, text, write } from '../src/index.mjs';
 
 const user = principal({ type: 'user', id: 'conditional-user' });
 const session = 'conditional-tab';
@@ -14,6 +14,16 @@ function declaration(name = 'ConditionalNote') {
     projectId: text({ immutable: true }),
     grant: () => grant(read, write, subscribe),
     history: { update: 'conditional' },
+  });
+}
+
+function createHistoryDeclaration(name = 'CreatedNote') {
+  return entity(name, {
+    body: text(),
+    projectId: text({ immutable: true }),
+    createdAt: date({ default: () => new Date() }),
+    grant: () => grant(read, write, subscribe),
+    history: { create: 'conditional' },
   });
 }
 
@@ -119,7 +129,8 @@ test('conditional history fails closed for stale state, erased facts, deleted ro
 
 test('conditional declaration is closed and ordinary generated updates stay patch-only', async (t) => {
   assert.throws(() => entity('BadConditionalHistory', { body: text(), history: { update: 'anything' } }), /history must/);
-  assert.throws(() => entity('BadConditionalHistoryKeys', { body: text(), history: { create: 'conditional' } }), /history must/);
+  assert.throws(() => entity('BadConditionalHistoryKeys', { body: text(), history: { remove: 'conditional' } }), /history must/);
+  assert.throws(() => entity('ConditionalCreateHash', { password: hash(), history: { create: 'conditional' } }), /replayable stored value/);
   assert.throws(() => entity('ConditionalComputed', { body: text(), summary: computed.stored({ compute: () => 'summary' }), history: { update: 'conditional' } }), /does not support stored computed/);
   const db = new DatabaseSync(':memory:');
   const Plain = entity('PlainNote', { body: text(), grant: () => grant(read, write, subscribe) });
@@ -131,4 +142,84 @@ test('conditional declaration is closed and ordinary generated updates stay patc
   assert.equal(result.ok, true);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _PrivateActionFact WHERE actionId = ?').get('plain-update').count, 0);
   assert.equal((await app.history.cursor({ scope: 'PlainNote:plain-1', principal: user, session })).undo, 0);
+});
+
+test('conditional generated create restores an exact private row and excludes ordinary removal from history', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Created = createHistoryDeclaration();
+  const app = workbench({ db, entities: [Created], history: history() });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  const create = await app.dispatch({
+    actionId: 'created-create', type: 'CreatedNote.create',
+    payload: { id: 'created-1', body: 'private body', projectId: 'p1' }, principal: user,
+    scope: 'CreatedNote:created-1', history: { session },
+  });
+  assert.equal(create.ok, true);
+  assert.equal(JSON.stringify(create.events).includes('private body'), true);
+  const fact = JSON.parse(db.prepare("SELECT fact FROM _PrivateActionFact WHERE actionId = 'created-create'").get().fact);
+  assert.equal(fact.before, null);
+  assert.equal(fact.after.body, 'private body');
+  assert.equal(typeof fact.after.createdAt, 'number');
+  assert.equal((await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).undo, 1);
+
+  const undo = await app.history.undo({ scope: 'CreatedNote:created-1', principal: user, session, actionId: 'created-undo', revision: (await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).revision });
+  assert.equal(undo.ok, true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM CreatedNote WHERE id = ?').get('created-1').count, 0);
+  const redo = await app.history.redo({ scope: 'CreatedNote:created-1', principal: user, session, actionId: 'created-redo', revision: (await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).revision });
+  assert.equal(redo.ok, true);
+  assert.deepEqual({ ...db.prepare('SELECT * FROM CreatedNote WHERE id = ?').get('created-1') }, fact.after);
+
+  const remove = await app.dispatch({ actionId: 'created-remove', type: 'CreatedNote.remove', payload: { id: 'created-1' }, principal: user, scope: 'CreatedNote:created-1', history: { session } });
+  assert.equal(remove.ok, true);
+  assert.equal((await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).undo, 1);
+});
+
+test('conditional generated create rolls stale lifecycle history back and fails closed for erased facts', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Created = createHistoryDeclaration('CreatedConflict');
+  const app = workbench({ db, entities: [Created], history: history() });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  await app.dispatch({ actionId: 'conflict-create', type: 'CreatedConflict.create', payload: { id: 'created-1', body: 'before', projectId: 'p1' }, principal: user, scope: 'CreatedConflict:created-1', history: { session } });
+  db.prepare('UPDATE CreatedConflict SET body = ? WHERE id = ?').run('changed', 'created-1');
+  const cursor = await app.history.cursor({ scope: 'CreatedConflict:created-1', principal: user, session });
+  const stale = await app.history.undo({ scope: 'CreatedConflict:created-1', principal: user, session, actionId: 'conflict-undo', revision: cursor.revision });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.failure.category, 'conflict');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'conflict-undo'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = 'conflict-undo'").get().count, 0);
+  db.prepare("DELETE FROM _PrivateActionFact WHERE actionId = 'conflict-create'").run();
+  const erasedCursor = await app.history.cursor({ scope: 'CreatedConflict:created-1', principal: user, session });
+  await assert.rejects(() => app.history.undo({ scope: 'CreatedConflict:created-1', principal: user, session, actionId: 'erased-undo', revision: erasedCursor.revision }), /missing or erased/);
+});
+
+test('conditional generated create reauthorizes the current row before private fact access', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Created = createHistoryDeclaration('CreatedDenied');
+  const app = workbench({ db, entities: [Created], history: history() });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  await app.dispatch({ actionId: 'denied-create', type: 'CreatedDenied.create', payload: { id: 'created-1', body: 'secret', projectId: 'p1' }, principal: user, scope: 'CreatedDenied:created-1', history: { session } });
+  app.entities.get('CreatedDenied').grant = () => [scope(() => everyone()).can(() => deny('revoked'))];
+  const cursor = await app.history.cursor({ scope: 'CreatedDenied:created-1', principal: user, session });
+  await assert.rejects(() => app.history.undo({ scope: 'CreatedDenied:created-1', principal: user, session, actionId: 'denied-undo', revision: cursor.revision }), /forbidden/);
+  assert.equal(db.prepare('SELECT body FROM CreatedDenied WHERE id = ?').get('created-1').body, 'secret');
+});
+
+test('conditional generated create records projected defaults for omitted optional fields', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Created = entity('CreatedOptional', {
+    body: text({ optional: true }),
+    projectId: text({ immutable: true }),
+    grant: () => grant(read, write, subscribe),
+    history: { create: 'conditional' },
+  });
+  const app = workbench({ db, entities: [Created], history: history() });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  const create = await app.dispatch({ actionId: 'optional-create', type: 'CreatedOptional.create', payload: { id: 'created-1', projectId: 'p1' }, principal: user, scope: 'CreatedOptional:created-1', history: { session } });
+  assert.equal(create.ok, true);
+  const fact = JSON.parse(db.prepare("SELECT fact FROM _PrivateActionFact WHERE actionId = 'optional-create'").get().fact);
+  assert.equal(fact.after.body, null);
 });

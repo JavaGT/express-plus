@@ -15,6 +15,7 @@ export function installRemovalCascades(entities) {
     if (field.onRemove !== 'cascade') throw new Error(`${entity.name}.${fieldName}.onRemove must be 'cascade'`);
     const parent = entities.get(targetName(field));
     if (!parent) throw new Error(`${entity.name}.${fieldName} references unknown cascade target '${targetName(field)}'`);
+    if (parent.conditionalCreateHistory) throw new Error(`entity '${parent.name}' conditional create history does not support removal cascades`);
     children.get(parent.name).push({ entity, fieldName });
   }
 

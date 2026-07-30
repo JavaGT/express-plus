@@ -25,6 +25,7 @@ import { bindAuthorizedRows, isAuthorizedRows } from './action-authorization.mjs
 import { replayPrivateFactProjections } from './post-commit-effects.mjs';
 import { txn } from './driver.mjs';
 import { installRemovalCascades } from './entity/removal-cascade.mjs';
+import { readDeletedRowAnchor } from './deleted-row-anchor.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
 // may target Inbox without mounting it — auth entities are never request-facing
@@ -403,6 +404,7 @@ export function buildKernel(app) {
   const generatedHistoryActions = {};
   for (const entity of entities.values()) {
     if (entity.historyActionRule) generatedHistoryActions[`${entity.name}.update`] = entity.historyActionRule;
+    if (entity.createHistoryActionRule) generatedHistoryActions[`${entity.name}.create`] = entity.createHistoryActionRule;
   }
   const sessionEntity = entities.get(Session.name);
   if (sessionEntity && app._sessionSchedule) {
@@ -480,12 +482,18 @@ export function buildKernel(app) {
       const declaration = registeredActions.get(context.type);
       if (!declaration) {
         const [entityName, verb] = String(context.type).split('.');
-        const entity = verb === 'update' ? app.entities?.get(entityName) : null;
-        if (!entity?.conditionalHistory) return true;
+        const entity = (verb === 'update' || verb === 'create') ? app.entities?.get(entityName) : null;
+        if (!entity || (verb === 'update' && !entity.conditionalHistory) || (verb === 'create' && !entity.conditionalCreateHistory)) return true;
         const id = context.payload?.id;
         if (typeof id !== 'string' || id.length === 0) return false;
-        const row = entity.findById(id, context.principal);
-        return !!row && mayRow(entity, 'update', row, context.principal);
+        const stored = app.db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id)
+          ?? (verb === 'create' ? readDeletedRowAnchor(app.db, entity.name, id) : null);
+        // Initial creates have no row (or deletion anchor) to authorize yet;
+        // normal lifecycle admission remains their authority. A history move
+        // always has either the live row or its deletion anchor to check.
+        if (!stored) return verb === 'create';
+        const row = entity.deserializeRow({ ...stored });
+        return mayRow(entity, verb === 'create' ? 'remove' : 'update', row, context.principal);
       }
       const authorize = isAuthorizedRows(declaration.authorize)
         ? bindAuthorizedRows(declaration.authorize, app)
