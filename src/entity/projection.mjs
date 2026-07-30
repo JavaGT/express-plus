@@ -1563,10 +1563,7 @@ export function createConditionalCreateHistoryProjection({ name, verbs }) {
       if (before !== null || !after || after.id !== event.data?.id) throw new Error(`${name}.create private fact is invalid`);
       const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(after.id);
       if (!current) throw Object.assign(new Error(`${name}.create projection conflicts`), { status: 409 });
-      if (Object.keys(after).length === 1) {
-        db.prepare('UPDATE _PrivateActionFact SET fact = ? WHERE actionId = ? AND scope = ?')
-          .run(JSON.stringify({ before: null, after: current }), event.actionId, event.scope);
-      } else if (Object.keys(after).length !== columns.length || columns.some((column) => !Object.hasOwn(after, column)) || !columns.every((column) => Object.is(current[column], after[column]))) {
+      if (Object.keys(after).length !== columns.length || columns.some((column) => !Object.hasOwn(after, column)) || !columns.every((column) => Object.is(current[column], after[column]))) {
         throw Object.assign(new Error(`${name}.create projection conflicts`), { status: 409 });
       }
     } else {

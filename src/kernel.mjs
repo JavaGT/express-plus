@@ -1,4 +1,5 @@
 import { mayRow } from './row-grant.mjs';
+import { CASCADE_PREAUTHORIZED } from './entity/removal-cascade.mjs';
 import {
   admitSystemMutation,
   clearRemovedScheduleReceipts,
@@ -268,6 +269,7 @@ function buildDurableAdmission(app) {
   return {
     async beforeProjection({ entityName, verb, principal, event, payload, db: hookDb, now }) {
       if (registeredEventTypes.has(event?.type)) return true;
+      if (event?.[CASCADE_PREAUTHORIZED]) return true;
       if (admitInvitationAcceptance({ event, principal })) return true;
       if (
         entityName === Invitation.name
@@ -305,7 +307,7 @@ function buildDurableAdmission(app) {
         }
         return granted;
       }
-      if (verb === 'update') {
+      if (verb === 'update' || verb === 'remove') {
         const granted = await admitsExistingRow({ entityName, verb, principal, event })
           && await admitsAnnotatedProject({ entityName, verb, principal, event });
         if (granted) {

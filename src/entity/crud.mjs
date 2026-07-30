@@ -24,6 +24,8 @@ import { assertR3BlockMergePayload, canonicalJsonEqual } from '../annotated-text
 import { assertR4AnnotationApplyPayload } from '../annotated-text-r4.mjs';
 import { assertR5AnnotationDetachPayload } from '../annotated-text-r5.mjs';
 import { erasureDirectivePreparation } from '../erasure-directive.mjs';
+import { CASCADE_PREAUTHORIZED } from './removal-cascade.mjs';
+import { mayRow } from '../row-grant.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 
@@ -273,7 +275,16 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           : scopeOf(name, id).key,
         data,
       }];
-      return conditionalCreateHistory ? { events, privateFact: { before: null, after: { id } } } : events;
+      if (!conditionalCreateHistory) return events;
+      // The durable fact must be complete before it is stored; projections cannot
+      // repair an already-persisted private fact after the fact.
+      const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
+      const after = Object.fromEntries(columns.map((column) => {
+        if (column === 'id') return [column, id];
+        const descriptor = fields[column];
+        return [column, descriptor && Object.hasOwn(data, column) ? serializeField(descriptor, data[column]) : null];
+      }));
+      return { events, privateFact: { before: null, after } };
     },
     [`${name}.update`]: ({ payload, principal: _p, db, history }) => {
       const { id, ...rest } = payload;
@@ -384,7 +395,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }
       return result;
     },
-    [`${name}.remove`]: ({ payload, principal, db, history }) => {
+    [`${name}.remove`]: async ({ payload, principal, db, history }) => {
       if (!payload.id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
       if (history) {
         if (!conditionalCreateHistory || history.operation !== 'undo' || !history.input || Object.keys(history.input).length !== 2) throw new ValidationError(`${name}.remove history input is invalid`);
@@ -393,7 +404,13 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }
       if (record.removalCascade) {
         return record.removalCascade(payload.id, principal, db)
-          .then((rows) => rows.map(({ entity, id }) => entity.removedEvent(id, db)));
+          .then((rows) => rows.map(({ entity, id }) => ({ ...entity.removedEvent(id, db), [CASCADE_PREAUTHORIZED]: true })));
+      }
+      // A conditional remove reads its private preimage below, so authorize the
+      // target row first rather than allowing that read to precede admission.
+      const admissionRow = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
+      if (!admissionRow || !(await mayRow(record, 'remove', admissionRow, principal))) {
+        throw Object.assign(new Error('forbidden'), { status: 403 });
       }
       const events = [{
         handle: verbs.removed.handle,
@@ -402,11 +419,10 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           ? resolveAnnotatedTextOwningScope(annotatedEntries[0][1], fields, db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id) ?? {}).key
           : scopeOf(name, payload.id).key,
         data: { id: payload.id },
+        [CASCADE_PREAUTHORIZED]: true,
       }];
       if (!conditionalCreateHistory) return events;
-      const before = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
-      if (!before) throw Object.assign(new Error(`${name} ${payload.id} not found`), { status: 404 });
-      return { events, privateFact: { before, after: null } };
+       return { events, privateFact: { before: admissionRow, after: null } };
     },
   };
   const cursorPolicy = {};
@@ -416,8 +432,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
   }
   if (conditionalCreateHistory) {
     Object.defineProperty(handlers[`${name}.create`], 'inTransaction', { value: true });
-    Object.defineProperty(handlers[`${name}.remove`], 'inTransaction', { value: true });
   }
+  Object.defineProperty(handlers[`${name}.remove`], 'inTransaction', { value: true });
   if (annotatedEntries.length > 0) {
     for (const type of [`${name}.create`, `${name}.update`, `${name}.remove`]) {
       Object.defineProperties(handlers[type], { inTransaction: { value: true }, batchForbidden: { value: true } });

@@ -161,6 +161,9 @@ test('conditional generated create restores an exact private row and excludes or
   assert.equal(fact.before, null);
   assert.equal(fact.after.body, 'private body');
   assert.equal(typeof fact.after.createdAt, 'number');
+  assert.deepEqual(fact.after, { ...db.prepare('SELECT * FROM CreatedNote WHERE id = ?').get('created-1') });
+  assert.equal(JSON.stringify(db.prepare("SELECT eventData FROM _Log WHERE actionId = 'created-create'").get()).includes('"after"'), false);
+  assert.equal(JSON.stringify(db.prepare("SELECT * FROM _ActionReceipt WHERE actionId = 'created-create'").get()).includes('"after"'), false);
   assert.equal((await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).undo, 1);
 
   const undo = await app.history.undo({ scope: 'CreatedNote:created-1', principal: user, session, actionId: 'created-undo', revision: (await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).revision });
@@ -173,6 +176,24 @@ test('conditional generated create restores an exact private row and excludes or
   const remove = await app.dispatch({ actionId: 'created-remove', type: 'CreatedNote.remove', payload: { id: 'created-1' }, principal: user, scope: 'CreatedNote:created-1', history: { session } });
   assert.equal(remove.ok, true);
   assert.equal((await app.history.cursor({ scope: 'CreatedNote:created-1', principal: user, session })).undo, 1);
+});
+
+test('ordinary generated remove admits the target row before durable writes', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Created = createHistoryDeclaration('CreatedRemoveAdmission');
+  const app = workbench({ db, entities: [Created], history: history() });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  await app.dispatch({ actionId: 'remove-admission-create', type: 'CreatedRemoveAdmission.create', payload: { id: 'created-1', body: 'secret', projectId: 'p1' }, principal: user });
+  app.entities.get('CreatedRemoveAdmission').grant = () => [scope(() => everyone()).can(() => deny('revoked'))];
+  const denied = await app.dispatch({ actionId: 'remove-admission-denied', type: 'CreatedRemoveAdmission.remove', payload: { id: 'created-1' }, principal: user });
+  assert.equal(denied.ok, false);
+  assert.equal(denied.failure.category, 'denied');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM CreatedRemoveAdmission WHERE id = ?').get('created-1').count, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'remove-admission-denied'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = 'remove-admission-denied'").get().count, 0);
+  app.entities.get('CreatedRemoveAdmission').grant = () => grant(read, write, subscribe);
+  assert.equal((await app.dispatch({ actionId: 'remove-admission-allowed', type: 'CreatedRemoveAdmission.remove', payload: { id: 'created-1' }, principal: user })).ok, true);
 });
 
 test('conditional generated create rolls stale lifecycle history back and fails closed for erased facts', async (t) => {

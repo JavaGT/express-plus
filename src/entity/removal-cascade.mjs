@@ -1,5 +1,7 @@
 import { mayRow } from '../row-grant.mjs';
 
+export const CASCADE_PREAUTHORIZED = Symbol('workbench.cascade-preauthorized');
+
 function targetName(descriptor) {
   return typeof descriptor?.target === 'string' ? descriptor.target : descriptor?.target?.name;
 }
