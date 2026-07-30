@@ -581,10 +581,17 @@ export type BatchActionFactory<Action extends BatchAction = BatchAction> =
 export interface WorkbenchEntity<Row extends object = Record<string, unknown>> {
   readonly name: string;
   readonly fields: Readonly<Record<string, FieldDescriptor>>;
+  readonly indexes: readonly EntityIndexDeclaration<Row>[];
   readonly field: EntityFields<Row>;
   readonly verbs: Readonly<Record<string, ActionHandle | EventHandle>>;
   readonly routes?: (routes: EntityRouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
   readonly [member: string]: unknown;
+}
+
+export type EntityIndexFields<Row extends object> = readonly [keyof Row & string, keyof Row & string, ...(keyof Row & string)[]];
+export interface EntityIndexDeclaration<Row extends object> {
+  readonly fields: EntityIndexFields<Row>;
+  readonly unique: true;
 }
 
 type SelectedKeys<Row extends object, Fields extends readonly FieldHandle<any, any>[]> =
@@ -620,6 +627,7 @@ export type EntityDeclaration<Row extends object> = Readonly<Record<string, unkn
   routes?: (routes: EntityRouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
   grant?: ScopeClause | ScopePredicate | InheritDirective | GrantDecision | ((context: unknown) => GrantDecision);
   history?: Readonly<{ create?: 'conditional'; update?: 'conditional' }>;
+  indexes?: readonly EntityIndexDeclaration<Row>[];
 };
 export function entity<Row extends object = Record<string, unknown>>(
   name: string,

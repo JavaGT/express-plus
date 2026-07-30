@@ -153,8 +153,15 @@ function physicalRef(entity, descriptor) {
     && (descriptor.target?.name || descriptor.target === entity.name);
 }
 
+function uniqueIndexes(entity) {
+  return (entity.indexes ?? []).map(({ fields }) => ({
+    name: `idx_${entity.name}_unique_${fields.join('_')}`,
+    fields,
+  }));
+}
+
 export function generatedIndexNames(entity) {
-  return [...refIndexes(entity), ...scheduleIndexNames(entity)].map(({ name }) => name);
+  return [...refIndexes(entity), ...scheduleIndexNames(entity), ...uniqueIndexes(entity)].map(({ name }) => name);
 }
 
 // Generate the main table DDL for one entity.
@@ -219,6 +226,9 @@ export function generateDDL(entity) {
   statements.push(...scheduleIndexDDL(entity));
   for (const { name, fieldName } of refIndexes(entity)) {
     statements.push(`CREATE INDEX IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(entity.name)} (${quoteIdent(fieldName)});`);
+  }
+  for (const { name, fields } of uniqueIndexes(entity)) {
+    statements.push(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(entity.name)} (${fields.map(quoteIdent).join(', ')});`);
   }
 
   return statements;

@@ -160,6 +160,19 @@ const Project: WorkbenchEntity<ProjectRow> = entity('Project', {
   grant: grant(read, write),
   routes: (routes) => routes.resource(),
 });
+entity<ProjectRow>('ProjectIndex', {
+  name: text(),
+  ownerId: ref('User'),
+  indexes: [{ fields: ['ownerId', 'name'], unique: true }],
+});
+entity<ProjectRow>('ProjectIndexInvalid', {
+  name: text(),
+  ownerId: ref('User'),
+  indexes: [
+    // @ts-expect-error composite unique indexes require at least two declared fields
+    { fields: ['ownerId'], unique: true },
+  ],
+});
 const frameworkTables: readonly string[] = frameworkTableNames;
 const projectTables: readonly string[] = declaredTableNames([Project]);
 assertNoFrameworkTableSql('SELECT id FROM Project');

@@ -53,7 +53,7 @@ import { scopeOf } from '../scope-handle.mjs';
 // compiler owns, which silently drops the field (fail closed).
 const RESERVED_DECLARATION_SLOTS = new Set([
   'fields', 'grant', 'checks', 'routes', 'create', 'effects', 'admitsEffects',
-  'schedule', 'simulation', 'gate', 'on', 'membership', 'field', 'history',
+  'schedule', 'simulation', 'gate', 'on', 'membership', 'field', 'history', 'indexes',
 ]);
 
 function looksLikeFieldDescriptor(value) {
@@ -78,7 +78,7 @@ export function entity(name, declaration = {}) {
     }
   }
 
-  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl } = declaration;
+  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl, indexes: indexesDecl } = declaration;
   if (historyDecl !== undefined && (typeof historyDecl !== 'object' || historyDecl === null || Array.isArray(historyDecl) || Object.keys(historyDecl).some((key) => key !== 'update' && key !== 'create') || ['update', 'create'].some((key) => historyDecl[key] !== undefined && historyDecl[key] !== 'conditional'))) {
     throw new Error(`entity('${name}') history must be { create?: 'conditional', update?: 'conditional' }`);
   }
@@ -174,6 +174,39 @@ export function entity(name, declaration = {}) {
     }
     if (descriptor.kind === 'annotatedText') {
       validateAnnotatedTextDeclaration(name, fieldName, descriptor, fields);
+    }
+  }
+
+  const indexes = [];
+  if (indexesDecl !== undefined) {
+    if (!Array.isArray(indexesDecl)) throw new Error(`entity('${name}') indexes must be an array`);
+    const seenIndexes = new Set();
+    for (const index of indexesDecl) {
+      if (!index || typeof index !== 'object' || Array.isArray(index) || index.unique !== true || !Array.isArray(index.fields)
+        || Object.keys(index).some((key) => key !== 'fields' && key !== 'unique')) {
+        throw new Error(`entity('${name}') indexes entries must be { fields: [..], unique: true }`);
+      }
+      if (index.fields.length < 2 || index.fields.some((fieldName) => typeof fieldName !== 'string')) {
+        throw new Error(`entity('${name}') index fields must contain at least two field names`);
+      }
+      const fieldsKey = [...index.fields].sort().join('\u0000');
+      if (new Set(index.fields).size !== index.fields.length) {
+        throw new Error(`entity('${name}') index fields must not contain duplicates`);
+      }
+      if (seenIndexes.has(fieldsKey)) {
+        throw new Error(`entity('${name}') duplicate index declaration for fields [${index.fields.join(', ')}]`);
+      }
+      seenIndexes.add(fieldsKey);
+      for (const fieldName of index.fields) {
+        const descriptor = fields[fieldName];
+        if (!descriptor || !(
+          descriptor.kind === 'value' || descriptor.kind === 'crdt' ||
+          descriptor.kind === 'hash' || descriptor.kind === 'state'
+        )) {
+          throw new Error(`entity('${name}') index field '${fieldName}' must be a stored main-table field`);
+        }
+      }
+      indexes.push(Object.freeze({ fields: Object.freeze([...index.fields]), unique: true }));
     }
   }
 
@@ -349,6 +382,7 @@ export function entity(name, declaration = {}) {
     storedComputedFields: Object.freeze(storedComputedFields),
     conditionalHistory,
     conditionalCreateHistory,
+    indexes: Object.freeze(indexes),
   };
 
   const sideTableStrategyEntries = collectSideTableStrategies(fields);

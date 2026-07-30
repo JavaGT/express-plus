@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { entity, grant, principal, read, ref, text, write } from '../src/index.mjs';
+import workbench, { computed, entity, grant, map, principal, read, ref, text, write } from '../src/index.mjs';
 import { defineSqliteSchema } from '../src/server.mjs';
 
 const user = principal({ type: 'user', id: 'ref-user' });
@@ -24,6 +24,7 @@ test('generated refs enforce deterministic indexes and fresh-database integrity'
   const ddl = Child.generateDDL().join('\n');
   assert.match(ddl, /FOREIGN KEY \("parentId"\) REFERENCES "RefParent" \("id"\) ON DELETE RESTRICT ON UPDATE NO ACTION/);
   assert.match(ddl, /CREATE INDEX IF NOT EXISTS "idx_RefChild_parentId" ON "RefChild" \("parentId"\);/);
+  assert.doesNotMatch(ddl, /CREATE UNIQUE INDEX/);
   assert.match(ddl, /parentId TEXT NOT NULL/);
   assert.match(ddl, /optionalParentId TEXT/);
   assert.match(ddl, /selfId TEXT/);
@@ -39,6 +40,67 @@ test('generated refs enforce deterministic indexes and fresh-database integrity'
   );
   assert.throws(() => db.prepare('DELETE FROM RefParent WHERE id = ?').run('parent'), /FOREIGN KEY constraint failed/);
   assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+});
+
+test('entity composite unique indexes preserve field order and SQLite NULL semantics', async (t) => {
+  const Parent = entity('UniqueIndexParent', { name: text(), grant: grants });
+  const Child = entity('UniqueIndexChild', {
+    leftId: ref(Parent, { physical: true }),
+    rightId: ref(Parent, { physical: true }),
+    label: text(),
+    indexes: [{ fields: ['leftId', 'rightId'], unique: true }],
+    grant: grants,
+  });
+  const Nullable = entity('NullableUniqueIndex', {
+    left: text({ optional: true }),
+    right: text({ optional: true }),
+    indexes: [{ fields: ['left', 'right'], unique: true }],
+    grant: grants,
+  });
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, entities: [Parent, Child, Nullable] });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+
+  assert.match(Child.generateDDL().join('\n'), /CREATE UNIQUE INDEX IF NOT EXISTS "idx_UniqueIndexChild_unique_leftId_rightId" ON "UniqueIndexChild" \("leftId", "rightId"\);/);
+  assert.deepEqual(
+    db.prepare("SELECT name, \"unique\" FROM pragma_index_list('UniqueIndexChild') WHERE origin = 'c' ORDER BY name").all().map(({ name, unique }) => ({ name, unique })),
+    [
+      { name: 'idx_UniqueIndexChild_leftId', unique: 0 },
+      { name: 'idx_UniqueIndexChild_rightId', unique: 0 },
+      { name: 'idx_UniqueIndexChild_unique_leftId_rightId', unique: 1 },
+    ],
+  );
+  assert.deepEqual(
+    db.prepare("SELECT name FROM pragma_index_info('idx_UniqueIndexChild_unique_leftId_rightId') ORDER BY seqno").all().map(({ name }) => ({ name })),
+    [{ name: 'leftId' }, { name: 'rightId' }],
+  );
+  db.prepare('INSERT INTO UniqueIndexParent (id, name) VALUES (?, ?), (?, ?)').run('a', 'A', 'b', 'B');
+  db.prepare('INSERT INTO UniqueIndexChild (id, leftId, rightId, label) VALUES (?, ?, ?, ?)').run('one', 'a', 'b', 'one');
+  db.prepare('INSERT INTO UniqueIndexChild (id, leftId, rightId, label) VALUES (?, ?, ?, ?)').run('distinct', 'b', 'a', 'distinct');
+  assert.throws(
+    () => db.prepare('INSERT INTO UniqueIndexChild (id, leftId, rightId, label) VALUES (?, ?, ?, ?)').run('two', 'a', 'b', 'two'),
+    /UNIQUE constraint failed/,
+  );
+  db.prepare('INSERT INTO NullableUniqueIndex (id, left, right) VALUES (?, ?, ?)').run('null-one', null, null);
+  db.prepare('INSERT INTO NullableUniqueIndex (id, left, right) VALUES (?, ?, ?)').run('null-two', null, null);
+  // SQLite unique indexes deliberately allow multiple rows containing NULL.
+});
+
+test('composite unique indexes reject invalid and duplicate declarations before schema write', async () => {
+  assert.throws(() => entity('BadUniqueIndex', { a: text(), indexes: [{ fields: ['a'], unique: true }], grant: grants }), /at least two/);
+  assert.throws(() => entity('BadUniqueField', { a: text(), indexes: [{ fields: ['a', 'missing'], unique: true }], grant: grants }), /stored main-table/);
+  assert.throws(() => entity('ComputedUniqueField', { a: text(), b: computed({ compute: () => 'b' }), indexes: [{ fields: ['a', 'b'], unique: true }], grant: grants }), /stored main-table/);
+  assert.throws(() => entity('SideTableUniqueField', { a: text(), b: map(text()), indexes: [{ fields: ['a', 'b'], unique: true }], grant: grants }), /stored main-table/);
+  assert.throws(() => entity('DuplicateUniqueField', { a: text(), b: text(), indexes: [{ fields: ['a', 'a'], unique: true }], grant: grants }), /must not contain duplicates/);
+  assert.throws(() => entity('DuplicateUniqueIndex', { a: text(), b: text(), indexes: [{ fields: ['a', 'b'], unique: true }, { fields: ['b', 'a'], unique: true }], grant: grants }), /duplicate index/);
+
+  const A = entity('CompositeCollision', { a: text(), b: text(), indexes: [{ fields: ['a', 'b'], unique: true }], grant: grants });
+  const B = entity('CompositeCollision_unique', { a_b: ref(A, { physical: true }), grant: grants });
+  const db = new DatabaseSync(':memory:');
+  await assert.rejects(workbench({ db, entities: [A, B] }).start(), /duplicate generated index/);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'CompositeCollision'").get().count, 0);
+  db.close();
 });
 
 test('eventful removal refs are deferred NO ACTION and cannot be deleted outside Workbench', async (t) => {
