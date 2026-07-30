@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
+import http from 'node:http';
+import { once } from 'node:events';
 
-import { createLiveDelivery } from '../src/server.mjs';
+import { createLiveDelivery, createLiveDeliveryHttpHandler } from '../src/server.mjs';
 import { entity, ref, snapshot, text } from '../src/index.mjs';
 import { executeFrameworkDDL } from '../src/ddl.mjs';
 import { grant, subscribe } from '../src/grant.mjs';
@@ -152,5 +154,34 @@ test('a required relation denies undeclared direct bootstrap, catch-up, and subs
   assert.equal(revoked, true);
   assert.equal(await subscription.activate(), undefined);
   controller.abort();
+  db.close();
+});
+
+test('a required relation denies annotated-text document bootstrap, catch-up, and live routes', async () => {
+  const { db, live, code } = setup();
+  const document = { entity: code, scope: 'Project:p1', documentId: 'ok' };
+  assert.deepEqual(await live.bootstrap({ principal: {}, scope: 'Project:p1', document }), { kind: 'revoked' });
+  assert.deepEqual(await live.catchup({ principal: {}, scope: 'Project:p1', after: 0, document }), { kind: 'revoked' });
+  let revoked = false;
+  const controller = new AbortController();
+  const subscription = await live.subscribe({ principal: {}, scope: 'Project:p1', after: 0, document, signal: controller.signal, revoke: () => { revoked = true; } });
+  assert.equal(revoked, true);
+  assert.equal(await subscription.activate(), undefined);
+  controller.abort();
+
+  const delivery = { ...live, resolveAnnotatedTextDocument: () => document };
+  const handler = createLiveDeliveryHttpHandler({ delivery, principalOf: () => ({}) });
+  const server = http.createServer((req, res) => handler(req, res));
+  server.listen(0);
+  await once(server, 'listening');
+  const endpoint = `http://127.0.0.1:${server.address().port}/live-delivery`;
+  const query = 'entity=Code&field=body&documentId=ok';
+  try {
+    assert.deepEqual(await fetch(`${endpoint}/bootstrap?mode=snapshot&${query}`).then((response) => response.json()), { kind: 'revoked' });
+    assert.deepEqual(await fetch(`${endpoint}/bootstrap?mode=catchup&after=0&${query}`).then((response) => response.json()), { kind: 'revoked' });
+    assert.equal((await fetch(`${endpoint}/events?after=0&${query}`)).status, 403);
+  } finally {
+    server.close();
+  }
   db.close();
 });

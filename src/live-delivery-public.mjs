@@ -136,7 +136,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
       }
       const handle = tryParseScopeKey(subscription.scope);
       const declaration = handle && composites.get(handle.entity);
-      if (handle && requiredEntities.has(handle.entity)) {
+      if ((subscription.document && requiredEntities.has(subscription.document.entity.name)) || (handle && requiredEntities.has(handle.entity))) {
         revoke?.();
         return Promise.resolve({ activate: async () => undefined });
       }
@@ -180,6 +180,10 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
       }));
     },
     async bootstrap({ principal, scope, document = null }) {
+      const handle = tryParseScopeKey(scope);
+      if ((document && requiredEntities.has(document.entity.name)) || (handle && requiredEntities.has(handle.entity))) {
+        return { kind: 'revoked' };
+      }
       if (document) {
         if (document.scope !== scope) return { kind: 'revoked' };
         const row = await this.authorizeAnnotatedTextDocument(document, principal);
@@ -191,8 +195,6 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
       }
       // The declaration is selected by the package scope grammar, before the
       // core pairs its synchronous result with the committed cursor.
-      const handle = tryParseScopeKey(scope);
-      if (handle && requiredEntities.has(handle.entity)) return { kind: 'revoked' };
       const aggregate = handle && composites.get(handle.entity);
       if (aggregate) return aggregateSnapshot({ principal, scope, declaration: aggregate });
       const result = await core.bootstrap({
@@ -209,9 +211,11 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
        return result;
     },
     async catchup(input) {
-      if (input.document) return this.bootstrap({ principal: input.principal, scope: input.scope, document: input.document });
       const handle = tryParseScopeKey(input.scope);
-      if (handle && requiredEntities.has(handle.entity)) return { kind: 'revoked' };
+      if ((input.document && requiredEntities.has(input.document.entity.name)) || (handle && requiredEntities.has(handle.entity))) {
+        return { kind: 'revoked' };
+      }
+      if (input.document) return this.bootstrap({ principal: input.principal, scope: input.scope, document: input.document });
       const declaration = handle && composites.get(handle.entity);
       if (declaration) {
         const cursor = input.after;

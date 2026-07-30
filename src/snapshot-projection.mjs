@@ -139,6 +139,12 @@ function compileTombstones(declaration, resolveEntity) {
   if (!isRegisteredEntity(entity, resolveEntity)) throw new TypeError(`snapshot tombstone entity '${entity.name}' must be registered`);
   const entityId = entity.fields[rule.entityId];
   const terminalScope = rule.terminalScope === undefined ? null : entityOf(rule.terminalScope);
+  if (rule.targetScope !== undefined && rule.targetScopeId === undefined) {
+    throw new TypeError('snapshot tombstone targetScope requires targetScopeId');
+  }
+  if (rule.targetScopeId !== undefined && rule.targetScope === undefined) {
+    throw new TypeError('snapshot tombstone targetScopeId requires targetScope');
+  }
   let scopeTarget = null;
   let targetScopeId = null;
   if (terminalScope) {
@@ -176,9 +182,6 @@ function compileTombstones(declaration, resolveEntity) {
         throw new TypeError(`snapshot tombstone target '${target.name}' owner scope '${explicitOwner}' must be a declared ref`);
       }
       const declaredOwnerScope = rule.targetScope === undefined ? null : entityOf(rule.targetScope);
-      if (rule.targetScopeId !== undefined && !declaredOwnerScope) {
-        throw new TypeError('snapshot tombstone targetScopeId requires targetScope');
-      }
       if (declaredOwnerScope && (!isRegisteredEntity(declaredOwnerScope, resolveEntity) || targetName(owner) !== declaredOwnerScope.name)) {
         throw new TypeError(`snapshot tombstone target '${target.name}' owner scope '${explicitOwner}' must reference registered ${declaredOwnerScope.name}`);
       }
