@@ -120,6 +120,86 @@ test('HTTP session delegates duplicate, gap and opaque resync recovery to the pa
   session.close();
 });
 
+test('HTTP session retries an unstable aggregate bootstrap until it receives a paired snapshot', async () => {
+  let attempts = 0;
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ++attempts === 1
+        ? { kind: 'retry' }
+        : { kind: 'snapshot', snapshot: { id: 'p1' }, cursor: { anchor: 1, aggregate: 2 } },
+    }),
+    eventSourceFactory: () => ({ close() {} }),
+    validateSnapshot: (value) => value,
+    sendAction: async () => ({ ok: true }),
+    historySession: 'tab-a',
+  });
+
+  await session.ready;
+  assert.equal(attempts, 2);
+  assert.equal(session.status, 'live');
+  assert.deepEqual(session.snapshot, { id: 'p1' });
+  session.close();
+});
+
+test('closing an HTTP session cancels aggregate bootstrap retry backoff', async () => {
+  let attempts = 0;
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async () => {
+      attempts += 1;
+      return { ok: true, status: 200, json: async () => ({ kind: 'retry' }) };
+    },
+    eventSourceFactory: () => ({ close() {} }),
+    validateSnapshot: (value) => value,
+    sendAction: async () => ({ ok: true }),
+    historySession: 'tab-a',
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  session.close();
+  await session.ready;
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  assert.equal(attempts, 1);
+  assert.equal(session.status, 'recovering');
+});
+
+test('a superseded aggregate bootstrap retry cannot replace newer reconnect recovery', async () => {
+  const sources = [];
+  let attempts = 0;
+  let releaseRetry;
+  const retryReturned = new Promise((resolve) => { releaseRetry = resolve; });
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { version: 1 }, cursor: { anchor: 1, aggregate: 1 } }) };
+      if (attempts === 2) return { ok: true, status: 200, json: async () => { releaseRetry(); return { kind: 'retry' }; } };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { version: 2 }, cursor: { anchor: 2, aggregate: 2 } }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+    validateSnapshot: (value) => value,
+    sendAction: async () => ({ ok: true }),
+    historySession: 'tab-a',
+  });
+
+  await session.ready;
+  sources[0].onmessage({ data: JSON.stringify([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]) });
+  await retryReturned;
+  await session.reconnect();
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  assert.equal(attempts, 3);
+  assert.equal(session.status, 'live');
+  assert.deepEqual(session.snapshot, { version: 2 });
+  session.close();
+});
+
 test('HTTP snapshot-only session settles a sender receipt through opaque SSE recovery without exposing action identity', async () => {
   const sources = [];
   let snapshots = 0;

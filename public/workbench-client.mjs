@@ -2211,6 +2211,27 @@ export function createLiveDeliverySession({
   let deliveryChain = Promise.resolve();
   const listeners = new Set();
   const operations = new Map();
+  const recoveryRetryWaiters = new Set();
+
+  function waitForRecoveryRetry(attempt) {
+    const delay = Math.min(50 * (2 ** attempt), 1000);
+    return new Promise((resolve) => {
+      const waiter = { timeout: null, resolve };
+      waiter.timeout = setTimeout(() => {
+        recoveryRetryWaiters.delete(waiter);
+        resolve(true);
+      }, delay);
+      recoveryRetryWaiters.add(waiter);
+    });
+  }
+
+  function cancelRecoveryRetries() {
+    for (const waiter of recoveryRetryWaiters) {
+      clearTimeout(waiter.timeout);
+      waiter.resolve(false);
+    }
+    recoveryRetryWaiters.clear();
+  }
 
   function createSettlement(operation) {
     const waiters = new Set();
@@ -2380,7 +2401,7 @@ export function createLiveDeliverySession({
     return true;
   }
 
-  async function recover(mode, snapshotCursorFloor) {
+  async function recover(mode, snapshotCursorFloor, retryAttempt = 0) {
     if (closed) return;
     const generation = ++recoveryGeneration;
     const receiptGenerationAtStart = receiptGeneration;
@@ -2396,7 +2417,8 @@ export function createLiveDeliverySession({
       return;
     }
     if (result.kind === 'retry') {
-      return recover('snapshot', snapshotCursorFloor);
+      if (!(await waitForRecoveryRetry(retryAttempt)) || closed || status === 'revoked' || generation !== recoveryGeneration) return;
+      return recover('snapshot', snapshotCursorFloor, retryAttempt + 1);
     }
     if (result.kind === 'snapshot') {
       assertCursor(result.cursor, 'snapshot cursor');
@@ -2547,6 +2569,7 @@ export function createLiveDeliverySession({
   function revoke(_reason) {
     if (closed || status === 'revoked') return;
     status = 'revoked';
+    cancelRecoveryRetries();
     baseSnapshot = null;
     visibleSnapshot = null;
     for (const operation of operations.values()) settleOperation(operation, { status: 'revoked' });
@@ -2786,6 +2809,7 @@ export function createLiveDeliverySession({
     close() {
       if (closed) return;
       closed = true;
+      cancelRecoveryRetries();
       subscription?.close?.();
       subscription = null;
       for (const operation of operations.values()) settleOperation(operation, { status: 'closed' });
@@ -2838,7 +2862,7 @@ export function createLiveDeliveryHttpSession({
     if (response.status === 401 || response.status === 403) return { kind: 'revoked' };
     if (!response.ok) throw new Error(`live delivery bootstrap failed with HTTP ${response.status}`);
     const result = await response.json();
-    if (!result || typeof result !== 'object' || !['snapshot', 'catchup', 'revoked'].includes(result.kind)) {
+    if (!result || typeof result !== 'object' || !['snapshot', 'catchup', 'retry', 'revoked'].includes(result.kind)) {
       throw new Error('live delivery bootstrap returned an invalid response');
     }
     return result;
