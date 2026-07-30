@@ -616,6 +616,7 @@ export interface BoundWorkbenchEntity<Row extends object = Record<string, unknow
 export type EntityDeclaration<Row extends object> = Readonly<Record<string, unknown>> & {
   routes?: (routes: EntityRouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
   grant?: ScopeClause | ScopePredicate | InheritDirective | GrantDecision | ((context: unknown) => GrantDecision);
+  history?: Readonly<{ update?: 'conditional' }>;
 };
 export function entity<Row extends object = Record<string, unknown>>(
   name: string,

@@ -9,7 +9,7 @@
 // focused on the entity-row lifecycle.
 
 import { createHash, randomUUID } from 'node:crypto';
-import { validateMaterializedField, validateMutation, ValidationError, deserializeField, resolveStrategy } from '../field-strategy.mjs';
+import { validateMaterializedField, validateMutation, ValidationError, deserializeField, serializeField, flattenStruct, resolveStrategy } from '../field-strategy.mjs';
 import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { assertFrontier, assertWellFormedText, canonicalTextOp, frontierDominates } from '../annotated-text.mjs';
@@ -211,7 +211,7 @@ export function materializeCreateDefaults(record, payload) {
   return data;
 }
 
-export function createCrudHandlers({ record, sideTableStrategyEntries }) {
+export function createCrudHandlers({ record, sideTableStrategyEntries, conditionalHistory = false }) {
   const { name, fields, verbs } = record;
   const ownerField = ownerFieldOf({ name, fields });
 
@@ -262,11 +262,36 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         data,
       }];
     },
-    [`${name}.update`]: ({ payload, principal: _p, db }) => {
+    [`${name}.update`]: ({ payload, principal: _p, db, history }) => {
       const { id, ...rest } = payload;
       if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
       if (Object.keys(rest).length === 0) {
-        throw new ValidationError(`${name}.update requires at least one field to change`);
+        if (!history) throw new ValidationError(`${name}.update requires at least one field to change`);
+      }
+      const currentStored = conditionalHistory ? db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id) : null;
+      if (conditionalHistory && !currentStored) throw Object.assign(new Error(`${name} ${id} not found`), { status: 404 });
+      if (history) {
+        if (!conditionalHistory || !history || (history.operation !== 'undo' && history.operation !== 'redo') || !history.input || Object.keys(history.input).length !== 2) throw new ValidationError(`${name}.update history input is invalid`);
+        const { expected, replacement } = history.input;
+        const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
+        const validRow = (row) => row && typeof row === 'object' && !Array.isArray(row) && Object.keys(row).length === columns.length && columns.every((column) => Object.hasOwn(row, column));
+        if (!validRow(expected) || !validRow(replacement) || expected.id !== id || replacement.id !== id) throw new ValidationError(`${name}.update history input rows are invalid`);
+        if (!columns.every((column) => Object.is(currentStored[column], expected[column]))) throw Object.assign(new Error(`${name}.update history expected row conflicts`), { status: 409 });
+        const data = {};
+        for (const [fieldName, descriptor] of Object.entries(fields)) {
+          if (descriptor.kind === 'struct') {
+            const cells = Object.keys(descriptor.cells).map((cell) => `${fieldName}__${cell}`);
+            if (cells.some((cell) => !Object.is(currentStored[cell], replacement[cell]))) {
+              data[fieldName] = Object.fromEntries(cells.map((column) => {
+                const cell = column.slice(fieldName.length + 2);
+                return [cell, deserializeField(descriptor.cells[cell], replacement[column])];
+              }));
+            }
+          } else if (Object.hasOwn(replacement, fieldName) && !Object.is(currentStored[fieldName], replacement[fieldName])) {
+            data[fieldName] = deserializeField(descriptor, replacement[fieldName]);
+          }
+        }
+        return { events: [{ handle: verbs.updated.handle, type: verbs.updated.type, scope: scopeOf(name, id).key, data: { ...data, id } }], privateFact: { before: expected, after: replacement } };
       }
       for (const fieldName of Object.keys(rest)) {
         if (fields[fieldName]?.kind === 'annotatedText') {
@@ -324,7 +349,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
       for (const [fieldName, descriptor] of Object.entries(fields)) {
         if (descriptor.touch) data[fieldName] = new Date();
       }
-      return [{
+      const result = [{
         handle: verbs.updated.handle,
         type: verbs.updated.type,
         scope: annotatedEntries.length > 0
@@ -333,6 +358,18 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
         data,
         ...(stateTransitions.length > 0 ? { _stateTransitions: stateTransitions } : {}),
       }];
+      if (conditionalHistory) {
+        const after = { ...currentStored };
+        for (const [fieldName, value] of Object.entries(data)) {
+          const descriptor = fields[fieldName];
+          if (!descriptor || descriptor.kind === 'store') continue;
+          if (descriptor.kind === 'struct') Object.assign(after, Object.fromEntries(Object.entries(flattenStruct(fieldName, descriptor, value))));
+          else after[fieldName] = resolveStrategy(descriptor.kind).serialize(value, descriptor);
+        }
+        for (const [fieldName, descriptor] of Object.entries(fields)) if (descriptor.touch) after[fieldName] = serializeField(descriptor, data[fieldName]);
+        return { events: result, privateFact: { before: currentStored, after } };
+      }
+      return result;
     },
     [`${name}.remove`]: ({ payload, principal: _p, db }) => {
       if (!payload.id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
@@ -348,6 +385,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries }) {
   };
   const cursorPolicy = {};
   const annotatedEntries = Object.entries(fields).filter(([, descriptor]) => descriptor.kind === 'annotatedText');
+  if (conditionalHistory) {
+    Object.defineProperty(handlers[`${name}.update`], 'inTransaction', { value: true });
+  }
   if (annotatedEntries.length > 0) {
     for (const type of [`${name}.create`, `${name}.update`, `${name}.remove`]) {
       Object.defineProperties(handlers[type], { inTransaction: { value: true }, batchForbidden: { value: true } });
