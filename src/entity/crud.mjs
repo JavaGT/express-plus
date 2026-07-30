@@ -24,7 +24,7 @@ import { assertR3BlockMergePayload, canonicalJsonEqual } from '../annotated-text
 import { assertR4AnnotationApplyPayload } from '../annotated-text-r4.mjs';
 import { assertR5AnnotationDetachPayload } from '../annotated-text-r5.mjs';
 import { erasureDirectivePreparation } from '../erasure-directive.mjs';
-import { CASCADE_PREAUTHORIZED } from './removal-cascade.mjs';
+import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.mjs';
 import { mayRow } from '../row-grant.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
@@ -400,11 +400,29 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       if (history) {
         if (!conditionalCreateHistory || history.operation !== 'undo' || !history.input || Object.keys(history.input).length !== 2) throw new ValidationError(`${name}.remove history input is invalid`);
         if (!history.input.expected || history.input.replacement !== null || history.input.expected.id !== payload.id) throw new ValidationError(`${name}.remove history input row is invalid`);
+        const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
+        const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
+        if (!current || Object.keys(history.input.expected).length !== columns.length || columns.some((column) => !Object.hasOwn(history.input.expected, column)) || !columns.every((column) => Object.is(current[column], history.input.expected[column]))) {
+          throw Object.assign(new Error(`${name} remove conflicts`), { status: 409 });
+        }
+        if (record.removalCascade && (await record.removalCascadeDescendants(payload.id, db)).length > 0) {
+          throw Object.assign(new Error(`${name} remove conflicts: cascade descendants exist`), { status: 409 });
+        }
         return { events: [{ handle: verbs.removed.handle, type: verbs.removed.type, scope: scopeOf(name, payload.id).key, data: { id: payload.id } }], privateFact: { before: history.input.expected, after: null } };
       }
       if (record.removalCascade) {
         return record.removalCascade(payload.id, principal, db)
-          .then((rows) => rows.map(({ entity, id }) => ({ ...entity.removedEvent(id, db), [CASCADE_PREAUTHORIZED]: true })));
+          .then((rows) => {
+            const events = rows.map(({ entity, id }, index) => ({
+              ...entity.removedEvent(id, db),
+              [CASCADE_PREAUTHORIZED]: true,
+              ...(index < rows.length - 1 ? { [CASCADE_DESCENDANT]: true } : {}),
+            }));
+            if (!conditionalCreateHistory) return events;
+            const parent = rows.at(-1);
+            const before = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(parent.id);
+            return { events, privateFact: { before, after: null } };
+          });
       }
       // A conditional remove reads its private preimage below, so authorize the
       // target row first rather than allowing that read to precede admission.

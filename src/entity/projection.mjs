@@ -2,6 +2,7 @@ import { getLog } from '../log.mjs';
 import { serializeField, flattenStruct, resolveStrategy, deserializeField } from '../field-strategy.mjs';
 import * as eventHandle from '../event-handle.mjs';
 import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
+import { CASCADE_DESCENDANT } from './removal-cascade.mjs';
 import { applyTextOp, assertUtf16Offset, assertWellFormedText, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
 import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, resolvePositionToEndpoint } from '../annotated-text-family.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
@@ -1506,7 +1507,9 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
           getLog().debug('dispatch', `${name}.updated`, { id: params.id });
         }
       } else if (handle.kind === eventHandle.EventKind.removed) {
-        if (conditionalCreateHistory) return;
+        // A cascade root with conditional-create history deletes from its exact
+        // private fact. Its descendants have no private facts in that receipt.
+        if (conditionalCreateHistory && !event[CASCADE_DESCENDANT]) return;
         const id = event.data?.id;
         // Capture the deleted-row history anchor BEFORE the delete, in the
         // same projection-consumer call (same transaction as the DELETE) —

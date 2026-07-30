@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { computed, date, deny, durableHistory, entity, everyone, grant, hash, principal, read, scope, subscribe, text, write } from '../src/index.mjs';
+import workbench, { computed, date, deny, durableHistory, entity, everyone, grant, hash, principal, read, ref, scope, subscribe, text, write } from '../src/index.mjs';
 
 const user = principal({ type: 'user', id: 'conditional-user' });
 const session = 'conditional-tab';
@@ -241,6 +241,87 @@ test('ordinary generated remove admits the target row before durable writes', as
   const allowed = await app.dispatch({ actionId: 'remove-admission-allowed', type: 'CreatedRemoveAdmission.remove', payload: { id: 'created-1' }, principal: user, scope: 'CreatedRemoveAdmission:created-1', history: { session } });
   assert.equal(allowed.ok, true);
   assert.deepEqual(await app.history.cursor({ scope: 'CreatedRemoveAdmission:created-1', principal: user, session }), beforeDenied);
+});
+
+test('conditional create parent supports eventful cascades and no-child undo/redo', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Parent = entity('ConditionalCascadeParent', {
+    body: text(), grant: () => grant(read, write, subscribe), history: { create: 'conditional' },
+  });
+  const Child = entity('ConditionalCascadeChild', {
+    parentId: ref(Parent, { onRemove: 'cascade' }),
+    body: text(), grant: () => grant(read, write, subscribe),
+  });
+  const app = workbench({ db, entities: [Parent, Child], history: history() });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  assert.equal((await app.dispatch({
+    actionId: 'conditional-cascade-create', type: 'ConditionalCascadeParent.create',
+    payload: { id: 'parent', body: 'private' }, principal: user,
+    scope: 'ConditionalCascadeParent:parent', history: { session },
+  })).ok, true);
+  const created = await app.history.cursor({ scope: 'ConditionalCascadeParent:parent', principal: user, session });
+  assert.equal((await app.history.undo({ scope: 'ConditionalCascadeParent:parent', principal: user, session, actionId: 'conditional-cascade-undo', revision: created.revision })).ok, true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM ConditionalCascadeParent WHERE id = ?').get('parent').count, 0);
+  const undone = await app.history.cursor({ scope: 'ConditionalCascadeParent:parent', principal: user, session });
+  assert.equal((await app.history.redo({ scope: 'ConditionalCascadeParent:parent', principal: user, session, actionId: 'conditional-cascade-redo', revision: undone.revision })).ok, true);
+  assert.equal(db.prepare('SELECT body FROM ConditionalCascadeParent WHERE id = ?').get('parent').body, 'private');
+});
+
+test('conditional create undo conflicts atomically when a direct-FK cascade child exists', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Parent = entity('ConditionalCascadeConflictParent', {
+    body: text(), grant: () => grant(read, write, subscribe), history: { create: 'conditional' },
+  });
+  const Child = entity('ConditionalCascadeConflictChild', {
+    parentId: ref(Parent, { onRemove: 'cascade', physical: true }),
+    body: text(), grant: () => grant(read, write, subscribe),
+  });
+  const app = workbench({ db, entities: [Parent, Child], history: history() });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  await app.dispatch({ actionId: 'conditional-conflict-create', type: 'ConditionalCascadeConflictParent.create', payload: { id: 'parent', body: 'private' }, principal: user, scope: 'ConditionalCascadeConflictParent:parent', history: { session } });
+  const created = await app.history.cursor({ scope: 'ConditionalCascadeConflictParent:parent', principal: user, session });
+  db.prepare('INSERT INTO ConditionalCascadeConflictChild (id, parentId, body) VALUES (?, ?, ?)').run('child', 'parent', 'child');
+  const before = await app.history.cursor({ scope: 'ConditionalCascadeConflictParent:parent', principal: user, session });
+  const result = await app.history.undo({ scope: 'ConditionalCascadeConflictParent:parent', principal: user, session, actionId: 'conditional-conflict-undo', revision: created.revision });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'conflict');
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM ConditionalCascadeConflictParent WHERE id = ?').get('parent').count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM ConditionalCascadeConflictChild WHERE id = ?').get('child').count, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'conditional-conflict-undo'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _ActionReceipt WHERE actionId = 'conditional-conflict-undo'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _PrivateActionFact WHERE actionId = 'conditional-conflict-undo'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _DeletedRowAnchor WHERE entity IN ('ConditionalCascadeConflictParent', 'ConditionalCascadeConflictChild')").get().count, 0);
+  assert.deepEqual(await app.history.cursor({ scope: 'ConditionalCascadeConflictParent:parent', principal: user, session }), before);
+  assert.throws(() => db.prepare('DELETE FROM ConditionalCascadeConflictParent WHERE id = ?').run('parent'), /FOREIGN KEY constraint failed/);
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+});
+
+test('ordinary remove cascades mixed conditional-create descendants and stores only the parent fact', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const Parent = entity('ConditionalCascadeRemoveParent', {
+    body: text(), grant: () => grant(read, write, subscribe), history: { create: 'conditional' },
+  });
+  const Child = entity('ConditionalCascadeRemoveChild', {
+    parentId: ref(Parent, { onRemove: 'cascade', physical: true }),
+    body: text(), grant: () => grant(read, write, subscribe), history: { create: 'conditional' },
+  });
+  const app = workbench({ db, entities: [Parent, Child] });
+  t.after(async () => { await app.shutdown(); db.close(); });
+  await app.start();
+  await app.dispatch({ actionId: 'ordinary-cascade-parent-create', type: 'ConditionalCascadeRemoveParent.create', payload: { id: 'parent', body: 'parent' }, principal: user });
+  db.prepare('INSERT INTO ConditionalCascadeRemoveChild (id, parentId, body) VALUES (?, ?, ?)').run('child', 'parent', 'child');
+  const parentBefore = { ...db.prepare('SELECT * FROM ConditionalCascadeRemoveParent WHERE id = ?').get('parent') };
+  const result = await app.dispatch({ actionId: 'ordinary-cascade-parent-remove', type: 'ConditionalCascadeRemoveParent.remove', payload: { id: 'parent' }, principal: user });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.events.map((event) => event.type), ['ConditionalCascadeRemoveChild.removed', 'ConditionalCascadeRemoveParent.removed']);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM ConditionalCascadeRemoveParent').get().count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM ConditionalCascadeRemoveChild').get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _DeletedRowAnchor WHERE entity = 'ConditionalCascadeRemoveChild' AND id = 'child'").get().count, 1);
+  assert.deepEqual(db.prepare('PRAGMA foreign_key_check').all(), []);
+  const fact = JSON.parse(db.prepare("SELECT fact FROM _PrivateActionFact WHERE actionId = 'ordinary-cascade-parent-remove'").get().fact);
+  assert.deepEqual(fact.before, parentBefore);
 });
 
 test('conditional generated create rolls stale lifecycle history back and fails closed for erased facts', async (t) => {
