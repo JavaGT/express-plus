@@ -1,16 +1,29 @@
 // write-queue.mjs — single-writer async mutex with bounded wait and depth.
 
+import { AsyncLocalStorage } from 'node:async_hooks';
+
 export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.now } = {}) {
+  const ownership = new AsyncLocalStorage();
   let waiters = 0;
   let running = false;
   let closed = false;
   let lock = Promise.resolve();
+
+  function invoke(fn) {
+    const owner = { active: true };
+    return Promise.resolve().then(() => ownership.run(owner, fn)).finally(() => {
+      owner.active = false;
+    });
+  }
   
   function run(fn) {
     if (closed) {
       const err = new Error('write queue is closed');
       err.status = 503;
       return Promise.reject(err);
+    }
+    if (ownership.getStore()?.active) {
+      return Promise.resolve().then(fn);
     }
     if (waiters + 1 >= maxDepth) {
       const err = new Error('write queue: depth limit exceeded');
@@ -23,7 +36,7 @@ export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.n
       let releaseNext;
       const completion = new Promise((r) => { releaseNext = r; });
       
-      const result = Promise.resolve().then(fn);
+      const result = invoke(fn);
       const wrapped = result.finally(() => {
         running = false;
         releaseNext();
@@ -31,7 +44,7 @@ export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.n
       lock = completion;
       return wrapped;
     }
-    
+
     waiters++;
     
     let cancelled = false;
@@ -76,7 +89,7 @@ export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.n
       clearTimeout(timeoutId);
     }).then(
       () => {
-        return Promise.resolve(fn()).finally(() => {
+        return invoke(fn).finally(() => {
           running = false;
           releaseNext();
         });
@@ -106,6 +119,9 @@ export function createWriteQueue({ maxDepth = 64, maxWaitMs = 5000, now = Date.n
     },
     get closed() {
       return closed;
+    },
+    get owned() {
+      return ownership.getStore()?.active === true;
     },
   };
 }

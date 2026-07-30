@@ -177,12 +177,14 @@ const nativeDb = new DatabaseSync(':memory:');
 const nativeApp: WorkbenchApp = workbench({ db: nativeDb });
 const writeQueue: WriteQueue = nativeApp.writeQueue;
 const queuedValue: Promise<number> = writeQueue.run(() => 1);
+const owned: boolean = writeQueue.owned;
+const nestedQueuedValue: Promise<number> = writeQueue.run(async () => writeQueue.run(() => 2));
 const declaredStorage: SqliteStorageDescription = describeEntityStorage(Project);
 const liveStorage: SqliteStorageDescription = describeSqliteStorage(nativeDb, []);
 // @ts-expect-error raw declarations are not compiled entities and have no storage name/fields
 describeEntityStorage({ grant: grant(read) });
 void [declaredStorage, liveStorage];
-void [nativeApp, queuedValue];
+void [nativeApp, queuedValue, owned, nestedQueuedValue];
 const migration: Migration = { version: 1, up: (database) => database.exec('SELECT 1') };
 const app: WorkbenchApp = workbench({
   db,

@@ -11,6 +11,66 @@ test('createWriteQueue returns expected API', () => {
   assert.strictEqual(typeof q.run, 'function');
   assert.strictEqual(q.depth, 0);
   assert.strictEqual(q.running, false);
+  assert.strictEqual(q.owned, false);
+});
+
+test('nested runs join the current ownership context exactly once', async () => {
+  const q = createWriteQueue();
+  const events = [];
+  let detached;
+
+  const result = await q.run(async () => {
+    events.push(['outer', q.owned]);
+    detached = new Promise((resolve) => setImmediate(() => resolve(q.owned)));
+    const nested = await q.run(async () => {
+      events.push(['nested', q.owned]);
+      await delay(1);
+      return 2;
+    });
+    events.push(['outer-after-nested', q.owned]);
+    return nested + 1;
+  });
+
+  assert.strictEqual(result, 3);
+  assert.deepStrictEqual(events, [
+    ['outer', true],
+    ['nested', true],
+    ['outer-after-nested', true],
+  ]);
+  assert.strictEqual(q.owned, false);
+  assert.strictEqual(await detached, false);
+  assert.strictEqual(await q.run(() => q.owned), true);
+  assert.strictEqual(q.owned, false);
+});
+
+test('an external writer waits while a nested writer joins', async () => {
+  const q = createWriteQueue();
+  let releaseOuter;
+  const outerGate = new Promise((resolve) => { releaseOuter = resolve; });
+  const events = [];
+
+  const outer = q.run(async () => {
+    events.push('outer-start');
+    const nested = q.run(() => {
+      events.push('nested');
+      return 'nested-result';
+    });
+    assert.strictEqual(await nested, 'nested-result');
+    await outerGate;
+    events.push('outer-end');
+  });
+  await delay(1);
+  const external = q.run(() => {
+    events.push('external');
+    return 'external-result';
+  });
+
+  await delay(1);
+  assert.deepStrictEqual(events, ['outer-start', 'nested']);
+  releaseOuter();
+  assert.strictEqual(await outer, undefined);
+  assert.strictEqual(await external, 'external-result');
+  assert.deepStrictEqual(events, ['outer-start', 'nested', 'outer-end', 'external']);
 });
 
 test('immediate runs always return promises', async () => {

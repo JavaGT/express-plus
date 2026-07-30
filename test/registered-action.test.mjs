@@ -58,6 +58,96 @@ test('registered action commits projection, project event, cursor, and receipt o
   assert.equal(readCommittedCursor(db, 'project:p1'), 1);
 });
 
+test('registered action re-enters the public writer without releasing its transaction', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE ExternalWrite (id TEXT PRIMARY KEY)');
+  let app;
+  let releaseNested;
+  const nestedCanFinish = new Promise((resolve) => { releaseNested = resolve; });
+  let nestedStarted;
+  const nestedHasStarted = new Promise((resolve) => { nestedStarted = resolve; });
+  let nestedRuns = 0;
+  const action = {
+    type: 'source.create',
+    authorize: () => true,
+    handler: async ({ payload, now }) => {
+      await app.writeQueue.run(async () => {
+        nestedRuns++;
+        assert.equal(app.writeQueue.owned, true);
+        assert.equal(db.isTransaction, true, 'a writer slot does not open the transaction; this dispatch already did');
+        db.prepare('INSERT INTO ExternalWrite (id) VALUES (?)').run(payload.id);
+        nestedStarted();
+        await nestedCanFinish;
+      });
+      return [{
+        type: 'source.created',
+        scope: `project:${payload.projectId}`,
+        data: { id: payload.id, entity: { ...payload, createdAt: now } },
+      }];
+    },
+    projections: [{
+      eventTypes: ['source.created'],
+      apply(event, tx) {
+        tx.prepare('INSERT INTO Source (id, projectId, name) VALUES (?, ?, ?)').run(
+          event.data.entity.id,
+          event.data.entity.projectId,
+          event.data.entity.name,
+        );
+      },
+    }],
+  };
+  db.exec('CREATE TABLE Source (id TEXT PRIMARY KEY, projectId TEXT NOT NULL, name TEXT NOT NULL)');
+  app = workbench({ db, actions: [action] });
+  await app.start();
+
+  const dispatch = app.dispatch({
+    actionId: 'reentrant-action', scope: 'project:p1', type: 'source.create',
+    payload: { id: 's1', projectId: 'p1', name: 'Interview' },
+    principal: { type: 'user', id: 'u1', attributes: {} },
+  });
+  await nestedHasStarted;
+
+  let externalRan = false;
+  const external = app.writeQueue.run(() => { externalRan = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(externalRan, false, 'an unrelated writer waits for the dispatch transaction');
+
+  releaseNested();
+  assert.equal((await dispatch).ok, true);
+  await external;
+  assert.equal(nestedRuns, 1);
+  assert.equal(externalRan, true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM ExternalWrite').get().count, 1);
+  db.close();
+});
+
+test('a failed re-entrant writer stays inside the dispatch rollback', async () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('CREATE TABLE ExternalWrite (id TEXT PRIMARY KEY)');
+  let app;
+  const action = {
+    type: 'source.create',
+    authorize: () => true,
+    handler: async ({ payload }) => {
+      await app.writeQueue.run(() => {
+        db.prepare('INSERT INTO ExternalWrite (id) VALUES (?)').run(payload.id);
+      });
+      throw new Error('reject re-entrant action');
+    },
+  };
+  app = workbench({ db, actions: [action] });
+  await app.start();
+
+  const result = await app.dispatch({
+    actionId: 'reentrant-rollback', scope: 'project:p1', type: 'source.create',
+    payload: { id: 's1' }, principal: { type: 'user', id: 'u1', attributes: {} },
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM ExternalWrite').get().count, 0);
+  db.close();
+});
+
 test('registered action handler receives the exact caller-selected owning scope', async () => {
   let receivedScope = null;
   const scopeAware = (db) => {

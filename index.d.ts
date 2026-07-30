@@ -1022,6 +1022,8 @@ export interface WriteQueue {
   readonly depth: number;
   readonly running: boolean;
   readonly closed: boolean;
+  /** True when the current async context holds this queue's writer slot. This does not start a SQLite transaction. */
+  readonly owned: boolean;
 }
 
 export interface WorkbenchApp extends RouteBuilder {
