@@ -178,6 +178,8 @@ export type FieldOptions<Value = unknown> = Readonly<{
   canonicalize?: (value: Value) => Value;
   oneOf?: readonly Value[];
   indexed?: string;
+  /** Emit a SQLite foreign key and one-column index for a declaration-bound ref. */
+  physical?: boolean;
   role?: string | readonly string[];
 }> & Readonly<Record<string, unknown>>;
 

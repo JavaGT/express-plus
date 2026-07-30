@@ -25,6 +25,16 @@ import { defineSqliteSchema } from './sqlite-schema.mjs';
 import { deletedRowAnchorTableDDL } from './deleted-row-anchor.mjs';
 import { annotatedTextDDL } from './annotated-text-field.mjs';
 
+function quoteIdent(name) {
+  return `"${String(name).replace(/"/g, '""')}"`;
+}
+
+function assertIdentifier(name, label) {
+  if (typeof name !== 'string' || name.length === 0 || name.includes('\0')) {
+    throw new Error(`${label} must be a non-empty SQL identifier without NUL bytes`);
+  }
+}
+
 const SUPPORTED_FIELD_TYPES = Object.freeze({
   value: new Set(['text', 'boolean', 'date', 'number', 'json', 'vector', 'ref']),
   crdt: new Set(['text', 'raster', 'polyline']),
@@ -108,7 +118,7 @@ function collectAstFields(ast, result, seen = new Set()) {
   }
 }
 
-function scheduleIndexDDL(entity) {
+function scheduleIndexNames(entity) {
   const fields = new Set();
   for (const triggerOrTriggers of Object.values(entity.schedule ?? {})) {
     const triggers = Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
@@ -122,10 +132,29 @@ function scheduleIndexDDL(entity) {
   return [...fields]
     .filter((fieldName) => isMainTableField(entity.fields?.[fieldName]))
     .sort()
-    .map((fieldName) => (
-      `CREATE INDEX IF NOT EXISTS idx_${entity.name}_schedule_${fieldName} ` +
-      `ON ${entity.name} (${fieldName});`
-    ));
+    .map((fieldName) => ({ name: `idx_${entity.name}_schedule_${fieldName}`, fieldName }));
+}
+
+function scheduleIndexDDL(entity) {
+  return scheduleIndexNames(entity).map(({ name, fieldName }) => (
+    `CREATE INDEX IF NOT EXISTS ${quoteIdent(name)} ` +
+    `ON ${quoteIdent(entity.name)} (${quoteIdent(fieldName)});`
+  ));
+}
+
+function refIndexes(entity) {
+  return Object.entries(entity.fields ?? {})
+    .filter(([, descriptor]) => physicalRef(entity, descriptor))
+    .map(([fieldName]) => ({ name: `idx_${entity.name}_${fieldName}`, fieldName }));
+}
+
+function physicalRef(entity, descriptor) {
+  return descriptor?.physical === true && descriptor?.kind === 'value' && descriptor.type === 'ref'
+    && (descriptor.target?.name || descriptor.target === entity.name);
+}
+
+export function generatedIndexNames(entity) {
+  return [...refIndexes(entity), ...scheduleIndexNames(entity)].map(({ name }) => name);
 }
 
 // Generate the main table DDL for one entity.
@@ -141,14 +170,30 @@ function mainTableDDL(entity) {
     // A text CRDT's declared cell is its canonical JSON checkpoint, not a
     // materialized string plus a hidden second authority.
     if (descriptor.kind === 'value' || descriptor.kind === 'crdt' || descriptor.kind === 'hash' || descriptor.kind === 'state' || descriptor.kind === 'projected' || (descriptor.kind === 'computed' && descriptor.mode === 'stored')) {
-      cols.push(`${name} ${sqlType(descriptor)}`);
+      let column = `${name} ${sqlType(descriptor)}`;
+      if (physicalRef(entity, descriptor) && !(descriptor.nullable || descriptor.optional)) column += ' NOT NULL';
+      cols.push(column);
     } else if (descriptor.kind === 'struct') {
       // struct fields (link) flatten to multiple columns
       for (const cellName of Object.keys(descriptor.cells ?? {})) {
-        cols.push(`${structCellColumn(name, cellName)} TEXT`);
+        const cell = structCellColumn(name, cellName);
+        cols.push(`${cell} TEXT`);
       }
     }
     // map / log / ephemeral / store → NOT stored in main table
+  }
+  for (const [name, descriptor] of Object.entries(fields)) {
+    if (!physicalRef(entity, descriptor)) continue;
+    const target = descriptor.target?.name ?? (descriptor.target === entity.name ? entity.name : null);
+    if (!target) continue;
+    assertIdentifier(target, `${entity.name}.${name} ref target`);
+    // Eventful cascades emit child removals before the parent removal, but their
+    // projections share one transaction. Defer NO ACTION to that transaction's
+    // end so direct SQL cannot bypass lifecycle events while the event stream can.
+    const removal = descriptor.onRemove === 'cascade'
+      ? ' ON DELETE NO ACTION ON UPDATE NO ACTION DEFERRABLE INITIALLY DEFERRED'
+      : ' ON DELETE RESTRICT ON UPDATE NO ACTION';
+    cols.push(`FOREIGN KEY (${quoteIdent(name)}) REFERENCES ${quoteIdent(target)} (${quoteIdent('id')})${removal}`);
   }
   return `CREATE TABLE IF NOT EXISTS ${entity.name} (\n  ${cols.join(',\n  ')}\n);`;
 }
@@ -159,8 +204,10 @@ export function generateDDL(entity) {
   const statements = [];
   const { fields } = entity;
   if (!fields) return statements;
+  assertIdentifier(entity.name, 'entity name');
 
   for (const [name, descriptor] of Object.entries(fields)) {
+    assertIdentifier(name, `${entity.name} field name`);
     assertSupportedField(entity.name, name, descriptor);
   }
   statements.push(mainTableDDL(entity));
@@ -170,6 +217,9 @@ export function generateDDL(entity) {
   // independent trailing statements, which also keeps generated migrations
   // stable for callers that inspect the table statements by position.
   statements.push(...scheduleIndexDDL(entity));
+  for (const { name, fieldName } of refIndexes(entity)) {
+    statements.push(`CREATE INDEX IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(entity.name)} (${quoteIdent(fieldName)});`);
+  }
 
   return statements;
 }

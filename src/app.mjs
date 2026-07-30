@@ -33,7 +33,7 @@ import {
   validateMaintenanceOptions,
 } from './application-runtime.mjs';
 import { wrapDriver } from './driver.mjs';
-import { executeDDL, executeFrameworkDDL, generateSideTableDDL } from './ddl.mjs';
+import { executeDDL, executeFrameworkDDL, generateSideTableDDL, generatedIndexNames } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
 import { validateSchemaOwnedEntityTable } from './schema-entity-validation.mjs';
 import { frameworkTableNames, declaredTableNames } from './schema-table-census.mjs';
@@ -301,6 +301,34 @@ export default function workbench({
         const schemaTables = new Map((schema?.tables ?? []).map((table) => [table.name.toLowerCase(), table]));
         const entityMainTables = new Set([...app.entities.values()].map((entity) => entity.name.toLowerCase()));
         const generatedTables = new Set(declaredTableNames([...app.entities.values()]).map((name) => name.toLowerCase()));
+        const registeredEntities = new Map([...app.entities.values()].map((entity) => [entity.name.toLowerCase(), entity]));
+        const generatedIndexes = new Map();
+        for (const entity of app.entities.values()) {
+          for (const [fieldName, field] of Object.entries(entity.fields ?? {})) {
+            if (field?.physical !== true || field?.kind !== 'value' || field.type !== 'ref') continue;
+            // String refs remain logical for compatibility with declarations whose
+            // target is supplied outside this app. A string self ref is closed.
+            const targetName = field.target?.name ?? (field.target === entity.name ? entity.name : null);
+            if (!targetName) continue;
+            const target = registeredEntities.get(String(targetName).toLowerCase());
+            if (!target) {
+              throw new Error(`entity '${entity.name}' field '${fieldName}' references unregistered Workbench entity '${String(targetName)}'`);
+            }
+            const targetSchema = schemaTables.get(target.name.toLowerCase());
+            if (targetSchema) {
+              const id = targetSchema.columns.find((column) => column.name.toLowerCase() === 'id');
+              if (!id || String(id.type).toLowerCase() !== 'text' || id.primaryKey !== true) {
+                throw new Error(`entity '${entity.name}' field '${fieldName}' ref target '${target.name}' must have a TEXT id primary key`);
+              }
+            }
+          }
+          for (const indexName of generatedIndexNames(entity)) {
+            const key = indexName.toLowerCase();
+            const prior = generatedIndexes.get(key);
+            if (prior) throw new Error(`duplicate generated index '${indexName}' from ${entity.name} and ${prior}`);
+            generatedIndexes.set(key, entity.name);
+          }
+        }
         for (const table of schema?.tables ?? []) {
           const name = table.name.toLowerCase();
           if (frameworkTableNames.some((frameworkName) => frameworkName.toLowerCase() === name)) {
