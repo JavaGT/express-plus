@@ -1,6 +1,6 @@
 import { parseEventType } from './event-handle.mjs';
 import { rowToEvent } from './committed-log.mjs';
-import { mayRow } from './row-grant.mjs';
+import { mayRow, mayVerb as rowGrantMayVerb } from './row-grant.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 import { hasAnnotatedTextFields } from './entity-snapshot-projection.mjs';
 import { publicEvent } from './event-delivery.mjs';
@@ -30,8 +30,10 @@ function reauthFor(entityRec, principal, handle, db, scopeVisible) {
 export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = null, projectRecipient, scopeVisible = () => true }) {
   if (!db) throw new Error('history reader requires a database');
   if (!entities) throw new Error('history reader requires an entity registry');
-  if (typeof mayVerb !== 'function') throw new Error('history reader requires a mayVerb function');
-  if (typeof projectRecipient !== 'function') throw new Error('history reader requires a projectRecipient function');
+  // Authorization defaults to the framework row-grant engine — the same engine
+  // the live-delivery and REST paths use. Apps may still inject their own
+  // mayVerb (e.g. to customize authorization for a transport).
+  const authorizeVerb = typeof mayVerb === 'function' ? mayVerb : (entity, verb, row, principal) => rowGrantMayVerb(entity, verb, row, principal);
 
   const resolveEntity = typeof entities === 'function' ? entities : (name) => entities.get(name);
   const denyEntities = annotatedHistory?.entities ?? new Set();
@@ -55,7 +57,7 @@ export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = 
     if (!entityRec) throw forbidden();
     const auth = reauthFor(entityRec, principal, handle, db, scopeVisible);
     if (!auth) throw forbidden();
-    if (!(await mayRow(entityRec, 'subscribe', auth.row, principal, mayVerb))) {
+    if (!(await mayRow(entityRec, 'subscribe', auth.row, principal, authorizeVerb))) {
       throw forbidden();
     }
     return { entityRec, row: auth.row };
@@ -66,6 +68,9 @@ export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = 
     if (!principal || principal.id == null) throw forbidden();
     if (!Number.isSafeInteger(sinceSeq) || sinceSeq < 0) throw new TypeError('sinceSeq must be a non-negative integer');
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000) throw new TypeError('limit must be an integer from 1 to 1000');
+    // Receipt reads need no projector; history reads do. Require it here so a
+    // reader can be constructed for readReceipt alone without an app projector.
+    if (typeof projectRecipient !== 'function') throw new Error('history reader requires a projectRecipient function to read committed history');
 
     const { entityRec, row } = await authorize(scope, principal);
 

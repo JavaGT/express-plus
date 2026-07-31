@@ -656,8 +656,10 @@ export type ScopeVisibleCheck = (context: Readonly<{
 export function createHistoryReader(options: {
   db: WorkbenchDatabase;
   entities: ReadonlyMap<string, LiveDeliveryEntity> | ((name: string) => LiveDeliveryEntity | undefined);
-  mayVerb: (entity: LiveDeliveryEntity, verb: string, row: Record<string, unknown>, principal: Principal) => boolean | Promise<boolean>;
+  /** Defaults to the framework row-grant engine (same engine REST and live delivery use). */
+  mayVerb?: (entity: LiveDeliveryEntity, verb: string, row: Record<string, unknown>, principal: Principal) => boolean | Promise<boolean>;
   annotatedHistory?: { entities?: Set<string>; actionTypes?: Set<string> } | null;
-  projectRecipient: ProjectRecipient;
+  /** Required to read committed history; optional for receipt reads only. */
+  projectRecipient?: ProjectRecipient;
   scopeVisible?: ScopeVisibleCheck;
 }): HistoryReader;

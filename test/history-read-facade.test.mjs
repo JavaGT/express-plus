@@ -8,7 +8,8 @@ import {
   readCommittedCursor,
 } from '../src/server.mjs';
 import { executeFrameworkDDL } from '../src/ddl.mjs';
-import { read, grant, subscribe } from '../src/index.mjs';
+import { read, grant, subscribe, text, everyone } from '../src/index.mjs';
+import { entity } from '../src/internal.mjs';
 import { scope } from '../src/scope.mjs';
 
 function appendEvent(db, scope, seq, type, data = {}) {
@@ -35,6 +36,15 @@ function noteEntity() {
     scopeFilter: () => ({ sql: '1=1', params: {} }),
     hydrate: (row) => ({ ...row }),
   };
+}
+
+// A fully compiled entity (registry + scopeFilter + hydrate) so the framework
+// row-grant engine can evaluate it as the default authorization.
+function compiledNote() {
+  return entity('Note', {
+    title: text(),
+    grant: () => [scope(everyone()).can(() => grant(read, subscribe))],
+  });
 }
 
 function makeReader(db, entities, mayVerb) {
@@ -228,6 +238,78 @@ test('receipt lookup returns null for unknown action', async () => {
   const reader = makeReader(db, [noteEntity()]);
   const receipt = await reader.readReceipt({ scope: 'Note:n1', actionId: 'nonexistent', principal: { type: 'user', id: 'u1' } });
   assert.equal(receipt, null);
+  db.close();
+});
+
+test('receipt lookup works with framework-default authorization (no mayVerb/projectRecipient)', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT)');
+  db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'test');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'test' });
+  db.prepare(
+    'INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs, actionType, operation) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run('Note:n1', 'action-1', '2026-07-26T00:00:00.000Z', JSON.stringify([{ scope: 'Note:n1', seq: 1 }]), 'Note.created', 'action');
+
+  const reader = createHistoryReader({ db, entities: new Map([['Note', compiledNote()]]) });
+  const receipt = await reader.readReceipt({ scope: 'Note:n1', actionId: 'action-1', principal: { type: 'user', id: 'u1' } });
+  assert.ok(receipt);
+  assert.equal(receipt.actionId, 'action-1');
+  assert.equal(receipt.scope, 'Note:n1');
+  db.close();
+});
+
+test('receipt lookup returns null for unknown action with default authorization', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT)');
+  db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'test');
+
+  const reader = createHistoryReader({ db, entities: new Map([['Note', compiledNote()]]) });
+  const receipt = await reader.readReceipt({ scope: 'Note:n1', actionId: 'missing', principal: { type: 'user', id: 'u1' } });
+  assert.equal(receipt, null);
+  db.close();
+});
+
+test('default authorization denies receipt reads on a grantless entity', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT)');
+  db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'test');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'test' });
+  db.prepare(
+    'INSERT INTO _ActionReceipt (scope, actionId, committedAt, eventRefs, actionType, operation) VALUES (?, ?, ?, ?, ?, ?)',
+  ).run('Note:n1', 'action-1', '2026-07-26T00:00:00.000Z', JSON.stringify([{ scope: 'Note:n1', seq: 1 }]), 'Note.created', 'action');
+
+  const reader = createHistoryReader({
+    db,
+    entities: new Map([['Note', {
+      name: 'Note',
+      fields: { title: { kind: 'value' } },
+      grant: null,
+      scopeFilter: () => ({ sql: '1=1', params: {} }),
+      hydrate: (row) => ({ ...row }),
+    }]]),
+  });
+  await assert.rejects(
+    reader.readReceipt({ scope: 'Note:n1', actionId: 'action-1', principal: { type: 'user', id: 'u1' } }),
+    { code: 'history.forbidden' },
+  );
+  db.close();
+});
+
+test('readCommittedHistory requires a projectRecipient at call time', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT)');
+  db.prepare('INSERT INTO Note (id, title) VALUES (?, ?)').run('n1', 'test');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'test' });
+
+  const reader = createHistoryReader({ db, entities: new Map([['Note', compiledNote()]]) });
+  await assert.rejects(
+    reader.readCommittedHistory({ scope: 'Note:n1', principal: { type: 'user', id: 'u1' } }),
+    /projectRecipient/,
+  );
   db.close();
 });
 
