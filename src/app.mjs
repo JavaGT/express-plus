@@ -42,6 +42,7 @@ import { createJobQueue } from './job-queue.mjs';
 import { createPostCommitEffectRunner } from './post-commit-effects.mjs';
 import { createClock } from './clock.mjs';
 import { createWriteQueue } from './write-queue.mjs';
+import { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.mjs';
 import { prepareGracefulShutdown } from './lifecycle.mjs';
 import { createLog, withLog } from './log.mjs';
 import { serveStatic } from './views.mjs';
@@ -267,6 +268,9 @@ export default function workbench({
   const clock = createClock();
   app.clock = clock;
   app.writeQueue = createWriteQueue();
+  const principalSnapshotRuntime = createPrincipalSnapshotTransaction(app);
+  app.principalSnapshots = { transaction: principalSnapshotRuntime.transaction };
+  app._principalSnapshotRuntime = principalSnapshotRuntime;
   prepareGracefulShutdown(app);
   if (db && jobOpts) {
     app.jobs = createJobQueue({ db, clock, ...jobOpts });

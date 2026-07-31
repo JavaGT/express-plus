@@ -701,6 +701,15 @@ export interface PrincipalSnapshotGrammar {
 }
 export const principalSnapshot: PrincipalSnapshotGrammar;
 
+export interface PrincipalSnapshotTransaction {
+  readonly db: WorkbenchDatabase;
+  invalidate(declaration: PrincipalSnapshotDeclaration, recipient: { type: Exclude<PrincipalType, 'anonymous'>; id: string }): void;
+}
+
+export interface PrincipalSnapshotTransactionApi {
+  transaction<T>(callback: (tx: PrincipalSnapshotTransaction) => T): Promise<T>;
+}
+
 export function principalSnapshotScope(options: { declaration: string; principal: { type: Exclude<PrincipalType, 'anonymous'>; id: string } }): string;
 
 export function inc(value: number): Readonly<{ kind: 'inc'; value: number }>;
@@ -1112,6 +1121,7 @@ export interface WorkbenchApp extends RouteBuilder {
   readonly jobs?: unknown;
   readonly postCommitEffects?: PostCommitEffectRunner;
   readonly blobs?: unknown;
+  readonly principalSnapshots?: PrincipalSnapshotTransactionApi;
   readonly history?: DurableHistoryRuntime;
   resolveScope?: WorkbenchOptions['resolveScope'];
   scopeSnapshot?: WorkbenchOptions['scopeSnapshot'];

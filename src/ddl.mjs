@@ -420,6 +420,13 @@ export function generateFrameworkDDL() {
   revoked INTEGER NOT NULL DEFAULT 0,
   registeredAt INTEGER NOT NULL
 );`,
+    `CREATE TABLE IF NOT EXISTS _PrincipalSnapshotRevision (
+  declaration TEXT NOT NULL,
+  principalType TEXT NOT NULL,
+  principalId TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK (revision >= 1),
+  PRIMARY KEY (declaration, principalType, principalId)
+);`,
     deletedRowAnchorTableDDL(),
   ];
 }

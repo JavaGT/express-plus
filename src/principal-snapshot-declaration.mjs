@@ -6,6 +6,7 @@ const _selectBrand = new WeakSet();
 const _orderBrand = new WeakSet();
 const _manyBrand = new WeakSet();
 const _objectBrand = new WeakSet();
+const _declarationBrand = new WeakSet();
 
 function assertSqlIdentifier(label, value) {
   if (typeof value !== 'string' || !SQL_IDENTIFIER.test(value)) {
@@ -88,13 +89,15 @@ export function principalSnapshot(name, { principalType, output }) {
     }
     fields[key] = rel;
   }
-  return Object.freeze({
+  const result = Object.freeze({
     kind: 'principalSnapshot',
     name,
     principalType,
     output,
     fields: Object.freeze(fields),
   });
+  _declarationBrand.add(result);
+  return result;
 }
 
 principalSnapshot.object = function object(shape) {
@@ -164,3 +167,7 @@ principalSnapshot.orderBy = function orderBy(handle, direction = 'asc') {
   _orderBrand.add(result);
   return result;
 };
+
+export function isPrincipalSnapshotDeclaration(value) {
+  return value !== null && typeof value === 'object' && _declarationBrand.has(value);
+}
