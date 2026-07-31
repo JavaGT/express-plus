@@ -2201,6 +2201,7 @@ export function createLiveDeliverySession({
   let closed = false;
   let initialized = false;
   let reconnecting = false;
+  let reconnectRequested = false;
   let connectionGeneration = 0;
   let recoveryGeneration = 0;
   let snapshotGeneration = 0;
@@ -2233,6 +2234,14 @@ export function createLiveDeliverySession({
 
   function terminalStatus() {
     return closed ? 'closed' : status === 'revoked' ? 'revoked' : 'unavailable';
+  }
+
+  function canTransmit(operation) {
+    return initialized
+      && !closed
+      && status === 'live'
+      && !reconnecting
+      && operations.get(operation.actionId) === operation;
   }
 
   function waitForRecoveryRetry(attempt) {
@@ -2559,33 +2568,48 @@ export function createLiveDeliverySession({
       },
       revoke,
       closed: () => {
-        if (generation === connectionGeneration) reconnect().catch(() => {});
+        if (generation !== connectionGeneration) return;
+        connectionGeneration += 1;
+        if (reconnecting) reconnectRequested = true;
+        else reconnect().catch(() => {});
       },
     });
     // Delivery can revoke access while transport establishment is pending.
     // Never retain a subscription that became unauthorized before its handle.
     if (closed || status === 'revoked' || generation !== connectionGeneration) {
       nextSubscription?.close?.();
-      return;
+      return false;
     }
     subscription = nextSubscription;
+    return true;
   }
 
   async function reconnect() {
-    if (closed || status === 'revoked' || reconnecting) return;
+    if (closed || status === 'revoked') return;
+    if (reconnecting) {
+      reconnectRequested = true;
+      return;
+    }
     // Some adapters report their own close synchronously. Mark reconnecting
     // before closing the old subscription so that callback cannot recurse.
     reconnecting = true;
     try {
-      // Invalidate the old transport before recovery reauthorizes the stream.
-      connectionGeneration += 1;
-      subscription?.close?.();
-      subscription = null;
-      await recover('catchup');
-      if (!closed && status !== 'revoked') {
-        await connect();
-        if (!closed && status === 'live') settleAdmissions(true);
-      }
+      do {
+        reconnectRequested = false;
+        // Invalidate the old transport before recovery reauthorizes the stream.
+        connectionGeneration += 1;
+        subscription?.close?.();
+        subscription = null;
+        await recover('catchup');
+        if (closed || status === 'revoked') break;
+        status = 'recovering';
+        if (!(await connect())) {
+          reconnectRequested = true;
+          continue;
+        }
+        status = 'live';
+      } while (reconnectRequested && !closed && status !== 'revoked');
+      if (!reconnectRequested && !closed && status === 'live') settleAdmissions(true);
     } catch (error) {
       if (!closed && status !== 'revoked') becomeUnavailable();
       throw error;
@@ -2614,8 +2638,7 @@ export function createLiveDeliverySession({
     try {
       await recover('snapshot');
       if (!closed && status !== 'revoked') {
-        await connect();
-        if (!closed && status === 'live') initialized = true;
+        if (await connect()) initialized = true;
       }
     } catch (error) {
       if (!closed && status !== 'revoked') becomeUnavailable();
@@ -2637,7 +2660,7 @@ export function createLiveDeliverySession({
     }
     operations.set(actionId, operation);
     publish();
-    if (!((status === 'live' && !reconnecting) || await admit(operation))) {
+    if (!((status === 'live' && !reconnecting) || await admit(operation)) || !canTransmit(operation)) {
       settleOperation(operation, { status: terminalStatus() });
       operations.delete(actionId);
       publish();
@@ -2793,7 +2816,7 @@ export function createLiveDeliverySession({
     createSettlement(operation);
     operations.set(actionId, operation);
     publish();
-    if (!((status === 'live' && !reconnecting) || await admit(operation))) {
+    if (!((status === 'live' && !reconnecting) || await admit(operation)) || !canTransmit(operation)) {
       settleOperation(operation, { status: terminalStatus() });
       operations.delete(actionId);
       publish();
@@ -2810,6 +2833,12 @@ export function createLiveDeliverySession({
       const failure = new TypeError('batch is not awaiting transport retry');
       settleOperation(rejectedOperation, { status: 'failed', error: failure });
       return { ok: false, status: 'failed-rolled-back', opId, settlement, failure };
+    }
+    if (!((status === 'live' && !reconnecting) || await admit(operation)) || !canTransmit(operation)) {
+      settleOperation(operation, { status: terminalStatus() });
+      operations.delete(opId);
+      publish();
+      return { ok: false, status: 'failed-rolled-back', opId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     operation.deliveryError = null;
     return submitBatch(operation);
