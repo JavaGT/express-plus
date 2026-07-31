@@ -5,9 +5,10 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotatedTextCreateAction, annotatedTextRetireAction, annotation,
   deny, entity, everyone, exportAnnotatedText,
-  admin, grant, measurement, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write,
+  admin, grant, measurement, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write, principalSnapshot, projectionSource,
 } from '../src/index.mjs';
 import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
+import { defineSqliteSchema } from '../src/sqlite-schema.mjs';
 import { createAnnotatedTextHttpSession, createLiveDeliveryHttpSession } from '../public/workbench-client.mjs';
 
 const user = { type: 'user', id: 'u1', attributes: {} };
@@ -120,6 +121,50 @@ test('application live delivery validates aggregate declarations without exposin
   );
   assert.equal(app._applicationLiveDelivery, undefined);
   db.close();
+});
+
+test('application live delivery serves and wakes a principal snapshot through HTTP', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const schema = defineSqliteSchema({
+    name: 'principal-hub',
+    tables: [{ name: 'HubNotice', columns: [
+      { name: 'id', type: 'text', primaryKey: true },
+      { name: 'recipientId', type: 'text', notNull: true },
+      { name: 'body', type: 'text', notNull: true },
+    ] }],
+  });
+  const notices = projectionSource(schema, 'HubNotice');
+  const hub = principalSnapshot('user-hub', {
+    principalType: 'user',
+    output: principalSnapshot.object({
+      notices: principalSnapshot.many(notices, {
+        via: notices.field.recipientId,
+        key: notices.field.id,
+        select: principalSnapshot.select(notices.field.body),
+      }),
+    }),
+  });
+  const app = workbench({ db, schema });
+  app.attachLiveDelivery({ principalOf: () => user, principalSnapshots: [hub] });
+  app.listen(0);
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  db.prepare('INSERT INTO HubNotice (id, recipientId, body) VALUES (?, ?, ?)').run('n1', 'u1', 'hello');
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const scopeKey = encodeURIComponent('PrincipalSnapshot:user-hub/user/u1');
+  const snapshotResult = await fetch(`${origin}/live-delivery/bootstrap?scope=${scopeKey}&mode=snapshot`).then((response) => response.json());
+  assert.deepEqual(snapshotResult, { kind: 'snapshot', snapshot: { notices: [{ body: 'hello', id: 'n1' }] }, cursor: 0 });
+  const controller = new AbortController();
+  const stream = await fetch(`${origin}/live-delivery/events?scope=${scopeKey}&after=0`, { signal: controller.signal });
+  const reader = stream.body.getReader();
+  await reader.read();
+  await app.principalSnapshots.transaction((tx) => {
+    tx.db.prepare('UPDATE HubNotice SET body = ? WHERE id = ?').run('updated', 'n1');
+    tx.invalidate(hub, { type: 'user', id: 'u1' });
+  });
+  assert.deepEqual(await nextSseJson(reader), [{ type: 'resync', seq: 1, reason: 'recipient-snapshot-required' }]);
+  await reader.cancel();
+  controller.abort();
 });
 
 test('application live delivery accepts its declared snapshot identity and rejects foreign same-name anchors', async (t) => {

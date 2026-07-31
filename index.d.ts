@@ -838,6 +838,8 @@ export interface AppLiveDeliveryOptions {
   maxSubscriptions?: number;
   /** Constrained relational snapshots; no event, SQL, or callback access. */
   snapshots?: readonly SnapshotDeclaration[];
+  /** Read-only principal-anchored recipient snapshots. */
+  principalSnapshots?: readonly PrincipalSnapshotDeclaration[];
   maxCatchupEvents?: number;
 }
 

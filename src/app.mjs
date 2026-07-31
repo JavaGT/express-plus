@@ -222,6 +222,7 @@ export default function workbench({
   // dispatch seam, not this field). An app with no db simply cannot serve
   // DB-backed entity CRUD — fail closed at dispatch.
   app.db = db;
+  app.schema = schema;
   app._maintenance = validateMaintenanceOptions({
     blobReapIntervalMs,
     blobReapTtlMs,

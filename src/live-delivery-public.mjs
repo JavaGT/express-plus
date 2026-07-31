@@ -9,6 +9,7 @@ import { readSeq } from './committed-log.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
+import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
 
 function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
@@ -37,10 +38,14 @@ function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
 // Package-private assembly for an application-owned activation. The public
 // factory below deliberately returns only the delivery protocol; application
 // lifecycle wiring retains the committed consumer and shutdown capability.
-export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log = null, maxCatchupEvents = 1000, includeActionId = true }) {
+export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, principalSnapshots, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }) {
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   const resolveEntity = typeof entities === 'function' ? entities : (name) => entities.get(name);
   const composites = compileSnapshots(snapshots, resolveEntity, db);
+  validatePrincipalSnapshotDeclarations(principalSnapshots, schema);
+  const principalDelivery = principalSnapshots?.length
+    ? createPrincipalSnapshotDelivery({ db, declarations: principalSnapshots })
+    : null;
   const requiredEntities = composites.requiredEntities ?? new Set();
   const aggregateRevision = () => Number(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get().revision);
   async function aggregateSnapshot({ principal, scope, declaration }) {
@@ -134,6 +139,11 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
       if (signal.aborted) {
         throw new Error('live delivery subscription is aborted');
       }
+      if (isPrincipalSnapshotScope(subscription.scope)) {
+        return principalDelivery
+          ? principalDelivery.subscribe(subscription)
+          : Promise.reject(Object.assign(new Error('principal snapshot delivery is not attached'), { code: 'live-delivery-revoked' }));
+      }
       const handle = tryParseScopeKey(subscription.scope);
       const declaration = handle && composites.get(handle.entity);
       if ((subscription.document && requiredEntities.has(subscription.document.entity.name)) || (handle && requiredEntities.has(handle.entity))) {
@@ -180,6 +190,11 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
       }));
     },
     async bootstrap({ principal, scope, document = null }) {
+      if (isPrincipalSnapshotScope(scope)) {
+        return principalDelivery
+          ? principalDelivery.bootstrap({ principal, scope })
+          : Object.freeze({ kind: 'revoked' });
+      }
       const handle = tryParseScopeKey(scope);
       if ((document && requiredEntities.has(document.entity.name)) || (handle && requiredEntities.has(handle.entity))) {
         return { kind: 'revoked' };
@@ -211,6 +226,11 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
        return result;
     },
     async catchup(input) {
+      if (isPrincipalSnapshotScope(input.scope)) {
+        return principalDelivery
+          ? principalDelivery.catchup(input)
+          : Object.freeze({ kind: 'revoked' });
+      }
       const handle = tryParseScopeKey(input.scope);
       if ((input.document && requiredEntities.has(input.document.entity.name)) || (handle && requiredEntities.has(handle.entity))) {
         return { kind: 'revoked' };
@@ -239,6 +259,10 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
       return core.catchup(input);
     },
     wake(scope) {
+      if (isPrincipalSnapshotScope(scope)) {
+        principalDelivery?.wake(scope);
+        return;
+      }
       // A wake is only a payloadless hint; it is not a delivery barrier.
       void core.wake(scope);
     },
@@ -274,6 +298,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, log 
     },
     close() {
       core.close();
+      principalDelivery?.close();
     },
   };
 }

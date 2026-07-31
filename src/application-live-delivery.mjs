@@ -5,12 +5,14 @@
 import { createOwnedLiveDelivery } from './live-delivery-public.mjs';
 import { createLiveDeliveryHttpHandler } from './live-delivery-http.mjs';
 import { mayVerb } from './row-grant.mjs';
+import { validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
 
 export function attachApplicationLiveDelivery(app, {
   principalOf,
   path = '/live-delivery',
   maxSubscriptions = 100,
   snapshots,
+  principalSnapshots,
   maxCatchupEvents,
 } = {}) {
   if (app._startPromise || app._startupMode || app._transportAttached) {
@@ -18,12 +20,15 @@ export function attachApplicationLiveDelivery(app, {
   }
   if (app._applicationLiveDelivery) throw new Error('live delivery is already attached');
   if (!app.db) throw new Error('live delivery requires an application database');
+  validatePrincipalSnapshotDeclarations(principalSnapshots, app.schema);
 
   const owned = createOwnedLiveDelivery({
     db: app.db,
     entities: (name, declaration) => declaration === undefined ? app.entities.get(name) : app.entity(declaration),
     mayVerb: (entity, verb, row, principal) => mayVerb(entity, verb, row, principal),
     snapshots,
+    principalSnapshots,
+    schema: app.schema,
     log: app.log,
     maxCatchupEvents,
     includeActionId: false,
@@ -40,6 +45,10 @@ export function attachApplicationLiveDelivery(app, {
     handler,
     wake: owned.delivery.wake,
     close: owned.close,
+  });
+  for (const declaration of principalSnapshots ?? []) app._principalSnapshotRuntime._registerDeclaration(declaration);
+  if (principalSnapshots?.length) app._principalSnapshotRuntime._setWakeHook((declaration, principal) => {
+    owned.delivery.wake(`PrincipalSnapshot:${declaration.name}/${principal.type}/${encodeURIComponent(principal.id)}`);
   });
   app.onShutdown('live delivery', () => owned.close(), { timeoutMs: 1000 });
   return app;
