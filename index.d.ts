@@ -643,6 +643,66 @@ export function membership<Row extends object>(
   roles: Readonly<Record<string, unknown>>,
 ): WorkbenchEntity<Row>;
 
+declare const projectionSourceFieldBrand: unique symbol;
+declare const projectionSourceBrand: unique symbol;
+declare const principalSnapshotManyBrand: unique symbol;
+declare const principalSnapshotObjectBrand: unique symbol;
+declare const principalSnapshotDeclarationBrand: unique symbol;
+
+export interface ProjectionSourceField {
+  readonly [projectionSourceFieldBrand]: true;
+  readonly kind: 'sourceField';
+  readonly source: ProjectionSource;
+  readonly column: string;
+  readonly entityName: string;
+  readonly fieldName: string;
+}
+export interface ProjectionSourceFieldWithDirection extends ProjectionSourceField {
+  readonly direction: 'asc' | 'desc';
+}
+
+export interface ProjectionSource {
+  readonly [projectionSourceBrand]: true;
+  readonly kind: 'projectionSource';
+  readonly schema: import('./src/server.js').SqliteSchemaResult;
+  readonly table: string;
+  readonly field: Readonly<Record<string, ProjectionSourceField>>;
+}
+export function projectionSource(schema: import('./src/server.js').SqliteSchemaResult, table: string): ProjectionSource;
+
+export interface PrincipalSnapshotMany {
+  readonly [principalSnapshotManyBrand]: true;
+  readonly kind: 'many';
+  readonly source: ProjectionSource;
+  readonly via: ProjectionSourceField;
+  readonly key: ProjectionSourceField;
+  readonly select: readonly ProjectionSourceField[];
+  readonly orderBy?: readonly ProjectionSourceFieldWithDirection[];
+}
+export interface PrincipalSnapshotObject {
+  readonly [principalSnapshotObjectBrand]: true;
+  readonly kind: 'object';
+  readonly shape: Readonly<Record<string, PrincipalSnapshotMany>>;
+}
+export interface PrincipalSnapshotDeclaration {
+  readonly [principalSnapshotDeclarationBrand]: true;
+  readonly kind: 'principalSnapshot';
+  readonly name: string;
+  readonly principalType: Exclude<PrincipalType, 'anonymous'>;
+  readonly output: PrincipalSnapshotObject;
+  readonly fields: Readonly<Record<string, PrincipalSnapshotMany>>;
+}
+export interface PrincipalSnapshotGrammar {
+  (name: string, options: { principalType: Exclude<PrincipalType, 'anonymous'>; output: PrincipalSnapshotObject }): PrincipalSnapshotDeclaration;
+  object(shape: Readonly<Record<string, PrincipalSnapshotMany>>): PrincipalSnapshotObject;
+  many(source: ProjectionSource, options: { via: ProjectionSourceField; key: ProjectionSourceField; select: readonly ProjectionSourceField[]; orderBy?: readonly ProjectionSourceFieldWithDirection[] }): PrincipalSnapshotMany;
+  select(...handles: readonly ProjectionSourceField[]): readonly ProjectionSourceField[];
+  orderBy(handle: ProjectionSourceField, direction?: 'asc' | 'desc'): ProjectionSourceFieldWithDirection;
+}
+export const principalSnapshot: PrincipalSnapshotGrammar;
+
+export function principalSnapshotScope(options: { declaration: string; principal: { type: Exclude<PrincipalType, 'anonymous'>; id: string } }): string;
+
 export function inc(value: number): Readonly<{ kind: 'inc'; value: number }>;
 export function dec(value: number): Readonly<{ kind: 'dec'; value: number }>;
 export const self: Readonly<Record<string, unknown>>;

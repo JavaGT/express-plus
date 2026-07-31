@@ -88,6 +88,14 @@ export function entity(name, declaration = {}) {
   // The entity name becomes a table name interpolated into SQL — validate first.
   assertSqlIdentifier('entity', name);
 
+  // 'PrincipalSnapshot' is reserved for principal snapshot identity and cannot
+  // be declared as a regular entity name.
+  if (name === 'PrincipalSnapshot') {
+    throw new Error(
+      `entity('${name}') is a reserved framework name and cannot be declared as an entity.`,
+    );
+  }
+
   // Fields-less declaration: every non-reserved top-level key is a field
   // descriptor. A reserved-slot name used as a field is a load-time error (the
   // developer intended a field, the compiler owns the slot — fail closed rather
