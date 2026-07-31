@@ -10,15 +10,15 @@ see each other's messages without a refresh.
 node projects/chat/server.mjs
 ```
 
-Open <http://localhost:3000> in **two browser tabs**. Sign in (any username +
-password creates the account), create a chat in one tab, send a message, and
+Open <http://localhost:3000> in **two browser tabs**. Create an account, sign in
+to that account in the other tab, create a chat, send a message, and
 watch it appear in the other tab.
 
 ## What this shows
 
 - `workbench({ db: 'chat.db' })` — a string db is opened by the framework,
   schema auto-created.
-- `.auth()` — `/auth/login` + `/auth/logout` set a fail-closed `sid` cookie.
+- `.auth()` — `/auth/register`, `/auth/login`, and `/auth/logout` set or clear a fail-closed `sid` cookie.
 - `Chat` — owner + `members` map; the `member` check compiles into the read
   scope (a correlated `EXISTS` over the membership side-table).
 - `Message` — `grant: inherit(Chat, { via: 'chat' })` inherits the parent's

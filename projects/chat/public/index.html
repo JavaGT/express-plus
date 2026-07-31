@@ -44,10 +44,11 @@
 
   <section id="login">
     <h2>Sign in</h2>
-    <p style="color:#777;margin-top:0">Any username + password creates the account.</p>
+    <p style="color:#777;margin-top:0">Sign in to an existing account or create a new one.</p>
     <label>username <input id="username" autofocus /></label>
     <label>password <input id="password" type="password" /></label>
-    <button class="primary" id="signin">sign in / sign up</button>
+    <button class="primary" id="signin">sign in</button>
+    <button id="register">create account</button>
     <p id="err" style="color:#b91c1c;margin-top:10px"></p>
   </section>
 
@@ -87,17 +88,19 @@
     const $ = (id) => document.getElementById(id);
 
     // --- auth ---
-    $('signin').onclick = async () => {
+    async function authenticate(intent) {
       $('err').textContent = '';
       const u = $('username').value.trim();
       const p = $('password').value;
       if (!u || !p) { $('err').textContent = 'enter a username and password'; return; }
       try {
-        const { user } = await auth.login(u, p);
+        const { user } = await auth[intent](u, p);
         me.id = user.id; me.username = user.username;
         enterApp();
       } catch (e) { $('err').textContent = e.message; }
-    };
+    }
+    $('signin').onclick = () => authenticate('login');
+    $('register').onclick = () => authenticate('register');
     $('logout').onclick = async () => { await auth.logout(); location.reload(); };
 
     function enterApp() {

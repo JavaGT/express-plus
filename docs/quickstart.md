@@ -74,7 +74,7 @@ node projects/chat/server.mjs
 
 Open **http://localhost:3000** in two tabs:
 
-1. Sign in (any username + password creates an account)  
+1. Create an account, then sign in to it in the other tab
 2. Create a chat in one tab  
 3. Send a message — it appears live in the other tab  
 
