@@ -485,6 +485,74 @@ describe('LiveDeliverySession', () => {
     session.close();
   });
 
+  it('waits for transport recovery before transmitting an admitted action', async () => {
+    let closeTransport;
+    let deliver;
+    let attempts = 0;
+    let recoveries = 0;
+    const session = createLiveDeliverySession({
+      bootstrap: async ({ mode }) => {
+        if (mode === 'catchup') {
+          recoveries += 1;
+          if (recoveries < 3) return { kind: 'retry' };
+          return { kind: 'catchup', envelopes: [], cursor: 1 };
+        }
+        return { kind: 'snapshot', snapshot: { values: [] }, cursor: 1 };
+      },
+      subscribe: async ({ deliver: nextDeliver, closed }) => {
+        deliver = nextDeliver;
+        closeTransport = closed;
+        return { close() {} };
+      },
+      validateSnapshot: (snapshot) => snapshot,
+      fold: (snapshot, envelope) => ({ values: [...snapshot.values, envelope.event.data.value] }),
+      optimistic: (snapshot, action) => ({ values: [...snapshot.values, `pending:${action.payload.value}`] }),
+      sendAction: async () => { attempts += 1; return { ok: true }; },
+      createActionId: () => 'recovering-action',
+    });
+    await session.ready;
+    closeTransport();
+    const dispatch = session.dispatch('Value.add', { value: 'queued' });
+    await Promise.resolve();
+    assert.equal(attempts, 0);
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    assert.equal((await dispatch).ok, true);
+    assert.equal(attempts, 1);
+    assert.equal(session.status, 'live');
+    session.close();
+    void deliver;
+  });
+
+  it('settles an admitted action without sending when recovery is closed or revoked', async () => {
+    for (const terminal of ['close', 'revoke']) {
+      let closeTransport;
+      let revoke;
+      let sends = 0;
+      const session = createLiveDeliverySession({
+        bootstrap: async ({ mode }) => mode === 'catchup' ? new Promise(() => {}) : { kind: 'snapshot', snapshot: { values: [] }, cursor: 1 },
+        subscribe: async ({ closed, revoke: nextRevoke }) => {
+          closeTransport = closed;
+          revoke = nextRevoke;
+          return { close() {} };
+        },
+        validateSnapshot: (snapshot) => snapshot,
+        fold: (snapshot) => snapshot,
+        optimistic: (snapshot) => snapshot,
+        sendAction: async () => { sends += 1; return { ok: true }; },
+        createActionId: () => `waiting-${terminal}`,
+      });
+      await session.ready;
+      closeTransport();
+      const dispatch = session.dispatch('Value.add', {});
+      await Promise.resolve();
+      if (terminal === 'close') session.close();
+      else revoke({ code: 'access-revoked' });
+      const result = await dispatch;
+      assert.equal(sends, 0);
+      assert.equal((await result.settlement.wait()).status, terminal === 'close' ? 'closed' : 'revoked');
+    }
+  });
+
   it('does not publish or dispatch when optimistic projection revokes access', async () => {
     let revoke;
     let sendCount = 0;

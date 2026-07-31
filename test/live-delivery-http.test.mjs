@@ -171,6 +171,48 @@ test('HTTP session retries transient initial bootstrap transport failures withou
   }
 });
 
+test('HTTP session waits to send until transient reconnect recovery restores its stream', async () => {
+  const sources = [];
+  let bootstrapAttempts = 0;
+  let sends = 0;
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async () => {
+      bootstrapAttempts += 1;
+      if (bootstrapAttempts === 1) {
+        return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { id: 'p1' }, cursor: 1 }) };
+      }
+      if (bootstrapAttempts < 4) return { ok: false, status: 503 };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { id: 'p1' }, cursor: 1 }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+    validateSnapshot: (value) => value,
+    fold: (snapshot) => snapshot,
+    optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+    sendAction: async () => { sends += 1; return { ok: true }; },
+    createActionId: () => 'recovered-action',
+    historySession: 'tab-a',
+  });
+  await session.ready;
+
+  sources[0].onerror();
+  const dispatch = session.dispatch('Project.rename', { name: 'Recovered' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sends, 0);
+  assert.equal(sources.length, 1);
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal((await dispatch).ok, true);
+  assert.equal(sends, 1);
+  assert.equal(sources.length, 2);
+  assert.equal(session.status, 'live');
+  session.close();
+});
+
 test('HTTP snapshot-only batch settlement survives a transient replacement snapshot failure', async () => {
   let attempts = 0;
   const session = createLiveDeliveryHttpSession({

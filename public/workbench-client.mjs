@@ -2199,6 +2199,7 @@ export function createLiveDeliverySession({
   let cursor = 0;
   let status = 'bootstrapping';
   let closed = false;
+  let initialized = false;
   let reconnecting = false;
   let connectionGeneration = 0;
   let recoveryGeneration = 0;
@@ -2212,6 +2213,27 @@ export function createLiveDeliverySession({
   const listeners = new Set();
   const operations = new Map();
   const recoveryRetryWaiters = new Set();
+  const admissionWaiters = [];
+
+  function admit(operation) {
+    if (closed || status === 'revoked' || status === 'unavailable') return Promise.resolve(false);
+    if (initialized && status === 'live' && !reconnecting) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      admissionWaiters.push({ operation, resolve });
+    });
+  }
+
+  function settleAdmissions(available) {
+    if (!available) {
+      for (const waiter of admissionWaiters.splice(0)) waiter.resolve(false);
+      return;
+    }
+    for (const waiter of admissionWaiters.splice(0)) waiter.resolve(true);
+  }
+
+  function terminalStatus() {
+    return closed ? 'closed' : status === 'revoked' ? 'revoked' : 'unavailable';
+  }
 
   function waitForRecoveryRetry(attempt) {
     const delay = Math.min(50 * (2 ** attempt), 1000);
@@ -2376,6 +2398,7 @@ export function createLiveDeliverySession({
   function becomeUnavailable() {
     if (closed || status === 'revoked') return;
     status = 'unavailable';
+    settleAdmissions(false);
     // An opaque aggregate can only be reconciled by its replacement snapshot.
     // Once that recovery fails, no optimistic projection is safe to retain.
     for (const operation of operations.values()) settleOperation(operation, { status: 'unavailable' });
@@ -2435,12 +2458,14 @@ export function createLiveDeliverySession({
       publish();
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       status = 'live';
+      if (initialized && !reconnecting) settleAdmissions(true);
       return;
     }
     if (result.kind === 'catchup' && mode === 'catchup') {
       if (!(await applyCatchup(result))) return recover('snapshot');
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       status = 'live';
+      if (initialized && !reconnecting) settleAdmissions(true);
       return;
     }
     throw new Error('bootstrap returned an unsupported result');
@@ -2557,7 +2582,10 @@ export function createLiveDeliverySession({
       subscription?.close?.();
       subscription = null;
       await recover('catchup');
-      if (!closed && status !== 'revoked') await connect();
+      if (!closed && status !== 'revoked') {
+        await connect();
+        if (!closed && status === 'live') settleAdmissions(true);
+      }
     } catch (error) {
       if (!closed && status !== 'revoked') becomeUnavailable();
       throw error;
@@ -2569,6 +2597,7 @@ export function createLiveDeliverySession({
   function revoke(_reason) {
     if (closed || status === 'revoked') return;
     status = 'revoked';
+    settleAdmissions(false);
     cancelRecoveryRetries();
     baseSnapshot = null;
     visibleSnapshot = null;
@@ -2584,7 +2613,10 @@ export function createLiveDeliverySession({
   async function start() {
     try {
       await recover('snapshot');
-      if (!closed && status !== 'revoked') await connect();
+      if (!closed && status !== 'revoked') {
+        await connect();
+        if (!closed && status === 'live') initialized = true;
+      }
     } catch (error) {
       if (!closed && status !== 'revoked') becomeUnavailable();
       throw error;
@@ -2599,14 +2631,16 @@ export function createLiveDeliverySession({
       delivered: false, confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null,
     };
     const settlement = createSettlement(operation);
-    if (closed || status !== 'live') {
-      settleOperation(operation, { status: closed ? 'closed' : 'unavailable' });
+    if (!initialized || closed || status === 'unavailable' || status === 'revoked') {
+      settleOperation(operation, { status: terminalStatus() });
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     operations.set(actionId, operation);
     publish();
-    if (closed || status !== 'live') {
-      settleOperation(operation, { status: closed ? 'closed' : 'unavailable' });
+    if (!((status === 'live' && !reconnecting) || await admit(operation))) {
+      settleOperation(operation, { status: terminalStatus() });
+      operations.delete(actionId);
+      publish();
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     try {
@@ -2749,8 +2783,8 @@ export function createLiveDeliverySession({
       settleOperation(rejectedOperation, { status: 'failed', error: failure });
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement: rejectedSettlement, failure };
     }
-    if (closed || status !== 'live') {
-      settleOperation(rejectedOperation, { status: closed ? 'closed' : 'unavailable' });
+    if (!initialized || closed || status === 'unavailable' || status === 'revoked') {
+      settleOperation(rejectedOperation, { status: terminalStatus() });
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement: rejectedSettlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     const retainedActions = freezeClone(structuredClone(actions));
@@ -2759,8 +2793,10 @@ export function createLiveDeliverySession({
     createSettlement(operation);
     operations.set(actionId, operation);
     publish();
-    if (closed || status !== 'live') {
-      settleOperation(operation, { status: closed ? 'closed' : 'unavailable' });
+    if (!((status === 'live' && !reconnecting) || await admit(operation))) {
+      settleOperation(operation, { status: terminalStatus() });
+      operations.delete(actionId);
+      publish();
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     return submitBatch(operation);
@@ -2809,6 +2845,7 @@ export function createLiveDeliverySession({
     close() {
       if (closed) return;
       closed = true;
+      settleAdmissions(false);
       cancelRecoveryRetries();
       subscription?.close?.();
       subscription = null;
