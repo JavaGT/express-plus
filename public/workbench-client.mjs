@@ -3017,6 +3017,47 @@ export function createLiveDeliveryHttpSession({
 }
 
 /**
+ * Snapshot-only client for a principal-anchored projection. The package owns
+ * its cursor, reconnect, and opaque-resync replacement; hosts receive no event
+ * reducer, mutation, optimistic-state, or cursor configuration seam.
+ */
+export function createPrincipalSnapshotHttpSession({
+  baseUrl,
+  declaration,
+  principal,
+  validateSnapshot,
+  fetchImpl,
+  eventSourceFactory,
+}) {
+  if (typeof declaration !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(declaration)) {
+    throw new TypeError('principal snapshot declaration is invalid');
+  }
+  if (!principal || !['user', 'link', 'system', 'apiKey'].includes(principal.type)
+    || typeof principal.id !== 'string' || principal.id.length === 0) {
+    throw new TypeError('principal snapshot principal is invalid');
+  }
+  if (typeof validateSnapshot !== 'function') throw new TypeError('validateSnapshot is required');
+  const scope = `PrincipalSnapshot:${declaration}/${principal.type}/${encodeURIComponent(principal.id)}`;
+  const session = createLiveDeliveryHttpSession({
+    baseUrl,
+    scope,
+    validateSnapshot,
+    fetchImpl,
+    eventSourceFactory,
+    historySession: 'principal-snapshot',
+    sendAction: async () => { throw new Error('principal snapshot sessions do not dispatch actions'); },
+  });
+  return Object.freeze({
+    get snapshot() { return session.snapshot; },
+    get status() { return session.status; },
+    get ready() { return session.ready; },
+    subscribe(listener) { return session.subscribe(listener); },
+    reconnect() { return session.reconnect(); },
+    close() { session.close(); },
+  });
+}
+
+/**
  * A document-bound annotated-text session. The document context owns scope,
  * action grammar, and the opaque recipient basis; callers only name edits.
  */

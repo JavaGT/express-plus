@@ -505,6 +505,28 @@ export function createLiveDeliveryHttpSession<Snapshot, Payload = unknown>(
   config: LiveDeliveryHttpSessionConfig<Snapshot, Payload>,
 ): LiveDeliveryHttpSession<Snapshot, Payload>;
 
+export interface PrincipalSnapshotHttpSession<Snapshot> {
+  readonly snapshot: Snapshot | null;
+  readonly status: 'bootstrapping' | 'recovering' | 'catching-up' | 'live' | 'unavailable' | 'revoked';
+  readonly ready: Promise<void>;
+  subscribe(listener: (snapshot: Snapshot | null) => void): () => void;
+  reconnect(): Promise<void>;
+  close(): void;
+}
+
+export interface PrincipalSnapshotHttpSessionConfig<Snapshot> {
+  baseUrl: string;
+  declaration: string;
+  principal: Readonly<{ type: Exclude<import('./index.d.ts').PrincipalType, 'anonymous'>; id: string }>;
+  validateSnapshot(snapshot: unknown): Snapshot;
+  fetchImpl?: typeof globalThis.fetch;
+  eventSourceFactory?: (url: string, options: EventSourceInit) => EventSource;
+}
+
+export function createPrincipalSnapshotHttpSession<Snapshot>(
+  config: PrincipalSnapshotHttpSessionConfig<Snapshot>,
+): PrincipalSnapshotHttpSession<Snapshot>;
+
 // ---------------------------------------------------------------------------
 // createScopeLiveStore — composite scope projection
 // ---------------------------------------------------------------------------
