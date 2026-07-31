@@ -2199,7 +2199,9 @@ export function createLiveDeliverySession({
   let cursor = 0;
   let status = 'bootstrapping';
   let closed = false;
+  let initialized = false;
   let reconnecting = false;
+  let reconnectRequested = false;
   let connectionGeneration = 0;
   let recoveryGeneration = 0;
   let snapshotGeneration = 0;
@@ -2211,6 +2213,56 @@ export function createLiveDeliverySession({
   let deliveryChain = Promise.resolve();
   const listeners = new Set();
   const operations = new Map();
+  const recoveryRetryWaiters = new Set();
+  const admissionWaiters = [];
+
+  function admit(operation) {
+    if (closed || status === 'revoked' || status === 'unavailable') return Promise.resolve(false);
+    if (initialized && status === 'live' && !reconnecting) return Promise.resolve(true);
+    return new Promise((resolve) => {
+      admissionWaiters.push({ operation, resolve });
+    });
+  }
+
+  function settleAdmissions(available) {
+    if (!available) {
+      for (const waiter of admissionWaiters.splice(0)) waiter.resolve(false);
+      return;
+    }
+    for (const waiter of admissionWaiters.splice(0)) waiter.resolve(true);
+  }
+
+  function terminalStatus() {
+    return closed ? 'closed' : status === 'revoked' ? 'revoked' : 'unavailable';
+  }
+
+  function canTransmit(operation) {
+    return initialized
+      && !closed
+      && status === 'live'
+      && !reconnecting
+      && operations.get(operation.actionId) === operation;
+  }
+
+  function waitForRecoveryRetry(attempt) {
+    const delay = Math.min(50 * (2 ** attempt), 1000);
+    return new Promise((resolve) => {
+      const waiter = { timeout: null, resolve };
+      waiter.timeout = setTimeout(() => {
+        recoveryRetryWaiters.delete(waiter);
+        resolve(true);
+      }, delay);
+      recoveryRetryWaiters.add(waiter);
+    });
+  }
+
+  function cancelRecoveryRetries() {
+    for (const waiter of recoveryRetryWaiters) {
+      clearTimeout(waiter.timeout);
+      waiter.resolve(false);
+    }
+    recoveryRetryWaiters.clear();
+  }
 
   function createSettlement(operation) {
     const waiters = new Set();
@@ -2355,6 +2407,7 @@ export function createLiveDeliverySession({
   function becomeUnavailable() {
     if (closed || status === 'revoked') return;
     status = 'unavailable';
+    settleAdmissions(false);
     // An opaque aggregate can only be reconciled by its replacement snapshot.
     // Once that recovery fails, no optimistic projection is safe to retain.
     for (const operation of operations.values()) settleOperation(operation, { status: 'unavailable' });
@@ -2380,7 +2433,7 @@ export function createLiveDeliverySession({
     return true;
   }
 
-  async function recover(mode, snapshotCursorFloor) {
+  async function recover(mode, snapshotCursorFloor, retryAttempt = 0) {
     if (closed) return;
     const generation = ++recoveryGeneration;
     const receiptGenerationAtStart = receiptGeneration;
@@ -2396,7 +2449,8 @@ export function createLiveDeliverySession({
       return;
     }
     if (result.kind === 'retry') {
-      return recover('snapshot', snapshotCursorFloor);
+      if (!(await waitForRecoveryRetry(retryAttempt)) || closed || status === 'revoked' || generation !== recoveryGeneration) return;
+      return recover('snapshot', snapshotCursorFloor, retryAttempt + 1);
     }
     if (result.kind === 'snapshot') {
       assertCursor(result.cursor, 'snapshot cursor');
@@ -2413,12 +2467,14 @@ export function createLiveDeliverySession({
       publish();
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       status = 'live';
+      if (initialized && !reconnecting) settleAdmissions(true);
       return;
     }
     if (result.kind === 'catchup' && mode === 'catchup') {
       if (!(await applyCatchup(result))) return recover('snapshot');
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       status = 'live';
+      if (initialized && !reconnecting) settleAdmissions(true);
       return;
     }
     throw new Error('bootstrap returned an unsupported result');
@@ -2512,30 +2568,48 @@ export function createLiveDeliverySession({
       },
       revoke,
       closed: () => {
-        if (generation === connectionGeneration) reconnect().catch(() => {});
+        if (generation !== connectionGeneration) return;
+        connectionGeneration += 1;
+        if (reconnecting) reconnectRequested = true;
+        else reconnect().catch(() => {});
       },
     });
     // Delivery can revoke access while transport establishment is pending.
     // Never retain a subscription that became unauthorized before its handle.
     if (closed || status === 'revoked' || generation !== connectionGeneration) {
       nextSubscription?.close?.();
-      return;
+      return false;
     }
     subscription = nextSubscription;
+    return true;
   }
 
   async function reconnect() {
-    if (closed || status === 'revoked' || reconnecting) return;
+    if (closed || status === 'revoked') return;
+    if (reconnecting) {
+      reconnectRequested = true;
+      return;
+    }
     // Some adapters report their own close synchronously. Mark reconnecting
     // before closing the old subscription so that callback cannot recurse.
     reconnecting = true;
     try {
-      // Invalidate the old transport before recovery reauthorizes the stream.
-      connectionGeneration += 1;
-      subscription?.close?.();
-      subscription = null;
-      await recover('catchup');
-      if (!closed && status !== 'revoked') await connect();
+      do {
+        reconnectRequested = false;
+        // Invalidate the old transport before recovery reauthorizes the stream.
+        connectionGeneration += 1;
+        subscription?.close?.();
+        subscription = null;
+        await recover('catchup');
+        if (closed || status === 'revoked') break;
+        status = 'recovering';
+        if (!(await connect())) {
+          reconnectRequested = true;
+          continue;
+        }
+        status = 'live';
+      } while (reconnectRequested && !closed && status !== 'revoked');
+      if (!reconnectRequested && !closed && status === 'live') settleAdmissions(true);
     } catch (error) {
       if (!closed && status !== 'revoked') becomeUnavailable();
       throw error;
@@ -2547,6 +2621,8 @@ export function createLiveDeliverySession({
   function revoke(_reason) {
     if (closed || status === 'revoked') return;
     status = 'revoked';
+    settleAdmissions(false);
+    cancelRecoveryRetries();
     baseSnapshot = null;
     visibleSnapshot = null;
     for (const operation of operations.values()) settleOperation(operation, { status: 'revoked' });
@@ -2561,7 +2637,9 @@ export function createLiveDeliverySession({
   async function start() {
     try {
       await recover('snapshot');
-      if (!closed && status !== 'revoked') await connect();
+      if (!closed && status !== 'revoked') {
+        if (await connect()) initialized = true;
+      }
     } catch (error) {
       if (!closed && status !== 'revoked') becomeUnavailable();
       throw error;
@@ -2576,14 +2654,16 @@ export function createLiveDeliverySession({
       delivered: false, confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null,
     };
     const settlement = createSettlement(operation);
-    if (closed || status !== 'live') {
-      settleOperation(operation, { status: closed ? 'closed' : 'unavailable' });
+    if (!initialized || closed || status === 'unavailable' || status === 'revoked') {
+      settleOperation(operation, { status: terminalStatus() });
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     operations.set(actionId, operation);
     publish();
-    if (closed || status !== 'live') {
-      settleOperation(operation, { status: closed ? 'closed' : 'unavailable' });
+    if (!((status === 'live' && !reconnecting) || await admit(operation)) || !canTransmit(operation)) {
+      settleOperation(operation, { status: terminalStatus() });
+      operations.delete(actionId);
+      publish();
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     try {
@@ -2726,8 +2806,8 @@ export function createLiveDeliverySession({
       settleOperation(rejectedOperation, { status: 'failed', error: failure });
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement: rejectedSettlement, failure };
     }
-    if (closed || status !== 'live') {
-      settleOperation(rejectedOperation, { status: closed ? 'closed' : 'unavailable' });
+    if (!initialized || closed || status === 'unavailable' || status === 'revoked') {
+      settleOperation(rejectedOperation, { status: terminalStatus() });
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement: rejectedSettlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     const retainedActions = freezeClone(structuredClone(actions));
@@ -2736,8 +2816,10 @@ export function createLiveDeliverySession({
     createSettlement(operation);
     operations.set(actionId, operation);
     publish();
-    if (closed || status !== 'live') {
-      settleOperation(operation, { status: closed ? 'closed' : 'unavailable' });
+    if (!((status === 'live' && !reconnecting) || await admit(operation)) || !canTransmit(operation)) {
+      settleOperation(operation, { status: terminalStatus() });
+      operations.delete(actionId);
+      publish();
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     return submitBatch(operation);
@@ -2751,6 +2833,12 @@ export function createLiveDeliverySession({
       const failure = new TypeError('batch is not awaiting transport retry');
       settleOperation(rejectedOperation, { status: 'failed', error: failure });
       return { ok: false, status: 'failed-rolled-back', opId, settlement, failure };
+    }
+    if (!((status === 'live' && !reconnecting) || await admit(operation)) || !canTransmit(operation)) {
+      settleOperation(operation, { status: terminalStatus() });
+      operations.delete(opId);
+      publish();
+      return { ok: false, status: 'failed-rolled-back', opId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     operation.deliveryError = null;
     return submitBatch(operation);
@@ -2786,6 +2874,8 @@ export function createLiveDeliverySession({
     close() {
       if (closed) return;
       closed = true;
+      settleAdmissions(false);
+      cancelRecoveryRetries();
       subscription?.close?.();
       subscription = null;
       for (const operation of operations.values()) settleOperation(operation, { status: 'closed' });
@@ -2834,11 +2924,17 @@ export function createLiveDeliveryHttpSession({
     for (const [key, value] of Object.entries(requestIdentity ?? {})) url.searchParams.set(key, value);
     url.searchParams.set('mode', mode);
     if (mode === 'catchup') url.searchParams.set('after', typeof after === 'object' ? JSON.stringify(after) : String(after));
-    const response = await fetchImpl(url.toString(), { credentials: 'include' });
+    let response;
+    try {
+      response = await fetchImpl(url.toString(), { credentials: 'include' });
+    } catch {
+      return { kind: 'retry' };
+    }
     if (response.status === 401 || response.status === 403) return { kind: 'revoked' };
+    if (response.status >= 500) return { kind: 'retry' };
     if (!response.ok) throw new Error(`live delivery bootstrap failed with HTTP ${response.status}`);
     const result = await response.json();
-    if (!result || typeof result !== 'object' || !['snapshot', 'catchup', 'revoked'].includes(result.kind)) {
+    if (!result || typeof result !== 'object' || !['snapshot', 'catchup', 'retry', 'revoked'].includes(result.kind)) {
       throw new Error('live delivery bootstrap returned an invalid response');
     }
     return result;
