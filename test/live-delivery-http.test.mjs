@@ -120,6 +120,182 @@ test('HTTP session delegates duplicate, gap and opaque resync recovery to the pa
   session.close();
 });
 
+test('HTTP session retries an unstable aggregate bootstrap until it receives a paired snapshot', async () => {
+  let attempts = 0;
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ++attempts === 1
+        ? { kind: 'retry' }
+        : { kind: 'snapshot', snapshot: { id: 'p1' }, cursor: { anchor: 1, aggregate: 2 } },
+    }),
+    eventSourceFactory: () => ({ close() {} }),
+    validateSnapshot: (value) => value,
+    sendAction: async () => ({ ok: true }),
+    historySession: 'tab-a',
+  });
+
+  await session.ready;
+  assert.equal(attempts, 2);
+  assert.equal(session.status, 'live');
+  assert.deepEqual(session.snapshot, { id: 'p1' });
+  session.close();
+});
+
+test('HTTP session retries transient initial bootstrap transport failures without becoming unavailable', async () => {
+  for (const failure of [new TypeError('network reset'), { ok: false, status: 503 }]) {
+    let attempts = 0;
+    const session = createLiveDeliveryHttpSession({
+      baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+      fetchImpl: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          if (failure instanceof Error) throw failure;
+          return failure;
+        }
+        return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { id: 'p1' }, cursor: 1 }) };
+      },
+      eventSourceFactory: () => ({ close() {} }),
+      validateSnapshot: (value) => value,
+      sendAction: async () => ({ ok: true }),
+      historySession: 'tab-a',
+    });
+
+    await session.ready;
+    assert.equal(attempts, 2);
+    assert.equal(session.status, 'live');
+    assert.deepEqual(session.snapshot, { id: 'p1' });
+    session.close();
+  }
+});
+
+test('HTTP session waits to send until transient reconnect recovery restores its stream', async () => {
+  const sources = [];
+  let bootstrapAttempts = 0;
+  let sends = 0;
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async () => {
+      bootstrapAttempts += 1;
+      if (bootstrapAttempts === 1) {
+        return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { id: 'p1' }, cursor: 1 }) };
+      }
+      if (bootstrapAttempts < 4) return { ok: false, status: 503 };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { id: 'p1' }, cursor: 1 }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+    validateSnapshot: (value) => value,
+    fold: (snapshot) => snapshot,
+    optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+    sendAction: async () => { sends += 1; return { ok: true }; },
+    createActionId: () => 'recovered-action',
+    historySession: 'tab-a',
+  });
+  await session.ready;
+
+  sources[0].onerror();
+  const dispatch = session.dispatch('Project.rename', { name: 'Recovered' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(sends, 0);
+  assert.equal(sources.length, 1);
+
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal((await dispatch).ok, true);
+  assert.equal(sends, 1);
+  assert.equal(sources.length, 2);
+  assert.equal(session.status, 'live');
+  session.close();
+});
+
+test('HTTP snapshot-only batch settlement survives a transient replacement snapshot failure', async () => {
+  let attempts = 0;
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 2) throw new TypeError('connection reset');
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { version: attempts }, cursor: attempts === 1 ? 1 : 2 }) };
+    },
+    eventSourceFactory: () => ({ close() {} }),
+    validateSnapshot: (value) => value,
+    optimistic: (snapshot) => ({ ...snapshot, pending: true }),
+    sendBatch: async (batch) => ({ ok: true, actionId: batch.actionId, confirmedThrough: 2 }),
+    createActionId: () => 'import-operation',
+    historySession: 'tab-a',
+  });
+  await session.ready;
+
+  const dispatched = await session.batch([{ type: 'Artefact.create', payload: { id: 'art-1' } }]);
+  assert.equal(dispatched.opId, 'import-operation');
+  assert.deepEqual(await dispatched.settlement.wait(), { opId: 'import-operation', status: 'reconciled' });
+  assert.equal(attempts, 3);
+  assert.equal(session.status, 'live');
+  assert.deepEqual(session.snapshot, { version: 3 });
+  session.close();
+});
+
+test('closing an HTTP session cancels aggregate bootstrap retry backoff', async () => {
+  let attempts = 0;
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async () => {
+      attempts += 1;
+      return { ok: true, status: 200, json: async () => ({ kind: 'retry' }) };
+    },
+    eventSourceFactory: () => ({ close() {} }),
+    validateSnapshot: (value) => value,
+    sendAction: async () => ({ ok: true }),
+    historySession: 'tab-a',
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  session.close();
+  await session.ready;
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  assert.equal(attempts, 1);
+  assert.equal(session.status, 'recovering');
+});
+
+test('a superseded aggregate bootstrap retry cannot replace newer reconnect recovery', async () => {
+  const sources = [];
+  let attempts = 0;
+  let releaseRetry;
+  const retryReturned = new Promise((resolve) => { releaseRetry = resolve; });
+  const session = createLiveDeliveryHttpSession({
+    baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts === 1) return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { version: 1 }, cursor: { anchor: 1, aggregate: 1 } }) };
+      if (attempts === 2) return { ok: true, status: 200, json: async () => { releaseRetry(); return { kind: 'retry' }; } };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { version: 2 }, cursor: { anchor: 2, aggregate: 2 } }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+    validateSnapshot: (value) => value,
+    sendAction: async () => ({ ok: true }),
+    historySession: 'tab-a',
+  });
+
+  await session.ready;
+  sources[0].onmessage({ data: JSON.stringify([{ type: 'resync', seq: 2, reason: 'recipient-snapshot-required' }]) });
+  await retryReturned;
+  await session.reconnect();
+  await new Promise((resolve) => setTimeout(resolve, 70));
+  assert.equal(attempts, 3);
+  assert.equal(session.status, 'live');
+  assert.deepEqual(session.snapshot, { version: 2 });
+  session.close();
+});
+
 test('HTTP snapshot-only session settles a sender receipt through opaque SSE recovery without exposing action identity', async () => {
   const sources = [];
   let snapshots = 0;
@@ -153,7 +329,7 @@ test('HTTP snapshot-only session settles a sender receipt through opaque SSE rec
 });
 
 test('HTTP session reserves revocation for authorization responses', async () => {
-  for (const [status, expected] of [[403, 'revoked'], [503, 'unavailable']]) {
+  for (const status of [401, 403]) {
     const session = createLiveDeliveryHttpSession({
       baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
       fetchImpl: async () => ({ ok: false, status, json: async () => ({}) }),
@@ -163,9 +339,8 @@ test('HTTP session reserves revocation for authorization responses', async () =>
       sendAction: async () => ({ ok: true }),
       historySession: 'tab-a',
     });
-    if (status === 503) await assert.rejects(session.ready, /HTTP 503/);
-    else await session.ready;
-    assert.equal(session.status, expected);
+    await session.ready;
+    assert.equal(session.status, 'revoked');
     session.close();
   }
 });
