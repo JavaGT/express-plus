@@ -2858,8 +2858,14 @@ export function createLiveDeliveryHttpSession({
     for (const [key, value] of Object.entries(requestIdentity ?? {})) url.searchParams.set(key, value);
     url.searchParams.set('mode', mode);
     if (mode === 'catchup') url.searchParams.set('after', typeof after === 'object' ? JSON.stringify(after) : String(after));
-    const response = await fetchImpl(url.toString(), { credentials: 'include' });
+    let response;
+    try {
+      response = await fetchImpl(url.toString(), { credentials: 'include' });
+    } catch {
+      return { kind: 'retry' };
+    }
     if (response.status === 401 || response.status === 403) return { kind: 'revoked' };
+    if (response.status >= 500) return { kind: 'retry' };
     if (!response.ok) throw new Error(`live delivery bootstrap failed with HTTP ${response.status}`);
     const result = await response.json();
     if (!result || typeof result !== 'object' || !['snapshot', 'catchup', 'retry', 'revoked'].includes(result.kind)) {
