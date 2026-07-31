@@ -443,7 +443,7 @@ test('passkey register + authenticate + list + delete round-trip', async (t) => 
   const { origin } = await boot(t);
 
   // 1. Password-login to get a session (needed for register)
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'bob', password: 'passkey-test' }),
@@ -572,7 +572,7 @@ test('authenticate with a wrong credential ID fails', async (t) => {
   const { origin } = await boot(t);
 
   // Login and register a passkey
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'test' }),
@@ -658,7 +658,7 @@ test('authenticate with an expired challenge fails', async (t) => {
 test('delete a credential that does not exist returns 404', async (t) => {
   const { origin } = await boot(t);
 
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'deletor', password: 'pw' }),
@@ -676,7 +676,7 @@ test('delete another user\'s credential returns 403', async (t) => {
   const { origin } = await boot(t);
 
   // Alice registers a passkey
-  const aliceLogin = await fetch(`${origin}/auth/login`, {
+  const aliceLogin = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'pw' }),
@@ -703,7 +703,7 @@ test('delete another user\'s credential returns 403', async (t) => {
   });
 
   // Bob tries to delete Alice's credential
-  const bobLogin = await fetch(`${origin}/auth/login`, {
+  const bobLogin = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'bob', password: 'pw' }),
@@ -721,7 +721,7 @@ test('authenticate mints a session cookie with correct attributes', async (t) =>
   const { origin } = await boot(t);
 
   // Register a passkey
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'user', password: 'pw' }),

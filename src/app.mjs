@@ -426,7 +426,7 @@ export default function workbench({
   // look a token up in. Throw at construction (loud), not mid-login (a 500).
   app.auth = function auth(options = {}) {
     if (!app.db) {
-      throw new Error('app.auth() requires a db — login writes a User row and mints a Session, and the session principal source has nothing to look a token up in without one (fail closed).');
+      throw new Error('app.auth() requires a db — registration writes a User row, authentication mints a Session, and the session principal source has nothing to look a token up in without one (fail closed).');
     }
     app._authEngaged = true;
     // `secure` follows THIS app's env, not the process-wide singleton — an app

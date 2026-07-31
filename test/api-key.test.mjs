@@ -318,7 +318,7 @@ test('HTTP: create key returns plain token once with prefix and name', async (t)
   const { origin } = await bootHttp(t);
 
   // Login first to get a session cookie
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -356,7 +356,7 @@ test('HTTP: list keys shows prefix and name but no token or hash', async (t) => 
   const { origin } = await bootHttp(t);
 
   // Login
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -398,7 +398,7 @@ test('HTTP: use key in Bearer header to access protected route', async (t) => {
   const { origin } = await bootHttp(t);
 
   // Login as alice to create a key
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -434,7 +434,7 @@ test('HTTP: revoke key → subsequent Bearer request returns 401', async (t) => 
   const { origin } = await bootHttp(t);
 
   // Login
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -484,7 +484,7 @@ test('HTTP: cannot revoke another user\'s key', async (t) => {
   const { origin } = await bootHttp(t);
 
   // Login as alice, create a key
-  const aliceLogin = await fetch(`${origin}/auth/login`, {
+  const aliceLogin = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -499,7 +499,7 @@ test('HTTP: cannot revoke another user\'s key', async (t) => {
   const { id: keyId } = await keyRes.json();
 
   // Login as bob, try to revoke alice's key
-  const bobLogin = await fetch(`${origin}/auth/login`, {
+  const bobLogin = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'bob', password: 'sekret' }),
@@ -517,7 +517,7 @@ test('HTTP: list keys returns only the current user\'s keys', async (t) => {
   const { origin } = await bootHttp(t);
 
   // Login as alice, create a key
-  const aliceLogin = await fetch(`${origin}/auth/login`, {
+  const aliceLogin = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -531,7 +531,7 @@ test('HTTP: list keys returns only the current user\'s keys', async (t) => {
   });
 
   // Login as bob, create a key
-  const bobLogin = await fetch(`${origin}/auth/login`, {
+  const bobLogin = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'bob', password: 'sekret' }),
@@ -630,7 +630,7 @@ test('session principal takes priority over Bearer token when both are present',
   const { origin } = await bootHttp(t);
 
   // Login as alice
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -662,7 +662,7 @@ test('session principal takes priority over Bearer token when both are present',
 
 test('an expired session falls back to a valid Bearer token', async (t) => {
   const { app, origin } = await bootHttp(t);
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),

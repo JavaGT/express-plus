@@ -76,37 +76,49 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     return { isValid: isTotpValid || isBackupValid, usedBackup: isBackupValid, backupCodes };
   }
 
-  // login: find-or-create user (create on first login, else verify the password
-  // against the `hash()` field's `.verify()`), mint a Session, and SET THE
-  // COOKIE — the piece the exemplar omits. `allowAnonymous` opts out of the
-  // fail-closed default gate because login MINTS a principal. The response body
-  // carries only the public user shape; the token is in the cookie, never the
-  // body (a body-borne token leaves the client anonymous to sessionPrincipalOf).
+  function findIdentity(credential, next) {
+    for (const name of identityFields) {
+      const field = User[name];
+      if (!field) {
+        next({ status: 500, message: `identifyBy references unknown User field '${name}'` });
+        return { failed: true };
+      }
+      const user = User.findOne(field.is(credential));
+      if (user) return { user };
+    }
+    return { user: null };
+  }
+
+  function createSessionResponse(user, res) {
+    const session = Session.create({ userId: user.id });
+    res.setHeader('set-cookie', sessionCookie(session.token, { secure }));
+    res.status(201).json({ user: { id: user.id, username: user.username } });
+  }
+
+  // Registration and login are distinct principal-minting intents. Registration
+  // creates exactly one identity; login never creates an unknown identity.
+  s.post('/register', allowAnonymous(), async (req, res, next) => {
+    const { username, password } = req.body ?? {};
+    if (!username || !password) {
+      return next({ status: 400, message: 'username and password are required' });
+    }
+    const found = findIdentity(username, next);
+    if (found.failed) return;
+    if (found.user) return next({ status: 409, message: 'account already exists' });
+    const user = User.create({ [identityFields[0]]: username, password });
+    createSessionResponse(user, res);
+  });
+
   s.post('/login', allowAnonymous(), async (req, res, next) => {
     const { username, password } = req.body ?? {};
     if (!username || !password) {
       return next({ status: 400, message: 'username and password are required' });
     }
-    // Resolve the credential against the configured identity field(s). The
-    // first field that matches a row wins; a credential that matches no row
-    // falls through to find-or-create on the PRIMARY (first) field so existing
-    // first-login create-on-sign-up behavior is preserved.
-    let user;
-    for (let i = 0; i < identityFields.length; i++) {
-      const field = User[identityFields[i]];
-      if (!field) {
-        return next({ status: 500, message: `identifyBy references unknown User field '${identityFields[i]}'` });
-      }
-      user = User.findOne(field.is(username));
-      if (user) break;
-    }
-    if (!user) {
-      // `password: hash()` digests on write; the plaintext is never stored.
-      // Create against the primary identity field so the credential is stored
-      // where a subsequent login will find it.
-      const primary = User[identityFields[0]];
-      user = primary ? User.create({ [identityFields[0]]: username, password }) : User.create({ username, password });
-    } else {
+    const found = findIdentity(username, next);
+    if (found.failed) return;
+    const user = found.user;
+    if (!user) return next({ status: 401, message: 'bad credentials' });
+    {
       // Lockout check — before password verification so scrypt is skipped
       // when the account is locked. A non-existent user has no lockout state.
       const lockout = checkLockout(user.lockedUntil);
@@ -137,9 +149,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     if (twoFactor && twoFactor.enabled === 1) {
       return res.json({ requiresTotp: true, userId: user.id });
     }
-    const session = Session.create({ userId: user.id });
-    res.setHeader('set-cookie', sessionCookie(session.token, { secure }));
-    res.status(201).json({ user: { id: user.id, username: user.username } });
+    createSessionResponse(user, res);
   });
 
   // logout: inherits the default-on `requireUser` gate, so a caller without a

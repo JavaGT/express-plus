@@ -69,15 +69,15 @@ function bearer(workerId, token) {
 // W1 — passkey auth (HTTP round-trips)
 // ---------------------------------------------------------------------------
 
-test('W1: login creates user and sets a session cookie', async (t) => {
+test('W1: registration creates user and sets a session cookie', async (t) => {
   const { origin } = await bootAuthApp(t);
 
-  const res = await fetch(`${origin}/auth/login`, {
+  const res = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
   });
-  assert.equal(res.status, 201, `login: expected 201 got ${res.status}`);
+  assert.equal(res.status, 201, `register: expected 201 got ${res.status}`);
   const cookie = res.headers.get('set-cookie');
   assert.ok(cookie, 'login sets a Set-Cookie header');
   assert.match(cookie, /HttpOnly/i);
@@ -90,8 +90,8 @@ test('W1: login creates user and sets a session cookie', async (t) => {
 test('W1: wrong password returns 401', async (t) => {
   const { origin } = await bootAuthApp(t);
 
-  // First login creates the user
-  await fetch(`${origin}/auth/login`, {
+  // Registration creates the user
+  await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'bob', password: 'right' }),
@@ -108,7 +108,7 @@ test('W1: wrong password returns 401', async (t) => {
 test('W1: authed user creates and reads an entity through session cookie', async (t) => {
   const { origin } = await bootAuthApp(t);
 
-  const login = await fetch(`${origin}/auth/login`, {
+  const login = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),

@@ -578,7 +578,7 @@ export interface ScopeLiveStore<Snapshot> {
 export function createScopeLiveStore<Snapshot>(config: ScopeLiveStoreConfig<Snapshot>): ScopeLiveStore<Snapshot>;
 
 // ---------------------------------------------------------------------------
-// createAuthClient — login/logout
+// createAuthClient — register/login/logout
 // ---------------------------------------------------------------------------
 
 export interface AuthClientConfig {
@@ -591,6 +591,7 @@ export interface LoginResult {
 }
 
 export interface AuthClient {
+  register(username: string, password: string): Promise<LoginResult>;
   login(username: string, password: string): Promise<LoginResult>;
   logout(): Promise<{ ok: boolean }>;
 }

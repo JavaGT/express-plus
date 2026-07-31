@@ -224,7 +224,7 @@ Shipped from `workbench` (not redeclared by apps):
 
 ### Auth product routes
 
-`.auth()` mounts login/logout and related routes (passkeys, TOTP, API keys as
+`.auth()` mounts registration/login/logout and related routes (passkeys, TOTP, API keys as
 implemented). See `projects/chat` and auth tests for shapes.
 
 ---

@@ -82,7 +82,7 @@ Details: [`projects/chat/README.md`](../projects/chat/README.md).
 
 What this shows beyond Option A:
 
-- `.auth()` — login/logout, `sid` cookie  
+- `.auth()` — registration/login/logout, `sid` cookie
 - Parent/child entities (`Chat` / `Message` with `inherit`)  
 - Map membership field + compiled membership check  
 - Static UI + browser SDK at `/workbench.mjs`  

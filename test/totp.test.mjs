@@ -54,17 +54,17 @@ async function boot(t) {
   return { app, origin: `http://127.0.0.1:${port}` };
 }
 
-// Login helper — creates a session and returns { origin, cookie, userId }.
+// Registration helper — creates a session and returns { origin, cookie, userId }.
 async function login(t) {
   const { origin, app } = await boot(t);
-  const res = await fetch(`${origin}/auth/login`, {
+  const res = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'testuser', password: 'testpass' }),
   });
   if (res.status !== 201) {
     const text = await res.text();
-    throw new Error(`login failed: ${res.status} ${text}`);
+    throw new Error(`registration failed: ${res.status} ${text}`);
   }
   const body = await res.json();
   const cookie = `sid=${sidFromSetCookie(res.headers.get('set-cookie'))}`;
@@ -612,7 +612,7 @@ test('enroll TOTP for another user is not possible (only own 2FA)', async (t) =>
   const { origin } = await boot(t);
 
   // Create two users
-  const res1 = await fetch(`${origin}/auth/login`, {
+  const res1 = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'pw' }),
@@ -621,7 +621,7 @@ test('enroll TOTP for another user is not possible (only own 2FA)', async (t) =>
   const aliceBody = await res1.json();
   const aliceId = aliceBody.user.id;
 
-  const res2 = await fetch(`${origin}/auth/login`, {
+  const res2 = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'bob', password: 'pw' }),

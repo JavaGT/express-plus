@@ -3245,12 +3245,12 @@ export function createScopeLiveStore({
 }
 
 // ---------------------------------------------------------------------------
-// createAuthClient — login/logout against the framework's `/auth` battery.
+// createAuthClient — register/login/logout against the framework's `/auth` battery.
 // ---------------------------------------------------------------------------
 //
-// Thin fetch wrappers over `/auth/login` and `/auth/logout` with
+// Thin fetch wrappers over `/auth/register`, `/auth/login`, and `/auth/logout` with
 // `credentials: 'include'` so the browser sends and stores the fail-closed
-// `sid` cookie the server sets on login. The token lives in the cookie, never
+// `sid` cookie the server sets on registration or login. The token lives in the cookie, never
 // client JS (HttpOnly), so the client never holds a credential it can leak.
 // Independent of the live-store machinery — a page may auth before subscribing.
 // `login` returns the parsed JSON body (`{ user: { id, username } }`); both
@@ -3259,8 +3259,8 @@ export function createScopeLiveStore({
 export function createAuthClient({ baseUrl, fetchImpl } = {}) {
   const fetchFn = fetchImpl ?? globalThis.fetch;
 
-  async function login(username, password) {
-    const res = await fetchFn(`${baseUrl}/auth/login`, {
+  async function authenticate(intent, username, password) {
+    const res = await fetchFn(`${baseUrl}/auth/${intent}`, {
       method: 'POST',
       credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
@@ -3269,6 +3269,14 @@ export function createAuthClient({ baseUrl, fetchImpl } = {}) {
     const decoded = await decodeResult(res);
     if (!decoded.ok) throw new Error(decoded.failure?.message ?? decoded.error);
     return decoded.value;
+  }
+
+  function register(username, password) {
+    return authenticate('register', username, password);
+  }
+
+  function login(username, password) {
+    return authenticate('login', username, password);
   }
 
   async function logout() {
@@ -3282,5 +3290,5 @@ export function createAuthClient({ baseUrl, fetchImpl } = {}) {
     return { ok: true };
   }
 
-  return { login, logout };
+  return { register, login, logout };
 }

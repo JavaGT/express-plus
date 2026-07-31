@@ -482,7 +482,7 @@ const deliverySession: LiveDeliverySession<{ projects: ProjectRow[] }> = createL
 const aggregateDeliveryCursor: ClientLiveDeliveryCursor = { anchor: 1, aggregate: 2 };
 void [aggregateDeliveryCursor, deliverySession.cursor];
 const auth = createAuthClient({ baseUrl: 'https://example.test' });
-void [list, store, scopeStore, deliverySession, auth.login('researcher', 'password'), decodeResult(new Response(null, { status: 204 }))];
+void [list, store, scopeStore, deliverySession, auth.register('researcher', 'password'), auth.login('researcher', 'password'), decodeResult(new Response(null, { status: 204 }))];
 
 declare const envelope: WsEnvelope;
 declare const snapshot: SnapshotResponse<ProjectRow>;

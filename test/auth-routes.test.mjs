@@ -1,6 +1,6 @@
 // auth-routes.test.mjs — the framework-owned `.auth()` battery, end-to-end.
 //
-// `.auth()` mounts `/auth` (login + logout) built from the SAME public
+// `.auth()` mounts `/auth` (registration + login + logout) built from the SAME public
 // primitives an app would use, PLUS the Set-Cookie handling the exemplar omits
 // — the 0→1 auth bug: `sessionPrincipalOf` reads ONLY the cookie, so a
 // body-only login leaves the client anonymous on every subsequent request.
@@ -55,9 +55,9 @@ function sidFromSetCookie(header) {
   return match ? match[1] : null;
 }
 
-test('login sets a fail-closed Set-Cookie (HttpOnly, SameSite=Lax, Path=/)', async (t) => {
+test('register sets a fail-closed Set-Cookie (HttpOnly, SameSite=Lax, Path=/)', async (t) => {
   const { origin } = await boot(t);
-  const res = await fetch(`${origin}/auth/login`, {
+  const res = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -78,10 +78,38 @@ test('login sets a fail-closed Set-Cookie (HttpOnly, SameSite=Lax, Path=/)', asy
   assert.equal(body.token, undefined, 'the token travels in the cookie, not the body');
 });
 
+test('login never creates an unknown user', async (t) => {
+  const { origin, app } = await boot(t);
+  const res = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'unknown', password: 'hunter2' }),
+  });
+  assert.equal(res.status, 401);
+  assert.equal(res.headers.get('set-cookie'), null);
+  assert.deepEqual(await res.json(), { ok: false, failure: { category: 'denied', message: 'bad credentials' } });
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM User').get().n, 0);
+});
+
+test('register rejects an existing identity without minting a session', async (t) => {
+  const { origin, app } = await boot(t);
+  const register = () => fetch(`${origin}/auth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  assert.equal((await register()).status, 201);
+  const duplicate = await register();
+  assert.equal(duplicate.status, 409);
+  assert.equal(duplicate.headers.get('set-cookie'), null);
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM User').get().n, 1);
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS n FROM Session').get().n, 1);
+});
+
 test('a subsequent request carrying the cookie hydrates a user principal (owner CRUD succeeds)', async (t) => {
   const { origin } = await boot(t);
-  // login as alice → capture the cookie
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  // register alice → capture the cookie
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -109,8 +137,8 @@ test('a subsequent request carrying the cookie hydrates a user principal (owner 
 
 test('wrong password → 401 and no cookie', async (t) => {
   const { origin } = await boot(t);
-  // first login creates alice
-  await fetch(`${origin}/auth/login`, {
+  // registration creates alice
+  await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -132,7 +160,7 @@ test('wrong password → 401 and no cookie', async (t) => {
 
 test('logout deletes the session and clears the cookie; the old cookie is anonymous afterwards', async (t) => {
   const { origin, app } = await boot(t);
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -176,6 +204,7 @@ test('.auth() on a db-less app throws at construction (fail closed, loud)', () =
 test('createAuthClient.login returns the user and propagates errors', async (t) => {
   const { origin } = await boot(t);
   const client = createAuthClient({ baseUrl: origin });
+  await client.register('alice', 'hunter2');
   const result = await client.login('alice', 'hunter2');
   assert.equal(result.user.username, 'alice');
   // a wrong-password login throws with the server's error message
@@ -187,7 +216,7 @@ test('createAuthClient.logout clears the session', async (t) => {
   // The client SDK uses credentials: 'include' so the cookie round-trips; in
   // Node's fetch the Set-Cookie is not auto-stored across requests, so we drive
   // the cookie manually here to exercise the logout path against the live route.
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -210,7 +239,7 @@ test('createAuthClient.logout clears the session', async (t) => {
 
 test('/auth/me returns the authenticated user profile', async (t) => {
   const { origin } = await boot(t);
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -234,7 +263,7 @@ test('/auth/me returns 401 without a valid session', async (t) => {
 
 test('/auth/me denies an expired session row before scheduled cleanup', async (t) => {
   const { origin, app } = await boot(t);
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -248,7 +277,7 @@ test('/auth/me denies an expired session row before scheduled cleanup', async (t
 
 test('/auth/me with email identity returns the email field', async (t) => {
   const { origin } = await bootWithEmail(t);
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice@example.com', password: 'hunter2' }),
@@ -269,7 +298,7 @@ test('/auth/me with email identity returns the email field', async (t) => {
 
 test('/auth/change-password succeeds with a correct current password', async (t) => {
   const { origin } = await boot(t);
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -301,7 +330,7 @@ test('/auth/change-password succeeds with a correct current password', async (t)
 
 test('/auth/change-password returns 401 with a wrong current password', async (t) => {
   const { origin } = await boot(t);
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -318,7 +347,7 @@ test('/auth/change-password returns 401 with a wrong current password', async (t
 
 test('/auth/change-password returns 400 with missing body fields', async (t) => {
   const { origin } = await boot(t);
-  const loginRes = await fetch(`${origin}/auth/login`, {
+  const loginRes = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
@@ -361,8 +390,8 @@ async function bootWithEmail(t) {
 
 test('identifyBy: a credential is matched against email first', async (t) => {
   const { origin, app } = await bootWithEmail(t);
-  // First login with an email credential → creates a user with that email.
-  const res = await fetch(`${origin}/auth/login`, {
+  // Registration with an email credential creates a user with that email.
+  const res = await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice@example.com', password: 'hunter2' }),
@@ -378,7 +407,7 @@ test('identifyBy: a credential is matched against email first', async (t) => {
 
 test('identifyBy: a second login with the same email verifies the password', async (t) => {
   const { origin } = await bootWithEmail(t);
-  await fetch(`${origin}/auth/login`, {
+  await fetch(`${origin}/auth/register`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ username: 'alice@example.com', password: 'hunter2' }),
