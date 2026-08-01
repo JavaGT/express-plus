@@ -386,6 +386,9 @@ export interface AnnotatedTextBlock {
   readonly fields: Readonly<Record<string, unknown>>;
   readonly annotationIds: readonly string[];
 }
+export interface AnnotatedTextCanonicalBlock extends AnnotatedTextBlock {
+  readonly groupId: string;
+}
 export interface AnnotatedTextAnnotation {
   readonly id: string;
   readonly family: string;
@@ -395,6 +398,29 @@ export interface AnnotatedTextMembership {
   readonly annotationId: string;
   readonly blockId: string;
   readonly ordinal: number;
+}
+export interface AnnotatedTextGroupMembership {
+  readonly annotationId: string;
+  readonly groupId: string;
+  readonly ordinal: number;
+}
+export interface AnnotatedTextRecipientVisibleBlock {
+  readonly kind: 'visible';
+  readonly id: string;
+  readonly text: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+  readonly annotationIds: readonly string[];
+}
+export interface AnnotatedTextRecipientRestrictedBlock {
+  readonly kind: 'restricted';
+  readonly id: string;
+  readonly placeholder: string;
+}
+export type AnnotatedTextRecipientBlock = AnnotatedTextRecipientVisibleBlock | AnnotatedTextRecipientRestrictedBlock;
+export interface AnnotatedTextRecipientBlockGroup {
+  readonly id: string;
+  readonly blockIds: readonly string[];
+  readonly annotationIds: readonly string[];
 }
 export interface AnnotatedTextMeasurement {
   readonly id: string;
@@ -413,11 +439,22 @@ export interface AnnotatedTextDocument {
 }
 export interface AnnotatedTextCanonicalDocument {
   readonly kind: 'workbench.annotatedText.canonical'; readonly version: 1;
-  readonly blocks: readonly AnnotatedTextBlock[];
+  readonly blocks: readonly AnnotatedTextCanonicalBlock[];
   readonly annotations: readonly (AnnotatedTextAnnotation & { readonly protectedTargetIds?: readonly string[] })[];
   readonly memberships: readonly AnnotatedTextMembership[];
+  readonly groupMemberships: readonly AnnotatedTextGroupMembership[];
   readonly measurements: readonly AnnotatedTextMeasurement[];
   readonly capabilities: readonly [];
+}
+export interface AnnotatedTextRecipientDocument {
+  readonly kind: 'workbench.annotatedText.recipient';
+  readonly version: 1;
+  readonly blockGroups: readonly AnnotatedTextRecipientBlockGroup[];
+  readonly blocks: readonly AnnotatedTextRecipientBlock[];
+  readonly annotations: readonly AnnotatedTextAnnotation[];
+  readonly memberships: readonly AnnotatedTextMembership[];
+  readonly measurements: readonly AnnotatedTextMeasurement[];
+  readonly capabilityHints: readonly string[];
 }
 export interface AnnotatedTextExpectedOwningScope {
   readonly entity: WorkbenchEntity;

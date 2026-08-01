@@ -272,6 +272,7 @@ test('R3 merge preserves active orphan-policy annotations and protector edges', 
   const denied = await deniedResponse.json();
   assert.deepEqual({ ...denied.snapshot.body, basis: typeof denied.snapshot.body.basis }, {
     kind: 'workbench.annotatedText.recipient', version: 1, basis: 'string',
+    blockGroups: [],
     blocks: [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }],
     annotations: [], memberships: [], measurements: [], capabilityHints: [],
   });
@@ -291,6 +292,8 @@ test('R2 edge splits remain no-ops before a valid R3 merge', async () => {
   });
   assert.equal(split.ok, true, split.failure?.message);
   const rightBlockId = split.events[0].data.operation.rightBlockId;
+  assert.equal(db.prepare('SELECT group_id FROM R4Doc_body_block_group WHERE block_id = ?').get(rightBlockId).group_id,
+    db.prepare('SELECT group_id FROM R4Doc_body_block_group WHERE block_id = ?').get(blockId).group_id);
   const beforeEdges = structuralExpected(db);
   const beforeFamilyCheckpoint = db.prepare("SELECT family_checkpoint FROM R4Doc_body_state WHERE document_id = 'd1'").get().family_checkpoint;
   const beforeBlocks = db.prepare("SELECT * FROM R4Doc_body_block WHERE document_id = 'd1' ORDER BY position").all();
@@ -489,6 +492,7 @@ test('HTTP snapshot projects protected annotated text for each recipient before 
   const recipient = await response.json();
   assert.deepEqual({ ...recipient.snapshot.body, basis: typeof recipient.snapshot.body.basis }, {
     kind: 'workbench.annotatedText.recipient', version: 1, basis: 'string',
+    blockGroups: [],
     blocks: [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }],
     annotations: [], memberships: [], measurements: [], capabilityHints: [],
   });
@@ -644,8 +648,12 @@ test('owner canonical export is complete and retirement erases history behind a 
   const { app, db, blockId } = await setupDoc('retired secret');
   const exportRequest = { app, entity: r4Doc(), field: r4Doc().body, documentId: 'd1', expectedOwningScope: { entity: app.entities.get('Project'), id: 'p1' } };
   const exported = await exportAnnotatedText({ ...exportRequest, principal: { id: 'u1' } });
-  assert.deepEqual(exported.blocks, [{ id: blockId, text: 'retired secret', fields: { reviewed: true }, annotationIds: [] }]);
+  assert.deepEqual(exported.blocks, [{ id: blockId, groupId: blockId, text: 'retired secret', fields: { reviewed: true }, annotationIds: [] }]);
   assert.deepEqual(exported.capabilities, []);
+  db.prepare("INSERT INTO R4Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('bad-group', 'd1', 'p1', 'u1', 'theme')").run();
+  db.prepare("INSERT INTO R4Doc_body_annotation_theme (annotation_id, color, weight) VALUES ('bad-group', 'red', 1)").run();
+  db.prepare("INSERT INTO R4Doc_body_group_membership (annotation_id, group_id, ordinal) VALUES ('bad-group', ?, 0)").run(blockId);
+  await assert.rejects(exportAnnotatedText({ ...exportRequest, principal: { id: 'u1' } }), /invalid group membership state/);
   await assert.rejects(exportAnnotatedText({ ...exportRequest, principal: { id: 'u2' } }), /owning scope admin authorization failed/);
 
   const retired = await app.dispatch({
@@ -693,6 +701,8 @@ test('R4 annotation.apply on prefix (start=0, end<length) produces one split, an
   assert.equal(result.events[0].data.splitBlockIds.length, 1);
   assert.equal(result.events[0].data.selectedBlockId, blockId);
   const newBlockId = result.events[0].data.splitBlockIds[0];
+  assert.equal(db.prepare('SELECT group_id FROM R4Doc_body_block_group WHERE block_id = ?').get(newBlockId).group_id,
+    db.prepare('SELECT group_id FROM R4Doc_body_block_group WHERE block_id = ?').get(blockId).group_id);
   assert.equal(result.events[0].data.after.structuralRevision, state.structure_version + 1);
   assert.equal(materializeBlock(restoreTextFamilyCheckpoint(result.events[0].data.family), blockId), 'hello');
   assert.equal(materializeBlock(restoreTextFamilyCheckpoint(result.events[0].data.family), newBlockId), ' world');

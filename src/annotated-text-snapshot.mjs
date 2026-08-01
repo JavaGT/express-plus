@@ -16,6 +16,42 @@ function deepFreeze(value) {
   return value;
 }
 
+function requireBlockGroupIds(blocks, groupRows, fieldName) {
+  if (groupRows.length !== blocks.length) fail(`field '${fieldName}' blocks do not have exactly one group row`);
+  const blockIds = new Set(blocks.map((block) => block.id));
+  const groupIds = new Map();
+  for (const group of groupRows) {
+    if (!blockIds.has(group.block_id) || groupIds.has(group.block_id) || typeof group.group_id !== 'string' || group.group_id.length === 0) {
+      fail(`field '${fieldName}' has invalid block group state`);
+    }
+    groupIds.set(group.block_id, group.group_id);
+  }
+  if (groupIds.size !== blocks.length) fail(`field '${fieldName}' blocks do not have exactly one group row`);
+  return groupIds;
+}
+
+function requireGroupMembershipIntegrity(groupMemberships, annotations, groupIds, descriptor, fieldName) {
+  const meta = getAnnotatedTextCompiledMetadata(descriptor);
+  const groupFamilies = new Set(Object.entries(meta.annotationHandles)
+    .filter(([, handle]) => handle.appliesTo === 'block-group').map(([family]) => family));
+  const annotationFamilies = new Map(annotations.map((annotation) => [annotation.id, annotation.family]));
+  const seen = new Set();
+  for (const membership of groupMemberships) {
+    const family = annotationFamilies.get(membership.annotation_id);
+    if (!family || !groupFamilies.has(family) || !groupIds.has(membership.group_id) ||
+        !Number.isSafeInteger(membership.ordinal) || membership.ordinal < 0) {
+      fail(`field '${fieldName}' has invalid group membership state`);
+    }
+    const key = `${membership.annotation_id}\u0000${membership.group_id}`;
+    if (seen.has(key)) fail(`field '${fieldName}' has duplicate group membership state`);
+    seen.add(key);
+    const handle = meta.annotationHandles[family];
+    if (handle.cardinality === 'one' && groupMemberships.some((other) => other.annotation_id === membership.annotation_id && other !== membership)) {
+      fail(`field '${fieldName}' has duplicated cardinality-one group annotation`);
+    }
+  }
+}
+
 // Reads only Workbench-owned annotated-text relations and projects them before
 // an HTTP snapshot is serialized. Any malformed state or access failure throws;
 // callers deny the entire snapshot rather than falling back to canonical facts.
@@ -28,12 +64,17 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   if (!state) fail(`field '${fieldName}' state is missing`);
   const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
   const blockRows = db.prepare(`SELECT * FROM ${prefix}_block WHERE document_id = ? ORDER BY position`).all(row.id);
+  const groupRows = db.prepare(`SELECT block_id, group_id FROM ${prefix}_block_group WHERE block_id IN (SELECT id FROM ${prefix}_block WHERE document_id = ?)` ).all(row.id);
+  const groupIds = requireBlockGroupIds(blockRows, groupRows, fieldName);
   if (blockRows.length !== family.blocks.length) fail(`field '${fieldName}' blocks disagree with checkpoint`);
   const annotations = db.prepare(
-    `SELECT annotation.id, annotation.family FROM ${prefix}_annotation AS annotation WHERE annotation.document_id = ? AND EXISTS (SELECT 1 FROM ${prefix}_membership AS membership WHERE membership.annotation_id = annotation.id) ORDER BY annotation.id`,
+    `SELECT annotation.id, annotation.family FROM ${prefix}_annotation AS annotation WHERE annotation.document_id = ? AND (EXISTS (SELECT 1 FROM ${prefix}_membership AS membership WHERE membership.annotation_id = annotation.id) OR EXISTS (SELECT 1 FROM ${prefix}_group_membership AS membership WHERE membership.annotation_id = annotation.id)) ORDER BY annotation.id`,
   ).all(row.id);
   const memberships = db.prepare(
     `SELECT membership.annotation_id, membership.block_id, membership.ordinal FROM ${prefix}_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ? ORDER BY membership.annotation_id, membership.ordinal`,
+  ).all(row.id);
+  const groupMemberships = db.prepare(
+    `SELECT membership.annotation_id, membership.group_id, membership.ordinal FROM ${prefix}_group_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ? ORDER BY membership.annotation_id, membership.ordinal`,
   ).all(row.id);
   const targetRows = db.prepare(
     `SELECT edge.annotation_id, edge.target_annotation_id FROM ${prefix}_annotation_protected_target AS edge JOIN ${prefix}_annotation AS annotation ON annotation.id = edge.annotation_id WHERE annotation.document_id = ? ORDER BY edge.annotation_id, edge.target_annotation_id`,
@@ -57,6 +98,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     kind: 'workbench.annotatedText.canonical', version: 1,
     blocks: blockRows.map((block) => ({
       id: block.id,
+      groupId: groupIds.get(block.id) ?? block.id,
       text: materializeBlock(family, block.id),
       fields: Object.fromEntries(Object.entries(descriptor.block ?? {}).map(([name, field]) => [name, deserializeField(field, block[name])])),
       annotationIds: canonicalMemberships.filter((membership) => membership.blockId === block.id).map((membership) => membership.annotationId),
@@ -66,7 +108,9 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     measurements: db.prepare(`SELECT id, block_id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id IN (SELECT id FROM ${prefix}_block WHERE document_id = ?) ORDER BY id`).all(row.id)
       .map((measurement) => ({ id: measurement.id, blockId: measurement.block_id, family: measurement.family, formatVersion: measurement.format_version, payload: JSON.parse(measurement.payload) })),
     capabilities: [],
+    groupMemberships: [],
   };
+  canonical.groupMemberships = groupMemberships.map((membership) => ({ annotationId: membership.annotation_id, groupId: membership.group_id, ordinal: membership.ordinal }));
   const active = canonicalAnnotations.filter((annotation) => Object.hasOwn(meta.protectingFamilies, annotation.family) && annotation.protectedTargetIds?.length)
     .filter((annotation) => {
       const own = new Set(canonicalMemberships.filter((membership) => membership.annotationId === annotation.id).map((membership) => membership.blockId));
@@ -127,8 +171,12 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
   if (!state) fail('document state is missing');
   const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
   const blocks = db.prepare(`SELECT * FROM ${prefix}_block WHERE document_id = ? ORDER BY position`).all(documentId);
+  const groupRows = db.prepare(`SELECT block_id, group_id FROM ${prefix}_block_group WHERE block_id IN (SELECT id FROM ${prefix}_block WHERE document_id = ?)` ).all(documentId);
+  const groupIds = requireBlockGroupIds(blocks, groupRows, fieldName);
   const annotations = db.prepare(`SELECT * FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(documentId);
   const memberships = db.prepare(`SELECT membership.* FROM ${prefix}_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ? ORDER BY membership.annotation_id, membership.ordinal`).all(documentId);
+  const groupMemberships = db.prepare(`SELECT membership.* FROM ${prefix}_group_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ? ORDER BY membership.annotation_id, membership.ordinal`).all(documentId);
+  requireGroupMembershipIntegrity(groupMemberships, annotations, new Set(groupIds.values()), descriptor, fieldName);
   const targets = db.prepare(`SELECT edge.* FROM ${prefix}_annotation_protected_target AS edge JOIN ${prefix}_annotation AS annotation ON annotation.id = edge.annotation_id WHERE annotation.document_id = ? ORDER BY edge.annotation_id, edge.target_annotation_id`).all(documentId);
   const targetMap = new Map();
   for (const target of targets) targetMap.set(target.annotation_id, [...(targetMap.get(target.annotation_id) ?? []), target.target_annotation_id]);
@@ -136,6 +184,7 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
     kind: 'workbench.annotatedText.canonical', version: 1,
     blocks: blocks.map((block) => ({
       id: block.id,
+      groupId: groupIds.get(block.id) ?? block.id,
       text: materializeBlock(family, block.id),
       fields: Object.fromEntries(Object.entries(descriptor.block ?? {}).map(([name, desc]) => [name, deserializeField(desc, block[name])])),
       annotationIds: memberships.filter((membership) => membership.block_id === block.id).map((membership) => membership.annotation_id),
@@ -149,6 +198,7 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
     memberships: memberships.map((membership) => ({ annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal })),
     measurements: db.prepare(`SELECT measurement.* FROM ${prefix}_measurement AS measurement JOIN ${prefix}_block AS block ON block.id = measurement.block_id WHERE block.document_id = ? ORDER BY measurement.id`).all(documentId).map((measurement) => ({ id: measurement.id, blockId: measurement.block_id, family: measurement.family, formatVersion: measurement.format_version, payload: JSON.parse(measurement.payload) })),
     capabilities: [],
+    groupMemberships: groupMemberships.map((membership) => ({ annotationId: membership.annotation_id, groupId: membership.group_id, ordinal: membership.ordinal })),
   };
   return deepFreeze(result);
 }

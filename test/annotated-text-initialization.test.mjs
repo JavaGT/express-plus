@@ -170,6 +170,21 @@ test('annotated text create atomically initializes one canonical empty family an
   assert.ok(!Object.hasOwn(db.prepare('SELECT * FROM InitDoc WHERE id = ?').get('d1'), '__workbench'));
 });
 
+test('annotated text snapshot fails closed when persisted block group identity is missing or invalid', async () => {
+  const { app, db, InitDoc } = await appFor();
+  const created = await app.dispatch({
+    actionId: 'group-integrity', type: 'InitDoc.create',
+    payload: { id: 'group-integrity', project: 'p1', owner: 'u1' }, principal: { id: 'u1' },
+  });
+  assert.equal(created.ok, true, created.failure?.message);
+  const row = db.prepare("SELECT * FROM InitDoc WHERE id = 'group-integrity'").get();
+  db.prepare('DELETE FROM InitDoc_body_block_group WHERE block_id IN (SELECT id FROM InitDoc_body_block WHERE document_id = ?)').run(row.id);
+  await assert.rejects(() => projectAnnotatedTextSnapshot({ db, entity: InitDoc, row, principal: { id: 'u1' }, fieldName: 'body', descriptor: InitDoc.fields.body }), /exactly one group row/);
+  db.prepare('INSERT INTO InitDoc_body_block_group (block_id, group_id) SELECT id, ? FROM InitDoc_body_block WHERE document_id = ?').run('', row.id);
+  await assert.rejects(() => projectAnnotatedTextSnapshot({ db, entity: InitDoc, row, principal: { id: 'u1' }, fieldName: 'body', descriptor: InitDoc.fields.body }), /invalid block group state/);
+  await app.close?.();
+});
+
 test('annotated text create imports declared measurements with generated identities and rejects invalid imports atomically', async () => {
   const { app, db } = await appFor();
   const source = { version: 1, blocks: [

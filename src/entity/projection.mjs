@@ -103,6 +103,7 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
       const block = { id: importedBlock.id, document_id: row.id, project_id: row[descriptor.project], owner_id: row[descriptor.owner], position: deriveBlockPosition(index), epoch: 1, structure_version: 1, ...cells };
       const columns = Object.keys(block);
       db.prepare(`INSERT INTO ${prefix}_block (${columns.join(', ')}) VALUES (${columns.map((column) => `:${column}`).join(', ')})`).run(block);
+      db.prepare(`INSERT INTO ${prefix}_block_group (block_id, group_id) VALUES (?, ?)`).run(importedBlock.id, importedBlock.id);
       const importedMeasurements = importedBlock.measurements ?? [];
       if (!Array.isArray(importedMeasurements)) throw new Error(`${name}.${fieldName} created event imported measurements are invalid`);
       const families = new Set();
@@ -346,6 +347,10 @@ function applyR2AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
 
   const sourceBlock = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(leftBlockId);
   if (!sourceBlock) throw new Error(`${name}.${handle.field}.operated v2 source block not found`);
+  const sourceGroup = db.prepare(`SELECT group_id FROM ${prefix}_block_group WHERE block_id = ?`).get(leftBlockId);
+  if (!sourceGroup || typeof sourceGroup.group_id !== 'string' || sourceGroup.group_id.length === 0) {
+    throw new Error(`${name}.${handle.field}.operated v2 source block group not found`);
+  }
   if (sourceBlock.epoch !== leftBlockFact.epoch || sourceBlock.epoch !== rightBlockFact.epoch) {
     throw new Error(`${name}.${handle.field}.operated v2 event block fact epochs do not match source`);
   }
@@ -513,6 +518,7 @@ function applyR2AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
         blockRow[bf] = serializeField(descriptor.block[bf], rightBlockFact.fields[bf]);
       }
       db.prepare(`INSERT INTO ${prefix}_block (${blockColumnNames}) VALUES (${blockParamNames})`).run(blockRow);
+      db.prepare(`INSERT INTO ${prefix}_block_group (block_id, group_id) VALUES (?, ?)`).run(bid, sourceGroup.group_id);
     }
   }
 
@@ -1250,6 +1256,10 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
     throw new Error(`${name}.${handle.field}.operated v4 source block '${blockId}' not found`);
   }
   const sourceBlock = existingById[blockId];
+  const sourceGroup = db.prepare(`SELECT group_id FROM ${prefix}_block_group WHERE block_id = ?`).get(blockId);
+  if (!sourceGroup || typeof sourceGroup.group_id !== 'string' || sourceGroup.group_id.length === 0) {
+    throw new Error(`${name}.${handle.field}.operated v4 source block group not found`);
+  }
 
   const blockFactById = {};
   for (const bf of data.blocks) blockFactById[bf.id] = bf;
@@ -1305,6 +1315,7 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
         blockRow[bf] = serializeField(descriptor.block[bf], blockFact.fields[bf]);
       }
       db.prepare(`INSERT INTO ${prefix}_block (${blockColumnNames}) VALUES (${blockParamNames})`).run(blockRow);
+      db.prepare(`INSERT INTO ${prefix}_block_group (block_id, group_id) VALUES (?, ?)`).run(bid, sourceGroup.group_id);
     }
   }
 

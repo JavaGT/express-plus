@@ -601,6 +601,7 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
   const orphan = `${prefix}${ORPHAN_TABLE_SUFFIX}`;
   const protectedTarget = `${prefix}_annotation_protected_target`;
   const membership = `${prefix}_membership`;
+  const groupMembership = `${prefix}_group_membership`;
   const measurement = `${prefix}_measurement`;
   const state = `${prefix}_state`;
   const basis = `${prefix}_basis`;
@@ -618,6 +619,7 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_annotation_protected_target_target ON ${protectedTarget} (target_annotation_id, annotation_id);`,
     `CREATE TABLE IF NOT EXISTS ${orphan} (\n  annotation_id TEXT PRIMARY KEY,\n  saved_quote TEXT NOT NULL,\n  last_memberships TEXT NOT NULL CHECK (json_valid(last_memberships)),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE\n);`,
   ];
+  statements.push(`CREATE TABLE IF NOT EXISTS ${prefix}_block_group (block_id TEXT PRIMARY KEY, group_id TEXT NOT NULL, FOREIGN KEY (block_id) REFERENCES ${block}(id) ON DELETE CASCADE);`);
   for (const family of families) {
     const annConfig = descriptor.annotations.find(a => a.annotationName === family);
     const annFields = annConfig ? annConfig.fields : {};
@@ -628,6 +630,15 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
     `CREATE TABLE IF NOT EXISTS ${membership} (\n  annotation_id TEXT NOT NULL,\n  block_id TEXT NOT NULL,\n  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),\n  start_point TEXT NOT NULL CHECK (json_valid(start_point)),\n  end_point TEXT NOT NULL CHECK (json_valid(end_point)),\n  PRIMARY KEY (annotation_id, ordinal),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE,\n  FOREIGN KEY (block_id) REFERENCES ${block}(id) ON DELETE CASCADE\n);`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_membership_block_once ON ${membership} (annotation_id, block_id);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_membership_by_block ON ${membership} (block_id, annotation_id);`,
+    `CREATE TABLE IF NOT EXISTS ${groupMembership} (
+  annotation_id TEXT NOT NULL,
+  group_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
+  PRIMARY KEY (annotation_id, ordinal),
+  UNIQUE (annotation_id, group_id),
+  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE
+);`,
+    `CREATE INDEX IF NOT EXISTS idx_${prefix}_group_membership_by_group ON ${groupMembership} (group_id, annotation_id);`,
     `CREATE TABLE IF NOT EXISTS ${measurement} (\n  id TEXT PRIMARY KEY,\n  block_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${measurements.map((name) => `'${name}'`).join(', ')})),\n  format_version INTEGER NOT NULL CHECK (format_version > 0),\n  payload TEXT NOT NULL CHECK (json_valid(payload)),\n  FOREIGN KEY (block_id) REFERENCES ${block}(id) ON DELETE CASCADE\n);`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_measurement_once ON ${measurement} (block_id, family);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_measurement_block ON ${measurement} (block_id, family, id);`,

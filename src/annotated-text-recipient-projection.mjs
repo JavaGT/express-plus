@@ -20,11 +20,12 @@ function exact(value, keys, label) {
 export function projectAnnotatedTextForRecipient(canonical, descriptor, decisions) {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail('descriptor must be compiled');
-  exact(canonical, ['kind', 'version', 'blocks', 'annotations', 'memberships', 'measurements', 'capabilities'], 'canonical');
+  const canonicalKeys = ['kind', 'version', 'blocks', 'annotations', 'memberships', 'measurements', 'capabilities', 'groupMemberships'];
+  exact(canonical, canonicalKeys, 'canonical');
   exact(decisions, ['version', 'protectors', 'capabilityHints'], 'decisions');
   if (canonical.kind !== 'workbench.annotatedText.canonical' || canonical.version !== 1 || decisions.version !== 1 ||
       !Array.isArray(canonical.blocks) || !Array.isArray(canonical.annotations) || !Array.isArray(canonical.memberships) ||
-      !Array.isArray(canonical.measurements) || !Array.isArray(decisions.protectors) || !Array.isArray(decisions.capabilityHints)) fail('invalid version or collection');
+      !Array.isArray(canonical.measurements) || !Array.isArray(canonical.groupMemberships) || !Array.isArray(decisions.protectors) || !Array.isArray(decisions.capabilityHints)) fail('invalid version or collection');
 
   const annotations = new Map();
   for (const annotation of canonical.annotations) {
@@ -35,17 +36,28 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     annotations.set(annotation.id, annotation);
   }
   const blockIds = new Set();
+  const canonicalGroupIds = new Set();
   for (const block of canonical.blocks) {
-    exact(block, ['id', 'text', 'fields', 'annotationIds'], 'block');
-    if (typeof block.id !== 'string' || blockIds.has(block.id) || typeof block.text !== 'string' || !Array.isArray(block.annotationIds)) fail('block is invalid');
+    exact(block, ['id', 'groupId', 'text', 'fields', 'annotationIds'], 'block');
+    if (typeof block.id !== 'string' || blockIds.has(block.id) || typeof block.groupId !== 'string' || block.groupId.length === 0 || typeof block.text !== 'string' || !Array.isArray(block.annotationIds)) fail('block is invalid');
     blockIds.add(block.id);
+    canonicalGroupIds.add(block.groupId);
   }
+  const blockFamilies = new Set(Object.entries(meta.annotationHandles).filter(([, handle]) => handle.appliesTo === 'block').map(([family]) => family));
+  const groupFamilies = new Set(Object.entries(meta.annotationHandles).filter(([, handle]) => handle.appliesTo === 'block-group').map(([family]) => family));
   for (const membership of canonical.memberships) {
     exact(membership, ['annotationId', 'blockId', 'ordinal'], 'membership');
-    if (!annotations.has(membership.annotationId) || !blockIds.has(membership.blockId) || !Number.isSafeInteger(membership.ordinal) || membership.ordinal < 0) fail('membership is invalid');
+    const annotation = annotations.get(membership.annotationId);
+    if (!annotation || !blockFamilies.has(annotation.family) || !blockIds.has(membership.blockId) || !Number.isSafeInteger(membership.ordinal) || membership.ordinal < 0) fail('membership is invalid');
+  }
+  const groupMemberships = canonical.groupMemberships;
+  for (const membership of groupMemberships) {
+    exact(membership, ['annotationId', 'groupId', 'ordinal'], 'group membership');
+    const annotation = annotations.get(membership.annotationId);
+    if (!annotation || !groupFamilies.has(annotation.family) || !canonicalGroupIds.has(membership.groupId) || !Number.isSafeInteger(membership.ordinal) || membership.ordinal < 0) fail('group membership is invalid');
   }
   for (const annotationId of annotations.keys()) {
-    if (!canonical.memberships.some((membership) => membership.annotationId === annotationId)) fail('canonical annotation has no membership');
+    if (!canonical.memberships.some((membership) => membership.annotationId === annotationId) && !groupMemberships.some((membership) => membership.annotationId === annotationId)) fail('canonical annotation has no membership');
   }
   const canonicalMemberships = new Map();
   for (const membership of canonical.memberships) {
@@ -53,10 +65,18 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     if (canonicalMemberships.has(key)) fail('canonical memberships must be unique per annotation and block');
     canonicalMemberships.set(key, membership);
   }
+  const groupMembershipKeys = new Set();
+  for (const membership of groupMemberships) {
+    const key = `${membership.annotationId}\u0000${membership.groupId}`;
+    if (groupMembershipKeys.has(key)) fail('canonical group memberships must be unique per annotation and group');
+    groupMembershipKeys.add(key);
+    if (meta.annotationHandles[annotations.get(membership.annotationId).family].cardinality === 'one' &&
+        groupMemberships.some((other) => other.annotationId === membership.annotationId && other !== membership)) fail('cardinality-one group annotation is duplicated');
+  }
   for (const block of canonical.blocks) {
     const expected = canonical.memberships.filter((m) => m.blockId === block.id).map((m) => m.annotationId).sort();
     const actual = [...block.annotationIds].sort();
-    if (new Set(actual).size !== actual.length || actual.some((id) => !annotations.has(id)) || JSON.stringify(actual) !== JSON.stringify(expected)) fail('canonical block memberships disagree');
+    if (new Set(actual).size !== actual.length || actual.some((id) => !annotations.has(id) || !blockFamilies.has(annotations.get(id).family)) || JSON.stringify(actual) !== JSON.stringify(expected)) fail('canonical block memberships disagree');
   }
   const measurementIds = new Set();
   for (const measurement of canonical.measurements) {
@@ -88,9 +108,34 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   const restricted = new Set();
   for (const [id, blocks] of active) if (outcomes.get(id) === 'deny') for (const blockId of blocks) restricted.add(blockId);
   const memberships = canonical.memberships.filter((m) => !restricted.has(m.blockId) && !Object.hasOwn(meta.protectingFamilies, annotations.get(m.annotationId).family));
-  const retainedIds = new Set(memberships.map((m) => m.annotationId));
+  const groups = [];
+  const groupsByCanonicalId = new Map();
+  for (const block of canonical.blocks) {
+    if (restricted.has(block.id)) {
+      groups.push(null);
+       groupsByCanonicalId.set(block.groupId, null);
+      continue;
+    }
+    const id = block.groupId;
+    let group = groups.at(-1);
+    if (!group || group.canonicalId !== id) { group = { id: `group-${groups.filter(Boolean).length}`, canonicalId: id, blockIds: [], annotationIds: [] }; groups.push(group); }
+    if (groupsByCanonicalId.has(id)) {
+      const prior = groupsByCanonicalId.get(id);
+      groupsByCanonicalId.set(id, prior === group ? group : null);
+    } else {
+      groupsByCanonicalId.set(id, group);
+    }
+    group.blockIds.push(block.id);
+  }
+  for (const membership of groupMemberships) {
+    const group = groupsByCanonicalId.get(membership.groupId);
+    if (group && !Object.hasOwn(meta.protectingFamilies, annotations.get(membership.annotationId).family)) group.annotationIds.push(membership.annotationId);
+  }
+  for (const group of groups.filter(Boolean)) { delete group.canonicalId; group.annotationIds = [...new Set(group.annotationIds)]; }
+  const retainedIds = new Set([...memberships.map((m) => m.annotationId), ...groups.filter(Boolean).flatMap((group) => group.annotationIds)]);
   return freeze({
     kind: 'workbench.annotatedText.recipient', version: 1,
+    blockGroups: groups.filter(Boolean),
     blocks: canonical.blocks.map((block) => restricted.has(block.id)
       ? { kind: 'restricted', id: block.id, placeholder: meta.restrictedPlaceholder }
       : { kind: 'visible', id: block.id, text: block.text, fields: { ...block.fields }, annotationIds: memberships.filter((m) => m.blockId === block.id).map((m) => m.annotationId) }),

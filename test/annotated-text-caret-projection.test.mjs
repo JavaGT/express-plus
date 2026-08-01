@@ -24,7 +24,7 @@ function descriptor() {
 function canonical(text = 'secret') {
   return {
     kind: 'workbench.annotatedText.canonical', version: 1,
-    blocks: [{ id: 'b1', text, fields: {}, annotationIds: ['a1', 'p1'] }],
+    blocks: [{ id: 'b1', groupId: 'b1', text, fields: {}, annotationIds: ['a1', 'p1'] }],
     annotations: [
       { id: 'a1', family: 'coding', fields: {} },
       { id: 'p1', family: 'confidential', fields: {}, protectedTargetIds: ['a1'] },
@@ -33,7 +33,7 @@ function canonical(text = 'secret') {
       { annotationId: 'a1', blockId: 'b1', ordinal: 0 },
       { annotationId: 'p1', blockId: 'b1', ordinal: 0 },
     ],
-    measurements: [], capabilities: [],
+    measurements: [], capabilities: [], groupMemberships: [],
   };
 }
 
