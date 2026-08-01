@@ -70,8 +70,16 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     const key = `${membership.annotationId}\u0000${membership.groupId}`;
     if (groupMembershipKeys.has(key)) fail('canonical group memberships must be unique per annotation and group');
     groupMembershipKeys.add(key);
-    if (meta.annotationHandles[annotations.get(membership.annotationId).family].cardinality === 'one' &&
-        groupMemberships.some((other) => other.annotationId === membership.annotationId && other !== membership)) fail('cardinality-one group annotation is duplicated');
+  }
+  for (const groupId of new Set(groupMemberships.map((membership) => membership.groupId))) {
+    const families = new Set();
+    for (const membership of groupMemberships.filter((entry) => entry.groupId === groupId)) {
+      const family = annotations.get(membership.annotationId).family;
+      if (meta.annotationHandles[family].cardinality === 'one') {
+        if (families.has(family)) fail('cardinality-one group annotation is duplicated');
+        families.add(family);
+      }
+    }
   }
   for (const block of canonical.blocks) {
     const expected = canonical.memberships.filter((m) => m.blockId === block.id).map((m) => m.annotationId).sort();

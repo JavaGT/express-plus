@@ -270,6 +270,12 @@ export function executeDDL(entity, db) {
   for (const sql of generateDDL(entity)) {
     db.exec(sql);
   }
+  for (const [fieldName, descriptor] of Object.entries(entity.fields ?? {})) {
+    if (descriptor.kind !== 'annotatedText') continue;
+    const table = `${entity.name}_${fieldName}_basis`;
+    const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
+    if (!columns.has('exposed_groups')) db.exec(`ALTER TABLE ${table} ADD COLUMN exposed_groups TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(exposed_groups))`);
+  }
 }
 
 // _ProjectedCursor is a response-staleness counter. _ConsumerCursor is the

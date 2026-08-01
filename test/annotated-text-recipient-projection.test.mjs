@@ -157,7 +157,7 @@ test('restricted content breaks groups without exposing canonical topology', () 
   assert.equal(JSON.stringify(projected).includes('g1'), false);
 });
 
-test('invalid group membership identity, family, and cardinality fail closed', () => {
+test('group cardinality permits one annotation spanning groups but rejects distinct annotations per group', () => {
   const decisions = { version: 1, protectors: [], capabilityHints: [] };
   const unknownGroup = groupedCanonical();
   unknownGroup.groupMemberships[0].groupId = 'missing';
@@ -165,8 +165,12 @@ test('invalid group membership identity, family, and cardinality fail closed', (
   const wrongFamily = groupedCanonical();
   wrongFamily.groupMemberships[0].annotationId = 'code';
   assert.throws(() => projectAnnotatedTextForRecipient(wrongFamily, groupedDescriptor(), decisions), /group membership is invalid/);
+  const spanning = groupedCanonical();
+  spanning.groupMemberships.push({ annotationId: 'card', groupId: 'g2', ordinal: 1 });
+  assert.deepEqual(projectAnnotatedTextForRecipient(spanning, groupedDescriptor(), decisions).blockGroups.map((group) => group.annotationIds), [['card'], ['card']]);
   const duplicateOne = groupedCanonical();
-  duplicateOne.groupMemberships.push({ annotationId: 'card', groupId: 'g2', ordinal: 1 });
+  duplicateOne.annotations.push({ id: 'card-2', family: 'card', fields: {} });
+  duplicateOne.groupMemberships.push({ annotationId: 'card-2', groupId: 'g1', ordinal: 1 });
   assert.throws(() => projectAnnotatedTextForRecipient(duplicateOne, groupedDescriptor(), decisions), /cardinality-one/);
 });
 

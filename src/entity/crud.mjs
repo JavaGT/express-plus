@@ -102,6 +102,38 @@ function ownerFieldOf(entity) {
   return null;
 }
 
+function assertR8Payload(name, fieldName, payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 5 ||
+      payload.version !== 8 || typeof payload.id !== 'string' || !payload.id || typeof payload.basis !== 'string' || !payload.basis ||
+      typeof payload.mutationId !== 'string' || !payload.mutationId || !payload.edit || typeof payload.edit !== 'object' || Array.isArray(payload.edit)) {
+    throw new ValidationError(`${name}.${fieldName}.operation requires version 8 { id, basis, mutationId, edit }`);
+  }
+  const p = (v, label) => {
+    if (!v || typeof v !== 'object' || Array.isArray(v) || Object.keys(v).length !== 2 || typeof v.blockId !== 'string' || !v.blockId || !Number.isSafeInteger(v.offset) || v.offset < 0) throw new ValidationError(`${name}.${fieldName}.operation ${label} requires { blockId, offset }`);
+    return { blockId: v.blockId, offset: v.offset };
+  };
+  const e = payload.edit;
+  let edit;
+  if (e.kind === 'block.continue' || e.kind === 'block.split-and-assign') {
+    if ((e.kind === 'block.continue' && Object.keys(e).length !== 2) || (e.kind === 'block.split-and-assign' && Object.keys(e).length !== 3)) throw new ValidationError(`${name}.${fieldName}.operation invalid v8 edit`);
+    edit = { kind: e.kind, at: p(e.at, 'position') };
+    if (e.kind === 'block.split-and-assign') edit.annotation = frozenJsonSnapshot(e.annotation);
+  } else if (e.kind === 'block-group.assignment.set' || e.kind === 'block-group.assignment.clear') {
+    if (Object.keys(e).length !== 3) throw new ValidationError(`${name}.${fieldName}.operation invalid v8 assignment`);
+    if (!e.selection || typeof e.selection !== 'object' || Array.isArray(e.selection)) throw new ValidationError(`${name}.${fieldName}.operation invalid selection`);
+    const s = e.selection;
+    let selection;
+    if (s.kind === 'one' && Object.keys(s).length === 2 && typeof s.blockGroupId === 'string' && s.blockGroupId) selection = { kind: 'one', blockGroupId: s.blockGroupId };
+    else if (s.kind === 'listed' && Object.keys(s).length === 2 && Array.isArray(s.blockGroupIds) && s.blockGroupIds.length && s.blockGroupIds.every((id) => typeof id === 'string' && id) && new Set(s.blockGroupIds).size === s.blockGroupIds.length) selection = { kind: 'listed', blockGroupIds: [...s.blockGroupIds] };
+    else if (s.kind === 'consecutive' && Object.keys(s).length === 2 && Array.isArray(s.blockGroupIds) && s.blockGroupIds.length && s.blockGroupIds.every((id) => typeof id === 'string' && id) && new Set(s.blockGroupIds).size === s.blockGroupIds.length) selection = { kind: 'consecutive', blockGroupIds: [...s.blockGroupIds] };
+    else throw new ValidationError(`${name}.${fieldName}.operation invalid selection`);
+    if (e.kind === 'block-group.assignment.set') edit = { kind: e.kind, selection, annotation: frozenJsonSnapshot(e.annotation) };
+    else if (Object.keys(e).length === 3 && typeof e.family === 'string' && e.family) edit = { kind: e.kind, selection, family: e.family };
+    else throw new ValidationError(`${name}.${fieldName}.operation invalid clear assignment`);
+  } else throw new ValidationError(`${name}.${fieldName}.operation unsupported v8 edit`);
+  return Object.freeze({ version: 8, id: payload.id, basis: payload.basis, mutationId: payload.mutationId, edit: frozenJsonSnapshot(edit) });
+}
+
 function materializeDefault(defaultValue) {
   const value = typeof defaultValue === 'function' ? defaultValue() : defaultValue;
   return value !== null && typeof value === 'object' ? structuredClone(value) : value;
@@ -540,6 +572,83 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       return command;
     };
 
+    const r8Handler = async ({ payload, db, scope, principal }) => {
+      const command = assertR8Payload(name, fieldName, payload);
+      const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(command.id);
+      if (!row) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+      const documentScope = resolveAnnotatedTextOwningScope(descriptor, fields, row).key;
+      if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
+      const basis = db.prepare(`SELECT structural_revision, family_checkpoint, visible_blocks, exposed_groups FROM ${prefix}_basis WHERE token = ? AND document_id = ? AND principal_id = ?`).get(command.basis, command.id, principal?.id ?? '');
+      if (!basis) throw new ValidationError(`${name}.${fieldName}.operation basis is unavailable`);
+       await authorizeFieldOp(record, fieldName, write, row, principal);
+       const currentRecipient = await projectAnnotatedTextSnapshot({ db, entity: record, row, principal, fieldName, descriptor, mintBasis: false });
+      let exposed;
+      try { exposed = JSON.parse(basis.exposed_groups || '[]'); } catch { throw new ValidationError(`${name}.${fieldName}.operation basis exposed groups are invalid`); }
+      if (!Array.isArray(exposed) || exposed.some((g) => !g || typeof g !== 'object' || Object.keys(g).sort().join() !== 'blockIds,groupId,id' || typeof g.id !== 'string' || typeof g.groupId !== 'string' || !Array.isArray(g.blockIds) || !g.blockIds.length || g.blockIds.some((id) => typeof id !== 'string'))) throw new ValidationError(`${name}.${fieldName}.operation basis exposed groups are invalid`);
+      const byId = new Map(exposed.map((g) => [g.id, g]));
+      const selectedIds = command.edit.selection ? (command.edit.selection.kind === 'one' ? [command.edit.selection.blockGroupId] : command.edit.selection.blockGroupIds) : [];
+      if (command.edit.selection && (!selectedIds.length || selectedIds.some((id) => !byId.has(id)))) throw new ValidationError(`${name}.${fieldName}.operation selection is not fully visible in basis`);
+      if (command.edit.selection?.kind === 'consecutive') {
+        const positions = selectedIds.map((id) => exposed.findIndex((group) => group.id === id));
+        if (positions.some((position, index) => position < 0 || (index > 0 && position !== positions[index - 1] + 1))) throw new ValidationError(`${name}.${fieldName}.operation consecutive selection must be ordered and adjacent`);
+      }
+      const selectedGroups = selectedIds.map((id) => byId.get(id)).sort((a, b) => exposed.indexOf(a) - exposed.indexOf(b));
+       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
+       if (!state) throw new ValidationError(`${name}.${fieldName}.operation document state is unavailable`);
+       const basedFamily = restoreTextFamilyCheckpoint(JSON.parse(basis.family_checkpoint));
+       const currentFamily = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+       if (!frontierDominates(currentFamily.checkpoint.frontier, basedFamily.checkpoint.frontier)) throw new ValidationError(`${name}.${fieldName}.operation basis is not dominated by current state`);
+       const currentRows = db.prepare(`SELECT block_id, group_id FROM ${prefix}_block_group WHERE block_id IN (SELECT id FROM ${prefix}_block WHERE document_id = ?)` ).all(command.id);
+       const currentByBlock = new Map(currentRows.map((row) => [row.block_id, row.group_id]));
+       const currentGroups = new Map(currentRecipient.blockGroups.map((group) => [group.id, group]));
+       const currentDurableBlocks = new Map();
+       for (const currentRow of currentRows) currentDurableBlocks.set(currentRow.group_id, [...(currentDurableBlocks.get(currentRow.group_id) ?? []), currentRow.block_id]);
+       for (const exposedGroup of selectedGroups) {
+         const currentGroup = currentGroups.get(exposedGroup.id);
+         const durable = currentGroup && [...new Set(currentGroup.blockIds.map((blockId) => currentByBlock.get(blockId)))];
+         if (!currentGroup || JSON.stringify([...currentGroup.blockIds].sort()) !== JSON.stringify([...exposedGroup.blockIds].sort()) || durable.length !== 1 || JSON.stringify([...currentGroup.blockIds].sort()) !== JSON.stringify([...(currentDurableBlocks.get(durable[0]) ?? [])].sort())) throw new ValidationError(`${name}.${fieldName}.operation basis group is stale, partial, or restricted`);
+       }
+      const visibleNow = new Set(JSON.parse(basis.visible_blocks));
+      for (const exposedGroup of selectedGroups) {
+        if (exposedGroup.blockIds.some((blockId) => !visibleNow.has(blockId) || currentByBlock.get(blockId) !== exposedGroup.groupId)) throw new ValidationError(`${name}.${fieldName}.operation selection is stale, partial, or restricted`);
+      }
+      if (command.edit.kind === 'block.continue' || command.edit.kind === 'block.split-and-assign') {
+         const family = currentFamily;
+        const block = family.blocks.find((b) => b.id === command.edit.at.blockId);
+         const group = exposed.find((g) => g.blockIds.includes(command.edit.at.blockId));
+         const currentGroup = currentRecipient.blockGroups.find((g) => g.blockIds.includes(command.edit.at.blockId));
+         const durableGroupIds = currentGroup ? [...new Set(currentGroup.blockIds.map((blockId) => currentByBlock.get(blockId)))] : [];
+         const currentDurable = durableGroupIds.length === 1 ? [...(currentDurableBlocks.get(durableGroupIds[0]) ?? [])] : [];
+         if (!block || !group || !currentGroup || durableGroupIds.length !== 1 ||
+             JSON.stringify([...group.blockIds].sort()) !== JSON.stringify([...currentGroup.blockIds].sort()) ||
+             JSON.stringify([...currentGroup.blockIds].sort()) !== JSON.stringify(currentDurable.sort()) ||
+             !JSON.parse(basis.visible_blocks).includes(command.edit.at.blockId)) throw new ValidationError(`${name}.${fieldName}.operation position is not in a current complete recipient group`);
+         const endpoint = resolvePositionToEndpoint(basedFamily, command.edit.at.blockId, command.edit.at.offset, basedFamily.checkpoint.frontier);
+        const offset = projectEndpointToBlockOffset(family, command.edit.at.blockId, Object.freeze({ ...endpoint, basisFrontier: family.checkpoint.frontier }));
+        if (offset <= 0 || offset >= materializeBlock(family, command.edit.at.blockId).length) throw new ValidationError(`${name}.${fieldName}.operation position must be strictly internal`);
+        return splitHandler({ payload: { version: 2, id: command.id, expected: { structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }, operation: { kind: 'block.split', blockId: command.edit.at.blockId, utf16Offset: offset } }, db, scope, structural: { kind: command.edit.kind, groupId: group.groupId, annotation: command.edit.annotation } });
+      }
+      const familyName = command.edit.kind.endsWith('.set') ? command.edit.annotation?.family : command.edit.family;
+      const familyMeta = compiledMeta.annotationHandles[familyName];
+      const familyDecl = descriptor.annotations.find((d) => d.annotationName === familyName);
+      if (!familyMeta || !familyDecl || familyDecl.kind !== 'annotation' || familyMeta.appliesTo !== 'block-group' || familyMeta.cardinality !== 'one') throw new ValidationError(`${name}.${fieldName}.operation requires a normal one-cardinality block-group annotation`);
+      let annotation;
+      if (command.edit.kind.endsWith('.set')) {
+        annotation = command.edit.annotation;
+         if (!annotation || typeof annotation.id !== 'string' || !annotation.id || !annotation.fields || typeof annotation.fields !== 'object' || Array.isArray(annotation.fields) || Object.keys(annotation).length !== 3 || Object.keys(annotation).some((k) => !['id', 'family', 'fields'].includes(k)) || db.prepare(`SELECT 1 FROM ${prefix}_annotation WHERE id = ?`).get(annotation.id)) throw new ValidationError(`${name}.${fieldName}.operation annotation must be fresh and valid`);
+        const decl = familyDecl;
+        if (!decl || JSON.stringify(Object.keys(annotation.fields).sort()) !== JSON.stringify(Object.keys(decl.fields).sort())) throw new ValidationError(`${name}.${fieldName}.operation annotation fields do not match declaration`);
+         for (const [key, value] of Object.entries(annotation.fields)) { const result = resolveStrategy(decl.fields[key].kind).validate(value, decl.fields[key]); if (result !== true || (typeof decl.fields[key].validate === 'function' && decl.fields[key].validate(value) !== true)) throw new ValidationError(`${name}.${fieldName}.operation annotation field '${key}' is invalid`); }
+      }
+      const groupIds = selectedGroups.map((g) => g.groupId);
+      const preimage = groupIds.map((groupId) => ({ groupId, annotationId: db.prepare(`SELECT a.id FROM ${prefix}_group_membership m JOIN ${prefix}_annotation a ON a.id = m.annotation_id WHERE m.group_id = ? AND a.family = ?`).get(groupId, familyName)?.id ?? null }));
+      const postimage = preimage.map(({ groupId }) => ({ groupId, annotationId: annotation?.id ?? null }));
+       const selectedSet = new Set(groupIds);
+       const removedAnnotationIds = [...new Set(preimage.map((entry) => entry.annotationId).filter(Boolean))].filter((annotationId) => db.prepare(`SELECT group_id FROM ${prefix}_group_membership WHERE annotation_id = ? UNION SELECT '__block__' AS group_id FROM ${prefix}_membership WHERE annotation_id = ?`).all(annotationId, annotationId).every((membership) => membership.group_id !== '__block__' && selectedSet.has(membership.group_id))).sort();
+      const handle = eventHandles.native(name, fieldName, 'operated');
+        return [{ handle, type: handle.type, scope: documentScope, data: Object.freeze({ version: 8, id: command.id, before: Object.freeze({ structuralRevision: state.structure_version, frontier: currentFamily.checkpoint.frontier }), after: Object.freeze({ structuralRevision: state.structure_version, frontier: currentFamily.checkpoint.frontier }), operation: Object.freeze(command.edit.kind.endsWith('.set') ? { kind: command.edit.kind, groupIds, annotation } : { kind: command.edit.kind, groupIds, family: familyName }), preimage, postimage, removedAnnotationIds }) }];
+    };
+
     const r1Handler = async ({ payload, db, scope, principal }) => {
       if (payload.version === 6 || payload.version === 7) {
         const command = assertAnnotatedTextOffsetEditPayload(name, fieldName, payload);
@@ -577,7 +686,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             // only its observation frontier advances.
             return projectEndpointToBlockOffset(family, point.blockId, Object.freeze({ ...endpoint, basisFrontier: family.checkpoint.frontier }));
           };
-          if (command.edit.kind === 'block.split') return r2Handler({ payload: { version: 2, id: command.id, expected, operation: { kind: 'block.split', blockId: command.edit.at.blockId, utf16Offset: offset(command.edit.at) } }, db, scope });
+          if (command.edit.kind === 'block.split') return splitHandler({ payload: { version: 2, id: command.id, expected, operation: { kind: 'block.split', blockId: command.edit.at.blockId, utf16Offset: offset(command.edit.at) } }, db, scope });
           if (command.edit.kind === 'block.merge') return r3Handler({ payload: { version: 3, id: command.id, expected, operation: command.edit }, db, scope });
           if (command.edit.kind === 'annotation.apply') {
             if (command.edit.from.blockId !== command.edit.to.blockId) throw new ValidationError(`${name}.${fieldName}.operation annotation range must remain in one block`);
@@ -635,7 +744,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }];
     };
 
-    const r2Handler = ({ payload, db, scope }) => {
+    const splitHandler = ({ payload, db, scope, structural = null }) => {
       const command = assertDocumentScope({ payload, scope, db });
       const documentScope = owningDocumentScope(db, command.id);
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
@@ -824,33 +933,55 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }
       }
 
+      if (structural) {
+        if (structural.kind !== 'block.continue' && structural.kind !== 'block.split-and-assign') throw new ValidationError(`${name}.${fieldName}.operation invalid structural kind`);
+        const leftGroup = db.prepare(`SELECT group_id FROM ${prefix}_block_group WHERE block_id = ?`).get(blockId);
+        if (!leftGroup || leftGroup.group_id !== structural.groupId) throw new ValidationError(`${name}.${fieldName}.operation source group changed`);
+        if (structural.kind === 'block.split-and-assign') {
+          const annotation = structural.annotation;
+          const familyName = annotation?.family;
+          const familyMeta = compiledMeta.annotationHandles[familyName];
+          const familyDecl = descriptor.annotations.find((d) => d.annotationName === familyName);
+          if (!familyMeta || !familyDecl || familyDecl.kind !== 'annotation' || familyMeta.appliesTo !== 'block-group' || familyMeta.cardinality !== 'one' ||
+               !annotation || Object.keys(annotation).sort().join() !== 'family,fields,id' || typeof annotation.id !== 'string' || !annotation.id ||
+              db.prepare(`SELECT 1 FROM ${prefix}_annotation WHERE id = ?`).get(annotation.id) ||
+              JSON.stringify(Object.keys(annotation.fields ?? {}).sort()) !== JSON.stringify(Object.keys(familyDecl.fields).sort())) throw new ValidationError(`${name}.${fieldName}.operation annotation must be fresh and valid`);
+          for (const [key, value] of Object.entries(annotation.fields)) {
+            const result = resolveStrategy(familyDecl.fields[key].kind).validate(value, familyDecl.fields[key]);
+            if (result !== true || (typeof familyDecl.fields[key].validate === 'function' && familyDecl.fields[key].validate(value) !== true)) throw new ValidationError(`${name}.${fieldName}.operation annotation field '${key}' is invalid`);
+          }
+        }
+      }
       const handle = eventHandles.native(name, fieldName, 'operated');
+      const eventData = {
+        version: structural ? 8 : 2,
+        id: command.id,
+        before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
+        operation: Object.freeze(structural ? (structural.kind === 'block.continue' ? {
+          kind: 'block.continue', leftBlockId: blockId, rightBlockId: newBlockId, utf16Offset, groupId: structural.groupId,
+        } : {
+          kind: 'block.split-and-assign', leftBlockId: blockId, rightBlockId: newBlockId, utf16Offset,
+           leftGroupId: structural.groupId, rightGroupId: newBlockId,
+        }) : {
+          kind: 'block.split', leftBlockId: blockId, rightBlockId: newBlockId, utf16Offset,
+        }),
+         after: Object.freeze({ structuralRevision: afterRevision, frontier: family.checkpoint.frontier }),
+        family: textFamilyCheckpoint(splitResult.family),
+        blocks: cleanBlocks,
+        memberships: Object.freeze(membershipResult.memberships.filter(m => affectedAnnotationIds.has(m.annotationId)).map(m => ({
+          annotationId: m.annotationId, blockId: m.blockId, ordinal: m.ordinal, start: m.start, end: m.end,
+        }))),
+        measurements: Object.freeze(measurementFacts),
+      };
+      if (structural?.kind === 'block.split-and-assign') {
+        eventData.annotation = structural.annotation;
+        eventData.groupMembership = { annotationId: structural.annotation.id, groupId: newBlockId, ordinal: 0 };
+      }
       return [{
         handle,
         type: handle.type,
         scope: documentScope,
-        data: Object.freeze({
-          version: 2,
-          id: command.id,
-          before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
-          operation: Object.freeze({
-            kind: 'block.split',
-            leftBlockId: blockId,
-            rightBlockId: newBlockId,
-            utf16Offset,
-          }),
-          after: Object.freeze({ structuralRevision: afterRevision, frontier: family.checkpoint.frontier }),
-          family: textFamilyCheckpoint(splitResult.family),
-          blocks: cleanBlocks,
-          memberships: Object.freeze(membershipResult.memberships.filter(m => affectedAnnotationIds.has(m.annotationId)).map(m => ({
-            annotationId: m.annotationId,
-            blockId: m.blockId,
-            ordinal: m.ordinal,
-            start: m.start,
-            end: m.end,
-          }))),
-          measurements: Object.freeze(measurementFacts),
-        }),
+        data: Object.freeze(eventData),
       }];
     };
 
@@ -1462,15 +1593,18 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     };
 
     const handler = ({ payload, db, scope, principal }) => {
+      if (payload.version === 8) return r8Handler({ payload, db, scope, principal });
       if (payload.version === 1 || payload.version === 6 || payload.version === 7) return r1Handler({ payload, db, scope, principal });
-      if (payload.version === 2) return r2Handler({ payload, db, scope });
+      if (payload.version === 2) return splitHandler({ payload, db, scope });
       if (payload.version === 3) return r3Handler({ payload, db, scope });
       if (payload.version === 4) return r4Handler({ payload, db, scope });
       return r5Handler({ payload, db, scope });
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', { value: true });
-    Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope, db }) => payload.version === 6 || payload.version === 7
+    Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope, db }) => payload.version === 8
+      ? (() => { const command = assertR8Payload(name, fieldName, payload); const documentScope = owningDocumentScope(db, command.id); if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`); return command; })()
+      : payload.version === 6 || payload.version === 7
       ? (() => {
         const command = assertAnnotatedTextOffsetEditPayload(name, fieldName, payload);
         const documentScope = owningDocumentScope(db, command.id);

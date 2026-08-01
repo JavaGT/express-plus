@@ -132,11 +132,120 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db }) {
     throw new Error(`${name}.${handle.field}.operated event has no data`);
   }
   if (data.version === 1) return applyR1AnnotatedTextOperation({ name, handle, db, data });
-  if (data.version === 2) return applyR2AnnotatedTextOperation({ name, handle, db, descriptor, data });
+   if (data.version === 2) return applyStructuralSplitProjection({ name, handle, db, descriptor, data });
   if (data.version === 3) return applyR3AnnotatedTextOperation({ name, handle, db, descriptor, data });
   if (data.version === 4) return applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data });
   if (data.version === 5) return applyR5AnnotatedTextOperation({ name, handle, db, descriptor, data });
+  if (data.version === 8) return applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data });
   throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
+}
+
+function applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+  const prefix = `${name}_${handle.field}`;
+  const shape = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data).sort().join() : '';
+   const structuralShape = 'after,before,blocks,family,id,measurements,memberships,operation,version';
+   const splitAssignmentShape = 'after,annotation,before,blocks,family,groupMembership,id,measurements,memberships,operation,version';
+   const assignmentShape = 'after,before,id,operation,postimage,preimage,removedAnnotationIds,version';
+  const exactRevision = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).sort().join() === 'frontier,structuralRevision' && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
+  if (shape !== structuralShape && shape !== splitAssignmentShape && shape !== assignmentShape) throw new Error(`${name}.${handle.field}.operated v8 event has invalid data shape`);
+  if (!exactRevision(data.before) || !exactRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v8 event revisions are invalid`);
+  if ((shape === structuralShape || shape === splitAssignmentShape) && (data.version !== 8 || typeof data.id !== 'string' || !data.operation || !data.before || !data.after || !Array.isArray(data.blocks) || !Array.isArray(data.memberships) || !Array.isArray(data.measurements))) throw new Error(`${name}.${handle.field}.operated v8 event has invalid structural data`);
+  if (shape === assignmentShape && (data.version !== 8 || typeof data.id !== 'string' || !data.operation || !data.before || !data.after || !Array.isArray(data.preimage) || !Array.isArray(data.postimage) || !Array.isArray(data.removedAnnotationIds))) throw new Error(`${name}.${handle.field}.operated v8 event has invalid assignment data`);
+  if (data.operation.kind === 'block.continue' || data.operation.kind === 'block.split-and-assign') {
+    const expectedKeys = data.operation.kind === 'block.continue' ? ['groupId', 'kind', 'leftBlockId', 'rightBlockId', 'utf16Offset'] : ['kind', 'leftBlockId', 'leftGroupId', 'rightBlockId', 'rightGroupId', 'utf16Offset'];
+    if (Object.keys(data.operation).sort().join() !== expectedKeys.join() || typeof data.operation.leftBlockId !== 'string' || typeof data.operation.rightBlockId !== 'string' || data.operation.leftBlockId === data.operation.rightBlockId || !Number.isSafeInteger(data.operation.utf16Offset) || data.operation.utf16Offset < 1) throw new Error(`${name}.${handle.field}.operated v8 operation is invalid`);
+    if (data.operation.kind === 'block.continue' ? shape !== structuralShape : shape !== splitAssignmentShape) throw new Error(`${name}.${handle.field}.operated v8 structural fields are invalid`);
+     const sourceGroup = db.prepare(`SELECT block_group.group_id FROM ${prefix}_block_group AS block_group JOIN ${prefix}_block AS block ON block.id = block_group.block_id WHERE block.id = ? AND block.document_id = ?`).get(data.operation.leftBlockId, data.id);
+    if (!sourceGroup || sourceGroup.group_id !== (data.operation.kind === 'block.continue' ? data.operation.groupId : data.operation.leftGroupId)) throw new Error(`${name}.${handle.field}.operated v8 source group fact mismatch`);
+    if (data.operation.kind === 'block.split-and-assign' && data.operation.rightGroupId !== data.operation.rightBlockId) throw new Error(`${name}.${handle.field}.operated v8 right group must equal right block`);
+    if (data.operation.kind === 'block.split-and-assign') {
+       const annotation = data.annotation;
+      const decl = descriptor.annotations.find((a) => a.annotationName === annotation?.family);
+      const meta = getAnnotatedTextCompiledMetadata(descriptor)?.annotationHandles?.[annotation?.family];
+       if (!decl || !meta || decl.kind !== 'annotation' || meta.appliesTo !== 'block-group' || meta.cardinality !== 'one' || !annotation || Object.keys(annotation).sort().join() !== 'family,fields,id' || typeof annotation.id !== 'string' || !annotation.id || db.prepare(`SELECT 1 FROM ${prefix}_annotation WHERE id = ?`).get(annotation.id) || JSON.stringify(Object.keys(annotation.fields ?? {}).sort()) !== JSON.stringify(Object.keys(decl.fields).sort())) throw new Error(`${name}.${handle.field}.operated v8 split annotation invalid`);
+      for (const [key, value] of Object.entries(annotation.fields)) {
+        const result = resolveStrategy(decl.fields[key].kind).validate(value, decl.fields[key]);
+        if (result !== true || (typeof decl.fields[key].validate === 'function' && decl.fields[key].validate(value) !== true)) throw new Error(`${name}.${handle.field}.operated v8 split annotation field invalid`);
+      }
+       if (!data.groupMembership || Object.keys(data.groupMembership).sort().join() !== 'annotationId,groupId,ordinal' || data.groupMembership.annotationId !== annotation.id || data.groupMembership.groupId !== data.operation.rightGroupId || data.groupMembership.ordinal !== 0) throw new Error(`${name}.${handle.field}.operated v8 group membership fact invalid`);
+     }
+     const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
+     if (!state || state.structure_version !== data.before.structuralRevision || JSON.stringify(JSON.parse(state.family_checkpoint).checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v8 event conflicts with projection state`);
+     if (data.after.structuralRevision !== data.before.structuralRevision + 1 || JSON.stringify(data.after.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v8 event has inconsistent after revision`);
+     const structural = {
+       version: 2, id: data.id, before: data.before, after: data.after, family: data.family,
+       blocks: data.blocks, memberships: data.memberships, measurements: data.measurements,
+       operation: { kind: 'block.split', leftBlockId: data.operation.leftBlockId, rightBlockId: data.operation.rightBlockId, utf16Offset: data.operation.utf16Offset },
+     };
+    applyStructuralSplitProjection({ name, handle, db, descriptor, data: structural });
+    if (data.operation.kind === 'block.split-and-assign') db.prepare(`UPDATE ${prefix}_block_group SET group_id = ? WHERE block_id = ?`).run(data.operation.rightGroupId, data.operation.rightBlockId);
+    if (data.operation.kind === 'block.split-and-assign') {
+       const annotation = data.annotation;
+      const decl = descriptor.annotations.find((a) => a.annotationName === annotation.family);
+      const source = db.prepare(`SELECT project_id, owner_id FROM ${prefix}_block WHERE id = ?`).get(data.operation.rightBlockId);
+      db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`).run(annotation.id, data.id, source.project_id, source.owner_id, annotation.family);
+      const names = Object.keys(decl.fields).sort();
+      if (names.length) db.prepare(`INSERT INTO ${prefix}_annotation_${annotation.family} (annotation_id, ${names.join(', ')}) VALUES (?, ${names.map(() => '?').join(', ')})`).run(annotation.id, ...names.map((n) => serializeField(decl.fields[n], annotation.fields[n])));
+      db.prepare(`INSERT INTO ${prefix}_group_membership (annotation_id, group_id, ordinal) VALUES (?, ?, 0)`).run(annotation.id, data.operation.rightGroupId);
+    }
+    return true;
+  }
+  const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
+  if (!state || state.structure_version !== data.before.structuralRevision || JSON.stringify(JSON.parse(state.family_checkpoint).checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v8 event conflicts with projection state`);
+  if (JSON.stringify(data.after) !== JSON.stringify(data.before)) throw new Error(`${name}.${handle.field}.operated v8 assignment event must not advance structural state`);
+   if (!['block-group.assignment.set', 'block-group.assignment.clear'].includes(data.operation.kind) || !Array.isArray(data.operation.groupIds) || !Array.isArray(data.preimage) || !Array.isArray(data.postimage) || !Array.isArray(data.removedAnnotationIds)) throw new Error(`${name}.${handle.field}.operated v8 event operation is unsupported by projection`);
+   const operationKeys = data.operation.kind.endsWith('.set') ? ['annotation', 'groupIds', 'kind'] : ['family', 'groupIds', 'kind'];
+   if (Object.keys(data.operation).sort().join() !== operationKeys.join() || data.operation.groupIds.some((id) => typeof id !== 'string' || !id) || new Set(data.operation.groupIds).size !== data.operation.groupIds.length || (data.operation.kind.endsWith('.clear') && (typeof data.operation.family !== 'string' || !data.operation.family))) throw new Error(`${name}.${handle.field}.operated v8 assignment operation is invalid`);
+   if (data.operation.kind.endsWith('.set')) {
+     const annotation = data.operation.annotation;
+     if (!annotation || Array.isArray(annotation) || Object.keys(annotation).sort().join() !== 'family,fields,id' || typeof annotation.id !== 'string' || !annotation.id || typeof annotation.family !== 'string' || !annotation.family || !annotation.fields || typeof annotation.fields !== 'object' || Array.isArray(annotation.fields)) throw new Error(`${name}.${handle.field}.operated v8 assignment annotation is invalid`);
+   }
+   if (data.before.structuralRevision !== data.after.structuralRevision || JSON.stringify(data.before.frontier) !== JSON.stringify(data.after.frontier)) throw new Error(`${name}.${handle.field}.operated v8 assignment revision mismatch`);
+   const validImage = (image) => image.length === data.operation.groupIds.length && image.every((entry, index) => entry && !Array.isArray(entry) && Object.keys(entry).sort().join() === 'annotationId,groupId' && entry.groupId === data.operation.groupIds[index] && (entry.annotationId === null || (typeof entry.annotationId === 'string' && entry.annotationId.length > 0)));
+   if (!validImage(data.preimage) || !validImage(data.postimage) || data.removedAnnotationIds.some((id) => typeof id !== 'string' || !id) || new Set(data.removedAnnotationIds).size !== data.removedAnnotationIds.length || JSON.stringify(data.removedAnnotationIds) !== JSON.stringify([...data.removedAnnotationIds].sort())) throw new Error(`${name}.${handle.field}.operated v8 assignment images are invalid`);
+  const family = data.operation.kind.endsWith('.set') ? data.operation.annotation?.family : data.operation.family;
+  const decl = descriptor.annotations.find((a) => a.annotationName === family);
+  const meta = getAnnotatedTextCompiledMetadata(descriptor)?.annotationHandles?.[family];
+  if (!decl || decl.kind !== 'annotation' || !meta || meta.appliesTo !== 'block-group' || meta.cardinality !== 'one') throw new Error(`${name}.${handle.field}.operated v8 event annotation family is invalid`);
+   const groupIds = data.operation.groupIds;
+   const resolvedGroups = db.prepare(`SELECT DISTINCT block_group.group_id FROM ${prefix}_block_group AS block_group JOIN ${prefix}_block AS block ON block.id = block_group.block_id AND block.document_id = ? WHERE block_group.group_id IN (${groupIds.map(() => '?').join(',')})`).all(data.id, ...groupIds);
+   if (resolvedGroups.length !== groupIds.length) throw new Error(`${name}.${handle.field}.operated v8 group IDs are unknown or cross-document`);
+  if (!groupIds.length || new Set(groupIds).size !== groupIds.length) throw new Error(`${name}.${handle.field}.operated v8 group IDs are invalid`);
+  if (JSON.stringify(groupIds) !== JSON.stringify([...new Set(groupIds)].sort((a, b) => {
+     const pa = db.prepare(`SELECT MIN(block.position) AS p FROM ${prefix}_block AS block JOIN ${prefix}_block_group AS block_group ON block_group.block_id = block.id WHERE block_group.group_id = ? AND block.document_id = ?` ).get(a, data.id)?.p ?? '';
+     const pb = db.prepare(`SELECT MIN(block.position) AS p FROM ${prefix}_block AS block JOIN ${prefix}_block_group AS block_group ON block_group.block_id = block.id WHERE block_group.group_id = ? AND block.document_id = ?` ).get(b, data.id)?.p ?? '';
+    return pa.localeCompare(pb);
+  }))) throw new Error(`${name}.${handle.field}.operated v8 group IDs are not document ordered`);
+  const expectedPreimage = groupIds.map((groupId) => ({ groupId, annotationId: db.prepare(`SELECT a.id FROM ${prefix}_group_membership m JOIN ${prefix}_annotation a ON a.id = m.annotation_id JOIN ${prefix}_block_group bg ON bg.group_id = m.group_id JOIN ${prefix}_block b ON b.id = bg.block_id WHERE m.group_id = ? AND a.family = ? AND a.document_id = ? AND b.document_id = ? LIMIT 1`).get(groupId, family, data.id, data.id)?.id ?? null }));
+  if (JSON.stringify(data.preimage) !== JSON.stringify(expectedPreimage)) throw new Error(`${name}.${handle.field}.operated v8 preimage mismatch`);
+  const expectedPostimage = expectedPreimage.map(({ groupId }) => ({ groupId, annotationId: data.operation.kind.endsWith('.set') ? data.operation.annotation?.id : null }));
+  if (JSON.stringify(data.postimage) !== JSON.stringify(expectedPostimage)) throw new Error(`${name}.${handle.field}.operated v8 postimage mismatch`);
+   const existing = db.prepare(`SELECT m.annotation_id, m.group_id FROM ${prefix}_group_membership AS m JOIN ${prefix}_annotation AS a ON a.id = m.annotation_id WHERE m.group_id IN (${groupIds.map(() => '?').join(',')}) AND a.document_id = ? AND a.family = ?`).all(...groupIds, data.id, family);
+  const oldIds = [...new Set(existing.map((r) => r.annotation_id))];
+  const selectedSet = new Set(groupIds);
+  const expectedRemoved = oldIds.filter((id) => db.prepare(`SELECT group_id FROM ${prefix}_group_membership WHERE annotation_id = ? UNION SELECT '__block__' AS group_id FROM ${prefix}_membership WHERE annotation_id = ?`).all(id, id).every((membership) => membership.group_id !== '__block__' && selectedSet.has(membership.group_id))).sort();
+  if (JSON.stringify(data.removedAnnotationIds) !== JSON.stringify(expectedRemoved)) throw new Error(`${name}.${handle.field}.operated v8 removal facts mismatch`);
+  if (data.operation.kind.endsWith('.set')) {
+    const dataAnnotation = data.operation.annotation;
+     if (!dataAnnotation || typeof dataAnnotation.id !== 'string' || !dataAnnotation.id || dataAnnotation.family !== family || !dataAnnotation.fields || typeof dataAnnotation.fields !== 'object' || Array.isArray(dataAnnotation.fields) || Object.keys(dataAnnotation).length !== 3 || db.prepare(`SELECT 1 FROM ${prefix}_annotation WHERE id = ?`).get(dataAnnotation.id)) throw new Error(`${name}.${handle.field}.operated v8 event annotation id is not fresh`);
+     const keys = Object.keys(dataAnnotation.fields ?? {}).sort();
+     if (JSON.stringify(keys) !== JSON.stringify(Object.keys(decl.fields).sort())) throw new Error(`${name}.${handle.field}.operated v8 event annotation fields are invalid`);
+     for (const [key, value] of Object.entries(dataAnnotation.fields)) {
+       const result = resolveStrategy(decl.fields[key].kind).validate(value, decl.fields[key]);
+       if (result !== true || (typeof decl.fields[key].validate === 'function' && decl.fields[key].validate(value) !== true)) throw new Error(`${name}.${handle.field}.operated v8 event annotation field is invalid`);
+     }
+    const source = db.prepare(`SELECT project_id, owner_id FROM ${prefix}_block WHERE document_id = ? ORDER BY position LIMIT 1`).get(data.id);
+    db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`).run(dataAnnotation.id, data.id, source.project_id, source.owner_id, family);
+    const names = Object.keys(decl.fields).sort();
+    if (names.length) db.prepare(`INSERT INTO ${prefix}_annotation_${family} (annotation_id, ${names.join(', ')}) VALUES (?, ${names.map(() => '?').join(', ')})`).run(dataAnnotation.id, ...names.map((n) => serializeField(decl.fields[n], dataAnnotation.fields[n])));
+    db.prepare(`DELETE FROM ${prefix}_group_membership WHERE group_id IN (${groupIds.map(() => '?').join(',')}) AND annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ? AND family = ?)`).run(...groupIds, data.id, family);
+    for (const groupId of groupIds) db.prepare(`INSERT INTO ${prefix}_group_membership (annotation_id, group_id, ordinal) VALUES (?, ?, ?)`).run(dataAnnotation.id, groupId, groupIds.indexOf(groupId));
+  } else {
+    db.prepare(`DELETE FROM ${prefix}_group_membership WHERE group_id IN (${groupIds.map(() => '?').join(',')}) AND annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ? AND family = ?)`).run(...groupIds, data.id, family);
+  }
+   for (const id of expectedRemoved) if (!db.prepare(`SELECT 1 FROM ${prefix}_group_membership WHERE annotation_id = ? UNION SELECT annotation_id FROM ${prefix}_membership WHERE annotation_id = ?`).get(id, id)) db.prepare(`DELETE FROM ${prefix}_annotation WHERE id = ?`).run(id);
+  return true;
 }
 
 function applyR5AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
@@ -280,7 +389,7 @@ function applyR1AnnotatedTextOperation({ name, handle, db, data }) {
   return true;
 }
 
-function applyR2AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+function applyStructuralSplitProjection({ name, handle, db, descriptor, data }) {
   const prefix = `${name}_${handle.field}`;
   const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
   const measurementConfigs = compiledMeta?.measurementConfigs ?? {};

@@ -46,7 +46,7 @@ function requireGroupMembershipIntegrity(groupMemberships, annotations, groupIds
     if (seen.has(key)) fail(`field '${fieldName}' has duplicate group membership state`);
     seen.add(key);
     const handle = meta.annotationHandles[family];
-    if (handle.cardinality === 'one' && groupMemberships.some((other) => other.annotation_id === membership.annotation_id && other !== membership)) {
+    if (handle.cardinality === 'one' && groupMemberships.some((other) => other.group_id === membership.group_id && other.annotation_id !== membership.annotation_id && annotationFamilies.get(other.annotation_id) === family)) {
       fail(`field '${fieldName}' has duplicated cardinality-one group annotation`);
     }
   }
@@ -131,8 +131,19 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   const visibleBlocks = recipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id);
   // A recipient has one current basis per document. A fresh snapshot supersedes
   // the prior coordinate frame while keeping storage bounded by recipients.
-  db.prepare(`INSERT INTO ${prefix}_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(document_id, principal_id) DO UPDATE SET token = excluded.token, structural_revision = excluded.structural_revision, family_checkpoint = excluded.family_checkpoint, visible_blocks = excluded.visible_blocks`)
-    .run(token, row.id, principal?.id ?? '', db.prepare(`SELECT structure_version FROM ${prefix}_state WHERE document_id = ?`).get(row.id).structure_version, JSON.stringify(textFamilyCheckpoint(family)), JSON.stringify(visibleBlocks));
+  const canonicalByBlock = new Map(canonical.blocks.map((block) => [block.id, block.groupId]));
+  const durableBlocks = new Map();
+  for (const block of canonical.blocks) durableBlocks.set(block.groupId, [...(durableBlocks.get(block.groupId) ?? []), block.id]);
+  const durableExposures = new Map();
+  for (const group of recipient.blockGroups) {
+    const durable = [...new Set(group.blockIds.map((id) => canonicalByBlock.get(id)))];
+    const complete = durable.length === 1 && JSON.stringify([...group.blockIds].sort()) === JSON.stringify([...(durableBlocks.get(durable[0]) ?? [])].sort());
+    if (complete) durableExposures.set(durable[0], [...(durableExposures.get(durable[0]) ?? []), group]);
+  }
+  const exposedGroups = [];
+  for (const [groupId, groups] of durableExposures) if (groups.length === 1) exposedGroups.push({ id: groups[0].id, groupId, blockIds: [...groups[0].blockIds] });
+  db.prepare(`INSERT INTO ${prefix}_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks, exposed_groups) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(document_id, principal_id) DO UPDATE SET token = excluded.token, structural_revision = excluded.structural_revision, family_checkpoint = excluded.family_checkpoint, visible_blocks = excluded.visible_blocks, exposed_groups = excluded.exposed_groups`)
+    .run(token, row.id, principal?.id ?? '', db.prepare(`SELECT structure_version FROM ${prefix}_state WHERE document_id = ?`).get(row.id).structure_version, JSON.stringify(textFamilyCheckpoint(family)), JSON.stringify(visibleBlocks), JSON.stringify(exposedGroups));
   return Object.freeze({ ...recipient, basis: token });
 }
 
