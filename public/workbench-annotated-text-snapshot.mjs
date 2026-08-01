@@ -15,7 +15,9 @@
 //   Annotation: {id, family, fields}
 //   Membership: {annotationId, blockId, ordinal}
 //   Measurement: {id, blockId, family, formatVersion, payload}
-//   Document: {version, blocks, annotations, memberships, measurements, capabilities}
+//   Document: {version, blocks, blockGroups, annotations, memberships, measurements, capabilities}
+
+import { createAnnotatedTextSnapshotSessionBinding, getAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -23,7 +25,8 @@ function fail(path, message) {
   throw new Error(`annotatedText snapshot: ${path}: ${message}`);
 }
 
-export function materializeAnnotatedTextSnapshot(snapshot, handle) {
+export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
+  const binding = getAnnotatedTextSnapshotSessionBinding(options) ?? createAnnotatedTextSnapshotSessionBinding();
   if (!snapshot || typeof snapshot !== 'object') {
     fail('', 'snapshot must be a non-null object');
   }
@@ -43,6 +46,10 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
   }
   if (typeof handle.measurements !== 'object' || handle.measurements === null || Array.isArray(handle.measurements)) {
     fail('handle', 'must be a compiled annotated-text static field handle (rejecting raw descriptor)');
+  }
+
+  if (!snapshot.blockGroups || !Array.isArray(snapshot.blockGroups)) {
+    fail('blockGroups', 'must be a recipient block-group array');
   }
 
   const declaredAnnotationNames = new Set(Object.keys(handle.annotations));
@@ -149,6 +156,10 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
     if (typeof m.annotationId !== 'string' || !seenAnnotationIds.has(m.annotationId)) {
       fail(`memberships[${i}].annotationId`, `must reference a declared annotation`);
     }
+    const annotation = annotations.find((candidate) => candidate.id === m.annotationId);
+    if (handle.annotations[annotation.family]?.appliesTo !== 'block') {
+      fail(`memberships[${i}].annotationId`, `must reference a block annotation`);
+    }
     if (typeof m.blockId !== 'string' || !seenBlockIds.has(m.blockId)) {
       fail(`memberships[${i}].blockId`, `must reference a declared block`);
     }
@@ -170,6 +181,10 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
       if (!seenAnnotationIds.has(aid)) {
         fail('blocks', `block '${block.id}' annotationIds references unknown annotation '${aid}'`);
       }
+      const annotation = annotations.find((candidate) => candidate.id === aid);
+      if (handle.annotations[annotation.family]?.appliesTo !== 'block') {
+        fail('blocks', `block '${block.id}' annotationIds references a non-block annotation '${aid}'`);
+      }
     }
   }
   for (const membership of memberships) {
@@ -179,6 +194,67 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
     }
     if (!block.annotationIds.includes(membership.annotationId)) {
       fail('memberships', `membership annotation '${membership.annotationId}' not in block '${membership.blockId}' annotationIds`);
+    }
+  }
+
+  // Recipient groups are the only public carrier of group annotation
+  // membership. Restricted blocks and block-level annotations cannot cross
+  // this boundary through a group.
+  const seenGroupIds = new Set();
+  const groupedVisibleBlocks = new Set();
+  const blockGroups = [];
+  for (let i = 0; i < snapshot.blockGroups.length; i++) {
+    const group = snapshot.blockGroups[i];
+    if (!group || typeof group !== 'object' || Array.isArray(group)
+      || Reflect.ownKeys(group).length !== 3
+      || !Object.hasOwn(group, 'id') || !Object.hasOwn(group, 'blockIds') || !Object.hasOwn(group, 'annotationIds')
+      || typeof group.id !== 'string' || group.id.length === 0
+      || !Array.isArray(group.blockIds) || !Array.isArray(group.annotationIds)) {
+      fail(`blockGroups[${i}]`, 'must contain exactly id, blockIds, and annotationIds');
+    }
+    if (seenGroupIds.has(group.id)) fail(`blockGroups[${i}].id`, `duplicate group id '${group.id}'`);
+    seenGroupIds.add(group.id);
+    if (group.blockIds.length === 0) fail(`blockGroups[${i}].blockIds`, 'must not be empty');
+    const blockIds = [];
+    const groupBlockIds = new Set();
+    for (const blockId of group.blockIds) {
+      if (typeof blockId !== 'string' || !seenBlockIds.has(blockId)) {
+        fail(`blockGroups[${i}].blockIds`, 'must reference declared blocks');
+      }
+      if (groupBlockIds.has(blockId)) fail(`blockGroups[${i}].blockIds`, `duplicate block '${blockId}'`);
+      groupBlockIds.add(blockId);
+      const block = blocks.find((candidate) => candidate.id === blockId);
+      if (block.kind === 'restricted') fail(`blockGroups[${i}].blockIds`, 'restricted blocks cannot belong to groups');
+      if (groupedVisibleBlocks.has(blockId)) fail(`blockGroups[${i}].blockIds`, `block '${blockId}' belongs to multiple groups`);
+      groupedVisibleBlocks.add(blockId);
+      blockIds.push(blockId);
+    }
+    const annotationIds = [];
+    const groupAnnotationIds = new Set();
+    for (const annotationId of group.annotationIds) {
+      if (typeof annotationId !== 'string' || !seenAnnotationIds.has(annotationId)) {
+        fail(`blockGroups[${i}].annotationIds`, 'must reference declared annotations');
+      }
+      if (groupAnnotationIds.has(annotationId)) fail(`blockGroups[${i}].annotationIds`, `duplicate annotation '${annotationId}'`);
+      groupAnnotationIds.add(annotationId);
+      annotationIds.push(annotationId);
+    }
+    blockGroups.push({ group, blockIds, annotationIds });
+  }
+  for (let i = 0; i < blockGroups.length; i++) {
+    for (const annotationId of blockGroups[i].annotationIds) {
+      const annotation = annotations.find((candidate) => candidate.id === annotationId);
+      if (handle.annotations[annotation.family]?.appliesTo !== 'block-group') {
+        fail(`blockGroups[${i}].annotationIds`, `group annotation '${annotationId}' is not declared as a block-group annotation`);
+      }
+      if (blocks.some((block) => block.kind === 'visible' && block.annotationIds.includes(annotationId))) {
+        fail(`blockGroups[${i}].annotationIds`, `group annotation '${annotationId}' cannot be a block annotation`);
+      }
+    }
+  }
+  for (const block of blocks) {
+    if (block.kind === 'visible' && !groupedVisibleBlocks.has(block.id)) {
+      fail('blockGroups', `visible block '${block.id}' must belong to exactly one group`);
     }
   }
 
@@ -236,14 +312,32 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle) {
     capabilities = Object.freeze([...capList]);
   }
 
-  return Object.freeze({
+  const materializedGroupEntries = blockGroups.map(({ group, blockIds, annotationIds }) => {
+    const materialized = Object.freeze({
+      kind: 'workbench.annotatedText.block-group',
+      blockIds: Object.freeze(blockIds),
+      annotationIds: Object.freeze(annotationIds),
+    });
+    return { materialized, serverId: group.id };
+  });
+  const materializedGroups = Object.freeze(materializedGroupEntries.map(({ materialized }) => materialized));
+  binding.generation += 1;
+  const document = Object.freeze({
     kind: 'workbench.annotatedText.recipient',
     version: 1,
     basis: snapshot.basis,
     blocks: Object.freeze(blocks),
+    blockGroups: materializedGroups,
     annotations: Object.freeze(annotations),
     memberships: Object.freeze(memberships),
     measurements: Object.freeze(measurements),
     capabilities,
   });
+  binding.document = document;
+  if (typeof binding.onBlockGroup === 'function') {
+    for (const { materialized, serverId } of materializedGroupEntries) {
+      binding.onBlockGroup(materialized, serverId, binding.generation);
+    }
+  }
+  return document;
 }

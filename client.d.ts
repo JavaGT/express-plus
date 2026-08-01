@@ -440,6 +440,7 @@ export interface LiveDeliverySessionConfig<Snapshot, Payload = unknown> {
   sendAction(action: { actionId: string; type: string; payload: Payload }): Promise<LiveDeliveryActionReceipt | void>;
   sendBatch?(batch: LiveDeliveryBatchEnvelope<Payload>): Promise<LiveDeliveryActionReceipt | void>;
   createActionId?: () => string;
+  onRecoveryStart?: () => void;
 }
 
 export interface LiveDeliveryBatchAction<Payload = unknown> {
@@ -497,6 +498,7 @@ export interface LiveDeliveryHttpSessionConfig<Snapshot, Payload = unknown> {
   fetchImpl?: typeof globalThis.fetch;
   eventSourceFactory?: (url: string, options: EventSourceInit) => EventSource;
   createActionId?: () => string;
+  onRecoveryStart?: () => void;
   /** Package-owned entity identity used to derive a server-side scope. */
   requestIdentity?: Readonly<Record<string, string>> | null;
 }
@@ -640,6 +642,15 @@ export interface AnnotatedTextRestrictedBlock {
 
 export type AnnotatedTextBlock = AnnotatedTextVisibleBlock | AnnotatedTextRestrictedBlock;
 
+declare const annotatedTextBlockGroupHandleBrand: unique symbol;
+
+export interface AnnotatedTextBlockGroupHandle {
+  readonly kind: 'workbench.annotatedText.block-group';
+  readonly blockIds: readonly string[];
+  readonly annotationIds: readonly string[];
+  readonly [annotatedTextBlockGroupHandleBrand]: never;
+}
+
 export interface AnnotatedTextAnnotation {
   readonly id: string;
   readonly family: string;
@@ -666,6 +677,7 @@ export interface AnnotatedTextDocument {
   /** Opaque recipient-bound reference for semantic offset edits. */
   readonly basis: string;
   readonly blocks: readonly AnnotatedTextBlock[];
+  readonly blockGroups: readonly AnnotatedTextBlockGroupHandle[];
   readonly annotations: readonly AnnotatedTextAnnotation[];
   readonly memberships: readonly AnnotatedTextMembership[];
   readonly measurements: readonly AnnotatedTextMeasurement[];
@@ -687,6 +699,10 @@ export interface AnnotatedTextAuthoringContext {
   readonly documentId: string;
 }
 
+export type AnnotatedTextBlockGroupSelection =
+  | { readonly kind: 'one'; readonly blockGroup: AnnotatedTextBlockGroupHandle }
+  | { readonly kind: 'consecutive' | 'listed'; readonly blockGroups: readonly AnnotatedTextBlockGroupHandle[] };
+
 export interface AnnotatedTextHttpSessionConfig {
   readonly baseUrl: string;
   readonly context: AnnotatedTextAuthoringContext;
@@ -706,6 +722,10 @@ export interface AnnotatedTextHttpSession {
   merge(input: { readonly mutationId: string; readonly leftBlockId: string; readonly rightBlockId: string }): Promise<ScopeDispatchResult>;
   applyAnnotation(input: { readonly mutationId: string; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
   detachAnnotation(input: { readonly mutationId: string; readonly annotationId: string; readonly blockId: string }): Promise<ScopeDispatchResult>;
+  continueBlock(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
+  setBlockGroupAssignment(input: { readonly mutationId: string; readonly selection: AnnotatedTextBlockGroupSelection; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>> } }): Promise<ScopeDispatchResult>;
+  clearBlockGroupAssignment(input: { readonly mutationId: string; readonly selection: AnnotatedTextBlockGroupSelection; readonly family: string }): Promise<ScopeDispatchResult>;
+  splitAndAssign(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>> } }): Promise<ScopeDispatchResult>;
   reconnect(): Promise<void>;
   subscribe(listener: (document: AnnotatedTextDocument | null) => void): () => void;
   close(): void;

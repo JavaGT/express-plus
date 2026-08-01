@@ -20,6 +20,7 @@ function snapshot(basis = 'basis-1') {
   return {
     body: {
       kind: 'workbench.annotatedText.recipient', version: 1, basis,
+      blockGroups: [{ id: 'group-1', blockIds: ['block-1'], annotationIds: [] }],
       blocks: [{ kind: 'visible', id: 'block-1', text: 'Hello', fields: {}, annotationIds: [] }],
       annotations: [], memberships: [], measurements: [], capabilityHints: null,
     },
@@ -30,6 +31,7 @@ function setup({ revoked = false } = {}) {
   const requests = [];
   const sources = [];
   let number = 0;
+  let accessRevoked = revoked;
   const session = createAnnotatedTextHttpSession({
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
@@ -39,7 +41,7 @@ function setup({ revoked = false } = {}) {
         requests.push(JSON.parse(options.body));
         return { ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: 2 }) };
       }
-      if (revoked) return { ok: false, status: 403, json: async () => ({}) };
+      if (accessRevoked) return { ok: false, status: 403, json: async () => ({}) };
       return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: snapshot(`basis-${++number}`), cursor: number }) };
     },
     eventSourceFactory: () => {
@@ -48,7 +50,7 @@ function setup({ revoked = false } = {}) {
       return source;
     },
   });
-  return { session, requests, sources };
+  return { session, requests, sources, revokeAccess: () => { accessRevoked = true; } };
 }
 
 test('document session bootstraps recipient snapshot and derives typed insert from its opaque basis', async () => {
@@ -98,4 +100,27 @@ test('document session exposes structural grammar without canonical revision or 
     assert.equal(JSON.stringify(request).includes('frontier'), false);
   }
   session.close();
+});
+
+test('document session translates opaque group selections into one v8 action each', async () => {
+  const cases = [
+    ['continueBlock', { mutationId: 'continue-1', at: { blockId: 'block-1', offset: 2 } }, { kind: 'block.continue', at: { blockId: 'block-1', offset: 2 } }],
+    ['setBlockGroupAssignment', { mutationId: 'assign-1', annotation: { id: 'group-ann-1', family: 'grouping', fields: {} } }, { kind: 'block-group.assignment.set', selection: { kind: 'one', blockGroupId: 'group-1' }, annotation: { id: 'group-ann-1', family: 'grouping', fields: {} } }],
+    ['clearBlockGroupAssignment', { mutationId: 'clear-1', family: 'grouping' }, { kind: 'block-group.assignment.clear', selection: { kind: 'listed', blockGroupIds: ['group-1'] }, family: 'grouping' }],
+    ['splitAndAssign', { mutationId: 'split-assign-1', at: { blockId: 'block-1', offset: 3 }, annotation: { id: 'group-ann-2', family: 'grouping', fields: {} } }, { kind: 'block.split-and-assign', at: { blockId: 'block-1', offset: 3 }, annotation: { id: 'group-ann-2', family: 'grouping', fields: {} } }],
+  ];
+  for (const [method, input, edit] of cases) {
+    const { session, requests } = setup();
+    await session.ready;
+    if (method === 'setBlockGroupAssignment' || method === 'clearBlockGroupAssignment') {
+      const blockGroup = session.document.blockGroups[0];
+      assert.equal(JSON.stringify(blockGroup).includes('group-1'), false);
+      input.selection = method === 'setBlockGroupAssignment'
+        ? { kind: 'one', blockGroup }
+        : { kind: 'listed', blockGroups: [blockGroup] };
+    }
+    await session[method](input);
+    assert.deepEqual(requests[0].payload, { version: 8, id: 'd1', basis: 'basis-1', mutationId: input.mutationId, edit });
+    session.close();
+  }
 });

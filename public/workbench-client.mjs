@@ -14,6 +14,7 @@
 
 import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } from './workbench-annotated-text.mjs';
 import { deleteText, insertText } from './workbench-text-edit.mjs';
+import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 import { materializeAnnotatedTextSnapshot } from './workbench-annotated-text-snapshot.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { materializeAnnotatedTextSnapshot };
@@ -2186,6 +2187,7 @@ export function createLiveDeliverySession({
   sendAction,
   sendBatch,
   createActionId,
+  onRecoveryStart,
 }) {
   if (typeof bootstrap !== 'function') throw new TypeError('bootstrap is required');
   if (typeof subscribe !== 'function') throw new TypeError('subscribe is required');
@@ -2435,6 +2437,7 @@ export function createLiveDeliverySession({
 
   async function recover(mode, snapshotCursorFloor, retryAttempt = 0) {
     if (closed) return;
+    onRecoveryStart?.();
     const generation = ++recoveryGeneration;
     const receiptGenerationAtStart = receiptGeneration;
     const snapshotCursorAtStart = cursor;
@@ -2593,6 +2596,7 @@ export function createLiveDeliverySession({
     // Some adapters report their own close synchronously. Mark reconnecting
     // before closing the old subscription so that callback cannot recurse.
     reconnecting = true;
+    onRecoveryStart?.();
     try {
       do {
         reconnectRequested = false;
@@ -2903,6 +2907,7 @@ export function createLiveDeliveryHttpSession({
   fetchImpl = globalThis.fetch,
   eventSourceFactory = (url, options) => new EventSource(url, options),
   createActionId,
+  onRecoveryStart,
   requestIdentity = null,
 }) {
   if (typeof baseUrl !== 'string' || baseUrl.length === 0) throw new TypeError('baseUrl is required');
@@ -3005,6 +3010,7 @@ export function createLiveDeliveryHttpSession({
       : (sendAction ?? sendHttpAction)(action),
     sendBatch: sendBatch ?? sendHttpBatch,
     createActionId,
+    onRecoveryStart,
   });
   // History commands use the same receipt/snapshot reconciliation path as an
   // application action. The server resolves this authenticated session's
@@ -3070,6 +3076,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     throw new TypeError('annotated text context requires declared entity and field handles');
   }
   const scope = `annotated-text:${documentId}`;
+  const blockGroupServerIds = new WeakMap();
+  const snapshotBinding = createAnnotatedTextSnapshotSessionBinding((handle, serverId, generation) => {
+    blockGroupServerIds.set(handle, { serverId, generation });
+  });
   const session = createLiveDeliveryHttpSession({
     baseUrl,
     scope,
@@ -3078,16 +3088,51 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     eventSourceFactory,
     createActionId,
     requestIdentity: { entity: entity.name, field: field.fieldName, documentId },
+    onRecoveryStart: () => revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding),
     validateSnapshot(snapshot) {
       if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('annotated text delivery snapshot must be an object');
-      return materializeAnnotatedTextSnapshot(snapshot[field?.fieldName], field);
+      return materializeAnnotatedTextSnapshot(snapshot[field?.fieldName], field, snapshotBinding);
     },
+  });
+  session.subscribe((document) => {
+    if (document === null) revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
   });
   async function dispatch(command) {
     const document = session.snapshot;
     if (!document) throw new ClientClosedError('Annotated text document is unavailable');
     const action = annotatedTextAction(entity, field, { ...command, id: documentId, basis: document.basis });
     return session.dispatch(action.type, action.payload);
+  }
+  function resolveBlockGroup(handle) {
+    if (!handle || typeof handle !== 'object' || Array.isArray(handle)) {
+      throw new TypeError('annotated text block-group selection requires an opaque block-group handle');
+    }
+    const current = session.snapshot;
+    if (!current) throw new ClientClosedError('Annotated text document is unavailable');
+    const entry = blockGroupServerIds.get(handle);
+    if (!entry || entry.generation !== snapshotBinding.generation || snapshotBinding.document !== current) {
+      throw new TypeError('annotated text block-group handle is stale, foreign, or forged');
+    }
+    return entry.serverId;
+  }
+  function resolveBlockGroupSelection(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new TypeError('annotated text block-group selection must be an object');
+    }
+    const keys = Reflect.ownKeys(value);
+    if (value.kind === 'one' && keys.length === 2 && Object.hasOwn(value, 'kind') && Object.hasOwn(value, 'blockGroup')) {
+      return { kind: 'one', blockGroupId: resolveBlockGroup(value.blockGroup) };
+    }
+    if ((value.kind === 'consecutive' || value.kind === 'listed') && keys.length === 2
+      && Object.hasOwn(value, 'kind') && Object.hasOwn(value, 'blockGroups')
+      && Array.isArray(value.blockGroups) && value.blockGroups.length > 0) {
+      const blockGroupIds = value.blockGroups.map(resolveBlockGroup);
+      if (new Set(blockGroupIds).size !== blockGroupIds.length) {
+        throw new TypeError('annotated text block-group selection must not contain duplicates');
+      }
+      return { kind: value.kind, blockGroupIds };
+    }
+    throw new TypeError('annotated text block-group selection must be one, consecutive, or listed with exact keys');
   }
   return Object.freeze({
     get document() { return session.snapshot; },
@@ -3099,9 +3144,20 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     merge({ mutationId, leftBlockId, rightBlockId }) { return dispatch({ kind: 'block.merge', mutationId, leftBlockId, rightBlockId }); },
     applyAnnotation({ mutationId, annotation, from, to }) { return dispatch({ kind: 'annotation.apply', mutationId, annotation, from, to }); },
     detachAnnotation({ mutationId, annotationId, blockId }) { return dispatch({ kind: 'annotation.detach', mutationId, annotationId, blockId }); },
+    continueBlock({ mutationId, at }) { return dispatch({ kind: 'block.continue', mutationId, at }); },
+    setBlockGroupAssignment({ mutationId, selection, annotation }) {
+      return dispatch({ kind: 'block-group.assignment.set', mutationId, selection: resolveBlockGroupSelection(selection), annotation });
+    },
+    clearBlockGroupAssignment({ mutationId, selection, family }) {
+      return dispatch({ kind: 'block-group.assignment.clear', mutationId, selection: resolveBlockGroupSelection(selection), family });
+    },
+    splitAndAssign({ mutationId, at, annotation }) { return dispatch({ kind: 'block.split-and-assign', mutationId, at, annotation }); },
     reconnect: () => session.reconnect(),
     subscribe: (listener) => session.subscribe(listener),
-    close: () => session.close(),
+    close: () => {
+      revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
+      session.close();
+    },
   });
 }
 
