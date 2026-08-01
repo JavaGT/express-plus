@@ -101,7 +101,9 @@ function admitsApplicationHttpAction(app, request) {
       if (!row) return false;
       owningScope = resolveAnnotatedTextOwningScope(annotatedEntries[0][1], entity.fields, row).key;
     }
-    if (request.scope !== undefined) return false;
+    // Project-shell sessions always send their subscribed scope. Generated
+    // document actions may accept it only when it is the declared owner scope.
+    if (request.scope !== undefined && request.scope !== owningScope) return false;
     request.scope = owningScope;
     if (request.type === `${entity.name}.create` || request.type === `${entity.name}.annotatedText.retire`) return true;
     if ([6, 7].includes(request.payload?.version)

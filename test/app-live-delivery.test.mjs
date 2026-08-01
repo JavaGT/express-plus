@@ -358,7 +358,9 @@ test('declared annotated text owns generated HTTP admission and package delivery
   const revokedEdit = await session.insert({ mutationId: 'revoked', at: { blockId: initialBlockId, offset: 0 }, text: 'x' });
   assert.equal(revokedEdit.ok, false);
   principal = user;
-  assert.equal((await post(annotatedTextRetireAction(Document, 'd1'))).status, 200);
+  const retire = annotatedTextRetireAction(Document, 'd1');
+  assert.equal((await post({ ...retire, scope: 'Project:p2' })).status, 404, 'retirement rejects a supplied scope other than the document owner');
+  assert.equal((await post({ ...retire, scope: 'Project:p1' })).status, 200, 'project-shell actions may supply the matching document owner scope');
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM HttpAnnotatedDocument_body_retired WHERE document_id = ?').get('d1').count, 1);
   session.close();
 });
