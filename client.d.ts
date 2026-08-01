@@ -714,6 +714,7 @@ export interface AnnotatedTextHttpSessionConfig {
 
 export interface AnnotatedTextHttpSession {
   readonly document: AnnotatedTextDocument | null;
+  readonly history: LiveDeliveryHistorySession;
   readonly status: LiveDeliverySession<AnnotatedTextDocument>['status'];
   readonly ready: Promise<void>;
   insert(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition; readonly text: string }): Promise<ScopeDispatchResult>;

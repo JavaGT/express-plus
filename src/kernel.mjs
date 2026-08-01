@@ -1,4 +1,4 @@
-import { mayRow } from './row-grant.mjs';
+import { mayRow, mayFieldOp } from './row-grant.mjs';
 import { CASCADE_PREAUTHORIZED } from './entity/removal-cascade.mjs';
 import {
   admitSystemMutation,
@@ -19,10 +19,13 @@ import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { createOperationalConsumers } from './operational-consumer.mjs';
 import { createPendingBlobLifecycle } from './pending-blob.mjs';
 import { readSeq } from './committed-log.mjs';
-import { CRUD_CURSOR_POLICY } from './entity/crud.mjs';
+import { CRUD_CURSOR_POLICY, assertR8Payload } from './entity/crud.mjs';
+import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
+import { isCanonicalAnnotatedTextHistoryImage } from './annotated-text-history.mjs';
 import { EventKind } from './event-handle.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 import { bindAuthorizedRows, isAuthorizedRows } from './action-authorization.mjs';
+import { write } from './grant.mjs';
 import { replayPrivateFactProjections } from './post-commit-effects.mjs';
 import { txn } from './driver.mjs';
 import { installRemovalCascades } from './entity/removal-cascade.mjs';
@@ -475,12 +478,44 @@ export function buildKernel(app) {
       .filter(([, field]) => field.kind === 'annotatedText')
       .map(([field]) => `${entity.name}.${field}.operation`)),
   );
+  const annotatedActionDetails = new Map();
+  for (const entity of entities.values()) for (const [fieldName, field] of Object.entries(entity.fields)) {
+    if (field.kind !== 'annotatedText') continue;
+    annotatedActionDetails.set(`${entity.name}.${fieldName}.operation`, { entity, fieldName, field });
+  }
+  const isAnnotatedHistoryAction = ({ type, payload }) => {
+    const detail = annotatedActionDetails.get(type);
+    if (!detail) return false;
+    try { assertR8Payload(detail.entity.name, detail.fieldName, payload); return true; } catch { return false; }
+  };
+  const isAnnotatedHistoryFact = ({ type, payload, fact }) => {
+    const detail = annotatedActionDetails.get(type);
+    if (!detail || !isAnnotatedHistoryAction({ type, payload }) || !fact || typeof fact !== 'object') return false;
+    return isCanonicalAnnotatedTextHistoryImage(fact.before, `${detail.entity.name}_${detail.fieldName}`, payload.id, getAnnotatedTextCompiledMetadata(detail.field))
+      && isCanonicalAnnotatedTextHistoryImage(fact.after, `${detail.entity.name}_${detail.fieldName}`, payload.id, getAnnotatedTextCompiledMetadata(detail.field));
+  };
+  // The four v8 document actions are the only annotated actions admitted to
+  // the existing durable cursor.  Their inverse is an internal restore input;
+  // no application-authored history rule or public history payload is created.
+  for (const type of annotatedActionTypes) {
+    generatedHistoryActions[type] = {
+      inverse: ({ action, fact }) => ({ type, payload: action.payload, input: { kind: 'annotated-text.restore', expected: fact.after, target: fact.before } }),
+      redo: ({ action, fact }) => ({ type, payload: action.payload, input: { kind: 'annotated-text.restore', expected: fact.before, target: fact.after } }),
+    };
+  }
 
   // Generated CRUD is authorized by row admission. Registered actions own an
   // explicit authorization function which runs at both durable auth gates.
   return createServer({
     handlers,
-    authorize: (context) => {
+    authorize: async (context) => {
+      const annotated = annotatedActionDetails.get(context.type);
+      if (annotated) {
+        const id = context.payload?.id;
+        if (typeof id !== 'string' || id.length === 0) return false;
+        const row = app.db.prepare(`SELECT * FROM ${annotated.entity.name} WHERE id = ?`).get(id);
+        return Boolean(row && await mayFieldOp(annotated.entity, annotated.fieldName, write, annotated.entity.deserializeRow({ ...row }), context.principal));
+      }
       const declaration = registeredActions.get(context.type);
       if (!declaration) {
         const [entityName, verb] = String(context.type).split('.');
@@ -506,7 +541,7 @@ export function buildKernel(app) {
     history: app._history,
     historyActions: generatedHistoryActions,
     cursorPolicy,
-    annotatedHistory: Object.freeze({ entities: annotatedEntities, actionTypes: annotatedActionTypes }),
+     annotatedHistory: Object.freeze({ entities: annotatedEntities, actionTypes: annotatedActionTypes, moveActionTypes: new Set([...annotatedActionDetails].filter(([, detail]) => detail).map(([type]) => type)), isEligibleAction: isAnnotatedHistoryAction, isCanonicalFact: isAnnotatedHistoryFact }),
     pipeline: durableMutationVariant({
       projectionConsumers: projections,
       admission: buildDurableAdmission(app),

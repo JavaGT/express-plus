@@ -3136,6 +3136,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   }
   return Object.freeze({
     get document() { return session.snapshot; },
+    get history() { return session.history; },
     get status() { return session.status; },
     get ready() { return session.ready; },
     insert({ mutationId, at, text }) { return dispatch({ kind: 'text.insert', mutationId, at, text }); },

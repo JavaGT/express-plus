@@ -197,6 +197,15 @@ export function createDurableHistoryRuntime({ db, descriptor, generatedActions =
   const rules = Object.freeze({ ...generatedActions, ...descriptor.actions });
   const annotatedEntities = annotatedHistory?.entities ?? new Set();
   const annotatedActionTypes = annotatedHistory?.actionTypes ?? new Set();
+  const annotatedMoveActionTypes = annotatedHistory?.moveActionTypes ?? new Set();
+  const annotatedEligibleAction = annotatedHistory?.isEligibleAction ?? (() => false);
+  const annotatedCanonicalFact = annotatedHistory?.isCanonicalFact ?? (() => false);
+  // Only the package-generated configuration may opt into the annotated move
+  // path.  In particular, actionTypes/entities alone must not turn an
+  // application-supplied history descriptor into an undo capability.
+  const hasAnnotatedMoveCapability = annotatedHistory !== null
+    && typeof annotatedHistory?.isEligibleAction === 'function'
+    && typeof annotatedHistory?.isCanonicalFact === 'function';
 
   function isAnnotatedScope(scope) {
     return annotatedEntities.has(tryParseScopeKey(scope)?.entity);
@@ -242,6 +251,11 @@ export function createDurableHistoryRuntime({ db, descriptor, generatedActions =
       return Array.isArray(actions) && actions.every((action) =>
         action && typeof action.type === 'string' && cursorPolicyFor(action.type) === 'eligible');
     }
+     if (annotatedActionTypes.has(receipt.actionType)) {
+       const payload = parseJson(receipt.actionData, null);
+       if (!annotatedEligibleAction({ type: receipt.actionType, payload })) return false;
+        try { if (!annotatedCanonicalFact({ type: receipt.actionType, payload, fact: privateFactFromReceipt(db, receipt) })) return false; } catch { return false; }
+     }
     return typeof receipt.actionType === 'string' && cursorPolicyFor(receipt.actionType) === 'eligible';
   }
 
@@ -271,11 +285,11 @@ export function createDurableHistoryRuntime({ db, descriptor, generatedActions =
     }
     // Batch: if any action is excluded, exclude cursor entry
     if (request.actions) {
-      const allEligible = request.actions.every(
-        (action) => cursorPolicyFor(action.type) !== 'excluded',
-      );
+       const allEligible = request.actions.every(
+         (action) => annotatedActionTypes.has(action.type) ? annotatedEligibleAction(action) : cursorPolicyFor(action.type) === 'eligible',
+       );
       if (!allEligible) return { metadata, apply: undefined };
-    } else if (cursorPolicyFor(request.type) === 'excluded') {
+     } else if (annotatedActionTypes.has(request.type) ? !annotatedEligibleAction(request) : cursorPolicyFor(request.type) === 'excluded') {
       return { metadata, apply: undefined };
     }
     const key = identity({ scope: request.scope, session: request.history.session, principal: request.principal });
@@ -333,13 +347,24 @@ export function createDurableHistoryRuntime({ db, descriptor, generatedActions =
       if (retry.operation !== operation || retry.principalKey !== key.principalKey || retry.sessionId !== key.sessionId) {
         throw conflict('history action id is already bound to another operation');
       }
+      // A package-owned annotated v8 move must still pass the ordinary action
+      // authorization on retry.  Do this before resolving or returning events;
+      // generic receipt retries retain their existing behavior.
+      if (hasAnnotatedMoveCapability && annotatedMoveActionTypes.has(retry.actionType)) {
+        let payload;
+        try { payload = parseJson(retry.actionData, null); } catch { throw forbidden(); }
+        const action = { type: retry.actionType, payload };
+        if (!annotatedEligibleAction(action) || !await authorize({ ...action, principal: args.principal })) throw forbidden();
+      }
       const retried = { ok: true, deduped: true, events: Object.freeze(eventsFromReceipt(db, retry, parseEventType)) };
       if (retry.actionType === '$history.empty') retried.empty = true;
       return Object.freeze(retried);
     }
     const expected = cursorRow(db, key, receiptIsEligible);
     if (expectedRevision !== revision(expected)) throw conflict('history cursor is stale');
-    if (scopeContainsAnnotatedText(key.scope)) throw forbidden();
+    if (scopeContainsAnnotatedText(key.scope) && !hasAnnotatedMoveCapability) throw forbidden();
+    // Annotated text has one narrow package-owned move path.  Public history
+    // reads and all other annotated scopes remain forbidden.
     const source = operation === 'undo' ? expected.past : expected.future;
     const targetId = source[source.length - 1];
     if (!targetId) {
@@ -357,19 +382,23 @@ export function createDurableHistoryRuntime({ db, descriptor, generatedActions =
     }
     const receipt = receiptFor(db, key.scope, targetId);
     if (!receipt) throw new Error(`history action '${targetId}' is no longer retained`);
-    if (receiptContainsAnnotatedText(receipt)) throw forbidden();
     const action = actionFromRow(db, receipt);
+    const annotatedMove = hasAnnotatedMoveCapability && annotatedMoveActionTypes.has(action.type);
+    if (annotatedMove && (!annotatedEligibleAction(action))) throw forbidden();
+    if (scopeContainsAnnotatedText(key.scope) && !annotatedMove) throw forbidden();
+    if (receiptContainsAnnotatedText(receipt) && !annotatedMove) throw forbidden();
     const rule = rules[action.type];
     if (!rule) throw conflict(`history action '${action.type}' is not undoable`);
     // Re-authorize the original canonical action before private material is
     // loaded or supplied to application translation code.
     if (!await authorize({ type: action.type, payload: action.payload, principal: args.principal })) throw forbidden();
     const fact = privateFactFromReceipt(db, receipt);
+    if (annotatedMove && !annotatedCanonicalFact({ type: action.type, payload: action.payload, fact })) throw forbidden();
     const translate = operation === 'undo' ? rule.inverse : rule.redo;
     const translated = translatedActions(
       await translate({ action, fact, principal: args.principal, session: args.session }), operation, key.scope,
     );
-    if (translated.some((child) => annotatedActionTypes.has(child.type))) throw forbidden();
+    if (translated.some((child) => annotatedActionTypes.has(child.type)) && !annotatedMove) throw forbidden();
     const receiptAction = translated.length === 1 ? translated[0] : null;
     const transition = {
       handlerInputs: Object.freeze(translated.map((child) => Object.freeze({

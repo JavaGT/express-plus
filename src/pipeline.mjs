@@ -24,6 +24,7 @@ import { failure, failureFromError, failureOutcome } from './outcome.mjs';
 import { principalKeyOf } from './principal.mjs';
 import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparation, prepareErasureDirective } from './erasure-directive.mjs';
 import { declarePostCommitEffectsInTxn } from './post-commit-effects.mjs';
+import { ANNOTATED_HISTORY_COMPLETION, isAnnotatedEntityProjection } from './annotated-text-history.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -198,6 +199,10 @@ export function durableMutationVariant({
               consumer.apply(ev, db, Object.freeze({ privateFact, ...(claimedBlobs ? { claimedBlobs } : {}) }));
             } else if (claimedBlobs) {
               consumer.apply(ev, db, Object.freeze({ claimedBlobs }));
+            } else if (isAnnotatedEntityProjection(consumer)
+              && ev.data?.version === 8 && ev.data?.operation?.kind === 'history.restore') {
+              if (privateFact === undefined) throw new TypeError('annotated history restore requires a private fact');
+              consumer.apply(ev, db, Object.freeze({ privateFact }));
             } else {
               consumer.apply(ev, db);
             }
@@ -464,6 +469,7 @@ async function commitEvents(db, events, {
         now, actionId, nextSeq, principal, payload: canonicalPayload, type, scope, privateFact,
         claimedBlobs: commit.claimedBlobs,
       });
+      handler?.[ANNOTATED_HISTORY_COMPLETION]?.({ db, actionId, scope, payload: canonicalPayload, result, history: historyCommit });
       // The owning-stream action receipt (Wave 4.9): written atomically with
       // the events it references, so a retry's dedupe check and a crash
       // recovery always see either both or neither.
@@ -636,7 +642,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {
         const action = actions[actionIndex];
         try {
-          allEmitted.push(...handlers[action.type]({ payload: action.payload, principal }));
+          allEmitted.push(...handlers[action.type]({ payload: action.payload, principal, scope }));
         } catch (err) {
           return executionFailure(err, { actionId, type: action.type }, { actionIndex });
         }
@@ -831,6 +837,8 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
           scope: transactionContext.scope,
           actionId: transactionContext.actionId,
         }
+        // Preserve the ordinary-batch handler contract: scope is available in
+        // both batch modes, while db/clock/action identity are transaction-only.
         : { scope };
       const allEmitted = [];
       for (let actionIndex = 0; actionIndex < actions.length; actionIndex += 1) {

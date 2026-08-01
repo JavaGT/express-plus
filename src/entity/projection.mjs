@@ -8,6 +8,7 @@ import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoin
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { deriveBlockPosition, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
+import { restoreAnnotatedTextHistoryImage, markAnnotatedEntityProjection } from '../annotated-text-history.mjs';
 
 const INITIAL_BLOCK_POSITION = 'a0';
 
@@ -123,7 +124,7 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
   }
 }
 
-function applyAnnotatedTextOperation({ name, fields, handle, event, db }) {
+function applyAnnotatedTextOperation({ name, fields, handle, event, db, privateFact }) {
   if (handle.kind !== eventHandle.EventKind.native || handle.nativeName !== 'operated') return false;
   const descriptor = fields[handle.field];
   if (descriptor?.kind !== 'annotatedText') return false;
@@ -136,12 +137,23 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db }) {
   if (data.version === 3) return applyR3AnnotatedTextOperation({ name, handle, db, descriptor, data });
   if (data.version === 4) return applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data });
   if (data.version === 5) return applyR5AnnotatedTextOperation({ name, handle, db, descriptor, data });
-  if (data.version === 8) return applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data });
+  if (data.version === 8) return applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact });
   throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
 }
 
-function applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+function applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact }) {
   const prefix = `${name}_${handle.field}`;
+  if (data?.operation?.kind === 'history.restore') {
+    if (data.version !== 8 || typeof data.id !== 'string' || Object.keys(data.operation).length !== 1 || !privateFact?.after) throw new Error(`${name}.${handle.field}.operated history restore is invalid`);
+    const document = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(data.id);
+    if (!document) throw new Error(`${name}.${handle.field}.operated history restore document is missing`);
+    restoreAnnotatedTextHistoryImage({
+      db, prefix, documentId: data.id, image: privateFact.after,
+      metadata: getAnnotatedTextCompiledMetadata(descriptor),
+      expectedOwnership: { documentId: data.id, projectId: document[descriptor.project], ownerId: document[descriptor.owner] },
+    });
+    return true;
+  }
   const shape = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data).sort().join() : '';
    const structuralShape = 'after,before,blocks,family,id,measurements,memberships,operation,version';
    const splitAssignmentShape = 'after,annotation,before,blocks,family,groupMembership,id,measurements,memberships,operation,version';
@@ -1491,7 +1503,7 @@ function buildProjectedComputeRow(storedRow, fields) {
 }
 
 export function createEntityProjection({ name, fields, verbs, storedComputedFields, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }) {
-  return Object.freeze({
+  const projection = {
     eventTypes: [
       verbs.created.type,
       verbs.updated.type,
@@ -1505,7 +1517,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
       ...sideTableStrategyEntries.flatMap(({ strategy, fields: strategyFields }) =>
         strategy.eventTypes(name, strategyFields)),
     ],
-    apply: (event, db) => {
+    apply: (event, db, context = {}) => {
       const table = name;
       const handle = event.handle;
       if (handle?.brand !== 'event-handle' || handle.entity !== name) return;
@@ -1522,7 +1534,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         db.prepare(`INSERT OR IGNORE INTO ${name}_${handle.field}_retired (document_id, generation, retired_at) VALUES (?, ?, ?)`).run(data.id, data.generation, data.retiredAt);
         return;
       }
-      if (applyAnnotatedTextOperation({ name, fields, handle, event, db })) return;
+      if (applyAnnotatedTextOperation({ name, fields, handle, event, db, privateFact: context.privateFact })) return;
       if (handle.kind === eventHandle.EventKind.native && handle.nativeName === 'applied') {
         const descriptor = fields[handle.field];
         if (descriptor?.kind !== 'crdt' || descriptor.type !== 'text') return;
@@ -1640,7 +1652,9 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         getLog().debug('dispatch', `${name}.removed`, { id });
       }
     },
-  });
+  };
+  if (Object.values(fields).some((field) => field.kind === 'annotatedText')) markAnnotatedEntityProjection(projection);
+  return Object.freeze(projection);
 }
 
 export function createConditionalHistoryProjection({ name, verbs }) {

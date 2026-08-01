@@ -26,6 +26,7 @@ import { assertR5AnnotationDetachPayload } from '../annotated-text-r5.mjs';
 import { erasureDirectivePreparation } from '../erasure-directive.mjs';
 import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.mjs';
 import { mayRow } from '../row-grant.mjs';
+import { ANNOTATED_HISTORY_COMPLETION, annotatedTextHistoryImage } from '../annotated-text-history.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 
@@ -102,7 +103,7 @@ function ownerFieldOf(entity) {
   return null;
 }
 
-function assertR8Payload(name, fieldName, payload) {
+export function assertR8Payload(name, fieldName, payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 5 ||
       payload.version !== 8 || typeof payload.id !== 'string' || !payload.id || typeof payload.basis !== 'string' || !payload.basis ||
       typeof payload.mutationId !== 'string' || !payload.mutationId || !payload.edit || typeof payload.edit !== 'object' || Array.isArray(payload.edit)) {
@@ -572,15 +573,34 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       return command;
     };
 
-    const r8Handler = async ({ payload, db, scope, principal }) => {
+    const r8Handler = async ({ payload, db, scope, principal, history, capture }) => {
+      // History moves use the ordinary operation action and pipeline, but the
+      // package-owned restore input is deliberately not part of the public v8
+      // grammar.  It is admitted only after the original action has been
+      // re-authorized and the current projection still equals its expected
+      // image.
+      if (history?.input?.kind === 'annotated-text.restore') {
+        const command = assertR8Payload(name, fieldName, payload);
+        const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(command.id);
+        if (!row || scope !== resolveAnnotatedTextOwningScope(descriptor, fields, row).key) throw new ValidationError(`${name}.${fieldName}.operation document scope is invalid`);
+        await authorizeFieldOp(record, fieldName, write, row, principal);
+        const prefix = `${name}_${fieldName}`;
+        const handle = eventHandles.native(name, fieldName, 'operated');
+        const current = annotatedTextHistoryImage({ db, prefix, documentId: command.id, metadata: compiledMeta });
+        if (JSON.stringify(current) !== JSON.stringify(history.input.expected)) throw Object.assign(new Error('annotated-text history image conflicts'), { status: 409 });
+        const target = history.input.target;
+        if (!target || target.version !== 1) throw new ValidationError('annotated-text history target is invalid');
+        return { events: [{ handle, type: handle.type, scope, data: Object.freeze({ version: 8, id: command.id, operation: Object.freeze({ kind: 'history.restore' }) }) }], privateFact: { before: current, after: target } };
+      }
       const command = assertR8Payload(name, fieldName, payload);
       const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(command.id);
       if (!row) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       const documentScope = resolveAnnotatedTextOwningScope(descriptor, fields, row).key;
       if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
-      const basis = db.prepare(`SELECT structural_revision, family_checkpoint, visible_blocks, exposed_groups FROM ${prefix}_basis WHERE token = ? AND document_id = ? AND principal_id = ?`).get(command.basis, command.id, principal?.id ?? '');
-      if (!basis) throw new ValidationError(`${name}.${fieldName}.operation basis is unavailable`);
        await authorizeFieldOp(record, fieldName, write, row, principal);
+       capture?.(annotatedTextHistoryImage({ db, prefix: `${name}_${fieldName}`, documentId: command.id, metadata: compiledMeta }));
+       const basis = db.prepare(`SELECT structural_revision, family_checkpoint, visible_blocks, exposed_groups FROM ${prefix}_basis WHERE token = ? AND document_id = ? AND principal_id = ?`).get(command.basis, command.id, principal?.id ?? '');
+       if (!basis) throw new ValidationError(`${name}.${fieldName}.operation basis is unavailable`);
        const currentRecipient = await projectAnnotatedTextSnapshot({ db, entity: record, row, principal, fieldName, descriptor, mintBasis: false });
       let exposed;
       try { exposed = JSON.parse(basis.exposed_groups || '[]'); } catch { throw new ValidationError(`${name}.${fieldName}.operation basis exposed groups are invalid`); }
@@ -667,7 +687,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }
         const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
         if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
-        await authorizeFieldOp(record, fieldName, write, row, principal);
+         await authorizeFieldOp(record, fieldName, write, row, principal);
         const currentRecipient = await projectAnnotatedTextSnapshot({ db, entity: record, row, principal, fieldName, descriptor, mintBasis: false });
         const currentVisible = new Set(currentRecipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id));
         if (referencedBlocks.some((blockId) => !currentVisible.has(blockId))) {
@@ -1592,8 +1612,16 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }];
     };
 
-    const handler = ({ payload, db, scope, principal }) => {
-      if (payload.version === 8) return r8Handler({ payload, db, scope, principal });
+    const handler = ({ payload, db, scope, principal, history }) => {
+      if (payload.version === 8) {
+        let before;
+        const capture = (image) => { before = image; };
+        return Promise.resolve(r8Handler({ payload, db, scope, principal, history, capture })).then((result) => {
+          if (history || !result || !Array.isArray(result) || result.length === 0) return result;
+          if (!before || !['block.continue', 'block-group.assignment.set', 'block-group.assignment.clear', 'block.split-and-assign'].includes(payload.edit?.kind)) return result;
+          return { events: result, privateFact: { before, after: null } };
+        });
+      }
       if (payload.version === 1 || payload.version === 6 || payload.version === 7) return r1Handler({ payload, db, scope, principal });
       if (payload.version === 2) return splitHandler({ payload, db, scope });
       if (payload.version === 3) return r3Handler({ payload, db, scope });
@@ -1601,6 +1629,15 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       return r5Handler({ payload, db, scope });
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
+    Object.defineProperty(handler, ANNOTATED_HISTORY_COMPLETION, { value: ({ db, actionId, scope, payload, result, history }) => {
+      if (history?.handlerInputs || payload?.version !== 8 || !['block.continue', 'block-group.assignment.set', 'block-group.assignment.clear', 'block.split-and-assign'].includes(payload.edit?.kind)) return;
+      if (!Array.isArray(result?.events ?? result) || (result?.events ?? result).length === 0) return;
+      const factRow = db.prepare('SELECT fact FROM _PrivateActionFact WHERE scope = ? AND actionId = ?').get(scope, actionId);
+      if (!factRow) throw new TypeError('annotated history private fact was not persisted');
+      const fact = JSON.parse(factRow.fact);
+      const after = annotatedTextHistoryImage({ db, prefix: `${name}_${fieldName}`, documentId: payload.id, metadata: compiledMeta });
+      db.prepare('UPDATE _PrivateActionFact SET fact = ? WHERE scope = ? AND actionId = ?').run(JSON.stringify({ ...fact, after }), scope, actionId);
+    }});
     Object.defineProperty(handler, 'batchForbidden', { value: true });
     Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope, db }) => payload.version === 8
       ? (() => { const command = assertR8Payload(name, fieldName, payload); const documentScope = owningDocumentScope(db, command.id); if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`); return command; })()

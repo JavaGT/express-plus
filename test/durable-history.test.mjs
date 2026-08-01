@@ -666,7 +666,7 @@ test('mixed batch: excluded action excludes cursor entry for whole batch', async
   const result = await server.dispatchBatch({
     actionId: 'batch-mixed',
     actions: [
-      { type: 'document.set', payload: { value: 1, before: 0 } },
+      { type: 'document.set', payload: { value: 1 } },
       { type: 'explicit.excluded', payload: { value: 99 } },
     ],
     principal,
