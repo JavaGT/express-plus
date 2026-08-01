@@ -9,6 +9,27 @@ function position(value, label) {
   return Object.freeze({ blockId: value.blockId, offset: value.offset });
 }
 
+function selection(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('selection must be an object');
+  const keys = Object.keys(value);
+  if (value.kind === 'one' && keys.length === 2 && typeof value.blockGroupId === 'string' && value.blockGroupId.length > 0) {
+    return Object.freeze({ kind: 'one', blockGroupId: value.blockGroupId });
+  }
+  if ((value.kind === 'consecutive' || value.kind === 'listed') && keys.length === 2 && Array.isArray(value.blockGroupIds) &&
+      value.blockGroupIds.length > 0 && value.blockGroupIds.every((id) => typeof id === 'string' && id.length > 0) &&
+      new Set(value.blockGroupIds).size === value.blockGroupIds.length) {
+    return Object.freeze({ kind: value.kind, blockGroupIds: Object.freeze([...value.blockGroupIds]) });
+  }
+  throw new TypeError('selection must have an exact supported shape');
+}
+
+function annotation(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 3 ||
+      typeof value.id !== 'string' || value.id.length === 0 || typeof value.family !== 'string' || value.family.length === 0 ||
+      !value.fields || typeof value.fields !== 'object' || Array.isArray(value.fields)) throw new TypeError('annotation must be { id, family, fields }');
+  return Object.freeze({ id: value.id, family: value.family, fields: Object.freeze(value.fields) });
+}
+
 export function annotatedTextAction(entity, field, command) {
   if (!entity || typeof entity.name !== 'string' || entity.name.length === 0
     || !field || typeof field.fieldName !== 'string' || field.fieldName.length === 0
@@ -38,10 +59,21 @@ export function annotatedTextAction(entity, field, command) {
   } else if (command.kind === 'annotation.detach') {
     if (typeof command.annotationId !== 'string' || command.annotationId.length === 0 || typeof command.blockId !== 'string' || command.blockId.length === 0) throw new TypeError('annotation detach requires annotation and block IDs');
     edit = Object.freeze({ kind: command.kind, annotationId: command.annotationId, blockId: command.blockId });
+  } else if (command.kind === 'block.continue') {
+    edit = Object.freeze({ kind: command.kind, at: position(command.at, 'continue position') });
+  } else if (command.kind === 'block-group.assignment.set') {
+    edit = Object.freeze({ kind: command.kind, selection: selection(command.selection), annotation: annotation(command.annotation) });
+  } else if (command.kind === 'block-group.assignment.clear') {
+    if (typeof command.family !== 'string' || command.family.length === 0) throw new TypeError('clear assignment requires a non-empty family');
+    edit = Object.freeze({ kind: command.kind, selection: selection(command.selection), family: command.family });
+  } else if (command.kind === 'block.split-and-assign') {
+    edit = Object.freeze({ kind: command.kind, at: position(command.at, 'split-and-assign position'), annotation: annotation(command.annotation) });
   } else throw new TypeError(`unsupported annotated text action kind '${String(command.kind)}'`);
   return Object.freeze({
     type: `${entity.name}.${field.fieldName}.operation`,
     scope: `${entity.name}:${command.id}`,
-    payload: Object.freeze({ version: command.kind === 'text.insert' || command.kind === 'text.delete' ? 6 : 7, id: command.id, basis: command.basis, mutationId: command.mutationId, edit }),
+    payload: Object.freeze({ version: command.kind === 'text.insert' || command.kind === 'text.delete' ? 6 :
+      command.kind === 'block.continue' || command.kind === 'block-group.assignment.set' ||
+      command.kind === 'block-group.assignment.clear' || command.kind === 'block.split-and-assign' ? 8 : 7, id: command.id, basis: command.basis, mutationId: command.mutationId, edit }),
   });
 }

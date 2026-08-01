@@ -32,6 +32,33 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
+function selection(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('annotatedTextAction: selection must be an object');
+  }
+  const keys = Object.keys(value);
+  if (value.kind === 'one' && keys.length === 2 && typeof value.blockGroupId === 'string' && value.blockGroupId.length > 0) {
+    return { kind: 'one', blockGroupId: value.blockGroupId };
+  }
+  if ((value.kind === 'consecutive' || value.kind === 'listed') && keys.length === 2 &&
+      Array.isArray(value.blockGroupIds) && value.blockGroupIds.length > 0 &&
+      value.blockGroupIds.every((id) => typeof id === 'string' && id.length > 0) &&
+      new Set(value.blockGroupIds).size === value.blockGroupIds.length) {
+    return { kind: value.kind, blockGroupIds: [...value.blockGroupIds] };
+  }
+  throw new Error('annotatedTextAction: selection must be one, consecutive, or listed with exact keys');
+}
+
+function annotation(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 3 ||
+      typeof value.id !== 'string' || value.id.length === 0 ||
+      typeof value.family !== 'string' || value.family.length === 0 ||
+      !value.fields || typeof value.fields !== 'object' || Array.isArray(value.fields)) {
+    throw new Error('annotatedTextAction: annotation must be { id, family, fields }');
+  }
+  return { id: value.id, family: value.family, fields: value.fields };
+}
+
 export function annotatedTextAction(entity, field, command) {
   const fieldName = validateEntityAndField(entity, field);
 
@@ -45,7 +72,8 @@ export function annotatedTextAction(entity, field, command) {
       typeof command.mutationId !== 'string' || command.mutationId.length === 0) {
     throw new Error('annotatedTextAction: command requires a non-empty basis and mutationId');
   }
-  const kinds = new Set(['text.insert', 'text.delete', 'block.split', 'block.merge', 'annotation.apply', 'annotation.detach']);
+  const kinds = new Set(['text.insert', 'text.delete', 'block.split', 'block.merge', 'annotation.apply', 'annotation.detach',
+    'block.continue', 'block-group.assignment.set', 'block-group.assignment.clear', 'block.split-and-assign']);
   if (!kinds.has(command.kind)) throw new Error(`annotatedTextAction: unsupported command kind '${String(command.kind)}'`);
   const position = (value, label) => {
     if (!value || typeof value !== 'object' || Array.isArray(value) ||
@@ -73,13 +101,27 @@ export function annotatedTextAction(entity, field, command) {
   } else if (command.kind === 'annotation.apply') {
     if (!command.annotation || typeof command.annotation !== 'object' || Array.isArray(command.annotation)) throw new Error('annotatedTextAction: annotation.apply requires annotation');
     edit = { kind: command.kind, annotation: command.annotation, from: position(command.from, 'from'), to: position(command.to, 'to') };
-  } else {
+  } else if (command.kind === 'annotation.detach') {
     if (typeof command.annotationId !== 'string' || !command.annotationId || typeof command.blockId !== 'string' || !command.blockId) {
       throw new Error('annotatedTextAction: annotation.detach requires annotationId and blockId');
     }
     edit = { kind: command.kind, annotationId: command.annotationId, blockId: command.blockId };
+  } else if (command.kind === 'block.continue') {
+    edit = { kind: command.kind, at: position(command.at, 'at') };
+  } else if (command.kind === 'block-group.assignment.set') {
+    edit = { kind: command.kind, selection: selection(command.selection), annotation: annotation(command.annotation) };
+  } else if (command.kind === 'block-group.assignment.clear') {
+    if (typeof command.family !== 'string' || command.family.length === 0) {
+      throw new Error('annotatedTextAction: block-group.assignment.clear requires a non-empty family');
+    }
+    edit = { kind: command.kind, selection: selection(command.selection), family: command.family };
+  } else {
+    edit = { kind: command.kind, at: position(command.at, 'at'), annotation: annotation(command.annotation) };
   }
-  const payload = deepFreeze({ version: command.kind === 'text.insert' || command.kind === 'text.delete' ? 6 : 7, id: command.id, basis: command.basis, mutationId: command.mutationId, edit });
+  const version = command.kind === 'text.insert' || command.kind === 'text.delete' ? 6 :
+    command.kind === 'block.continue' || command.kind === 'block-group.assignment.set' ||
+    command.kind === 'block-group.assignment.clear' || command.kind === 'block.split-and-assign' ? 8 : 7;
+  const payload = deepFreeze({ version, id: command.id, basis: command.basis, mutationId: command.mutationId, edit });
 
   const type = `${entity.name}.${fieldName}.operation`;
 

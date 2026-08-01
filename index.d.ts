@@ -322,6 +322,14 @@ export interface AnnotatedTextPosition {
   readonly blockId: string;
   readonly offset: number;
 }
+export interface AnnotatedTextActionAnnotation {
+  readonly id: string;
+  readonly family: string;
+  readonly fields: Readonly<Record<string, unknown>>;
+}
+export interface AnnotatedTextOneSelection { readonly kind: 'one'; readonly blockGroupId: string; }
+export interface AnnotatedTextGroupSelection { readonly kind: 'consecutive' | 'listed'; readonly blockGroupIds: readonly [string, ...string[]]; }
+export type AnnotatedTextSelection = AnnotatedTextOneSelection | AnnotatedTextGroupSelection;
 interface AnnotatedTextCommandBase {
   readonly id: string;
   readonly basis: string;
@@ -341,13 +349,21 @@ export interface AnnotatedTextSplitCommand extends AnnotatedTextCommandBase { re
 export interface AnnotatedTextMergeCommand extends AnnotatedTextCommandBase { readonly kind: 'block.merge'; readonly leftBlockId: string; readonly rightBlockId: string; }
 export interface AnnotatedTextApplyAnnotationCommand extends AnnotatedTextCommandBase { readonly kind: 'annotation.apply'; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition; }
 export interface AnnotatedTextDetachAnnotationCommand extends AnnotatedTextCommandBase { readonly kind: 'annotation.detach'; readonly annotationId: string; readonly blockId: string; }
+export interface AnnotatedTextContinueBlockCommand extends AnnotatedTextCommandBase { readonly kind: 'block.continue'; readonly at: AnnotatedTextPosition; }
+export interface AnnotatedTextSetGroupAssignmentCommand extends AnnotatedTextCommandBase { readonly kind: 'block-group.assignment.set'; readonly selection: AnnotatedTextSelection; readonly annotation: AnnotatedTextActionAnnotation; }
+export interface AnnotatedTextClearGroupAssignmentCommand extends AnnotatedTextCommandBase { readonly kind: 'block-group.assignment.clear'; readonly selection: AnnotatedTextSelection; readonly family: string; }
+export interface AnnotatedTextSplitAndAssignCommand extends AnnotatedTextCommandBase { readonly kind: 'block.split-and-assign'; readonly at: AnnotatedTextPosition; readonly annotation: AnnotatedTextActionAnnotation; }
 export type AnnotatedTextOperationCommand =
   | AnnotatedTextInsertCommand
   | AnnotatedTextDeleteCommand
   | AnnotatedTextSplitCommand
   | AnnotatedTextMergeCommand
   | AnnotatedTextApplyAnnotationCommand
-  | AnnotatedTextDetachAnnotationCommand;
+  | AnnotatedTextDetachAnnotationCommand
+  | AnnotatedTextContinueBlockCommand
+  | AnnotatedTextSetGroupAssignmentCommand
+  | AnnotatedTextClearGroupAssignmentCommand
+  | AnnotatedTextSplitAndAssignCommand;
 export interface AnnotatedTextActionRequest<Payload = unknown> {
   readonly type: string;
   readonly payload: Payload;

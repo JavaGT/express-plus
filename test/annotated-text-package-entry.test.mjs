@@ -75,6 +75,45 @@ test('public action grammar validates field handles and emits closed generated a
   assert.deepEqual(annotatedTextAction(Document, Document.body, { kind: 'block.split', id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-1', at: { blockId: 'block-1', offset: 1 } }).payload, {
     version: 7, id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-1', edit: { kind: 'block.split', at: { blockId: 'block-1', offset: 1 } },
   });
+  const assignment = annotatedTextAction(Document, Document.body, {
+    kind: 'block-group.assignment.set', id: 'doc-1', basis: 'opaque-basis', mutationId: 'assign-1',
+    selection: { kind: 'listed', blockGroupIds: ['group-2', 'group-1'] },
+    annotation: { id: 'annotation-1', family: 'coding', fields: { value: 'x' } },
+  });
+  assert.deepEqual(assignment.payload, {
+    version: 8, id: 'doc-1', basis: 'opaque-basis', mutationId: 'assign-1', edit: {
+      kind: 'block-group.assignment.set', selection: { kind: 'listed', blockGroupIds: ['group-2', 'group-1'] },
+      annotation: { id: 'annotation-1', family: 'coding', fields: { value: 'x' } },
+    },
+  });
+  assert.ok(Object.isFrozen(assignment.payload.edit.selection));
+  assert.ok(Object.isFrozen(assignment.payload.edit.annotation));
+  assert.deepEqual(annotatedTextAction(Document, Document.body, {
+    kind: 'block-group.assignment.clear', id: 'doc-1', basis: 'opaque-basis', mutationId: 'clear-1',
+    selection: { kind: 'one', blockGroupId: 'group-1' }, family: 'coding',
+  }).payload.edit, { kind: 'block-group.assignment.clear', selection: { kind: 'one', blockGroupId: 'group-1' }, family: 'coding' });
+  const continued = annotatedTextAction(Document, Document.body, {
+    kind: 'block.continue', id: 'doc-1', basis: 'opaque-basis', mutationId: 'continue-1', at: { blockId: 'block-1', offset: 1 },
+  });
+  assert.deepEqual(continued.payload.edit, { kind: 'block.continue', at: { blockId: 'block-1', offset: 1 } });
+  assert.equal(continued.payload.version, 8);
+  const splitAssignment = annotatedTextAction(Document, Document.body, {
+    kind: 'block.split-and-assign', id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-assign-1', at: { blockId: 'block-1', offset: 1 },
+    annotation: { id: 'annotation-2', family: 'coding', fields: {} },
+  });
+  assert.equal(splitAssignment.payload.edit.kind, 'block.split-and-assign');
+  assert.equal(splitAssignment.payload.version, 8);
+  assert.equal(annotatedTextAction(Document, Document.body, {
+    kind: 'block-group.assignment.clear', id: 'doc-1', basis: 'opaque-basis', mutationId: 'clear-2',
+    selection: { kind: 'one', blockGroupId: 'group-1' }, family: 'coding',
+  }).payload.version, 8);
+  assert.equal(assignment.payload.version, 8);
+  for (const command of [
+    { kind: 'block-group.assignment.set', selection: { kind: 'one', blockGroupId: 'g', extra: true }, annotation: { id: 'a', family: 'f', fields: {} } },
+    { kind: 'block-group.assignment.set', selection: { kind: 'listed', blockGroupIds: ['g', 'g'] }, annotation: { id: 'a', family: 'f', fields: {} } },
+    { kind: 'block-group.assignment.set', selection: { kind: 'one', blockGroupId: 'g' }, annotation: { id: 'a', family: 'f', fields: {}, protectedTargetIds: [] } },
+    { kind: 'block-group.assignment.clear', selection: { kind: 'one', blockGroupId: 'g' }, family: '' },
+  ]) assert.throws(() => annotatedTextAction(Document, Document.body, { ...command, id: 'doc-1', basis: 'b', mutationId: 'm' }));
   assert.deepEqual(annotatedTextRetireAction(Document, 'doc-1'), {
     type: 'PackageActionDocument.annotatedText.retire', payload: { id: 'doc-1' },
   });
