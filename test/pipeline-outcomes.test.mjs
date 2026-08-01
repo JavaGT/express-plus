@@ -141,3 +141,22 @@ test('post-commit failure cannot turn a committed mutation into a reported failu
   });
   db.close();
 });
+
+test('ordinary batch handlers retain the owning scope context', async () => {
+  const db = new DatabaseSync(':memory:');
+  for (const sql of generateFrameworkDDL()) db.exec(sql);
+  const scopes = [];
+  const server = createServer({
+    db,
+    handlers: { 'note.create': ({ scope }) => { scopes.push(scope); return [event]; } },
+    authorize: () => true,
+  });
+
+  const outcome = await server.dispatchBatch({
+    actionId: 'batch-1', scope: 'project:one', principal: { id: 'user-1' },
+    actions: [{ type: 'note.create', payload: { id: 'note-1' } }],
+  });
+  assert.equal(outcome.ok, true);
+  assert.deepEqual(scopes, ['project:one']);
+  db.close();
+});
