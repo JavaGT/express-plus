@@ -790,6 +790,48 @@ test('annotation() returns a frozen descriptor with correct shape', () => {
   assert.deepEqual(Object.keys(a.fields), ['col1']);
   assert.deepEqual(a.actions, []);
   assert.equal(a.empty, 'delete');
+  assert.equal(a.appliesTo, 'block');
+  assert.equal(a.cardinality, 'many');
+});
+
+test('annotation() accepts and compiles block-group one declarations', () => {
+  const d = annotatedText({
+    project: 'project', owner: 'owner',
+    annotations: [annotation('groupCode', { appliesTo: 'block-group', cardinality: 'one', fields: { value: text() } })],
+    measurements: [measurement('m', { extension: 'testFieldExt' })],
+  });
+  validateAnnotatedTextDeclaration('Doc', 'body', d, makeFields());
+  const handle = getAnnotatedTextCompiledMetadata(d).annotationHandles.groupCode;
+  assert.equal(handle.appliesTo, 'block-group');
+  assert.equal(handle.cardinality, 'one');
+});
+
+test('annotation() rejects invalid appliesTo and cardinality declarations', () => {
+  assert.throws(() => annotation('bad', { appliesTo: 'document' }), /appliesTo must be 'block' or 'block-group'/);
+  assert.throws(() => annotation('bad', { cardinality: 'some' }), /cardinality must be 'many' or 'one'/);
+  assert.throws(() => annotation('bad', { cardinality: 'one' }), /requires appliesTo 'block-group'/);
+
+  for (const [key, value, message] of [
+    ['appliesTo', 'document', /must be 'block' or 'block-group'/],
+    ['cardinality', 'some', /must be 'many' or 'one'/],
+  ]) {
+    const bad = Object.freeze({ ...annotation('bad'), [key]: value });
+    assert.throws(() => validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
+      project: 'project', owner: 'owner', annotations: [bad],
+      measurements: [measurement('m', { extension: 'testFieldExt' })],
+    }), makeFields()), message);
+  }
+});
+
+test('declaration validation rejects invalid block-one annotation descriptors', () => {
+  const bad = Object.freeze({
+    ...annotation('bad'),
+    cardinality: 'one',
+  });
+  assert.throws(() => validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
+    project: 'project', owner: 'owner', annotations: [bad],
+    measurements: [measurement('m', { extension: 'testFieldExt' })],
+  }), makeFields()), /'one' requires appliesTo 'block-group'/);
 });
 
 test('annotation empty policy is closed and compiled into its static handle', () => {

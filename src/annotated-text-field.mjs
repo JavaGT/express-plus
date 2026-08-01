@@ -163,9 +163,18 @@ function assertScalarFields(entity, field, path, entries, reserved) {
 
 // -- Declarative annotation / measurement descriptor constructors --
 
-export function annotation(name, { fields = {}, actions = [], empty = 'delete' } = {}) {
+export function annotation(name, { appliesTo = 'block', cardinality = 'many', fields = {}, actions = [], empty = 'delete' } = {}) {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`annotation name '${name}' is not a valid identifier`);
+  }
+  if (appliesTo !== 'block' && appliesTo !== 'block-group') {
+    throw new Error(`annotation '${name}' appliesTo must be 'block' or 'block-group'`);
+  }
+  if (cardinality !== 'many' && cardinality !== 'one') {
+    throw new Error(`annotation '${name}' cardinality must be 'many' or 'one'`);
+  }
+  if (cardinality === 'one' && appliesTo !== 'block-group') {
+    throw new Error(`annotation '${name}' cardinality 'one' requires appliesTo 'block-group'`);
   }
   if (empty !== 'delete' && empty !== 'orphan') {
     throw new Error(`annotation '${name}' empty policy must be 'delete' or 'orphan'`);
@@ -178,6 +187,8 @@ export function annotation(name, { fields = {}, actions = [], empty = 'delete' }
   return Object.freeze({
     kind: 'annotation',
     annotationName: name,
+    appliesTo,
+    cardinality,
     fields: Object.freeze(frozenFields),
     actions: frozenActions,
     empty,
@@ -313,6 +324,17 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     if (ann.empty !== 'delete' && ann.empty !== 'orphan') {
       fail(entity, field, `annotations.${name}.empty`, "must be 'delete' or 'orphan'");
     }
+    const appliesTo = ann.appliesTo === undefined ? 'block' : ann.appliesTo;
+    if (appliesTo !== 'block' && appliesTo !== 'block-group') {
+      fail(entity, field, `annotations.${name}.appliesTo`, "must be 'block' or 'block-group'");
+    }
+    const cardinality = ann.cardinality === undefined ? 'many' : ann.cardinality;
+    if (cardinality !== 'many' && cardinality !== 'one') {
+      fail(entity, field, `annotations.${name}.cardinality`, "must be 'many' or 'one'");
+    }
+    if (cardinality === 'one' && appliesTo !== 'block-group') {
+      fail(entity, field, `annotations.${name}.cardinality`, "'one' requires appliesTo 'block-group'");
+    }
     if (annotationNames.has(name)) {
       fail(entity, field, `annotations.${name}`, 'duplicate annotation name');
     }
@@ -411,7 +433,7 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   }
 
   // Validate no unknown keys on annotation annotations
-  const ALLOWED_ANN_KEYS = new Set(['kind', 'annotationName', 'fields', 'actions', 'empty', 'protects', 'placeholder', 'access']);
+  const ALLOWED_ANN_KEYS = new Set(['kind', 'annotationName', 'appliesTo', 'cardinality', 'fields', 'actions', 'empty', 'protects', 'placeholder', 'access']);
   for (const ann of descriptor.annotations) {
     for (const key of Object.keys(ann)) {
       if (!ALLOWED_ANN_KEYS.has(key)) {
@@ -528,6 +550,8 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
         return [n, Object.freeze({
           family: n,
           annotationName: n,
+          appliesTo: annConfig?.appliesTo === undefined ? 'block' : annConfig.appliesTo,
+          cardinality: annConfig?.cardinality === undefined ? 'many' : annConfig.cardinality,
           actions: annotationActionIds[n] || Object.freeze([]),
           empty: (annConfig && annConfig.empty) || 'delete',
         })];
