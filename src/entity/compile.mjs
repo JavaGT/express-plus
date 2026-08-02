@@ -54,7 +54,9 @@ import { scopeOf } from '../scope-handle.mjs';
 const RESERVED_DECLARATION_SLOTS = new Set([
   'fields', 'grant', 'checks', 'routes', 'create', 'effects', 'admitsEffects',
   'schedule', 'simulation', 'gate', 'on', 'membership', 'field', 'history', 'indexes',
+  'applicationHttpActions',
 ]);
+const APPLICATION_HTTP_CRUD_VERBS = Object.freeze(['create', 'update', 'remove']);
 
 function looksLikeFieldDescriptor(value) {
   return value !== null && typeof value === 'object' && typeof value.kind === 'string';
@@ -78,12 +80,32 @@ export function entity(name, declaration = {}) {
     }
   }
 
-  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl, indexes: indexesDecl } = declaration;
+  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl, indexes: indexesDecl, applicationHttpActions: declaredApplicationHttpActions } = declaration;
   if (historyDecl !== undefined && (typeof historyDecl !== 'object' || historyDecl === null || Array.isArray(historyDecl) || Object.keys(historyDecl).some((key) => key !== 'update' && key !== 'create') || ['update', 'create'].some((key) => historyDecl[key] !== undefined && historyDecl[key] !== 'conditional'))) {
     throw new Error(`entity('${name}') history must be { create?: 'conditional', update?: 'conditional' }`);
   }
   const conditionalHistory = historyDecl?.update === 'conditional';
   const conditionalCreateHistory = historyDecl?.create === 'conditional';
+  let applicationHttpActions = Object.freeze([]);
+  if (declaredApplicationHttpActions !== undefined) {
+    if (!Array.isArray(declaredApplicationHttpActions) || declaredApplicationHttpActions.length === 0) {
+      throw new Error(`entity('${name}') applicationHttpActions must be a non-empty array of 'create' | 'update' | 'remove'`);
+    }
+    const seen = new Set();
+    for (const verb of declaredApplicationHttpActions) {
+      if (!APPLICATION_HTTP_CRUD_VERBS.includes(verb)) {
+        throw new Error(
+          `entity('${name}') applicationHttpActions has unknown verb '${verb}'. ` +
+            `Allowed verbs are ${APPLICATION_HTTP_CRUD_VERBS.join(', ')}.`,
+        );
+      }
+      if (seen.has(verb)) {
+        throw new Error(`entity('${name}') applicationHttpActions lists '${verb}' more than once`);
+      }
+      seen.add(verb);
+    }
+    applicationHttpActions = Object.freeze(APPLICATION_HTTP_CRUD_VERBS.filter((verb) => seen.has(verb)));
+  }
 
   // The entity name becomes a table name interpolated into SQL — validate first.
   assertSqlIdentifier('entity', name);
@@ -374,6 +396,10 @@ export function entity(name, declaration = {}) {
     },
     routes,
     gate,
+    applicationHttpActions,
+    inherit: clauses?.inherit
+      ? Object.freeze({ parent: clauses.inherit.name, via: clauses.via })
+      : null,
     readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
     scopeAst,
     scopeFilter(principal) {

@@ -1,11 +1,13 @@
-// Package-owned browser transport for registered actions. It deliberately
-// accepts one opaque envelope instead of exposing entity-specific REST writes.
+// Package-owned browser transport for registered actions and explicitly
+// opted-in generated entity CRUD. It deliberately accepts one opaque envelope
+// instead of exposing entity-specific REST writes.
 
 import { readSeq } from './cursor.mjs';
 import { BodyError, readRequestBody } from './http-body.mjs';
 import { failure, isWorkbenchFailure } from './outcome.mjs';
 import { sendFailure } from './http-failure.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
+import { scopeOf } from './scope-handle.mjs';
 
 const ACTION_PATH = '/workbench/actions';
 const BATCH_ACTION_PATH = '/workbench/actions/batch';
@@ -13,6 +15,7 @@ const HISTORY_PATH = '/workbench/history';
 const MAX_STRING_LENGTH = 512;
 const historyHttpDispatchers = new WeakMap();
 const batchHttpDispatchers = new WeakMap();
+const APPLICATION_HTTP_CRUD_VERBS = new Set(['create', 'update', 'remove']);
 
 export function installHistoryHttpDispatcher(app, dispatch) {
   historyHttpDispatchers.set(app, dispatch);
@@ -80,13 +83,33 @@ function historyRequest(body) {
   return { actionId, scope, session };
 }
 
-function admitsApplicationHttpAction(app, request) {
-  if (app.actions.some((action) => action.type === request.type)) return true;
+function parseGeneratedCrudType(type) {
+  const dot = type.lastIndexOf('.');
+  if (dot <= 0 || dot === type.length - 1) return null;
+  const verb = type.slice(dot + 1);
+  if (!APPLICATION_HTTP_CRUD_VERBS.has(verb)) return null;
+  return { entityName: type.slice(0, dot), verb };
+}
 
-  // Generated entity handlers are not a public mutation catalog. Annotated
-  // text is the one generated browser grammar: derive its exact closed set from
-  // registered declarations, and bind lifecycle requests to their document
-  // scope rather than recognizing action-name prefixes.
+function resolveInheritedOwnerScope(app, entity, verb, payload) {
+  const inherit = entity.inherit;
+  if (!inherit) return null;
+  if (verb === 'create') {
+    const ownerId = payload?.[inherit.via];
+    if (typeof ownerId !== 'string' || ownerId.length === 0) return null;
+    return scopeOf(inherit.parent, ownerId).key;
+  }
+  const id = payload?.id;
+  if (typeof id !== 'string' || id.length === 0) return null;
+  const row = app.db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id);
+  if (!row) return null;
+  const ownerId = row[inherit.via];
+  if (typeof ownerId !== 'string' || ownerId.length === 0) return null;
+  if (Object.hasOwn(payload, inherit.via) && payload[inherit.via] !== ownerId) return null;
+  return scopeOf(inherit.parent, ownerId).key;
+}
+
+function admitsAnnotatedTextAction(app, request) {
   for (const entity of app.entities.values()) {
     const annotatedEntries = Object.entries(entity.fields).filter(([, field]) => field.kind === 'annotatedText');
     const annotatedFields = annotatedEntries.map(([name]) => name);
@@ -110,6 +133,36 @@ function admitsApplicationHttpAction(app, request) {
       && annotatedFields.some((field) => request.type === `${entity.name}.${field}.operation`)) return true;
   }
   return false;
+}
+
+function admitsGeneratedCrudAction(app, request) {
+  const parsed = parseGeneratedCrudType(request.type);
+  if (!parsed) return false;
+  const entity = app.entities.get(parsed.entityName);
+  if (!entity) return false;
+  if (!entity.applicationHttpActions?.includes(parsed.verb)) return false;
+  if (!entity.crudHandlers?.[request.type]) return false;
+  const owningScope = resolveInheritedOwnerScope(app, entity, parsed.verb, request.payload);
+  if (!owningScope) return false;
+  if (request.scope === undefined || request.scope !== owningScope) return false;
+  return true;
+}
+
+/** Single admission predicate for registered, opted-in CRUD, and annotated-text actions. */
+export function admitsApplicationHttpAction(app, request) {
+  if (app.actions.some((action) => action.type === request.type)) return true;
+  if (admitsGeneratedCrudAction(app, request)) return true;
+  return admitsAnnotatedTextAction(app, request);
+}
+
+function routeGateDenies(app, request, principal) {
+  const parsed = parseGeneratedCrudType(request.type);
+  if (!parsed) return false;
+  const entity = app.entities.get(parsed.entityName);
+  if (!entity?.applicationHttpActions?.includes(parsed.verb)) return false;
+  const gate = entity.gate?.[parsed.verb];
+  if (typeof gate !== 'function') return true;
+  return !gate(principal);
 }
 
 /** Handle the fixed HTTP skin for application-registered actions. */
@@ -137,13 +190,14 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
     sendFailure(sendJson, res, failure('invalid-input', 'invalid action request'));
     return true;
   }
-  // Registered declarations are an explicit public mutation contract. Do not
-  // let this generic transport reach generated entity CRUD kernel handlers.
+  // Registered declarations and explicit applicationHttpActions form the public
+  // mutation contract. Kernel handler existence alone never admits a type.
   if (url.pathname === ACTION_PATH && !admitsApplicationHttpAction(app, request)) {
     sendFailure(sendJson, res, failure('unknown-action', 'action is not available'));
     return true;
   }
-  if (url.pathname === BATCH_ACTION_PATH && request.actions.some((action) => !app.actions.some((declared) => declared.type === action.type))) {
+  if (url.pathname === BATCH_ACTION_PATH
+    && request.actions.some((action) => !admitsApplicationHttpAction(app, { ...action, scope: request.scope }))) {
     sendFailure(sendJson, res, failure('unknown-action', 'batch action is not available'));
     return true;
   }
@@ -155,6 +209,16 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
   }
   if (!validPrincipal(principal)) {
     sendFailure(sendJson, res, failure('denied', 'authentication required'));
+    return true;
+  }
+
+  if (url.pathname === ACTION_PATH && routeGateDenies(app, request, principal)) {
+    sendFailure(sendJson, res, failure('denied', 'forbidden'));
+    return true;
+  }
+  if (url.pathname === BATCH_ACTION_PATH
+    && request.actions.some((action) => routeGateDenies(app, { ...action, scope: request.scope }, principal))) {
+    sendFailure(sendJson, res, failure('denied', 'forbidden'));
     return true;
   }
 

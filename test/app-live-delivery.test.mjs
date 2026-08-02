@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   annotatedText, annotatedTextCreateAction, annotatedTextRetireAction, annotation,
-  deny, entity, everyone, exportAnnotatedText,
+  deny, entity, everyone, exportAnnotatedText, inherit,
   admin, grant, measurement, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write, principalSnapshot, projectionSource,
 } from '../src/index.mjs';
 import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
@@ -286,6 +286,118 @@ test('package batch transport admits only registered actions and returns one dur
   assert.equal((await post({ ...request, actions: [{ type: 'project.batchWrite', payload: { id: 'p1', name: 'two', authorized: true } }] })).status, 409);
   assert.equal((await post({ ...request, actionId: 'generated', actions: [{ type: 'Project.create', payload: {} }] })).status, 404);
   assert.equal((await post({ ...request, actionId: 'forged', cursor: 1 })).status, 400);
+});
+
+test('explicit applicationHttpActions admits generated CRUD on project shell scope with parent-scoped events', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`
+    CREATE TABLE Project (id TEXT PRIMARY KEY, name TEXT, owner TEXT);
+    CREATE TABLE User (id TEXT PRIMARY KEY);
+    INSERT INTO User VALUES ('u1');
+    INSERT INTO Project VALUES ('p1', 'shell', 'u1'), ('p2', 'other', 'u2');
+  `);
+  const Project = entity('Project', {
+    name: text(),
+    owner: ref('User', { role: 'owner' }),
+    grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not project owner'))],
+  });
+  const Codebook = entity('Codebook', {
+    projectId: ref(Project, { immutable: true }),
+    name: text(),
+    grant: inherit(Project, { via: 'projectId' }),
+    applicationHttpActions: ['create', 'update', 'remove'],
+  });
+  const Note = entity('Note', {
+    projectId: ref(Project, { immutable: true }),
+    title: text(),
+    grant: inherit(Project, { via: 'projectId' }),
+  });
+  executeDDL(Codebook, db);
+  executeDDL(Note, db);
+  const app = workbench({ db, entities: [Project, Codebook, Note] });
+  app.attachLiveDelivery({
+    principalOf: () => user,
+    snapshots: [snapshot(Project, { output: object({ name: select(Project.field.name) }) })],
+  });
+  app.listen(0, { principalOf: () => user });
+  await app.ready;
+  t.after(async () => {
+    app.httpServer.closeAllConnections?.();
+    await app.shutdown();
+    db.close();
+  });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const before = db.prepare("SELECT seq FROM _Log WHERE scope = 'Project:p1' ORDER BY seq DESC LIMIT 1").get()?.seq ?? 0;
+  const endpoint = `${origin}/workbench/actions`;
+  const post = (body) => fetch(endpoint, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+
+  const created = await post({
+    actionId: 'book-create', scope: 'Project:p1', clientId: 'tab-a',
+    type: 'Codebook.create', payload: { id: 'book-1', projectId: 'p1', name: 'Interviews' },
+  });
+  assert.equal(created.status, 200);
+  const receipt = await created.json();
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.actionId, 'book-create');
+  assert.ok(receipt.confirmedThrough > before);
+  assert.equal(db.prepare('SELECT name FROM Codebook WHERE id = ?').get('book-1')?.name, 'Interviews');
+  assert.equal(
+    db.prepare("SELECT scope FROM _Log WHERE actionId = 'book-create'").get()?.scope,
+    'Project:p1',
+  );
+
+  const updated = await post({
+    actionId: 'book-update', scope: 'Project:p1', clientId: 'tab-a',
+    type: 'Codebook.update', payload: { id: 'book-1', name: 'Fieldwork' },
+  });
+  assert.equal(updated.status, 200);
+  assert.equal(db.prepare('SELECT name FROM Codebook WHERE id = ?').get('book-1')?.name, 'Fieldwork');
+
+  assert.equal((await post({
+    actionId: 'note-create', scope: 'Project:p1',
+    type: 'Note.create', payload: { id: 'note-1', projectId: 'p1', title: 'private' },
+  })).status, 404, 'generated CRUD without applicationHttpActions stays unavailable');
+
+  assert.equal((await post({
+    actionId: 'book-spoof', scope: 'Project:p2',
+    type: 'Codebook.create', payload: { id: 'book-2', projectId: 'p1', name: 'spoof' },
+  })).status, 404, 'mismatched project shell scope is fail-closed');
+
+  assert.equal((await post({
+    actionId: 'book-cross', scope: 'Project:p1',
+    type: 'Codebook.update', payload: { id: 'book-1', projectId: 'p2', name: 'cross' },
+  })).status, 404, 'payload owner spoof on update is fail-closed');
+
+  const batch = await fetch(`${origin}/workbench/actions/batch`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      actionId: 'book-batch', scope: 'Project:p1', clientId: 'tab-a',
+      actions: [{ type: 'Codebook.update', payload: { id: 'book-1', name: 'Batch' } }],
+    }),
+  });
+  assert.equal(batch.status, 200);
+  assert.equal(db.prepare('SELECT name FROM Codebook WHERE id = ?').get('book-1')?.name, 'Batch');
+
+  const removed = await post({
+    actionId: 'book-remove', scope: 'Project:p1', clientId: 'tab-a',
+    type: 'Codebook.remove', payload: { id: 'book-1' },
+  });
+  assert.equal(removed.status, 200);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM Codebook').get().count, 0);
+});
+
+test('applicationHttpActions rejects unknown verbs and duplicates at compile time', () => {
+  assert.throws(
+    () => entity('BadHttp', { name: text(), grant: () => grant(read), applicationHttpActions: ['create', 'create'] }),
+    /more than once/,
+  );
+  assert.throws(
+    () => entity('BadHttpVerb', { name: text(), grant: () => grant(read), applicationHttpActions: ['list'] }),
+    /unknown verb/,
+  );
 });
 
 test('declared annotated text owns generated HTTP admission and package delivery recovery', async (t) => {

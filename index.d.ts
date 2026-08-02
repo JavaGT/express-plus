@@ -637,6 +637,8 @@ export interface BatchAction<Payload = Record<string, unknown>> {
 export type BatchActionFactory<Action extends BatchAction = BatchAction> =
   () => readonly Action[];
 
+export type ApplicationHttpCrudVerb = 'create' | 'update' | 'remove';
+
 export interface WorkbenchEntity<Row extends object = Record<string, unknown>> {
   readonly name: string;
   readonly fields: Readonly<Record<string, FieldDescriptor>>;
@@ -644,6 +646,7 @@ export interface WorkbenchEntity<Row extends object = Record<string, unknown>> {
   readonly field: EntityFields<Row>;
   readonly verbs: Readonly<Record<string, ActionHandle | EventHandle>>;
   readonly routes?: (routes: EntityRouteBuilder, entity: BoundWorkbenchEntity<Row>) => unknown | Promise<unknown>;
+  readonly applicationHttpActions?: readonly ApplicationHttpCrudVerb[];
   readonly [member: string]: unknown;
 }
 
@@ -687,6 +690,8 @@ export type EntityDeclaration<Row extends object> = Readonly<Record<string, unkn
   grant?: ScopeClause | ScopePredicate | InheritDirective | GrantDecision | ((context: unknown) => GrantDecision);
   history?: Readonly<{ create?: 'conditional'; update?: 'conditional' }>;
   indexes?: readonly EntityIndexDeclaration<Row>[];
+  /** Explicit allowlist of generated CRUD verbs admitted on POST /workbench/actions. */
+  applicationHttpActions?: readonly ApplicationHttpCrudVerb[];
 };
 export function entity<Row extends object = Record<string, unknown>>(
   name: string,

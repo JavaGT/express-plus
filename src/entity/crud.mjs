@@ -30,6 +30,22 @@ import { ANNOTATED_HISTORY_COMPLETION, annotatedTextHistoryImage } from '../anno
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 
+/** Prefer the dispatch scope when it is the inherited parent shell for this row. */
+export function resolveGeneratedEventScope(record, { id, row, payload, scope }) {
+  const inherit = record.inherit;
+  if (inherit && typeof scope === 'string' && scope.length > 0) {
+    const ownerId = row?.[inherit.via] ?? payload?.[inherit.via];
+    if (typeof ownerId === 'string' && ownerId.length > 0 && scope === scopeOf(inherit.parent, ownerId).key) {
+      return scope;
+    }
+  }
+  if (Object.values(record.fields).some((descriptor) => descriptor.kind === 'annotatedText')) {
+    const annotated = Object.entries(record.fields).find(([, descriptor]) => descriptor.kind === 'annotatedText');
+    return resolveAnnotatedTextOwningScope(annotated[1], record.fields, row ?? payload ?? {}).key;
+  }
+  return scopeOf(record.name, id).key;
+}
+
 export function assertAnnotatedTextOperationPayload(name, fieldName, payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       Object.keys(payload).length !== 4 ||
@@ -251,7 +267,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
   const ownerField = ownerFieldOf({ name, fields });
 
   const handlers = {
-    [`${name}.create`]: ({ payload, principal, db, history }) => {
+    [`${name}.create`]: ({ payload, principal, db, history, scope }) => {
       if (Object.hasOwn(payload, '__workbench')) {
         throw new ValidationError(`${name}.__workbench is reserved for framework event metadata`);
       }
@@ -281,7 +297,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }
         const restored = { id };
         for (const [fieldName, descriptor] of Object.entries(fields)) restored[fieldName] = deserializeField(descriptor, replacement[fieldName]);
-        return { events: [{ handle: verbs.created.handle, type: verbs.created.type, scope: scopeOf(name, id).key, data: restored }], privateFact: { before: null, after: replacement } };
+        return { events: [{ handle: verbs.created.handle, type: verbs.created.type, scope: resolveGeneratedEventScope(record, { id, payload: replacement, scope }), data: restored }], privateFact: { before: null, after: replacement } };
       }
       const data = materializeCreateDefaults(record, { ...validatedFields, id });
       if (ownerField) data[ownerField] = principal?.id;
@@ -303,9 +319,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       const events = [{
         handle: verbs.created.handle,
         type: verbs.created.type,
-        scope: Object.values(fields).some((descriptor) => descriptor.kind === 'annotatedText')
-          ? resolveAnnotatedTextOwningScope(Object.values(fields).find((descriptor) => descriptor.kind === 'annotatedText'), fields, data).key
-          : scopeOf(name, id).key,
+        scope: resolveGeneratedEventScope(record, { id, payload: data, scope }),
         data,
       }];
       if (!conditionalCreateHistory) return events;
@@ -319,7 +333,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }));
       return { events, privateFact: { before: null, after } };
     },
-    [`${name}.update`]: ({ payload, principal: _p, db, history }) => {
+    [`${name}.update`]: ({ payload, principal: _p, db, history, scope }) => {
       const { id, ...rest } = payload;
       if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
       if (Object.keys(rest).length === 0) {
@@ -348,7 +362,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             data[fieldName] = deserializeField(descriptor, replacement[fieldName]);
           }
         }
-        return { events: [{ handle: verbs.updated.handle, type: verbs.updated.type, scope: scopeOf(name, id).key, data: { ...data, id } }], privateFact: { before: expected, after: replacement } };
+        return { events: [{ handle: verbs.updated.handle, type: verbs.updated.type, scope: resolveGeneratedEventScope(record, { id, row: currentStored, payload: replacement, scope }), data: { ...data, id } }], privateFact: { before: expected, after: replacement } };
       }
       for (const fieldName of Object.keys(rest)) {
         if (fields[fieldName]?.kind === 'annotatedText') {
@@ -406,12 +420,11 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       for (const [fieldName, descriptor] of Object.entries(fields)) {
         if (descriptor.touch) data[fieldName] = new Date();
       }
+      const updateRow = db?.prepare?.(`SELECT * FROM ${name} WHERE id = ?`).get(id) ?? null;
       const result = [{
         handle: verbs.updated.handle,
         type: verbs.updated.type,
-        scope: annotatedEntries.length > 0
-          ? resolveAnnotatedTextOwningScope(annotatedEntries[0][1], fields, db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id) ?? {}).key
-          : scopeOf(name, id).key,
+        scope: resolveGeneratedEventScope(record, { id, row: updateRow, payload, scope }),
         data,
         ...(stateTransitions.length > 0 ? { _stateTransitions: stateTransitions } : {}),
       }];
@@ -428,7 +441,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }
       return result;
     },
-    [`${name}.remove`]: async ({ payload, principal, db, history }) => {
+    [`${name}.remove`]: async ({ payload, principal, db, history, scope }) => {
       if (!payload.id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
       if (history) {
         if (!conditionalCreateHistory || history.operation !== 'undo' || !history.input || Object.keys(history.input).length !== 2) throw new ValidationError(`${name}.remove history input is invalid`);
@@ -441,7 +454,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (record.removalCascade && (await record.removalCascadeDescendants(payload.id, db)).length > 0) {
           throw Object.assign(new Error(`${name} remove conflicts: cascade descendants exist`), { status: 409 });
         }
-        return { events: [{ handle: verbs.removed.handle, type: verbs.removed.type, scope: scopeOf(name, payload.id).key, data: { id: payload.id } }], privateFact: { before: history.input.expected, after: null } };
+        return { events: [{ handle: verbs.removed.handle, type: verbs.removed.type, scope: resolveGeneratedEventScope(record, { id: payload.id, row: current, payload: history.input.expected, scope }), data: { id: payload.id } }], privateFact: { before: history.input.expected, after: null } };
       }
       if (record.removalCascade) {
         return record.removalCascade(payload.id, principal, db)
@@ -466,9 +479,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       const events = [{
         handle: verbs.removed.handle,
         type: verbs.removed.type,
-        scope: annotatedEntries.length > 0
-          ? resolveAnnotatedTextOwningScope(annotatedEntries[0][1], fields, db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id) ?? {}).key
-          : scopeOf(name, payload.id).key,
+        scope: resolveGeneratedEventScope(record, { id: payload.id, row: admissionRow, payload, scope }),
         data: { id: payload.id },
         [CASCADE_PREAUTHORIZED]: true,
       }];
