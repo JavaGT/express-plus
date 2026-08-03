@@ -2587,39 +2587,47 @@ export function createLiveDeliverySession({
     return true;
   }
 
+  let reconnectLoop = null;
   async function reconnect() {
     if (closed || status === 'revoked') return;
     if (reconnecting) {
       reconnectRequested = true;
-      return;
+      // A reconnect loop is already running. Await its completion (which
+      // includes the extra iteration this request triggers) so the caller
+      // observes the loop's final snapshot, not an intermediate one.
+      return reconnectLoop;
     }
     // Some adapters report their own close synchronously. Mark reconnecting
     // before closing the old subscription so that callback cannot recurse.
     reconnecting = true;
     onRecoveryStart?.();
-    try {
-      do {
-        reconnectRequested = false;
-        // Invalidate the old transport before recovery reauthorizes the stream.
-        connectionGeneration += 1;
-        subscription?.close?.();
-        subscription = null;
-        await recover('catchup');
-        if (closed || status === 'revoked') break;
-        status = 'recovering';
-        if (!(await connect())) {
-          reconnectRequested = true;
-          continue;
-        }
-        status = 'live';
-      } while (reconnectRequested && !closed && status !== 'revoked');
-      if (!reconnectRequested && !closed && status === 'live') settleAdmissions(true);
-    } catch (error) {
-      if (!closed && status !== 'revoked') becomeUnavailable();
-      throw error;
-    } finally {
-      reconnecting = false;
-    }
+    reconnectLoop = (async () => {
+      try {
+        do {
+          reconnectRequested = false;
+          // Invalidate the old transport before recovery reauthorizes the stream.
+          connectionGeneration += 1;
+          subscription?.close?.();
+          subscription = null;
+          await recover('catchup');
+          if (closed || status === 'revoked') break;
+          status = 'recovering';
+          if (!(await connect())) {
+            reconnectRequested = true;
+            continue;
+          }
+          status = 'live';
+        } while (reconnectRequested && !closed && status !== 'revoked');
+        if (!reconnectRequested && !closed && status === 'live') settleAdmissions(true);
+      } catch (error) {
+        if (!closed && status !== 'revoked') becomeUnavailable();
+        throw error;
+      } finally {
+        reconnecting = false;
+        reconnectLoop = null;
+      }
+    })();
+    return reconnectLoop;
   }
 
   function revoke(_reason) {
@@ -3097,11 +3105,52 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   session.subscribe((document) => {
     if (document === null) revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
   });
+  const STALE_BASIS_CODE = 'basis-unavailable';
+  let basisRecovery = null;
+  function isStaleBasisFailure(failure) {
+    return Boolean(
+      failure && typeof failure === 'object'
+      && failure.details && typeof failure.details === 'object'
+      && failure.details.code === STALE_BASIS_CODE,
+    );
+  }
+  function recipientStateFingerprint(document) {
+    return JSON.stringify([
+      document.blocks,
+      document.blockGroups,
+      document.annotations,
+      document.memberships,
+      document.measurements,
+    ]);
+  }
+  function recoverBasis() {
+    if (!basisRecovery) {
+      basisRecovery = session.reconnect().finally(() => { basisRecovery = null; });
+    }
+    return basisRecovery;
+  }
   async function dispatch(command) {
-    const document = session.snapshot;
-    if (!document) throw new ClientClosedError('Annotated text document is unavailable');
-    const action = annotatedTextAction(entity, field, { ...command, id: documentId, basis: document.basis });
-    return session.dispatch(action.type, action.payload);
+    const builtAgainst = session.snapshot;
+    if (!builtAgainst) throw new ClientClosedError('Annotated text document is unavailable');
+    const action = annotatedTextAction(entity, field, { ...command, id: documentId, basis: builtAgainst.basis });
+    const result = await session.dispatch(action.type, action.payload);
+    if (result?.ok !== false || !isStaleBasisFailure(result.failure)) return result;
+    // The basis token was superseded by a fresh projection (e.g. a reconnect
+    // re-bootstrap re-minted it). Recover once and retry ONLY when the
+    // committed state is unchanged: replaying numeric coordinates onto a
+    // shifted projection could land a write at the wrong place, so when the
+    // state moved we surface the original failure and let the caller re-apply
+    // against the fresh document.
+    const before = recipientStateFingerprint(builtAgainst);
+    try {
+      await recoverBasis();
+    } catch {
+      return result;
+    }
+    const after = session.snapshot;
+    if (!after || recipientStateFingerprint(after) !== before) return result;
+    const retried = annotatedTextAction(entity, field, { ...command, id: documentId, basis: after.basis });
+    return session.dispatch(retried.type, retried.payload);
   }
   function resolveBlockGroup(handle) {
     if (!handle || typeof handle !== 'object' || Array.isArray(handle)) {

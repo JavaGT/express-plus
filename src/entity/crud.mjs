@@ -611,7 +611,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
        await authorizeFieldOp(record, fieldName, write, row, principal);
        capture?.(annotatedTextHistoryImage({ db, prefix: `${name}_${fieldName}`, documentId: command.id, metadata: compiledMeta }));
        const basis = db.prepare(`SELECT structural_revision, family_checkpoint, visible_blocks, exposed_groups FROM ${prefix}_basis WHERE token = ? AND document_id = ? AND principal_id = ?`).get(command.basis, command.id, principal?.id ?? '');
-       if (!basis) throw new ValidationError(`${name}.${fieldName}.operation basis is unavailable`);
+       if (!basis) throw new ValidationError(`${name}.${fieldName}.operation basis is unavailable`, { code: 'basis-unavailable' });
        const currentRecipient = await projectAnnotatedTextSnapshot({ db, entity: record, row, principal, fieldName, descriptor, mintBasis: false });
       let exposed;
       try { exposed = JSON.parse(basis.exposed_groups || '[]'); } catch { throw new ValidationError(`${name}.${fieldName}.operation basis exposed groups are invalid`); }
@@ -688,7 +688,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         const documentScope = resolveAnnotatedTextOwningScope(descriptor, fields, row).key;
         if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);
         const basis = db.prepare(`SELECT structural_revision, family_checkpoint, visible_blocks FROM ${prefix}_basis WHERE token = ? AND document_id = ? AND principal_id = ?`).get(command.basis, command.id, principal?.id ?? '');
-        if (!basis) throw new ValidationError(`${name}.${fieldName}.operation basis is unavailable`);
+        if (!basis) throw new ValidationError(`${name}.${fieldName}.operation basis is unavailable`, { code: 'basis-unavailable' });
         const visibleBlocks = new Set(JSON.parse(basis.visible_blocks));
         const referencedBlocks = command.edit.kind === 'text.insert' || command.edit.kind === 'block.split' ? [command.edit.at.blockId]
           : command.edit.kind === 'text.delete' || command.edit.kind === 'annotation.apply' ? [command.edit.from.blockId, command.edit.to.blockId]

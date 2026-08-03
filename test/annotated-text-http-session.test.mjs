@@ -124,3 +124,163 @@ test('document session translates opaque group selections into one v8 action eac
     session.close();
   }
 });
+
+function staleBasisSetup({ firstPost = 'stale-basis', stateChangedOnRecovery = false, deferCatchup = false, secondPost = 'success' } = {}) {
+  const requests = [];
+  const sources = [];
+  const catchups = [];
+  let number = 0;
+  let actionNumber = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => `action-${++actionNumber}`,
+    fetchImpl: async (_url, options) => {
+      if (options?.method === 'POST') {
+        const body = JSON.parse(options.body);
+        requests.push(body);
+        const stale = firstPost === 'stale-basis' && body.payload.basis === 'basis-1'
+          || secondPost === 'stale-basis' && body.payload.basis === 'basis-2';
+        if (stale) {
+          return { ok: false, status: 400, json: async () => ({
+            ok: false, failure: {
+              category: 'invalid-input', message: 'LiveDocument.body.operation basis is unavailable',
+              details: { code: 'basis-unavailable' },
+            },
+          }) };
+        }
+        if (firstPost === 'generic' && requests.length === 1) {
+          return { ok: false, status: 400, json: async () => ({
+            ok: false, failure: { category: 'invalid-input', message: 'LiveDocument.body.operation rejected for another reason' },
+          }) };
+        }
+        return { ok: true, status: 200, json: async () => ({ ok: true, actionId: body.actionId, confirmedThrough: 2 }) };
+      }
+      const basis = `basis-${++number}`;
+      const body = snapshot(basis).body;
+      if (stateChangedOnRecovery && number === 2) {
+        return { ok: true, status: 200, json: async () => ({
+          kind: 'snapshot', cursor: number,
+          snapshot: { body: { ...body, blocks: [{ kind: 'visible', id: 'block-1', text: 'Hello world', fields: {}, annotationIds: [] }] } },
+        }) };
+      }
+      if (deferCatchup && number >= 2) {
+        return new Promise((resolve) => {
+          catchups.push({
+            resolve: () => resolve({
+              ok: true, status: 200,
+              json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor: number }),
+            }),
+          });
+        });
+      }
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor: number }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  return { session, requests, sources, catchups };
+}
+
+test('stale-basis rejection recovers once and retries with the fresh basis when the state is unchanged', async () => {
+  const { session, requests } = staleBasisSetup();
+  await session.ready;
+  assert.equal(session.document.basis, 'basis-1');
+  const result = await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 1 }, text: 'x' });
+  assert.equal(result.ok, true, result.failure?.message);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].payload.basis, 'basis-1');
+  assert.equal(requests[1].payload.basis, 'basis-2');
+  assert.equal(requests[0].payload.mutationId, 'm1');
+  assert.equal(requests[1].payload.mutationId, 'm1');
+  session.close();
+});
+
+test('stale-basis rejection is surfaced unchanged when the state moved during recovery', async () => {
+  const { session, requests } = staleBasisSetup({ stateChangedOnRecovery: true });
+  await session.ready;
+  const result = await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 1 }, text: 'x' });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure?.details?.code, 'basis-unavailable');
+  assert.equal(requests.length, 1);
+  session.close();
+});
+
+test('non-basis failures pass through without recovery or retry', async () => {
+  const { session, requests } = staleBasisSetup({ firstPost: 'generic' });
+  await session.ready;
+  const result = await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 1 }, text: 'x' });
+  assert.equal(result.ok, false);
+  assert.equal(requests.length, 1);
+  session.close();
+});
+
+test('concurrent stale-basis dispatches share one recovery and retry with the fresh basis', async () => {
+  const { session, requests } = staleBasisSetup();
+  await session.ready;
+  const [a, b] = await Promise.all([
+    session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 1 }, text: 'x' }),
+    session.insert({ mutationId: 'm2', at: { blockId: 'block-1', offset: 2 }, text: 'y' }),
+  ]);
+  assert.equal(a.ok, true, a.failure?.message);
+  assert.equal(b.ok, true, b.failure?.message);
+  const failures = requests.filter((request) => request.payload.basis === 'basis-1');
+  const retries = requests.filter((request) => request.payload.basis === 'basis-2');
+  assert.equal(failures.length, 2);
+  assert.equal(retries.length, 2);
+  assert.deepEqual([...retries.map((request) => request.payload.mutationId)].sort(), ['m1', 'm2']);
+  session.close();
+});
+
+test('stale-basis retry waits for an in-flight reconnect loop before retrying with the final basis', async () => {
+  const { session, requests, catchups } = staleBasisSetup({ deferCatchup: true });
+  await session.ready;
+  const pending = session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 1 }, text: 'x' });
+  assert.equal(requests.length, 1, 'the insert POST should already be in flight');
+  const inFlight = session.reconnect();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(catchups.length, 1, 'reconnect loop should suspend on its first catchup snapshot');
+  assert.equal(requests[0].payload.basis, 'basis-1');
+  catchups[0].resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(catchups.length, 2, 'the requested extra iteration should start its own catchup');
+  catchups[1].resolve();
+  const result = await pending;
+  assert.equal(result.ok, true, result.failure?.message);
+  const retried = requests[requests.length - 1];
+  assert.equal(retried.payload.basis, 'basis-3', 'retry must use the final basis from the completed loop');
+  await inFlight;
+  session.close();
+});
+
+test('a retry that still hits a stale basis returns that second failure without recursing', async () => {
+  const { session, requests } = staleBasisSetup({ secondPost: 'stale-basis' });
+  await session.ready;
+  const result = await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 1 }, text: 'x' });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure?.details?.code, 'basis-unavailable');
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].payload.basis, 'basis-1');
+  assert.equal(requests[1].payload.basis, 'basis-2');
+  session.close();
+});
+
+test('unchanged-state block-group assignment retries successfully after recovery', async () => {
+  const { session, requests } = staleBasisSetup();
+  await session.ready;
+  const blockGroup = session.document.blockGroups[0];
+  const result = await session.setBlockGroupAssignment({
+    mutationId: 'assign-1',
+    selection: { kind: 'one', blockGroup },
+    annotation: { id: 'group-ann-1', family: 'grouping', fields: {} },
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0].payload.basis, 'basis-1');
+  assert.equal(requests[1].payload.basis, 'basis-2');
+  assert.deepEqual(requests[1].payload.edit, requests[0].payload.edit);
+  session.close();
+});

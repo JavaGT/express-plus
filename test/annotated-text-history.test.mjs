@@ -137,6 +137,7 @@ test('restoring history clears a minted basis and the old token cannot issue v8 
   assert.equal(c.db.prepare('SELECT COUNT(*) AS n FROM HistoryDocument_body_basis WHERE document_id = ?').get('d1').n, 0);
   const stale = await c.app.dispatch({ actionId: 'basis-reuse', principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', history: { session: 'tab-a' }, ...annotatedTextAction(c.Document, c.Document.body, { ...command, id: 'd1', basis: snapshot.basis, mutationId: 'basis-reuse' }) });
   assert.equal(stale.ok, false); assert.match(stale.failure?.message ?? '', /basis|snapshot|token/i);
+  assert.equal(stale.failure?.details?.code, 'basis-unavailable');
 });
 
 test('annotated history actions and events are not public reads or image-bearing receipts', async (t) => {

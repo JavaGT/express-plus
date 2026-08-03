@@ -316,7 +316,7 @@ function unknownActionOutcome(type, details) {
 
 function executionFailure(error, context = {}, details) {
   const normalized = error instanceof ValidationError
-    ? failure('invalid-input', error.message)
+    ? failure('invalid-input', error.message, isPlainObject(error.failure) ? error.failure : undefined)
     : failureFromError(error);
   if (normalized.category === 'internal') {
     getLog().error('dispatch', 'dispatch failed', { err: error, ...context });

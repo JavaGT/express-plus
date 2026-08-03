@@ -21,9 +21,13 @@ import { tryBetterAuthHash } from './hash-compat.mjs';
 // downstream runs (no apply, no persist, no emit) — a bad payload never proceeds
 // (SPEC §7 stage 1, fail closed). The message names the field path + reason.
 export class ValidationError extends Error {
-  constructor(message) {
+  constructor(message, failureDetails) {
     super(message);
     this.name = 'ValidationError';
+    // Optional structured failure details (JSON-safe record) attached to the
+    // invalid-input failure so clients can classify a rejection without
+    // parsing its human-readable message.
+    if (failureDetails !== undefined) this.failure = failureDetails;
   }
 }
 
