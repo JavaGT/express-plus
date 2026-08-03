@@ -384,7 +384,7 @@ function recordInMemoryDispatch(dispatched, scope, actionId, events) {
 function checkDurableDedupe(db, scope, actionId) {
   const receipt = receiptFor(db, scope, actionId);
   if (!receipt) return null;
-  return successOutcome(eventsFromReceipt(db, receipt, parseEventType), true);
+  return Object.freeze({ ...successOutcome(eventsFromReceipt(db, receipt, parseEventType), true), resultData: receipt.resultData });
 }
 
 function checkDurableBatchDedupe(db, scope, actionId, actions) {
@@ -470,6 +470,10 @@ async function commitEvents(db, events, {
         claimedBlobs: commit.claimedBlobs,
       });
       handler?.[ANNOTATED_HISTORY_COMPLETION]?.({ db, actionId, scope, payload: canonicalPayload, result, history: historyCommit });
+      const confirmedThrough = readSeq(db, scope);
+      const resultData = commit.authoringReceipt
+        ? commit.authoringReceipt({ db, actionId, scope, confirmedThrough, finalizedEvents: result })
+        : Object.freeze({ version: 1, actionId, confirmedThrough });
       // The owning-stream action receipt (Wave 4.9): written atomically with
       // the events it references, so a retry's dedupe check and a crash
       // recovery always see either both or neither.
@@ -486,10 +490,11 @@ async function commitEvents(db, events, {
         ? {
           ...historyCommit?.metadata,
           actionType: type ?? historyCommit?.metadata?.actionType,
-          actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData,
+           actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData,
+           resultData,
         }
         : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
-      return result;
+      return Object.freeze({ events: result, resultData });
     });
   } catch (err) {
     if (err?.[BATCH_HANDLER_FAILURE]) {
@@ -503,11 +508,11 @@ async function commitEvents(db, events, {
   }
 
   try {
-    await pipeline.afterCommit(committed, { db, actionId });
+    await pipeline.afterCommit(committed.events, { db, actionId });
   } catch (err) {
     getLog().error('dispatch', 'post-commit delivery failed', { err, actionId });
   }
-  return successOutcome(committed);
+  return Object.freeze({ ...successOutcome(committed.events), resultData: committed.resultData });
 }
 
 function receiptMetadata(request, historyCommit) {

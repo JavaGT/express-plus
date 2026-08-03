@@ -398,6 +398,7 @@ export function resolvePositionToEndpoint(family, blockId, utf16Offset, basisFro
 
   if (utf16Offset === 0) {
     if (!hasVisibleScalar) {
+      if (blockIndex === 0) return assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier });
       fail('fully tombstoned block offset 0 is ambiguous; provide explicit affinity');
     }
     if (blockIndex === 0) {

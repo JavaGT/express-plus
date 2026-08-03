@@ -2457,7 +2457,7 @@ export function createLiveDeliverySession({
     }
     if (result.kind === 'snapshot') {
       assertCursor(result.cursor, 'snapshot cursor');
-      const nextSnapshot = validateSnapshot(result.snapshot);
+      const nextSnapshot = validateSnapshot(result.snapshot, result);
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       // A receipt confirmation must never install a replacement snapshot that
       // predates its committed fence, even when reconnect superseded its first
@@ -2945,7 +2945,7 @@ export function createLiveDeliveryHttpSession({
     }
     if (response.status === 401 || response.status === 403) return { kind: 'revoked' };
     if (response.status >= 500) return { kind: 'retry' };
-    if (!response.ok) throw new Error(`live delivery bootstrap failed with HTTP ${response.status}`);
+    if (!response.ok) throw new Error(`live delivery bootstrap failed with HTTP ${response.status}: ${await response.text()}`);
     const result = await response.json();
     if (!result || typeof result !== 'object' || !['snapshot', 'catchup', 'retry', 'revoked'].includes(result.kind)) {
       throw new Error('live delivery bootstrap returned an invalid response');
@@ -3073,7 +3073,7 @@ export function createPrincipalSnapshotHttpSession({
 
 /**
  * A document-bound annotated-text session. The document context owns scope,
- * action grammar, and the opaque recipient basis; callers only name edits.
+ * action grammar, and private authoring bindings; callers only name positions.
  */
 export function createAnnotatedTextHttpSession({ baseUrl, context, historySession, fetchImpl, eventSourceFactory, createActionId }) {
   if (!context || typeof context !== 'object' || typeof context.documentId !== 'string' || context.documentId.length === 0) {
@@ -3084,9 +3084,12 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     throw new TypeError('annotated text context requires declared entity and field handles');
   }
   const scope = `annotated-text:${documentId}`;
-  const blockGroupServerIds = new WeakMap();
+  const authoringClient = globalThis.crypto?.getRandomValues
+    ? (() => { const bytes = new Uint8Array(32); globalThis.crypto.getRandomValues(bytes); return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', ''); })()
+    : `authoring-${Math.random().toString(36).slice(2)}`;
+  const blockGroupTokens = new WeakMap();
   const snapshotBinding = createAnnotatedTextSnapshotSessionBinding((handle, serverId, generation) => {
-    blockGroupServerIds.set(handle, { serverId, generation });
+    blockGroupTokens.set(handle, { serverId, generation });
   });
   const session = createLiveDeliveryHttpSession({
     baseUrl,
@@ -3095,62 +3098,43 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     fetchImpl,
     eventSourceFactory,
     createActionId,
-    requestIdentity: { entity: entity.name, field: field.fieldName, documentId },
+    requestIdentity: { entity: entity.name, field: field.fieldName, documentId, authoringClient },
     onRecoveryStart: () => revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding),
-    validateSnapshot(snapshot) {
+    validateSnapshot(snapshot, delivery) {
       if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('annotated text delivery snapshot must be an object');
-      return materializeAnnotatedTextSnapshot(snapshot[field?.fieldName], field, snapshotBinding);
+      const authoring = delivery?.authoring;
+      if (!authoring || authoring.acknowledgementFence !== delivery.cursor) throw new Error('annotated text delivery authoring envelope is invalid');
+      const result = materializeAnnotatedTextSnapshot({ ...snapshot[field?.fieldName], authoring }, field, snapshotBinding);
+      return result;
     },
   });
   session.subscribe((document) => {
     if (document === null) revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
+    if (document && snapshotBinding.authoring) {
+      void fetchImpl(`${baseUrl.replace(/\/$/, '')}/authoring/ack`, {
+        method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ version: 1, entity: entity.name, field: field.fieldName, documentId,
+          stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease, snapshot: snapshotBinding.authoring.snapshot }),
+      });
+    }
   });
-  const STALE_BASIS_CODE = 'basis-unavailable';
-  let basisRecovery = null;
-  function isStaleBasisFailure(failure) {
-    return Boolean(
-      failure && typeof failure === 'object'
-      && failure.details && typeof failure.details === 'object'
-      && failure.details.code === STALE_BASIS_CODE,
-    );
-  }
-  function recipientStateFingerprint(document) {
-    return JSON.stringify([
-      document.blocks,
-      document.blockGroups,
-      document.annotations,
-      document.memberships,
-      document.measurements,
-    ]);
-  }
-  function recoverBasis() {
-    if (!basisRecovery) {
-      basisRecovery = session.reconnect().finally(() => { basisRecovery = null; });
-    }
-    return basisRecovery;
-  }
   async function dispatch(command) {
-    const builtAgainst = session.snapshot;
-    if (!builtAgainst) throw new ClientClosedError('Annotated text document is unavailable');
-    const action = annotatedTextAction(entity, field, { ...command, id: documentId, basis: builtAgainst.basis });
-    const result = await session.dispatch(action.type, action.payload);
-    if (result?.ok !== false || !isStaleBasisFailure(result.failure)) return result;
-    // The basis token was superseded by a fresh projection (e.g. a reconnect
-    // re-bootstrap re-minted it). Recover once and retry ONLY when the
-    // committed state is unchanged: replaying numeric coordinates onto a
-    // shifted projection could land a write at the wrong place, so when the
-    // state moved we surface the original failure and let the caller re-apply
-    // against the fresh document.
-    const before = recipientStateFingerprint(builtAgainst);
-    try {
-      await recoverBasis();
-    } catch {
-      return result;
-    }
-    const after = session.snapshot;
-    if (!after || recipientStateFingerprint(after) !== before) return result;
-    const retried = annotatedTextAction(entity, field, { ...command, id: documentId, basis: after.basis });
-    return session.dispatch(retried.type, retried.payload);
+    if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
+    const tokenAt = (value) => {
+      if (!value || typeof value !== 'object' || typeof value.blockId !== 'string') throw new TypeError('annotated text position is invalid');
+      const positionToken = snapshotBinding.authoring.positionTokens.get(value.blockId);
+      if (!positionToken) throw new TypeError('annotated text position is unavailable');
+      return { positionToken, offset: value.offset };
+    };
+    const temporaryBlock = command.kind === 'block.split' || command.kind === 'block.continue' || command.kind === 'block.split-and-assign'
+      ? (globalThis.crypto?.randomUUID?.() ?? `temporary_${Math.random().toString(36).slice(2)}`) : undefined;
+    const translated = { ...command, id: documentId, authoring: { version: 1, stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease, mutationId: command.mutationId } };
+    if (command.at) translated.at = tokenAt(command.at);
+    if (command.from) translated.from = tokenAt(command.from);
+    if (command.to) translated.to = tokenAt(command.to);
+    if (temporaryBlock) translated.temporaryBlock = temporaryBlock;
+    const action = annotatedTextAction(entity, field, translated);
+    return session.dispatch(action.type, action.payload);
   }
   function resolveBlockGroup(handle) {
     if (!handle || typeof handle !== 'object' || Array.isArray(handle)) {
@@ -3158,7 +3142,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     }
     const current = session.snapshot;
     if (!current) throw new ClientClosedError('Annotated text document is unavailable');
-    const entry = blockGroupServerIds.get(handle);
+    const entry = blockGroupTokens.get(handle);
     if (!entry || entry.generation !== snapshotBinding.generation || snapshotBinding.document !== current) {
       throw new TypeError('annotated text block-group handle is stale, foreign, or forged');
     }
@@ -3170,16 +3154,16 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     }
     const keys = Reflect.ownKeys(value);
     if (value.kind === 'one' && keys.length === 2 && Object.hasOwn(value, 'kind') && Object.hasOwn(value, 'blockGroup')) {
-      return { kind: 'one', blockGroupId: resolveBlockGroup(value.blockGroup) };
+      return { kind: 'one', groupToken: resolveBlockGroup(value.blockGroup) };
     }
     if ((value.kind === 'consecutive' || value.kind === 'listed') && keys.length === 2
       && Object.hasOwn(value, 'kind') && Object.hasOwn(value, 'blockGroups')
       && Array.isArray(value.blockGroups) && value.blockGroups.length > 0) {
-      const blockGroupIds = value.blockGroups.map(resolveBlockGroup);
-      if (new Set(blockGroupIds).size !== blockGroupIds.length) {
+      const groupTokens = value.blockGroups.map(resolveBlockGroup);
+      if (new Set(groupTokens).size !== groupTokens.length) {
         throw new TypeError('annotated text block-group selection must not contain duplicates');
       }
-      return { kind: value.kind, blockGroupIds };
+      return { kind: value.kind, groupTokens };
     }
     throw new TypeError('annotated text block-group selection must be one, consecutive, or listed with exact keys');
   }

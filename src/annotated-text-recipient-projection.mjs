@@ -20,12 +20,16 @@ function exact(value, keys, label) {
 export function projectAnnotatedTextForRecipient(canonical, descriptor, decisions) {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail('descriptor must be compiled');
+  // Canonical annotated-text inputs are internal, but caret tests and older
+  // internal callers predate orphan state. Treat their absence as no orphans;
+  // snapshots always supply the field.
   const canonicalKeys = ['kind', 'version', 'blocks', 'annotations', 'memberships', 'measurements', 'capabilities', 'groupMemberships'];
+  if (Object.hasOwn(canonical ?? {}, 'orphans')) canonicalKeys.push('orphans');
   exact(canonical, canonicalKeys, 'canonical');
   exact(decisions, ['version', 'protectors', 'capabilityHints'], 'decisions');
   if (canonical.kind !== 'workbench.annotatedText.canonical' || canonical.version !== 1 || decisions.version !== 1 ||
       !Array.isArray(canonical.blocks) || !Array.isArray(canonical.annotations) || !Array.isArray(canonical.memberships) ||
-      !Array.isArray(canonical.measurements) || !Array.isArray(canonical.groupMemberships) || !Array.isArray(decisions.protectors) || !Array.isArray(decisions.capabilityHints)) fail('invalid version or collection');
+      !Array.isArray(canonical.measurements) || !Array.isArray(canonical.groupMemberships) || (canonical.orphans !== undefined && !Array.isArray(canonical.orphans)) || !Array.isArray(decisions.protectors) || !Array.isArray(decisions.capabilityHints)) fail('invalid version or collection');
 
   const annotations = new Map();
   for (const annotation of canonical.annotations) {
@@ -58,6 +62,14 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   }
   for (const annotationId of annotations.keys()) {
     if (!canonical.memberships.some((membership) => membership.annotationId === annotationId) && !groupMemberships.some((membership) => membership.annotationId === annotationId)) fail('canonical annotation has no membership');
+  }
+  const orphanIds = new Set();
+  for (const orphan of canonical.orphans ?? []) {
+    exact(orphan, ['id', 'family', 'fields', 'savedQuote', 'membershipBlockIds'], 'orphan');
+    if (typeof orphan.id !== 'string' || orphanIds.has(orphan.id) || !Object.hasOwn(meta.annotationHandles, orphan.family) || meta.annotationHandles[orphan.family].appliesTo !== 'block' || typeof orphan.savedQuote !== 'string' ||
+        !Array.isArray(orphan.membershipBlockIds) || orphan.membershipBlockIds.length === 0 || orphan.membershipBlockIds.some((id) => typeof id !== 'string' || !blockIds.has(id)) || new Set(orphan.membershipBlockIds).size !== orphan.membershipBlockIds.length) fail('orphan is invalid');
+    if (annotations.has(orphan.id)) fail('orphan id conflicts with active annotation');
+    orphanIds.add(orphan.id);
   }
   const canonicalMemberships = new Map();
   for (const membership of canonical.memberships) {
@@ -141,6 +153,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   }
   for (const group of groups.filter(Boolean)) { delete group.canonicalId; group.annotationIds = [...new Set(group.annotationIds)]; }
   const retainedIds = new Set([...memberships.map((m) => m.annotationId), ...groups.filter(Boolean).flatMap((group) => group.annotationIds)]);
+  const visibleBlockIds = new Set(canonical.blocks.filter((block) => !restricted.has(block.id)).map((block) => block.id));
   return freeze({
     kind: 'workbench.annotatedText.recipient', version: 1,
     blockGroups: groups.filter(Boolean),
@@ -151,5 +164,12 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     memberships: memberships.map((m) => ({ ...m })),
     measurements: canonical.measurements.filter((m) => !restricted.has(m.blockId)).map((m) => ({ ...m })),
     capabilityHints: [...capabilityHints].filter((hint) => !restricted.size || hint !== 'body.read'),
+    // An orphan has no active membership. It is therefore disclosed only when
+    // every block that formed its saved quote is currently recipient-visible.
+    // Missing/deleted or restricted source blocks fail closed.
+    orphans: (canonical.orphans ?? [])
+      .filter((orphan) => !Object.hasOwn(meta.protectingFamilies, orphan.family))
+      .filter((orphan) => orphan.membershipBlockIds.every((id) => visibleBlockIds.has(id)))
+      .map(({ id, family, fields, savedQuote }) => ({ id, family, fields: { ...fields }, savedQuote })),
   });
 }

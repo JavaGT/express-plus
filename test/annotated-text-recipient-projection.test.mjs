@@ -45,7 +45,7 @@ function groupedCanonical() {
     ],
     memberships: [{ annotationId: 'code', blockId: 'a', ordinal: 0 }],
     groupMemberships: [{ annotationId: 'card', groupId: 'g1', ordinal: 0 }],
-    measurements: [], capabilities: {},
+    measurements: [], capabilities: {}, orphans: [],
   };
 }
 
@@ -68,7 +68,7 @@ function canonical(hidden = 'secret') {
       { id: 'm-a', blockId: 'a', family: 'words', formatVersion: 1, payload: { token: hidden } },
       { id: 'm-b', blockId: 'b', family: 'words', formatVersion: 1, payload: { token: 'visible' } },
     ],
-    capabilities: {}, groupMemberships: [],
+    capabilities: {}, groupMemberships: [], orphans: [],
   };
 }
 
@@ -185,4 +185,114 @@ test('canonical group identity is required and cannot be normalized', () => {
   const emptyGroupId = groupedCanonical();
   emptyGroupId.blocks[0].groupId = '';
   assert.throws(() => projectAnnotatedTextForRecipient(emptyGroupId, groupedDescriptor(), decisions), /block is invalid/);
+});
+
+test('orphan projection passes safe fields and excludes raw memberships', () => {
+  const c = canonical();
+  c.annotations = [];
+  c.memberships = [];
+  c.blocks = c.blocks.map((b) => ({ ...b, annotationIds: [] }));
+  c.orphans = [{ id: 'orphan-1', family: 'coding', fields: { color: 'blue' }, savedQuote: 'secret', membershipBlockIds: ['a', 'b'] }];
+  const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
+    version: 1, protectors: [], capabilityHints: [],
+  });
+  assert.equal(projected.orphans.length, 1);
+  assert.equal(projected.orphans[0].id, 'orphan-1');
+  assert.equal(projected.orphans[0].family, 'coding');
+  assert.deepEqual(projected.orphans[0].fields, { color: 'blue' });
+  assert.equal(projected.orphans[0].savedQuote, 'secret');
+  assert.equal(projected.orphans[0].protectedTargetIds, undefined);
+  const serialized = JSON.stringify(projected);
+  assert.equal(serialized.includes('last_memberships'), false);
+  assert.equal(serialized.includes('endpoint'), false);
+  assert.equal(serialized.includes('frontier'), false);
+  assert.equal(serialized.includes('structuralRevision'), false);
+});
+
+test('orphan with conflicting annotation id fails closed', () => {
+  assert.throws(() => {
+    const c = canonical();
+    c.orphans = [{ id: 'code', family: 'coding', fields: {}, savedQuote: 'quote', membershipBlockIds: ['a'] }];
+    projectAnnotatedTextForRecipient(c, descriptor(), {
+      version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
+    });
+  }, /orphan id conflicts/);
+});
+
+test('orphan with unknown family fails closed', () => {
+  assert.throws(() => {
+    const c = canonical();
+    c.orphans = [{ id: 'orphan-x', family: 'unknown', fields: {}, savedQuote: 'quote', membershipBlockIds: ['a'] }];
+    projectAnnotatedTextForRecipient(c, descriptor(), {
+      version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
+    });
+  }, /orphan is invalid/);
+});
+
+test('orphan with malformed shape fails closed', () => {
+  assert.throws(() => {
+    const c = canonical();
+    c.orphans = [{ id: 'orphan-x', family: 'coding', fields: {} }];
+    projectAnnotatedTextForRecipient(c, descriptor(), {
+      version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
+    });
+  }, /orphan has invalid shape/);
+});
+
+test('orphan excluded when all blocks are restricted', () => {
+  const c = {
+    kind: 'workbench.annotatedText.canonical', version: 1,
+    blocks: [{ id: 'x', groupId: 'x', text: 'secret', fields: {}, annotationIds: ['code', 'protect'] }],
+    annotations: [
+      { id: 'code', family: 'coding', fields: {} },
+      { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
+    ],
+    memberships: [
+      { annotationId: 'code', blockId: 'x', ordinal: 0 },
+      { annotationId: 'protect', blockId: 'x', ordinal: 0 },
+    ],
+    groupMemberships: [], measurements: [], capabilities: {},
+    orphans: [{ id: 'orphan-r', family: 'coding', fields: {}, savedQuote: 'hidden quote', membershipBlockIds: ['x'] }],
+  };
+  const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
+    version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [],
+  });
+  assert.equal(projected.orphans.length, 0);
+  assert.equal(JSON.stringify(projected).includes('orphan-r'), false);
+  assert.equal(JSON.stringify(projected).includes('hidden quote'), false);
+});
+
+test('orphan fails closed when any source block is missing or restricted', () => {
+  const c = canonical();
+  c.annotations = [];
+  c.memberships = [];
+  c.blocks = c.blocks.map((block) => ({ ...block, annotationIds: [] }));
+  c.orphans = [{ id: 'orphan-missing', family: 'coding', fields: {}, savedQuote: 'quote', membershipBlockIds: ['missing'] }];
+  assert.throws(() => projectAnnotatedTextForRecipient(c, descriptor(), { version: 1, protectors: [], capabilityHints: [] }), /orphan is invalid/);
+
+  c.orphans = [{ id: 'orphan-hidden', family: 'coding', fields: {}, savedQuote: 'quote', membershipBlockIds: ['a'] }];
+  c.annotations = [
+    { id: 'code', family: 'coding', fields: {} },
+    { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
+  ];
+  c.memberships = [
+    { annotationId: 'code', blockId: 'a', ordinal: 0 },
+    { annotationId: 'protect', blockId: 'a', ordinal: 0 },
+  ];
+  c.blocks[0].annotationIds = ['code', 'protect'];
+  const projected = projectAnnotatedTextForRecipient(c, descriptor(), { version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [] });
+  assert.deepEqual(projected.orphans, []);
+});
+
+test('protecting and block-group orphans are never recipient-visible', () => {
+  const c = canonical();
+  c.annotations = [];
+  c.memberships = [];
+  c.blocks = c.blocks.map((block) => ({ ...block, annotationIds: [] }));
+  c.orphans = [{ id: 'protect-orphan', family: 'confidential', fields: {}, savedQuote: 'secret', membershipBlockIds: ['a'] }];
+  assert.deepEqual(projectAnnotatedTextForRecipient(c, descriptor(), { version: 1, protectors: [], capabilityHints: [] }).orphans, []);
+
+  const grouped = groupedCanonical();
+  grouped.orphans = [{ id: 'card-orphan', family: 'card', fields: {}, savedQuote: 'quote', membershipBlockIds: ['a'] }];
+  assert.throws(() => projectAnnotatedTextForRecipient(grouped, groupedDescriptor(), { version: 1, protectors: [], capabilityHints: [] }), /orphan is invalid/);
 });

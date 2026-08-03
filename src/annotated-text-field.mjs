@@ -604,13 +604,10 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
   const groupMembership = `${prefix}_group_membership`;
   const measurement = `${prefix}_measurement`;
   const state = `${prefix}_state`;
-  const basis = `${prefix}_basis`;
   const retired = `${prefix}_retired`;
   const statements = [
     `CREATE TABLE IF NOT EXISTS ${retired} (\n  document_id TEXT PRIMARY KEY,\n  generation TEXT NOT NULL,\n  retired_at TEXT NOT NULL\n);`,
     `CREATE TABLE IF NOT EXISTS ${state} (\n  document_id TEXT PRIMARY KEY,\n  structure_version INTEGER NOT NULL CHECK (structure_version >= 0),\n  family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
-     `CREATE TABLE IF NOT EXISTS ${basis} (\n  token TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  principal_id TEXT NOT NULL,\n  structural_revision INTEGER NOT NULL CHECK (structural_revision >= 1),\n  family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)),\n  visible_blocks TEXT NOT NULL CHECK (json_valid(visible_blocks)),\n  exposed_groups TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(exposed_groups)),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_basis_recipient ON ${basis} (document_id, principal_id);`,
     `CREATE TABLE IF NOT EXISTS ${block} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  owner_id TEXT NOT NULL,\n  position TEXT NOT NULL,\n  epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0),\n  structure_version INTEGER NOT NULL DEFAULT 1 CHECK (structure_version > 0)${blockFields.length ? `,\n  ${extensionColumns(descriptor.block, blockFields).join(',\n  ')}` : ''},\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE,\n  FOREIGN KEY (project_id) REFERENCES ${projectTarget}(id) ON DELETE CASCADE,\n  FOREIGN KEY (owner_id) REFERENCES ${ownerTarget}(id) ON DELETE CASCADE\n);`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_block_order ON ${block} (document_id, position);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_block_project ON ${block} (project_id, document_id, position, id);`,
@@ -644,4 +641,21 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_measurement_block ON ${measurement} (block_id, family, id);`,
   );
   return statements;
+}
+
+export function annotatedTextAuthoringStreamDDL(entity, field) {
+  const prefix = `${entity}_${field}`;
+  return [
+    `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_stream (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  principal_type TEXT NOT NULL,\n  principal_id TEXT NOT NULL,\n  created_at TEXT NOT NULL,\n  last_used_at TEXT NOT NULL,\n  expires_at TEXT NOT NULL,\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_authoring_stream_doc_principal ON ${prefix}_authoring_stream (document_id, principal_type, principal_id);`,
+    `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_lease (\n  id TEXT PRIMARY KEY,\n  stream_id TEXT NOT NULL,\n  client_nonce_hash TEXT NOT NULL,\n  acknowledged_fence INTEGER NOT NULL DEFAULT 0,\n  created_at TEXT NOT NULL,\n  expires_at TEXT NOT NULL,\n  FOREIGN KEY (stream_id) REFERENCES ${prefix}_authoring_stream(id) ON DELETE CASCADE\n);`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_authoring_lease_stream_nonce ON ${prefix}_authoring_lease (stream_id, client_nonce_hash);`,
+    `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_position (\n  token TEXT PRIMARY KEY,\n  lease_id TEXT NOT NULL,\n  issued_fence INTEGER NOT NULL,\n  block_id TEXT,\n  family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)),\n  visible_at_issue INTEGER NOT NULL DEFAULT 1,\n  created_at TEXT NOT NULL,\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE\n);`,
+    `CREATE INDEX IF NOT EXISTS idx_${prefix}_authoring_position_lease ON ${prefix}_authoring_position (lease_id, issued_fence);`,
+    `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_group (\n  token TEXT PRIMARY KEY,\n  lease_id TEXT NOT NULL,\n  issued_fence INTEGER NOT NULL,\n  group_id TEXT,\n  visible_blocks TEXT NOT NULL CHECK (json_valid(visible_blocks)),\n  assignable INTEGER NOT NULL,\n  created_at TEXT NOT NULL,\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE\n);`,
+    `CREATE INDEX IF NOT EXISTS idx_${prefix}_authoring_group_lease ON ${prefix}_authoring_group (lease_id, issued_fence);`,
+    `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_snapshot (\n  id TEXT PRIMARY KEY,\n  lease_id TEXT NOT NULL,\n  fence INTEGER NOT NULL,\n  issued_at TEXT NOT NULL,\n  acknowledged_at TEXT,\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE\n);`,
+    `CREATE INDEX IF NOT EXISTS idx_${prefix}_authoring_snapshot_lease ON ${prefix}_authoring_snapshot (lease_id, fence);`,
+    `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_split (\n  lease_id TEXT NOT NULL,\n  temporary_block TEXT NOT NULL,\n  authoritative_block_id TEXT NOT NULL,\n  position_token TEXT NOT NULL,\n  action_id TEXT NOT NULL,\n  mutation_id TEXT NOT NULL,\n  fence INTEGER NOT NULL,\n  created_at TEXT NOT NULL,\n  PRIMARY KEY (lease_id, temporary_block),\n  UNIQUE (lease_id, action_id, temporary_block),\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE\n);`,
+  ];
 }

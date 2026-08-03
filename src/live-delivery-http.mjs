@@ -64,6 +64,37 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
 
   return async function handleLiveDelivery(req, res) {
     const url = requestUrl(req);
+
+    // Authoring ack endpoint
+    if (url.pathname === `${path}/authoring/ack`) {
+      if (req.method !== 'POST') { reject(res, 405, 'method not allowed'); return true; }
+      let body;
+      try {
+        const { readRequestBody, BodyError } = await import('./http-body.mjs');
+        body = await readRequestBody(req, { jsonOnly: true });
+      } catch {
+        reject(res, 400, 'invalid body');
+        return true;
+      }
+      if (!body || typeof body !== 'object' || Array.isArray(body) || body.version !== 1 ||
+          typeof body.entity !== 'string' || typeof body.field !== 'string' || typeof body.documentId !== 'string' ||
+          typeof body.stream !== 'string' || typeof body.lease !== 'string' || typeof body.snapshot !== 'string') {
+        reject(res, 400, 'invalid ack request');
+        return true;
+      }
+      let principal;
+      try { principal = await principalOf(req); } catch { reject(res, 403, 'access denied'); return true; }
+      if (!principal || typeof principal !== 'object') { reject(res, 403, 'access denied'); return true; }
+      const documentIdentity = { entity: body.entity, field: body.field, documentId: body.documentId };
+      const document = delivery.resolveAnnotatedTextDocument ? delivery.resolveAnnotatedTextDocument(documentIdentity) : null;
+      if (!document) { reject(res, 404, 'document not found'); return true; }
+      const result = await delivery.acknowledgeAuthoringSnapshot({ document, principal, stream: body.stream, lease: body.lease, snapshot: body.snapshot });
+       if (!result) { reject(res, 409, 'acknowledgement rejected'); return true; }
+      const { sendJson } = await import('./http-response.mjs');
+      sendJson(res, 200, { ok: true, acknowledgedThrough: result.acknowledgedThrough });
+      return true;
+    }
+
     if (url.pathname !== `${path}/bootstrap` && url.pathname !== `${path}/events`) return false;
     if (req.method !== 'GET') {
       reject(res, 405, 'method not allowed');
@@ -74,7 +105,10 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
     const documentIdentity = url.searchParams.has('documentId') ? {
       entity: url.searchParams.get('entity'), field: url.searchParams.get('field'), documentId: url.searchParams.get('documentId'),
     } : null;
-    const document = documentIdentity ? delivery.resolveAnnotatedTextDocument?.(documentIdentity) : null;
+    const resolvedDocument = documentIdentity ? delivery.resolveAnnotatedTextDocument?.(documentIdentity) : null;
+    const document = resolvedDocument && url.searchParams.has('authoringClient')
+      ? { ...resolvedDocument, clientNonce: url.searchParams.get('authoringClient') }
+      : resolvedDocument;
     const effectiveScope = document?.scope ?? scope;
     if (!effectiveScope || after === null || (documentIdentity && (!document || (scope !== null && scope !== effectiveScope)))) {
       reject(res, 400, 'invalid live delivery request');

@@ -33,7 +33,7 @@ function canonical(text = 'secret') {
       { annotationId: 'a1', blockId: 'b1', ordinal: 0 },
       { annotationId: 'p1', blockId: 'b1', ordinal: 0 },
     ],
-    measurements: [], capabilities: [], groupMemberships: [],
+    measurements: [], capabilities: [], groupMemberships: [], orphans: [],
   };
 }
 

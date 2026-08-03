@@ -9,6 +9,7 @@ import { readSeq } from './committed-log.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
+import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, prunePositions } from './annotated-text-authoring-stream.mjs';
 import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
 
 function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
@@ -204,9 +205,16 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
         const row = await this.authorizeAnnotatedTextDocument(document, principal);
         if (!row) return { kind: 'revoked' };
         const before = readSeq(db, scope);
-        const snapshot = await projectEntitySnapshot({ db, entity: document.entity, row, principal });
+        const authoring = document.descriptor?.kind === 'annotatedText' && typeof document.clientNonce === 'string' && /^[A-Za-z0-9_-]{43}$/.test(document.clientNonce)
+          ? (() => { const prefix = `${document.entity.name}_${document.fieldName}`; const stream = ensureStream({ db, prefix, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' }); const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: hashClientNonce(document.clientNonce) }); return lease ? { streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, fence: before } : null; })()
+          : null;
+        const snapshot = await projectEntitySnapshot({ db, entity: document.entity, row, principal, authoring });
         if (readSeq(db, scope) !== before) return { kind: 'retry' };
-        return Object.freeze({ kind: 'snapshot', snapshot, cursor: before });
+        const annotated = snapshot[document.fieldName];
+        const envelope = annotated?.authoring;
+        if (!envelope || envelope.acknowledgementFence !== before) return { kind: 'retry' };
+        const publicSnapshot = Object.freeze({ ...snapshot, [document.fieldName]: Object.freeze(Object.fromEntries(Object.entries(annotated).filter(([key]) => key !== 'authoring'))) });
+        return Object.freeze({ kind: 'snapshot', snapshot: publicSnapshot, cursor: before, authoring: envelope });
       }
       // The declaration is selected by the package scope grammar, before the
       // core pairs its synchronous result with the committed cursor.
@@ -265,6 +273,24 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       }
       // A wake is only a payloadless hint; it is not a delivery barrier.
       void core.wake(scope);
+    },
+    async acknowledgeAuthoringSnapshot({ document, principal, stream, lease, snapshot }) {
+      const documentIdentity = { entity: document.entity.name, field: document.fieldName, documentId: document.documentId };
+      const resolved = this.resolveAnnotatedTextDocument(documentIdentity);
+      if (!resolved) return null;
+      const row = await this.authorizeAnnotatedTextDocument(resolved, principal);
+      if (!row) return null;
+       const prefix = `${document.entity.name}_${document.fieldName}`;
+       const { acknowledgeSnapshot } = await import('./annotated-text-authoring-stream.mjs');
+       const resolvedStream = resolveStream({ db, prefix, streamToken: stream, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' });
+      if (!resolvedStream) return null;
+      const resolvedLease = resolveLease({ db, prefix, leaseToken: lease, streamId: resolvedStream.id });
+      if (!resolvedLease) return null;
+       const result = acknowledgeSnapshot({ db, prefix, snapshotId: snapshot, leaseId: resolvedLease.id });
+       if (!result) return null;
+       const issued = db.prepare(`SELECT block_id FROM ${prefix}_authoring_position WHERE lease_id = ? AND issued_fence = ?`).all(resolvedLease.id, result.fence);
+       prunePositions({ db, prefix, leaseId: resolvedLease.id, fence: result.fence, snapshotId: snapshot, visibleBlockIds: new Set(issued.map(({ block_id }) => block_id)), retainedSnapshotIds: new Set([snapshot]) });
+       return { acknowledgedThrough: result.fence };
     },
   };
 

@@ -23,7 +23,7 @@ import { sideTableDDL } from './side-table-strategy.mjs';
 import { frameworkLogDDL } from './committed-log.mjs';
 import { defineSqliteSchema } from './sqlite-schema.mjs';
 import { deletedRowAnchorTableDDL } from './deleted-row-anchor.mjs';
-import { annotatedTextDDL } from './annotated-text-field.mjs';
+import { annotatedTextDDL, annotatedTextAuthoringStreamDDL } from './annotated-text-field.mjs';
 
 function quoteIdent(name) {
   return `"${String(name).replace(/"/g, '""')}"`;
@@ -259,6 +259,7 @@ export function generateSideTableDDL(entity) {
       if (ftsDDL) statements.push(ftsDDL);
     } else if (descriptor.kind === 'annotatedText') {
       statements.push(...annotatedTextDDL(entity.name, name, descriptor, fields));
+      statements.push(...annotatedTextAuthoringStreamDDL(entity.name, name));
     }
   }
 
@@ -269,12 +270,6 @@ export function generateSideTableDDL(entity) {
 export function executeDDL(entity, db) {
   for (const sql of generateDDL(entity)) {
     db.exec(sql);
-  }
-  for (const [fieldName, descriptor] of Object.entries(entity.fields ?? {})) {
-    if (descriptor.kind !== 'annotatedText') continue;
-    const table = `${entity.name}_${fieldName}_basis`;
-    const columns = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((column) => column.name));
-    if (!columns.has('exposed_groups')) db.exec(`ALTER TABLE ${table} ADD COLUMN exposed_groups TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(exposed_groups))`);
   }
 }
 
@@ -477,6 +472,7 @@ function ensureActionReceiptColumns(db) {
     ['principalKey', 'TEXT'],
     ['sessionId', 'TEXT'],
     ['operation', "TEXT NOT NULL DEFAULT 'action'"],
+    ['resultData', 'TEXT'],
   ];
   for (const [name, sqlType] of additions) {
     if (!cols.has(name)) db.exec(`ALTER TABLE _ActionReceipt ADD COLUMN ${name} ${sqlType}`);

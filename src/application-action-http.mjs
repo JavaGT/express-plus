@@ -2,7 +2,6 @@
 // opted-in generated entity CRUD. It deliberately accepts one opaque envelope
 // instead of exposing entity-specific REST writes.
 
-import { readSeq } from './cursor.mjs';
 import { BodyError, readRequestBody } from './http-body.mjs';
 import { failure, isWorkbenchFailure } from './outcome.mjs';
 import { sendFailure } from './http-failure.mjs';
@@ -129,7 +128,7 @@ function admitsAnnotatedTextAction(app, request) {
     if (request.scope !== undefined && request.scope !== owningScope) return false;
     request.scope = owningScope;
     if (request.type === `${entity.name}.create` || request.type === `${entity.name}.annotatedText.retire`) return true;
-    if ([6, 7].includes(request.payload?.version)
+    if (request.payload?.version === 9
       && annotatedFields.some((field) => request.type === `${entity.name}.${field}.operation`)) return true;
   }
   return false;
@@ -230,7 +229,7 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
     ? await historyHttpDispatchers.get(app)?.(body.command, { ...request, principal })
     : url.pathname === BATCH_ACTION_PATH
       ? await batchHttpDispatchers.get(app)?.({ ...request, principal, ...(request.clientId === undefined ? {} : { history: { session: request.clientId } }) })
-      : await app.dispatch({ ...request, principal, ...(request.clientId === undefined ? {} : { history: { session: request.clientId } }) });
+       : await app.dispatch({ ...request, principal, ...(request.clientId === undefined ? {} : { history: { session: request.clientId } }) });
   if (!result?.ok) {
     sendFailure(sendJson, res, isWorkbenchFailure(result?.failure)
       ? result.failure
@@ -238,11 +237,13 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
     return true;
   }
 
-  // A cursor read after dispatch is a conservative receipt fence: a concurrent
-  // commit can only make the client require a newer authorized snapshot.
-  const confirmedThrough = readSeq(app.db, request.scope);
   app._applicationLiveDelivery?.wake(request.scope);
-  sendJson(res, 200, { ok: true, actionId: request.actionId, confirmedThrough });
+  const receipt = result.resultData;
+  if (!receipt || receipt.version !== 1 || receipt.actionId !== request.actionId || !Number.isSafeInteger(receipt.confirmedThrough)) {
+    sendFailure(sendJson, res, failure('internal', 'Action receipt is unavailable.'));
+    return true;
+  }
+  sendJson(res, 200, { ok: true, ...receipt });
   return true;
 }
 

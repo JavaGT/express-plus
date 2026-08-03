@@ -4,6 +4,8 @@
 // These capabilities are package-internal: neither is re-exported by the app
 // surface.  The projection capability is intentionally identity based, not a
 // public opt-in property on an arbitrary consumer.
+import { clearAuthoringState } from './annotated-text-authoring-stream.mjs';
+
 export const ANNOTATED_HISTORY_COMPLETION = Symbol('workbench.annotated-history-completion');
 const annotatedEntityProjections = new WeakSet();
 export function markAnnotatedEntityProjection(projection) { annotatedEntityProjections.add(projection); return projection; }
@@ -147,9 +149,9 @@ export function restoreAnnotatedTextHistoryImage({ db, prefix, documentId, image
   const { names, schema } = validated;
   const currentBlocks = db.prepare(`SELECT id FROM ${prefix}_block WHERE document_id = ?`).all(documentId).map((r) => r.id);
   const currentAnnotations = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE document_id = ?`).all(documentId).map((r) => r.id);
-  // Basis capabilities are recipient-specific and must never be revived by a
-  // historical restore. They are intentionally not part of the image.
-  db.prepare(`DELETE FROM ${prefix}_basis WHERE document_id = ?`).run(documentId);
+  // Authoring stream state is recipient-specific and must never be revived by a
+  // historical restore. It is intentionally not part of the image.
+  clearAuthoringState(db, prefix, documentId);
   for (const table of names.slice().reverse()) {
     const columns = schema.get(table);
     const column = columns.has('document_id') ? 'document_id' : columns.has('block_id') ? 'block_id' : 'annotation_id';

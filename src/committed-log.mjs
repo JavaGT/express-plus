@@ -58,8 +58,9 @@ export function actionReceiptTableDDL() {
   actionType TEXT,
   actionData TEXT,
   principalKey TEXT,
-  sessionId TEXT,
-  operation TEXT NOT NULL DEFAULT 'action',
+   sessionId TEXT,
+   operation TEXT NOT NULL DEFAULT 'action',
+   resultData TEXT,
   PRIMARY KEY (scope, actionId)
 );`;
 }
@@ -117,7 +118,7 @@ export function receiptFor(db, scope, actionId) {
     'SELECT * FROM _ActionReceipt WHERE scope = :scope AND actionId = :actionId',
   ).get({ scope, actionId });
   if (!row) return undefined;
-  return { ...row, eventRefs: JSON.parse(row.eventRefs) };
+  return { ...row, eventRefs: JSON.parse(row.eventRefs), resultData: row.resultData ? JSON.parse(row.resultData) : null };
 }
 
 // eventsFromReceipt — resolve a receipt's stored `eventRefs` back into full
@@ -146,9 +147,9 @@ export function insertReceipt(db, scope, actionId, committedAt, events, metadata
   ).get({ scope }).next;
   db.prepare(
     `INSERT INTO _ActionReceipt
-      (scope, actionId, committedAt, eventRefs, historyOrder, actionType, actionData, principalKey, sessionId, operation)
+      (scope, actionId, committedAt, eventRefs, historyOrder, actionType, actionData, principalKey, sessionId, operation, resultData)
      VALUES
-      (:scope, :actionId, :committedAt, :eventRefs, :historyOrder, :actionType, :actionData, :principalKey, :sessionId, :operation)`,
+       (:scope, :actionId, :committedAt, :eventRefs, :historyOrder, :actionType, :actionData, :principalKey, :sessionId, :operation, :resultData)`,
   ).run({
     scope,
     actionId,
@@ -160,6 +161,7 @@ export function insertReceipt(db, scope, actionId, committedAt, events, metadata
     principalKey: metadata.principalKey ?? null,
     sessionId: metadata.sessionId ?? null,
     operation: metadata.operation ?? 'action',
+    resultData: metadata.resultData === undefined ? null : JSON.stringify(metadata.resultData),
   });
   // This survives receipt erasure and is transactionally paired with every
   // committed action, unlike SQLite's reusable implicit rowid.

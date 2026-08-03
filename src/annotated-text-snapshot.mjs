@@ -1,11 +1,12 @@
 import { deserializeField } from './field-strategy.mjs';
 import { materializeBlock, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from './annotated-text-family.mjs';
+import { assertAnnotationLastMemberships } from './annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
 import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.mjs';
 import { mayRow, protectingAnnotationCapabilities } from './row-grant.mjs';
 import { read } from './grant.mjs';
-import { randomUUID } from 'node:crypto';
+import { resolveStream, resolveLease, issuePositionFrame, issueGroupFrame, issueSnapshot, buildAuthoringEnvelope } from './annotated-text-authoring-stream.mjs';
 
 function fail(message) { throw new Error(`annotated-text snapshot: ${message}`); }
 function deepFreeze(value) {
@@ -15,6 +16,7 @@ function deepFreeze(value) {
   }
   return value;
 }
+
 
 function requireBlockGroupIds(blocks, groupRows, fieldName) {
   if (groupRows.length !== blocks.length) fail(`field '${fieldName}' blocks do not have exactly one group row`);
@@ -55,7 +57,7 @@ function requireGroupMembershipIntegrity(groupMemberships, annotations, groupIds
 // Reads only Workbench-owned annotated-text relations and projects them before
 // an HTTP snapshot is serialized. Any malformed state or access failure throws;
 // callers deny the entire snapshot rather than falling back to canonical facts.
-async function projectAnnotatedText({ db, entity, row, principal, fieldName, descriptor, caret = null, presence = null, mintBasis = true }) {
+async function projectAnnotatedText({ db, entity, row, principal, fieldName, descriptor, caret = null, presence = null, mintBasis = true, authoring = null }) {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail(`field '${fieldName}' is not compiled`);
   const prefix = `${entity.name}_${fieldName}`;
@@ -81,6 +83,13 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   ).all(row.id);
   const targets = new Map();
   for (const edge of targetRows) targets.set(edge.annotation_id, [...(targets.get(edge.annotation_id) ?? []), edge.target_annotation_id]);
+  const orphanRows = db.prepare(
+    `SELECT a.id, a.family, o.saved_quote, o.last_memberships
+       FROM ${prefix}_annotation AS a
+       JOIN ${prefix}_annotation_orphan_state AS o ON o.annotation_id = a.id
+      WHERE a.document_id = ?
+      ORDER BY a.id`,
+  ).all(row.id);
   const canonicalMemberships = memberships.map((membership) => ({ annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal }));
   const canonicalAnnotations = annotations.map((annotation) => {
     const declared = descriptor.annotations.find((entry) => entry.annotationName === annotation.family);
@@ -105,6 +114,21 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     })),
     annotations: canonicalAnnotations,
     memberships: canonicalMemberships,
+    orphans: orphanRows.map((o) => {
+      const declared = descriptor.annotations.find((entry) => entry.annotationName === o.family);
+      if (!declared) fail(`orphan '${o.id}' has unknown family`);
+      let lastMemberships;
+      try {
+        lastMemberships = assertAnnotationLastMemberships(JSON.parse(o.last_memberships));
+      } catch {
+        fail(`orphan '${o.id}' has malformed last memberships`);
+      }
+      const fields = {};
+      const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${o.family} WHERE annotation_id = ?`).get(o.id);
+      if (!stored && Object.keys(declared.fields).length !== 0) fail(`orphan '${o.id}' fields are missing`);
+      for (const [name, field] of Object.entries(declared.fields)) fields[name] = deserializeField(field, stored[name]);
+      return { id: o.id, family: o.family, fields, savedQuote: o.saved_quote, membershipBlockIds: lastMemberships[4].map((entry) => entry[1]) };
+    }),
     measurements: db.prepare(`SELECT id, block_id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id IN (SELECT id FROM ${prefix}_block WHERE document_id = ?) ORDER BY id`).all(row.id)
       .map((measurement) => ({ id: measurement.id, blockId: measurement.block_id, family: measurement.family, formatVersion: measurement.format_version, payload: JSON.parse(measurement.payload) })),
     capabilities: [],
@@ -127,24 +151,37 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     ? projectAnnotatedTextForRecipient(canonical, descriptor, decisions)
     : projectAnnotatedTextCaretForRecipient(canonical, descriptor, decisions, caret, presence);
   if (caret !== null || !mintBasis) return recipient;
-  const token = randomUUID();
+
+  const cursor = authoring?.fence ?? db.prepare(`SELECT lastSeq FROM _ProjectedCursor WHERE entity = ? AND field = ?`).get(entity.name, fieldName)?.lastSeq ?? 0;
   const visibleBlocks = recipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id);
-  // A recipient has one current basis per document. A fresh snapshot supersedes
-  // the prior coordinate frame while keeping storage bounded by recipients.
-  const canonicalByBlock = new Map(canonical.blocks.map((block) => [block.id, block.groupId]));
-  const durableBlocks = new Map();
-  for (const block of canonical.blocks) durableBlocks.set(block.groupId, [...(durableBlocks.get(block.groupId) ?? []), block.id]);
-  const durableExposures = new Map();
-  for (const group of recipient.blockGroups) {
-    const durable = [...new Set(group.blockIds.map((id) => canonicalByBlock.get(id)))];
-    const complete = durable.length === 1 && JSON.stringify([...group.blockIds].sort()) === JSON.stringify([...(durableBlocks.get(durable[0]) ?? [])].sort());
-    if (complete) durableExposures.set(durable[0], [...(durableExposures.get(durable[0]) ?? []), group]);
+
+  if (!authoring) {
+    return recipient;
   }
-  const exposedGroups = [];
-  for (const [groupId, groups] of durableExposures) if (groups.length === 1) exposedGroups.push({ id: groups[0].id, groupId, blockIds: [...groups[0].blockIds] });
-  db.prepare(`INSERT INTO ${prefix}_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks, exposed_groups) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(document_id, principal_id) DO UPDATE SET token = excluded.token, structural_revision = excluded.structural_revision, family_checkpoint = excluded.family_checkpoint, visible_blocks = excluded.visible_blocks, exposed_groups = excluded.exposed_groups`)
-    .run(token, row.id, principal?.id ?? '', db.prepare(`SELECT structure_version FROM ${prefix}_state WHERE document_id = ?`).get(row.id).structure_version, JSON.stringify(textFamilyCheckpoint(family)), JSON.stringify(visibleBlocks), JSON.stringify(exposedGroups));
-  return Object.freeze({ ...recipient, basis: token });
+
+  const { streamToken, leaseToken, leaseId, clientNonceHash } = authoring;
+  const stream = resolveStream({ db, prefix, streamToken, documentId: row.id, principalType: 'principal', principalId: principal?.id ?? '' });
+  if (!stream) fail('authoring stream is unavailable');
+  const lease = resolveLease({ db, prefix, leaseToken, streamId: stream.id });
+  if (!lease) fail('authoring lease is unavailable');
+
+  const positionFrames = visibleBlocks.map((blockId) => issuePositionFrame({ db, prefix, leaseId: lease.id, blockId, fence: cursor, familyCheckpoint: textFamilyCheckpoint(family), visibleAtIssue: true }));
+  if (positionFrames.some((frame) => !frame)) fail('authoring stream capacity exceeded');
+  const groupFrames = recipient.blockGroups.map((group) => {
+    const frame = issueGroupFrame({
+      db, prefix, leaseId: lease.id, groupId: group.id, visibleBlocks: group.blockIds,
+      assignable: group.blockIds.every((blockId) => visibleBlocks.includes(blockId)), fence: cursor,
+    });
+    if (!frame) fail('authoring stream capacity exceeded');
+    return frame;
+  });
+  const snapshot = issueSnapshot({ db, prefix, leaseId: lease.id, fence: cursor });
+  if (!snapshot) fail('authoring stream capacity exceeded');
+  const splitResolutions = db.prepare(`SELECT temporary_block, authoritative_block_id FROM ${prefix}_authoring_split WHERE lease_id = ?`).all(lease.id)
+    .map((s) => ({ temporaryBlock: s.temporary_block, blockId: s.authoritative_block_id }));
+
+  const envelope = buildAuthoringEnvelope({ db, prefix, streamToken, leaseToken, leaseId: lease.id, snapshotToken: snapshot.id, fence: cursor, positionFrames, groupFrames, splitResolutions });
+  return Object.freeze({ ...recipient, authoring: envelope });
 }
 
 /** Owning-scope-admin-authorized package canonical export. Never projects through a recipient view. */

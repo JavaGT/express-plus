@@ -33,7 +33,6 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
   if (snapshot.kind !== 'workbench.annotatedText.recipient' || snapshot.version !== 1) {
     fail('kind', 'must be a version 1 recipient projection');
   }
-  if (typeof snapshot.basis !== 'string' || snapshot.basis.length === 0) fail('basis', 'must be a non-empty opaque basis token');
   if (typeof handle !== 'object' || handle === null) {
     fail('', 'handle must be a non-null object');
   }
@@ -312,20 +311,46 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
     capabilities = Object.freeze([...capList]);
   }
 
-  const materializedGroupEntries = blockGroups.map(({ group, blockIds, annotationIds }) => {
+  const authoring = snapshot.authoring;
+  if (authoring !== undefined && (!authoring || typeof authoring !== 'object' || Array.isArray(authoring) || authoring.version !== 1
+    || typeof authoring.stream !== 'string' || !authoring.stream || typeof authoring.lease !== 'string' || !authoring.lease
+    || typeof authoring.snapshot !== 'string' || !authoring.snapshot || !Number.isSafeInteger(authoring.acknowledgementFence) || authoring.acknowledgementFence < 0
+    || !Array.isArray(authoring.positionFrames) || !Array.isArray(authoring.groupFrames) || !Array.isArray(authoring.splitResolutions))) fail('authoring', 'must be a complete version 1 envelope');
+  const visibleIds = new Set(blocks.filter((block) => block.kind === 'visible').map((block) => block.id));
+  const positionTokens = new Map();
+  for (const frame of authoring?.positionFrames ?? []) {
+    if (!frame || typeof frame !== 'object' || Object.keys(frame).length !== 2 || typeof frame.blockId !== 'string' || typeof frame.positionToken !== 'string' || !frame.positionToken || !visibleIds.has(frame.blockId) || positionTokens.has(frame.blockId)) fail('authoring.positionFrames', 'must exactly name visible blocks with unique opaque tokens');
+    positionTokens.set(frame.blockId, frame.positionToken);
+  }
+  if (authoring && positionTokens.size !== visibleIds.size) fail('authoring.positionFrames', 'must exactly match visible blocks');
+  const groupTokens = new Map();
+  for (let index = 0; index < (authoring?.groupFrames ?? []).length; index += 1) {
+    const frame = authoring.groupFrames[index];
+    if (!frame || typeof frame !== 'object' || Object.keys(frame).length !== 1 || typeof frame.groupToken !== 'string' || !frame.groupToken || groupTokens.has(frame.groupToken)) fail('authoring.groupFrames', 'must contain unique opaque tokens');
+    groupTokens.set(frame.groupToken, blockGroups[index]?.group);
+  }
+  if (authoring && groupTokens.size !== blockGroups.length) fail('authoring.groupFrames', 'must exactly match block groups');
+  const splitTokens = new Set();
+  for (const entry of authoring?.splitResolutions ?? []) {
+    if (!entry || typeof entry !== 'object' || Object.keys(entry).length !== 2
+      || typeof entry.temporaryBlock !== 'string' || !entry.temporaryBlock
+      || typeof entry.blockId !== 'string' || !visibleIds.has(entry.blockId)
+      || splitTokens.has(entry.temporaryBlock)) fail('authoring.splitResolutions', 'must name visible blocks with unique temporary blocks');
+    splitTokens.add(entry.temporaryBlock);
+  }
+  const materializedGroupEntries = blockGroups.map(({ group, blockIds, annotationIds }, index) => {
     const materialized = Object.freeze({
       kind: 'workbench.annotatedText.block-group',
       blockIds: Object.freeze(blockIds),
       annotationIds: Object.freeze(annotationIds),
     });
-    return { materialized, serverId: group.id };
+    return { materialized, serverId: authoring ? authoring.groupFrames[index].groupToken : group.id };
   });
   const materializedGroups = Object.freeze(materializedGroupEntries.map(({ materialized }) => materialized));
   binding.generation += 1;
   const document = Object.freeze({
     kind: 'workbench.annotatedText.recipient',
     version: 1,
-    basis: snapshot.basis,
     blocks: Object.freeze(blocks),
     blockGroups: materializedGroups,
     annotations: Object.freeze(annotations),
@@ -339,5 +364,8 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
       binding.onBlockGroup(materialized, serverId, binding.generation);
     }
   }
+  // The public document never carries authoring tokens. The returned binding is
+  // session-private and is read only by createAnnotatedTextHttpSession.
+  if (authoring) binding.authoring = Object.freeze({ stream: authoring.stream, lease: authoring.lease, snapshot: authoring.snapshot, acknowledgementFence: authoring.acknowledgementFence, positionTokens, groupTokens, splitResolutions: Object.freeze(authoring.splitResolutions.map((entry) => Object.freeze({ ...entry }))) });
   return document;
 }

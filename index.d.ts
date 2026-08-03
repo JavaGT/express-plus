@@ -332,7 +332,6 @@ export interface AnnotatedTextGroupSelection { readonly kind: 'consecutive' | 'l
 export type AnnotatedTextSelection = AnnotatedTextOneSelection | AnnotatedTextGroupSelection;
 interface AnnotatedTextCommandBase {
   readonly id: string;
-  readonly basis: string;
   readonly mutationId: string;
 }
 export interface AnnotatedTextInsertCommand extends AnnotatedTextCommandBase {

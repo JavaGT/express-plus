@@ -37,14 +37,14 @@ function selection(value) {
     throw new Error('annotatedTextAction: selection must be an object');
   }
   const keys = Object.keys(value);
-  if (value.kind === 'one' && keys.length === 2 && typeof value.blockGroupId === 'string' && value.blockGroupId.length > 0) {
-    return { kind: 'one', blockGroupId: value.blockGroupId };
+  if (value.kind === 'one' && keys.length === 2 && typeof value.groupToken === 'string' && value.groupToken.length > 0) {
+    return { kind: 'one', groupToken: value.groupToken };
   }
   if ((value.kind === 'consecutive' || value.kind === 'listed') && keys.length === 2 &&
-      Array.isArray(value.blockGroupIds) && value.blockGroupIds.length > 0 &&
-      value.blockGroupIds.every((id) => typeof id === 'string' && id.length > 0) &&
-      new Set(value.blockGroupIds).size === value.blockGroupIds.length) {
-    return { kind: value.kind, blockGroupIds: [...value.blockGroupIds] };
+      Array.isArray(value.groupTokens) && value.groupTokens.length > 0 &&
+      value.groupTokens.every((id) => typeof id === 'string' && id.length > 0) &&
+      new Set(value.groupTokens).size === value.groupTokens.length) {
+    return { kind: value.kind, groupTokens: [...value.groupTokens] };
   }
   throw new Error('annotatedTextAction: selection must be one, consecutive, or listed with exact keys');
 }
@@ -68,20 +68,22 @@ export function annotatedTextAction(entity, field, command) {
   if (typeof command.id !== 'string' || command.id.length === 0) {
     throw new Error('annotatedTextAction: command must include a non-empty document id');
   }
-  if (typeof command.basis !== 'string' || command.basis.length === 0 ||
-      typeof command.mutationId !== 'string' || command.mutationId.length === 0) {
-    throw new Error('annotatedTextAction: command requires a non-empty basis and mutationId');
+  if (!command.authoring || typeof command.authoring !== 'object' ||
+      command.authoring.version !== 1 || typeof command.authoring.stream !== 'string' || !command.authoring.stream ||
+      typeof command.authoring.lease !== 'string' || !command.authoring.lease ||
+      typeof command.authoring.mutationId !== 'string' || !command.authoring.mutationId) {
+    throw new Error('annotatedTextAction: command requires an authoring stream binding');
   }
   const kinds = new Set(['text.insert', 'text.delete', 'block.split', 'block.merge', 'annotation.apply', 'annotation.detach',
     'block.continue', 'block-group.assignment.set', 'block-group.assignment.clear', 'block.split-and-assign']);
   if (!kinds.has(command.kind)) throw new Error(`annotatedTextAction: unsupported command kind '${String(command.kind)}'`);
   const position = (value, label) => {
     if (!value || typeof value !== 'object' || Array.isArray(value) ||
-        typeof value.blockId !== 'string' || value.blockId.length === 0 ||
+        typeof value.positionToken !== 'string' || value.positionToken.length === 0 ||
         !Number.isSafeInteger(value.offset) || value.offset < 0) {
-      throw new Error(`annotatedTextAction: ${label} must be { blockId, offset }`);
+       throw new Error(`annotatedTextAction: ${label} must be { positionToken, offset }`);
     }
-    return { blockId: value.blockId, offset: value.offset };
+    return { positionToken: value.positionToken, offset: value.offset };
   };
   let edit;
   if (command.kind === 'text.insert') {
@@ -94,18 +96,18 @@ export function annotatedTextAction(entity, field, command) {
   } else if (command.kind === 'block.split') {
     edit = { kind: command.kind, at: position(command.at, 'at') };
   } else if (command.kind === 'block.merge') {
-    if (typeof command.leftBlockId !== 'string' || !command.leftBlockId || typeof command.rightBlockId !== 'string' || !command.rightBlockId) {
-      throw new Error('annotatedTextAction: block.merge requires leftBlockId and rightBlockId');
+    if (typeof command.leftPositionToken !== 'string' || !command.leftPositionToken || typeof command.rightPositionToken !== 'string' || !command.rightPositionToken) {
+      throw new Error('annotatedTextAction: block.merge requires position tokens');
     }
-    edit = { kind: command.kind, leftBlockId: command.leftBlockId, rightBlockId: command.rightBlockId };
+    edit = { kind: command.kind, leftPositionToken: command.leftPositionToken, rightPositionToken: command.rightPositionToken };
   } else if (command.kind === 'annotation.apply') {
     if (!command.annotation || typeof command.annotation !== 'object' || Array.isArray(command.annotation)) throw new Error('annotatedTextAction: annotation.apply requires annotation');
     edit = { kind: command.kind, annotation: command.annotation, from: position(command.from, 'from'), to: position(command.to, 'to') };
   } else if (command.kind === 'annotation.detach') {
-    if (typeof command.annotationId !== 'string' || !command.annotationId || typeof command.blockId !== 'string' || !command.blockId) {
-      throw new Error('annotatedTextAction: annotation.detach requires annotationId and blockId');
+    if (typeof command.annotationId !== 'string' || !command.annotationId || typeof command.positionToken !== 'string' || !command.positionToken) {
+      throw new Error('annotatedTextAction: annotation.detach requires annotationId and positionToken');
     }
-    edit = { kind: command.kind, annotationId: command.annotationId, blockId: command.blockId };
+    edit = { kind: command.kind, annotationId: command.annotationId, positionToken: command.positionToken };
   } else if (command.kind === 'block.continue') {
     edit = { kind: command.kind, at: position(command.at, 'at') };
   } else if (command.kind === 'block-group.assignment.set') {
@@ -118,10 +120,7 @@ export function annotatedTextAction(entity, field, command) {
   } else {
     edit = { kind: command.kind, at: position(command.at, 'at'), annotation: annotation(command.annotation) };
   }
-  const version = command.kind === 'text.insert' || command.kind === 'text.delete' ? 6 :
-    command.kind === 'block.continue' || command.kind === 'block-group.assignment.set' ||
-    command.kind === 'block-group.assignment.clear' || command.kind === 'block.split-and-assign' ? 8 : 7;
-  const payload = deepFreeze({ version, id: command.id, basis: command.basis, mutationId: command.mutationId, edit });
+  const payload = deepFreeze({ version: 9, id: command.id, authoring: command.authoring, edit });
 
   const type = `${entity.name}.${fieldName}.operation`;
 

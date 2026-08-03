@@ -14,5 +14,6 @@ export function revokeAnnotatedTextSnapshotSessionBinding(binding) {
   if (bindings.has(binding)) {
     binding.generation += 1;
     binding.document = null;
+    binding.authoring = null;
   }
 }
