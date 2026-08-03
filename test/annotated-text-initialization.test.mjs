@@ -1760,6 +1760,28 @@ test('public structural grammar resolves a basis position across concurrent text
   await app.close?.();
 });
 
+test('public annotation authoring classifies an unprojectable basis position as invalid input', async () => {
+  const { app, db } = await appFor();
+  const created = await app.dispatch({ actionId: 'stale-project-create', type: 'InitDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'abcd' }] } }, principal: { id: 'u1' } });
+  const blockId = created.events[0].data.__workbench.annotatedText.body.initialBlockId;
+  const basis = db.prepare("SELECT structure_version, family_checkpoint FROM InitDoc_body_state WHERE document_id = 'd1'").get();
+  db.prepare('INSERT INTO InitDoc_body_basis (token, document_id, principal_id, structural_revision, family_checkpoint, visible_blocks) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('stale-project-basis', 'd1', 'u1', basis.structure_version, basis.family_checkpoint, JSON.stringify([blockId]));
+
+  const result = await app.dispatch({
+    actionId: 'stale-project-apply', principal: { id: 'u1' }, scope: 'Project:p1',
+    ...annotatedTextAction(app.entities.get('InitDoc'), app.entities.get('InitDoc').body, {
+      kind: 'annotation.apply', id: 'd1', basis: 'stale-project-basis', mutationId: 'stale-project-apply',
+      annotation: { id: 'note-1', family: 'note', fields: {} }, from: { blockId, offset: 0 }, to: { blockId, offset: 5 },
+    }),
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.match(result.failure.message, /offset is outside text bounds/);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'stale-project-apply'").get().count, 0);
+  await app.close?.();
+});
+
 test('public offset authoring rejects invalid UTF-16 boundaries from its basis', async () => {
   const { app, db } = await appFor();
   const created = await app.dispatch({ actionId: 'unicode-create', type: 'InitDoc.create', payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'a😀b' }] } }, principal: { id: 'u1' } });

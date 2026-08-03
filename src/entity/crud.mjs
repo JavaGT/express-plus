@@ -655,8 +655,13 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
              JSON.stringify([...group.blockIds].sort()) !== JSON.stringify([...currentGroup.blockIds].sort()) ||
              JSON.stringify([...currentGroup.blockIds].sort()) !== JSON.stringify(currentDurable.sort()) ||
              !JSON.parse(basis.visible_blocks).includes(command.edit.at.blockId)) throw new ValidationError(`${name}.${fieldName}.operation position is not in a current complete recipient group`);
-         const endpoint = resolvePositionToEndpoint(basedFamily, command.edit.at.blockId, command.edit.at.offset, basedFamily.checkpoint.frontier);
-        const offset = projectEndpointToBlockOffset(family, command.edit.at.blockId, Object.freeze({ ...endpoint, basisFrontier: family.checkpoint.frontier }));
+         let offset;
+         try {
+           const endpoint = resolvePositionToEndpoint(basedFamily, command.edit.at.blockId, command.edit.at.offset, basedFamily.checkpoint.frontier);
+           offset = projectEndpointToBlockOffset(family, command.edit.at.blockId, Object.freeze({ ...endpoint, basisFrontier: family.checkpoint.frontier }));
+         } catch (error) {
+           throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+         }
         if (offset <= 0 || offset >= materializeBlock(family, command.edit.at.blockId).length) throw new ValidationError(`${name}.${fieldName}.operation position must be strictly internal`);
         return splitHandler({ payload: { version: 2, id: command.id, expected: { structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }, operation: { kind: 'block.split', blockId: command.edit.at.blockId, utf16Offset: offset } }, db, scope, structural: { kind: command.edit.kind, groupId: group.groupId, annotation: command.edit.annotation } });
       }
@@ -712,11 +717,15 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (command.version === 7 && command.edit.kind !== 'text.insert' && command.edit.kind !== 'text.delete') {
           const expected = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
           const offset = (point) => {
-            const endpoint = resolvePositionToEndpoint(basedFamily, point.blockId, point.offset, basedFamily.checkpoint.frontier);
-            // The anchor/affinity names the semantic basis position. Current
-            // projection evaluates that stable point in the dominated family;
-            // only its observation frontier advances.
-            return projectEndpointToBlockOffset(family, point.blockId, Object.freeze({ ...endpoint, basisFrontier: family.checkpoint.frontier }));
+            try {
+              const endpoint = resolvePositionToEndpoint(basedFamily, point.blockId, point.offset, basedFamily.checkpoint.frontier);
+              // The anchor/affinity names the semantic basis position. Current
+              // projection evaluates that stable point in the dominated family;
+              // only its observation frontier advances.
+              return projectEndpointToBlockOffset(family, point.blockId, Object.freeze({ ...endpoint, basisFrontier: family.checkpoint.frontier }));
+            } catch (error) {
+              throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+            }
           };
           if (command.edit.kind === 'block.split') return splitHandler({ payload: { version: 2, id: command.id, expected, operation: { kind: 'block.split', blockId: command.edit.at.blockId, utf16Offset: offset(command.edit.at) } }, db, scope });
           if (command.edit.kind === 'block.merge') return r3Handler({ payload: { version: 3, id: command.id, expected, operation: command.edit }, db, scope });

@@ -150,6 +150,17 @@ test('v8 rejects invalid consecutive selections, stale/partial bases, boundaries
    assert.deepEqual(durableAnnotatedTextState(ctx.db), before);
 });
 
+test('v8 block continuation classifies an unprojectable basis position as invalid input', async (t) => {
+  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
+  const before = durableAnnotatedTextState(ctx.db);
+  const result = await dispatch(ctx, 'invalid-position', { kind: 'block.continue', at: { blockId: ctx.blockId, offset: 12 } });
+  assert.equal(result.ok, false);
+  assert.equal(result.failure.category, 'invalid-input');
+  assert.match(result.failure.message, /offset is outside text bounds/);
+  assert.equal(rows(ctx.db, "SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'invalid-position'")[0].count, 0);
+  assert.deepEqual(durableAnnotatedTextState(ctx.db), before);
+});
+
 test('v8 projection rejects tampered split facts before any durable write', async (t) => {
   const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
   const result = await dispatch(ctx, 'tamper-source', { kind: 'block.continue', at: { blockId: ctx.blockId, offset: 5 } }); assert.equal(result.ok, true);
