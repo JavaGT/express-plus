@@ -291,13 +291,25 @@ export async function readAnnotatedTextForRecipient(input) {
   const { app, field, documentId, expectedOwningScope, principal } = input;
   const db = app.db;
   const entity = app.entities.get(input.entity.name);
-  if (!entity) throw new TypeError('readAnnotatedTextForRecipient entity is not registered with the application');
+  if (!entity || input.entity !== entity.declaration) {
+    throw new TypeError('readAnnotatedTextForRecipient entity must be the application-registered declaration');
+  }
   const descriptor = entity.fields?.[field.fieldName];
-  if (!descriptor || descriptor.kind !== 'annotatedText') {
-    throw new TypeError('readAnnotatedTextForRecipient field is not annotatedText');
+  const metadata = getAnnotatedTextCompiledMetadata(descriptor);
+  if (!descriptor || descriptor.kind !== 'annotatedText' ||
+      field.annotations !== metadata?.annotationHandles ||
+      field.measurements !== metadata?.measurementHandles ||
+      field.capabilities !== metadata?.capabilityHandles) {
+    throw new TypeError('readAnnotatedTextForRecipient field must be the registered annotatedText handle');
+  }
+  const expectedScopeEntity = app.entities.get(expectedOwningScope.entity.name);
+  if (!expectedScopeEntity || expectedOwningScope.entity !== expectedScopeEntity.declaration) {
+    throw new TypeError('readAnnotatedTextForRecipient expectedOwningScope entity must be the application-registered declaration');
   }
 
   for (let attempt = 0; attempt < RECIPIENT_READ_ATTEMPTS; attempt += 1) {
+    let capturedOwningScopeKey = null;
+    let capturedOwningScopeCursor = null;
     try {
       const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(documentId);
       // There is no declared owner for a missing or malformed document. Bind its
@@ -336,6 +348,8 @@ export async function readAnnotatedTextForRecipient(input) {
       // This capture deliberately precedes every authorization await. Grants and
       // protection decisions are part of the recipient projection candidate.
       const owningScopeCursorBefore = readSeq(db, owningScope.key);
+      capturedOwningScopeKey = owningScope.key;
+      capturedOwningScopeCursor = owningScopeCursorBefore;
       const mayReadScope = await mayRow(scopeEntity, 'read', scopeRow, principal);
       const mayReadDocument = await mayRow(entity, 'read', row, principal);
       if (!mayReadScope || !mayReadDocument) {
@@ -358,6 +372,8 @@ export async function readAnnotatedTextForRecipient(input) {
       if (owningScopeCursorBefore !== owningScopeCursorAfter) continue;
       return deepFreeze({ kind: 'snapshot', document, owningScopeCursor: owningScopeCursorAfter });
     } catch (error) {
+      if (capturedOwningScopeKey !== null && capturedOwningScopeCursor !== null &&
+          !unchangedCursor(db, capturedOwningScopeKey, capturedOwningScopeCursor)) continue;
       throw sanitizedRecipientReadFailure();
     }
   }

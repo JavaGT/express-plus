@@ -64,6 +64,19 @@ test('recipient read returns a deeply frozen, cursor-bound public projection and
   assert.deepEqual(await readAnnotatedTextForRecipient(c.request), { kind: 'unavailable' });
 });
 
+test('recipient read rejects unregistered declaration and lookalike field handles before data access', async (t) => {
+  const c = await setup(); t.after(c.close);
+  const UnregisteredProject = entity('RecipientReadProject', { owner: ref('User') });
+  const UnregisteredTranscript = entity('RecipientReadTranscript', {
+    project: ref(UnregisteredProject), owner: ref('User'),
+    body: annotatedText({ project: 'project', owner: 'owner', annotations: [annotation('note')], measurements: [measurement('words', { extension: 'recipientReadMeasurement' })] }),
+  });
+  await assert.rejects(readAnnotatedTextForRecipient({ ...c.request, entity: UnregisteredTranscript }), TypeError);
+  await assert.rejects(readAnnotatedTextForRecipient({ ...c.request, field: UnregisteredTranscript.body }), TypeError);
+  await assert.rejects(readAnnotatedTextForRecipient({ ...c.request, field: { fieldName: 'body' } }), TypeError);
+  await assert.rejects(readAnnotatedTextForRecipient({ ...c.request, expectedOwningScope: { entity: UnregisteredProject, id: 'p1' } }), TypeError);
+});
+
 test('owning-scope and document authorization candidates are discarded when their scope cursor changes', async (t) => {
   let allowed = true; let first; let entered; let gate = false;
   const c = await setup({ scopeAccess: async () => { if (gate) { entered.resolve(); await first.promise; } return allowed; } }); t.after(c.close);
@@ -94,6 +107,40 @@ test('two relevant changes exhaust the bounded recipient read and unrelated-scop
   const pending = readAnnotatedTextForRecipient(unrelated.request);
   await entered.promise; advance(unrelated.db, 'RecipientReadProject:p2'); first.resolve();
   assert.equal((await pending).kind, 'snapshot');
+});
+
+test('authorization throws after owning cursor changes retry rather than sanitize', async (t) => {
+  let scopeCalls = 0; let active = false;
+  let db;
+  const owner = await setup({ scopeAccess: async () => {
+    if (!active) return true;
+    scopeCalls += 1;
+    if (scopeCalls === 1) { advance(db); throw new Error('owner changed'); }
+    return true;
+  } }); t.after(owner.close); db = owner.db;
+  active = true;
+  assert.equal((await readAnnotatedTextForRecipient(owner.request)).kind, 'snapshot');
+  assert.equal(scopeCalls, 2);
+
+  let documentCalls = 0; active = false;
+  const document = await setup({ documentAccess: async () => {
+    if (!active) return true;
+    documentCalls += 1;
+    if (documentCalls === 1) { advance(db); throw new Error('document changed'); }
+    return true;
+  } }); t.after(document.close); db = document.db;
+  active = true;
+  assert.equal((await readAnnotatedTextForRecipient(document.request)).kind, 'snapshot');
+  assert.equal(documentCalls, 2);
+
+  let changingCalls = 0; active = false;
+  const exhausted = await setup({ scopeAccess: async () => {
+    if (!active) return true;
+    changingCalls += 1; advance(db); throw new Error('still changing');
+  } }); t.after(exhausted.close); db = exhausted.db;
+  active = true;
+  assert.deepEqual(await readAnnotatedTextForRecipient(exhausted.request), { kind: 'retry' });
+  assert.equal(changingCalls, 2);
 });
 
 test('stable projection corruption is sanitized, and an annotated operation advances only its Project owning cursor', async (t) => {
