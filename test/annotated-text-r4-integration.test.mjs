@@ -274,7 +274,7 @@ test('R3 merge preserves active orphan-policy annotations and protector edges', 
     kind: 'workbench.annotatedText.recipient', version: 1, basis: 'string',
     blockGroups: [],
     blocks: [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }],
-    annotations: [], memberships: [], measurements: [], capabilityHints: [],
+    annotations: [], memberships: [], measurements: [], capabilityHints: [], orphans: [],
   });
   const deniedSerialized = JSON.stringify(denied);
   for (const serialized of [ownerSerialized, deniedSerialized]) {
@@ -321,6 +321,25 @@ test('R2 edge splits remain no-ops before a valid R3 merge', async () => {
   assert.equal(merge.ok, true, merge.failure?.message);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_block WHERE document_id = 'd1'").get().count, 1);
   assert.equal(materializeBlock(restoreTextFamilyCheckpoint(merge.events[0].data.family), blockId), 'hello world');
+  await app.close?.();
+});
+
+test('R2 split reorders persisted later blocks before inserting its right block', async () => {
+  const { app, db, blockId, state } = await setupDoc('hello world');
+  const first = await app.dispatch({
+    actionId: 'r2-first-split', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: v2Payload(blockId, 6, { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier }),
+  });
+  assert.equal(first.ok, true, first.failure?.message);
+  const second = await app.dispatch({
+    actionId: 'r2-insert-before-later-block', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: v2Payload(blockId, 2, structuralExpected(db)),
+  });
+  assert.equal(second.ok, true, second.failure?.message);
+  assert.deepEqual(
+    db.prepare("SELECT position FROM R4Doc_body_block WHERE document_id = 'd1' ORDER BY position").all().map((row) => row.position),
+    ['0000000000000', '0000000000001', '0000000000002'],
+  );
   await app.close?.();
 });
 
@@ -474,12 +493,22 @@ test('HTTP snapshot projects protected annotated text for each recipient before 
     actionId: 'http-protection', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: v4Payload('d1', blockId, 0, 11, 'http-protect', 'confidential', {}, expected, ['http-theme']),
   })).ok, true);
+  const orphanLastMemberships = ['workbench.annotation-last-memberships', 1, 1, [], [[
+    0, blockId,
+    ['endpoint', expected.frontier, ['point', ['root'], 'left']],
+    ['endpoint', expected.frontier, ['point', ['root'], 'right']],
+  ]]];
+  db.prepare("INSERT INTO R4Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('http-orphan', 'd1', 'p1', 'u1', 'theme')").run();
+  db.prepare("INSERT INTO R4Doc_body_annotation_theme (annotation_id, color, weight) VALUES ('http-orphan', 'orphan-color', 3)").run();
+  db.prepare("INSERT INTO R4Doc_body_annotation_orphan_state (annotation_id, saved_quote, last_memberships) VALUES ('http-orphan', 'orphan quote', ?)")
+    .run(JSON.stringify(orphanLastMemberships));
   db.prepare("INSERT INTO R4Doc_body_measurement (id, block_id, family, format_version, payload) VALUES ('http-measurement', ?, 'source', 1, '{\"text\":\"hello world\"}')").run(blockId);
   const ownerResponse = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(ownerResponse.status, 200);
   const owner = await ownerResponse.json();
   assert.equal(owner.snapshot.body.blocks[0].kind, 'visible');
   assert.equal(owner.snapshot.body.blocks[0].text, 'hello world');
+  assert.deepEqual(owner.snapshot.body.orphans, [{ id: 'http-orphan', family: 'theme', fields: { color: 'orphan-color', weight: 3 }, savedQuote: 'orphan quote' }]);
   const ownerBasis = owner.snapshot.body.basis;
   const refreshedOwner = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
   const refreshedOwnerBasis = (await refreshedOwner.json()).snapshot.body.basis;
@@ -494,13 +523,15 @@ test('HTTP snapshot projects protected annotated text for each recipient before 
     kind: 'workbench.annotatedText.recipient', version: 1, basis: 'string',
     blockGroups: [],
     blocks: [{ kind: 'restricted', id: blockId, placeholder: '[Restricted]' }],
-    annotations: [], memberships: [], measurements: [], capabilityHints: [],
+    annotations: [], memberships: [], measurements: [], capabilityHints: [], orphans: [],
   });
   const serialized = JSON.stringify(recipient.snapshot.body);
   assert.equal(serialized.includes('hello world'), false);
   assert.equal(serialized.includes('http-measurement'), false);
   assert.equal(serialized.includes('http-theme'), false);
   assert.equal(serialized.includes('http-protect'), false);
+  assert.equal(serialized.includes('http-orphan'), false);
+  assert.equal(serialized.includes('orphan quote'), false);
   assert.equal(serialized.includes('protectedTargetIds'), false);
 
   principal = { id: 'u1' };
@@ -568,16 +599,42 @@ test('HTTP snapshot fails closed on malformed state and throwing protector acces
   assert.equal((await malformed.text()).includes('secret'), false);
 });
 
-test('HTTP snapshot keeps persisted orphan annotations server-side', async (t) => {
+test('HTTP snapshot projects orphan annotations with safe fields for the recipient', async (t) => {
   const { app, db } = await setupDoc('visible', 'u1');
   t.after(async () => { await app.shutdown(); db.close(); });
   db.prepare("INSERT INTO R4Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('orphan', 'd1', 'p1', 'u1', 'theme')").run();
   db.prepare("INSERT INTO R4Doc_body_annotation_theme (annotation_id, color, weight) VALUES ('orphan', 'secret-color', 7)").run();
-  db.prepare("INSERT INTO R4Doc_body_annotation_orphan_state (annotation_id, saved_quote, last_memberships) VALUES ('orphan', 'secret orphan quote', '[]')").run();
+  const orphanBlockId = db.prepare("SELECT id FROM R4Doc_body_block WHERE document_id = 'd1'").get().id;
+  const lastMemberships = ['workbench.annotation-last-memberships', 1, 1, [], [[
+    0, orphanBlockId,
+    ['endpoint', [], ['point', ['root'], 'left']],
+    ['endpoint', [], ['point', ['root'], 'right']],
+  ]]];
+  db.prepare("INSERT INTO R4Doc_body_annotation_orphan_state (annotation_id, saved_quote, last_memberships) VALUES ('orphan', 'secret orphan quote', ?)")
+    .run(JSON.stringify(lastMemberships));
   const response = await fetch(`http://127.0.0.1:${app.httpServer.address().port}/snapshot/R4Doc/d1`, { signal: AbortSignal.timeout(5_000) });
   assert.equal(response.status, 200);
-  const serialized = await response.text();
-  for (const secret of ['orphan', 'secret-color', 'secret orphan quote']) assert.equal(serialized.includes(secret), false);
+  const body = (await response.json()).snapshot.body;
+  assert.equal(body.orphans.length, 1);
+  assert.equal(body.orphans[0].id, 'orphan');
+  assert.equal(body.orphans[0].family, 'theme');
+  assert.deepEqual(body.orphans[0].fields, { color: 'secret-color', weight: 7 });
+  assert.equal(body.orphans[0].savedQuote, 'secret orphan quote');
+  assert.equal(body.orphans[0].protectedTargetIds, undefined);
+  // Orphan annotation does not appear in active annotations/memberships
+  assert.equal(body.annotations.some((a) => a.id === 'orphan'), false);
+  assert.equal(body.memberships.some((m) => m.annotationId === 'orphan'), false);
+  // No leak of raw last_memberships or block/protector/endpoint info
+  const serialized = JSON.stringify(body);
+  assert.equal(serialized.includes('last_memberships'), false);
+  assert.equal(serialized.includes('endpoint'), false);
+  assert.equal(serialized.includes('frontier'), false);
+  assert.equal(serialized.includes('membershipBlockIds'), false);
+  assert.equal(serialized.includes('structuralRevision'), false);
+  // Unrelated text is not rebound
+  assert.equal(body.blocks.length, 1);
+  assert.equal(body.blocks[0].text, 'visible');
+  assert.equal(body.blocks[0].annotationIds.length, 0);
 });
 
 test('HTTP replay never serializes annotated-text events and requires a fresh snapshot', async (t) => {
@@ -713,6 +770,26 @@ test('R4 annotation.apply on prefix (start=0, end<length) produces one split, an
   const memberships = db.prepare("SELECT * FROM R4Doc_body_membership WHERE annotation_id = 'ann-2'").all();
   assert.equal(memberships.length, 1);
   assert.equal(memberships[0].block_id, blockId);
+  await app.close?.();
+});
+
+test('R4 annotation.apply reorders persisted blocks before inserting an annotation split', async () => {
+  const { app, db, blockId, state } = await setupDoc('hello world');
+  const firstSplit = await app.dispatch({
+    actionId: 'make-later-block', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: v2Payload(blockId, 6, { structuralRevision: state.structure_version, frontier: JSON.parse(state.family_checkpoint).checkpoint.frontier }),
+  });
+  assert.equal(firstSplit.ok, true, firstSplit.failure?.message);
+  const afterFirstSplit = structuralExpected(db);
+  const result = await app.dispatch({
+    actionId: 'apply-before-later-block', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 5, 'ann-before-later-block', 'flag', { flagged: true }, afterFirstSplit),
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  assert.deepEqual(
+    db.prepare("SELECT position FROM R4Doc_body_block WHERE document_id = 'd1' ORDER BY position").all().map((row) => row.position),
+    ['0000000000000', '0000000000001', '0000000000002'],
+  );
   await app.close?.();
 });
 

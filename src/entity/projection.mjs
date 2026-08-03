@@ -141,6 +141,12 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db, privateF
   throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
 }
 
+function stageBlockPositions(db, prefix, existingById) {
+  for (const id of Object.keys(existingById)) {
+    db.prepare(`UPDATE ${prefix}_block SET position = ? WHERE id = ?`).run(`~${id}`, id);
+  }
+}
+
 function applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact }) {
   const prefix = `${name}_${handle.field}`;
   if (data?.operation?.kind === 'history.restore') {
@@ -614,6 +620,7 @@ function applyStructuralSplitProjection({ name, handle, db, descriptor, data }) 
       throw new Error(`${name}.${handle.field}.operated v2 family references unknown block '${fb.id}'`);
     }
   }
+  stageBlockPositions(db, prefix, existingById);
 
   for (const [index, fb] of familyBlocks.entries()) {
     const pos = deriveBlockPosition(index);
@@ -973,6 +980,7 @@ function applyR3AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   if (!existingById[rightBlockId]) {
     throw new Error(`${name}.${handle.field}.operated v3 right block vanished before projection`);
   }
+  stageBlockPositions(db, prefix, existingById);
 
   for (const [index, fb] of familyBlocks.entries()) {
     const pos = deriveBlockPosition(index);
@@ -1403,6 +1411,8 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
     }
     virtualStoredBlocks.set(split.newBlockId, source);
   }
+
+  if (anySplit) stageBlockPositions(db, prefix, existingById);
 
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`)
     .run(data.after.structuralRevision, JSON.stringify(textFamilyCheckpoint(reduced)), data.id);
