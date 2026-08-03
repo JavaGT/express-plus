@@ -1276,6 +1276,9 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   if (!annotationFamilyMeta || !annotationDescriptor) {
     throw new Error(`${name}.${handle.field}.operated v4 event references unknown annotation family '${evAnn.family}'`);
   }
+  if (compiledMeta.annotationHandles[evAnn.family]?.appliesTo !== 'block') {
+    throw new Error(`${name}.${handle.field}.operated v4 event annotation family '${evAnn.family}' must apply to blocks`);
+  }
   const protectedTargetIds = evAnn.protectedTargetIds ?? [];
   if (protectedTargetIds.length !== 0 &&
       (annotationDescriptor.kind !== 'protectingAnnotation' || annotationDescriptor.protects === null)) {

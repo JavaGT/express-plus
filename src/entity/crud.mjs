@@ -1283,6 +1283,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       if (!annotationFamilyMeta || !annotationDescriptor) {
         throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family '${annInput.family}'`);
       }
+      if (compiledMeta.annotationHandles[annInput.family]?.appliesTo !== 'block') {
+        throw new ValidationError(`${name}.${fieldName}.operation annotation family '${annInput.family}' must apply to blocks`);
+      }
       const protectedTargetIds = annInput.protectedTargetIds ?? [];
       if (protectedTargetIds.length !== 0 &&
           (annotationDescriptor.kind !== 'protectingAnnotation' || annotationDescriptor.protects === null)) {

@@ -63,6 +63,7 @@ function r4Doc({
         annotation('theme', { fields: { color: text({ default: 'blue' }), weight: number({ default: 1 }) } }),
         annotation('flag', { fields: { flagged: boolean({ default: false }) } }),
         annotation('comment', { empty: commentEmpty }),
+        annotation('speaker', { appliesTo: 'block-group', cardinality: 'one' }),
         protectingAnnotation('confidential', { protects: 'theme', access: protectingAccess }),
         protectingAnnotation('standalone', { access: () => grant(read) }),
       ],
@@ -870,6 +871,18 @@ test('R4 annotation.apply rejects unknown annotation family', async () => {
   assert.equal(result.ok, false);
   assert.equal(result.failure.category, 'invalid-input');
   await app.close?.();
+});
+
+test('R4 annotation.apply rejects a block-group annotation family', async () => {
+  const { app, db, blockId } = await setupDoc('hello');
+  const expected = structuralExpected(db);
+  const result = await app.dispatch({
+    actionId: 'apply-group-annotation', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: v4Payload('d1', blockId, 0, 5, 'speaker-1', 'speaker', {}, expected),
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.failure?.message ?? '', /annotation family 'speaker' must apply to blocks/);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation WHERE document_id = 'd1'").get().count, 0);
 });
 
 test('R4 annotation.apply rejects duplicate annotation id', async () => {
