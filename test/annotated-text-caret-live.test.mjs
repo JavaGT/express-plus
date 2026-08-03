@@ -44,6 +44,8 @@ function seedAnnotatedTextTables(db, entityName, fieldName, docId, blockId, proj
     .run(docId, 0, JSON.stringify(family));
   db.prepare(`INSERT INTO ${prefix}_block (id, document_id, project_id, owner_id, position, epoch, structure_version) VALUES (?, ?, ?, ?, ?, ?, ?)`)
     .run(blockId, docId, projectId, ownerId, 'a', 1, 1);
+  db.prepare(`INSERT INTO ${prefix}_block_group (block_id, group_id) VALUES (?, ?)`)
+    .run(blockId, blockId);
 }
 
 function setup() {

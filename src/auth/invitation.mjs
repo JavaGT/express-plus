@@ -10,7 +10,13 @@ import { rowCapabilities } from '../row-grant.mjs';
 import { MEMBER_COLUMN, membershipOwnerCol, membershipTable } from '../scope-sql.mjs';
 import { mapMutationAction } from '../side-table-strategy.mjs';
 import { failure } from '../outcome.mjs';
-import { EventKind } from '../event-handle.mjs';
+import {
+  admitInvitationAcceptance,
+  authorizeInvitationAcceptance,
+  invitationAcceptancePrincipal,
+} from './invitation-acceptance-authority.mjs';
+
+export { admitInvitationAcceptance } from './invitation-acceptance-authority.mjs';
 
 function httpError(status, message) {
   return Object.assign(new Error(message), { status });
@@ -23,7 +29,6 @@ function requireSuccess(result, operation) {
 }
 
 const invitationCreationAuthorities = new WeakSet();
-const invitationAcceptanceAuthorities = new WeakMap();
 
 function invitationCreationPrincipal(user) {
   const authority = Object.freeze({
@@ -37,41 +42,6 @@ function invitationCreationPrincipal(user) {
 
 export function isInvitationCreationAuthority(principal) {
   return principal != null && invitationCreationAuthorities.has(principal);
-}
-
-function invitationAcceptancePrincipal(user) {
-  const authority = Object.freeze({
-    type: 'user',
-    id: user.id,
-    attributes: Object.freeze({ ...(user.attributes ?? {}) }),
-  });
-  invitationAcceptanceAuthorities.set(authority, null);
-  return authority;
-}
-
-function authorizeInvitationAcceptance(authority, details) {
-  invitationAcceptanceAuthorities.set(authority, Object.freeze(details));
-}
-
-export function admitInvitationAcceptance({ event, principal }) {
-  const details = invitationAcceptanceAuthorities.get(principal);
-  if (!details || !event?.handle) return false;
-  const { handle, data } = event;
-  if (
-    handle.entity === details.targetEntity
-    && handle.field === details.fieldName
-    && handle.kind === EventKind.native
-    && handle.nativeName === details.mapOperation
-  ) {
-    return String(data?.owner) === details.targetId
-      && String(data?.member) === details.memberId
-      && data?.role === details.role;
-  }
-  if (handle.entity !== Invitation.name || String(data?.id) !== details.invitationId) return false;
-  if (details.invitationOperation === 'update') {
-    return handle.kind === EventKind.updated && data?.useCount === details.useCount;
-  }
-  return details.invitationOperation === 'remove' && handle.kind === EventKind.removed;
 }
 
 function invitationTargetFor(runtime, name, role) {
@@ -286,6 +256,7 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
     if (user.type !== 'user') {
       throw httpError(403, 'a user principal is required to reject an invitation');
     }
+    const authority = invitationAcceptancePrincipal(user);
     const result = await runtime.batch(() => {
       const invitation = Invitation.findOne(Invitation.token.is(token));
       if (!invitation) throw httpError(404, 'invitation not found');
@@ -295,8 +266,20 @@ export function createInvitationApi({ Invitation, db: suppliedDb } = {}) {
       if (String(invitation.targetUser) !== String(user.id)) {
         throw httpError(403, 'this invitation is for a different user');
       }
+      const target = targetFor(invitation.targetEntity, invitation.role);
+      authorizeInvitationAcceptance(authority, {
+        targetEntity: target.entity.name,
+        targetId: String(invitation.targetId),
+        fieldName: target.fieldName,
+        role: invitation.role,
+        memberId: String(user.id),
+        mapOperation: null,
+        invitationId: String(invitation.id),
+        invitationOperation: 'remove',
+        useCount: invitation.useCount,
+      });
       return [{ type: 'Invitation.remove', payload: { id: invitation.id } }];
-    }, { principal: user });
+    }, { principal: authority });
     requireSuccess(result, 'rejection');
   }
 

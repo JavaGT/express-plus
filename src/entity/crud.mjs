@@ -27,6 +27,7 @@ import { erasureDirectivePreparation } from '../erasure-directive.mjs';
 import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.mjs';
 import { mayRow } from '../row-grant.mjs';
 import { ANNOTATED_HISTORY_COMPLETION, annotatedTextHistoryImage } from '../annotated-text-history.mjs';
+import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 
@@ -473,7 +474,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       // A conditional remove reads its private preimage below, so authorize the
       // target row first rather than allowing that read to precede admission.
       const admissionRow = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
-      if (!admissionRow || !(await mayRow(record, 'remove', admissionRow, principal))) {
+      if (!admissionRow || (!(await mayRow(record, 'remove', admissionRow, principal))
+        && !(record.name === 'Invitation' && admitsInvitationRemoval(principal, payload.id)))) {
         throw Object.assign(new Error('forbidden'), { status: 403 });
       }
       const events = [{
@@ -481,10 +483,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         type: verbs.removed.type,
         scope: resolveGeneratedEventScope(record, { id: payload.id, row: admissionRow, payload, scope }),
         data: { id: payload.id },
-        [CASCADE_PREAUTHORIZED]: true,
       }];
       if (!conditionalCreateHistory) return events;
-       return { events, privateFact: { before: admissionRow, after: null } };
+      return { events, privateFact: { before: admissionRow, after: null } };
     },
   };
   const cursorPolicy = {};
