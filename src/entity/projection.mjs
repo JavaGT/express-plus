@@ -1033,7 +1033,10 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
     Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
 
   const operation = data.operation;
-  if (Object.keys(data).length !== 13 || data.version !== 4 ||
+  if ((Object.keys(data).length !== 13 && Object.keys(data).length !== 14) || data.version !== 4 ||
+      (Object.keys(data).length === 14 &&
+        (!Object.hasOwn(data, 'actorId') ||
+          (data.actorId !== null && (typeof data.actorId !== 'string' || data.actorId.length === 0 || data.actorId.length > 200)))) ||
       !isVersion(data.before) || !isVersion(data.after) ||
       !operation || typeof operation !== 'object' || Array.isArray(operation) ||
       JSON.stringify(Object.keys(operation).sort()) !== JSON.stringify(['annotation', 'kind', 'selection']) ||
@@ -1463,7 +1466,7 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   }
 
   db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
-    .run(evAnn.id, data.id, sourceBlock.project_id, sourceBlock.owner_id, evAnn.family);
+    .run(evAnn.id, data.id, sourceBlock.project_id, data.actorId != null && typeof data.actorId === 'string' && data.actorId.length > 0 ? data.actorId : sourceBlock.owner_id, evAnn.family);
 
   for (const targetId of protectedTargetIds) {
     db.prepare(`INSERT INTO ${prefix}_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)`)

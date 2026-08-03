@@ -378,7 +378,7 @@ export function projectEndpointToBlockOffset(family, blockId, endpoint) {
   return offset;
 }
 
-export function resolvePositionToEndpoint(family, blockId, utf16Offset, basisFrontier) {
+export function resolvePositionToEndpoint(family, blockId, utf16Offset, basisFrontier, affinity) {
   assertBlockId(blockId);
   const blockIndex = family.blocks.findIndex((b) => b.id === blockId);
   if (blockIndex === -1) fail(`block not found: ${blockId}`);
@@ -398,8 +398,20 @@ export function resolvePositionToEndpoint(family, blockId, utf16Offset, basisFro
 
   if (utf16Offset === 0) {
     if (!hasVisibleScalar) {
+      if (affinity !== 'left' && affinity !== 'right') fail('fully tombstoned block offset 0 is ambiguous; provide explicit affinity');
+      if (ownedSet.size === 0 && blockIndex === 0) {
+        return assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier });
+      }
+      if (affinity === 'right') {
+        const lastOwnedKey = findLastOwnedKey(family, ownedSet);
+        if (lastOwnedKey === null) fail('block has no elements');
+        const element = checkpoint.elements[lastOwnedKey];
+        return assertStructuralEndpoint({
+          point: ['point', ['element', [[...element.op], element.ordinal]], 'right'],
+          basisFrontier,
+        });
+      }
       if (blockIndex === 0) return assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier });
-      fail('fully tombstoned block offset 0 is ambiguous; provide explicit affinity');
     }
     if (blockIndex === 0) {
       return assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier });
@@ -601,7 +613,7 @@ export function textOperationForOffsetEdit(family, edit, actor, lamport) {
     assertUtf16Offset(text, edit.at.offset);
     const anchor = text.length === 0 && block.elementKeys.length === 0 && family.blocks[0].id === edit.at.blockId && edit.at.offset === 0
       ? ['root']
-      : resolvePositionToEndpoint(family, edit.at.blockId, edit.at.offset, basis).point[1];
+      : resolvePositionToEndpoint(family, edit.at.blockId, edit.at.offset, basis, edit.at.affinity).point[1];
     return canonicalTextOp(['workbench.text', 1, op, lamport, basis, ['insert', anchor, edit.text]]);
   }
   if (edit.kind !== 'text.delete' || edit.from.blockId !== edit.to.blockId) fail('delete endpoints must name the same block');

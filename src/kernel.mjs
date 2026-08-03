@@ -19,7 +19,7 @@ import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { createOperationalConsumers } from './operational-consumer.mjs';
 import { createPendingBlobLifecycle } from './pending-blob.mjs';
 import { readSeq } from './committed-log.mjs';
-import { CRUD_CURSOR_POLICY, assertR8Payload } from './entity/crud.mjs';
+import { CRUD_CURSOR_POLICY, assertV9AnnotatedTextOffsetEditPayload } from './entity/crud.mjs';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 import { isCanonicalAnnotatedTextHistoryImage } from './annotated-text-history.mjs';
 import { EventKind } from './event-handle.mjs';
@@ -486,7 +486,7 @@ export function buildKernel(app) {
   const isAnnotatedHistoryAction = ({ type, payload }) => {
     const detail = annotatedActionDetails.get(type);
     if (!detail) return false;
-    try { assertR8Payload(detail.entity.name, detail.fieldName, payload); return true; } catch { return false; }
+    try { assertV9AnnotatedTextOffsetEditPayload(detail.entity.name, detail.fieldName, payload); return true; } catch { return false; }
   };
   const isAnnotatedHistoryFact = ({ type, payload, fact }) => {
     const detail = annotatedActionDetails.get(type);

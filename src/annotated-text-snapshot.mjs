@@ -6,7 +6,9 @@ import { projectAnnotatedTextForRecipient } from './annotated-text-recipient-pro
 import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.mjs';
 import { mayRow, protectingAnnotationCapabilities } from './row-grant.mjs';
 import { read } from './grant.mjs';
-import { resolveStream, resolveLease, issuePositionFrame, issueGroupFrame, issueSnapshot, buildAuthoringEnvelope } from './annotated-text-authoring-stream.mjs';
+import { resolveStream, resolveLease, issueAuthoringSnapshot, buildAuthoringEnvelope } from './annotated-text-authoring-stream.mjs';
+import { readSeq } from './cursor.mjs';
+import { scopeOf } from './scope-handle.mjs';
 
 function fail(message) { throw new Error(`annotated-text snapshot: ${message}`); }
 function deepFreeze(value) {
@@ -15,6 +17,32 @@ function deepFreeze(value) {
     Object.freeze(value);
   }
   return value;
+}
+
+const RECIPIENT_READ_ATTEMPTS = 2;
+const recipientUnavailable = deepFreeze({ kind: 'unavailable' });
+const recipientRetry = deepFreeze({ kind: 'retry' });
+function requireRecipientReadInput(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input) ||
+      !input.app?.db || !input.app?.entities || typeof input.entity?.name !== 'string' ||
+      !input.field || typeof input.field.fieldName !== 'string' ||
+      typeof input.documentId !== 'string' || input.documentId.length === 0 ||
+      !input.expectedOwningScope || typeof input.expectedOwningScope !== 'object' ||
+      typeof input.expectedOwningScope.entity?.name !== 'string' ||
+      typeof input.expectedOwningScope.id !== 'string' || input.expectedOwningScope.id.length === 0 ||
+      !input.principal || typeof input.principal !== 'object' ||
+      typeof input.principal.type !== 'string' || !Object.hasOwn(input.principal, 'id') ||
+      !Object.hasOwn(input.principal, 'attributes')) {
+    throw new TypeError('readAnnotatedTextForRecipient requires a complete public recipient read input');
+  }
+}
+
+function sanitizedRecipientReadFailure() {
+  return new Error('annotated-text recipient read failed');
+}
+
+function unchangedCursor(db, scopeKey, before) {
+  return readSeq(db, scopeKey) === before;
 }
 
 
@@ -70,7 +98,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   const groupIds = requireBlockGroupIds(blockRows, groupRows, fieldName);
   if (blockRows.length !== family.blocks.length) fail(`field '${fieldName}' blocks disagree with checkpoint`);
   const annotations = db.prepare(
-    `SELECT annotation.id, annotation.family FROM ${prefix}_annotation AS annotation WHERE annotation.document_id = ? AND (EXISTS (SELECT 1 FROM ${prefix}_membership AS membership WHERE membership.annotation_id = annotation.id) OR EXISTS (SELECT 1 FROM ${prefix}_group_membership AS membership WHERE membership.annotation_id = annotation.id)) ORDER BY annotation.id`,
+    `SELECT annotation.id, annotation.family, annotation.owner_id FROM ${prefix}_annotation AS annotation WHERE annotation.document_id = ? AND (EXISTS (SELECT 1 FROM ${prefix}_membership AS membership WHERE membership.annotation_id = annotation.id) OR EXISTS (SELECT 1 FROM ${prefix}_group_membership AS membership WHERE membership.annotation_id = annotation.id)) ORDER BY annotation.id`,
   ).all(row.id);
   const memberships = db.prepare(
     `SELECT membership.annotation_id, membership.block_id, membership.ordinal FROM ${prefix}_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ? ORDER BY membership.annotation_id, membership.ordinal`,
@@ -84,7 +112,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   const targets = new Map();
   for (const edge of targetRows) targets.set(edge.annotation_id, [...(targets.get(edge.annotation_id) ?? []), edge.target_annotation_id]);
   const orphanRows = db.prepare(
-    `SELECT a.id, a.family, o.saved_quote, o.last_memberships
+    `SELECT a.id, a.family, a.owner_id, o.saved_quote, o.last_memberships
        FROM ${prefix}_annotation AS a
        JOIN ${prefix}_annotation_orphan_state AS o ON o.annotation_id = a.id
       WHERE a.document_id = ?
@@ -99,7 +127,10 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     if (!stored && Object.keys(declared.fields).length !== 0) fail(`annotation '${annotation.id}' fields are missing`);
     for (const [name, field] of Object.entries(declared.fields)) fields[name] = deserializeField(field, stored[name]);
     const targetIds = targets.get(annotation.id);
-    return targetIds ? { id: annotation.id, family: annotation.family, fields, protectedTargetIds: targetIds } : { id: annotation.id, family: annotation.family, fields };
+    const owner = annotation.owner_id;
+    return targetIds
+      ? { id: annotation.id, family: annotation.family, fields, owner, protectedTargetIds: targetIds }
+      : { id: annotation.id, family: annotation.family, fields, owner };
   });
   const blockIds = new Set(blockRows.map((block) => block.id));
   if (blockIds.size !== blockRows.length || family.blocks.some((block) => !blockIds.has(block.id))) fail(`field '${fieldName}' block IDs disagree with checkpoint`);
@@ -127,7 +158,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
       const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${o.family} WHERE annotation_id = ?`).get(o.id);
       if (!stored && Object.keys(declared.fields).length !== 0) fail(`orphan '${o.id}' fields are missing`);
       for (const [name, field] of Object.entries(declared.fields)) fields[name] = deserializeField(field, stored[name]);
-      return { id: o.id, family: o.family, fields, savedQuote: o.saved_quote, membershipBlockIds: lastMemberships[4].map((entry) => entry[1]) };
+      return { id: o.id, family: o.family, fields, owner: o.owner_id, savedQuote: o.saved_quote, membershipBlockIds: lastMemberships[4].map((entry) => entry[1]) };
     }),
     measurements: db.prepare(`SELECT id, block_id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id IN (SELECT id FROM ${prefix}_block WHERE document_id = ?) ORDER BY id`).all(row.id)
       .map((measurement) => ({ id: measurement.id, blockId: measurement.block_id, family: measurement.family, formatVersion: measurement.format_version, payload: JSON.parse(measurement.payload) })),
@@ -159,25 +190,24 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     return recipient;
   }
 
-  const { streamToken, leaseToken, leaseId, clientNonceHash } = authoring;
-  const stream = resolveStream({ db, prefix, streamToken, documentId: row.id, principalType: 'principal', principalId: principal?.id ?? '' });
+  const { streamToken, leaseToken, leaseId } = authoring;
+  const stream = resolveStream({ db, prefix, streamToken, documentId: row.id, principalType: principal?.type ?? 'principal', principalId: principal?.id ?? '' });
   if (!stream) fail('authoring stream is unavailable');
   const lease = resolveLease({ db, prefix, leaseToken, streamId: stream.id });
   if (!lease) fail('authoring lease is unavailable');
 
-  const positionFrames = visibleBlocks.map((blockId) => issuePositionFrame({ db, prefix, leaseId: lease.id, blockId, fence: cursor, familyCheckpoint: textFamilyCheckpoint(family), visibleAtIssue: true }));
-  if (positionFrames.some((frame) => !frame)) fail('authoring stream capacity exceeded');
-  const groupFrames = recipient.blockGroups.map((group) => {
-    const frame = issueGroupFrame({
-      db, prefix, leaseId: lease.id, groupId: group.id, visibleBlocks: group.blockIds,
-      assignable: group.blockIds.every((blockId) => visibleBlocks.includes(blockId)), fence: cursor,
-    });
-    if (!frame) fail('authoring stream capacity exceeded');
-    return frame;
+  const issued = issueAuthoringSnapshot({
+    db, prefix, leaseId: lease.id, fence: cursor,
+    positions: visibleBlocks.map((blockId) => ({ blockId, familyCheckpoint: textFamilyCheckpoint(family), visibleAtIssue: true })),
+    groups: recipient.blockGroups.map((group) => {
+      const canonicalGroupId = groupIds.get(group.blockIds[0]);
+      return { groupId: canonicalGroupId, visibleBlocks: group.blockIds, assignable: group.blockIds.every((blockId) => visibleBlocks.includes(blockId)) };
+    }),
   });
-  const snapshot = issueSnapshot({ db, prefix, leaseId: lease.id, fence: cursor });
-  if (!snapshot) fail('authoring stream capacity exceeded');
+  if (!issued) fail('authoring stream capacity exceeded');
+  const { positionFrames, groupFrames, snapshot } = issued;
   const splitResolutions = db.prepare(`SELECT temporary_block, authoritative_block_id FROM ${prefix}_authoring_split WHERE lease_id = ?`).all(lease.id)
+    .filter((s) => visibleBlocks.includes(s.authoritative_block_id))
     .map((s) => ({ temporaryBlock: s.temporary_block, blockId: s.authoritative_block_id }));
 
   const envelope = buildAuthoringEnvelope({ db, prefix, streamToken, leaseToken, leaseId: lease.id, snapshotToken: snapshot.id, fence: cursor, positionFrames, groupFrames, splitResolutions });
@@ -241,7 +271,7 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
       const declared = descriptor.annotations.find((entry) => entry.annotationName === annotation.family);
       if (!declared) fail(`annotation '${annotation.id}' has unknown family`);
       const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${annotation.family} WHERE annotation_id = ?`).get(annotation.id) ?? {};
-      return { id: annotation.id, family: annotation.family, fields: Object.fromEntries(Object.entries(declared.fields).map(([name, desc]) => [name, deserializeField(desc, stored[name])])), ...(targetMap.has(annotation.id) ? { protectedTargetIds: targetMap.get(annotation.id) } : {}) };
+      return { id: annotation.id, family: annotation.family, fields: Object.fromEntries(Object.entries(declared.fields).map(([name, desc]) => [name, deserializeField(desc, stored[name])])), owner: annotation.owner_id, ...(targetMap.has(annotation.id) ? { protectedTargetIds: targetMap.get(annotation.id) } : {}) };
     }),
     memberships: memberships.map((membership) => ({ annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal })),
     measurements: db.prepare(`SELECT measurement.* FROM ${prefix}_measurement AS measurement JOIN ${prefix}_block AS block ON block.id = measurement.block_id WHERE block.document_id = ? ORDER BY measurement.id`).all(documentId).map((measurement) => ({ id: measurement.id, blockId: measurement.block_id, family: measurement.family, formatVersion: measurement.format_version, payload: JSON.parse(measurement.payload) })),
@@ -249,6 +279,89 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
     groupMemberships: groupMemberships.map((membership) => ({ annotationId: membership.annotation_id, groupId: membership.group_id, ordinal: membership.ordinal })),
   };
   return deepFreeze(result);
+}
+
+/**
+ * Public recipient snapshot read. The expected scope binds the caller's intent,
+ * while current row grants on both the document and its resolved owner decide
+ * authority. Deliberately returns one opaque result for every ordinary denial.
+ */
+export async function readAnnotatedTextForRecipient(input) {
+  requireRecipientReadInput(input);
+  const { app, field, documentId, expectedOwningScope, principal } = input;
+  const db = app.db;
+  const entity = app.entities.get(input.entity.name);
+  if (!entity) throw new TypeError('readAnnotatedTextForRecipient entity is not registered with the application');
+  const descriptor = entity.fields?.[field.fieldName];
+  if (!descriptor || descriptor.kind !== 'annotatedText') {
+    throw new TypeError('readAnnotatedTextForRecipient field is not annotatedText');
+  }
+
+  for (let attempt = 0; attempt < RECIPIENT_READ_ATTEMPTS; attempt += 1) {
+    try {
+      const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(documentId);
+      // There is no declared owner for a missing or malformed document. Bind its
+      // opaque result to the caller-declared scope rather than inventing one.
+      if (!row) {
+        const before = readSeq(db, scopeOf(expectedOwningScope.entity.name, expectedOwningScope.id).key);
+        if (unchangedCursor(db, scopeOf(expectedOwningScope.entity.name, expectedOwningScope.id).key, before)) return recipientUnavailable;
+        continue;
+      }
+      let owningScope;
+      try {
+        owningScope = resolveAnnotatedTextOwningScope(descriptor, entity.fields, row);
+      } catch {
+        const before = readSeq(db, scopeOf(expectedOwningScope.entity.name, expectedOwningScope.id).key);
+        if (unchangedCursor(db, scopeOf(expectedOwningScope.entity.name, expectedOwningScope.id).key, before)) return recipientUnavailable;
+        continue;
+      }
+      if (owningScope.entity !== expectedOwningScope.entity.name || owningScope.id !== expectedOwningScope.id) {
+        const before = readSeq(db, owningScope.key);
+        if (unchangedCursor(db, owningScope.key, before)) return recipientUnavailable;
+        continue;
+      }
+      const scopeEntity = app.entities.get(owningScope.entity);
+      if (!scopeEntity) {
+        const before = readSeq(db, owningScope.key);
+        if (unchangedCursor(db, owningScope.key, before)) return recipientUnavailable;
+        continue;
+      }
+      const scopeRow = db.prepare(`SELECT * FROM ${scopeEntity.name} WHERE id = ?`).get(owningScope.id);
+      if (!scopeRow) {
+        const before = readSeq(db, owningScope.key);
+        if (unchangedCursor(db, owningScope.key, before)) return recipientUnavailable;
+        continue;
+      }
+
+      // This capture deliberately precedes every authorization await. Grants and
+      // protection decisions are part of the recipient projection candidate.
+      const owningScopeCursorBefore = readSeq(db, owningScope.key);
+      const mayReadScope = await mayRow(scopeEntity, 'read', scopeRow, principal);
+      const mayReadDocument = await mayRow(entity, 'read', row, principal);
+      if (!mayReadScope || !mayReadDocument) {
+        if (unchangedCursor(db, owningScope.key, owningScopeCursorBefore)) return recipientUnavailable;
+        continue;
+      }
+      let document;
+      try {
+        document = await projectAnnotatedText({
+          db, entity, row, principal, fieldName: field.fieldName, descriptor, mintBasis: false,
+        });
+      } catch (error) {
+        if (!unchangedCursor(db, owningScope.key, owningScopeCursorBefore)) continue;
+        // Retirement is a normal unavailable state; malformed persistence and
+        // projector failures are deliberately not converted to an access oracle.
+        if (db.prepare(`SELECT 1 FROM ${entity.name}_${field.fieldName}_retired WHERE document_id = ?`).get(documentId)) return recipientUnavailable;
+        throw error;
+      }
+      const owningScopeCursorAfter = readSeq(db, owningScope.key);
+      if (owningScopeCursorBefore !== owningScopeCursorAfter) continue;
+      return deepFreeze({ kind: 'snapshot', document, owningScopeCursor: owningScopeCursorAfter });
+    } catch (error) {
+      throw sanitizedRecipientReadFailure();
+    }
+  }
+  return recipientRetry;
 }
 
 export async function projectAnnotatedTextSnapshot(input) {

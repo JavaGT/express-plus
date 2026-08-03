@@ -15,7 +15,7 @@
 import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } from './workbench-annotated-text.mjs';
 import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
-import { materializeAnnotatedTextSnapshot } from './workbench-annotated-text-snapshot.mjs';
+import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument } from './workbench-annotated-text-snapshot.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { materializeAnnotatedTextSnapshot };
 
@@ -2909,6 +2909,7 @@ export function createLiveDeliveryHttpSession({
   fold,
   optimistic,
   sendAction,
+  serializeAction,
   sendBatch,
   actionUrl,
   historySession,
@@ -3007,15 +3008,22 @@ export function createLiveDeliveryHttpSession({
     return receipt;
   }
 
+  let actionTail = Promise.resolve();
+  const transportAction = (action) => action.type.startsWith('$history.')
+    ? sendHttpAction(action)
+    : (sendAction ?? sendHttpAction)(action);
   const session = createLiveDeliverySession({
     bootstrap,
     subscribe,
     validateSnapshot,
     fold,
     optimistic,
-    sendAction: (action) => action.type.startsWith('$history.')
-      ? sendHttpAction(action)
-      : (sendAction ?? sendHttpAction)(action),
+    sendAction: (action) => {
+      if (!serializeAction?.(action)) return transportAction(action);
+      const pending = actionTail.then(() => transportAction(action));
+      actionTail = pending.catch(() => {});
+      return pending;
+    },
     sendBatch: sendBatch ?? sendHttpBatch,
     createActionId,
     onRecoveryStart,
@@ -3084,10 +3092,17 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     throw new TypeError('annotated text context requires declared entity and field handles');
   }
   const scope = `annotated-text:${documentId}`;
-  const authoringClient = globalThis.crypto?.getRandomValues
-    ? (() => { const bytes = new Uint8Array(32); globalThis.crypto.getRandomValues(bytes); return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', ''); })()
-    : `authoring-${Math.random().toString(36).slice(2)}`;
+  const randomToken = () => {
+    if (!globalThis.crypto?.getRandomValues) throw new Error('secure random authoring tokens are unavailable');
+    const bytes = new Uint8Array(32);
+    globalThis.crypto.getRandomValues(bytes);
+    return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
+  };
+  const authoringClient = randomToken();
   const blockGroupTokens = new WeakMap();
+  const pendingActionPositionBlocks = new WeakMap();
+  const deferredAuthoringAcknowledgements = new Map();
+  let translatedActions = 0;
   const snapshotBinding = createAnnotatedTextSnapshotSessionBinding((handle, serverId, generation) => {
     blockGroupTokens.set(handle, { serverId, generation });
   });
@@ -3100,6 +3115,19 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     createActionId,
     requestIdentity: { entity: entity.name, field: field.fieldName, documentId, authoringClient },
     onRecoveryStart: () => revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding),
+    optimistic(document, action) {
+      const positionBlocks = new Map();
+      const bound = pendingActionPositionBlocks.get(action.payload);
+      if (bound) {
+        for (const [blockId, positionToken] of bound) positionBlocks.set(positionToken, blockId);
+      } else {
+        for (const [blockId, positionToken] of snapshotBinding.authoring?.positionTokens ?? []) positionBlocks.set(positionToken, blockId);
+      }
+      return projectPendingAnnotatedTextDocument(document, action, positionBlocks);
+    },
+    serializeAction(action) {
+      return action.payload?.edit?.kind === 'text.insert' || action.payload?.edit?.kind === 'text.delete';
+    },
     validateSnapshot(snapshot, delivery) {
       if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('annotated text delivery snapshot must be an object');
       const authoring = delivery?.authoring;
@@ -3108,14 +3136,24 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       return result;
     },
   });
+  function acknowledgeAuthoring(authoring) {
+    void Promise.resolve().then(() => fetchImpl(`${baseUrl.replace(/\/$/, '')}/authoring/ack`, {
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ version: 1, entity: entity.name, field: field.fieldName, documentId,
+        stream: authoring.stream, lease: authoring.lease, snapshot: authoring.snapshot }),
+    })).catch(() => {});
+  }
+  function flushAuthoringAcknowledgements() {
+    if (translatedActions !== 0) return;
+    for (const authoring of deferredAuthoringAcknowledgements.values()) acknowledgeAuthoring(authoring);
+    deferredAuthoringAcknowledgements.clear();
+  }
   session.subscribe((document) => {
     if (document === null) revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
     if (document && snapshotBinding.authoring) {
-      void fetchImpl(`${baseUrl.replace(/\/$/, '')}/authoring/ack`, {
-        method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ version: 1, entity: entity.name, field: field.fieldName, documentId,
-          stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease, snapshot: snapshotBinding.authoring.snapshot }),
-      });
+      const authoring = snapshotBinding.authoring;
+      if (translatedActions === 0) acknowledgeAuthoring(authoring);
+      else deferredAuthoringAcknowledgements.set(authoring.snapshot, authoring);
     }
   });
   async function dispatch(command) {
@@ -3124,17 +3162,36 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       if (!value || typeof value !== 'object' || typeof value.blockId !== 'string') throw new TypeError('annotated text position is invalid');
       const positionToken = snapshotBinding.authoring.positionTokens.get(value.blockId);
       if (!positionToken) throw new TypeError('annotated text position is unavailable');
-      return { positionToken, offset: value.offset };
+      if (value.affinity !== 'left' && value.affinity !== 'right') throw new TypeError('annotated text position requires an affinity');
+      return { positionToken, offset: value.offset, affinity: value.affinity };
     };
     const temporaryBlock = command.kind === 'block.split' || command.kind === 'block.continue' || command.kind === 'block.split-and-assign'
-      ? (globalThis.crypto?.randomUUID?.() ?? `temporary_${Math.random().toString(36).slice(2)}`) : undefined;
+      ? randomToken() : undefined;
     const translated = { ...command, id: documentId, authoring: { version: 1, stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease, mutationId: command.mutationId } };
+    const pendingPositionBlocks = new Map(snapshotBinding.authoring.positionTokens.entries());
     if (command.at) translated.at = tokenAt(command.at);
     if (command.from) translated.from = tokenAt(command.from);
     if (command.to) translated.to = tokenAt(command.to);
+    if (command.kind === 'block.merge') {
+      translated.leftPositionToken = tokenAt({ blockId: command.leftBlockId, offset: 0, affinity: 'left' }).positionToken;
+      translated.rightPositionToken = tokenAt({ blockId: command.rightBlockId, offset: 0, affinity: 'left' }).positionToken;
+      delete translated.leftBlockId;
+      delete translated.rightBlockId;
+    }
+    if (command.kind === 'annotation.detach') {
+      translated.positionToken = tokenAt({ blockId: command.blockId, offset: 0, affinity: 'left' }).positionToken;
+      delete translated.blockId;
+    }
     if (temporaryBlock) translated.temporaryBlock = temporaryBlock;
     const action = annotatedTextAction(entity, field, translated);
-    return session.dispatch(action.type, action.payload);
+    pendingActionPositionBlocks.set(action.payload, pendingPositionBlocks);
+    translatedActions += 1;
+    try {
+      return await session.dispatch(action.type, action.payload);
+    } finally {
+      translatedActions -= 1;
+      flushAuthoringAcknowledgements();
+    }
   }
   function resolveBlockGroup(handle) {
     if (!handle || typeof handle !== 'object' || Array.isArray(handle)) {

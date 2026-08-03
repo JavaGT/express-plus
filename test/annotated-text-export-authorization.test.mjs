@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   admin, annotatedText, annotatedTextCreateAction, annotation,
-  deny, entity, everyone, exportAnnotatedText, grant, map, measurement, read, ref,
+  deny, entity, everyone, exportAnnotatedText, grant, map, measurement, read, readAnnotatedTextForRecipient, ref,
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, scope, write,
 } from '../src/index.mjs';
 import { executeDDL, executeFrameworkDDL } from '../src/internal.mjs';
@@ -78,6 +78,20 @@ test('canonical export is bound to the declared owning Project and its current a
   assert.equal(JSON.stringify(exported).includes('checkpoint'), false);
   assert.equal(JSON.stringify(exported).includes('operation'), false);
 
+  const recipientRead = await readAnnotatedTextForRecipient({ ...request, principal: principal('editor') });
+  assert.equal(recipientRead.kind, 'snapshot');
+  assert.equal(typeof recipientRead.owningScopeCursor, 'number');
+  assert.equal(Object.hasOwn(recipientRead, 'cursor'), false);
+  assert.equal(recipientRead.document.kind, 'workbench.annotatedText.recipient');
+  assert.deepEqual(recipientRead.document.blocks.filter((block) => block.kind === 'visible').map((block) => block.text), ['canonical ', 'text']);
+  assert.ok(Object.isFrozen(recipientRead));
+  assert.ok(Object.isFrozen(recipientRead.document));
+  await assert.rejects(exportAnnotatedText({ ...request, principal: principal('editor') }), /owning scope admin authorization failed/);
+  assert.deepEqual(
+    await readAnnotatedTextForRecipient({ ...request, expectedOwningScope: { entity: Project, id: 'p2' }, principal: principal('editor') }),
+    await readAnnotatedTextForRecipient({ ...request, documentId: 'missing', principal: principal('editor') }),
+  );
+
   const recipient = await projectAnnotatedTextSnapshot({
     db, entity: Transcript, row: db.prepare('SELECT * FROM ExportTranscript WHERE id = ?').get('d1'),
     principal: principal('editor'), fieldName: 'body', descriptor: Transcript.fields.body,
@@ -100,4 +114,5 @@ test('canonical export is bound to the declared owning Project and its current a
   db.prepare('INSERT INTO ExportTranscript_body_retired (document_id, generation, retired_at) VALUES (?, ?, ?)')
     .run('d1', 'retired-generation', new Date().toISOString());
   await assert.rejects(exportAnnotatedText({ ...request, principal: principal('project-owner') }), /document is retired/);
+  assert.deepEqual(await readAnnotatedTextForRecipient({ ...request, principal: principal('editor') }), { kind: 'unavailable' });
 });

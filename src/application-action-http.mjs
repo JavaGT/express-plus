@@ -239,11 +239,14 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
 
   app._applicationLiveDelivery?.wake(request.scope);
   const receipt = result.resultData;
-  if (!receipt || receipt.version !== 1 || receipt.actionId !== request.actionId || !Number.isSafeInteger(receipt.confirmedThrough)) {
+  if (!receipt || receipt.actionId !== request.actionId || !Number.isSafeInteger(receipt.confirmedThrough)) {
     sendFailure(sendJson, res, failure('internal', 'Action receipt is unavailable.'));
     return true;
   }
-  sendJson(res, 200, { ok: true, ...receipt });
+  const publicReceipt = receipt.authoring
+    ? receipt
+    : { actionId: receipt.actionId, confirmedThrough: receipt.confirmedThrough };
+  sendJson(res, 200, { ok: true, ...publicReceipt });
   return true;
 }
 

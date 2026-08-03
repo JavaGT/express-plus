@@ -444,10 +444,10 @@ test('declared annotated text owns generated HTTP admission and package delivery
   });
   await session.ready;
   assert.equal(session.document.blocks[0].id, initialBlockId);
-  assert.equal((await session.insert({ mutationId: 'insert-1', at: { blockId: initialBlockId, offset: 0 }, text: 'hello' })).ok, true);
+  assert.equal((await session.insert({ mutationId: 'insert-1', at: { blockId: initialBlockId, offset: 0, affinity: 'right' }, text: 'hello' })).ok, true);
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(session.document.blocks[0].text, 'hello', 'committed receipt recovers through recipient snapshot ingest');
-  assert.equal((await session.split({ mutationId: 'split-1', at: { blockId: initialBlockId, offset: 2 } })).ok, true);
+  assert.equal((await session.split({ mutationId: 'split-1', at: { blockId: initialBlockId, offset: 2, affinity: 'right' } })).ok, true);
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(session.document.blocks.length, 2);
   assert.equal('dispatch' in session, false);
@@ -467,7 +467,7 @@ test('declared annotated text owns generated HTTP admission and package delivery
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE scope = ?').get('Project:p1').count, committedBeforeForbidden);
 
   principal = { ...user, id: 'u2' };
-  const revokedEdit = await session.insert({ mutationId: 'revoked', at: { blockId: initialBlockId, offset: 0 }, text: 'x' });
+  const revokedEdit = await session.insert({ mutationId: 'revoked', at: { blockId: initialBlockId, offset: 0, affinity: 'right' }, text: 'x' });
   assert.equal(revokedEdit.ok, false);
   principal = user;
   const retire = annotatedTextRetireAction(Document, 'd1');

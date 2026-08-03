@@ -98,11 +98,11 @@ annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, { id
 // @ts-expect-error package generates measurement identities and format versions
 annotatedTextCreateAction(annotatedTextEntity, requiredAnnotatedTextHandle, { id: 'document-1', projectId: 'project-1', ownerId: 'owner-1', source: { blocks: [{ text: 'hello', measurements: [{ id: 'raw-id', family: 'wordCount', formatVersion: 1, payload: {} }] }] } });
 annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, {
-  kind: 'text.insert', id: 'document-1', basis: 'opaque-basis', mutationId: 'insert-1',
-  at: { blockId: 'block-1', offset: 1 }, text: 'x',
+  kind: 'text.insert', id: 'document-1', mutationId: 'insert-1',
+  at: { blockId: 'block-1', offset: 1, affinity: 'right' }, text: 'x',
 });
-// @ts-expect-error public edits require an opaque recipient basis
-annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'text.insert', id: 'document-1', mutationId: 'insert-1', at: { blockId: 'block-1', offset: 1 }, text: 'x' });
+// @ts-expect-error public positions require a recipient-visible block id
+annotatedTextAction(annotatedTextEntity, requiredAnnotatedTextHandle, { kind: 'text.insert', id: 'document-1', mutationId: 'insert-1', at: { offset: 1 }, text: 'x' });
 
 declare const projectedAnnotatedTextSnapshot: Record<string, unknown>;
 declare const compiledAnnotatedTextHandle: AnnotatedTextFieldHandle;
@@ -111,8 +111,8 @@ const projectedAnnotatedText = materializeAnnotatedTextSnapshot(
   compiledAnnotatedTextHandle,
 );
 const projectedKind: 'workbench.annotatedText.recipient' = projectedAnnotatedText.kind;
-const projectedBasis: string = projectedAnnotatedText.basis;
-void projectedBasis;
+// @ts-expect-error recipient snapshots never expose authoring basis state
+projectedAnnotatedText.basis;
 for (const block of projectedAnnotatedText.blocks) {
   const blockId: string = block.id;
   if (block.kind === 'restricted') {

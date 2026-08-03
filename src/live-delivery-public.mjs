@@ -9,7 +9,7 @@ import { readSeq } from './committed-log.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
-import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, prunePositions } from './annotated-text-authoring-stream.mjs';
+import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, acknowledgeAndPruneSnapshot } from './annotated-text-authoring-stream.mjs';
 import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
 
 function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
@@ -281,16 +281,13 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       const row = await this.authorizeAnnotatedTextDocument(resolved, principal);
       if (!row) return null;
        const prefix = `${document.entity.name}_${document.fieldName}`;
-       const { acknowledgeSnapshot } = await import('./annotated-text-authoring-stream.mjs');
-       const resolvedStream = resolveStream({ db, prefix, streamToken: stream, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' });
+        const resolvedStream = resolveStream({ db, prefix, streamToken: stream, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' });
       if (!resolvedStream) return null;
       const resolvedLease = resolveLease({ db, prefix, leaseToken: lease, streamId: resolvedStream.id });
       if (!resolvedLease) return null;
-       const result = acknowledgeSnapshot({ db, prefix, snapshotId: snapshot, leaseId: resolvedLease.id });
-       if (!result) return null;
-       const issued = db.prepare(`SELECT block_id FROM ${prefix}_authoring_position WHERE lease_id = ? AND issued_fence = ?`).all(resolvedLease.id, result.fence);
-       prunePositions({ db, prefix, leaseId: resolvedLease.id, fence: result.fence, snapshotId: snapshot, visibleBlockIds: new Set(issued.map(({ block_id }) => block_id)), retainedSnapshotIds: new Set([snapshot]) });
-       return { acknowledgedThrough: result.fence };
+        const result = acknowledgeAndPruneSnapshot({ db, prefix, snapshotId: snapshot, leaseId: resolvedLease.id });
+        if (!result) return null;
+        return { acknowledgedThrough: result.fence };
     },
   };
 

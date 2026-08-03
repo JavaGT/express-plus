@@ -81,7 +81,7 @@ test('DDL generates correct table count and names', () => {
   const tables = ddl.filter(s => s.startsWith('CREATE TABLE'));
   const indexes = ddl.filter(s => s.startsWith('CREATE INDEX') || s.startsWith('CREATE UNIQUE INDEX'));
 
-  assert.equal(tables.length, 11);
+  assert.equal(tables.length, 12);
   assert.ok(tables.some(s => s.includes('Doc_body_block')));
   assert.ok(tables.some(s => s.includes('Doc_body_state')));
   assert.ok(tables.some(s => s.includes('Doc_body_retired')));
@@ -89,6 +89,7 @@ test('DDL generates correct table count and names', () => {
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_highlight')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_tag')));
   assert.ok(tables.some(s => s.includes('Doc_body_membership')));
+  assert.ok(tables.some(s => s.includes('Doc_body_group_membership')));
   assert.ok(tables.some(s => s.includes('Doc_body_measurement')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_orphan_state')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_protected_target')));

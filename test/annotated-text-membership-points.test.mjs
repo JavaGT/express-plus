@@ -138,12 +138,33 @@ test('block-end with trailing tombstone uses final owned scalar right marker, no
   assert.equal(ep.point[2], 'right');
 });
 
-test('all-tombstone block offset 0 is ambiguous and rejected', () => {
+test('all-tombstone first block offset 0 requires explicit affinity', () => {
   const first = ['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'a']];
   const del = ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['delete', [[[A, 1], 0, 1]]]];
   const family = makeFamily([first, del]);
+  assert.throws(() => resolvePositionToEndpoint(family, 'block1', 0, family.checkpoint.frontier), /ambiguous/);
+  const ep = resolvePositionToEndpoint(family, 'block1', 0, family.checkpoint.frontier, 'left');
+  assert.equal(ep.point[0], 'point');
+  assert.equal(ep.point[1][0], 'root');
+  assert.equal(ep.point[2], 'left');
+  assert.equal(projectEndpointToBlockOffset(family, 'block1', ep), 0);
+});
+
+test('all-tombstone non-first block offset 0 is ambiguous and rejected', () => {
+  const ops = [['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]];
+  const state = applyAll(createTextState(), ops);
+  const checkpoint = textCheckpoint(state);
+  const family = createTextFamily('doc1', checkpoint, 'block1');
+  const splitResult = splitBlock(family, 'block1', 'block2', 3);
+  assert.equal(splitResult.type, 'split');
+  const split = splitResult.family;
+  const del = ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['delete', [[[A, 1], 3, 3]]]];
+  const tombstoneState = applyAll(createTextState(), [...ops, del]);
+  const tombstoneCheckpoint = textCheckpoint(tombstoneState);
+  const restored = Object.freeze({ ...split, checkpoint: tombstoneCheckpoint });
+  assert.equal(materializeBlock(restored, 'block2'), '');
   assert.throws(() => {
-    resolvePositionToEndpoint(family, 'block1', 0, family.checkpoint.frontier);
+    resolvePositionToEndpoint(restored, 'block2', 0, restored.checkpoint.frontier);
   }, /ambiguous/);
 });
 

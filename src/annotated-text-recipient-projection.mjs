@@ -33,9 +33,12 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
 
   const annotations = new Map();
   for (const annotation of canonical.annotations) {
-    const keys = annotation?.protectedTargetIds === undefined ? ['id', 'family', 'fields'] : ['id', 'family', 'fields', 'protectedTargetIds'];
+    const keys = annotation?.protectedTargetIds === undefined
+      ? (annotation?.owner === undefined ? ['id', 'family', 'fields'] : ['id', 'family', 'fields', 'owner'])
+      : (annotation?.owner === undefined ? ['id', 'family', 'fields', 'protectedTargetIds'] : ['id', 'family', 'fields', 'owner', 'protectedTargetIds']);
     exact(annotation, keys, 'annotation');
     if (typeof annotation.id !== 'string' || annotations.has(annotation.id) || !Object.hasOwn(meta.annotationHandles, annotation.family)) fail('annotation is invalid');
+    if (annotation.owner !== undefined && (typeof annotation.owner !== 'string' || annotation.owner.length === 0)) fail('annotation owner is invalid');
     if (annotation.protectedTargetIds !== undefined && (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !Array.isArray(annotation.protectedTargetIds) || annotation.protectedTargetIds.some((id, i, all) => typeof id !== 'string' || (i > 0 && all[i - 1] >= id)))) fail('protector targets are invalid');
     annotations.set(annotation.id, annotation);
   }
@@ -65,7 +68,8 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   }
   const orphanIds = new Set();
   for (const orphan of canonical.orphans ?? []) {
-    exact(orphan, ['id', 'family', 'fields', 'savedQuote', 'membershipBlockIds'], 'orphan');
+    exact(orphan, orphan?.owner === undefined ? ['id', 'family', 'fields', 'savedQuote', 'membershipBlockIds'] : ['id', 'family', 'fields', 'owner', 'savedQuote', 'membershipBlockIds'], 'orphan');
+    if (orphan.owner !== undefined && (typeof orphan.owner !== 'string' || orphan.owner.length === 0)) fail('orphan owner is invalid');
     if (typeof orphan.id !== 'string' || orphanIds.has(orphan.id) || !Object.hasOwn(meta.annotationHandles, orphan.family) || meta.annotationHandles[orphan.family].appliesTo !== 'block' || typeof orphan.savedQuote !== 'string' ||
         !Array.isArray(orphan.membershipBlockIds) || orphan.membershipBlockIds.length === 0 || orphan.membershipBlockIds.some((id) => typeof id !== 'string' || !blockIds.has(id)) || new Set(orphan.membershipBlockIds).size !== orphan.membershipBlockIds.length) fail('orphan is invalid');
     if (annotations.has(orphan.id)) fail('orphan id conflicts with active annotation');
@@ -160,7 +164,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     blocks: canonical.blocks.map((block) => restricted.has(block.id)
       ? { kind: 'restricted', id: block.id, placeholder: meta.restrictedPlaceholder }
       : { kind: 'visible', id: block.id, text: block.text, fields: { ...block.fields }, annotationIds: memberships.filter((m) => m.blockId === block.id).map((m) => m.annotationId) }),
-    annotations: [...annotations.values()].filter((a) => retainedIds.has(a.id)).map(({ id, family, fields }) => ({ id, family, fields: { ...fields } })),
+    annotations: [...annotations.values()].filter((a) => retainedIds.has(a.id)).map(({ id, family, fields, owner }) => ({ id, family, fields: { ...fields }, ...(owner ? { owner } : {}) })),
     memberships: memberships.map((m) => ({ ...m })),
     measurements: canonical.measurements.filter((m) => !restricted.has(m.blockId)).map((m) => ({ ...m })),
     capabilityHints: [...capabilityHints].filter((hint) => !restricted.size || hint !== 'body.read'),
@@ -170,6 +174,6 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     orphans: (canonical.orphans ?? [])
       .filter((orphan) => !Object.hasOwn(meta.protectingFamilies, orphan.family))
       .filter((orphan) => orphan.membershipBlockIds.every((id) => visibleBlockIds.has(id)))
-      .map(({ id, family, fields, savedQuote }) => ({ id, family, fields: { ...fields }, savedQuote })),
+      .map(({ id, family, fields, savedQuote, owner }) => ({ id, family, fields: { ...fields }, savedQuote, ...(owner ? { owner } : {}) })),
   });
 }

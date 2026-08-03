@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { assertWellFormedText } from './annotated-text.mjs';
 import { resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';
 import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
@@ -43,7 +44,7 @@ function selection(value) {
   if ((value.kind === 'consecutive' || value.kind === 'listed') && keys.length === 2 &&
       Array.isArray(value.groupTokens) && value.groupTokens.length > 0 &&
       value.groupTokens.every((id) => typeof id === 'string' && id.length > 0) &&
-      new Set(value.groupTokens).size === value.groupTokens.length) {
+       new Set(value.groupTokens).size === value.groupTokens.length) {
     return { kind: value.kind, groupTokens: [...value.groupTokens] };
   }
   throw new Error('annotatedTextAction: selection must be one, consecutive, or listed with exact keys');
@@ -80,10 +81,11 @@ export function annotatedTextAction(entity, field, command) {
   const position = (value, label) => {
     if (!value || typeof value !== 'object' || Array.isArray(value) ||
         typeof value.positionToken !== 'string' || value.positionToken.length === 0 ||
-        !Number.isSafeInteger(value.offset) || value.offset < 0) {
-       throw new Error(`annotatedTextAction: ${label} must be { positionToken, offset }`);
+        !Number.isSafeInteger(value.offset) || value.offset < 0 ||
+        (value.affinity !== 'left' && value.affinity !== 'right')) {
+       throw new Error(`annotatedTextAction: ${label} must be { positionToken, offset, affinity }`);
     }
-    return { positionToken: value.positionToken, offset: value.offset };
+    return { positionToken: value.positionToken, offset: value.offset, affinity: value.affinity };
   };
   let edit;
   if (command.kind === 'text.insert') {
@@ -94,7 +96,7 @@ export function annotatedTextAction(entity, field, command) {
   } else if (command.kind === 'text.delete') {
     edit = { kind: command.kind, from: position(command.from, 'from'), to: position(command.to, 'to') };
   } else if (command.kind === 'block.split') {
-    edit = { kind: command.kind, at: position(command.at, 'at') };
+    edit = { kind: command.kind, at: position(command.at, 'at'), temporaryBlock: typeof command.temporaryBlock === 'string' && command.temporaryBlock.length > 0 ? command.temporaryBlock : randomBytes(32).toString('base64url') };
   } else if (command.kind === 'block.merge') {
     if (typeof command.leftPositionToken !== 'string' || !command.leftPositionToken || typeof command.rightPositionToken !== 'string' || !command.rightPositionToken) {
       throw new Error('annotatedTextAction: block.merge requires position tokens');
@@ -109,7 +111,7 @@ export function annotatedTextAction(entity, field, command) {
     }
     edit = { kind: command.kind, annotationId: command.annotationId, positionToken: command.positionToken };
   } else if (command.kind === 'block.continue') {
-    edit = { kind: command.kind, at: position(command.at, 'at') };
+    edit = { kind: command.kind, at: position(command.at, 'at'), temporaryBlock: typeof command.temporaryBlock === 'string' && command.temporaryBlock.length > 0 ? command.temporaryBlock : randomBytes(32).toString('base64url') };
   } else if (command.kind === 'block-group.assignment.set') {
     edit = { kind: command.kind, selection: selection(command.selection), annotation: annotation(command.annotation) };
   } else if (command.kind === 'block-group.assignment.clear') {
@@ -118,7 +120,7 @@ export function annotatedTextAction(entity, field, command) {
     }
     edit = { kind: command.kind, selection: selection(command.selection), family: command.family };
   } else {
-    edit = { kind: command.kind, at: position(command.at, 'at'), annotation: annotation(command.annotation) };
+    edit = { kind: command.kind, at: position(command.at, 'at'), temporaryBlock: typeof command.temporaryBlock === 'string' && command.temporaryBlock.length > 0 ? command.temporaryBlock : randomBytes(32).toString('base64url'), annotation: annotation(command.annotation) };
   }
   const payload = deepFreeze({ version: 9, id: command.id, authoring: command.authoring, edit });
 

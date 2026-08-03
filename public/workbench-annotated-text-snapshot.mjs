@@ -20,9 +20,41 @@
 import { createAnnotatedTextSnapshotSessionBinding, getAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
+
+function exactKeys(value, keys) {
+  return Reflect.ownKeys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function opaqueToken(value) {
+  return typeof value === 'string' && OPAQUE_TOKEN.test(value);
+}
 
 function fail(path, message) {
   throw new Error(`annotatedText snapshot: ${path}: ${message}`);
+}
+
+/**
+ * Apply the visible, text-only placeholder for one pending v9 authoring action.
+ * Authoritative recipient snapshots remain the only reconciliation authority.
+ */
+export function projectPendingAnnotatedTextDocument(document, action, positionBlocks) {
+  const edit = action?.payload?.version === 9 ? action.payload.edit : null;
+  if (!edit || (edit.kind !== 'text.insert' && edit.kind !== 'text.delete')) return document;
+  const blockId = positionBlocks.get(edit.kind === 'text.insert' ? edit.at.positionToken : edit.from.positionToken);
+  if (!blockId || (edit.kind === 'text.delete' && blockId !== positionBlocks.get(edit.to.positionToken))) return document;
+  const index = document.blocks.findIndex((block) => block.kind === 'visible' && block.id === blockId);
+  if (index === -1) return document;
+  const block = document.blocks[index];
+  const start = edit.kind === 'text.insert' ? edit.at.offset : edit.from.offset;
+  const end = edit.kind === 'text.insert' ? start : edit.to.offset;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > block.text.length) return document;
+  const text = edit.kind === 'text.insert'
+    ? `${block.text.slice(0, start)}${edit.text}${block.text.slice(start)}`
+    : `${block.text.slice(0, start)}${block.text.slice(end)}`;
+  const blocks = [...document.blocks];
+  blocks[index] = Object.freeze({ ...block, text });
+  return Object.freeze({ ...document, blocks: Object.freeze(blocks) });
 }
 
 export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
@@ -135,10 +167,14 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
     const fields = a.fields && typeof a.fields === 'object' && !Array.isArray(a.fields)
       ? Object.freeze({ ...a.fields })
       : Object.freeze({});
+    if (a.owner !== undefined && (typeof a.owner !== 'string' || a.owner.length === 0)) {
+      fail(`annotations[${i}].owner`, 'must be a non-empty string when present');
+    }
     annotations.push(Object.freeze({
       id: a.id,
       family: a.family,
       fields,
+      ...(typeof a.owner === 'string' ? { owner: a.owner } : {}),
     }));
   }
 
@@ -312,31 +348,40 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
   }
 
   const authoring = snapshot.authoring;
-  if (authoring !== undefined && (!authoring || typeof authoring !== 'object' || Array.isArray(authoring) || authoring.version !== 1
-    || typeof authoring.stream !== 'string' || !authoring.stream || typeof authoring.lease !== 'string' || !authoring.lease
-    || typeof authoring.snapshot !== 'string' || !authoring.snapshot || !Number.isSafeInteger(authoring.acknowledgementFence) || authoring.acknowledgementFence < 0
+  if (authoring !== undefined && (!authoring || typeof authoring !== 'object' || Array.isArray(authoring)
+    || !exactKeys(authoring, ['version', 'stream', 'lease', 'snapshot', 'acknowledgementFence', 'positionFrames', 'groupFrames', 'splitResolutions'])
+    || authoring.version !== 1 || !opaqueToken(authoring.stream) || !opaqueToken(authoring.lease)
+    || !opaqueToken(authoring.snapshot) || new Set([authoring.stream, authoring.lease, authoring.snapshot]).size !== 3
+    || !Number.isSafeInteger(authoring.acknowledgementFence) || authoring.acknowledgementFence < 0
     || !Array.isArray(authoring.positionFrames) || !Array.isArray(authoring.groupFrames) || !Array.isArray(authoring.splitResolutions))) fail('authoring', 'must be a complete version 1 envelope');
   const visibleIds = new Set(blocks.filter((block) => block.kind === 'visible').map((block) => block.id));
   const positionTokens = new Map();
+  const opaqueTokens = new Set(authoring ? [authoring.stream, authoring.lease, authoring.snapshot] : []);
   for (const frame of authoring?.positionFrames ?? []) {
-    if (!frame || typeof frame !== 'object' || Object.keys(frame).length !== 2 || typeof frame.blockId !== 'string' || typeof frame.positionToken !== 'string' || !frame.positionToken || !visibleIds.has(frame.blockId) || positionTokens.has(frame.blockId)) fail('authoring.positionFrames', 'must exactly name visible blocks with unique opaque tokens');
+    if (!frame || typeof frame !== 'object' || Array.isArray(frame) || !exactKeys(frame, ['blockId', 'positionToken'])
+      || typeof frame.blockId !== 'string' || !opaqueToken(frame.positionToken) || !visibleIds.has(frame.blockId)
+      || positionTokens.has(frame.blockId) || opaqueTokens.has(frame.positionToken)) fail('authoring.positionFrames', 'must exactly name visible blocks with unique opaque tokens');
     positionTokens.set(frame.blockId, frame.positionToken);
+    opaqueTokens.add(frame.positionToken);
   }
   if (authoring && positionTokens.size !== visibleIds.size) fail('authoring.positionFrames', 'must exactly match visible blocks');
   const groupTokens = new Map();
   for (let index = 0; index < (authoring?.groupFrames ?? []).length; index += 1) {
     const frame = authoring.groupFrames[index];
-    if (!frame || typeof frame !== 'object' || Object.keys(frame).length !== 1 || typeof frame.groupToken !== 'string' || !frame.groupToken || groupTokens.has(frame.groupToken)) fail('authoring.groupFrames', 'must contain unique opaque tokens');
+    if (!frame || typeof frame !== 'object' || Array.isArray(frame) || !exactKeys(frame, ['groupToken'])
+      || !opaqueToken(frame.groupToken) || opaqueTokens.has(frame.groupToken)) fail('authoring.groupFrames', 'must contain unique opaque tokens');
     groupTokens.set(frame.groupToken, blockGroups[index]?.group);
+    opaqueTokens.add(frame.groupToken);
   }
   if (authoring && groupTokens.size !== blockGroups.length) fail('authoring.groupFrames', 'must exactly match block groups');
   const splitTokens = new Set();
   for (const entry of authoring?.splitResolutions ?? []) {
-    if (!entry || typeof entry !== 'object' || Object.keys(entry).length !== 2
-      || typeof entry.temporaryBlock !== 'string' || !entry.temporaryBlock
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !exactKeys(entry, ['temporaryBlock', 'blockId'])
+      || !opaqueToken(entry.temporaryBlock)
       || typeof entry.blockId !== 'string' || !visibleIds.has(entry.blockId)
-      || splitTokens.has(entry.temporaryBlock)) fail('authoring.splitResolutions', 'must name visible blocks with unique temporary blocks');
+      || splitTokens.has(entry.temporaryBlock) || opaqueTokens.has(entry.temporaryBlock)) fail('authoring.splitResolutions', 'must name visible blocks with unique temporary blocks');
     splitTokens.add(entry.temporaryBlock);
+    opaqueTokens.add(entry.temporaryBlock);
   }
   const materializedGroupEntries = blockGroups.map(({ group, blockIds, annotationIds }, index) => {
     const materialized = Object.freeze({

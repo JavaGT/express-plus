@@ -4,6 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, { annotatedText, annotation, boolean, durableHistory, entity, executeDDL, executeFrameworkDDL, grant, measurement, ref, read, scope, write, everyone, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
 import { annotatedTextAction, annotatedTextRetireAction } from '../src/annotated-text-public.mjs';
 import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
+import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 const extension = Object.freeze({ version: 1, validate() {}, edit() {}, partition({ blockText, utf16Offset, payload }) { return { version: 1, leftPayload: { ...payload, text: blockText.slice(0, utf16Offset) }, rightPayload: { ...payload, text: blockText.slice(utf16Offset) } }; }, combine({ left, right }) { return { version: 1, payload: { text: `${left?.payload?.text ?? ''}${right?.payload?.text ?? ''}` } }; } });
 registerAnnotatedTextContract('historySource', Object.freeze({ kind: 'measurement' }));
@@ -21,14 +22,38 @@ async function setup(fieldAccess) {
   const created = await app.dispatch({ actionId: 'create', type: 'HistoryDocument.create', principal: { type: 'user', id: 'u1' }, payload: { id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'hello world', fields: { reviewed: false }, measurements: [{ family: 'source', payload: { text: 'hello world' } }] }] } } });
   assert.equal(created.ok, true, created.failure?.message); return { app, db, Document: app.entities.get('HistoryDocument'), blockId: db.prepare('SELECT id FROM HistoryDocument_body_block').get().id };
 }
-const state = (db) => db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'HistoryDocument_body_*' ORDER BY name").all().map(({ name }) => [name, db.prepare(`SELECT * FROM ${name}`).all().sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))]).filter(([name]) => !name.endsWith('_basis'));
+const state = (db) => db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'HistoryDocument_body_*' ORDER BY name").all().filter(({ name }) => !name.includes('_authoring_')).map(({ name }) => [name, db.prepare(`SELECT * FROM ${name}`).all().sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))]);
 const durableMeta = (db) => ['_Log', '_ActionReceipt', '_HistoryCursor'].map((table) => [table, db.prepare(`SELECT * FROM ${table} ORDER BY 1, 2, 3`).all()]);
-async function edit(ctx, actionId, edit, principal = { type: 'user', id: 'u1' }) { const row = ctx.db.prepare('SELECT * FROM HistoryDocument WHERE id = ?').get('d1'); const snapshot = await projectAnnotatedTextSnapshot({ db: ctx.db, entity: ctx.Document, row, principal, fieldName: 'body', descriptor: ctx.Document.fields.body }); const command = typeof edit === 'function' ? edit(snapshot) : edit; return ctx.app.dispatch({ actionId, principal, scope: 'Project:p1', history: { session: 'tab-a' }, ...annotatedTextAction(ctx.Document, ctx.Document.body, { ...command, id: 'd1', basis: snapshot.basis, mutationId: actionId }) }); }
+async function edit(ctx, actionId, editFn, principal = { type: 'user', id: 'u1' }) {
+  const row = ctx.db.prepare('SELECT * FROM HistoryDocument WHERE id = ?').get('d1');
+  const binding = await withAuthoringBinding({ db: ctx.db, entity: ctx.Document, Document: ctx.Document, row, principal, fieldName: 'body', descriptor: ctx.Document.fields.body });
+  const command = typeof editFn === 'function' ? editFn(binding.snapshot) : editFn;
+  const pos = ({ blockId, offset, affinity }) => ({ positionToken: binding.positionTokens.get(blockId), offset, affinity });
+  let edit;
+  if (command.kind === 'block-group.assignment.set') {
+    const selection = command.selection.kind === 'one'
+      ? { kind: 'one', groupToken: binding.groupTokens.get(command.selection.blockGroupId) }
+      : { kind: command.selection.kind, groupTokens: command.selection.blockGroupIds.map((id) => binding.groupTokens.get(id)) };
+    edit = { kind: 'block-group.assignment.set', selection, annotation: command.annotation };
+  } else if (command.kind === 'block-group.assignment.clear') {
+    const selection = command.selection.kind === 'one'
+      ? { kind: 'one', groupToken: binding.groupTokens.get(command.selection.blockGroupId) }
+      : { kind: command.selection.kind, groupTokens: command.selection.blockGroupIds.map((id) => binding.groupTokens.get(id)) };
+    edit = { kind: 'block-group.assignment.clear', selection, family: command.family };
+  } else {
+    const hasSplit = command.kind === 'block.split' || command.kind === 'block.continue' || command.kind === 'block.split-and-assign';
+    edit = { kind: command.kind, ...(command.at ? { at: pos(command.at) } : {}), ...(hasSplit ? { temporaryBlock: `temporary-${actionId}` } : {}) };
+    if (command.annotation) edit.annotation = command.annotation;
+    if (command.text) edit.text = command.text;
+    if (command.kind === 'block.merge') { edit.leftPositionToken = binding.positionTokens.get(command.leftBlockId); edit.rightPositionToken = binding.positionTokens.get(command.rightBlockId); }
+  }
+  return ctx.app.dispatch({ actionId, principal, scope: 'Project:p1', history: { session: 'tab-a' }, type: 'HistoryDocument.body.operation', payload: { version: 9, id: 'd1', authoring: { version: 1, stream: binding.streamToken, lease: binding.leaseToken, mutationId: actionId }, edit } });
+}
 async function move(ctx, operation, actionId) { const cursor = await ctx.app.history.cursor({ scope: 'Project:p1', principal: { type: 'user', id: 'u1' }, session: 'tab-a' }); return ctx.app.history[operation]({ scope: 'Project:p1', principal: { type: 'user', id: 'u1' }, session: 'tab-a', actionId, revision: cursor.revision }); }
 
-test('v8 continuation has one opaque cursor entry and exact undo/redo projection', async (t) => {
+test('v9 continuation has one opaque cursor entry and exact undo/redo projection', async (t) => {
   const c = await setup(); t.after(() => { c.app.shutdown(); c.db.close(); }); const before = state(c.db);
-  const result = await edit(c, 'continue', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5 } }); assert.equal(result.ok, true, result.failure?.message); const after = state(c.db);
+  const result = await edit(c, 'continue', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5, affinity: 'right' } }); assert.equal(result.ok, true, result.failure?.message); const after = state(c.db);
   assert.deepEqual((await c.app.history.cursor({ scope: 'Project:p1', principal: { type: 'user', id: 'u1' }, session: 'tab-a' })).undo, 1);
    assert.equal(result.events.length, 1); assert.equal(result.events[0].type, 'HistoryDocument.body.operated');
    const publicText = JSON.stringify([c.db.prepare("SELECT eventData FROM _Log WHERE actionId = 'continue'").all(), c.db.prepare("SELECT actionData FROM _ActionReceipt WHERE actionId = 'continue'").all()]); assert.equal(/tables|family_checkpoint|private/i.test(publicText), false);
@@ -37,24 +62,24 @@ test('v8 continuation has one opaque cursor entry and exact undo/redo projection
   assert.equal(c.db.prepare("SELECT COUNT(*) AS n FROM _Log WHERE actionId IN ('undo','redo') AND eventType = 'HistoryDocument.body.operated'").get().n, 2);
 });
 
-test('v8 assignment and split-and-assign undo/redo are atomic and preserve unrelated membership', async (t) => {
+test('v9 assignment and split-and-assign undo/redo are atomic and preserve unrelated membership', async (t) => {
   const c = await setup(); t.after(() => { c.app.shutdown(); c.db.close(); });
-  const split = await edit(c, 'split', { kind: 'block.split-and-assign', at: { blockId: c.blockId, offset: 5 }, annotation: { id: 'old', family: 'tag', fields: { value: true } } }); assert.equal(split.ok, true, split.failure?.message);
+  const split = await edit(c, 'split', { kind: 'block.split-and-assign', at: { blockId: c.blockId, offset: 5, affinity: 'right' }, annotation: { id: 'old', family: 'tag', fields: { value: true } } }); assert.equal(split.ok, true, split.failure?.message);
   const pre = state(c.db); const set = await edit(c, 'set', (snapshot) => ({ kind: 'block-group.assignment.set', selection: { kind: 'listed', blockGroupIds: snapshot.blockGroups.map((group) => group.id) }, annotation: { id: 'new', family: 'tag', fields: { value: false } } })); assert.equal(set.ok, true, set.failure?.message);
    const post = state(c.db); assert.equal((await move(c, 'undo', 'undo-set')).ok, true); assert.deepEqual(state(c.db), pre); assert.equal((await move(c, 'redo', 'redo-set')).ok, true); assert.deepEqual(state(c.db), post);
    assert.equal((await move(c, 'undo', 'undo-set-again')).ok, true); assert.equal((await move(c, 'undo', 'undo-split')).ok, true); // selected assignment undo followed by split undo restores topology
   assert.equal(c.db.prepare('SELECT COUNT(*) AS n FROM HistoryDocument_body_block').get().n, 1); assert.equal(c.db.prepare('SELECT COUNT(*) AS n FROM HistoryDocument_body_group_membership').get().n, 0);
 });
 
-test('v6/v7 do not clear an existing v8 future and empty moves remain no-op receipts', async (t) => {
-  const c = await setup(); t.after(() => { c.app.shutdown(); c.db.close(); }); await edit(c, 'continue', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5 } }); assert.equal((await move(c, 'undo', 'undo')).ok, true);
+test('v9 do not clear an existing v8 future and empty moves remain no-op receipts', async (t) => {
+  const c = await setup(); t.after(() => { c.app.shutdown(); c.db.close(); }); await edit(c, 'continue', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5, affinity: 'right' } }); assert.equal((await move(c, 'undo', 'undo')).ok, true);
   const empty = await move(c, 'undo', 'empty'); assert.equal(empty.empty, true); assert.equal(empty.events.length, 0); assert.equal((await move(c, 'redo', 'redo')).ok, true);
   const cursor = await c.app.history.cursor({ scope: 'Project:p1', principal: { type: 'user', id: 'u1' }, session: 'tab-a' }); assert.deepEqual({ undo: cursor.undo, redo: cursor.redo }, { undo: 1, redo: 0 });
 });
 
 test('non-human principals cannot create an annotated history cursor entry', async (t) => {
   const c = await setup(); t.after(() => { c.app.shutdown(); c.db.close(); });
-  const result = await edit(c, 'api-edit', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5 } }, { type: 'apiKey', id: 'key-1' });
+  const result = await edit(c, 'api-edit', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5, affinity: 'right' } }, { type: 'apiKey', id: 'key-1' });
   assert.equal(result.ok, true, result.failure?.message);
   assert.equal((await c.app.history.cursor({ scope: 'Project:p1', principal: { type: 'apiKey', id: 'key-1' }, session: 'tab-a' })).undo, 0);
   assert.equal(c.db.prepare("SELECT COUNT(*) AS n FROM _HistoryCursor WHERE principalKey = 'apiKey:key-1'").get().n, 0);
@@ -63,7 +88,7 @@ test('non-human principals cannot create an annotated history cursor entry', asy
 test('revoked field access is checked before loading a private history fact', async (t) => {
   let allowed = true;
   const c = await setup(() => allowed ? grant(read, write) : grant(read)); t.after(() => { c.app.shutdown(); c.db.close(); });
-  assert.equal((await edit(c, 'private-edit', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5 } })).ok, true);
+  assert.equal((await edit(c, 'private-edit', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5, affinity: 'right' } })).ok, true);
   // A malformed fact makes ordering observable: authorization must deny first.
   c.db.prepare("UPDATE _PrivateActionFact SET fact = 'not-json' WHERE actionId = 'private-edit'").run();
   allowed = false;
@@ -92,7 +117,7 @@ test('malformed persisted annotated image rejects undo atomically', async () => 
   for (const [index, mutate] of mutations.entries()) {
     const c = await setup();
     try {
-      assert.equal((await edit(c, `bad-image-${index}`, { kind: 'block.continue', at: { blockId: c.blockId, offset: 5 } })).ok, true);
+      assert.equal((await edit(c, `bad-image-${index}`, { kind: 'block.continue', at: { blockId: c.blockId, offset: 5, affinity: 'right' } })).ok, true);
       const fact = c.db.prepare('SELECT fact FROM _PrivateActionFact WHERE actionId = ?').get(`bad-image-${index}`);
       const parsed = JSON.parse(fact.fact); mutate(parsed);
       c.db.prepare('UPDATE _PrivateActionFact SET fact = ? WHERE actionId = ?').run(JSON.stringify(parsed), `bad-image-${index}`);
@@ -107,7 +132,7 @@ test('malformed persisted annotated image rejects undo atomically', async () => 
 
 test('stale revision after an intervening v8 action rejects the intended undo without movement', async (t) => {
   const c = await setup(); t.after(() => { c.app.shutdown(); c.db.close(); });
-  assert.equal((await edit(c, 'first', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5 } })).ok, true);
+  assert.equal((await edit(c, 'first', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5, affinity: 'right' } })).ok, true);
   const old = await c.app.history.cursor({ scope: 'Project:p1', principal: { type: 'user', id: 'u1' }, session: 'tab-a' });
   const second = await edit(c, 'second', (snapshot) => ({ kind: 'block-group.assignment.set', selection: { kind: 'listed', blockGroupIds: snapshot.blockGroups.map((group) => group.id) }, annotation: { id: 'second-tag', family: 'tag', fields: { value: true } } }));
   assert.equal(second.ok, true, second.failure?.message);
@@ -118,7 +143,7 @@ test('stale revision after an intervening v8 action rejects the intended undo wi
 
 test('retired annotated documents reject history moves without restoration or cursor movement', async (t) => {
   const c = await setup(); t.after(() => { c.app.shutdown(); c.db.close(); });
-  assert.equal((await edit(c, 'retire-edit', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5 } })).ok, true);
+  assert.equal((await edit(c, 'retire-edit', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5, affinity: 'right' } })).ok, true);
   const cursor = await c.app.history.cursor({ scope: 'Project:p1', principal: { type: 'user', id: 'u1' }, session: 'tab-a' });
   const retired = await c.app.dispatch({ actionId: 'retire', principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', ...annotatedTextRetireAction(c.Document, 'd1') });
   assert.equal(retired.ok, true, retired.failure?.message);
@@ -127,22 +152,24 @@ test('retired annotated documents reject history moves without restoration or cu
   assert.deepEqual(state(c.db), before.state); assert.deepEqual(durableMeta(c.db), before.meta);
 });
 
-test('restoring history clears a minted basis and the old token cannot issue v8 afterward', async (t) => {
+test('restoring history clears authoring bindings and old bindings cannot issue v9 actions', async (t) => {
   const c = await setup(); t.after(() => { c.app.shutdown(); c.db.close(); });
   const row = c.db.prepare('SELECT * FROM HistoryDocument WHERE id = ?').get('d1');
-  const snapshot = await projectAnnotatedTextSnapshot({ db: c.db, entity: c.Document, row, principal: { type: 'user', id: 'u1' }, fieldName: 'body', descriptor: c.Document.fields.body });
-  const command = { kind: 'block.continue', at: { blockId: c.blockId, offset: 5 } };
-  assert.equal((await c.app.dispatch({ actionId: 'basis-edit', principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', history: { session: 'tab-a' }, ...annotatedTextAction(c.Document, c.Document.body, { ...command, id: 'd1', basis: snapshot.basis, mutationId: 'basis-edit' }) })).ok, true);
-  assert.equal((await move(c, 'undo', 'basis-undo')).ok, true);
-  assert.equal(c.db.prepare('SELECT COUNT(*) AS n FROM HistoryDocument_body_basis WHERE document_id = ?').get('d1').n, 0);
-  const stale = await c.app.dispatch({ actionId: 'basis-reuse', principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', history: { session: 'tab-a' }, ...annotatedTextAction(c.Document, c.Document.body, { ...command, id: 'd1', basis: snapshot.basis, mutationId: 'basis-reuse' }) });
-  assert.equal(stale.ok, false); assert.match(stale.failure?.message ?? '', /basis|snapshot|token/i);
-  assert.equal(stale.failure?.details?.code, 'basis-unavailable');
+  const binding = await withAuthoringBinding({ db: c.db, entity: c.Document, Document: c.Document, row, principal: { type: 'user', id: 'u1' }, fieldName: 'body', descriptor: c.Document.fields.body });
+  const command = { kind: 'block.continue', at: { blockId: c.blockId, offset: 5, affinity: 'right' } };
+  const pos = ({ blockId, offset, affinity }) => ({ positionToken: binding.positionTokens.get(blockId), offset, affinity });
+  const authoring = { version: 1, stream: binding.streamToken, lease: binding.leaseToken, mutationId: 'authoring-edit' };
+  assert.equal((await c.app.dispatch({ actionId: 'authoring-edit', principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', history: { session: 'tab-a' }, type: 'HistoryDocument.body.operation', payload: { version: 9, id: 'd1', authoring, edit: { kind: 'block.continue', at: pos(command.at), temporaryBlock: 'temporary-authoring-edit' } } })).ok, true);
+  assert.equal((await move(c, 'undo', 'authoring-undo')).ok, true);
+  assert.equal(c.db.prepare('SELECT COUNT(*) AS n FROM HistoryDocument_body_authoring_stream WHERE document_id = ?').get('d1').n, 0);
+  const stale = await c.app.dispatch({ actionId: 'authoring-reuse', principal: { type: 'user', id: 'u1' }, scope: 'Project:p1', history: { session: 'tab-a' }, type: 'HistoryDocument.body.operation', payload: { version: 9, id: 'd1', authoring, edit: { kind: 'block.continue', at: pos(command.at), temporaryBlock: 'temporary-authoring-reuse' } } });
+  assert.equal(stale.ok, false);
+  assert.equal(stale.failure?.details?.code, 'authoring-stream-unavailable');
 });
 
 test('annotated history actions and events are not public reads or image-bearing receipts', async (t) => {
   const c = await setup(); t.after(() => { c.app.shutdown(); c.db.close(); });
-  const result = await edit(c, 'opaque', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5 } });
+  const result = await edit(c, 'opaque', { kind: 'block.continue', at: { blockId: c.blockId, offset: 5, affinity: 'right' } });
   assert.equal(result.ok, true, result.failure?.message);
   assert.equal(c.app.history.actions, undefined); assert.equal(c.app.history.events, undefined);
   const durable = JSON.stringify(c.db.prepare("SELECT eventData FROM _Log WHERE actionId = 'opaque'").all()) + JSON.stringify(c.db.prepare("SELECT actionData FROM _ActionReceipt WHERE actionId = 'opaque'").all());

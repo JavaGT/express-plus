@@ -51,7 +51,7 @@ function groupDeclaration() {
 
 function snapshot() {
   return {
-    kind: 'workbench.annotatedText.recipient', version: 1, basis: 'opaque-basis',
+    kind: 'workbench.annotatedText.recipient', version: 1,
     blockGroups: [{ id: 'group-1', blockIds: ['block-1'], annotationIds: [] }],
     blocks: [{ kind: 'visible', id: 'block-1', text: 'Hello', fields: {}, annotationIds: ['annotation-1'] }],
     annotations: [{ id: 'annotation-1', family: 'coding', fields: {} }],
@@ -67,7 +67,7 @@ test('materializes a compiled annotated-text snapshot into public immutable shap
   });
   const document = materializeAnnotatedTextSnapshot(snapshot(), Doc.body);
   assert.deepEqual(document, {
-    kind: 'workbench.annotatedText.recipient', version: 1, basis: 'opaque-basis',
+    kind: 'workbench.annotatedText.recipient', version: 1,
     blockGroups: [{ kind: 'workbench.annotatedText.block-group', blockIds: ['block-1'], annotationIds: [] }],
     blocks: [{ kind: 'visible', id: 'block-1', text: 'Hello', fields: {}, annotationIds: ['annotation-1'] }],
     annotations: [{ id: 'annotation-1', family: 'coding', fields: {} }],
@@ -82,6 +82,26 @@ test('materializes a compiled annotated-text snapshot into public immutable shap
   assert.deepEqual(Object.keys(document.blockGroups[0]), ['kind', 'blockIds', 'annotationIds']);
   assert.equal(Object.hasOwn(document.blockGroups[0], 'id'), false);
   assert.ok(Object.isFrozen(document.blockGroups[0]));
+  assert.equal('basis' in document, false);
+  assert.equal('authoring' in document, false);
+});
+
+test('materializes annotation owner when present and rejects malformed owner', () => {
+  const Doc = entity('SnapshotOwnerDoc', {
+    project: ref('Project'), owner: ref('User'), body: declaration(),
+  });
+  const withOwner = {
+    ...snapshot(),
+    annotations: [{ id: 'annotation-1', family: 'coding', fields: {}, owner: 'user-42' }],
+  };
+  const materialized = materializeAnnotatedTextSnapshot(withOwner, Doc.body);
+  assert.equal(materialized.annotations[0].owner, 'user-42');
+  assert.ok(Object.isFrozen(materialized.annotations[0]));
+
+  const badType = { ...snapshot(), annotations: [{ id: 'annotation-1', family: 'coding', fields: {}, owner: 42 }] };
+  assert.throws(() => materializeAnnotatedTextSnapshot(badType, Doc.body), /owner.*non-empty string/);
+  const empty = { ...snapshot(), annotations: [{ id: 'annotation-1', family: 'coding', fields: {}, owner: '' }] };
+  assert.throws(() => materializeAnnotatedTextSnapshot(empty, Doc.body), /owner.*non-empty string/);
 });
 
 test('rejects uncompiled declarations and undeclared projected names', () => {
@@ -220,4 +240,92 @@ test('materializeAnnotatedTextSnapshot is re-exported from public/workbench-clie
   const document = clientSnapshot(snapshot(), Doc.body);
   assert.equal(document.version, 1);
   assert.ok(Object.isFrozen(document));
+  assert.equal('basis' in document, false);
+  assert.equal('authoring' in document, false);
+});
+
+test('rejects incomplete or invalid v9 authoring envelope', () => {
+  const Doc = entity('AuthoringEnvelopeDoc', {
+    project: ref('Project'), owner: ref('User'), body: declaration(),
+  });
+
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: null }, Doc.body), /authoring/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: {} }, Doc.body), /authoring/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: { version: 1 } }, Doc.body), /authoring/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: { version: 1, stream: 's', lease: 'l', snapshot: 'snap', acknowledgementFence: -1, positionFrames: [], groupFrames: [], splitResolutions: [] } }, Doc.body), /authoring/);
+
+  const authoring = { version: 1, stream: 's', lease: 'l', snapshot: 'snap', acknowledgementFence: 0, positionFrames: [{ blockId: 'block-1', positionToken: 'x' }], groupFrames: [], splitResolutions: [] };
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: { ...authoring, positionFrames: [] } }, Doc.body), /authoring/);
+});
+
+test('accepts and strips valid v9 authoring envelope from public document', () => {
+  const Doc = entity('AuthoringStrippedDoc', {
+    project: ref('Project'), owner: ref('User'), body: declaration(),
+  });
+  const data = snapshot();
+  const withAuthoring = { ...data, authoring: { version: 1, stream: 'a'.repeat(43), lease: 'b'.repeat(43), snapshot: 'c'.repeat(43), acknowledgementFence: 0, positionFrames: [{ blockId: 'block-1', positionToken: 'd'.repeat(43) }], groupFrames: [{ groupToken: 'e'.repeat(43) }], splitResolutions: [] } };
+  const document = materializeAnnotatedTextSnapshot(withAuthoring, Doc.body);
+  assert.equal('basis' in document, false);
+  assert.equal('authoring' in document, false);
+  assert.equal(document.version, 1);
+});
+
+test('validates authoring.positionFrames exactly match visible blocks', () => {
+  const Doc = entity('PositionFrameMatchDoc', {
+    project: ref('Project'), owner: ref('User'), body: declaration(),
+  });
+
+  const extra = { version: 1, stream: 'a'.repeat(43), lease: 'b'.repeat(43), snapshot: 'c'.repeat(43), acknowledgementFence: 0, positionFrames: [{ blockId: 'block-1', positionToken: 'a'.repeat(43) }, { blockId: 'block-2', positionToken: 'b'.repeat(43) }], groupFrames: [{ groupToken: 'e'.repeat(43) }], splitResolutions: [] };
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: extra }, Doc.body), /positionFrames/);
+
+  const empty = { version: 1, stream: 'a'.repeat(43), lease: 'b'.repeat(43), snapshot: 'c'.repeat(43), acknowledgementFence: 0, positionFrames: [], groupFrames: [{ groupToken: 'e'.repeat(43) }], splitResolutions: [] };
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: empty }, Doc.body), /positionFrames/);
+});
+
+test('validates authoring.groupFrames exactly match block groups', () => {
+  const Doc = entity('GroupFrameMatchDoc', {
+    project: ref('Project'), owner: ref('User'), body: declaration(),
+  });
+  const extra = { version: 1, stream: 'a'.repeat(43), lease: 'b'.repeat(43), snapshot: 'c'.repeat(43), acknowledgementFence: 0, positionFrames: [{ blockId: 'block-1', positionToken: 'd'.repeat(43) }], groupFrames: [{ groupToken: 'g1'.repeat(22) }, { groupToken: 'g2'.repeat(22) }], splitResolutions: [] };
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: extra }, Doc.body), /groupFrames/);
+});
+
+test('rejects authoring envelope with duplicate split resolution tokens', () => {
+  const Doc = entity('DuplicateSplitDoc', {
+    project: ref('Project'), owner: ref('User'), body: declaration(),
+  });
+  const data = snapshot();
+  data.blocks.push({ kind: 'visible', id: 'block-2', text: 'World', fields: {}, annotationIds: [] });
+  data.blockGroups = [{ id: 'group-1', blockIds: ['block-1', 'block-2'], annotationIds: [] }];
+  data.memberships = [];
+  data.measurements = [];
+  const authoring = {
+    version: 1, stream: 'a'.repeat(43), lease: 'b'.repeat(43), snapshot: 'c'.repeat(43), acknowledgementFence: 0,
+    positionFrames: [
+      { blockId: 'block-1', positionToken: 'd'.repeat(43) },
+      { blockId: 'block-2', positionToken: 'e'.repeat(43) },
+    ],
+    groupFrames: [{ groupToken: 'g'.repeat(43) }],
+    splitResolutions: [
+      { temporaryBlock: 'f'.repeat(43), blockId: 'block-2' },
+      { temporaryBlock: 'f'.repeat(43), blockId: 'block-2' },
+    ],
+  };
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...data, authoring }, Doc.body), /splitResolutions/);
+});
+
+test('rejects authoring envelope extra keys, malformed tokens, and token reuse', () => {
+  const Doc = entity('StrictAuthoringEnvelopeDoc', {
+    project: ref('Project'), owner: ref('User'), body: declaration(),
+  });
+  const valid = {
+    version: 1, stream: 'a'.repeat(43), lease: 'b'.repeat(43), snapshot: 'c'.repeat(43), acknowledgementFence: 0,
+    positionFrames: [{ blockId: 'block-1', positionToken: 'd'.repeat(43) }], groupFrames: [{ groupToken: 'e'.repeat(43) }], splitResolutions: [],
+  };
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: { ...valid, extra: true } }, Doc.body), /authoring/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: { ...valid, lease: valid.stream } }, Doc.body), /authoring/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: { ...valid, positionFrames: [{ blockId: 'block-1', positionToken: 'not-a-256-bit-token' }] } }, Doc.body), /positionFrames/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: { ...valid, positionFrames: [{ blockId: 'block-1', positionToken: valid.stream }] } }, Doc.body), /positionFrames/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: { ...valid, groupFrames: [{ groupToken: valid.stream }] } }, Doc.body), /groupFrames/);
+  assert.throws(() => materializeAnnotatedTextSnapshot({ ...snapshot(), authoring: { ...valid, positionFrames: [{ blockId: 'block-1', positionToken: 'd'.repeat(43), extra: true }] } }, Doc.body), /positionFrames/);
 });

@@ -192,7 +192,7 @@ test('orphan projection passes safe fields and excludes raw memberships', () => 
   c.annotations = [];
   c.memberships = [];
   c.blocks = c.blocks.map((b) => ({ ...b, annotationIds: [] }));
-  c.orphans = [{ id: 'orphan-1', family: 'coding', fields: { color: 'blue' }, savedQuote: 'secret', membershipBlockIds: ['a', 'b'] }];
+  c.orphans = [{ id: 'orphan-1', family: 'coding', fields: { color: 'blue' }, owner: 'user-7', savedQuote: 'secret', membershipBlockIds: ['a', 'b'] }];
   const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
     version: 1, protectors: [], capabilityHints: [],
   });
@@ -201,12 +201,36 @@ test('orphan projection passes safe fields and excludes raw memberships', () => 
   assert.equal(projected.orphans[0].family, 'coding');
   assert.deepEqual(projected.orphans[0].fields, { color: 'blue' });
   assert.equal(projected.orphans[0].savedQuote, 'secret');
+  assert.equal(projected.orphans[0].owner, 'user-7');
   assert.equal(projected.orphans[0].protectedTargetIds, undefined);
   const serialized = JSON.stringify(projected);
   assert.equal(serialized.includes('last_memberships'), false);
   assert.equal(serialized.includes('endpoint'), false);
   assert.equal(serialized.includes('frontier'), false);
   assert.equal(serialized.includes('structuralRevision'), false);
+});
+
+test('recipient projection carries annotation owner and rejects malformed owner', () => {
+  const c = canonical();
+  c.annotations = [
+    { id: 'code', family: 'coding', fields: {}, owner: 'user-42' },
+    { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
+  ];
+  const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
+    version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
+  });
+  const code = projected.annotations.find((a) => a.id === 'code');
+  assert.equal(code?.owner, 'user-42');
+
+  const bad = canonical();
+  bad.annotations = [
+    { id: 'code', family: 'coding', fields: {}, owner: '' },
+    { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
+  ];
+  assert.throws(
+    () => projectAnnotatedTextForRecipient(bad, descriptor(), { version: 1, protectors: [], capabilityHints: [] }),
+    /annotation owner is invalid/
+  );
 });
 
 test('orphan with conflicting annotation id fails closed', () => {

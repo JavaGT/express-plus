@@ -321,6 +321,7 @@ export function registerAnnotatedTextStructuralExtension(extensionName: string, 
 export interface AnnotatedTextPosition {
   readonly blockId: string;
   readonly offset: number;
+  readonly affinity: 'left' | 'right';
 }
 export interface AnnotatedTextActionAnnotation {
   readonly id: string;
@@ -408,6 +409,8 @@ export interface AnnotatedTextAnnotation {
   readonly id: string;
   readonly family: string;
   readonly fields: Readonly<Record<string, unknown>>;
+  /** Principal id of the user who applied this annotation; absent on legacy/interop snapshots that predate attribution. */
+  readonly owner?: string;
 }
 export interface AnnotatedTextMembership {
   readonly annotationId: string;
@@ -475,6 +478,18 @@ export interface AnnotatedTextExpectedOwningScope {
   readonly entity: WorkbenchEntity;
   readonly id: string;
 }
+export type AnnotatedTextRecipientReadResult =
+  | { readonly kind: 'snapshot'; readonly document: AnnotatedTextRecipientDocument; readonly owningScopeCursor: number }
+  | { readonly kind: 'unavailable' }
+  | { readonly kind: 'retry' };
+export function readAnnotatedTextForRecipient(input: {
+  readonly app: WorkbenchApp;
+  readonly entity: WorkbenchEntity;
+  readonly field: AnnotatedTextFieldHandle;
+  readonly documentId: string;
+  readonly expectedOwningScope: AnnotatedTextExpectedOwningScope;
+  readonly principal: Principal;
+}): Promise<AnnotatedTextRecipientReadResult>;
 export function exportAnnotatedText(input: {
   readonly app: WorkbenchApp;
   readonly entity: WorkbenchEntity;

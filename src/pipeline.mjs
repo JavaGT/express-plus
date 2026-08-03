@@ -380,10 +380,14 @@ function recordInMemoryDispatch(dispatched, scope, actionId, events) {
 }
 
 // Durable dedupe: returns successOutcome when the actionId receipt exists,
-// or null for a fresh action.
-function checkDurableDedupe(db, scope, actionId) {
+// or null for a fresh action. Handlers with private receipts can require an
+// exact request match before their resultData is replayed.
+function checkDurableDedupe(db, scope, actionId, request, receiptMatches) {
   const receipt = receiptFor(db, scope, actionId);
   if (!receipt) return null;
+  if (receiptMatches && !receiptMatches(receipt, request)) {
+    return failureOutcome(failure('conflict', 'Action ID is already committed for a different request.'));
+  }
   return Object.freeze({ ...successOutcome(eventsFromReceipt(db, receipt, parseEventType), true), resultData: receipt.resultData });
 }
 
@@ -393,7 +397,7 @@ function checkDurableBatchDedupe(db, scope, actionId, actions) {
   if (receipt.actionType !== '$batch' || receipt.actionData !== JSON.stringify(actions)) {
     return failureOutcome(failure('conflict', 'Action ID is already committed for a different batch.'));
   }
-  return successOutcome(eventsFromReceipt(db, receipt, parseEventType), true);
+  return Object.freeze({ ...successOutcome(eventsFromReceipt(db, receipt, parseEventType), true), resultData: receipt.resultData });
 }
 
 // commitEvents — the durable transaction brace shared by `dispatch` and
@@ -473,7 +477,7 @@ async function commitEvents(db, events, {
       const confirmedThrough = readSeq(db, scope);
       const resultData = commit.authoringReceipt
         ? commit.authoringReceipt({ db, actionId, scope, confirmedThrough, finalizedEvents: result })
-        : Object.freeze({ version: 1, actionId, confirmedThrough });
+        : Object.freeze({ actionId, confirmedThrough });
       // The owning-stream action receipt (Wave 4.9): written atomically with
       // the events it references, so a retry's dedupe check and a crash
       // recovery always see either both or neither.
@@ -490,7 +494,7 @@ async function commitEvents(db, events, {
         ? {
           ...historyCommit?.metadata,
           actionType: type ?? historyCommit?.metadata?.actionType,
-           actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData,
+            actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData ?? payload,
            resultData,
         }
         : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
@@ -720,7 +724,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     if (denied) return denied;
 
     try {
-      handler.preDedupe?.({ payload, principal, scope, db });
+      handler.preDedupe?.({ payload, principal, scope, db, ...(historyCommit?.handlerInputs ? { history: historyCommit.handlerInputs[0] } : {}) });
     } catch (err) {
       return executionFailure(err, { actionId, type });
     }
@@ -732,7 +736,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // under a different owning scope is independent action identity, and a
     // zero-event action is durably deduped via its receipt even though it left
     // no _Log row to key on.
-    const dedupe = checkDurableDedupe(db, scope, actionId);
+    const dedupe = checkDurableDedupe(db, scope, actionId, request, handler.dedupeReceiptMatches);
     if (dedupe) return dedupe;
 
     // Run the handler — events only, no DB writes (Fork A: entity-as-projection).
@@ -857,7 +861,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
           });
           const commit = Array.isArray(emitted) ? { events: emitted } : emitted;
           if (!commit || !Array.isArray(commit.events) || commit.privateFact !== undefined
-            || commit.effects !== undefined || commit.directive !== undefined || commit.canonicalPayload !== undefined) {
+            || commit.effects !== undefined || commit.directive !== undefined) {
             throw new TypeError(`batched action '${action.type}' handler must return an event array`);
           }
           allEmitted.push(...commit.events);

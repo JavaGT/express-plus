@@ -136,7 +136,7 @@ test('post-commit failure cannot turn a committed mutation into a reported failu
 
   const outcome = await server.dispatch(request());
   assert.deepEqual({ outcome, committedRows: db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count }, {
-    outcome: { ok: true, deduped: false, events: outcome.events },
+    outcome: { ok: true, deduped: false, events: outcome.events, resultData: outcome.resultData },
     committedRows: 1,
   });
   db.close();

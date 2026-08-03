@@ -16,4 +16,4 @@ export {
   annotatedTextCreateAction,
   annotatedTextRetireAction,
 } from './annotated-text-action.mjs';
-export { exportAnnotatedText } from './annotated-text-snapshot.mjs';
+export { exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-snapshot.mjs';

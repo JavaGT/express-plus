@@ -655,6 +655,7 @@ export interface AnnotatedTextAnnotation {
   readonly id: string;
   readonly family: string;
   readonly fields: Readonly<Record<string, unknown>>;
+  readonly owner?: string;
 }
 
 export interface AnnotatedTextMembership {

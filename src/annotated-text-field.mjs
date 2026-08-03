@@ -656,6 +656,8 @@ export function annotatedTextAuthoringStreamDDL(entity, field) {
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_authoring_group_lease ON ${prefix}_authoring_group (lease_id, issued_fence);`,
     `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_snapshot (\n  id TEXT PRIMARY KEY,\n  lease_id TEXT NOT NULL,\n  fence INTEGER NOT NULL,\n  issued_at TEXT NOT NULL,\n  acknowledged_at TEXT,\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE\n);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_authoring_snapshot_lease ON ${prefix}_authoring_snapshot (lease_id, fence);`,
+    `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_snapshot_position (\n  snapshot_id TEXT NOT NULL,\n  position_token TEXT NOT NULL,\n  PRIMARY KEY (snapshot_id, position_token),\n  FOREIGN KEY (snapshot_id) REFERENCES ${prefix}_authoring_snapshot(id) ON DELETE CASCADE,\n  FOREIGN KEY (position_token) REFERENCES ${prefix}_authoring_position(token) ON DELETE CASCADE\n);`,
+    `CREATE INDEX IF NOT EXISTS idx_${prefix}_authoring_snapshot_position_token ON ${prefix}_authoring_snapshot_position (position_token, snapshot_id);`,
     `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_split (\n  lease_id TEXT NOT NULL,\n  temporary_block TEXT NOT NULL,\n  authoritative_block_id TEXT NOT NULL,\n  position_token TEXT NOT NULL,\n  action_id TEXT NOT NULL,\n  mutation_id TEXT NOT NULL,\n  fence INTEGER NOT NULL,\n  created_at TEXT NOT NULL,\n  PRIMARY KEY (lease_id, temporary_block),\n  UNIQUE (lease_id, action_id, temporary_block),\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE\n);`,
   ];
 }

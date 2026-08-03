@@ -10,6 +10,7 @@ export {
   annotatedTextCreateAction,
   annotatedTextRetireAction,
   exportAnnotatedText,
+  readAnnotatedTextForRecipient,
 } from './index.js';
 
 export type {
@@ -48,6 +49,7 @@ export type {
   AnnotatedTextRecipientBlock,
   AnnotatedTextRecipientBlockGroup,
   AnnotatedTextExpectedOwningScope,
+  AnnotatedTextRecipientReadResult,
   AnnotatedTextCreateInput,
   AnnotatedTextCreateSourceBlock,
   AnnotatedTextCreateSourceMeasurement,

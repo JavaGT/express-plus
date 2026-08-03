@@ -21,6 +21,7 @@ import {
 } from '../src/annotated-text-public.mjs';
 
 const extension = 'packageEntryMeasurement';
+const token = (label) => `${label}${'x'.repeat(43)}`.slice(0, 43);
 registerAnnotatedTextContract(extension, Object.freeze({ kind: 'measurement' }));
 registerAnnotatedTextStructuralExtension(extension, Object.freeze({
   version: 1,
@@ -53,67 +54,68 @@ test('annotated-text package entry shares declarations and registry authority wi
   assert.equal(Document.body.measurements.words.measurementName, 'words');
 });
 
-test('public action grammar validates field handles and emits closed generated action requests', () => {
+test('public action grammar validates field handles and emits closed v9 authoring action requests', () => {
   const Document = entity('PackageActionDocument', {
     project: ref('Project'), owner: ref('User'),
     body: annotatedText({ project: 'project', owner: 'owner', block: {}, annotations: [annotation('coding')], measurements: [measurement('words', { extension })] }),
     summary: annotatedText({ project: 'project', owner: 'owner', block: {}, annotations: [annotation('coding')], measurements: [measurement('words', { extension })] }),
     grant: grant(read),
   });
-  const request = annotatedTextAction(Document, Document.body, { kind: 'text.insert', id: 'doc-1', basis: 'opaque-basis', mutationId: 'insert-1', at: { blockId: 'block-1', offset: 0 }, text: 'hello' });
+  const authoring = { version: 1, stream: token('stream'), lease: token('lease'), mutationId: 'insert-1' };
+  const request = annotatedTextAction(Document, Document.body, { kind: 'text.insert', id: 'doc-1', authoring, at: { positionToken: token('position'), offset: 0, affinity: 'right' }, text: 'hello' });
   assert.equal(request.type, 'PackageActionDocument.body.operation');
   assert.equal('scope' in request, false);
-  assert.equal(request.payload.version, 6);
+  assert.equal(request.payload.version, 9);
   assert.ok(Object.isFrozen(request));
   assert.ok(Object.isFrozen(request.payload));
-  assert.throws(() => annotatedTextAction(Document, Document.project, { kind: 'text.insert', id: 'doc-1', basis: 'opaque-basis', mutationId: 'insert-1', at: { blockId: 'block-1', offset: 0 }, text: 'hello' }), /not an annotatedText field/);
-  assert.deepEqual(annotatedTextAction(Document, Document.body, { kind: 'text.delete', id: 'doc-1', basis: 'opaque-basis', mutationId: 'delete-1', from: { blockId: 'block-1', offset: 0 }, to: { blockId: 'block-1', offset: 1 } }).payload.edit, { kind: 'text.delete', from: { blockId: 'block-1', offset: 0 }, to: { blockId: 'block-1', offset: 1 } });
+  assert.throws(() => annotatedTextAction(Document, Document.project, { kind: 'text.insert', id: 'doc-1', authoring, at: { positionToken: token('position'), offset: 0, affinity: 'right' }, text: 'hello' }), /not an annotatedText field/);
+  assert.deepEqual(annotatedTextAction(Document, Document.body, { kind: 'text.delete', id: 'doc-1', authoring, from: { positionToken: token('position'), offset: 0, affinity: 'left' }, to: { positionToken: token('position'), offset: 1, affinity: 'right' } }).payload.edit, { kind: 'text.delete', from: { positionToken: token('position'), offset: 0, affinity: 'left' }, to: { positionToken: token('position'), offset: 1, affinity: 'right' } });
 
   assert.deepEqual(annotatedTextCreateAction(Document, Document.body, { id: 'doc-1', projectId: 'p1', ownerId: 'u1' }), {
     type: 'PackageActionDocument.create', payload: { id: 'doc-1', project: 'p1', owner: 'u1' },
   });
-  assert.deepEqual(annotatedTextAction(Document, Document.body, { kind: 'block.split', id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-1', at: { blockId: 'block-1', offset: 1 } }).payload, {
-    version: 7, id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-1', edit: { kind: 'block.split', at: { blockId: 'block-1', offset: 1 } },
+  assert.deepEqual(annotatedTextAction(Document, Document.body, { kind: 'block.split', id: 'doc-1', authoring, at: { positionToken: token('position'), offset: 1, affinity: 'right' }, temporaryBlock: token('temporary') }).payload, {
+    version: 9, id: 'doc-1', authoring, edit: { kind: 'block.split', at: { positionToken: token('position'), offset: 1, affinity: 'right' }, temporaryBlock: token('temporary') },
   });
   const assignment = annotatedTextAction(Document, Document.body, {
-    kind: 'block-group.assignment.set', id: 'doc-1', basis: 'opaque-basis', mutationId: 'assign-1',
-    selection: { kind: 'listed', blockGroupIds: ['group-2', 'group-1'] },
+    kind: 'block-group.assignment.set', id: 'doc-1', authoring,
+    selection: { kind: 'listed', groupTokens: [token('group2'), token('group1')] },
     annotation: { id: 'annotation-1', family: 'coding', fields: { value: 'x' } },
   });
   assert.deepEqual(assignment.payload, {
-    version: 8, id: 'doc-1', basis: 'opaque-basis', mutationId: 'assign-1', edit: {
-      kind: 'block-group.assignment.set', selection: { kind: 'listed', blockGroupIds: ['group-2', 'group-1'] },
+    version: 9, id: 'doc-1', authoring, edit: {
+      kind: 'block-group.assignment.set', selection: { kind: 'listed', groupTokens: [token('group2'), token('group1')] },
       annotation: { id: 'annotation-1', family: 'coding', fields: { value: 'x' } },
     },
   });
   assert.ok(Object.isFrozen(assignment.payload.edit.selection));
   assert.ok(Object.isFrozen(assignment.payload.edit.annotation));
   assert.deepEqual(annotatedTextAction(Document, Document.body, {
-    kind: 'block-group.assignment.clear', id: 'doc-1', basis: 'opaque-basis', mutationId: 'clear-1',
-    selection: { kind: 'one', blockGroupId: 'group-1' }, family: 'coding',
-  }).payload.edit, { kind: 'block-group.assignment.clear', selection: { kind: 'one', blockGroupId: 'group-1' }, family: 'coding' });
+    kind: 'block-group.assignment.clear', id: 'doc-1', authoring,
+    selection: { kind: 'one', groupToken: token('group1') }, family: 'coding',
+  }).payload.edit, { kind: 'block-group.assignment.clear', selection: { kind: 'one', groupToken: token('group1') }, family: 'coding' });
   const continued = annotatedTextAction(Document, Document.body, {
-    kind: 'block.continue', id: 'doc-1', basis: 'opaque-basis', mutationId: 'continue-1', at: { blockId: 'block-1', offset: 1 },
+    kind: 'block.continue', id: 'doc-1', authoring, at: { positionToken: token('position'), offset: 1, affinity: 'right' }, temporaryBlock: token('temporary'),
   });
-  assert.deepEqual(continued.payload.edit, { kind: 'block.continue', at: { blockId: 'block-1', offset: 1 } });
-  assert.equal(continued.payload.version, 8);
+  assert.deepEqual(continued.payload.edit, { kind: 'block.continue', at: { positionToken: token('position'), offset: 1, affinity: 'right' }, temporaryBlock: token('temporary') });
+  assert.equal(continued.payload.version, 9);
   const splitAssignment = annotatedTextAction(Document, Document.body, {
-    kind: 'block.split-and-assign', id: 'doc-1', basis: 'opaque-basis', mutationId: 'split-assign-1', at: { blockId: 'block-1', offset: 1 },
+    kind: 'block.split-and-assign', id: 'doc-1', authoring, at: { positionToken: token('position'), offset: 1, affinity: 'right' }, temporaryBlock: token('temporary'),
     annotation: { id: 'annotation-2', family: 'coding', fields: {} },
   });
   assert.equal(splitAssignment.payload.edit.kind, 'block.split-and-assign');
-  assert.equal(splitAssignment.payload.version, 8);
+  assert.equal(splitAssignment.payload.version, 9);
   assert.equal(annotatedTextAction(Document, Document.body, {
-    kind: 'block-group.assignment.clear', id: 'doc-1', basis: 'opaque-basis', mutationId: 'clear-2',
-    selection: { kind: 'one', blockGroupId: 'group-1' }, family: 'coding',
-  }).payload.version, 8);
-  assert.equal(assignment.payload.version, 8);
+    kind: 'block-group.assignment.clear', id: 'doc-1', authoring,
+    selection: { kind: 'one', groupToken: token('group1') }, family: 'coding',
+  }).payload.version, 9);
+  assert.equal(assignment.payload.version, 9);
   for (const command of [
-    { kind: 'block-group.assignment.set', selection: { kind: 'one', blockGroupId: 'g', extra: true }, annotation: { id: 'a', family: 'f', fields: {} } },
-    { kind: 'block-group.assignment.set', selection: { kind: 'listed', blockGroupIds: ['g', 'g'] }, annotation: { id: 'a', family: 'f', fields: {} } },
-    { kind: 'block-group.assignment.set', selection: { kind: 'one', blockGroupId: 'g' }, annotation: { id: 'a', family: 'f', fields: {}, protectedTargetIds: [] } },
-    { kind: 'block-group.assignment.clear', selection: { kind: 'one', blockGroupId: 'g' }, family: '' },
-  ]) assert.throws(() => annotatedTextAction(Document, Document.body, { ...command, id: 'doc-1', basis: 'b', mutationId: 'm' }));
+    { kind: 'block-group.assignment.set', selection: { kind: 'one', groupToken: 'g', extra: true }, annotation: { id: 'a', family: 'f', fields: {} } },
+    { kind: 'block-group.assignment.set', selection: { kind: 'listed', groupTokens: ['g', 'g'] }, annotation: { id: 'a', family: 'f', fields: {} } },
+    { kind: 'block-group.assignment.set', selection: { kind: 'one', groupToken: 'g' }, annotation: { id: 'a', family: 'f', fields: {}, protectedTargetIds: [] } },
+    { kind: 'block-group.assignment.clear', selection: { kind: 'one', groupToken: 'g' }, family: '' },
+  ]) assert.throws(() => annotatedTextAction(Document, Document.body, { ...command, id: 'doc-1', authoring, mutationId: 'm' }));
   assert.deepEqual(annotatedTextRetireAction(Document, 'doc-1'), {
     type: 'PackageActionDocument.annotatedText.retire', payload: { id: 'doc-1' },
   });
