@@ -156,6 +156,16 @@
     let rendering = false;
     let busy = false;
 
+    // Local draft is the typing authority. Session delivery is applied when the
+    // serial write queue is idle. Without this, rapid keystrokes race: each
+    // beforeinput fires a concurrent insert against a stale offset, CRDT
+    // reorders by actor id, and mid-render keystrokes get dropped.
+    let draftText = '';
+    let draftAnchor = 0; // selection start (UTF-16)
+    let draftFocus = 0;  // selection end (UTF-16)
+    let pendingEdits = 0;
+    let writeChain = Promise.resolve();
+
     // Action IDs are durable-deduped by (scope, actionId). Never reuse a sequence
     // that can collide after reload (sessionStorage historySession + counter).
     function freshId(prefix) {
@@ -179,15 +189,20 @@
       return primaryBlock(document)?.text ?? '';
     }
 
-    function caretOffsetWithin(editor) {
+    function selectionOffsets(editor) {
       const selection = window.getSelection();
       if (!selection || selection.rangeCount === 0) return null;
       const range = selection.getRangeAt(0);
-      if (!editor.contains(range.startContainer)) return null;
-      const pre = range.cloneRange();
-      pre.selectNodeContents(editor);
-      pre.setEnd(range.startContainer, range.startOffset);
-      return pre.toString().length;
+      if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) return null;
+      const startRange = range.cloneRange();
+      startRange.selectNodeContents(editor);
+      startRange.setEnd(range.startContainer, range.startOffset);
+      const start = startRange.toString().length;
+      const endRange = range.cloneRange();
+      endRange.selectNodeContents(editor);
+      endRange.setEnd(range.endContainer, range.endOffset);
+      const end = endRange.toString().length;
+      return { start: Math.min(start, end), end: Math.max(start, end) };
     }
 
     function setCaretOffset(editor, offset) {
@@ -208,6 +223,21 @@
       range.collapse(true);
       selection.removeAllRanges();
       selection.addRange(range);
+    }
+
+    function paintDraft() {
+      const editor = $('editor');
+      rendering = true;
+      if (editor.textContent !== draftText) editor.textContent = draftText;
+      setCaretOffset(editor, draftFocus);
+      rendering = false;
+    }
+
+    function adoptDocument(document) {
+      draftText = visibleText(document);
+      draftAnchor = Math.min(draftAnchor, draftText.length);
+      draftFocus = Math.min(draftFocus, draftText.length);
+      paintDraft();
     }
 
     function renderDocList() {
@@ -238,14 +268,79 @@
         .replaceAll('"', '&quot;');
     }
 
-    function renderDocument(document) {
+    function enqueue(op) {
+      pendingEdits += 1;
+      writeChain = writeChain
+        .then(async () => {
+          if (!session?.document) return;
+          const block = primaryBlock(session.document);
+          if (!block) {
+            setStatus('no visible block', 'error');
+            return;
+          }
+          let result;
+          if (op.kind === 'insert') {
+            result = await session.insert({
+              mutationId: freshId('ins'),
+              at: { blockId: block.id, offset: op.offset, affinity: 'right' },
+              text: op.text,
+            });
+          } else if (op.kind === 'delete') {
+            result = await session.delete({
+              mutationId: freshId('del'),
+              from: { blockId: block.id, offset: op.from, affinity: 'right' },
+              to: { blockId: block.id, offset: op.to, affinity: 'right' },
+            });
+          }
+          if (result && result.ok === false) {
+            setStatus(result.failure?.message || 'edit rejected', 'error');
+          }
+        })
+        .catch((error) => {
+          setStatus(String(error.message || error), 'error');
+        })
+        .finally(() => {
+          pendingEdits -= 1;
+          if (pendingEdits === 0 && session?.document) {
+            const serverText = visibleText(session.document);
+            if (serverText !== draftText) {
+              // Failed or transformed path — re-sync draft from authority.
+              draftText = serverText;
+              draftAnchor = Math.min(draftAnchor, draftText.length);
+              draftFocus = Math.min(draftFocus, draftText.length);
+              paintDraft();
+            }
+          }
+        });
+    }
+
+    function syncSelectionFromDom() {
+      if (rendering || !session) return;
       const editor = $('editor');
-      const text = visibleText(document);
-      const caret = caretOffsetWithin(editor);
-      rendering = true;
-      if (editor.textContent !== text) editor.textContent = text;
-      if (caret != null) setCaretOffset(editor, Math.min(caret, text.length));
-      rendering = false;
+      if (document.activeElement !== editor) return;
+      if (editor.textContent !== draftText) return;
+      const sel = selectionOffsets(editor);
+      if (!sel) return;
+      draftAnchor = sel.start;
+      draftFocus = sel.end;
+    }
+
+    function replaceSelectionWith(text) {
+      const from = Math.min(draftAnchor, draftFocus);
+      const to = Math.max(draftAnchor, draftFocus);
+      if (to > from) {
+        draftText = draftText.slice(0, from) + draftText.slice(to);
+        enqueue({ kind: 'delete', from, to });
+      }
+      if (text) {
+        draftText = draftText.slice(0, from) + text + draftText.slice(from);
+        enqueue({ kind: 'insert', offset: from, text });
+        draftAnchor = from + text.length;
+      } else {
+        draftAnchor = from;
+      }
+      draftFocus = draftAnchor;
+      paintDraft();
     }
 
     async function loadDocs() {
@@ -285,6 +380,11 @@
         session.close();
         session = null;
       }
+      writeChain = Promise.resolve();
+      pendingEdits = 0;
+      draftText = '';
+      draftAnchor = 0;
+      draftFocus = 0;
     }
 
     async function openDoc(id) {
@@ -313,18 +413,20 @@
             setStatus('document unavailable', 'error');
             return;
           }
-          renderDocument(document);
+          // While local keystrokes are in flight, draft owns the surface.
+          if (pendingEdits === 0) adoptDocument(document);
           const block = primaryBlock(document);
           const extra = document.blocks.length > 1
             ? ` · editing first of ${document.blocks.length} blocks`
             : '';
+          const queue = pendingEdits > 0 ? ` · ${pendingEdits} pending` : '';
           setStatus(
-            `${session.status} · ${block ? block.id.slice(0, 8) + '…' : 'no visible block'}${extra}`,
+            `${session.status} · ${block ? block.id.slice(0, 8) + '…' : 'no visible block'}${extra}${queue}`,
             session.status === 'live' || session.status === 'ready' ? 'ok' : '',
           );
         });
         await session.ready;
-        if (session.document) renderDocument(session.document);
+        if (session.document) adoptDocument(session.document);
         $('editor').focus();
       } catch (error) {
         setStatus(String(error.message || error), 'error');
@@ -334,48 +436,24 @@
       }
     }
 
-    async function applyEdit(run) {
-      if (!session?.document || busy) return;
-      const block = primaryBlock(session.document);
-      if (!block) {
-        setStatus('no visible block', 'error');
-        return;
-      }
-      try {
-        const result = await run(block);
-        if (result && result.ok === false) {
-          setStatus(result.failure?.message || 'edit rejected', 'error');
-        }
-      } catch (error) {
-        setStatus(String(error.message || error), 'error');
-      }
-    }
-
-    function nextMutationId(prefix) {
-      return freshId(prefix);
-    }
+    document.addEventListener('selectionchange', syncSelectionFromDom);
 
     $('editor').addEventListener('beforeinput', (event) => {
-      if (rendering || !session?.document) return;
-      if (event.isComposing) return;
-
-      const inputType = event.inputType;
-      const editor = $('editor');
-      const offset = caretOffsetWithin(editor);
-      if (offset == null) {
+      if (!session?.document || busy) {
         event.preventDefault();
         return;
       }
+      if (event.isComposing) return;
+
+      // Always own typing — never let the browser mutate the DOM under us.
+      const inputType = event.inputType;
 
       if (inputType === 'insertText' || inputType === 'insertCompositionText') {
         const text = event.data ?? '';
         if (!text) return;
         event.preventDefault();
-        void applyEdit((block) => session.insert({
-          mutationId: nextMutationId('ins'),
-          at: { blockId: block.id, offset, affinity: 'right' },
-          text,
-        }));
+        syncSelectionFromDom();
+        replaceSelectionWith(text);
         return;
       }
 
@@ -385,11 +463,8 @@
           ?? event.data
           ?? '';
         if (!text) return;
-        void applyEdit((block) => session.insert({
-          mutationId: nextMutationId('paste'),
-          at: { blockId: block.id, offset, affinity: 'right' },
-          text,
-        }));
+        syncSelectionFromDom();
+        replaceSelectionWith(text);
         return;
       }
 
@@ -401,47 +476,26 @@
         || inputType === 'deleteContent'
       ) {
         event.preventDefault();
-        const selection = window.getSelection();
-        if (!selection || selection.rangeCount === 0) return;
-        const range = selection.getRangeAt(0);
-        const startRange = range.cloneRange();
-        startRange.selectNodeContents(editor);
-        startRange.setEnd(range.startContainer, range.startOffset);
-        const start = startRange.toString().length;
-        const endRange = range.cloneRange();
-        endRange.selectNodeContents(editor);
-        endRange.setEnd(range.endContainer, range.endOffset);
-        let end = endRange.toString().length;
-
-        if (start === end) {
+        syncSelectionFromDom();
+        let from = Math.min(draftAnchor, draftFocus);
+        let to = Math.max(draftAnchor, draftFocus);
+        if (from === to) {
           if (inputType === 'deleteContentBackward') {
-            if (start === 0) return;
-            void applyEdit((block) => session.delete({
-              mutationId: nextMutationId('del'),
-              from: { blockId: block.id, offset: start - 1, affinity: 'right' },
-              to: { blockId: block.id, offset: start, affinity: 'right' },
-            }));
-            return;
-          }
-          if (inputType === 'deleteContentForward') {
-            const text = editor.textContent ?? '';
-            if (start >= text.length) return;
-            void applyEdit((block) => session.delete({
-              mutationId: nextMutationId('del'),
-              from: { blockId: block.id, offset: start, affinity: 'right' },
-              to: { blockId: block.id, offset: start + 1, affinity: 'right' },
-            }));
+            if (from === 0) return;
+            from -= 1;
+          } else if (inputType === 'deleteContentForward' || inputType === 'deleteContent') {
+            if (to >= draftText.length) return;
+            to += 1;
+          } else {
             return;
           }
         }
-
-        if (end < start) end = start;
-        if (start === end) return;
-        void applyEdit((block) => session.delete({
-          mutationId: nextMutationId('del'),
-          from: { blockId: block.id, offset: start, affinity: 'right' },
-          to: { blockId: block.id, offset: end, affinity: 'right' },
-        }));
+        if (from === to) return;
+        draftText = draftText.slice(0, from) + draftText.slice(to);
+        draftAnchor = from;
+        draftFocus = from;
+        paintDraft();
+        enqueue({ kind: 'delete', from, to });
         return;
       }
 
@@ -453,14 +507,9 @@
     $('editor').addEventListener('keydown', (event) => {
       if (event.key === 'Enter') {
         event.preventDefault();
-        if (!session?.document) return;
-        const offset = caretOffsetWithin($('editor'));
-        if (offset == null) return;
-        void applyEdit((block) => session.insert({
-          mutationId: nextMutationId('nl'),
-          at: { blockId: block.id, offset, affinity: 'right' },
-          text: '\n',
-        }));
+        if (!session?.document || busy) return;
+        syncSelectionFromDom();
+        replaceSelectionWith('\n');
       }
     });
 
