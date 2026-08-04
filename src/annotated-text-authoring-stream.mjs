@@ -179,9 +179,9 @@ function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }) {
   return id;
 }
 
-export function issuePositionFrame({ db, prefix, leaseId, blockId, fence, familyCheckpoint, checkpointId, visibleAtIssue }) {
+export function issuePositionFrame({ db, prefix, leaseId, blockId, fence, familyCheckpoint, visibleAtIssue }) {
   const token = randomToken();
-  const resolvedCheckpointId = checkpointId ?? ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint });
+  const resolvedCheckpointId = ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint });
   const createdAt = now();
   if (!hasCapacity({ db, prefix, leaseId, bytes: rowBytes([token, leaseId, fence, blockId, resolvedCheckpointId, visibleAtIssue ? 1 : 0, createdAt]) })) {
     db.prepare(`DELETE FROM ${prefix}_authoring_checkpoint AS checkpoint WHERE checkpoint.id = ? AND NOT EXISTS (SELECT 1 FROM ${prefix}_authoring_position WHERE checkpoint_id = checkpoint.id)`).run(resolvedCheckpointId);
@@ -201,13 +201,19 @@ export function issueSnapshot({ db, prefix, leaseId, fence }) {
 
 // A snapshot is one retained unit. Capacity failure must not leave predecessor
 // frames behind because those rows are unacknowledged and cannot be evicted.
+// A snapshot is one coherent basis: every position must serialize to the same
+// family checkpoint, otherwise the dedup key could split into the pre/post-split
+// bases an action was never meant to straddle.
 export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions, groups }) {
   db.exec('SAVEPOINT authoring_snapshot_issue');
   try {
-    const checkpointId = positions.length > 0
-      ? ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint: positions[0].familyCheckpoint })
-      : null;
-    const positionFrames = positions.map((position) => issuePositionFrame({ db, prefix, leaseId, fence, ...(checkpointId ? { checkpointId } : {}), ...position }));
+    if (positions.length > 0) {
+      const serialized = positions.map((position) => JSON.stringify(position.familyCheckpoint));
+      if (serialized.some((value) => value !== serialized[0])) {
+        throw new Error('inconsistent position family checkpoints');
+      }
+    }
+    const positionFrames = positions.map((position) => issuePositionFrame({ db, prefix, leaseId, fence, ...position }));
     if (positionFrames.some((frame) => !frame)) throw new Error('capacity');
     const groupFrames = groups.map((group) => issueGroupFrame({ db, prefix, leaseId, fence, ...group }));
     if (groupFrames.some((frame) => !frame)) throw new Error('capacity');
@@ -297,7 +303,12 @@ function retainedBytes(db, prefix, leaseId = null, streamId = null) {
     return Number(db.prepare(`SELECT COALESCE(SUM(${columns.map((column) => `COALESCE(length(CAST(${alias}.${column} AS BLOB)), 0)`).join(' + ')}), 0) AS bytes FROM ${prefix}_${table} AS ${alias}${filter}`).get(parameter).bytes);
   };
   return total('authoring_position', 'position', ['token', 'lease_id', 'issued_fence', 'block_id', 'checkpoint_id', 'visible_at_issue', 'created_at'])
-    + Number(db.prepare(`SELECT COALESCE(SUM(length(CAST(checkpoint.family_checkpoint AS BLOB))), 0) AS bytes FROM ${prefix}_authoring_checkpoint AS checkpoint JOIN ${prefix}_authoring_lease AS lease ON lease.id = checkpoint.lease_id ${leaseId !== null ? 'WHERE checkpoint.lease_id = ?' : 'WHERE lease.stream_id = ?'}`).get(leaseId ?? streamId).bytes)
+    + Number(db.prepare(`SELECT COALESCE(SUM(
+          length(CAST(checkpoint.id AS BLOB))
+        + length(CAST(checkpoint.lease_id AS BLOB))
+        + length(CAST(checkpoint.created_at AS BLOB))
+        + length(CAST(checkpoint.family_checkpoint AS BLOB))
+      ), 0) AS bytes FROM ${prefix}_authoring_checkpoint AS checkpoint JOIN ${prefix}_authoring_lease AS lease ON lease.id = checkpoint.lease_id ${leaseId !== null ? 'WHERE checkpoint.lease_id = ?' : 'WHERE lease.stream_id = ?'}`).get(leaseId ?? streamId).bytes)
     + total('authoring_group', 'group_frame', ['token', 'lease_id', 'issued_fence', 'group_id', 'visible_blocks', 'assignable', 'created_at'])
     + total('authoring_snapshot', 'snapshot', ['id', 'lease_id', 'fence', 'issued_at', 'acknowledged_at'])
     + total('authoring_split', 'split', ['lease_id', 'temporary_block', 'authoritative_block_id', 'position_token', 'action_id', 'mutation_id', 'fence', 'created_at'])

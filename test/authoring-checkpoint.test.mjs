@@ -12,7 +12,7 @@ import {
   resolvePosition,
 } from '../src/annotated-text-authoring-stream.mjs';
 import { annotatedTextAuthoringStreamDDL } from '../src/annotated-text-field.mjs';
-import { runWorkbenchMigrations, appliedWorkbenchVersion } from '../src/workbench-migrations.mjs';
+import { runWorkbenchMigrations, appliedWorkbenchVersion, ensureWorkbenchMigrationTable } from '../src/workbench-migrations.mjs';
 
 const prefix = 'Doc_body';
 
@@ -163,6 +163,49 @@ test('A2b: capacity refusal — churn beyond the cap refuses while prior state s
   assert.equal(count(db, `${prefix}_authoring_position`), 100 + fitted, 'only fitted churn positions exist');
 });
 
+test('A2c: heterogeneous bases in one snapshot reject atomically with a deterministic invariant error', () => {
+  const db = setupCanonical();
+  wireDoc(db, 'doc-2c');
+  const stream = ensureStream({ db, prefix, documentId: 'doc-2c', principalType: 'user', principalId: 'u1' });
+  const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
+
+  const basisA = { ...largeCheckpoint(1), id: 'basis-a' };
+  const basisB = { ...largeCheckpoint(1), id: 'basis-b' };
+
+  // A snapshot must be one coherent basis. Mixing serialized family
+  // checkpoints is an authoring-invariant violation and must fail atomically.
+  const positions = [
+    { blockId: 'blk-a', familyCheckpoint: basisA, visibleAtIssue: true },
+    { blockId: 'blk-b', familyCheckpoint: basisB, visibleAtIssue: true },
+  ];
+  assert.throws(
+    () => issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions, groups: [] }),
+    /inconsistent position family checkpoints/,
+  );
+  // Atomic rejection: no partial checkpoint, position, or snapshot rows.
+  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 0, 'no partial checkpoint from heterogeneous rejection');
+  assert.equal(count(db, `${prefix}_authoring_position`), 0, 'no partial positions from heterogeneous rejection');
+  assert.equal(count(db, `${prefix}_authoring_snapshot`), 0, 'no snapshot from heterogeneous rejection');
+  assert.equal(count(db, `${prefix}_authoring_snapshot_position`), 0, 'no snapshot-position rows from heterogeneous rejection');
+
+  // The invariant error is deterministic and reserved for this failure, not a
+  // plain capacity refusal.
+  assert.throws(() => issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions, groups: [] }), /inconsistent position family checkpoints/);
+
+  // Dedup path: identical bases on the same lease dedupe once (equal bases).
+  const same = issueAuthoringSnapshot({
+    db, prefix, leaseId: lease.id, fence: 2,
+    positions: [
+      { blockId: 'blk-1', familyCheckpoint: basisA, visibleAtIssue: true },
+      { blockId: 'blk-2', familyCheckpoint: basisA, visibleAtIssue: true },
+    ],
+    groups: [],
+  });
+  assert.ok(same, 'homogeneous snapshot issues');
+  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1, 'equal bases dedupe once per lease');
+  assert.equal(db.prepare(`SELECT COUNT(DISTINCT checkpoint_id) AS c FROM ${prefix}_authoring_position`).get().c, 1);
+});
+
 test('A3: ack/prune keeps tracked checkpoint until unreferenced then removes it', () => {
   const db = setupCanonical();
   wireDoc(db, 'doc-3');
@@ -202,7 +245,7 @@ test('A3: ack/prune keeps tracked checkpoint until unreferenced then removes it'
   assert.equal(count(db, `${prefix}_authoring_position`), 3, 'anew acknowledged snapshot keeps its own positions');
 });
 
-test('A4: split lifecycle inherits checkpoint and protects it until resolved', () => {
+test('A4: split lifecycle mints the post-split basis and protects it until resolved', () => {
   const db = setupCanonical();
   wireDoc(db, 'doc-4');
   const stream = ensureStream({ db, prefix, documentId: 'doc-4', principalType: 'user', principalId: 'u1' });
@@ -213,11 +256,25 @@ test('A4: split lifecycle inherits checkpoint and protects it until resolved', (
   const source = db.prepare(`SELECT * FROM ${prefix}_authoring_position WHERE token = ?`).get(snapshotA.positionFrames[0].token);
   const sourceCheckpointId = source.checkpoint_id;
 
-  // Split-created frame inherits the source position's checkpoint_id.
-  const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: 'right', fence: 1, familyCheckpoint: basis, checkpointId: source.checkpoint_id, visibleAtIssue: true });
+  // A split-created frame carries the POST-split family, so it must mint (or
+  // dedupe to) the post-split basis checkpoint — never inherit the pre-split
+  // checkpoint even though the family is derived from the source position's.
+  const postSplitFamily = largeCheckpoint(3);
+  postSplitFamily.id = 'post-split-basis';
+  postSplitFamily.blocks.push('right');
+  postSplitFamily.checkpoint.frontier.push('right');
+  postSplitFamily.checkpoint.elements.right = { id: 'right', type: 'text', text: 'right side', run: [{ style: 'plain' }] };
+  const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: 'right', fence: 1, familyCheckpoint: postSplitFamily, visibleAtIssue: true });
   assert.ok(frame);
-  assert.equal(db.prepare(`SELECT checkpoint_id FROM ${prefix}_authoring_position WHERE token = ?`).get(frame.token).checkpoint_id, sourceCheckpointId);
-  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1, 'split must not copy the payload');
+  const splitCheckpointId = db.prepare(`SELECT checkpoint_id FROM ${prefix}_authoring_position WHERE token = ?`).get(frame.token).checkpoint_id;
+  assert.notEqual(splitCheckpointId, sourceCheckpointId, 'split frame must not inherit the pre-split checkpoint');
+  assert.equal(db.prepare(`SELECT family_checkpoint FROM ${prefix}_authoring_checkpoint WHERE id = ?`).get(splitCheckpointId).family_checkpoint, JSON.stringify(postSplitFamily), 'split frame checkpoint payload is the post-split family');
+  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 2, 'pre and post-split bases are distinct');
+  assert.equal(db.prepare(`SELECT COUNT(*) AS c FROM ${prefix}_authoring_checkpoint WHERE id = ?`).get(splitCheckpointId).c, 1, 'post-split basis dedupes once per lease');
+  const resolvedFrame = resolvePosition({ db, prefix, positionToken: frame.token, leaseId: lease.id });
+  assert.equal(resolvedFrame.checkpoint_id, splitCheckpointId, 'split frame hydrates the post-split checkpoint');
+  assert.deepEqual(JSON.parse(resolvedFrame.family_checkpoint), postSplitFamily);
+  assert.equal(JSON.parse(resolvedFrame.family_checkpoint).checkpoint.elements.right.text, 'right side', 'hydrated basis contains the new right block');
 
   // Unresolved split protects the split position and therefore the checkpoint.
   recordSplit({ db, prefix, leaseId: lease.id, temporaryBlock: 'temp', authoritativeBlockId: 'right', positionToken: frame.token, actionId: 'a1', mutationId: 'm1', fence: 1 });
@@ -292,7 +349,7 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
 
   // Run the built-in Workbench migration (fresh apply).
   runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 1);
+  assert.equal(appliedWorkbenchVersion(db), 2);
 
   // Canonical shape: position has checkpoint_id NOT NULL, no family_checkpoint.
   const positionColumns = new Set(db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => r.name));
@@ -313,7 +370,7 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
 
   // Second startup is a no-op.
   runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 1);
+  assert.equal(appliedWorkbenchVersion(db), 2);
 });
 
 test('A8-rollback: induced migration failure rolls back and leaves legacy schema intact', () => {
@@ -342,30 +399,32 @@ test('A8-rollback: induced migration failure rolls back and leaves legacy schema
   // With the trigger removed, the same run succeeds (idempotent re-apply after rollback).
   db.exec(`DROP TRIGGER fail_migration`);
   runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 1);
+  assert.equal(appliedWorkbenchVersion(db), 2);
 });
 
-test('A8-fresh: migration on a fresh canonical DB is a structural no-op with preserved lineage', () => {
+test('A8-v2: migration invalidates defective ephemeral state and preserves durable state', () => {
   const db = setupCanonical();
   wireDoc(db, 'doc-10');
+  db.exec('CREATE TABLE durable_marker (id TEXT PRIMARY KEY, value TEXT NOT NULL)');
+  db.prepare('INSERT INTO durable_marker (id, value) VALUES (?, ?)').run('keep', 'durable');
+  ensureWorkbenchMigrationTable(db);
+  db.prepare('INSERT INTO _WorkbenchMigration (version, appliedAt) VALUES (1, ?)').run(new Date().toISOString());
   const stream = ensureStream({ db, prefix, documentId: 'doc-10', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
 
-  // Pre-migration issuance exists; a canonical family must survive v1 intact.
-  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ blockId: 'b', familyCheckpoint: { id: 'fresh', checkpoint: { version: 1, frontier: ['b'], elements: { b: { id: 'b', type: 'text', text: 'x', run: [] } } }, blocks: ['b'] }, visibleAtIssue: true }], groups: [] });
+  issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ blockId: 'b', familyCheckpoint: { id: 'defective-build', checkpoint: { version: 1, frontier: ['b'], elements: { b: { id: 'b', type: 'text', text: 'x', run: [] } } }, blocks: ['b'] }, visibleAtIssue: true }], groups: [] });
   assert.equal(count(db, `${prefix}_authoring_position`), 1);
   assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1);
 
-  // Fresh DB → migration v1 is a genuine canonical-skip no-op, then re-run no-op.
+  // Upgrade from the deployed v1 build invalidates every opaque authoring token.
   runWorkbenchMigrations(db);
   runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 1);
-
-  // Issued canonical data survives the migration untouched (no clear/rebuild).
-  assert.equal(count(db, `${prefix}_authoring_position`), 1, 'canonical positions preserved by migration');
-  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1, 'canonical checkpoint preserved by migration');
-  const checksum = db.prepare(`SELECT length(family_checkpoint) AS len FROM ${prefix}_authoring_checkpoint`).get().len;
-  assert.ok(checksum > 0, 'checkpoint payload survives');
+  assert.equal(appliedWorkbenchVersion(db), 2);
+  assert.equal(count(db, `${prefix}_authoring_stream`), 0, 'streams from the defective build are invalidated');
+  assert.equal(count(db, `${prefix}_authoring_lease`), 0, 'leases from the defective build are invalidated');
+  assert.equal(count(db, `${prefix}_authoring_position`), 0, 'defective position tokens are removed');
+  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 0, 'defective checkpoint bases are removed');
+  assert.equal(db.prepare("SELECT value FROM durable_marker WHERE id = 'keep'").get().value, 'durable');
 
   // The canonical structure must already be in place (new DDL emitted it);
   // the migration does not regress it.
@@ -491,7 +550,7 @@ test('A10: app.prepareSchema upgrades a legacy authoring schema via the built-in
   assert.ok(positionColumns.has('checkpoint_id'), 'position has checkpoint_id after app boot');
   assert.ok(positionColumns.has('family_checkpoint') === false, 'legacy family_checkpoint column removed after app boot');
   const applied = db.prepare('SELECT MAX(version) AS v FROM _WorkbenchMigration').get();
-  assert.equal(applied.v, 1, 'Workbench migration v1 recorded');
+  assert.equal(applied.v, 2, 'Workbench migrations v1 and v2 recorded');
   assert.equal(count(db, `${prefix}_authoring_position`), 0, 'pre-migration legacy positions cleared');
   app.db.close();
 });

@@ -653,7 +653,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
              if (splitResult.length > 0) {
                const splitData = splitResult[0].data;
                const rightBlockId = splitData.operation.rightBlockId;
-               const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: rightBlockId, fence: cursor, familyCheckpoint: splitData.family, checkpointId: position.checkpoint_id, visibleAtIssue: true });
+               const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: rightBlockId, fence: cursor, familyCheckpoint: splitData.family, visibleAtIssue: true });
                if (!frame || !recordSplit({ db, prefix, leaseId: lease.id, temporaryBlock: edit.temporaryBlock, authoritativeBlockId: rightBlockId, positionToken: frame.token, actionId, mutationId: command.authoring.mutationId, fence: cursor })) throw new ValidationError(`${name}.${fieldName}.operation authoring stream capacity exceeded`, { code: 'authoring-stream-capacity' });
              }
           return splitResult;
@@ -756,7 +756,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             const splitData = splitResult[0].data;
             const rightBlockId = splitData.operation.rightBlockId || (splitData.operation?.leftBlockId !== position.block_id ? splitData.operation.leftBlockId : null);
             if (rightBlockId) {
-               const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: rightBlockId, fence: cursor, familyCheckpoint: splitData.family, checkpointId: position.checkpoint_id, visibleAtIssue: true });
+               const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: rightBlockId, fence: cursor, familyCheckpoint: splitData.family, visibleAtIssue: true });
                if (!frame || !recordSplit({ db, prefix, leaseId: lease.id, temporaryBlock: edit.temporaryBlock, authoritativeBlockId: rightBlockId, positionToken: frame.token, actionId, mutationId: command.authoring.mutationId, fence: cursor })) throw new ValidationError(`${name}.${fieldName}.operation authoring stream capacity exceeded`, { code: 'authoring-stream-capacity' });
             }
           }

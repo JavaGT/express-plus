@@ -143,6 +143,39 @@ export const WORKBENCH_MIGRATIONS = Object.freeze([
       }
     },
   },
+  {
+    // v2: purge authoring state produced by the defective pre-issue defect
+    // (checkpointId footgun). A split-created right-block frame could inherit
+    // the source position's checkpoint while carrying the post-split family,
+    // leaving positions that resolve to the wrong family checkpoint and leases
+    // whose retained bytes undercount checkpoint row metadata. Durable document
+    // state and the committed log are untouched: clients re-bootstrap recovery
+    // authoritative tokens for the same document, exactly as v1 does after its
+    // legacy rebuild.
+    version: 2,
+    transaction: 'exclusive',
+    up(db) {
+      for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_authoring_lease'").all()) {
+        const name = row.name;
+        if (!name.endsWith('_authoring_lease')) continue;
+        const prefix = name.slice(0, -'_authoring_lease'.length);
+        if (PREFIX_IDENTIFIER.test(prefix) === false) {
+          throw new Error(`invalid authoring stream table prefix: ${prefix}`);
+        }
+        const required = ['stream', 'snapshot_position', 'split', 'snapshot', 'group', 'position', 'checkpoint'];
+        const missing = required.filter((table) => !tableExists(db, `${prefix}_authoring_${table}`));
+        if (missing.length > 0) {
+          throw new Error(`incomplete authoring stream table family: ${prefix} missing ${missing.join(', ')}`);
+        }
+        // Invalidate the whole ephemeral family once, child-first. Removing
+        // streams cascades leases after every lease-owned row is already gone.
+        for (const table of ['snapshot_position', 'split', 'snapshot', 'group', 'position', 'checkpoint']) {
+          db.exec(`DELETE FROM ${prefix}_authoring_${table}`);
+        }
+        db.exec(`DELETE FROM ${prefix}_authoring_stream`);
+      }
+    },
+  },
 ]);
 
 export function ensureWorkbenchMigrationTable(db) {
