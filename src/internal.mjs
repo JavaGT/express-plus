@@ -50,3 +50,4 @@ export { setActiveDb, resetActiveDb, getActiveDb } from './db.mjs';
 export { generateTypes } from './generate-types.mjs';
 export { parsePrincipalSnapshotScope } from './principal-snapshot-scope.mjs';
 export { createPrincipalSnapshotTransaction } from './principal-snapshot-transaction.mjs';
+export { WORKBENCH_MIGRATIONS, ensureWorkbenchMigrationTable, appliedWorkbenchVersion, runWorkbenchMigrations } from './workbench-migrations.mjs';

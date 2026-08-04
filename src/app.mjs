@@ -35,6 +35,7 @@ import {
 import { wrapDriver } from './driver.mjs';
 import { executeDDL, executeFrameworkDDL, generateSideTableDDL, generatedIndexNames } from './ddl.mjs';
 import { runMigrations } from './migrations.mjs';
+import { runWorkbenchMigrations } from './workbench-migrations.mjs';
 import { validateSchemaOwnedEntityTable } from './schema-entity-validation.mjs';
 import { frameworkTableNames, declaredTableNames } from './schema-table-census.mjs';
 import { createBlobStore } from './blob-store.mjs';
@@ -362,6 +363,7 @@ export default function workbench({
         // Migrations run last, pre-traffic, after every entity table exists. Each
         // is its own transaction (DDL + meta-version bump atomic). Runs only when
         // declared — an app with no migrations is untouched (no _Migration table).
+        runWorkbenchMigrations(app.db);
         if (allMigrations.length) runMigrations(app.db, allMigrations);
         if (schema) schema.prepare(app.db, { skipMigrations: true });
         for (const entity of app.entities.values()) {

@@ -650,12 +650,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
           }
           const splitResult = splitHandler({ payload: { version: 2, id: command.id, expected: { structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }, operation: { kind: 'block.split', blockId: position.block_id, utf16Offset: offset } }, db, scope });
-           if (splitResult.length > 0) {
-             const splitData = splitResult[0].data;
-             const rightBlockId = splitData.operation.rightBlockId;
-             const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: rightBlockId, fence: cursor, familyCheckpoint: splitData.family, visibleAtIssue: true });
-             if (!frame || !recordSplit({ db, prefix, leaseId: lease.id, temporaryBlock: edit.temporaryBlock, authoritativeBlockId: rightBlockId, positionToken: frame.token, actionId, mutationId: command.authoring.mutationId, fence: cursor })) throw new ValidationError(`${name}.${fieldName}.operation authoring stream capacity exceeded`, { code: 'authoring-stream-capacity' });
-          }
+             if (splitResult.length > 0) {
+               const splitData = splitResult[0].data;
+               const rightBlockId = splitData.operation.rightBlockId;
+               const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: rightBlockId, fence: cursor, familyCheckpoint: splitData.family, checkpointId: position.checkpoint_id, visibleAtIssue: true });
+               if (!frame || !recordSplit({ db, prefix, leaseId: lease.id, temporaryBlock: edit.temporaryBlock, authoritativeBlockId: rightBlockId, positionToken: frame.token, actionId, mutationId: command.authoring.mutationId, fence: cursor })) throw new ValidationError(`${name}.${fieldName}.operation authoring stream capacity exceeded`, { code: 'authoring-stream-capacity' });
+             }
           return splitResult;
         }
         if (edit.kind === 'block.merge') {
@@ -756,7 +756,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             const splitData = splitResult[0].data;
             const rightBlockId = splitData.operation.rightBlockId || (splitData.operation?.leftBlockId !== position.block_id ? splitData.operation.leftBlockId : null);
             if (rightBlockId) {
-               const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: rightBlockId, fence: cursor, familyCheckpoint: splitData.family, visibleAtIssue: true });
+               const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: rightBlockId, fence: cursor, familyCheckpoint: splitData.family, checkpointId: position.checkpoint_id, visibleAtIssue: true });
                if (!frame || !recordSplit({ db, prefix, leaseId: lease.id, temporaryBlock: edit.temporaryBlock, authoritativeBlockId: rightBlockId, positionToken: frame.token, actionId, mutationId: command.authoring.mutationId, fence: cursor })) throw new ValidationError(`${name}.${fieldName}.operation authoring stream capacity exceeded`, { code: 'authoring-stream-capacity' });
             }
           }

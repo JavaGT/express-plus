@@ -118,6 +118,7 @@ function clearLeaseChildren(db, prefix, leaseId) {
   db.prepare(`DELETE FROM ${prefix}_authoring_group WHERE lease_id = ?`).run(leaseId);
   db.prepare(`DELETE FROM ${prefix}_authoring_snapshot WHERE lease_id = ?`).run(leaseId);
   db.prepare(`DELETE FROM ${prefix}_authoring_split WHERE lease_id = ?`).run(leaseId);
+  db.prepare(`DELETE FROM ${prefix}_authoring_checkpoint WHERE lease_id = ?`).run(leaseId);
 }
 
 export function resolveStream({ db, prefix, streamToken, documentId, principalType, principalId }) {
@@ -151,7 +152,7 @@ export function resolveLease({ db, prefix, leaseToken, streamId }) {
 }
 
 export function resolvePosition({ db, prefix, positionToken, leaseId }) {
-  const position = db.prepare(`SELECT * FROM ${prefix}_authoring_position WHERE token = ? AND lease_id = ?`).get(positionToken, leaseId);
+  const position = db.prepare(`SELECT position.*, checkpoint.family_checkpoint AS family_checkpoint FROM ${prefix}_authoring_position AS position LEFT JOIN ${prefix}_authoring_checkpoint AS checkpoint ON checkpoint.id = position.checkpoint_id WHERE position.token = ? AND position.lease_id = ?`).get(positionToken, leaseId);
   if (!position) return null;
   return position;
 }
@@ -169,12 +170,24 @@ export function issueGroupFrame({ db, prefix, leaseId, groupId, visibleBlocks, a
   return { token };
 }
 
-export function issuePositionFrame({ db, prefix, leaseId, blockId, fence, familyCheckpoint, visibleAtIssue }) {
+function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }) {
+  const serialized = JSON.stringify(familyCheckpoint);
+  const existing = db.prepare(`SELECT id FROM ${prefix}_authoring_checkpoint WHERE lease_id = ? AND family_checkpoint = ? LIMIT 1`).get(leaseId, serialized);
+  if (existing) return existing.id;
+  const id = randomToken();
+  db.prepare(`INSERT INTO ${prefix}_authoring_checkpoint (id, lease_id, family_checkpoint, created_at) VALUES (?, ?, ?, ?)`).run(id, leaseId, serialized, now());
+  return id;
+}
+
+export function issuePositionFrame({ db, prefix, leaseId, blockId, fence, familyCheckpoint, checkpointId, visibleAtIssue }) {
   const token = randomToken();
-  const checkpoint = JSON.stringify(familyCheckpoint);
+  const resolvedCheckpointId = checkpointId ?? ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint });
   const createdAt = now();
-  if (!hasCapacity({ db, prefix, leaseId, bytes: rowBytes([token, leaseId, fence, blockId, checkpoint, visibleAtIssue ? 1 : 0, createdAt]) })) return null;
-  db.prepare(`INSERT INTO ${prefix}_authoring_position (token, lease_id, issued_fence, block_id, family_checkpoint, visible_at_issue, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(token, leaseId, fence, blockId, checkpoint, visibleAtIssue ? 1 : 0, createdAt);
+  if (!hasCapacity({ db, prefix, leaseId, bytes: rowBytes([token, leaseId, fence, blockId, resolvedCheckpointId, visibleAtIssue ? 1 : 0, createdAt]) })) {
+    db.prepare(`DELETE FROM ${prefix}_authoring_checkpoint AS checkpoint WHERE checkpoint.id = ? AND NOT EXISTS (SELECT 1 FROM ${prefix}_authoring_position WHERE checkpoint_id = checkpoint.id)`).run(resolvedCheckpointId);
+    return null;
+  }
+  db.prepare(`INSERT INTO ${prefix}_authoring_position (token, lease_id, issued_fence, block_id, checkpoint_id, visible_at_issue, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(token, leaseId, fence, blockId, resolvedCheckpointId, visibleAtIssue ? 1 : 0, createdAt);
   return { token, blockId };
 }
 
@@ -191,7 +204,10 @@ export function issueSnapshot({ db, prefix, leaseId, fence }) {
 export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions, groups }) {
   db.exec('SAVEPOINT authoring_snapshot_issue');
   try {
-    const positionFrames = positions.map((position) => issuePositionFrame({ db, prefix, leaseId, fence, ...position }));
+    const checkpointId = positions.length > 0
+      ? ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint: positions[0].familyCheckpoint })
+      : null;
+    const positionFrames = positions.map((position) => issuePositionFrame({ db, prefix, leaseId, fence, ...(checkpointId ? { checkpointId } : {}), ...position }));
     if (positionFrames.some((frame) => !frame)) throw new Error('capacity');
     const groupFrames = groups.map((group) => issueGroupFrame({ db, prefix, leaseId, fence, ...group }));
     if (groupFrames.some((frame) => !frame)) throw new Error('capacity');
@@ -259,7 +275,8 @@ export function acknowledgeAndPruneSnapshot({ db, prefix, snapshotId, leaseId })
   // The newly acknowledged snapshot is the idempotency marker. Older completed
   // snapshots need no marker; outstanding snapshots are deliberately retained.
   db.prepare(`DELETE FROM ${prefix}_authoring_snapshot
-    WHERE lease_id = ? AND id <> ? AND acknowledged_at IS NOT NULL`).run(leaseId, snapshotId);
+     WHERE lease_id = ? AND id <> ? AND acknowledged_at IS NOT NULL`).run(leaseId, snapshotId);
+  db.prepare(`DELETE FROM ${prefix}_authoring_checkpoint AS checkpoint WHERE checkpoint.lease_id = ? AND NOT EXISTS (SELECT 1 FROM ${prefix}_authoring_position AS position WHERE position.checkpoint_id = checkpoint.id)`).run(leaseId);
   db.exec('RELEASE authoring_snapshot_acknowledge');
   return { fence: existing.fence, alreadyAcknowledged: false };
   } catch (error) {
@@ -279,7 +296,8 @@ function retainedBytes(db, prefix, leaseId = null, streamId = null) {
     const parameter = leaseId ?? streamId;
     return Number(db.prepare(`SELECT COALESCE(SUM(${columns.map((column) => `COALESCE(length(CAST(${alias}.${column} AS BLOB)), 0)`).join(' + ')}), 0) AS bytes FROM ${prefix}_${table} AS ${alias}${filter}`).get(parameter).bytes);
   };
-  return total('authoring_position', 'position', ['token', 'lease_id', 'issued_fence', 'block_id', 'family_checkpoint', 'visible_at_issue', 'created_at'])
+  return total('authoring_position', 'position', ['token', 'lease_id', 'issued_fence', 'block_id', 'checkpoint_id', 'visible_at_issue', 'created_at'])
+    + Number(db.prepare(`SELECT COALESCE(SUM(length(CAST(checkpoint.family_checkpoint AS BLOB))), 0) AS bytes FROM ${prefix}_authoring_checkpoint AS checkpoint JOIN ${prefix}_authoring_lease AS lease ON lease.id = checkpoint.lease_id ${leaseId !== null ? 'WHERE checkpoint.lease_id = ?' : 'WHERE lease.stream_id = ?'}`).get(leaseId ?? streamId).bytes)
     + total('authoring_group', 'group_frame', ['token', 'lease_id', 'issued_fence', 'group_id', 'visible_blocks', 'assignable', 'created_at'])
     + total('authoring_snapshot', 'snapshot', ['id', 'lease_id', 'fence', 'issued_at', 'acknowledged_at'])
     + total('authoring_split', 'split', ['lease_id', 'temporary_block', 'authoritative_block_id', 'position_token', 'action_id', 'mutation_id', 'fence', 'created_at'])
