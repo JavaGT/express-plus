@@ -453,6 +453,65 @@ test('e2e: expired session is deleted by clock-dispatch', async (t) => {
   assert.ok(fresh, 'fresh session is untouched');
 });
 
+test('Session expiry scheduler allowance remains bound to its declared source and durable admission', async () => {
+  const db = seededDb();
+  for (const sql of generateDDL(Session)) db.exec(sql);
+  const app = workbench({ db, entities: [Session] });
+  const boundSession = app.entity(Session);
+  const now = Date.now();
+  db.prepare(
+    'INSERT INTO Session (id, token, principalType, principalId, createdAt) VALUES (?, ?, ?, ?, ?)',
+  ).run('expired', 'tok-expired', 'user', 'alice', now - 8 * 86_400_000);
+  db.prepare(
+    'INSERT INTO Session (id, token, principalType, principalId, createdAt) VALUES (?, ?, ?, ?, ?)',
+  ).run('fresh', 'tok-fresh', 'user', 'bob', now);
+
+  const entities = new Map([[boundSession.name, boundSession]]);
+  const server = createServer({
+    handlers: boundSession.crudHandlers,
+    db,
+    authorize: () => true,
+    pipeline: durableMutationVariant({
+      projectionConsumers: [boundSession.projection],
+      admission: {
+        beforeProjection: async ({ entityName, verb, principal, event, payload, db: hookDb, now: hookNow }) => {
+          if (principal?.type !== 'system' || !principal.attributes?.source) return true;
+          const entity = entities.get(entityName);
+          return entity && admitSystemMutation({
+            entity, verb, rowId: event?.data?.id, payload, principal, db: hookDb ?? db, now: hookNow ?? now,
+          });
+        },
+        afterProjection: async () => true,
+      },
+    }),
+  });
+  const exactPrincipal = makePrincipal({
+    type: 'system', attributes: { source: schedulerSource('Session', 'remove', Session.schedule.remove.triggerId) },
+  });
+  const dispatch = (actionId, { type = 'Session.remove', payload = { id: 'expired' }, principal = exactPrincipal } = {}) =>
+    server.dispatch({ actionId, type, payload, principal });
+  const assertDeniedWithoutEffects = async (actionId, request) => {
+    const logBefore = db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count;
+    const result = await dispatch(actionId, request);
+    assert.notEqual(result.ok, true, `${actionId} is denied`);
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, logBefore, `${actionId} appends no log`);
+    assert.ok(db.prepare('SELECT id FROM Session WHERE id = ?').get('expired'), `${actionId} leaves the projection unchanged`);
+  };
+
+  await assertDeniedWithoutEffects('wrong-source', {
+    principal: makePrincipal({ type: 'system', attributes: { source: 'Session.remove.other' } }),
+  });
+  await assertDeniedWithoutEffects('wrong-verb', { type: 'Session.update' });
+  await assertDeniedWithoutEffects('wrong-payload', { payload: { id: 'expired', unexpected: true } });
+  await assertDeniedWithoutEffects('non-system', { principal: makePrincipal({ type: 'user', id: 'alice' }) });
+  await assertDeniedWithoutEffects('not-due', { payload: { id: 'fresh' } });
+
+  const admitted = await dispatch('exact-expiry');
+  assert.equal(admitted.ok, true, 'the exact declared scheduler principal is admitted');
+  assert.equal(db.prepare('SELECT id FROM Session WHERE id = ?').get('expired'), undefined, 'expired session is removed');
+  assert.ok(db.prepare('SELECT id FROM Session WHERE id = ?').get('fresh'), 'fresh session remains');
+});
+
 test('e2e: entity with NO schedule triggers returns no-op clock', () => {
   const statusDesc = { kind: 'value', type: 'text' };
   const Blog = entity('BlogNoSchedule', {

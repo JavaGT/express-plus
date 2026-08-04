@@ -24,7 +24,7 @@ import { text, hash, ref, date, number } from '../field.mjs';
 import { scope } from '../scope.mjs';
 import { never } from '../scope-sql.mjs';
 import { grant, deny, read, write, subscribe } from '../grant.mjs';
-import { schedule } from '../schedule.mjs';
+import { schedule, schedulerSource } from '../schedule.mjs';
 import { config } from '../config.mjs';
 import { generateSecret, generateBackupCodes } from './totp.mjs';
 
@@ -67,6 +67,8 @@ export const User = entity('User', {
 });
 
 const SessionCreatedAt = date();
+const sessionExpiryTrigger = schedule.after(SessionCreatedAt, config.sessionDurationMs, { key: 'expiry' });
+const sessionExpirySchedulerSource = schedulerSource('Session', 'remove', sessionExpiryTrigger.key);
 
 // The two session intents are a CLOSED set, each a named whole mapped to the one
 // canonical stored row { token, principalType, principalId, createdAt }:
@@ -104,12 +106,22 @@ export const Session = entity('Session', {
   principalId: text({ readonly: true }),
   createdAt: SessionCreatedAt,
 
-  grant: () => [notRequestReadable('Session')],
+  checks: {
+    // This is the sole normal-grant allowance for this otherwise private entity.
+    // The source is derived from its declared remove schedule, and durable
+    // beforeProjection admission still rechecks its row, due time, and payload.
+    expiryReaper: ({ principal }) =>
+      principal?.type === 'system' && principal.attributes?.source === sessionExpirySchedulerSource,
+  },
+  grant: () => [scope(() => never()).can(async ({ is }) =>
+    (await is.expiryReaper())
+      ? grant(write)
+      : deny('Session is a framework auth entity, reached only by trusted server code or its declared expiry scheduler'))],
   create: mintSession,
   // Request-time sessionPrincipalOf invalidates expired rows; this schedule
   // only reclaims their storage.
   schedule: {
-    remove: schedule.after(SessionCreatedAt, config.sessionDurationMs),
+    remove: sessionExpiryTrigger,
   },
 });
 
