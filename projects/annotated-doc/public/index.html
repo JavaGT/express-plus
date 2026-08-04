@@ -227,8 +227,21 @@
 
     function paintDraft() {
       const editor = $('editor');
+      const hadFocus = document.activeElement === editor;
       rendering = true;
-      if (editor.textContent !== draftText) editor.textContent = draftText;
+      // Prefer mutating the existing text node. Replacing textContent on every
+      // keystroke can break contenteditable input in Firefox (further typing
+      // never reaches beforeinput — only the first character sticks).
+      let textNode = editor.firstChild;
+      if (draftText === '') {
+        if (editor.childNodes.length) editor.textContent = '';
+      } else if (!textNode || textNode.nodeType !== Node.TEXT_NODE || editor.childNodes.length !== 1) {
+        editor.textContent = draftText;
+        textNode = editor.firstChild;
+      } else if (textNode.data !== draftText) {
+        textNode.data = draftText;
+      }
+      if (hadFocus) editor.focus();
       setCaretOffset(editor, draftFocus);
       rendering = false;
     }
@@ -278,18 +291,26 @@
             setStatus('no visible block', 'error');
             return;
           }
+          // Offsets are relative to the serial stream of prior ops. Prefer the
+          // live session text length when the op appends at the draft end so a
+          // lagging optimistic surface cannot reject in-range inserts.
+          const live = block.text ?? '';
           let result;
           if (op.kind === 'insert') {
+            const offset = Math.max(0, Math.min(op.offset, live.length));
             result = await session.insert({
               mutationId: freshId('ins'),
-              at: { blockId: block.id, offset: op.offset, affinity: 'right' },
+              at: { blockId: block.id, offset, affinity: 'right' },
               text: op.text,
             });
           } else if (op.kind === 'delete') {
+            const from = Math.max(0, Math.min(op.from, live.length));
+            const to = Math.max(from, Math.min(op.to, live.length));
+            if (from === to) return;
             result = await session.delete({
               mutationId: freshId('del'),
-              from: { blockId: block.id, offset: op.from, affinity: 'right' },
-              to: { blockId: block.id, offset: op.to, affinity: 'right' },
+              from: { blockId: block.id, offset: from, affinity: 'right' },
+              to: { blockId: block.id, offset: to, affinity: 'right' },
             });
           }
           if (result && result.ok === false) {
@@ -301,16 +322,8 @@
         })
         .finally(() => {
           pendingEdits -= 1;
-          if (pendingEdits === 0 && session?.document) {
-            const serverText = visibleText(session.document);
-            if (serverText !== draftText) {
-              // Failed or transformed path — re-sync draft from authority.
-              draftText = serverText;
-              draftAnchor = Math.min(draftAnchor, draftText.length);
-              draftFocus = Math.min(draftFocus, draftText.length);
-              paintDraft();
-            }
-          }
+          // Never clobber a focused draft with a lagging snapshot — that was
+          // wiping multi-character bursts down to the first committed char.
         });
     }
 
@@ -318,7 +331,11 @@
       if (rendering || !session) return;
       const editor = $('editor');
       if (document.activeElement !== editor) return;
-      if (editor.textContent !== draftText) return;
+      // Compare via text node when possible; textContent can normalize.
+      const domText = editor.firstChild?.nodeType === Node.TEXT_NODE
+        ? editor.firstChild.data
+        : editor.textContent;
+      if (domText !== draftText) return;
       const sel = selectionOffsets(editor);
       if (!sel) return;
       draftAnchor = sel.start;
@@ -413,8 +430,13 @@
             setStatus('document unavailable', 'error');
             return;
           }
-          // While local keystrokes are in flight, draft owns the surface.
-          if (pendingEdits === 0) adoptDocument(document);
+          // Draft owns the surface while typing (pending or focused). Adopting a
+          // lagging snapshot mid-burst was resetting the editor to one character.
+          const serverText = visibleText(document);
+          const focused = document.activeElement === $('editor');
+          if (pendingEdits === 0 && !focused && serverText !== draftText) {
+            adoptDocument(document);
+          }
           const block = primaryBlock(document);
           const extra = document.blocks.length > 1
             ? ` · editing first of ${document.blocks.length} blocks`
@@ -443,22 +465,22 @@
         event.preventDefault();
         return;
       }
-      if (event.isComposing) return;
+      // Composition (IME) uses composition* events; don't steal mid-compose.
+      if (event.isComposing || event.inputType === 'insertCompositionText') return;
 
       // Always own typing — never let the browser mutate the DOM under us.
       const inputType = event.inputType;
+      event.preventDefault();
 
-      if (inputType === 'insertText' || inputType === 'insertCompositionText') {
+      if (inputType === 'insertText') {
         const text = event.data ?? '';
         if (!text) return;
-        event.preventDefault();
         syncSelectionFromDom();
         replaceSelectionWith(text);
         return;
       }
 
       if (inputType === 'insertFromPaste' || inputType === 'insertFromDrop') {
-        event.preventDefault();
         const text = event.dataTransfer?.getData('text/plain')
           ?? event.data
           ?? '';
@@ -475,7 +497,6 @@
         || inputType === 'deleteByDrag'
         || inputType === 'deleteContent'
       ) {
-        event.preventDefault();
         syncSelectionFromDom();
         let from = Math.min(draftAnchor, draftFocus);
         let to = Math.max(draftAnchor, draftFocus);
@@ -499,15 +520,14 @@
         return;
       }
 
-      // Refuse structural / rich input types so the only path is insert/delete.
-      event.preventDefault();
+      // Other rich input types are ignored (already preventDefault'd).
     });
 
-    // Keep Enter from creating DOM <div>/<br> structure outside the CRDT.
+    // Enter does not always produce beforeinput insertText across browsers.
     $('editor').addEventListener('keydown', (event) => {
+      if (!session?.document || busy || event.isComposing) return;
       if (event.key === 'Enter') {
         event.preventDefault();
-        if (!session?.document || busy) return;
         syncSelectionFromDom();
         replaceSelectionWith('\n');
       }
