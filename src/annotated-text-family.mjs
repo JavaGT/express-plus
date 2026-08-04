@@ -622,18 +622,46 @@ export function textOperationForOffsetEdit(family, edit, actor, lamport) {
   assertUtf16Offset(text, edit.to.offset);
   if (edit.from.offset >= edit.to.offset) fail('delete range must be non-empty and forward');
   const owned = new Set(family.blocks.find((block) => block.id === edit.from.blockId)?.elementKeys ?? []);
-  const spans = [];
+  // Collect target scalars, then emit spans sorted by op id with consecutive
+  // ordinals merged. Document order is NOT op-id order: each offset-edit uses a
+  // unique actor (`[actor, 1]`), so multi-character deletes (select-all, etc.)
+  // fail assertDeleteSpans unless spans are reordered like public deleteText().
+  const byOp = new Map();
   let offset = 0;
   for (const [, element] of rgaTraversal(family.checkpoint)) {
     if (!owned.has(elementKey(element.op, element.ordinal)) || element.deletedBy.length) continue;
     const next = offset + element.scalar.length;
     if (offset >= edit.from.offset && next <= edit.to.offset) {
-      const prior = spans.at(-1);
-      if (prior && prior[0][0] === element.op[0] && prior[0][1] === element.op[1] && prior[1] + prior[2] === element.ordinal) prior[2] += 1;
-      else spans.push([[...element.op], element.ordinal, 1]);
+      const key = `${element.op[0]}:${element.op[1]}`;
+      const list = byOp.get(key);
+      if (list) list.push(element.ordinal);
+      else byOp.set(key, [element.ordinal]);
     }
     offset = next;
   }
-  if (offset !== text.length || spans.length === 0) fail('delete range cannot be resolved');
+  if (offset !== text.length || byOp.size === 0) fail('delete range cannot be resolved');
+  const spans = [];
+  const sortedKeys = [...byOp.keys()].sort((a, b) => {
+    const [aActor, aCounter] = a.split(':');
+    const [bActor, bCounter] = b.split(':');
+    return compareOpId([aActor, Number(aCounter)], [bActor, Number(bCounter)]);
+  });
+  for (const key of sortedKeys) {
+    const [spActor, spCounterS] = key.split(':');
+    const spCounter = Number(spCounterS);
+    const ordinals = byOp.get(key).sort((a, b) => a - b);
+    let spanStart = ordinals[0];
+    let spanCount = 1;
+    for (let i = 1; i < ordinals.length; i++) {
+      if (ordinals[i] === ordinals[i - 1] + 1) {
+        spanCount += 1;
+      } else {
+        spans.push([[spActor, spCounter], spanStart, spanCount]);
+        spanStart = ordinals[i];
+        spanCount = 1;
+      }
+    }
+    spans.push([[spActor, spCounter], spanStart, spanCount]);
+  }
   return canonicalTextOp(['workbench.text', 1, op, lamport, basis, ['delete', spans]]);
 }

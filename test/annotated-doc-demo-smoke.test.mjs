@@ -54,14 +54,28 @@ test('annotated-doc demo creates a document and inserts via the document session
   assert.equal(session.document.blocks[0].text, '');
   const blockId = session.document.blocks[0].id;
 
-  const inserted = await session.insert({
-    mutationId: 'smoke-insert',
-    at: { blockId, offset: 0, affinity: 'right' },
-    text: 'hello demo',
+  // Per-keystroke inserts (distinct actors) — select-all delete must sort spans by op id.
+  for (const ch of 'hello') {
+    const block = session.document.blocks[0];
+    const inserted = await session.insert({
+      mutationId: `smoke-ins-${ch}-${++actionNumber}`,
+      at: { blockId: block.id, offset: block.text.length, affinity: 'right' },
+      text: ch,
+    });
+    assert.equal(inserted.ok, true, inserted.failure?.message);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(session.document.blocks[0].text, 'hello');
+
+  const len = session.document.blocks[0].text.length;
+  const deleted = await session.delete({
+    mutationId: 'smoke-del-all',
+    from: { blockId, offset: 0, affinity: 'right' },
+    to: { blockId, offset: len, affinity: 'right' },
   });
-  assert.equal(inserted.ok, true);
+  assert.equal(deleted.ok, true, deleted.failure?.message);
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(session.document.blocks[0].text, 'hello demo');
+  assert.equal(session.document.blocks[0].text, '');
 
   const listed = await (await fetch(`${origin}/docs`)).json();
   assert.equal(listed.docs.length, 1);
