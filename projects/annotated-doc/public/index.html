@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>annotated-doc — workbench floor</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --panel: #fff;
+      --line: #d8dce3;
+      --muted: #667085;
+      --accent: #1d4ed8;
+      --danger: #b91c1c;
+      --ok: #15803d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.45 system-ui, sans-serif;
+      background: var(--bg);
+      color: #111;
+      min-height: 100vh;
+    }
+    header {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      padding: 10px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+    }
+    header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+    header .meta { margin-left: auto; color: var(--muted); font-size: 12px; }
+    main {
+      display: grid;
+      grid-template-columns: 240px 1fr;
+      height: calc(100vh - 45px);
+    }
+    aside {
+      border-right: 1px solid var(--line);
+      background: var(--panel);
+      padding: 12px;
+      overflow: auto;
+    }
+    #create {
+      width: 100%;
+      margin-bottom: 12px;
+      background: var(--accent);
+      color: #fff;
+      border-color: var(--accent);
+    }
+    button {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      padding: 7px 10px;
+      border-radius: 7px;
+      cursor: pointer;
+    }
+    button:disabled { opacity: 0.5; cursor: default; }
+    .doc {
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      margin-bottom: 4px;
+      border: 1px solid transparent;
+    }
+    .doc:hover { background: #eef2ff; }
+    .doc.active { background: #e0e7ff; border-color: #c7d2fe; }
+    .doc small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+    #editor-wrap {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    #status {
+      padding: 8px 16px;
+      border-bottom: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--muted);
+      font-size: 12px;
+      min-height: 34px;
+    }
+    #status.error { color: var(--danger); }
+    #status.ok { color: var(--ok); }
+    #editor {
+      flex: 1;
+      margin: 16px;
+      padding: 16px 18px;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      outline: none;
+      white-space: pre-wrap;
+      overflow: auto;
+      min-height: 200px;
+      font: 15px/1.55 ui-sans-serif, system-ui, sans-serif;
+    }
+    #editor:empty::before {
+      content: attr(data-placeholder);
+      color: #98a2b3;
+    }
+    #empty {
+      margin: 40px auto;
+      color: var(--muted);
+      text-align: center;
+    }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>annotated-doc</h1>
+    <span class="meta">Workbench <code>annotatedText()</code> floor · fixed principal <code>demo</code></span>
+  </header>
+  <main>
+    <aside>
+      <button id="create">New document</button>
+      <div id="list"></div>
+    </aside>
+    <section id="editor-wrap">
+      <div id="status">Select or create a document.</div>
+      <div id="empty">No document open.</div>
+      <div
+        id="editor"
+        class="hidden"
+        contenteditable="true"
+        spellcheck="true"
+        data-placeholder="Type here — insert/delete only, through createAnnotatedTextHttpSession"
+        role="textbox"
+        aria-multiline="true"
+      ></div>
+    </section>
+  </main>
+
+  <script type="module">
+    import { createAnnotatedTextHttpSession } from '/workbench.mjs';
+    import { DocClient } from './client-handle.mjs';
+
+    const $ = (id) => document.getElementById(id);
+    const historySession = (() => {
+      const key = 'annotated-doc-history-session';
+      let value = sessionStorage.getItem(key);
+      if (!value) {
+        value = crypto.randomUUID().replaceAll('-', '');
+        sessionStorage.setItem(key, value);
+      }
+      return value;
+    })();
+
+    let docs = [];
+    let currentId = null;
+    let session = null;
+    let unsubscribe = null;
+    let mutation = 0;
+    let rendering = false;
+    let busy = false;
+
+    function setStatus(message, kind = '') {
+      const el = $('status');
+      el.textContent = message;
+      el.className = kind;
+    }
+
+    // v1 edits one visible block only so UTF-16 offsets map 1:1 into the CRDT.
+    function primaryBlock(document) {
+      return document?.blocks?.find((block) => block.kind === 'visible') ?? null;
+    }
+
+    function visibleText(document) {
+      return primaryBlock(document)?.text ?? '';
+    }
+
+    function caretOffsetWithin(editor) {
+      const selection = window.getSelection();
+      if (!selection || selection.rangeCount === 0) return null;
+      const range = selection.getRangeAt(0);
+      if (!editor.contains(range.startContainer)) return null;
+      const pre = range.cloneRange();
+      pre.selectNodeContents(editor);
+      pre.setEnd(range.startContainer, range.startOffset);
+      return pre.toString().length;
+    }
+
+    function setCaretOffset(editor, offset) {
+      const selection = window.getSelection();
+      if (!selection) return;
+      const textNode = editor.firstChild;
+      if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return;
+      }
+      const clamped = Math.max(0, Math.min(offset, textNode.data.length));
+      const range = document.createRange();
+      range.setStart(textNode, clamped);
+      range.collapse(true);
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+
+    function renderDocList() {
+      const list = $('list');
+      list.innerHTML = '';
+      if (!docs.length) {
+        list.innerHTML = '<p style="color:#98a2b3;margin:8px 4px">no documents yet</p>';
+        return;
+      }
+      for (const doc of docs) {
+        const el = document.createElement('div');
+        el.className = 'doc' + (doc.id === currentId ? ' active' : '');
+        el.innerHTML = `<strong>${escapeHtml(shortId(doc.id))}</strong><small>${escapeHtml(doc.id)}</small>`;
+        el.onclick = () => openDoc(doc.id);
+        list.appendChild(el);
+      }
+    }
+
+    function shortId(id) {
+      return id.length > 12 ? id.slice(0, 8) + '…' : id;
+    }
+
+    function escapeHtml(value) {
+      return String(value)
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;');
+    }
+
+    function renderDocument(document) {
+      const editor = $('editor');
+      const text = visibleText(document);
+      const caret = caretOffsetWithin(editor);
+      rendering = true;
+      if (editor.textContent !== text) editor.textContent = text;
+      if (caret != null) setCaretOffset(editor, Math.min(caret, text.length));
+      rendering = false;
+    }
+
+    async function loadDocs() {
+      const res = await fetch('/docs', { credentials: 'include' });
+      if (!res.ok) throw new Error(`list failed (${res.status})`);
+      const body = await res.json();
+      docs = body.docs ?? [];
+      renderDocList();
+    }
+
+    async function createDoc() {
+      $('create').disabled = true;
+      try {
+        const res = await fetch('/docs', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ clientId: historySession }),
+        });
+        const body = await res.json();
+        if (!res.ok || !body.ok) throw new Error(body.failure?.message || `create failed (${res.status})`);
+        await loadDocs();
+        await openDoc(body.id);
+      } catch (error) {
+        setStatus(String(error.message || error), 'error');
+      } finally {
+        $('create').disabled = false;
+      }
+    }
+
+    function closeSession() {
+      if (unsubscribe) {
+        unsubscribe();
+        unsubscribe = null;
+      }
+      if (session) {
+        session.close();
+        session = null;
+      }
+    }
+
+    async function openDoc(id) {
+      if (busy) return;
+      busy = true;
+      closeSession();
+      currentId = id;
+      renderDocList();
+      $('empty').classList.add('hidden');
+      $('editor').classList.remove('hidden');
+      setStatus(`opening ${shortId(id)}…`);
+
+      try {
+        session = createAnnotatedTextHttpSession({
+          baseUrl: '/live-delivery',
+          context: {
+            entity: DocClient,
+            field: DocClient.body,
+            documentId: id,
+          },
+          historySession,
+          createActionId: () => `demo-${historySession.slice(0, 8)}-${++mutation}`,
+        });
+        unsubscribe = session.subscribe((document) => {
+          if (!document) {
+            setStatus('document unavailable', 'error');
+            return;
+          }
+          renderDocument(document);
+          const block = primaryBlock(document);
+          const extra = document.blocks.length > 1
+            ? ` · editing first of ${document.blocks.length} blocks`
+            : '';
+          setStatus(
+            `${session.status} · ${block ? block.id.slice(0, 8) + '…' : 'no visible block'}${extra}`,
+            session.status === 'live' || session.status === 'ready' ? 'ok' : '',
+          );
+        });
+        await session.ready;
+        if (session.document) renderDocument(session.document);
+        $('editor').focus();
+      } catch (error) {
+        setStatus(String(error.message || error), 'error');
+        closeSession();
+      } finally {
+        busy = false;
+      }
+    }
+
+    async function applyEdit(run) {
+      if (!session?.document || busy) return;
+      const block = primaryBlock(session.document);
+      if (!block) {
+        setStatus('no visible block', 'error');
+        return;
+      }
+      try {
+        const result = await run(block);
+        if (result && result.ok === false) {
+          setStatus(result.failure?.message || 'edit rejected', 'error');
+        }
+      } catch (error) {
+        setStatus(String(error.message || error), 'error');
+      }
+    }
+
+    function nextMutationId(prefix) {
+      return `${prefix}-${++mutation}`;
+    }
+
+    $('editor').addEventListener('beforeinput', (event) => {
+      if (rendering || !session?.document) return;
+      if (event.isComposing) return;
+
+      const inputType = event.inputType;
+      const editor = $('editor');
+      const offset = caretOffsetWithin(editor);
+      if (offset == null) {
+        event.preventDefault();
+        return;
+      }
+
+      if (inputType === 'insertText' || inputType === 'insertCompositionText') {
+        const text = event.data ?? '';
+        if (!text) return;
+        event.preventDefault();
+        void applyEdit((block) => session.insert({
+          mutationId: nextMutationId('ins'),
+          at: { blockId: block.id, offset, affinity: 'right' },
+          text,
+        }));
+        return;
+      }
+
+      if (inputType === 'insertFromPaste' || inputType === 'insertFromDrop') {
+        event.preventDefault();
+        const text = event.dataTransfer?.getData('text/plain')
+          ?? event.data
+          ?? '';
+        if (!text) return;
+        void applyEdit((block) => session.insert({
+          mutationId: nextMutationId('paste'),
+          at: { blockId: block.id, offset, affinity: 'right' },
+          text,
+        }));
+        return;
+      }
+
+      if (
+        inputType === 'deleteContentBackward'
+        || inputType === 'deleteContentForward'
+        || inputType === 'deleteByCut'
+        || inputType === 'deleteByDrag'
+        || inputType === 'deleteContent'
+      ) {
+        event.preventDefault();
+        const selection = window.getSelection();
+        if (!selection || selection.rangeCount === 0) return;
+        const range = selection.getRangeAt(0);
+        const startRange = range.cloneRange();
+        startRange.selectNodeContents(editor);
+        startRange.setEnd(range.startContainer, range.startOffset);
+        const start = startRange.toString().length;
+        const endRange = range.cloneRange();
+        endRange.selectNodeContents(editor);
+        endRange.setEnd(range.endContainer, range.endOffset);
+        let end = endRange.toString().length;
+
+        if (start === end) {
+          if (inputType === 'deleteContentBackward') {
+            if (start === 0) return;
+            void applyEdit((block) => session.delete({
+              mutationId: nextMutationId('del'),
+              from: { blockId: block.id, offset: start - 1, affinity: 'right' },
+              to: { blockId: block.id, offset: start, affinity: 'right' },
+            }));
+            return;
+          }
+          if (inputType === 'deleteContentForward') {
+            const text = editor.textContent ?? '';
+            if (start >= text.length) return;
+            void applyEdit((block) => session.delete({
+              mutationId: nextMutationId('del'),
+              from: { blockId: block.id, offset: start, affinity: 'right' },
+              to: { blockId: block.id, offset: start + 1, affinity: 'right' },
+            }));
+            return;
+          }
+        }
+
+        if (end < start) end = start;
+        if (start === end) return;
+        void applyEdit((block) => session.delete({
+          mutationId: nextMutationId('del'),
+          from: { blockId: block.id, offset: start, affinity: 'right' },
+          to: { blockId: block.id, offset: end, affinity: 'right' },
+        }));
+        return;
+      }
+
+      // Refuse structural / rich input types so the only path is insert/delete.
+      event.preventDefault();
+    });
+
+    // Keep Enter from creating DOM <div>/<br> structure outside the CRDT.
+    $('editor').addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        if (!session?.document) return;
+        const offset = caretOffsetWithin($('editor'));
+        if (offset == null) return;
+        void applyEdit((block) => session.insert({
+          mutationId: nextMutationId('nl'),
+          at: { blockId: block.id, offset, affinity: 'right' },
+          text: '\n',
+        }));
+      }
+    });
+
+    $('create').onclick = () => void createDoc();
+
+    try {
+      await loadDocs();
+      if (docs[0]) await openDoc(docs[0].id);
+    } catch (error) {
+      setStatus(String(error.message || error), 'error');
+    }
+  </script>
+</body>
+</html>

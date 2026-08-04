@@ -1,0 +1,64 @@
+# annotated-doc
+
+The floor demo for Workbench **`annotatedText()`** — collaborative CRDT text
+with recipient-projected delivery, without Scope Studio chrome.
+
+This is deliberately smaller than chat/gdoc: one document field, a fixed demo
+principal, and browser **insert/delete** only.
+
+## Run
+
+```sh
+cd /path/to/workbench
+node projects/annotated-doc/server.mjs
+```
+
+Open <http://127.0.0.1:3460> (override with `PORT`).
+
+1. Click **New document**
+2. Type in the editor
+3. Reload — text persists
+4. Open a second tab on the same document — edits converge over live delivery
+
+DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
+`ANNOTATED_DOC_DB`).
+
+## What this shows
+
+| Piece | Role |
+| --- | --- |
+| `Doc.body: annotatedText(...)` | Decision-0010 document field (blocks + CRDT bodies) |
+| Stub `note` annotation + `words` measurement | Satisfies declaration grammar; unused in UI |
+| Fixed principal `demo` | No auth ceremony while refining the field |
+| `POST /docs` → `annotatedTextCreateAction` | Create through the package action only |
+| `createAnnotatedTextHttpSession` | Typed insert/delete; no raw CRDT ops |
+| `/live-delivery` | Recipient snapshot + ingest recovery |
+
+## Non-goals (v1)
+
+- Annotation apply/detach UI
+- Block split / merge / continue controls
+- Carets / multi-user presence
+- Login, sharing, or multi-principal grants
+- Scope entities, coding, speakers, or Studio
+- `text.crdt()` (see `projects/note.mjs` / `projects/gdoc.mjs` for that floor)
+
+## Client handle
+
+`public/client-handle.mjs` is a frozen browser-safe mirror of the server
+declaration (same pattern as Scope’s `TranscriptClient`). When you change
+annotation or measurement families on the server, update the client handle in
+the same change.
+
+## Mutation path
+
+```text
+contenteditable beforeinput
+  → createAnnotatedTextHttpSession.insert|delete
+  → POST /workbench/actions (package)
+  → committed log + projection
+  → live delivery recipient snapshot
+  → session.subscribe re-render
+```
+
+There is no second write path and no hand-rolled CRDT reduce in the demo page.

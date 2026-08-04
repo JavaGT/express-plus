@@ -9,4 +9,5 @@ examples/*.db
 examples/*.db-*
 gdoc.db*
 projects/chat/*.db*
+projects/annotated-doc/*.db*
 .agents/
