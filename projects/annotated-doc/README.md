@@ -10,10 +10,22 @@ principal, and browser **insert/delete** only.
 
 ```sh
 cd /path/to/workbench
-node projects/annotated-doc/server.mjs
+PORT=3460 node projects/annotated-doc/server.mjs
 ```
 
-Open <http://127.0.0.1:3460> (override with `PORT`).
+- Local: <http://127.0.0.1:3460>
+- Public (nginx): <https://test.javagrant.ac.nz>
+
+nginx vhost (from workbench root):
+
+```sh
+cp projects/annotated-doc/nginx-test.javagrant.ac.nz.conf \
+  /opt/homebrew/etc/nginx/servers/test.javagrant.ac.nz.conf
+nginx -t && nginx -s reload
+```
+
+The public URL is a reverse proxy to `127.0.0.1:3460` — the Node process must be
+running or nginx returns 502.
 
 1. Click **New document**
 2. Type in the editor
