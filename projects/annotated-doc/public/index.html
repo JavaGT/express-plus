@@ -153,9 +153,16 @@
     let currentId = null;
     let session = null;
     let unsubscribe = null;
-    let mutation = 0;
     let rendering = false;
     let busy = false;
+
+    // Action IDs are durable-deduped by (scope, actionId). Never reuse a sequence
+    // that can collide after reload (sessionStorage historySession + counter).
+    function freshId(prefix) {
+      const uuid = globalThis.crypto?.randomUUID?.()
+        ?? `x${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+      return `${prefix}-${uuid}`;
+    }
 
     function setStatus(message, kind = '') {
       const el = $('status');
@@ -299,7 +306,7 @@
             documentId: id,
           },
           historySession,
-          createActionId: () => `demo-${historySession.slice(0, 8)}-${++mutation}`,
+          createActionId: () => freshId('demo'),
         });
         unsubscribe = session.subscribe((document) => {
           if (!document) {
@@ -345,7 +352,7 @@
     }
 
     function nextMutationId(prefix) {
-      return `${prefix}-${++mutation}`;
+      return freshId(prefix);
     }
 
     $('editor').addEventListener('beforeinput', (event) => {
