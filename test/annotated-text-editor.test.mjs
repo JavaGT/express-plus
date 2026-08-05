@@ -79,6 +79,39 @@ test('annotated editor backspace and forward delete preserve surrogate pairs', a
   forward.binding.close();
 });
 
+test('annotated editor deletes to the start of the line for soft and hard line backward input', async () => {
+  for (const inputType of ['deleteSoftLineBackward', 'deleteHardLineBackward']) {
+    const harness = setup('a\nb');
+    harness.select(3);
+    harness.beforeinput(inputType);
+    await flushInput();
+    assert.deepEqual(harness.calls[0][1], {
+      from: { blockId: 'block-1', offset: 2, affinity: 'right' },
+      to: { blockId: 'block-1', offset: 3, affinity: 'right' },
+      text: '',
+    });
+    harness.binding.close();
+
+    const emoji = setup('a\n😀b');
+    emoji.select(5);
+    emoji.beforeinput(inputType);
+    await flushInput();
+    assert.deepEqual(emoji.calls[0][1], {
+      from: { blockId: 'block-1', offset: 2, affinity: 'right' },
+      to: { blockId: 'block-1', offset: 5, affinity: 'right' },
+      text: '',
+    });
+    emoji.binding.close();
+
+    const lineStart = setup('a\nb');
+    lineStart.select(2);
+    lineStart.beforeinput(inputType);
+    await flushInput();
+    assert.deepEqual(lineStart.calls, []);
+    lineStart.binding.close();
+  }
+});
+
 test('annotated editor commits composition once and delegates history', async () => {
   const harness = setup('ab');
   harness.select(1);

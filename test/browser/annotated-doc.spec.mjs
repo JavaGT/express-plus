@@ -54,6 +54,20 @@ test('rapid typing and scalar-safe deletion survive reload', async ({ page }) =>
   await expect(page.locator('#editor')).toHaveText('hello');
 });
 
+test('Cmd+Backspace deletes to the start of the current line', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('one two three', { delay: 0 });
+  await expect(editor).toHaveText('one two three');
+  await editor.press('Meta+Backspace');
+  await expect(editor).toHaveText('');
+  await expect(page.locator('#status')).toContainText('live');
+  await expect(page.locator('#status')).not.toContainText('offset is outside text bounds');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(page.locator('#editor')).toHaveText('');
+});
+
 test('repeated reloads retain one authoring lease', async ({ page }) => {
   const id = await createDocument(page);
   for (let reload = 0; reload < 17; reload += 1) {

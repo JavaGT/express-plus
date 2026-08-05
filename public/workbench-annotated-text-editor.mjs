@@ -166,6 +166,11 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
 
   function deleteRange(inputType, text, from, to) {
     if (from !== to) return { from: scalarStart(text, from), to: scalarEnd(text, to) };
+    if (inputType === 'deleteSoftLineBackward' || inputType === 'deleteHardLineBackward') {
+      const lineStart = text.lastIndexOf('\n', from - 1) + 1;
+      if (lineStart === from) return null;
+      return { from: lineStart, to: scalarEnd(text, from) };
+    }
     if (inputType === 'deleteContentBackward') {
       if (from === 0) return null;
       return { from: scalarStart(text, from - 1), to: from };
