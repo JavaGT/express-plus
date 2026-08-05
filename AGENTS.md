@@ -78,6 +78,16 @@ Map of modules to loops: `docs/architecture-map.md`.
 
 ### Core rules
 
+- **Use semantic operations and reducer projections.** For a durable change,
+  name the user/domain intent, the exact contribution it makes, and the
+  deterministic reducer that projects it. A later action compensates,
+  transforms, or supersedes that contribution against *current* state; it does
+  not broadly restore saved state over unrelated concurrent work. Normal
+  collaborative undo/redo follows this rule and is an ordinary durable action.
+  Snapshot/bootstrap/resync is allowed for recovery and delivery, but is never
+  the semantic definition of a normal collaborative action. Use
+  [`docs/semantic-operations.md`](./docs/semantic-operations.md) when designing
+  durable state, collaboration, retries, conflicts, or history.
 - **Prefer a singular system.** One way to do a thing. Multiple pathways to the
   same goal drift apart, conflict in unexpected ways, and confuse. If a second
   path seems needed, fold it into the first or remove the first — don't run two

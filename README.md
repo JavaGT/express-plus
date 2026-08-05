@@ -52,6 +52,8 @@ schedule/tick, email).
 | **[AGENTS.md](AGENTS.md)** | Binding design values (naming, architecture, auth, live) |
 | **[CONTEXT.md](CONTEXT.md)** | Domain glossary (Entity, Grant, Scope handle, Kernel, …) |
 | **[docs/architecture-map.md](docs/architecture-map.md)** | Modules mapped to compile / commit / deliver |
+| **[docs/semantic-operations.md](docs/semantic-operations.md)** | Required durable programming model: Actions, semantic operations, projections, compensation, snapshots |
+| **[docs/durable-history-contract.md](docs/durable-history-contract.md)** | Durable history and collaborative-compensation contract |
 | **[SPEC.md](SPEC.md)** | Long-form specification (some historical roadmap wording remains) |
 | **[DECISIONLOG.md](DECISIONLOG.md)** | Append-only decision ledger |
 | **[docs/adr/](docs/adr/)** | Numbered ADRs for settled seams |

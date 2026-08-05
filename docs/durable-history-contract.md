@@ -5,6 +5,31 @@ they do not execute, persist, replay, or read canonical history independently.
 
 ## Public declaration and runtime
 
+## Collaborative history rule
+
+Undo and redo are **compensating actions**, not state restoration. The inverse
+of an eligible action is a new ordinary durable action that targets the original
+action's surviving contribution in the current projection. It shares the normal
+authorize → handler → log → projection → receipt → delivery → client fold path.
+
+This gives history its collaboration rule: a user's undo may remove or
+compensate for that user's contribution, but it must preserve unrelated later
+contributions from other users. Redo compensates the completed undo action; it
+does not replace current state with an old after-image. If a contribution no
+longer exists or cannot safely be transformed, the declared inverse must fail
+closed or produce an explicit idempotent no-op. It must never silently restore a
+broad document, row, or projection snapshot.
+
+Every undoable action therefore declares its contribution and its compensating
+algebra explicitly. Text may target CRDT element identities; a structural edit
+may target its created topology; a compound action must compensate its text,
+structure, annotations, and derived facts atomically. A private fact may retain
+the narrow provenance needed to authorize and validate that compensation, but it
+is not a recoverable whole-state image and is never delivered to clients.
+
+The general agent-facing programming guide is
+[`semantic-operations.md`](./semantic-operations.md).
+
 `durableHistory({ authorize, actions })` declares a closed action-type registry. Each registered type
 has explicit `inverse(context)` and `redo(context)`; absent types are non-undoable and are skipped
 without clearing older cursor entries. Translations return an ordinary registered action request and
@@ -56,5 +81,8 @@ resurrect or reveal erased material. Malformed stored cursor/history fails close
   payload-bearing authorization surface.
 - Putting before-images in payloads, receipts, events, or application history storage: each turns a
   transaction-local capability into recoverable application-owned history.
+- Whole-document, row, or projection snapshot restore as ordinary collaborative
+  undo: it overwrites unrelated concurrent work rather than compensating for the
+  initiating user's contribution.
 
 Fresh schemas only; there is no legacy reader, migration, compatibility adapter, or alternate engine.
