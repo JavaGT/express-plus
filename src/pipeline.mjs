@@ -24,7 +24,6 @@ import { failure, failureFromError, failureOutcome } from './outcome.mjs';
 import { principalKeyOf } from './principal.mjs';
 import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparation, prepareErasureDirective } from './erasure-directive.mjs';
 import { declarePostCommitEffectsInTxn } from './post-commit-effects.mjs';
-import { ANNOTATED_HISTORY_COMPLETION, isAnnotatedEntityProjection } from './annotated-text-history.mjs';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
@@ -199,10 +198,6 @@ export function durableMutationVariant({
               consumer.apply(ev, db, Object.freeze({ privateFact, ...(claimedBlobs ? { claimedBlobs } : {}) }));
             } else if (claimedBlobs) {
               consumer.apply(ev, db, Object.freeze({ claimedBlobs }));
-            } else if (isAnnotatedEntityProjection(consumer)
-              && ev.data?.version === 8 && ev.data?.operation?.kind === 'history.restore') {
-              if (privateFact === undefined) throw new TypeError('annotated history restore requires a private fact');
-              consumer.apply(ev, db, Object.freeze({ privateFact }));
             } else {
               consumer.apply(ev, db);
             }
@@ -473,7 +468,6 @@ async function commitEvents(db, events, {
         now, actionId, nextSeq, principal, payload: canonicalPayload, type, scope, privateFact,
         claimedBlobs: commit.claimedBlobs,
       });
-      handler?.[ANNOTATED_HISTORY_COMPLETION]?.({ db, actionId, scope, payload: canonicalPayload, result, history: historyCommit });
       const confirmedThrough = readSeq(db, scope);
       const resultData = commit.authoringReceipt
         ? commit.authoringReceipt({ db, actionId, scope, confirmedThrough, finalizedEvents: result })
@@ -493,9 +487,10 @@ async function commitEvents(db, events, {
       insertReceipt(db, scope, actionId, now, result, directive === undefined
         ? {
           ...historyCommit?.metadata,
-          actionType: type ?? historyCommit?.metadata?.actionType,
-            actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData ?? payload,
-           resultData,
+           actionType: type ?? historyCommit?.metadata?.actionType,
+             actionData: commit.canonicalPayload ?? historyCommit?.metadata?.actionData ?? payload,
+            resultData,
+            ...(commit.historyOutcome ? { historyOutcome: commit.historyOutcome } : {}),
         }
         : { actionType: type, actionData: { version: 1 }, operation: 'erasure' });
       return Object.freeze({ events: result, resultData });

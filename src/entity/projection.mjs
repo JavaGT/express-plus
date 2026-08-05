@@ -8,7 +8,7 @@ import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoin
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { deriveBlockPosition, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
-import { restoreAnnotatedTextHistoryImage, markAnnotatedEntityProjection } from '../annotated-text-history.mjs';
+import { markAnnotatedEntityProjection } from '../annotated-text-history.mjs';
 
 const INITIAL_BLOCK_POSITION = 'a0';
 
@@ -149,17 +149,6 @@ function stageBlockPositions(db, prefix, existingById) {
 
 function applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact }) {
   const prefix = `${name}_${handle.field}`;
-  if (data?.operation?.kind === 'history.restore') {
-    if (data.version !== 8 || typeof data.id !== 'string' || Object.keys(data.operation).length !== 1 || !privateFact?.after) throw new Error(`${name}.${handle.field}.operated history restore is invalid`);
-    const document = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(data.id);
-    if (!document) throw new Error(`${name}.${handle.field}.operated history restore document is missing`);
-    restoreAnnotatedTextHistoryImage({
-      db, prefix, documentId: data.id, image: privateFact.after,
-      metadata: getAnnotatedTextCompiledMetadata(descriptor),
-      expectedOwnership: { documentId: data.id, projectId: document[descriptor.project], ownerId: document[descriptor.owner] },
-    });
-    return true;
-  }
   const shape = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data).sort().join() : '';
    const structuralShape = 'after,before,blocks,family,id,measurements,memberships,operation,version';
    const splitAssignmentShape = 'after,annotation,before,blocks,family,groupMembership,id,measurements,memberships,operation,version';

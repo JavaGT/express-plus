@@ -473,6 +473,9 @@ function ensureActionReceiptColumns(db) {
     ['sessionId', 'TEXT'],
     ['operation', "TEXT NOT NULL DEFAULT 'action'"],
     ['resultData', 'TEXT'],
+    ['historyRootActionId', 'TEXT'],
+    ['historyTargetActionId', 'TEXT'],
+    ['historyOutcome', 'TEXT'],
   ];
   for (const [name, sqlType] of additions) {
     if (!cols.has(name)) db.exec(`ALTER TABLE _ActionReceipt ADD COLUMN ${name} ${sqlType}`);

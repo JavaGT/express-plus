@@ -28,7 +28,8 @@
 		"test": "node scripts/run-tests.mjs",
 		"test:playwright": "playwright test",
 		"test:coverage": "node scripts/check-coverage.mjs 0",
-		"typecheck": "tsc --noEmit"
+		"typecheck": "tsc --noEmit",
+		"verify:concise": "pnpm lint && pnpm typecheck && pnpm test"
 	},
 	"devDependencies": {
 		"@types/node": "^26.1.1",

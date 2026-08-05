@@ -12,7 +12,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { validateMaterializedField, validateMutation, ValidationError, deserializeField, serializeField, flattenStruct, resolveStrategy } from '../field-strategy.mjs';
 import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
-import { assertFrontier, assertWellFormedText, canonicalTextOp, frontierDominates } from '../annotated-text.mjs';
+import { assertFrontier, assertWellFormedText, canonicalTextOp, frontierDominates, scalarCount } from '../annotated-text.mjs';
 import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint, projectEndpointToBlockOffset, textOperationForOffsetEdit } from '../annotated-text-family.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
@@ -26,12 +26,12 @@ import { assertR5AnnotationDetachPayload } from '../annotated-text-r5.mjs';
 import { erasureDirectivePreparation } from '../erasure-directive.mjs';
 import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.mjs';
 import { mayRow } from '../row-grant.mjs';
-import { ANNOTATED_HISTORY_COMPLETION, annotatedTextHistoryImage } from '../annotated-text-history.mjs';
 import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority.mjs';
 import { resolveStream, resolveLease, resolvePosition, resolveGroup, issuePositionFrame, recordSplit, clearAuthoringState } from '../annotated-text-authoring-stream.mjs';
 import { readSeq } from '../committed-log.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
+export const ANNOTATED_TEXT_COMPENSATION = Symbol('workbench.annotated-text-compensation');
 
 /** Prefer the dispatch scope when it is the inherited parent shell for this row. */
 export function resolveGeneratedEventScope(record, { id, row, payload, scope }) {
@@ -1655,21 +1655,54 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     };
 
     const handler = ({ payload, db, scope, principal, actionId, history }) => {
-      if (history?.input?.kind === 'annotated-text.restore') {
-        const command = assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload);
-        const handle = eventHandles.native(name, fieldName, 'operated');
-        return {
-          events: [Object.freeze({ handle, type: handle.type, scope, data: Object.freeze({ version: 8, id: command.id, operation: Object.freeze({ kind: 'history.restore' }) }) })],
-          privateFact: { before: history.input.expected, after: history.input.target },
-        };
-      }
+      if (!history?.input && payload?.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
       const command = payload.version === 9 ? assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload) : null;
-      const before = command ? annotatedTextHistoryImage({ db, prefix, documentId: command.id, metadata: compiledMeta }) : null;
+      if (history?.input?.kind === ANNOTATED_TEXT_COMPENSATION) {
+        if (payload.version !== 1 || !payload.history || payload.history.version !== 1
+          || !['undo', 'redo'].includes(payload.history.direction)) throw new ValidationError('invalid annotated text compensation');
+        const sourceFact = history.input.targetFact;
+        if (!sourceFact || sourceFact.version !== 2 || sourceFact.documentId !== payload.id) throw new ValidationError('invalid annotated text compensation fact');
+        const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(payload.id);
+        if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
+        const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+        if (payload.history.direction === 'redo' && sourceFact.linkage?.outcome === 'noop') {
+          return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
+        }
+        const contribution = payload.history.direction === 'undo' ? sourceFact.contribution : sourceFact.redo;
+        if (!contribution || contribution.kind !== 'text.insert') throw new ValidationError('invalid annotated text compensation contribution');
+        const originalOp = contribution.opId;
+        const expectedKeys = Array.from({ length: contribution.scalarCount }, (_, ordinal) => `${originalOp[0]}:${originalOp[1]}:${ordinal}`);
+        const block = family.blocks.find((candidate) => candidate.id === contribution.blockId);
+        const live = expectedKeys.filter((elementKey) => family.checkpoint.elements[elementKey]?.deletedBy.length === 0);
+        const owned = new Set(block?.elementKeys ?? []);
+        if (payload.history.direction === 'undo' && live.length > 0 && (live.length !== expectedKeys.length || expectedKeys.some((key) => !owned.has(key)))) {
+          throw new ValidationError('annotated text compensation conflicts with concurrent ownership');
+        }
+        let operation = null;
+        if (payload.history.direction === 'undo' && live.length === expectedKeys.length) {
+          const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${payload.id}\u0000${actionId}`).digest('hex').slice(0, 32);
+          const lamport = Math.max(0, ...Object.values(family.checkpoint.elements).map((element) => element.lamport)) + 1;
+          operation = canonicalTextOp(['workbench.text', 1, [actor, 1], lamport, family.checkpoint.frontier, ['delete', [[originalOp, 0, contribution.scalarCount]]]]);
+        } else if (payload.history.direction === 'redo' && sourceFact.linkage?.outcome === 'applied') {
+          const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${payload.id}\u0000${actionId}`).digest('hex').slice(0, 32);
+          const lamport = Math.max(0, ...Object.values(family.checkpoint.elements).map((element) => element.lamport)) + 1;
+          operation = canonicalTextOp(['workbench.text', 1, [actor, 1], lamport, family.checkpoint.frontier, ['insert', contribution.anchor, contribution.text]]);
+        }
+        if (!operation) return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
+        const nextFamily = applyTextOperationToBlock(family, contribution.blockId, operation);
+        const handle = eventHandles.native(name, fieldName, 'operated');
+        const compensation = { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'applied' }, contribution: { kind: 'text.insert', blockId: contribution.blockId, opId: operation[2], anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount } };
+        if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', blockId: contribution.blockId, opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount };
+        return { events: [Object.freeze({ handle, type: handle.type, scope, data: Object.freeze({ version: 1, id: payload.id, before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }), operation: Object.freeze({ kind: 'text.apply', blockId: contribution.blockId, operation }), after: Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier }), family: textFamilyCheckpoint(nextFamily) }) })], privateFact: compensation, historyOutcome: 'applied' };
+      }
+      if (payload.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
       return Promise.resolve(r1Handler({ payload, db, scope, principal, actionId })).then((events) => {
         if (payload.version !== 9) return events;
         return {
           events,
-          privateFact: { before, after: before },
+          privateFact: command.edit.kind === 'text.insert'
+            ? { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', blockId: events[0].data.operation.blockId, opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } }
+            : { version: 2, kind: 'annotated-text.barrier', documentId: command.id },
           authoringReceipt: ({ db: receiptDb, confirmedThrough }) => {
             const splits = receiptDb.prepare(`SELECT temporary_block, authoritative_block_id, position_token FROM ${prefix}_authoring_split WHERE lease_id = ? AND action_id = ? AND mutation_id = ? ORDER BY temporary_block`).all(command.authoring.lease, actionId, command.authoring.mutationId);
             return Object.freeze({ version: 1, actionId, confirmedThrough, authoring: Object.freeze({
@@ -1682,23 +1715,33 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       });
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
-    Object.defineProperty(handler, ANNOTATED_HISTORY_COMPLETION, { value: ({ db, actionId, scope, payload, result, history }) => {
-      if (history?.handlerInputs) return;
-      if (!Array.isArray(result?.events ?? result) || (result?.events ?? result).length === 0) return;
-      const factRow = db.prepare('SELECT fact FROM _PrivateActionFact WHERE scope = ? AND actionId = ?').get(scope, actionId);
-      if (!factRow) throw new TypeError('annotated history private fact was not persisted');
-      const fact = JSON.parse(factRow.fact);
-      const after = annotatedTextHistoryImage({ db, prefix: `${name}_${fieldName}`, documentId: payload.id, metadata: compiledMeta });
-      db.prepare('UPDATE _PrivateActionFact SET fact = ? WHERE scope = ? AND actionId = ?').run(JSON.stringify({ ...fact, after }), scope, actionId);
-    }});
     Object.defineProperty(handler, 'batchForbidden', { value: true });
     Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope, db, principal, history }) => {
+      if (history?.input?.kind === ANNOTATED_TEXT_COMPENSATION) return;
       const command = assertDocumentScope({ payload, scope, db });
-      if (command.version === 9 && history?.input?.kind !== 'annotated-text.restore') assertV9AuthoringBinding({ command, db, principal });
+      if (command.version === 9) assertV9AuthoringBinding({ command, db, principal });
     }});
     Object.defineProperty(handler, 'dedupeReceiptMatches', { value: (receipt, request) =>
       receipt.actionType === operationType && receipt.actionData === JSON.stringify(request.payload) });
     handlers[operationType] = handler;
+    const compensationHandler = (context) => {
+      if (!context.history?.input || context.history.input.kind !== ANNOTATED_TEXT_COMPENSATION) {
+        throw new ValidationError('annotated text compensation is history-authored only');
+      }
+      return handler(context);
+    };
+    Object.defineProperties(compensationHandler, {
+      inTransaction: { value: true },
+      batchForbidden: { value: true },
+      preDedupe: { value: ({ history }) => {
+        if (!history?.input || history.input.kind !== ANNOTATED_TEXT_COMPENSATION) {
+          throw new ValidationError('annotated text compensation is history-authored only');
+        }
+      } },
+      dedupeReceiptMatches: { value: (receipt, request) =>
+        receipt.actionType === `${name}.${fieldName}.compensate` && receipt.actionData === JSON.stringify(request.payload) },
+    });
+    handlers[`${name}.${fieldName}.compensate`] = compensationHandler;
     cursorPolicy[operationType] = 'excluded';
   }
 

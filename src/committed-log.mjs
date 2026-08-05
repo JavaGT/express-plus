@@ -61,6 +61,9 @@ export function actionReceiptTableDDL() {
    sessionId TEXT,
    operation TEXT NOT NULL DEFAULT 'action',
    resultData TEXT,
+   historyRootActionId TEXT,
+   historyTargetActionId TEXT,
+   historyOutcome TEXT,
   PRIMARY KEY (scope, actionId)
 );`;
 }
@@ -147,9 +150,9 @@ export function insertReceipt(db, scope, actionId, committedAt, events, metadata
   ).get({ scope }).next;
   db.prepare(
     `INSERT INTO _ActionReceipt
-      (scope, actionId, committedAt, eventRefs, historyOrder, actionType, actionData, principalKey, sessionId, operation, resultData)
+       (scope, actionId, committedAt, eventRefs, historyOrder, actionType, actionData, principalKey, sessionId, operation, resultData, historyRootActionId, historyTargetActionId, historyOutcome)
      VALUES
-       (:scope, :actionId, :committedAt, :eventRefs, :historyOrder, :actionType, :actionData, :principalKey, :sessionId, :operation, :resultData)`,
+       (:scope, :actionId, :committedAt, :eventRefs, :historyOrder, :actionType, :actionData, :principalKey, :sessionId, :operation, :resultData, :historyRootActionId, :historyTargetActionId, :historyOutcome)`,
   ).run({
     scope,
     actionId,
@@ -162,6 +165,9 @@ export function insertReceipt(db, scope, actionId, committedAt, events, metadata
     sessionId: metadata.sessionId ?? null,
     operation: metadata.operation ?? 'action',
     resultData: metadata.resultData === undefined ? null : JSON.stringify(metadata.resultData),
+    historyRootActionId: metadata.historyRootActionId ?? null,
+    historyTargetActionId: metadata.historyTargetActionId ?? null,
+    historyOutcome: metadata.historyOutcome ?? null,
   });
   // This survives receipt erasure and is transactionally paired with every
   // committed action, unlike SQLite's reusable implicit rowid.
@@ -250,7 +256,10 @@ export function retentionPrune(db, cutoffIso) {
     const cursors = db.prepare('SELECT * FROM _HistoryCursor').all();
     const update = db.prepare('UPDATE _HistoryCursor SET past = ?, future = ? WHERE principalKey = ? AND sessionId = ? AND scope = ?');
     for (const cursor of cursors) {
-      const filter = (json) => JSON.parse(json).filter((id) => !expired.has(`${cursor.scope}\u0000${id}`));
+      const filter = (json) => JSON.parse(json).filter((frame) => {
+        const actionId = typeof frame === 'string' ? frame : frame?.rootActionId;
+        return typeof actionId === 'string' && !expired.has(`${cursor.scope}\u0000${actionId}`);
+      });
       update.run(JSON.stringify(filter(cursor.past)), JSON.stringify(filter(cursor.future)), cursor.principalKey, cursor.sessionId, cursor.scope);
     }
     db.prepare('UPDATE _ActionReceipt SET actionData = NULL WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });

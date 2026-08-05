@@ -36,6 +36,36 @@ function normalizeEffects(effects) {
   });
 }
 
+function exactKeys(value, keys) {
+  return Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function annotatedContribution(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && exactKeys(value, ['kind', 'blockId', 'opId', 'anchor', 'text', 'scalarCount'])
+    && value.kind === 'text.insert' && typeof value.blockId === 'string' && value.blockId.length > 0
+    && Array.isArray(value.opId) && Array.isArray(value.anchor) && typeof value.text === 'string'
+    && Number.isSafeInteger(value.scalarCount) && value.scalarCount > 0;
+}
+
+function annotatedPrivateFact(fact) {
+  if (fact.version !== 2 || typeof fact.documentId !== 'string' || fact.documentId.length === 0) return false;
+  if (fact.kind === 'annotated-text.contribution') {
+    return exactKeys(fact, ['version', 'kind', 'documentId', 'contribution']) && annotatedContribution(fact.contribution);
+  }
+  if (fact.kind === 'annotated-text.barrier') return exactKeys(fact, ['version', 'kind', 'documentId']);
+  if (fact.kind !== 'annotated-text.compensation' || !fact.linkage || typeof fact.linkage !== 'object' || Array.isArray(fact.linkage)) return false;
+  const keys = fact.linkage.outcome === 'applied'
+    ? ['version', 'kind', 'documentId', 'linkage', 'contribution', ...(fact.linkage.direction === 'undo' ? ['redo'] : [])]
+    : ['version', 'kind', 'documentId', 'linkage'];
+  return exactKeys(fact, keys)
+    && exactKeys(fact.linkage, ['rootActionId', 'targetActionId', 'direction', 'outcome'])
+    && typeof fact.linkage.rootActionId === 'string' && fact.linkage.rootActionId.length > 0
+    && typeof fact.linkage.targetActionId === 'string' && fact.linkage.targetActionId.length > 0
+    && ['undo', 'redo'].includes(fact.linkage.direction) && ['applied', 'noop'].includes(fact.linkage.outcome)
+    && (fact.linkage.outcome === 'noop' || (annotatedContribution(fact.contribution) && (!Object.hasOwn(fact, 'redo') || annotatedContribution(fact.redo))));
+}
+
 export function postCommitEffect(input) {
   return Object.freeze({
     file: assertText(input?.file, 'postCommitEffect.file'),
@@ -53,11 +83,10 @@ function canonicalPrivateFact(privateFact, required) {
   }
   const factJson = json(privateFact, 'registered action privateFact');
   const fact = JSON.parse(factJson);
-  if (
-    !fact || typeof fact !== 'object' || Array.isArray(fact)
-    || !Object.prototype.hasOwnProperty.call(fact, 'before')
-    || !Object.prototype.hasOwnProperty.call(fact, 'after')
-  ) {
+  if (!fact || typeof fact !== 'object' || Array.isArray(fact)) {
+    throw new TypeError('registered action privateFact must be an object');
+  }
+  if (!annotatedPrivateFact(fact) && (!Object.hasOwn(fact, 'before') || !Object.hasOwn(fact, 'after'))) {
     throw new TypeError('registered action privateFact must have before and after properties');
   }
   return { fact: deepFreeze(fact), factJson };

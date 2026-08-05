@@ -19,9 +19,8 @@ import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { createOperationalConsumers } from './operational-consumer.mjs';
 import { createPendingBlobLifecycle } from './pending-blob.mjs';
 import { readSeq } from './committed-log.mjs';
-import { CRUD_CURSOR_POLICY, assertV9AnnotatedTextOffsetEditPayload } from './entity/crud.mjs';
+import { CRUD_CURSOR_POLICY, assertV9AnnotatedTextOffsetEditPayload, ANNOTATED_TEXT_COMPENSATION } from './entity/crud.mjs';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
-import { isCanonicalAnnotatedTextHistoryImage } from './annotated-text-history.mjs';
 import { EventKind } from './event-handle.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 import { bindAuthorizedRows, isAuthorizedRows } from './action-authorization.mjs';
@@ -482,25 +481,27 @@ export function buildKernel(app) {
   for (const entity of entities.values()) for (const [fieldName, field] of Object.entries(entity.fields)) {
     if (field.kind !== 'annotatedText') continue;
     annotatedActionDetails.set(`${entity.name}.${fieldName}.operation`, { entity, fieldName, field });
+    annotatedActionDetails.set(`${entity.name}.${fieldName}.compensate`, { entity, fieldName, field, compensation: true });
   }
-  const isAnnotatedHistoryAction = ({ type, payload }) => {
+   const isAnnotatedHistoryAction = ({ type, payload }) => {
     const detail = annotatedActionDetails.get(type);
-    if (!detail) return false;
-    try { assertV9AnnotatedTextOffsetEditPayload(detail.entity.name, detail.fieldName, payload); return true; } catch { return false; }
+    if (!detail || detail.compensation) return false;
+     try { const command = assertV9AnnotatedTextOffsetEditPayload(detail.entity.name, detail.fieldName, payload); return command.edit.kind === 'text.insert' && command.edit.text.length > 0; } catch { return false; }
   };
-  const isAnnotatedHistoryFact = ({ type, payload, fact }) => {
-    const detail = annotatedActionDetails.get(type);
-    if (!detail || !isAnnotatedHistoryAction({ type, payload }) || !fact || typeof fact !== 'object') return false;
-    return isCanonicalAnnotatedTextHistoryImage(fact.before, `${detail.entity.name}_${detail.fieldName}`, payload.id, getAnnotatedTextCompiledMetadata(detail.field))
-      && isCanonicalAnnotatedTextHistoryImage(fact.after, `${detail.entity.name}_${detail.fieldName}`, payload.id, getAnnotatedTextCompiledMetadata(detail.field));
-  };
-  // The four v8 document actions are the only annotated actions admitted to
-  // the existing durable cursor.  Their inverse is an internal restore input;
-  // no application-authored history rule or public history payload is created.
+    const isContribution = (fact, documentId) => fact?.version === 2 && fact.kind === 'annotated-text.contribution'
+      && fact.documentId === documentId && fact.contribution?.kind === 'text.insert'
+      && typeof fact.contribution.blockId === 'string' && Array.isArray(fact.contribution.opId)
+      && typeof fact.contribution.text === 'string' && Number.isSafeInteger(fact.contribution.scalarCount);
+    const isAnnotatedHistoryFact = ({ type, payload, fact }) => {
+      const detail = annotatedActionDetails.get(type);
+      return Boolean(detail && isAnnotatedHistoryAction({ type, payload }) && isContribution(fact, payload.id));
+    };
+  // Annotated text history is a package-owned compensation action. It is not a
+  // public action and is admitted only through the trusted history capability.
   for (const type of annotatedActionTypes) {
     generatedHistoryActions[type] = {
-      inverse: ({ action, fact }) => ({ type, payload: action.payload, input: { kind: 'annotated-text.restore', expected: fact.after, target: fact.before } }),
-      redo: ({ action, fact }) => ({ type, payload: action.payload, input: { kind: 'annotated-text.restore', expected: fact.before, target: fact.after } }),
+      inverse: ({ origin, target, targetFact }) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'undo' } }, input: { kind: ANNOTATED_TEXT_COMPENSATION, targetFact } }),
+      redo: ({ origin, target, targetFact }) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'redo' } }, input: { kind: ANNOTATED_TEXT_COMPENSATION, targetFact } }),
     };
   }
 
