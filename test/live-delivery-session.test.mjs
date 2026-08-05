@@ -58,6 +58,31 @@ describe('LiveDeliverySession', () => {
     session.close();
   });
 
+  it('emits one non-terminal delayed-recovery warning across managed retries', async () => {
+    const warnings = [];
+    let bootstraps = 0;
+    const session = createLiveDeliverySession({
+      bootstrap: async ({ mode }) => {
+        bootstraps += 1;
+        return bootstraps === 1 && mode === 'snapshot'
+          ? { kind: 'snapshot', snapshot: { values: [] }, cursor: 1 }
+          : { kind: 'retry' };
+      },
+      subscribe: async () => ({ close() {} }),
+      validateSnapshot: (snapshot) => snapshot,
+      sendAction: async () => ({ ok: true }),
+      recoveryWarningDelayMs: 10,
+      onRecoveryDelayed: (delayed) => warnings.push(delayed),
+    });
+    await session.ready;
+    const reconnect = session.reconnect();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.deepEqual(warnings, [true]);
+    session.close();
+    assert.deepEqual(warnings, [true, false]);
+    await reconnect;
+  });
+
   it('silently drops duplicate delivery and confirms pending work only through its echo', async () => {
     const { session, deliver } = setup();
     await session.ready;

@@ -282,6 +282,11 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
            },
          }) });
   if (!result?.ok) {
+    app.log?.error?.('action', 'application action rejected', {
+      actionId: request.actionId,
+      type: request.type,
+      message: isWorkbenchFailure(result?.failure) ? result.failure.message : 'Internal error.',
+    });
     sendFailure(sendJson, res, isWorkbenchFailure(result?.failure)
       ? result.failure
       : failure('internal', 'Internal error.'));

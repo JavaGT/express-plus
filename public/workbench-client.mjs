@@ -2189,6 +2189,8 @@ export function createLiveDeliverySession({
   sendBatch,
   createActionId,
   onRecoveryStart,
+  onRecoveryDelayed,
+  recoveryWarningDelayMs = 5000,
 }) {
   if (typeof bootstrap !== 'function') throw new TypeError('bootstrap is required');
   if (typeof subscribe !== 'function') throw new TypeError('subscribe is required');
@@ -2218,6 +2220,29 @@ export function createLiveDeliverySession({
   const operations = new Map();
   const recoveryRetryWaiters = new Set();
   const admissionWaiters = [];
+  let recoveryWarningTimer = null;
+  let recoveryWarningActive = false;
+
+  function finishRecoveryWarning() {
+    if (recoveryWarningTimer !== null) {
+      clearTimeout(recoveryWarningTimer);
+      recoveryWarningTimer = null;
+    }
+    if (recoveryWarningActive) {
+      recoveryWarningActive = false;
+      try { onRecoveryDelayed?.(false); } catch { /* isolate consumers */ }
+    }
+  }
+
+  function startRecoveryWarning() {
+    if (recoveryWarningTimer !== null || recoveryWarningActive) return;
+    recoveryWarningTimer = setTimeout(() => {
+      recoveryWarningTimer = null;
+      if (closed || status === 'revoked' || status === 'unavailable') return;
+      recoveryWarningActive = true;
+      try { onRecoveryDelayed?.(true); } catch { /* isolate consumers */ }
+    }, recoveryWarningDelayMs);
+  }
 
   function admit(operation) {
     if (closed || status === 'revoked' || status === 'unavailable') return Promise.resolve(false);
@@ -2409,6 +2434,7 @@ export function createLiveDeliverySession({
 
   function becomeUnavailable() {
     if (closed || status === 'revoked') return;
+    finishRecoveryWarning();
     status = 'unavailable';
     settleAdmissions(false);
     // An opaque aggregate can only be reconciled by its replacement snapshot.
@@ -2439,6 +2465,7 @@ export function createLiveDeliverySession({
   async function recover(mode, snapshotCursorFloor, retryAttempt = 0) {
     if (closed) return;
     onRecoveryStart?.();
+    startRecoveryWarning();
     const generation = ++recoveryGeneration;
     const receiptGenerationAtStart = receiptGeneration;
     const snapshotCursorAtStart = cursor;
@@ -2470,6 +2497,7 @@ export function createLiveDeliverySession({
       settleSnapshotConfirmations(receiptGenerationAtStart);
       publish();
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
+      finishRecoveryWarning();
       status = 'live';
       if (initialized && !reconnecting) settleAdmissions(true);
       return;
@@ -2477,6 +2505,7 @@ export function createLiveDeliverySession({
     if (result.kind === 'catchup' && mode === 'catchup') {
       if (!(await applyCatchup(result))) return recover('snapshot');
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
+      finishRecoveryWarning();
       status = 'live';
       if (initialized && !reconnecting) settleAdmissions(true);
       return;
@@ -2634,6 +2663,7 @@ export function createLiveDeliverySession({
   function revoke(_reason) {
     if (closed || status === 'revoked') return;
     status = 'revoked';
+    finishRecoveryWarning();
     settleAdmissions(false);
     cancelRecoveryRetries();
     baseSnapshot = null;
@@ -2900,6 +2930,7 @@ export function createLiveDeliverySession({
     close() {
       if (closed) return;
       closed = true;
+      finishRecoveryWarning();
       settleAdmissions(false);
       cancelRecoveryRetries();
       subscription?.close?.();
@@ -2931,6 +2962,7 @@ export function createLiveDeliveryHttpSession({
   eventSourceFactory = (url, options) => new EventSource(url, options),
   createActionId,
   onRecoveryStart,
+  onRecoveryDelayed,
   requestIdentity = null,
 }) {
   if (typeof baseUrl !== 'string' || baseUrl.length === 0) throw new TypeError('baseUrl is required');
@@ -3048,6 +3080,7 @@ export function createLiveDeliveryHttpSession({
     sendBatch: sendBatch ?? sendHttpBatch,
     createActionId,
     onRecoveryStart,
+    onRecoveryDelayed,
   });
   // History commands use the same receipt/snapshot reconciliation path as an
   // application action. The server resolves this authenticated session's
@@ -3104,7 +3137,7 @@ export function createPrincipalSnapshotHttpSession({
  * A document-bound annotated-text session. The document context owns scope,
  * action grammar, and private authoring bindings; callers only name positions.
  */
-export function createAnnotatedTextHttpSession({ baseUrl, context, historySession, fetchImpl, eventSourceFactory, createActionId }) {
+export function createAnnotatedTextHttpSession({ baseUrl, context, historySession, fetchImpl, eventSourceFactory, createActionId, onRecoveryDelayed }) {
   if (!context || typeof context !== 'object' || typeof context.documentId !== 'string' || context.documentId.length === 0) {
     throw new TypeError('annotated text context requires a documentId');
   }
@@ -3148,6 +3181,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     createActionId,
     requestIdentity: { entity: entity.name, field: field.fieldName, documentId, authoringClient },
     onRecoveryStart: () => revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding),
+    onRecoveryDelayed,
     optimistic(document, action) {
       const positionBlocks = new Map();
       const bound = pendingActionPositionBlocks.get(action.payload?.authoring?.mutationId);

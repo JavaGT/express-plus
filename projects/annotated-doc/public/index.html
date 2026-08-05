@@ -155,6 +155,9 @@
           baseUrl: '/live-delivery',
           context: { entity: DocClient, field: DocClient.body, documentId: id },
           historySession,
+          onRecoveryDelayed: (delayed) => {
+            if (delayed) setStatus('sync delayed - still retrying...');
+          },
         });
         unsubscribe = session.subscribe(renderSessionStatus);
         editorBinding = bindAnnotatedTextEditor({
