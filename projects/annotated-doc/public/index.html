@@ -170,6 +170,17 @@
     // sets this so the fallback does not double-delete when both fire.
     let modifierDeleteHandled = false;
 
+    // Local typing history. Package durable history for annotatedText is keyed
+    // by project scope; this session's live-delivery scope is annotated-text:…
+    // so session.history.undo() would miss our edits. Draft-level undo matches
+    // the editor authority and Cmd+Z expectations.
+    const MAX_UNDO = 200;
+    let undoStack = [];
+    let redoStack = [];
+    let undoGroup = null; // coalesce consecutive single-char type/backspace
+    let historyBusy = false;
+    let historyKeyHandled = false;
+
     // Action IDs are durable-deduped by (scope, actionId). Never reuse a sequence
     // that can collide after reload (sessionStorage historySession + counter).
     function freshId(prefix) {
@@ -414,10 +425,85 @@
       draftFocus = sel.end;
     }
 
-    function replaceSelectionWith(text) {
+    function clearHistory() {
+      undoStack = [];
+      redoStack = [];
+      undoGroup = null;
+    }
+
+    function snapshotDraft() {
+      return { text: draftText, anchor: draftAnchor, focus: draftFocus };
+    }
+
+    function applySnapshot(snap) {
+      draftText = snap.text;
+      draftAnchor = Math.max(0, Math.min(snap.anchor, draftText.length));
+      draftFocus = Math.max(0, Math.min(snap.focus, draftText.length));
+      paintDraft();
+    }
+
+    /**
+     * Record a checkpoint before a user-driven mutation.
+     * Coalesce consecutive single-character inserts (typing) and consecutive
+     * single-character backspaces so "hello" undoes as one stroke group.
+     */
+    function beforeUserEdit(group) {
+      if (undoGroup !== null && undoGroup === group) return;
+      const top = undoStack[undoStack.length - 1];
+      const snap = snapshotDraft();
+      if (!top || top.text !== snap.text || top.anchor !== snap.anchor || top.focus !== snap.focus) {
+        undoStack.push(snap);
+        if (undoStack.length > MAX_UNDO) undoStack.shift();
+      }
+      redoStack = [];
+      undoGroup = group;
+    }
+
+    function breakUndoGroup() {
+      undoGroup = null;
+    }
+
+    async function performHistoryMove(direction) {
+      if (!session?.document || busy || historyBusy) return;
+      const stack = direction === 'undo' ? undoStack : redoStack;
+      const other = direction === 'undo' ? redoStack : undoStack;
+      if (!stack.length) return;
+      historyBusy = true;
+      breakUndoGroup();
+      try {
+        // Drain in-flight writes so reconcile starts from a settled session.
+        await writeChain;
+        const current = snapshotDraft();
+        const target = stack.pop();
+        other.push(current);
+        applySnapshot(target);
+        // Force session to match the restored draft (may diverge arbitrarily).
+        reconciling = false;
+        await reconcileSessionToDraft();
+        paintDraft();
+        setStatus(
+          `${session.status} · ${direction === 'undo' ? 'undid' : 'redid'} · ${undoStack.length} undo / ${redoStack.length} redo`,
+          session.status === 'live' || session.status === 'ready' ? 'ok' : '',
+        );
+      } catch (error) {
+        setStatus(String(error.message || error), 'error');
+      } finally {
+        historyBusy = false;
+      }
+    }
+
+    function replaceSelectionWith(text, { group } = {}) {
       const from = Math.min(draftAnchor, draftFocus);
       const to = Math.max(draftAnchor, draftFocus);
-      if (to > from) {
+      const hasSelection = to > from;
+      // Coalesce only pure single-character typing with no selection.
+      let editGroup = group;
+      if (editGroup === undefined) {
+        if (!hasSelection && text && text.length === 1 && text !== '\n') editGroup = 'insert';
+        else editGroup = null;
+      }
+      beforeUserEdit(editGroup);
+      if (hasSelection) {
         draftText = draftText.slice(0, from) + draftText.slice(to);
         enqueue({ kind: 'delete', from, to });
       }
@@ -432,8 +518,14 @@
       paintDraft();
     }
 
-    function applyDeleteRange(from, to) {
+    function applyDeleteRange(from, to, { group } = {}) {
       if (from >= to) return;
+      // Coalesce single-code-unit backspace runs; everything else is atomic.
+      let editGroup = group;
+      if (editGroup === undefined) {
+        editGroup = (to - from === 1) ? 'delete-unit' : null;
+      }
+      beforeUserEdit(editGroup);
       draftText = draftText.slice(0, from) + draftText.slice(to);
       draftAnchor = from;
       draftFocus = from;
@@ -557,6 +649,8 @@
       draftText = '';
       draftAnchor = 0;
       draftFocus = 0;
+      clearHistory();
+      historyBusy = false;
     }
 
     async function openDoc(id) {
@@ -621,7 +715,7 @@
     document.addEventListener('selectionchange', syncSelectionFromDom);
 
     $('editor').addEventListener('beforeinput', (event) => {
-      if (!session?.document || busy) {
+      if (!session?.document || busy || historyBusy) {
         event.preventDefault();
         return;
       }
@@ -631,6 +725,17 @@
       // Always own typing — never let the browser mutate the DOM under us.
       const inputType = event.inputType;
       event.preventDefault();
+
+      if (inputType === 'historyUndo') {
+        historyKeyHandled = true;
+        void performHistoryMove('undo');
+        return;
+      }
+      if (inputType === 'historyRedo') {
+        historyKeyHandled = true;
+        void performHistoryMove('redo');
+        return;
+      }
 
       if (inputType === 'insertText') {
         const text = event.data ?? '';
@@ -646,7 +751,7 @@
           ?? '';
         if (!text) return;
         syncSelectionFromDom();
-        replaceSelectionWith(text);
+        replaceSelectionWith(text, { group: null });
         return;
       }
 
@@ -668,7 +773,11 @@
         syncSelectionFromDom();
         const range = deleteRangeForInputType(inputType);
         if (!range) return;
-        applyDeleteRange(range.from, range.to);
+        // Word/line deletes are atomic undo steps.
+        const atomic = inputType !== 'deleteContentBackward'
+          && inputType !== 'deleteContentForward'
+          && inputType !== 'deleteContent';
+        applyDeleteRange(range.from, range.to, atomic ? { group: null } : undefined);
         return;
       }
 
@@ -678,12 +787,45 @@
     // Enter does not always produce beforeinput insertText across browsers.
     // Cmd/Option+Backspace usually goes through beforeinput (deleteSoftLineBackward /
     // deleteWordBackward); keydown is only a fallback when beforeinput is skipped.
+    // Cmd+Z / Cmd+Shift+Z drive the local draft undo stack (historyUndo/historyRedo
+    // also arrive via beforeinput on some browsers).
     $('editor').addEventListener('keydown', (event) => {
-      if (!session?.document || busy || event.isComposing) return;
+      if (!session?.document || busy || historyBusy || event.isComposing) return;
+
+      const mod = event.metaKey || event.ctrlKey;
+      if (mod && !event.altKey && (event.key === 'z' || event.key === 'Z')) {
+        event.preventDefault();
+        const direction = event.shiftKey ? 'redo' : 'undo';
+        historyKeyHandled = false;
+        queueMicrotask(() => {
+          if (historyKeyHandled) return;
+          void performHistoryMove(direction);
+        });
+        return;
+      }
+      // Windows / some Linux layouts: Ctrl+Y redo
+      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
+        && (event.key === 'y' || event.key === 'Y')) {
+        event.preventDefault();
+        historyKeyHandled = false;
+        queueMicrotask(() => {
+          if (historyKeyHandled) return;
+          void performHistoryMove('redo');
+        });
+        return;
+      }
+
       if (event.key === 'Enter') {
         event.preventDefault();
         syncSelectionFromDom();
-        replaceSelectionWith('\n');
+        replaceSelectionWith('\n', { group: null });
+        return;
+      }
+
+      // Arrow / Home / End / Page* break typing coalescing (new undo group next).
+      if (event.key.startsWith('Arrow') || event.key === 'Home' || event.key === 'End'
+        || event.key === 'PageUp' || event.key === 'PageDown') {
+        breakUndoGroup();
         return;
       }
 
@@ -705,10 +847,10 @@
       // beforeinput runs after keydown in the same turn when the browser emits it.
       queueMicrotask(() => {
         if (modifierDeleteHandled) return;
-        if (!session?.document || busy) return;
+        if (!session?.document || busy || historyBusy) return;
         syncSelectionFromDom();
         const range = deleteRangeForInputType(inputType);
-        if (range) applyDeleteRange(range.from, range.to);
+        if (range) applyDeleteRange(range.from, range.to, { group: null });
       });
     });
 
