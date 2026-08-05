@@ -91,7 +91,7 @@
         const detail = document.createElement('small');
         detail.textContent = doc.id;
         item.append(label, detail);
-        item.onclick = () => void openDoc(doc.id);
+        item.onclick = () => void openWhenFree(doc.id);
         $('list').append(item);
       }
     }
@@ -120,6 +120,21 @@
       );
     }
 
+    function withTimeout(promise, ms, message) {
+      let timer;
+      return Promise.race([
+        promise,
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(message)), ms); }),
+      ]).finally(() => clearTimeout(timer));
+    }
+
+    function openWhenFree(id) {
+      return (async () => {
+        while (busy) await new Promise((resolve) => setTimeout(resolve, 50));
+        await openDoc(id);
+      })();
+    }
+
     async function openDoc(id) {
       if (busy) return;
       busy = true;
@@ -141,7 +156,7 @@
           session,
           onError: (error) => setStatus(error?.message ?? String(error), 'error'),
         });
-        await session.ready;
+        await withTimeout(session.ready, 10000, 'document is taking too long to open — try again');
         renderSessionStatus();
         editorBinding.focus();
       } catch (error) {
@@ -162,7 +177,7 @@
         const body = await response.json();
         if (!response.ok || !body.ok) throw new Error(body.failure?.message ?? `create failed (${response.status})`);
         await loadDocs();
-        await openDoc(body.id);
+        await openWhenFree(body.id);
       } catch (error) {
         setStatus(error?.message ?? String(error), 'error');
       } finally {

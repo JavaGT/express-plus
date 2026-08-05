@@ -1,4 +1,5 @@
 import { expect, test } from '@playwright/test';
+import { createHash } from 'node:crypto';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -65,6 +66,42 @@ test('repeated reloads retain one authoring lease', async ({ page }) => {
     JOIN Doc_body_authoring_stream AS stream ON stream.id = lease.stream_id
     WHERE stream.document_id = ?`).get(id);
   expect(leases.count).toBe(1);
+});
+
+test('an exhausted document surfaces an error and never blocks new documents', async ({ page, browser }) => {
+  const anchorId = '00000000-0000-0000-0000-000000000000';
+  const exhaustedId = 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+  await page.goto(origin);
+  const created = await page.evaluate(async ([anchor, exhausted]) => {
+    const create = (id) => fetch('/docs', {
+      method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ clientId: 'fixture', id }),
+    }).then((response) => response.json());
+    return [await create(anchor), await create(exhausted)];
+  }, [anchorId, exhaustedId]);
+  expect(created.every((result) => result.ok)).toBe(true);
+  await page.reload();
+  await page.locator('.doc', { hasText: exhaustedId }).click();
+  await expect(page.locator('#status')).toContainText('live');
+
+  const stream = app.db.prepare(`SELECT id FROM Doc_body_authoring_stream WHERE document_id = ?`).get(exhaustedId);
+  const insertLease = app.db.prepare(`INSERT INTO Doc_body_authoring_lease (id, stream_id, client_nonce_hash, acknowledged_fence, created_at, expires_at) VALUES (?, ?, ?, 0, ?, ?)`);
+  const now = new Date().toISOString();
+  const later = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+  for (let index = 0; index < 15; index += 1) {
+    insertLease.run(`fixture-lease-${index}`, stream.id, createHash('sha256').update(`fixture-nonce-${index}`).digest('hex'), now, later);
+  }
+  expect(app.db.prepare(`SELECT COUNT(*) AS count FROM Doc_body_authoring_lease WHERE stream_id = ?`).get(stream.id).count).toBe(16);
+
+  const context = await browser.newContext();
+  const fresh = await context.newPage();
+  await fresh.goto(origin);
+  await expect(fresh.locator('#status')).toContainText('live', { timeout: 15000 });
+  await fresh.locator('.doc', { hasText: exhaustedId }).click();
+  await expect(fresh.locator('#status')).toContainText('try again', { timeout: 15000 });
+  await fresh.getByRole('button', { name: 'New document' }).click();
+  await expect(fresh.locator('#status')).toContainText('live', { timeout: 15000 });
+  await context.close();
 });
 
 test('two pages converge through session ingest without repair writes', async ({ browser }) => {
