@@ -39,6 +39,10 @@ function authoringEnvelope(cursor) {
   };
 }
 
+function authoringClientFrom(url) {
+  return new URL(url).searchParams.get('authoringClient');
+}
+
 function setup({ revoked = false } = {}) {
   const requests = [];
   const sources = [];
@@ -78,6 +82,93 @@ test('document session bootstraps recipient snapshot and derives typed insert fr
     authoring: { version: 1, stream: token('stream'), lease: token('lease'), mutationId: 'm1' },
     edit: { kind: 'text.insert', at: { positionToken: token('position1'), offset: 1, affinity: 'right' }, text: 'x' },
   });
+  session.close();
+});
+
+test('document session reuses its tab-scoped authoring client across reloads', async (t) => {
+  const previous = globalThis.sessionStorage;
+  const values = new Map();
+  globalThis.sessionStorage = {
+    getItem(key) { return values.get(key) ?? null; },
+    setItem(key, value) { values.set(key, value); },
+  };
+  t.after(() => {
+    if (previous === undefined) delete globalThis.sessionStorage;
+    else globalThis.sessionStorage = previous;
+  });
+  const clients = [];
+  for (let reload = 0; reload < 17; reload += 1) {
+    const session = createAnnotatedTextHttpSession({
+      baseUrl: reload % 2 === 0 ? 'https://example.test/live-delivery' : 'https://example.test/live-delivery/',
+      context: { entity: Document, field: Document.body, documentId: 'reloaded' },
+      historySession: 'tab-a', createActionId: () => `reload-${reload}`,
+      fetchImpl: async (url, options) => {
+        if (options?.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+        clients.push(authoringClientFrom(url));
+        return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: snapshot(), cursor: 1, authoring: authoringEnvelope(1) }) };
+      },
+      eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+    });
+    await session.ready;
+    session.close();
+  }
+  assert.equal(new Set(clients).size, 1);
+  assert.match(clients[0], /^[A-Za-z0-9_-]{43}$/);
+});
+
+test('document session replaces a malformed stored authoring client', async (t) => {
+  const previous = globalThis.sessionStorage;
+  let stored = 'not-a-valid-authoring-client';
+  globalThis.sessionStorage = {
+    getItem() { return stored; },
+    setItem(_key, value) { stored = value; },
+  };
+  t.after(() => {
+    if (previous === undefined) delete globalThis.sessionStorage;
+    else globalThis.sessionStorage = previous;
+  });
+  let requested;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'malformed-storage' },
+    historySession: 'tab-a', createActionId: () => 'malformed-storage',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      requested = authoringClientFrom(url);
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: snapshot(), cursor: 1, authoring: authoringEnvelope(1) }) };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+  assert.match(requested, /^[A-Za-z0-9_-]{43}$/);
+  assert.equal(stored, requested);
+  session.close();
+});
+
+test('document session bootstraps when authoring client storage is unavailable', async (t) => {
+  const previous = globalThis.sessionStorage;
+  globalThis.sessionStorage = {
+    getItem() { throw new Error('storage denied'); },
+    setItem() { throw new Error('storage denied'); },
+  };
+  t.after(() => {
+    if (previous === undefined) delete globalThis.sessionStorage;
+    else globalThis.sessionStorage = previous;
+  });
+  let requested;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'storage-denied' },
+    historySession: 'tab-a', createActionId: () => 'storage-denied',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      requested = authoringClientFrom(url);
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: snapshot(), cursor: 1, authoring: authoringEnvelope(1) }) };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready;
+  assert.match(requested, /^[A-Za-z0-9_-]{43}$/);
   session.close();
 });
 

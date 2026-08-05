@@ -3119,7 +3119,19 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     globalThis.crypto.getRandomValues(bytes);
     return btoa(String.fromCharCode(...bytes)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '');
   };
-  const authoringClient = randomToken();
+  const authoringClientStorageKey = `workbench:annotated-text-authoring-client:${JSON.stringify([
+    baseUrl.replace(/\/+$/, ''), entity.name, field.fieldName, documentId,
+  ])}`;
+  let authoringClient;
+  try {
+    const stored = globalThis.sessionStorage?.getItem(authoringClientStorageKey);
+    authoringClient = typeof stored === 'string' && /^[A-Za-z0-9_-]{43}$/.test(stored) ? stored : randomToken();
+    if (stored !== authoringClient) {
+      try { globalThis.sessionStorage?.setItem(authoringClientStorageKey, authoringClient); } catch {}
+    }
+  } catch {
+    authoringClient = randomToken();
+  }
   const blockGroupTokens = new WeakMap();
   const pendingActionPositionBlocks = new Map();
   const deferredAuthoringAcknowledgements = new Map();

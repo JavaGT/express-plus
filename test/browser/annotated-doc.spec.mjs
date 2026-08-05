@@ -53,6 +53,20 @@ test('rapid typing and scalar-safe deletion survive reload', async ({ page }) =>
   await expect(page.locator('#editor')).toHaveText('hello');
 });
 
+test('repeated reloads retain one authoring lease', async ({ page }) => {
+  const id = await createDocument(page);
+  for (let reload = 0; reload < 17; reload += 1) {
+    await page.reload();
+    await openDocument(page, id);
+  }
+  await expect(page.locator('#status')).toContainText('live');
+  const leases = app.db.prepare(`SELECT COUNT(*) AS count
+    FROM Doc_body_authoring_lease AS lease
+    JOIN Doc_body_authoring_stream AS stream ON stream.id = lease.stream_id
+    WHERE stream.document_id = ?`).get(id);
+  expect(leases.count).toBe(1);
+});
+
 test('two pages converge through session ingest without repair writes', async ({ browser }) => {
   const context = await browser.newContext();
   const first = await context.newPage();
