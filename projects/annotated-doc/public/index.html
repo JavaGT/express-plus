@@ -165,6 +165,7 @@
     let draftFocus = 0;  // selection end (UTF-16)
     let pendingEdits = 0;
     let writeChain = Promise.resolve();
+    let reconciling = false;
 
     // Action IDs are durable-deduped by (scope, actionId). Never reuse a sequence
     // that can collide after reload (sessionStorage historySession + counter).
@@ -281,49 +282,117 @@
         .replaceAll('"', '&quot;');
     }
 
+    async function awaitSettlement(result) {
+      if (!result?.ok || !result.settlement?.wait) return result;
+      try {
+        // Snapshot-only annotated-text settles after receipt snapshot recovery.
+        // Waiting prevents the next keystroke from racing a lagging "1"-char
+        // replacement snapshot that would wipe later optimistic inserts.
+        await Promise.race([
+          result.settlement.wait(),
+          new Promise((resolve) => setTimeout(resolve, 5000)),
+        ]);
+      } catch {
+        /* settlement errors surface via session status */
+      }
+      return result;
+    }
+
+    async function dispatchOp(op) {
+      if (!session?.document) return;
+      const block = primaryBlock(session.document);
+      if (!block) {
+        setStatus('no visible block', 'error');
+        return;
+      }
+      const live = block.text ?? '';
+      let result;
+      if (op.kind === 'insert') {
+        const offset = Math.max(0, Math.min(op.offset, live.length));
+        result = await session.insert({
+          mutationId: freshId('ins'),
+          at: { blockId: block.id, offset, affinity: 'right' },
+          text: op.text,
+        });
+      } else if (op.kind === 'delete') {
+        const from = Math.max(0, Math.min(op.from, live.length));
+        const to = Math.max(from, Math.min(op.to, live.length));
+        if (from === to) return;
+        result = await session.delete({
+          mutationId: freshId('del'),
+          from: { blockId: block.id, offset: from, affinity: 'right' },
+          to: { blockId: block.id, offset: to, affinity: 'right' },
+        });
+      }
+      if (result && result.ok === false) {
+        setStatus(result.failure?.message || 'edit rejected', 'error');
+        return;
+      }
+      await awaitSettlement(result);
+    }
+
+    /**
+     * Draft is the typing authority. After the local queue drains, force the
+     * session document to match draft. Per-keystroke snapshot recovery can
+     * otherwise leave the session at the first character while the draft has
+     * the full string — and a later adopt would paint "1".
+     */
+    async function reconcileSessionToDraft() {
+      if (reconciling || !session?.document || pendingEdits > 0) return;
+      const block = primaryBlock(session.document);
+      if (!block) return;
+      let live = block.text ?? '';
+      if (live === draftText) return;
+
+      reconciling = true;
+      try {
+        // Common case: session is a prefix of draft (tail inserts lost to races).
+        if (draftText.startsWith(live)) {
+          const suffix = draftText.slice(live.length);
+          if (!suffix) return;
+          await dispatchOp({ kind: 'insert', offset: live.length, text: suffix });
+          return;
+        }
+
+        // Common case: draft is a prefix of session (should be rare with draft-first).
+        if (live.startsWith(draftText)) {
+          if (live.length === draftText.length) return;
+          await dispatchOp({ kind: 'delete', from: draftText.length, to: live.length });
+          return;
+        }
+
+        // Diverged: replace whole block body with draft.
+        if (live.length > 0) {
+          await dispatchOp({ kind: 'delete', from: 0, to: live.length });
+        }
+        if (draftText.length > 0) {
+          await dispatchOp({ kind: 'insert', offset: 0, text: draftText });
+        }
+      } finally {
+        reconciling = false;
+      }
+    }
+
     function enqueue(op) {
       pendingEdits += 1;
       writeChain = writeChain
         .then(async () => {
-          if (!session?.document) return;
-          const block = primaryBlock(session.document);
-          if (!block) {
-            setStatus('no visible block', 'error');
-            return;
-          }
-          // Offsets are relative to the serial stream of prior ops. Prefer the
-          // live session text length when the op appends at the draft end so a
-          // lagging optimistic surface cannot reject in-range inserts.
-          const live = block.text ?? '';
-          let result;
-          if (op.kind === 'insert') {
-            const offset = Math.max(0, Math.min(op.offset, live.length));
-            result = await session.insert({
-              mutationId: freshId('ins'),
-              at: { blockId: block.id, offset, affinity: 'right' },
-              text: op.text,
-            });
-          } else if (op.kind === 'delete') {
-            const from = Math.max(0, Math.min(op.from, live.length));
-            const to = Math.max(from, Math.min(op.to, live.length));
-            if (from === to) return;
-            result = await session.delete({
-              mutationId: freshId('del'),
-              from: { blockId: block.id, offset: from, affinity: 'right' },
-              to: { blockId: block.id, offset: to, affinity: 'right' },
-            });
-          }
-          if (result && result.ok === false) {
-            setStatus(result.failure?.message || 'edit rejected', 'error');
-          }
+          await dispatchOp(op);
         })
         .catch((error) => {
           setStatus(String(error.message || error), 'error');
         })
-        .finally(() => {
+        .finally(async () => {
           pendingEdits -= 1;
-          // Never clobber a focused draft with a lagging snapshot — that was
-          // wiping multi-character bursts down to the first committed char.
+          if (pendingEdits === 0) {
+            try {
+              await reconcileSessionToDraft();
+            } catch (error) {
+              setStatus(String(error.message || error), 'error');
+            }
+            // Always re-paint draft so a lagging session publish cannot stick.
+            paintDraft();
+          }
         });
     }
 
@@ -430,22 +499,27 @@
             setStatus('document unavailable', 'error');
             return;
           }
-          // Draft owns the surface while typing (pending or focused). Adopting a
-          // lagging snapshot mid-burst was resetting the editor to one character.
-          const serverText = visibleText(document);
-          const focused = document.activeElement === $('editor');
-          if (pendingEdits === 0 && !focused && serverText !== draftText) {
-            adoptDocument(document);
-          }
+          // Never paint session snapshots over the draft after open. Annotated-
+          // text delivery is snapshot-only: a lagging receipt recovery for the
+          // first keystroke was publishing "1" and wiping the burst. Draft is
+          // authoritative; reconcileSessionToDraft pushes draft → session.
           const block = primaryBlock(document);
+          const serverText = visibleText(document);
           const extra = document.blocks.length > 1
             ? ` · editing first of ${document.blocks.length} blocks`
             : '';
           const queue = pendingEdits > 0 ? ` · ${pendingEdits} pending` : '';
+          const lag = pendingEdits === 0 && serverText !== draftText
+            ? ` · syncing…`
+            : '';
           setStatus(
-            `${session.status} · ${block ? block.id.slice(0, 8) + '…' : 'no visible block'}${extra}${queue}`,
+            `${session.status} · ${block ? block.id.slice(0, 8) + '…' : 'no visible block'}${extra}${queue}${lag}`,
             session.status === 'live' || session.status === 'ready' ? 'ok' : '',
           );
+          // If a late snapshot left the session behind while idle, re-push draft.
+          if (pendingEdits === 0 && serverText !== draftText) {
+            void writeChain.then(() => reconcileSessionToDraft()).then(() => paintDraft());
+          }
         });
         await session.ready;
         if (session.document) adoptDocument(session.document);
