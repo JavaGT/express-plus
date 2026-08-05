@@ -151,3 +151,33 @@ test('two pages converge through session ingest without repair writes', async ({
   await expect(second.locator('#editor')).toHaveText('AB');
   await context.close();
 });
+
+test('two pages type concurrently and converge on identical final text', async ({ browser }) => {
+  const context = await browser.newContext();
+  const first = await context.newPage();
+  const id = await createDocument(first);
+  const second = await context.newPage();
+  await openDocument(second, id);
+
+  const firstEditor = first.locator('#editor');
+  const secondEditor = second.locator('#editor');
+  await firstEditor.click();
+  await secondEditor.click();
+  const [firstTyped, secondTyped] = ['A', 'B'];
+  await Promise.all([
+    firstEditor.pressSequentially(firstTyped, { delay: 0 }),
+    secondEditor.pressSequentially(secondTyped, { delay: 0 }),
+  ]);
+
+  await expect.poll(async () => {
+    const firstText = (await firstEditor.textContent()) ?? '';
+    const secondText = (await secondEditor.textContent()) ?? '';
+    return firstText === secondText && [...firstText].sort().join('') === 'AB';
+  }, { timeout: 15000 }).toBe(true);
+
+  await first.reload();
+  await openDocument(first, id);
+  await expect(firstEditor).toHaveText(/^[AB]{2}$/);
+  await expect(secondEditor).toHaveText(/^[AB]{2}$/);
+  await context.close();
+});

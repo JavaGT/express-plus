@@ -57,6 +57,31 @@ test('HTTP delivery rejects malformed requests and enforces a stream cap', async
   } finally { server.close(); }
 });
 
+test('HTTP delivery logs bootstrap exceptions before returning a sanitized failure', async () => {
+  const logs = [];
+  const delivery = {
+    bootstrap: async () => { throw new Error('offset is outside text bounds'); },
+    catchup: async () => ({ kind: 'revoked' }),
+    subscribe: async () => ({ activate: async () => 0 }),
+  };
+  const handler = createLiveDeliveryHttpHandler({
+    delivery,
+    principalOf: () => ({ type: 'user', id: 'u1' }),
+    log: { error: (channel, message, context) => logs.push({ channel, message, context }) },
+  });
+  const { server, baseUrl } = await serve(handler);
+  try {
+    const response = await fetch(`${baseUrl}/bootstrap?scope=Project%3Ap1&mode=snapshot`);
+    assert.equal(response.status, 400);
+    assert.deepEqual(logs, [{
+      channel: 'live',
+      message: 'HTTP live delivery request failed',
+      context: { path: '/live-delivery/bootstrap', error: 'offset is outside text bounds' },
+    }]);
+    assert.deepEqual(await response.json(), { error: 'live delivery unavailable' });
+  } finally { server.close(); }
+});
+
 test('HTTP delivery transports aggregate cursors without widening their shape', async () => {
   const cursor = { anchor: 3, aggregate: 7 };
   const delivery = {

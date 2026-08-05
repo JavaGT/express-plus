@@ -52,7 +52,7 @@ function writeJson(res, value) {
  * {path}/events?scope=<scope>&after=<cursor>` is an SSE stream whose data
  * frames are arrays of recipient envelopes. Return false for unrelated routes.
  */
-export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/live-delivery', maxSubscriptions = 100 } = {}) {
+export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/live-delivery', maxSubscriptions = 100, log = null } = {}) {
   if (!delivery || typeof delivery.bootstrap !== 'function' || typeof delivery.catchup !== 'function' || typeof delivery.subscribe !== 'function') {
     throw new TypeError('delivery must be a LiveDelivery');
   }
@@ -198,6 +198,10 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
       if (revoked && !res.writableEnded) res.end();
       return true;
     } catch (error) {
+      log?.error?.('live', 'HTTP live delivery request failed', {
+        path: url.pathname,
+        error: error instanceof Error ? error.message : String(error),
+      });
       releaseStream?.();
       if (url.pathname === `${path}/events`) {
         if (!res.headersSent) reject(res, error?.code === 'live-delivery-revoked' ? 403 : 400, 'live delivery unavailable');

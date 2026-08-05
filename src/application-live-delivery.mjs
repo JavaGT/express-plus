@@ -38,6 +38,7 @@ export function attachApplicationLiveDelivery(app, {
     principalOf,
     path,
     maxSubscriptions,
+    log: app.log,
   });
 
   app._applicationLiveDelivery = Object.freeze({
