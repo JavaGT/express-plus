@@ -81,6 +81,40 @@ test('document session bootstraps recipient snapshot and derives typed insert fr
   session.close();
 });
 
+test('document session owns mutation identity and rejects non-atomic selection replacement', async () => {
+  const { session, requests } = setup();
+  await session.ready;
+  await session.insert({ at: { blockId: 'block-1', offset: 1, affinity: 'right' }, text: 'x' });
+  assert.match(requests[0].payload.authoring.mutationId, /^[A-Za-z0-9_-]{43}$/);
+  session.close();
+
+  const batchRequests = [];
+  let cursor = 0;
+  const replacement = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'replace-action',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: cursor }) };
+        const body = JSON.parse(options.body);
+        batchRequests.push(body);
+        return { ok: true, status: 200, json: async () => ({ ok: true, actionId: body.actionId, confirmedThrough: cursor }) };
+      }
+      cursor += 1;
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: snapshot(cursor), cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await replacement.ready;
+  await assert.rejects(replacement.replace({
+    mutationId: 'replace-1', from: { blockId: 'block-1', offset: 1, affinity: 'right' },
+    to: { blockId: 'block-1', offset: 4, affinity: 'right' }, text: 'i',
+  }), /not yet supported atomically/);
+  assert.equal(batchRequests.length, 0);
+  replacement.close();
+});
+
 test('document session confirms through authorized replacement and refreshes its token after opaque recovery', async () => {
   const { session, requests, sources } = setup();
   await session.ready;

@@ -68,9 +68,11 @@ function wireMutationSurface(app) {
 function bindAnnotatedTextScope(app, args) {
   if (!args?.type || !args?.payload || typeof args.payload !== 'object') return args;
   const entity = [...app.entities.values()].find((candidate) => args.type.startsWith(`${candidate.name}.`));
-  const descriptor = entity && Object.values(entity.fields).find((field) => field.kind === 'annotatedText');
-  if (!descriptor) return args;
-  const operationType = Object.entries(entity.fields).find(([, field]) => field.kind === 'annotatedText');
+  const annotatedFields = entity && Object.entries(entity.fields).filter(([, field]) => field.kind === 'annotatedText');
+  if (!annotatedFields?.length) return args;
+  const operationType = annotatedFields.find(([name]) => args.type === `${entity.name}.${name}.operation`)
+    ?? annotatedFields[0];
+  const descriptor = operationType[1];
   if (args.type !== `${entity.name}.create` && args.type !== `${entity.name}.update` && args.type !== `${entity.name}.remove`
     && args.type !== `${entity.name}.annotatedText.retire` && args.type !== `${entity.name}.${operationType[0]}.operation`) return args;
   const id = args.payload.id;

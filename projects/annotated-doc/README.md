@@ -57,16 +57,16 @@ DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 
 ## Client handle
 
-`public/client-handle.mjs` is a frozen browser-safe mirror of the server
-declaration (same pattern as Scope’s `TranscriptClient`). When you change
-annotation or measurement families on the server, update the client handle in
-the same change.
+`GET /client-handle.mjs` serializes the compiled `Doc.body` handle. The browser
+does not maintain a second declaration or manually mirror annotation and
+measurement families.
 
 ## Mutation path
 
 ```text
 contenteditable beforeinput
-  → createAnnotatedTextHttpSession.insert|delete
+  → bindAnnotatedTextEditor
+  → createAnnotatedTextHttpSession.replace
   → POST /workbench/actions (package)
   → committed log + projection
   → live delivery recipient snapshot

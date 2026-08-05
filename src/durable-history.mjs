@@ -269,11 +269,12 @@ export function createDurableHistoryRuntime({ db, descriptor, generatedActions =
 
   function receiptMetadata(request, operation = 'action') {
     const session = request.history?.session;
+    const historyIdentity = request.history?.identity ?? session;
     return {
       actionType: request.type ?? '$batch',
       actionData: request.type ? request.payload : request.actions,
       principalKey: principalKey(request.principal),
-      sessionId: session ?? null,
+      sessionId: historyIdentity ?? null,
       operation,
     };
   }
@@ -292,7 +293,7 @@ export function createDurableHistoryRuntime({ db, descriptor, generatedActions =
      } else if (annotatedActionTypes.has(request.type) ? !annotatedEligibleAction(request) : cursorPolicyFor(request.type) === 'excluded') {
       return { metadata, apply: undefined };
     }
-    const key = identity({ scope: request.scope, session: request.history.session, principal: request.principal });
+    const key = identity({ scope: request.scope, session: request.history.identity ?? request.history.session, principal: request.principal });
     const expected = cursorRow(db, key, receiptIsEligible);
     return {
       metadata,

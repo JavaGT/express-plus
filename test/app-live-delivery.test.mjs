@@ -416,7 +416,8 @@ test('declared annotated text owns generated HTTP admission and package delivery
     owner: ref('User', { role: 'owner' }),
     grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not project owner'))],
   });
-  const app = workbench({ db, entities: [Project, Document] });
+  const history = (await import('../src/index.mjs')).durableHistory({ authorize: () => true });
+  const app = workbench({ db, entities: [Project, Document], history });
   app.attachLiveDelivery({ principalOf });
   app.listen(0, { principalOf });
   await app.ready;
@@ -424,7 +425,7 @@ test('declared annotated text owns generated HTTP admission and package delivery
   const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
   const post = (action, headers = {}) => fetch(`${origin}/workbench/actions`, {
     method: 'POST', headers: { 'content-type': 'application/json', ...headers },
-    body: JSON.stringify({ actionId: action.payload?.version ? `op-${action.payload.mutationId}` : `action-${action.type}`, ...action, clientId: 'tab-a' }),
+    body: JSON.stringify({ actionId: action.payload?.version ? `op-${action.payload.mutationId}` : `action-${action.type}-${action.payload?.id ?? ''}`, ...action, clientId: 'tab-a' }),
   });
 
   const create = annotatedTextCreateAction(Document, Document.body, { id: 'd1', projectId: 'p1', ownerId: 'u1' });
@@ -442,15 +443,38 @@ test('declared annotated text owns generated HTTP admission and package delivery
     historySession: 'tab-a', createActionId: () => `typed-${++actionNumber}`,
     eventSourceFactory: () => { const source = { close() {}, onmessage: null, onerror: null }; sources.push(source); return source; },
   });
-  await session.ready;
+  await session.ready.catch((error) => { error.message = `first document ready: ${error.message}`; throw error; });
   assert.equal(session.document.blocks[0].id, initialBlockId);
-  assert.equal((await session.insert({ mutationId: 'insert-1', at: { blockId: initialBlockId, offset: 0, affinity: 'right' }, text: 'hello' })).ok, true);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  const inserted = await session.insert({ mutationId: 'insert-1', at: { blockId: initialBlockId, offset: 0, affinity: 'right' }, text: 'hello' });
+  assert.equal(inserted.ok, true);
+  assert.equal((await inserted.settlement.wait()).status, 'reconciled');
   assert.equal(session.document.blocks[0].text, 'hello', 'committed receipt recovers through recipient snapshot ingest');
-  assert.equal((await session.split({ mutationId: 'split-1', at: { blockId: initialBlockId, offset: 2, affinity: 'right' } })).ok, true);
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  const split = await session.split({ mutationId: 'split-1', at: { blockId: initialBlockId, offset: 2, affinity: 'right' } });
+  assert.equal(split.ok, true);
+  assert.equal((await split.settlement.wait()).status, 'reconciled');
   assert.equal(session.document.blocks.length, 2);
   assert.equal('dispatch' in session, false);
+
+  assert.equal((await post(annotatedTextCreateAction(Document, Document.body, {
+    id: 'd2', projectId: 'p1', ownerId: 'u1',
+  }))).status, 200);
+  const second = createAnnotatedTextHttpSession({
+    baseUrl: `${origin}/live-delivery`, context: { entity: Document, field: Document.body, documentId: 'd2' },
+    historySession: 'tab-a', createActionId: () => `second-${++actionNumber}`,
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await second.ready.catch((error) => { error.message = `second document ready: ${error.message}`; throw error; });
+  const secondBlockId = second.document.blocks[0].id;
+  const secondInsert = await second.insert({
+    mutationId: 'second-insert', at: { blockId: secondBlockId, offset: 0, affinity: 'right' }, text: 'second',
+  });
+  assert.equal((await secondInsert.settlement.wait()).status, 'reconciled');
+  const undoneSecond = await second.history.undo();
+  assert.equal(undoneSecond.ok, true);
+  assert.equal((await undoneSecond.settlement.wait()).status, 'reconciled');
+  assert.equal(second.document.blocks[0].text, '');
+  assert.equal(session.document.blocks.map((block) => block.text).join(''), 'hello', 'same-project document history is isolated');
+  second.close();
 
   const exportRequest = { app, entity: Document, field: Document.body, documentId: 'd1', expectedOwningScope: { entity: Project, id: 'p1' } };
   const exported = await exportAnnotatedText({ ...exportRequest, principal });
@@ -521,15 +545,22 @@ test('HTTP delivery session posts its package-owned batch envelope to the fixed 
 
 test('package history transport uses durable authorization, wakes delivery, and returns the receipt fence', async (t) => {
   const db = new DatabaseSync(':memory:');
+  const HistoryDocument = entity('HistoryDocument', {
+    project: ref('Project'), owner: ref('User'),
+    body: annotatedText({ project: 'project', owner: 'owner' }),
+    grant: [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
   const history = (await import('../src/index.mjs')).durableHistory({ authorize: () => true, actions: {
     'project.write': {
       inverse: ({ fact }) => ({ type: 'project.write', payload: { ...fact.before, authorized: true, exists: true } }),
       redo: ({ fact }) => ({ type: 'project.write', payload: { ...fact.after, authorized: true, exists: true } }),
     },
   } });
-  const app = workbench({ db, entities: [project()], history, actions: [projectAction()] });
-  app.attachLiveDelivery({ principalOf: () => user });
-  app.listen(0, { principalOf: () => user });
+  let historyPrincipal = user;
+  const principalOf = () => historyPrincipal;
+  const app = workbench({ db, entities: [project(), HistoryDocument], history, actions: [projectAction()] });
+  app.attachLiveDelivery({ principalOf });
+  app.listen(0, { principalOf });
   await app.ready;
   t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
   assert.equal('_historyHttp' in app, false);
@@ -548,13 +579,22 @@ test('package history transport uses durable authorization, wakes delivery, and 
     payload: { id: 'p1', name: 'before', authorized: true, before: { id: 'p1', name: 'initial' } },
   });
   assert.equal(action.status, 200);
+  db.prepare('INSERT INTO HistoryDocument (id, project, owner) VALUES (?, ?, ?)').run('history-doc', 'p1', 'u1');
   assert.partialDeepStrictEqual(await app.history.cursor({ scope: 'Project:p1', session: 'tab-a', principal: user }), { undo: 1, redo: 0 });
   // A browser cannot inject an old, forged, or cross-session cursor into the
   // package-owned HTTP contract.
   assert.equal((await postHistory({
     actionId: 'forged-revision', command: 'undo', scope: 'Project:p1', session: 'tab-a', revision: 'forged',
   })).status, 400);
-  const response = await postHistory({ actionId: 'history-http-undo', command: 'undo', scope: 'Project:p1', session: 'tab-a' });
+  historyPrincipal = { type: 'anonymous', id: 'anonymous' };
+  assert.equal((await postHistory({
+    actionId: 'hidden-document', command: 'undo',
+    document: { entity: 'HistoryDocument', field: 'body', documentId: 'missing' }, session: 'tab-a',
+  })).status, 403, 'authentication runs before document lookup');
+  historyPrincipal = user;
+  const response = await postHistory({
+    actionId: 'history-http-undo', command: 'undo', scope: 'Project:p1', session: 'tab-a',
+  });
   const receipt = await response.json();
   assert.equal(response.status, 200);
   assert.deepEqual(Object.keys(receipt).sort(), ['actionId', 'confirmedThrough', 'ok']);

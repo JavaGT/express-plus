@@ -36,6 +36,33 @@ export function resolveAnnotatedTextOwningScope(descriptor, fields, row) {
   return { entity: projectTarget, id: String(projectId), key: `${projectTarget}:${projectId}` };
 }
 
+export function annotatedTextClientHandle(entity, field) {
+  if (!entity || typeof entity.name !== 'string' || !field || typeof field.fieldName !== 'string'
+    || entity.fields?.[field.fieldName]?.kind !== 'annotatedText') {
+    throw new TypeError('annotatedTextClientHandle requires a compiled annotatedText field');
+  }
+  const fields = Object.freeze(Object.fromEntries(
+    Object.entries(entity.fields).map(([name, descriptor]) => [name, Object.freeze({ kind: descriptor.kind })]),
+  ));
+  const annotatedField = Object.freeze({
+    fieldName: field.fieldName,
+    annotations: field.annotations,
+    measurements: field.measurements,
+    capabilities: field.capabilities,
+  });
+  return Object.freeze({ name: entity.name, fields, [field.fieldName]: annotatedField });
+}
+
+export function annotatedTextHistorySession(session, { entity, field, documentId }) {
+  if (typeof session !== 'string' || session.length === 0
+    || typeof entity !== 'string' || entity.length === 0
+    || typeof field !== 'string' || field.length === 0
+    || typeof documentId !== 'string' || documentId.length === 0) {
+    throw new TypeError('annotated text history identity is invalid');
+  }
+  return JSON.stringify([session, entity, field, documentId]);
+}
+
 export function getAnnotatedTextCompiledMetadata(descriptor) {
   return compiledMeta.get(descriptor) ?? null;
 }
@@ -302,11 +329,8 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   }
 
   // Validate annotations array
-  if (!descriptor.annotations || !Array.isArray(descriptor.annotations)) {
-    fail(entity, field, 'annotations', 'must be a non-empty array of annotation descriptors');
-  }
-  if (descriptor.annotations.length === 0) {
-    fail(entity, field, 'annotations', 'must declare at least one annotation');
+  if (!Array.isArray(descriptor.annotations)) {
+    fail(entity, field, 'annotations', 'must be an array of annotation descriptors');
   }
   const annotationNames = new Set();
   const annotationFields = {};
@@ -359,11 +383,8 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   }
 
   // Validate measurements array
-  if (!descriptor.measurements || !Array.isArray(descriptor.measurements)) {
-    fail(entity, field, 'measurements', 'must be a non-empty array of measurement descriptors');
-  }
-  if (descriptor.measurements.length === 0) {
-    fail(entity, field, 'measurements', 'must declare at least one measurement');
+  if (!Array.isArray(descriptor.measurements)) {
+    fail(entity, field, 'measurements', 'must be an array of measurement descriptors');
   }
   const measurementNames = new Set();
   const measurementConfigs = {};

@@ -1,4 +1,4 @@
-import { closeSync, mkdtempSync, openSync, readFileSync, rmSync } from 'node:fs';
+import { closeSync, globSync, mkdtempSync, openSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -10,10 +10,11 @@ const logDirectory = mkdtempSync(join(tmpdir(), 'workbench-test-'));
 const logPath = join(logDirectory, 'node-test.log');
 const output = openSync(logPath, 'w');
 const started = performance.now();
+const testFiles = globSync('test/**/*.test.mjs').filter((file) => !file.startsWith('test/browser/'));
 
 const child = spawn(
   process.execPath,
-  ['--test', '--test-force-exit', '--test-reporter=dot', '--test-timeout=30000', ...process.argv.slice(2)],
+  ['--test', '--test-force-exit', '--test-reporter=dot', '--test-timeout=30000', ...process.argv.slice(2), ...testFiles],
   { cwd: process.cwd(), env: process.env, stdio: ['ignore', output, output] },
 );
 

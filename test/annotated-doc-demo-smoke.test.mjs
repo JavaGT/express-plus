@@ -4,7 +4,6 @@ import test from 'node:test';
 
 import { createAnnotatedTextHttpSession } from '../public/workbench-client.mjs';
 import { createAnnotatedDocApp } from '../projects/annotated-doc/server.mjs';
-import { DocClient } from '../projects/annotated-doc/public/client-handle.mjs';
 
 test('annotated-doc demo creates a document and inserts via the document session', async (t) => {
   const { app, principalOf } = createAnnotatedDocApp({ db: ':memory:' });
@@ -19,6 +18,11 @@ test('annotated-doc demo creates a document and inserts via the document session
   app.db.prepare(`INSERT OR IGNORE INTO Project (id, owner) VALUES ('p1', 'demo')`).run();
 
   const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const handleSource = await (await fetch(`${origin}/client-handle.mjs`)).text();
+  const handleUrl = `data:text/javascript;base64,${Buffer.from(handleSource).toString('base64')}`;
+  const { DocClient } = await import(handleUrl);
+  assert.deepEqual(Object.keys(DocClient.body.annotations), []);
+  assert.deepEqual(Object.keys(DocClient.body.measurements), []);
 
   const listEmpty = await fetch(`${origin}/docs`);
   assert.equal(listEmpty.status, 200);
@@ -63,7 +67,7 @@ test('annotated-doc demo creates a document and inserts via the document session
       text: ch,
     });
     assert.equal(inserted.ok, true, inserted.failure?.message);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal((await inserted.settlement.wait()).status, 'reconciled');
   }
   assert.equal(session.document.blocks[0].text, 'hello');
 
@@ -74,7 +78,7 @@ test('annotated-doc demo creates a document and inserts via the document session
     to: { blockId, offset: len, affinity: 'right' },
   });
   assert.equal(deleted.ok, true, deleted.failure?.message);
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal((await deleted.settlement.wait()).status, 'reconciled');
   assert.equal(session.document.blocks[0].text, '');
 
   const listed = await (await fetch(`${origin}/docs`)).json();

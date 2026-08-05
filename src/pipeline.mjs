@@ -522,6 +522,7 @@ async function commitEvents(db, events, {
 function receiptMetadata(request, historyCommit) {
   const clientId = request.clientId;
   const historySession = request.history?.session;
+  const historyIdentity = request.history?.identity;
   if (clientId === undefined) return historyCommit;
   if (typeof clientId !== 'string' || clientId.length === 0) {
     throw new ValidationError('clientId must be a non-empty string');
@@ -534,7 +535,7 @@ function receiptMetadata(request, historyCommit) {
     metadata: {
       ...historyCommit?.metadata,
       principalKey: principalKeyOf(request.principal),
-      sessionId: clientId,
+      sessionId: historyIdentity ?? clientId,
     },
   };
 }

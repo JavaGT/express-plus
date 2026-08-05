@@ -120,6 +120,29 @@ test('HTTP session delegates duplicate, gap and opaque resync recovery to the pa
   session.close();
 });
 
+test('HTTP action classifies malformed rejection as rolled back and malformed success as outcome unknown', async () => {
+  for (const [status, expected] of [[403, 'failed-rolled-back'], [200, 'outcome-unknown']]) {
+    let requests = 0;
+    const session = createLiveDeliveryHttpSession({
+      baseUrl: 'https://example.test/live-delivery', scope: 'Project:p1',
+      fetchImpl: async (_url, options) => {
+        if (!options?.method) return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: {}, cursor: 1 }) };
+        requests += 1;
+        return { ok: status < 400, status, json: async () => { throw new SyntaxError('not json'); } };
+      },
+      eventSourceFactory: () => ({ close() {} }), validateSnapshot: (value) => value,
+      optimistic: (snapshot) => ({ ...snapshot, pending: true }), historySession: 'tab-a',
+      createActionId: () => `action-${status}`,
+    });
+    await session.ready;
+    const result = await session.dispatch('Project.rename', {});
+    assert.equal(result.status, expected);
+    assert.equal(session.pendingCount(), status === 200 ? 1 : 0);
+    assert.equal(requests, 1);
+    session.close();
+  }
+});
+
 test('HTTP session retries an unstable aggregate bootstrap until it receives a paired snapshot', async () => {
   let attempts = 0;
   const session = createLiveDeliveryHttpSession({

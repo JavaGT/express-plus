@@ -197,6 +197,88 @@ describe('LiveDeliverySession', () => {
     batchSession.close();
   });
 
+  it('retains a frozen single action envelope after an uncertain transport exception and retries it', async () => {
+    const sent = [];
+    let attempts = 0;
+    let delivery;
+    const session = createLiveDeliverySession({
+      bootstrap: async () => ({ kind: 'snapshot', snapshot: { values: [] }, cursor: 1 }),
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      validateSnapshot: (snapshot) => snapshot,
+      fold: (snapshot, envelope) => ({ values: [...snapshot.values, envelope.event.data.value] }),
+      optimistic: (snapshot, action) => ({ values: [...snapshot.values, `pending:${action.payload.value}`] }),
+      sendAction: async (action) => {
+        sent.push(action);
+        attempts += 1;
+        if (attempts === 1) throw new TypeError('network response lost');
+        return { ok: true, actionId: action.actionId, cursor: 2 };
+      },
+      createActionId: () => 'single-action-1',
+    });
+    await session.ready;
+
+    const payload = { value: 'one' };
+    const first = await session.dispatch('Value.add', payload);
+    assert.equal(first.ok, false);
+    assert.equal(first.status, 'outcome-unknown');
+    assert.equal(first.opId, 'single-action-1');
+    assert.deepEqual(first.deliveryError, { message: 'network response lost' });
+    assert.equal(session.pendingCount(), 1);
+    assert.deepEqual(session.snapshot, { values: ['pending:one'] });
+    payload.value = 'changed-after-send';
+    const publicOperation = session.operations()[0];
+    assert.equal(publicOperation.actionId, 'single-action-1');
+    assert.equal('batch' in publicOperation, false);
+    assert.equal('actions' in publicOperation, false);
+
+    const retry = await session.retry('single-action-1');
+    assert.equal(retry.ok, true);
+    assert.equal(retry.settlement, first.settlement);
+    assert.equal(sent.length, 2);
+    assert.equal(sent[0], sent[1], 'the package retains and resends the same frozen single action');
+    assert.equal(sent[1].actionId, 'single-action-1');
+    assert.equal(sent[1].payload.value, 'one');
+    assert.equal(Object.isFrozen(sent[1].payload), true);
+
+    await delivery([event(2, 'committed', 'single-action-1')]);
+    assert.equal(session.pendingCount(), 0);
+    assert.deepEqual(session.snapshot, { values: ['committed'] });
+    assert.deepEqual(await first.settlement.wait(), { opId: 'single-action-1', status: 'reconciled' });
+    session.close();
+  });
+
+  it('rejects retry for states other than a retained uncertain transport envelope', async () => {
+    const { session } = setup({ sendAction: async () => ({ ok: true }) });
+    await session.ready;
+
+    const rejected = await session.retry('no-such-op');
+    assert.equal(rejected.ok, false);
+    assert.equal(rejected.status, 'failed-rolled-back');
+    assert.equal(rejected.opId, 'no-such-op');
+    assert.equal(rejected.settlement.opId, 'no-such-op');
+    assert.equal(rejected.failure.message, 'operation is not awaiting transport retry');
+    session.close();
+  });
+
+  it('keeps a known receipt rejection failed and rolled back without a retained retry', async () => {
+    const { session, deliver } = setup({
+      sendAction: async () => ({ ok: false, failure: { message: 'denied' } }),
+    });
+    await session.ready;
+
+    const dispatched = await session.dispatch('Value.add', { value: 'own' });
+    assert.equal(dispatched.ok, false);
+    assert.equal(dispatched.status, 'failed-rolled-back');
+    assert.equal(dispatched.opId, 'own-action');
+    assert.equal(session.pendingCount(), 0);
+    assert.deepEqual(session.snapshot, { values: [] });
+
+    await deliver([event(2, 'own', 'own-action')]);
+    assert.equal(session.pendingCount(), 0);
+    assert.deepEqual(session.snapshot, { values: ['own'] });
+    session.close();
+  });
+
   it('rejects non-JSON batch payloads before retaining an envelope', async () => {
     const session = createLiveDeliverySession({
       bootstrap: async () => ({ kind: 'snapshot', snapshot: {}, cursor: 1 }),
@@ -312,7 +394,7 @@ describe('LiveDeliverySession', () => {
       validateSnapshot: (snapshot) => snapshot,
       bootstrap: async ({ mode }) => {
         calls.push(mode);
-        if (mode === 'catchup') return { kind: 'catchup', envelopes: [], cursor: 3 };
+        if (mode === 'catchup') return { kind: 'catchup', envelopes: [], cursor: 1 };
         snapshots += 1;
         if (snapshots === 1) return { kind: 'snapshot', snapshot: { version: 1 }, cursor: 1 };
         if (snapshots === 2) return receiptSnapshot.promise;
@@ -331,7 +413,7 @@ describe('LiveDeliverySession', () => {
     receiptSnapshot.resolve({ kind: 'snapshot', snapshot: { version: 3 }, cursor: 3 });
     await reconnect;
     await new Promise((resolve) => setTimeout(resolve, 0));
-    assert.deepEqual(calls, ['snapshot', 'catchup', 'snapshot']);
+    assert.deepEqual(calls, ['snapshot', 'snapshot', 'catchup', 'snapshot']);
     assert.equal(session.pendingCount(), 0);
     assert.deepEqual(session.snapshot, { version: 3 });
     assert.deepEqual(await dispatched.settlement.wait(), { opId: dispatched.opId, status: 'reconciled' });
@@ -383,8 +465,9 @@ describe('LiveDeliverySession', () => {
     });
     await session.ready;
     await session.dispatch('Project.rename', {});
-    await session.dispatch('Project.rename', {});
+    const laterDispatch = session.dispatch('Project.rename', {});
     firstSnapshot.resolve({ kind: 'snapshot', snapshot: { version: 2 }, cursor: 3 });
+    await laterDispatch;
     await new Promise((resolve) => setTimeout(resolve, 0));
     await new Promise((resolve) => setTimeout(resolve, 0));
 

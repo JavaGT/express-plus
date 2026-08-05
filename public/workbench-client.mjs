@@ -17,6 +17,7 @@ import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument } from './workbench-annotated-text-snapshot.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
+export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
 export { materializeAnnotatedTextSnapshot };
 
 // --- BEGIN GENERATED from src/replay-decision.mjs (keep in sync; zero-import) ---
@@ -2660,7 +2661,7 @@ export function createLiveDeliverySession({
 
   async function dispatch(type, payload) {
     const actionId = nextActionId();
-    const action = { actionId, type, payload };
+    const action = freezeClone(structuredClone({ actionId, type, payload }));
     const operation = {
       opId: actionId, actionId, action, status: 'pending', error: null,
       delivered: false, confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null,
@@ -2678,26 +2679,44 @@ export function createLiveDeliverySession({
       publish();
       return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
+    return submitAction(operation);
+  }
+
+  async function submitAction(operation) {
     try {
-      const receipt = await sendAction(action);
+      const receipt = await sendAction(operation.action);
       if (status === 'revoked') {
         settleOperation(operation, { status: 'revoked' });
-        return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery access was revoked') };
+        operations.delete(operation.actionId);
+        publish();
+        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery access was revoked') };
       }
       if (receipt?.ok === false) {
         // The matching committed envelope is authoritative when a request
         // failure races its delivery; never tell callers to retry that action.
         if (operation.echoCursor != null) {
-          operations.delete(actionId);
+          operations.delete(operation.actionId);
           publish();
           settleOperation(operation, { status: 'reconciled' });
-          return { ok: true, status: 'committed', opId: actionId, settlement };
+          return { ok: true, status: 'committed', opId: operation.actionId, settlement: operation.settlement };
         }
-        throw receipt.failure ?? receipt.error ?? receipt;
+        const failure = receipt.failure ?? receipt.error ?? receipt;
+        operations.delete(operation.actionId);
+        operation.status = 'failed';
+        operation.error = failure;
+        settleOperation(operation, { status: 'failed', error: failure });
+        publish();
+        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure };
       }
       const confirmedThrough = receipt?.confirmedThrough;
-      if (snapshotOnly && (!Number.isSafeInteger(confirmedThrough) || confirmedThrough < 0 || receipt?.actionId !== actionId)) {
-        throw new Error('snapshot-only action receipt must confirm its actionId through a nonnegative cursor');
+      if (snapshotOnly && (!Number.isSafeInteger(confirmedThrough) || confirmedThrough < 0 || receipt?.actionId !== operation.actionId)) {
+        const failure = new Error('snapshot-only action receipt must confirm its actionId through a nonnegative cursor');
+        operations.delete(operation.actionId);
+        operation.status = 'failed';
+        operation.error = failure;
+        settleOperation(operation, { status: 'failed', error: failure });
+        publish();
+        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure };
       }
       operation.delivered = true;
       const confirmedCursor = receipt?.cursor ?? receipt?.seq;
@@ -2712,31 +2731,27 @@ export function createLiveDeliverySession({
       if (operation.echoCursor != null
         && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
         settleOperation(operation, { status: 'reconciled' });
-        operations.delete(actionId);
+        operations.delete(operation.actionId);
       }
       publish();
-      return { ok: true, status: 'committed', opId: actionId, settlement, value: receipt?.value };
+      return { ok: true, status: 'committed', opId: operation.actionId, settlement: operation.settlement, value: receipt?.value };
     } catch (error) {
       if (status === 'revoked') {
         settleOperation(operation, { status: 'revoked' });
-        return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: new ClientClosedError('Live delivery access was revoked') };
+        operations.delete(operation.actionId);
+        publish();
+        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery access was revoked') };
       }
       // A delivery echo proves the action reached the committed recipient
       // stream even when its request promise fails after that point.
       if (operation.echoCursor != null) {
         settleOperation(operation, { status: 'reconciled' });
-        operations.delete(actionId);
+        operations.delete(operation.actionId);
         publish();
-        return { ok: true, status: 'committed', opId: actionId, settlement };
+        return { ok: true, status: 'committed', opId: operation.actionId, settlement: operation.settlement };
       }
-      if (operations.get(actionId) === operation) {
-        operations.delete(actionId);
-        operation.status = 'failed';
-        operation.error = error;
-        settleOperation(operation, { status: 'failed', error });
-        publish();
-      }
-      return { ok: false, status: 'failed-rolled-back', opId: actionId, settlement, failure: error };
+      operation.deliveryError = error;
+      return { ok: false, status: 'outcome-unknown', opId: operation.actionId, settlement: operation.settlement, deliveryError: { message: String(error?.message ?? error) } };
     }
   }
 
@@ -2839,10 +2854,10 @@ export function createLiveDeliverySession({
 
   async function retry(opId) {
     const operation = operations.get(opId);
-    if (!operation?.batch || !operation.deliveryError) {
+    if (!operation?.deliveryError || (!operation.batch && !operation.action)) {
       const rejectedOperation = { opId };
       const settlement = createSettlement(rejectedOperation);
-      const failure = new TypeError('batch is not awaiting transport retry');
+      const failure = new TypeError('operation is not awaiting transport retry');
       settleOperation(rejectedOperation, { status: 'failed', error: failure });
       return { ok: false, status: 'failed-rolled-back', opId, settlement, failure };
     }
@@ -2853,7 +2868,7 @@ export function createLiveDeliverySession({
       return { ok: false, status: 'failed-rolled-back', opId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery is unavailable') };
     }
     operation.deliveryError = null;
-    return submitBatch(operation);
+    return operation.batch ? submitBatch(operation) : submitAction(operation);
   }
 
   const ready = start();
@@ -2872,7 +2887,6 @@ export function createLiveDeliverySession({
       return [...operations.values()].map((operation) => Object.freeze({
         opId: operation.opId,
         actionId: operation.actionId,
-        ...(operation.action ? { action: Object.freeze(structuredClone(operation.action)) } : {}),
         status: operation.status,
         error: operation.error,
       }));
@@ -2981,7 +2995,8 @@ export function createLiveDeliveryHttpSession({
       : action.type === '$history.redo' ? 'redo' : null;
     const historyPayload = action.payload;
     const historyRequest = historyCommand && historyPayload && typeof historyPayload === 'object'
-      ? { actionId: action.actionId, command: historyCommand, ...historyPayload, scope }
+      ? { actionId: action.actionId, command: historyCommand, ...historyPayload,
+          ...(requestIdentity ? { document: requestIdentity } : { scope }) }
       : null;
     const response = await fetchImpl(historyRequest ? historyEndpoint : actionEndpoint, {
       method: 'POST',
@@ -2990,7 +3005,10 @@ export function createLiveDeliveryHttpSession({
       body: JSON.stringify(historyRequest ?? { ...action, ...(requestIdentity ? {} : { scope }), clientId: historySession }),
     });
     let receipt;
-    try { receipt = await response.json(); } catch { throw new Error(`action dispatch failed with HTTP ${response.status}`); }
+    try { receipt = await response.json(); } catch {
+      if (!response.ok) return { ok: false, failure: new Error(`action dispatch failed with HTTP ${response.status}`) };
+      throw new Error(`action dispatch failed with HTTP ${response.status}`);
+    }
     if (!response.ok) return receipt?.ok === false ? receipt : { ok: false, failure: receipt };
     if (!receipt || receipt.ok !== true) throw new Error('action dispatch returned an invalid receipt');
     return receipt;
@@ -2999,10 +3017,13 @@ export function createLiveDeliveryHttpSession({
   async function sendHttpBatch(batch) {
     const response = await fetchImpl(batchActionEndpoint, {
       method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ ...batch, scope, clientId: historySession }),
+      body: JSON.stringify({ ...batch, ...(requestIdentity ? { document: requestIdentity } : { scope }), clientId: historySession }),
     });
     let receipt;
-    try { receipt = await response.json(); } catch { throw new Error(`batch dispatch failed with HTTP ${response.status}`); }
+    try { receipt = await response.json(); } catch {
+      if (!response.ok) return { ok: false, failure: new Error(`batch dispatch failed with HTTP ${response.status}`) };
+      throw new Error(`batch dispatch failed with HTTP ${response.status}`);
+    }
     if (!response.ok) return receipt?.ok === false ? receipt : { ok: false, failure: receipt };
     if (!receipt || receipt.ok !== true || receipt.actionId !== batch.actionId) throw new Error('batch dispatch returned an invalid receipt');
     return receipt;
@@ -3100,7 +3121,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   };
   const authoringClient = randomToken();
   const blockGroupTokens = new WeakMap();
-  const pendingActionPositionBlocks = new WeakMap();
+  const pendingActionPositionBlocks = new Map();
   const deferredAuthoringAcknowledgements = new Map();
   let translatedActions = 0;
   const snapshotBinding = createAnnotatedTextSnapshotSessionBinding((handle, serverId, generation) => {
@@ -3117,7 +3138,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     onRecoveryStart: () => revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding),
     optimistic(document, action) {
       const positionBlocks = new Map();
-      const bound = pendingActionPositionBlocks.get(action.payload);
+      const bound = pendingActionPositionBlocks.get(action.payload?.authoring?.mutationId);
       if (bound) {
         for (const [blockId, positionToken] of bound) positionBlocks.set(positionToken, blockId);
       } else {
@@ -3167,7 +3188,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     };
     const temporaryBlock = command.kind === 'block.split' || command.kind === 'block.continue' || command.kind === 'block.split-and-assign'
       ? randomToken() : undefined;
-    const translated = { ...command, id: documentId, authoring: { version: 1, stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease, mutationId: command.mutationId } };
+    const translated = { ...command, id: documentId, authoring: { version: 1, stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease, mutationId: command.mutationId ?? randomToken() } };
     const pendingPositionBlocks = new Map(snapshotBinding.authoring.positionTokens.entries());
     if (command.at) translated.at = tokenAt(command.at);
     if (command.from) translated.from = tokenAt(command.from);
@@ -3184,10 +3205,65 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     }
     if (temporaryBlock) translated.temporaryBlock = temporaryBlock;
     const action = annotatedTextAction(entity, field, translated);
-    pendingActionPositionBlocks.set(action.payload, pendingPositionBlocks);
+    pendingActionPositionBlocks.set(action.payload.authoring.mutationId, pendingPositionBlocks);
     translatedActions += 1;
     try {
-      return await session.dispatch(action.type, action.payload);
+      const result = await session.dispatch(action.type, action.payload);
+      if (result.status === 'failed-rolled-back') {
+        pendingActionPositionBlocks.delete(action.payload.authoring.mutationId);
+      } else if (result.settlement?.wait) {
+        void result.settlement.wait().finally(() => {
+          pendingActionPositionBlocks.delete(action.payload.authoring.mutationId);
+        });
+      }
+      return result;
+    } catch (error) {
+      pendingActionPositionBlocks.delete(action.payload.authoring.mutationId);
+      throw error;
+    } finally {
+      translatedActions -= 1;
+      flushAuthoringAcknowledgements();
+    }
+  }
+  async function replace({ mutationId = randomToken(), from, to, text }) {
+    if (typeof text !== 'string') throw new TypeError('annotated text replacement text must be a string');
+    if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
+    const positionToken = snapshotBinding.authoring.positionTokens.get(from?.blockId);
+    if (!positionToken || from.blockId !== to?.blockId) throw new TypeError('annotated text replacement requires one available block');
+    if (from.offset !== to.offset && text) throw new TypeError('annotated text selection replacement is not yet supported atomically');
+    const authoring = { version: 1, stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease };
+    const pendingPositionBlocks = new Map(snapshotBinding.authoring.positionTokens.entries());
+    const position = (value) => ({ positionToken, offset: value.offset, affinity: value.affinity });
+    const actions = [];
+    if (from.offset !== to.offset) {
+      actions.push(annotatedTextAction(entity, field, {
+        kind: 'text.delete', id: documentId, authoring: { ...authoring, mutationId: `${mutationId}:delete` },
+        from: position(from), to: position(to),
+      }));
+    }
+    if (text) {
+      actions.push(annotatedTextAction(entity, field, {
+        kind: 'text.insert', id: documentId, authoring: { ...authoring, mutationId: `${mutationId}:insert` },
+        at: position(from), text,
+      }));
+    }
+    if (actions.length === 0) return null;
+    for (const action of actions) pendingActionPositionBlocks.set(action.payload.authoring.mutationId, pendingPositionBlocks);
+    translatedActions += 1;
+    try {
+      const result = await session.dispatch(actions[0].type, actions[0].payload);
+      const mutationId = actions[0].payload.authoring.mutationId;
+      if (result.status === 'failed-rolled-back') {
+        pendingActionPositionBlocks.delete(mutationId);
+      } else if (result.settlement?.wait) {
+        void result.settlement.wait().finally(() => {
+          pendingActionPositionBlocks.delete(mutationId);
+        });
+      }
+      return result;
+    } catch (error) {
+      pendingActionPositionBlocks.delete(actions[0].payload.authoring.mutationId);
+      throw error;
     } finally {
       translatedActions -= 1;
       flushAuthoringAcknowledgements();
@@ -3231,6 +3307,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     get ready() { return session.ready; },
     insert({ mutationId, at, text }) { return dispatch({ kind: 'text.insert', mutationId, at, text }); },
     delete({ mutationId, from, to }) { return dispatch({ kind: 'text.delete', mutationId, from, to }); },
+    replace,
     split({ mutationId, at }) { return dispatch({ kind: 'block.split', mutationId, at }); },
     merge({ mutationId, leftBlockId, rightBlockId }) { return dispatch({ kind: 'block.merge', mutationId, leftBlockId, rightBlockId }); },
     applyAnnotation({ mutationId, annotation, from, to }) { return dispatch({ kind: 'annotation.apply', mutationId, annotation, from, to }); },
@@ -3246,6 +3323,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     reconnect: () => session.reconnect(),
     subscribe: (listener) => session.subscribe(listener),
     close: () => {
+      pendingActionPositionBlocks.clear();
       revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
       session.close();
     },

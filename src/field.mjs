@@ -60,7 +60,13 @@ export function text(options = {}) {
 }
 
 export function annotatedText(options = {}) {
-  return makeDescriptor({ kind: 'annotatedText', type: 'annotatedText', ...options });
+  return makeDescriptor({
+    kind: 'annotatedText',
+    type: 'annotatedText',
+    annotations: Object.freeze([]),
+    measurements: Object.freeze([]),
+    ...options,
+  });
 }
 
 // Declarative annotation/measurement constructors — re-exported from

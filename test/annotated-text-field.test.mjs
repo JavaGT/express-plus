@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { annotatedText, text, boolean, number, ref, date, json, annotation, protectingAnnotation, measurement, annotationAction, grant, read } from '../src/index.mjs';
+import { annotatedText, annotatedTextClientHandle, text, boolean, number, ref, date, json, annotation, protectingAnnotation, measurement, annotationAction, grant, read } from '../src/index.mjs';
 import { entity, generateDDL } from '../src/internal.mjs';
 import { validateAnnotatedTextDeclaration, annotatedTextDDL, getAnnotatedTextCompiledMetadata, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, resolveDeclarationMeasurementExtension } from '../src/annotated-text-field.mjs';
 
@@ -54,6 +54,36 @@ test('annotatedText() returns a frozen descriptor with kind annotatedText', () =
   assert.equal(d.kind, 'annotatedText');
   assert.equal(d.type, 'annotatedText');
   assert.ok(Object.isFrozen(d));
+});
+
+test('annotatedText() defaults to a text-only declaration', () => {
+  const descriptor = annotatedText({ project: 'project', owner: 'owner' });
+  const result = validateAnnotatedTextDeclaration('Doc', 'body', descriptor, makeFields());
+
+  assert.deepEqual(descriptor.annotations, []);
+  assert.deepEqual(descriptor.measurements, []);
+  assert.ok(Object.isFrozen(descriptor.annotations));
+  assert.ok(Object.isFrozen(descriptor.measurements));
+  assert.deepEqual(result.families, []);
+  assert.deepEqual(result.measurements, []);
+});
+
+test('annotatedTextClientHandle derives browser metadata from the compiled entity', () => {
+  const Document = entity('ClientHandleDoc', {
+    project: ref('Project'), owner: ref('User'), title: text(),
+    body: annotatedText({ project: 'project', owner: 'owner' }),
+  });
+  const handle = annotatedTextClientHandle(Document, Document.body);
+
+  assert.deepEqual(handle.fields, {
+    project: { kind: 'value' }, owner: { kind: 'value' }, title: { kind: 'value' }, body: { kind: 'annotatedText' },
+  });
+  assert.deepEqual(handle.body, {
+    fieldName: 'body', annotations: Document.body.annotations,
+    measurements: Document.body.measurements, capabilities: Document.body.capabilities,
+  });
+  assert.ok(Object.isFrozen(handle));
+  assert.ok(Object.isFrozen(handle.fields));
 });
 
 test('valid entity declaration with annotatedText, owner/project refs', () => {
@@ -609,16 +639,6 @@ test('rejects: annotation family with reserved column name family', () => {
   }, /invalid or reserved identifier/);
 });
 
-test('rejects: annotations is empty array', () => {
-  assert.throws(() => {
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      annotations: [],
-      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
-    }), makeFields());
-  }, /must declare at least one annotation/);
-});
-
 test('rejects: annotations is not an array', () => {
   assert.throws(() => {
     validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
@@ -626,17 +646,7 @@ test('rejects: annotations is not an array', () => {
       annotations: 'not-an-array',
       measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), makeFields());
-  }, /must be a non-empty array/);
-});
-
-test('rejects: measurements is empty array', () => {
-  assert.throws(() => {
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      annotations: [annotation('hl')],
-      measurements: [],
-    }), makeFields());
-  }, /must declare at least one measurement/);
+  }, /must be an array/);
 });
 
 test('rejects: measurements is not an array', () => {
@@ -646,7 +656,7 @@ test('rejects: measurements is not an array', () => {
       annotations: [annotation('hl')],
       measurements: 'bad',
     }), makeFields());
-  }, /must be a non-empty array/);
+  }, /must be an array/);
 });
 
 test('rejects: measurement formatVersion is not a positive integer', () => {

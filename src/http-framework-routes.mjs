@@ -416,6 +416,7 @@ const TEXT_EDIT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/sr
 const ANNOTATED_TEXT_SNAPSHOT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot.mjs';
 const ANNOTATED_TEXT_SNAPSHOT_INTERNAL_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot-internal.mjs';
 const ANNOTATED_TEXT_ACTION_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-action.mjs';
+const ANNOTATED_TEXT_EDITOR_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-editor.mjs';
 
 export function handleClientSdkRoute(app, req, res) {
   if (req.method !== 'GET') return false;
@@ -451,6 +452,13 @@ export function handleClientSdkRoute(app, req, res) {
   if (url.pathname === '/workbench-annotated-text-action.mjs') {
     if (!app || !app.db) return false;
     const body = readFileSync(ANNOTATED_TEXT_ACTION_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-annotated-text-editor.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(ANNOTATED_TEXT_EDITOR_SDK_PATH);
     res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
     res.end(body);
     return true;

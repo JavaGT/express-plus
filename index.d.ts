@@ -244,9 +244,9 @@ export function annotationAction(name: string): AnnotatedTextActionDescriptor;
 export interface AnnotatedTextOptions {
   project: string;
   owner: string;
-  block: Record<string, FieldDescriptor>;
-  annotations: readonly (AnnotatedTextAnnotationDescriptor | AnnotatedTextProtectingAnnotationDescriptor)[];
-  measurements: readonly AnnotatedTextMeasurementDescriptor[];
+  block?: Record<string, FieldDescriptor>;
+  annotations?: readonly (AnnotatedTextAnnotationDescriptor | AnnotatedTextProtectingAnnotationDescriptor)[];
+  measurements?: readonly AnnotatedTextMeasurementDescriptor[];
   capabilities?: Readonly<Record<string, unknown>>;
 }
 
@@ -273,6 +273,14 @@ export interface AnnotatedTextFieldHandle {
   readonly capabilities: Readonly<Record<string, AnnotatedTextCapabilityHandle>> | null;
 }
 export function annotatedText(options: AnnotatedTextOptions): FieldDescriptor<AnnotatedTextFieldHandle>;
+export interface AnnotatedTextClientEntityHandle {
+  readonly name: string;
+  readonly fields: Readonly<Record<string, { readonly kind: string }>>;
+}
+export function annotatedTextClientHandle(
+  entity: WorkbenchEntity,
+  field: AnnotatedTextFieldHandle,
+): AnnotatedTextClientEntityHandle & Readonly<Record<string, unknown>>;
 
 export function registerAnnotatedTextContract(contractName: string, contract: { readonly kind: 'measurement' | 'measurement-query' | 'annotation-action' | 'event'; readonly [key: string]: unknown }): void;
 

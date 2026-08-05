@@ -26,11 +26,13 @@
 	"scripts": {
 		"lint": "eslint .",
 		"test": "node scripts/run-tests.mjs",
+		"test:playwright": "playwright test",
 		"test:coverage": "node scripts/check-coverage.mjs 0",
 		"typecheck": "tsc --noEmit"
 	},
 	"devDependencies": {
 		"@types/node": "^26.1.1",
+		"@playwright/test": "^1.62.1",
 		"eslint": "^9.39.5",
 		"fake-indexeddb": "^6.2.5",
 		"globals": "^17.7.0",

@@ -462,7 +462,7 @@ export interface LiveDeliverySession<Snapshot, Payload = unknown> {
   batch(actions: readonly LiveDeliveryBatchAction<Payload>[]): Promise<LiveDeliveryDispatchResult>;
   retry(opId: string): Promise<LiveDeliveryDispatchResult>;
   reconnect(): Promise<void>;
-  operations(): Array<{ opId: string; actionId: string; action?: { actionId: string; type: string; payload: Payload }; status: 'pending'; error: unknown }>;
+  operations(): Array<{ opId: string; actionId: string; status: 'pending'; error: unknown }>;
   pendingCount(): number;
   subscribe(listener: (snapshot: Snapshot | null) => void): () => void;
   close(): void;
@@ -716,8 +716,9 @@ export interface AnnotatedTextHttpSession {
   readonly history: LiveDeliveryHistorySession;
   readonly status: LiveDeliverySession<AnnotatedTextDocument>['status'];
   readonly ready: Promise<void>;
-  insert(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition; readonly text: string }): Promise<ScopeDispatchResult>;
-  delete(input: { readonly mutationId: string; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
+  insert(input: { readonly mutationId?: string; readonly at: AnnotatedTextPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult>;
+  delete(input: { readonly mutationId?: string; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition }): Promise<LiveDeliveryDispatchResult>;
+  replace(input: { readonly mutationId?: string; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition; readonly text: string }): Promise<LiveDeliveryDispatchResult | null>;
   split(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
   merge(input: { readonly mutationId: string; readonly leftBlockId: string; readonly rightBlockId: string }): Promise<ScopeDispatchResult>;
   applyAnnotation(input: { readonly mutationId: string; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
@@ -732,3 +733,14 @@ export interface AnnotatedTextHttpSession {
 }
 
 export function createAnnotatedTextHttpSession(config: AnnotatedTextHttpSessionConfig): AnnotatedTextHttpSession;
+
+export interface AnnotatedTextEditorBinding {
+  focus(): void;
+  close(): void;
+}
+
+export function bindAnnotatedTextEditor(config: {
+  readonly element: HTMLElement;
+  readonly session: AnnotatedTextHttpSession;
+  readonly onError?: (error: unknown) => void;
+}): AnnotatedTextEditorBinding;

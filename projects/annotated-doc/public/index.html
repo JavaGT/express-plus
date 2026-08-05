@@ -1,118 +1,40 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>annotated-doc — workbench floor</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>annotated-doc - Workbench floor</title>
   <style>
-    :root {
-      color-scheme: light dark;
-      --bg: #f6f7f9;
-      --panel: #fff;
-      --line: #d8dce3;
-      --muted: #667085;
-      --accent: #1d4ed8;
-      --danger: #b91c1c;
-      --ok: #15803d;
-    }
-    * { box-sizing: border-box; }
-    body {
-      margin: 0;
-      font: 14px/1.45 system-ui, sans-serif;
-      background: var(--bg);
-      color: #111;
-      min-height: 100vh;
-    }
-    header {
-      display: flex;
-      gap: 12px;
-      align-items: center;
-      padding: 10px 16px;
-      border-bottom: 1px solid var(--line);
-      background: var(--panel);
-    }
-    header h1 { font-size: 15px; margin: 0; font-weight: 650; }
-    header .meta { margin-left: auto; color: var(--muted); font-size: 12px; }
-    main {
-      display: grid;
-      grid-template-columns: 240px 1fr;
-      height: calc(100vh - 45px);
-    }
-    aside {
-      border-right: 1px solid var(--line);
-      background: var(--panel);
-      padding: 12px;
-      overflow: auto;
-    }
-    #create {
-      width: 100%;
-      margin-bottom: 12px;
-      background: var(--accent);
-      color: #fff;
-      border-color: var(--accent);
-    }
-    button {
-      border: 1px solid var(--line);
-      background: var(--panel);
-      padding: 7px 10px;
-      border-radius: 7px;
-      cursor: pointer;
-    }
-    button:disabled { opacity: 0.5; cursor: default; }
-    .doc {
-      padding: 8px 10px;
-      border-radius: 8px;
-      cursor: pointer;
-      margin-bottom: 4px;
-      border: 1px solid transparent;
-    }
-    .doc:hover { background: #eef2ff; }
-    .doc.active { background: #e0e7ff; border-color: #c7d2fe; }
-    .doc small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
-    #editor-wrap {
-      display: flex;
-      flex-direction: column;
-      min-width: 0;
-    }
-    #status {
-      padding: 8px 16px;
-      border-bottom: 1px solid var(--line);
-      background: var(--panel);
-      color: var(--muted);
-      font-size: 12px;
-      min-height: 34px;
-    }
-    #status.error { color: var(--danger); }
-    #status.ok { color: var(--ok); }
-    #editor {
-      flex: 1;
-      margin: 16px;
-      padding: 16px 18px;
-      background: var(--panel);
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      outline: none;
-      white-space: pre-wrap;
-      overflow: auto;
-      min-height: 200px;
-      font: 15px/1.55 ui-sans-serif, system-ui, sans-serif;
-    }
-    #editor:empty::before {
-      content: attr(data-placeholder);
-      color: #98a2b3;
-    }
-    #empty {
-      margin: 40px auto;
-      color: var(--muted);
-      text-align: center;
-    }
-    .hidden { display: none !important; }
+    :root { color-scheme:light dark; --bg:#f6f7f9; --panel:#fff; --line:#d8dce3; --muted:#667085; --accent:#1d4ed8; --danger:#b91c1c; --ok:#15803d; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; color:#111; background:var(--bg); font:14px/1.45 system-ui,sans-serif; }
+    header { display:flex; gap:12px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+    header h1 { margin:0; font-size:15px; font-weight:650; }
+    header .meta { margin-left:auto; color:var(--muted); font-size:12px; }
+    main { display:grid; grid-template-columns:240px 1fr; height:calc(100vh - 45px); }
+    aside { overflow:auto; padding:12px; border-right:1px solid var(--line); background:var(--panel); }
+    button { padding:7px 10px; border:1px solid var(--line); border-radius:7px; background:var(--panel); cursor:pointer; }
+    button:disabled { opacity:.5; cursor:default; }
+    #create { width:100%; margin-bottom:12px; color:#fff; border-color:var(--accent); background:var(--accent); }
+    .doc { margin-bottom:4px; padding:8px 10px; border:1px solid transparent; border-radius:8px; cursor:pointer; }
+    .doc:hover { background:#eef2ff; }
+    .doc.active { border-color:#c7d2fe; background:#e0e7ff; }
+    .doc small { display:block; margin-top:2px; color:var(--muted); font-size:11px; }
+    #editor-wrap { display:flex; flex-direction:column; min-width:0; }
+    #status { min-height:34px; padding:8px 16px; border-bottom:1px solid var(--line); color:var(--muted); background:var(--panel); font-size:12px; }
+    #status.error { color:var(--danger); }
+    #status.ok { color:var(--ok); }
+    #editor { flex:1; overflow:auto; min-height:200px; margin:16px; padding:16px 18px; border:1px solid var(--line); border-radius:10px; outline:none; background:var(--panel); white-space:pre-wrap; font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
+    #editor:empty::before { color:#98a2b3; content:attr(data-placeholder); }
+    #empty { margin:40px auto; color:var(--muted); text-align:center; }
+    .hidden { display:none !important; }
+    @media (max-width:700px) { main { grid-template-columns:1fr; grid-template-rows:auto 1fr; } aside { display:flex; gap:8px; overflow:auto; border-right:0; border-bottom:1px solid var(--line); } #create { width:auto; margin:0; } #list { display:flex; gap:4px; } .doc { min-width:140px; } }
   </style>
 </head>
 <body>
   <header>
     <h1>annotated-doc</h1>
-    <span class="meta">Workbench <code>annotatedText()</code> floor · fixed principal <code>demo</code></span>
+    <span class="meta">Workbench <code>annotatedText()</code> floor - fixed principal <code>demo</code></span>
   </header>
   <main>
     <aside>
@@ -122,535 +44,80 @@
     <section id="editor-wrap">
       <div id="status">Select or create a document.</div>
       <div id="empty">No document open.</div>
-      <div
-        id="editor"
-        class="hidden"
-        contenteditable="true"
-        spellcheck="true"
-        data-placeholder="Type here — insert/delete only, through createAnnotatedTextHttpSession"
-        role="textbox"
-        aria-multiline="true"
-      ></div>
+      <div id="editor" class="hidden" spellcheck="true" data-placeholder="Type here" role="textbox" aria-multiline="true"></div>
     </section>
   </main>
-
   <script type="module">
-    import { createAnnotatedTextHttpSession } from '/workbench.mjs';
-    import { DocClient } from './client-handle.mjs';
+    import { bindAnnotatedTextEditor, createAnnotatedTextHttpSession } from '/workbench.mjs';
+    import { DocClient } from '/client-handle.mjs';
 
     const $ = (id) => document.getElementById(id);
     const historySession = (() => {
       const key = 'annotated-doc-history-session';
-      let value = sessionStorage.getItem(key);
-      if (!value) {
-        value = crypto.randomUUID().replaceAll('-', '');
-        sessionStorage.setItem(key, value);
-      }
+      const existing = sessionStorage.getItem(key);
+      if (existing) return existing;
+      const value = crypto.randomUUID().replaceAll('-', '');
+      sessionStorage.setItem(key, value);
       return value;
     })();
-
     let docs = [];
     let currentId = null;
     let session = null;
+    let editorBinding = null;
     let unsubscribe = null;
-    let rendering = false;
     let busy = false;
 
-    // Local draft is the typing authority. Session delivery is applied when the
-    // serial write queue is idle. Without this, rapid keystrokes race: each
-    // beforeinput fires a concurrent insert against a stale offset, CRDT
-    // reorders by actor id, and mid-render keystrokes get dropped.
-    let draftText = '';
-    let draftAnchor = 0; // selection start (UTF-16)
-    let draftFocus = 0;  // selection end (UTF-16)
-    let pendingEdits = 0;
-    let writeChain = Promise.resolve();
-    let reconciling = false;
-    // keydown schedules a microtask fallback for Cmd/Option+Backspace; beforeinput
-    // sets this so the fallback does not double-delete when both fire.
-    let modifierDeleteHandled = false;
-
-    // Local typing history. Package durable history for annotatedText is keyed
-    // by project scope; this session's live-delivery scope is annotated-text:…
-    // so session.history.undo() would miss our edits. Draft-level undo matches
-    // the editor authority and Cmd+Z expectations.
-    const MAX_UNDO = 200;
-    let undoStack = [];
-    let redoStack = [];
-    let undoGroup = null; // coalesce consecutive single-char type/backspace
-    let historyBusy = false;
-    let historyKeyHandled = false;
-
-    // Action IDs are durable-deduped by (scope, actionId). Never reuse a sequence
-    // that can collide after reload (sessionStorage historySession + counter).
-    function freshId(prefix) {
-      const uuid = globalThis.crypto?.randomUUID?.()
-        ?? `x${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
-      return `${prefix}-${uuid}`;
-    }
-
     function setStatus(message, kind = '') {
-      const el = $('status');
-      el.textContent = message;
-      el.className = kind;
+      $('status').textContent = message;
+      $('status').className = kind;
     }
 
-    // v1 edits one visible block only so UTF-16 offsets map 1:1 into the CRDT.
-    function primaryBlock(document) {
-      return document?.blocks?.find((block) => block.kind === 'visible') ?? null;
-    }
-
-    function visibleText(document) {
-      return primaryBlock(document)?.text ?? '';
-    }
-
-    function selectionOffsets(editor) {
-      const selection = window.getSelection();
-      if (!selection || selection.rangeCount === 0) return null;
-      const range = selection.getRangeAt(0);
-      if (!editor.contains(range.startContainer) || !editor.contains(range.endContainer)) return null;
-      const startRange = range.cloneRange();
-      startRange.selectNodeContents(editor);
-      startRange.setEnd(range.startContainer, range.startOffset);
-      const start = startRange.toString().length;
-      const endRange = range.cloneRange();
-      endRange.selectNodeContents(editor);
-      endRange.setEnd(range.endContainer, range.endOffset);
-      const end = endRange.toString().length;
-      return { start: Math.min(start, end), end: Math.max(start, end) };
-    }
-
-    function setCaretOffset(editor, offset) {
-      const selection = window.getSelection();
-      if (!selection) return;
-      const textNode = editor.firstChild;
-      if (!textNode || textNode.nodeType !== Node.TEXT_NODE) {
-        const range = document.createRange();
-        range.selectNodeContents(editor);
-        range.collapse(true);
-        selection.removeAllRanges();
-        selection.addRange(range);
-        return;
-      }
-      const clamped = Math.max(0, Math.min(offset, textNode.data.length));
-      const range = document.createRange();
-      range.setStart(textNode, clamped);
-      range.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(range);
-    }
-
-    function paintDraft() {
-      const editor = $('editor');
-      const hadFocus = document.activeElement === editor;
-      rendering = true;
-      // Prefer mutating the existing text node. Replacing textContent on every
-      // keystroke can break contenteditable input in Firefox (further typing
-      // never reaches beforeinput — only the first character sticks).
-      let textNode = editor.firstChild;
-      if (draftText === '') {
-        if (editor.childNodes.length) editor.textContent = '';
-      } else if (!textNode || textNode.nodeType !== Node.TEXT_NODE || editor.childNodes.length !== 1) {
-        editor.textContent = draftText;
-        textNode = editor.firstChild;
-      } else if (textNode.data !== draftText) {
-        textNode.data = draftText;
-      }
-      if (hadFocus) editor.focus();
-      setCaretOffset(editor, draftFocus);
-      rendering = false;
-    }
-
-    function adoptDocument(document) {
-      draftText = visibleText(document);
-      draftAnchor = Math.min(draftAnchor, draftText.length);
-      draftFocus = Math.min(draftFocus, draftText.length);
-      paintDraft();
-    }
+    function shortId(id) { return id.length > 12 ? `${id.slice(0, 8)}...` : id; }
 
     function renderDocList() {
-      const list = $('list');
-      list.innerHTML = '';
+      $('list').replaceChildren();
       if (!docs.length) {
-        list.innerHTML = '<p style="color:#98a2b3;margin:8px 4px">no documents yet</p>';
+        const empty = document.createElement('p');
+        empty.textContent = 'no documents yet';
+        empty.style.cssText = 'color:#98a2b3;margin:8px 4px';
+        $('list').append(empty);
         return;
       }
       for (const doc of docs) {
-        const el = document.createElement('div');
-        el.className = 'doc' + (doc.id === currentId ? ' active' : '');
-        el.innerHTML = `<strong>${escapeHtml(shortId(doc.id))}</strong><small>${escapeHtml(doc.id)}</small>`;
-        el.onclick = () => openDoc(doc.id);
-        list.appendChild(el);
-      }
-    }
-
-    function shortId(id) {
-      return id.length > 12 ? id.slice(0, 8) + '…' : id;
-    }
-
-    function escapeHtml(value) {
-      return String(value)
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;');
-    }
-
-    async function awaitSettlement(result) {
-      if (!result?.ok || !result.settlement?.wait) return result;
-      try {
-        // Snapshot-only annotated-text settles after receipt snapshot recovery.
-        // Waiting prevents the next keystroke from racing a lagging "1"-char
-        // replacement snapshot that would wipe later optimistic inserts.
-        await Promise.race([
-          result.settlement.wait(),
-          new Promise((resolve) => setTimeout(resolve, 5000)),
-        ]);
-      } catch {
-        /* settlement errors surface via session status */
-      }
-      return result;
-    }
-
-    async function dispatchOp(op) {
-      if (!session?.document) return;
-      const block = primaryBlock(session.document);
-      if (!block) {
-        setStatus('no visible block', 'error');
-        return;
-      }
-      const live = block.text ?? '';
-      let result;
-      if (op.kind === 'insert') {
-        const offset = Math.max(0, Math.min(op.offset, live.length));
-        result = await session.insert({
-          mutationId: freshId('ins'),
-          at: { blockId: block.id, offset, affinity: 'right' },
-          text: op.text,
-        });
-      } else if (op.kind === 'delete') {
-        const from = Math.max(0, Math.min(op.from, live.length));
-        const to = Math.max(from, Math.min(op.to, live.length));
-        if (from === to) return;
-        result = await session.delete({
-          mutationId: freshId('del'),
-          from: { blockId: block.id, offset: from, affinity: 'right' },
-          to: { blockId: block.id, offset: to, affinity: 'right' },
-        });
-      }
-      if (result && result.ok === false) {
-        setStatus(result.failure?.message || 'edit rejected', 'error');
-        return;
-      }
-      await awaitSettlement(result);
-    }
-
-    /**
-     * Draft is the typing authority. After the local queue drains, force the
-     * session document to match draft. Per-keystroke snapshot recovery can
-     * otherwise leave the session at the first character while the draft has
-     * the full string — and a later adopt would paint "1".
-     */
-    async function reconcileSessionToDraft() {
-      if (reconciling || !session?.document || pendingEdits > 0) return;
-      const block = primaryBlock(session.document);
-      if (!block) return;
-      let live = block.text ?? '';
-      if (live === draftText) return;
-
-      reconciling = true;
-      try {
-        // Common case: session is a prefix of draft (tail inserts lost to races).
-        if (draftText.startsWith(live)) {
-          const suffix = draftText.slice(live.length);
-          if (!suffix) return;
-          await dispatchOp({ kind: 'insert', offset: live.length, text: suffix });
-          return;
-        }
-
-        // Common case: draft is a prefix of session (should be rare with draft-first).
-        if (live.startsWith(draftText)) {
-          if (live.length === draftText.length) return;
-          await dispatchOp({ kind: 'delete', from: draftText.length, to: live.length });
-          return;
-        }
-
-        // Diverged: replace whole block body with draft.
-        if (live.length > 0) {
-          await dispatchOp({ kind: 'delete', from: 0, to: live.length });
-        }
-        if (draftText.length > 0) {
-          await dispatchOp({ kind: 'insert', offset: 0, text: draftText });
-        }
-      } finally {
-        reconciling = false;
-      }
-    }
-
-    function enqueue(op) {
-      pendingEdits += 1;
-      writeChain = writeChain
-        .then(async () => {
-          await dispatchOp(op);
-        })
-        .catch((error) => {
-          setStatus(String(error.message || error), 'error');
-        })
-        .finally(async () => {
-          pendingEdits -= 1;
-          if (pendingEdits === 0) {
-            try {
-              await reconcileSessionToDraft();
-            } catch (error) {
-              setStatus(String(error.message || error), 'error');
-            }
-            // Always re-paint draft so a lagging session publish cannot stick.
-            paintDraft();
-          }
-        });
-    }
-
-    function syncSelectionFromDom() {
-      if (rendering || !session) return;
-      const editor = $('editor');
-      if (document.activeElement !== editor) return;
-      // Compare via text node when possible; textContent can normalize.
-      const domText = editor.firstChild?.nodeType === Node.TEXT_NODE
-        ? editor.firstChild.data
-        : editor.textContent;
-      if (domText !== draftText) return;
-      const sel = selectionOffsets(editor);
-      if (!sel) return;
-      draftAnchor = sel.start;
-      draftFocus = sel.end;
-    }
-
-    function clearHistory() {
-      undoStack = [];
-      redoStack = [];
-      undoGroup = null;
-    }
-
-    function snapshotDraft() {
-      return { text: draftText, anchor: draftAnchor, focus: draftFocus };
-    }
-
-    function applySnapshot(snap) {
-      draftText = snap.text;
-      draftAnchor = Math.max(0, Math.min(snap.anchor, draftText.length));
-      draftFocus = Math.max(0, Math.min(snap.focus, draftText.length));
-      paintDraft();
-    }
-
-    /**
-     * Record a checkpoint before a user-driven mutation.
-     * Coalesce consecutive single-character inserts (typing) and consecutive
-     * single-character backspaces so "hello" undoes as one stroke group.
-     */
-    function beforeUserEdit(group) {
-      if (undoGroup !== null && undoGroup === group) return;
-      const top = undoStack[undoStack.length - 1];
-      const snap = snapshotDraft();
-      if (!top || top.text !== snap.text || top.anchor !== snap.anchor || top.focus !== snap.focus) {
-        undoStack.push(snap);
-        if (undoStack.length > MAX_UNDO) undoStack.shift();
-      }
-      redoStack = [];
-      undoGroup = group;
-    }
-
-    function breakUndoGroup() {
-      undoGroup = null;
-    }
-
-    async function performHistoryMove(direction) {
-      if (!session?.document || busy || historyBusy) return;
-      const stack = direction === 'undo' ? undoStack : redoStack;
-      const other = direction === 'undo' ? redoStack : undoStack;
-      if (!stack.length) return;
-      historyBusy = true;
-      breakUndoGroup();
-      try {
-        // Drain in-flight writes so reconcile starts from a settled session.
-        await writeChain;
-        const current = snapshotDraft();
-        const target = stack.pop();
-        other.push(current);
-        applySnapshot(target);
-        // Force session to match the restored draft (may diverge arbitrarily).
-        reconciling = false;
-        await reconcileSessionToDraft();
-        paintDraft();
-        setStatus(
-          `${session.status} · ${direction === 'undo' ? 'undid' : 'redid'} · ${undoStack.length} undo / ${redoStack.length} redo`,
-          session.status === 'live' || session.status === 'ready' ? 'ok' : '',
-        );
-      } catch (error) {
-        setStatus(String(error.message || error), 'error');
-      } finally {
-        historyBusy = false;
-      }
-    }
-
-    function replaceSelectionWith(text, { group } = {}) {
-      const from = Math.min(draftAnchor, draftFocus);
-      const to = Math.max(draftAnchor, draftFocus);
-      const hasSelection = to > from;
-      // Coalesce only pure single-character typing with no selection.
-      let editGroup = group;
-      if (editGroup === undefined) {
-        if (!hasSelection && text && text.length === 1 && text !== '\n') editGroup = 'insert';
-        else editGroup = null;
-      }
-      beforeUserEdit(editGroup);
-      if (hasSelection) {
-        draftText = draftText.slice(0, from) + draftText.slice(to);
-        enqueue({ kind: 'delete', from, to });
-      }
-      if (text) {
-        draftText = draftText.slice(0, from) + text + draftText.slice(from);
-        enqueue({ kind: 'insert', offset: from, text });
-        draftAnchor = from + text.length;
-      } else {
-        draftAnchor = from;
-      }
-      draftFocus = draftAnchor;
-      paintDraft();
-    }
-
-    function applyDeleteRange(from, to, { group } = {}) {
-      if (from >= to) return;
-      // Coalesce single-code-unit backspace runs; everything else is atomic.
-      let editGroup = group;
-      if (editGroup === undefined) {
-        editGroup = (to - from === 1) ? 'delete-unit' : null;
-      }
-      beforeUserEdit(editGroup);
-      draftText = draftText.slice(0, from) + draftText.slice(to);
-      draftAnchor = from;
-      draftFocus = from;
-      paintDraft();
-      enqueue({ kind: 'delete', from, to });
-    }
-
-    /** Soft line = run of text between newlines (v1 is a single pre-wrap block). */
-    function softLineBounds(offset) {
-      const start = draftText.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
-      let end = draftText.indexOf('\n', offset);
-      if (end < 0) end = draftText.length;
-      return { start, end };
-    }
-
-    /** Word boundary for Option+Backspace / Option+Delete style deletes. */
-    function wordBoundaryBackward(offset) {
-      let i = offset;
-      while (i > 0 && /\s/.test(draftText[i - 1])) i -= 1;
-      while (i > 0 && !/\s/.test(draftText[i - 1])) i -= 1;
-      return i;
-    }
-
-    function wordBoundaryForward(offset) {
-      let i = offset;
-      while (i < draftText.length && /\s/.test(draftText[i])) i += 1;
-      while (i < draftText.length && !/\s/.test(draftText[i])) i += 1;
-      return i;
-    }
-
-    /**
-     * Expand a collapsed caret into a delete range for platform delete variants.
-     * When a selection already exists, delete that selection (browser default).
-     */
-    function deleteRangeForInputType(inputType) {
-      let from = Math.min(draftAnchor, draftFocus);
-      let to = Math.max(draftAnchor, draftFocus);
-      if (from !== to) return { from, to };
-
-      switch (inputType) {
-        case 'deleteContentBackward':
-          if (from === 0) return null;
-          return { from: from - 1, to: from };
-        case 'deleteContentForward':
-        case 'deleteContent':
-          if (to >= draftText.length) return null;
-          return { from: to, to: to + 1 };
-        case 'deleteWordBackward':
-          if (from === 0) return null;
-          return { from: wordBoundaryBackward(from), to: from };
-        case 'deleteWordForward':
-          if (to >= draftText.length) return null;
-          return { from: to, to: wordBoundaryForward(to) };
-        case 'deleteSoftLineBackward':
-        case 'deleteHardLineBackward': {
-          // Cmd+Backspace (macOS): delete from caret to start of soft line.
-          const { start } = softLineBounds(from);
-          if (from === start) return null;
-          return { from: start, to: from };
-        }
-        case 'deleteSoftLineForward':
-        case 'deleteHardLineForward': {
-          const { end } = softLineBounds(to);
-          if (to === end) return null;
-          return { from: to, to: end };
-        }
-        case 'deleteEntireSoftLine': {
-          const { start, end } = softLineBounds(from);
-          // Include the trailing newline when present so the line is removed.
-          const lineEnd = end < draftText.length && draftText[end] === '\n' ? end + 1 : end;
-          if (start === lineEnd) return null;
-          return { from: start, to: lineEnd };
-        }
-        case 'deleteByCut':
-        case 'deleteByDrag':
-          return null;
-        default:
-          return null;
+        const item = document.createElement('div');
+        item.className = `doc${doc.id === currentId ? ' active' : ''}`;
+        const label = document.createElement('strong');
+        label.textContent = shortId(doc.id);
+        const detail = document.createElement('small');
+        detail.textContent = doc.id;
+        item.append(label, detail);
+        item.onclick = () => void openDoc(doc.id);
+        $('list').append(item);
       }
     }
 
     async function loadDocs() {
-      const res = await fetch('/docs', { credentials: 'include' });
-      if (!res.ok) throw new Error(`list failed (${res.status})`);
-      const body = await res.json();
-      docs = body.docs ?? [];
+      const response = await fetch('/docs', { credentials: 'include' });
+      if (!response.ok) throw new Error(`list failed (${response.status})`);
+      docs = (await response.json()).docs ?? [];
       renderDocList();
     }
 
-    async function createDoc() {
-      $('create').disabled = true;
-      try {
-        const res = await fetch('/docs', {
-          method: 'POST',
-          credentials: 'include',
-          headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ clientId: historySession }),
-        });
-        const body = await res.json();
-        if (!res.ok || !body.ok) throw new Error(body.failure?.message || `create failed (${res.status})`);
-        await loadDocs();
-        await openDoc(body.id);
-      } catch (error) {
-        setStatus(String(error.message || error), 'error');
-      } finally {
-        $('create').disabled = false;
-      }
+    function closeSession() {
+      unsubscribe?.();
+      editorBinding?.close();
+      session?.close();
+      unsubscribe = null;
+      editorBinding = null;
+      session = null;
     }
 
-    function closeSession() {
-      if (unsubscribe) {
-        unsubscribe();
-        unsubscribe = null;
-      }
-      if (session) {
-        session.close();
-        session = null;
-      }
-      writeChain = Promise.resolve();
-      pendingEdits = 0;
-      draftText = '';
-      draftAnchor = 0;
-      draftFocus = 0;
-      clearHistory();
-      historyBusy = false;
+    function renderSessionStatus(document = session?.document) {
+      const block = document?.blocks?.find((candidate) => candidate.kind === 'visible');
+      setStatus(
+        document ? `${session.status} - ${block ? `${block.id.slice(0, 8)}...` : 'no visible block'}` : 'document unavailable',
+        document && session.status === 'live' ? 'ok' : document ? '' : 'error',
+      );
     }
 
     async function openDoc(id) {
@@ -661,206 +128,54 @@
       renderDocList();
       $('empty').classList.add('hidden');
       $('editor').classList.remove('hidden');
-      setStatus(`opening ${shortId(id)}…`);
-
+      setStatus(`opening ${shortId(id)}...`);
       try {
         session = createAnnotatedTextHttpSession({
           baseUrl: '/live-delivery',
-          context: {
-            entity: DocClient,
-            field: DocClient.body,
-            documentId: id,
-          },
+          context: { entity: DocClient, field: DocClient.body, documentId: id },
           historySession,
-          createActionId: () => freshId('demo'),
         });
-        unsubscribe = session.subscribe((document) => {
-          if (!document) {
-            setStatus('document unavailable', 'error');
-            return;
-          }
-          // Never paint session snapshots over the draft after open. Annotated-
-          // text delivery is snapshot-only: a lagging receipt recovery for the
-          // first keystroke was publishing "1" and wiping the burst. Draft is
-          // authoritative; reconcileSessionToDraft pushes draft → session.
-          const block = primaryBlock(document);
-          const serverText = visibleText(document);
-          const extra = document.blocks.length > 1
-            ? ` · editing first of ${document.blocks.length} blocks`
-            : '';
-          const queue = pendingEdits > 0 ? ` · ${pendingEdits} pending` : '';
-          const lag = pendingEdits === 0 && serverText !== draftText
-            ? ` · syncing…`
-            : '';
-          setStatus(
-            `${session.status} · ${block ? block.id.slice(0, 8) + '…' : 'no visible block'}${extra}${queue}${lag}`,
-            session.status === 'live' || session.status === 'ready' ? 'ok' : '',
-          );
-          // If a late snapshot left the session behind while idle, re-push draft.
-          if (pendingEdits === 0 && serverText !== draftText) {
-            void writeChain.then(() => reconcileSessionToDraft()).then(() => paintDraft());
-          }
+        unsubscribe = session.subscribe(renderSessionStatus);
+        editorBinding = bindAnnotatedTextEditor({
+          element: $('editor'),
+          session,
+          onError: (error) => setStatus(error?.message ?? String(error), 'error'),
         });
         await session.ready;
-        if (session.document) adoptDocument(session.document);
-        $('editor').focus();
+        renderSessionStatus();
+        editorBinding.focus();
       } catch (error) {
-        setStatus(String(error.message || error), 'error');
+        setStatus(error?.message ?? String(error), 'error');
         closeSession();
       } finally {
         busy = false;
       }
     }
 
-    document.addEventListener('selectionchange', syncSelectionFromDom);
-
-    $('editor').addEventListener('beforeinput', (event) => {
-      if (!session?.document || busy || historyBusy) {
-        event.preventDefault();
-        return;
-      }
-      // Composition (IME) uses composition* events; don't steal mid-compose.
-      if (event.isComposing || event.inputType === 'insertCompositionText') return;
-
-      // Always own typing — never let the browser mutate the DOM under us.
-      const inputType = event.inputType;
-      event.preventDefault();
-
-      if (inputType === 'historyUndo') {
-        historyKeyHandled = true;
-        void performHistoryMove('undo');
-        return;
-      }
-      if (inputType === 'historyRedo') {
-        historyKeyHandled = true;
-        void performHistoryMove('redo');
-        return;
-      }
-
-      if (inputType === 'insertText') {
-        const text = event.data ?? '';
-        if (!text) return;
-        syncSelectionFromDom();
-        replaceSelectionWith(text);
-        return;
-      }
-
-      if (inputType === 'insertFromPaste' || inputType === 'insertFromDrop') {
-        const text = event.dataTransfer?.getData('text/plain')
-          ?? event.data
-          ?? '';
-        if (!text) return;
-        syncSelectionFromDom();
-        replaceSelectionWith(text, { group: null });
-        return;
-      }
-
-      if (
-        inputType === 'deleteContentBackward'
-        || inputType === 'deleteContentForward'
-        || inputType === 'deleteByCut'
-        || inputType === 'deleteByDrag'
-        || inputType === 'deleteContent'
-        || inputType === 'deleteWordBackward'
-        || inputType === 'deleteWordForward'
-        || inputType === 'deleteSoftLineBackward'
-        || inputType === 'deleteSoftLineForward'
-        || inputType === 'deleteHardLineBackward'
-        || inputType === 'deleteHardLineForward'
-        || inputType === 'deleteEntireSoftLine'
-      ) {
-        modifierDeleteHandled = true;
-        syncSelectionFromDom();
-        const range = deleteRangeForInputType(inputType);
-        if (!range) return;
-        // Word/line deletes are atomic undo steps.
-        const atomic = inputType !== 'deleteContentBackward'
-          && inputType !== 'deleteContentForward'
-          && inputType !== 'deleteContent';
-        applyDeleteRange(range.from, range.to, atomic ? { group: null } : undefined);
-        return;
-      }
-
-      // Other rich input types are ignored (already preventDefault'd).
-    });
-
-    // Enter does not always produce beforeinput insertText across browsers.
-    // Cmd/Option+Backspace usually goes through beforeinput (deleteSoftLineBackward /
-    // deleteWordBackward); keydown is only a fallback when beforeinput is skipped.
-    // Cmd+Z / Cmd+Shift+Z drive the local draft undo stack (historyUndo/historyRedo
-    // also arrive via beforeinput on some browsers).
-    $('editor').addEventListener('keydown', (event) => {
-      if (!session?.document || busy || historyBusy || event.isComposing) return;
-
-      const mod = event.metaKey || event.ctrlKey;
-      if (mod && !event.altKey && (event.key === 'z' || event.key === 'Z')) {
-        event.preventDefault();
-        const direction = event.shiftKey ? 'redo' : 'undo';
-        historyKeyHandled = false;
-        queueMicrotask(() => {
-          if (historyKeyHandled) return;
-          void performHistoryMove(direction);
+    async function createDoc() {
+      $('create').disabled = true;
+      try {
+        const response = await fetch('/docs', {
+          method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ clientId: historySession }),
         });
-        return;
+        const body = await response.json();
+        if (!response.ok || !body.ok) throw new Error(body.failure?.message ?? `create failed (${response.status})`);
+        await loadDocs();
+        await openDoc(body.id);
+      } catch (error) {
+        setStatus(error?.message ?? String(error), 'error');
+      } finally {
+        $('create').disabled = false;
       }
-      // Windows / some Linux layouts: Ctrl+Y redo
-      if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey
-        && (event.key === 'y' || event.key === 'Y')) {
-        event.preventDefault();
-        historyKeyHandled = false;
-        queueMicrotask(() => {
-          if (historyKeyHandled) return;
-          void performHistoryMove('redo');
-        });
-        return;
-      }
-
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        syncSelectionFromDom();
-        replaceSelectionWith('\n', { group: null });
-        return;
-      }
-
-      // Arrow / Home / End / Page* break typing coalescing (new undo group next).
-      if (event.key.startsWith('Arrow') || event.key === 'Home' || event.key === 'End'
-        || event.key === 'PageUp' || event.key === 'PageDown') {
-        breakUndoGroup();
-        return;
-      }
-
-      const isBackspace = event.key === 'Backspace';
-      const isDelete = event.key === 'Delete';
-      if (!isBackspace && !isDelete) return;
-      if (!(event.altKey || event.metaKey || event.ctrlKey)) return;
-
-      let inputType = null;
-      if (isBackspace && event.metaKey) inputType = 'deleteSoftLineBackward';
-      else if (isDelete && event.metaKey) inputType = 'deleteSoftLineForward';
-      else if (isBackspace && (event.altKey || event.ctrlKey)) inputType = 'deleteWordBackward';
-      else if (isDelete && (event.altKey || event.ctrlKey)) inputType = 'deleteWordForward';
-      if (!inputType) return;
-
-      // Always prevent native mutation (we own the DOM via draft).
-      event.preventDefault();
-      modifierDeleteHandled = false;
-      // beforeinput runs after keydown in the same turn when the browser emits it.
-      queueMicrotask(() => {
-        if (modifierDeleteHandled) return;
-        if (!session?.document || busy || historyBusy) return;
-        syncSelectionFromDom();
-        const range = deleteRangeForInputType(inputType);
-        if (range) applyDeleteRange(range.from, range.to, { group: null });
-      });
-    });
+    }
 
     $('create').onclick = () => void createDoc();
-
     try {
       await loadDocs();
       if (docs[0]) await openDoc(docs[0].id);
     } catch (error) {
-      setStatus(String(error.message || error), 'error');
+      setStatus(error?.message ?? String(error), 'error');
     }
   </script>
 </body>

@@ -5,7 +5,7 @@
 import { BodyError, readRequestBody } from './http-body.mjs';
 import { failure, isWorkbenchFailure } from './outcome.mjs';
 import { sendFailure } from './http-failure.mjs';
-import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
+import { annotatedTextHistorySession, resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { scopeOf } from './scope-handle.mjs';
 
 const ACTION_PATH = '/workbench/actions';
@@ -52,16 +52,20 @@ function actionRequest(body) {
 function batchActionRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const keys = Object.keys(body);
-  if (keys.length < 3 || keys.length > 4 || keys.some((key) => !['actionId', 'scope', 'actions', 'clientId'].includes(key))) return null;
-  const { actionId, scope, actions, clientId } = body;
+  if (keys.length < 3 || keys.length > 5 || keys.some((key) => !['actionId', 'scope', 'document', 'actions', 'clientId'].includes(key))) return null;
+  const { actionId, scope, document, actions, clientId } = body;
   if (typeof actionId !== 'string' || actionId.length === 0 || actionId.length > MAX_STRING_LENGTH) return null;
-  if (typeof scope !== 'string' || scope.length === 0 || scope.length > MAX_STRING_LENGTH) return null;
+  if (scope === undefined && document === undefined) return null;
+  if (scope !== undefined && (typeof scope !== 'string' || scope.length === 0 || scope.length > MAX_STRING_LENGTH)) return null;
+  if (document !== undefined && (!document || typeof document !== 'object' || Array.isArray(document)
+    || Object.keys(document).some((key) => !['entity', 'field', 'documentId', 'authoringClient'].includes(key))
+    || !['entity', 'field', 'documentId'].every((key) => typeof document[key] === 'string' && document[key].length > 0))) return null;
   if (clientId !== undefined && (typeof clientId !== 'string' || clientId.length === 0 || clientId.length > MAX_STRING_LENGTH)) return null;
   if (!Array.isArray(actions) || actions.length === 0 || actions.some((action) => {
     if (!action || typeof action !== 'object' || Array.isArray(action) || Object.keys(action).length !== 2) return true;
     return typeof action.type !== 'string' || action.type.length === 0 || action.type.length > MAX_STRING_LENGTH || !isJsonValue(action.payload);
   })) return null;
-  return { actionId, scope, actions, ...(clientId === undefined ? {} : { clientId }) };
+  return { actionId, ...(scope === undefined ? {} : { scope }), ...(document === undefined ? {} : { document }), actions, ...(clientId === undefined ? {} : { clientId }) };
 }
 
 function validPrincipal(principal) {
@@ -74,12 +78,39 @@ function validPrincipal(principal) {
 
 function historyRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
-  const { actionId, scope, session, command } = body;
-  const allowed = ['actionId', 'scope', 'session', 'command'];
-  if (Object.keys(body).length !== allowed.length || Object.keys(body).some((key) => !allowed.includes(key))) return null;
+  const { actionId, scope, document, session, command } = body;
+  const allowed = ['actionId', 'scope', 'document', 'session', 'command'];
+  if (Object.keys(body).some((key) => !allowed.includes(key)) || (scope === undefined) === (document === undefined)) return null;
   if (!['undo', 'redo'].includes(command)
-    || ![actionId, scope, session].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)) return null;
-  return { actionId, scope, session };
+    || ![actionId, session].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)) return null;
+  if (scope !== undefined && (typeof scope !== 'string' || !scope || scope.length > MAX_STRING_LENGTH)) return null;
+  if (document !== undefined && (!document || typeof document !== 'object' || Array.isArray(document)
+    || !['entity', 'field', 'documentId'].every((key) => typeof document[key] === 'string' && document[key].length > 0))) return null;
+  return { actionId, ...(scope === undefined ? {} : { scope }), ...(document === undefined ? {} : { document }), session };
+}
+
+function resolveDocumentScope(app, document) {
+  if (!document) return null;
+  const entity = app.entities.get(document.entity);
+  const descriptor = entity?.fields?.[document.field];
+  if (!entity || descriptor?.kind !== 'annotatedText') return null;
+  const row = app.db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(document.documentId);
+  if (!row) return null;
+  try { return resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key; } catch { return null; }
+}
+
+function annotatedTextActionIdentity(app, request) {
+  const id = request.payload?.id;
+  if (typeof id !== 'string' || id.length === 0) return null;
+  for (const entity of app.entities.values()) {
+    for (const [field, descriptor] of Object.entries(entity.fields)) {
+      if (descriptor.kind === 'annotatedText' && request.type === `${entity.name}.${field}.operation`) {
+        const row = app.db.prepare(`SELECT 1 FROM ${entity.name} WHERE id = ?`).get(id);
+        return row ? { entity: entity.name, field, documentId: id } : null;
+      }
+    }
+  }
+  return null;
 }
 
 function parseGeneratedCrudType(type) {
@@ -189,6 +220,28 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
     sendFailure(sendJson, res, failure('invalid-input', 'invalid action request'));
     return true;
   }
+  let principal;
+  try { principal = await principalOf(req); } catch {
+    sendFailure(sendJson, res, failure('denied', 'authentication required'));
+    return true;
+  }
+  if (!validPrincipal(principal)) {
+    sendFailure(sendJson, res, failure('denied', 'authentication required'));
+    return true;
+  }
+
+  if (request.document) {
+    const document = request.document;
+    request.scope = resolveDocumentScope(app, document);
+    if (!request.scope) {
+      sendFailure(sendJson, res, failure('not-found', 'document is unavailable'));
+      return true;
+    }
+    if (url.pathname === HISTORY_PATH) {
+      request.session = annotatedTextHistorySession(request.session, document);
+    }
+    delete request.document;
+  }
   // Registered declarations and explicit applicationHttpActions form the public
   // mutation contract. Kernel handler existence alone never admits a type.
   if (url.pathname === ACTION_PATH && !admitsApplicationHttpAction(app, request)) {
@@ -198,16 +251,6 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
   if (url.pathname === BATCH_ACTION_PATH
     && request.actions.some((action) => !admitsApplicationHttpAction(app, { ...action, scope: request.scope }))) {
     sendFailure(sendJson, res, failure('unknown-action', 'batch action is not available'));
-    return true;
-  }
-
-  let principal;
-  try { principal = await principalOf(req); } catch {
-    sendFailure(sendJson, res, failure('denied', 'authentication required'));
-    return true;
-  }
-  if (!validPrincipal(principal)) {
-    sendFailure(sendJson, res, failure('denied', 'authentication required'));
     return true;
   }
 
@@ -229,7 +272,15 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
     ? await historyHttpDispatchers.get(app)?.(body.command, { ...request, principal })
     : url.pathname === BATCH_ACTION_PATH
       ? await batchHttpDispatchers.get(app)?.({ ...request, principal, ...(request.clientId === undefined ? {} : { history: { session: request.clientId } }) })
-       : await app.dispatch({ ...request, principal, ...(request.clientId === undefined ? {} : { history: { session: request.clientId } }) });
+       : await app.dispatch({ ...request, principal, ...(request.clientId === undefined ? {} : {
+           history: {
+             session: request.clientId,
+             ...(() => {
+               const document = annotatedTextActionIdentity(app, request);
+               return document ? { identity: annotatedTextHistorySession(request.clientId, document) } : {};
+             })(),
+           },
+         }) });
   if (!result?.ok) {
     sendFailure(sendJson, res, isWorkbenchFailure(result?.failure)
       ? result.failure

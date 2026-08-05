@@ -6,9 +6,6 @@
 //   node projects/annotated-doc/server.mjs
 //   open http://127.0.0.1:3460
 //
-// Client handle (public/client-handle.mjs) must stay aligned with the body
-// declaration below.
-
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -16,16 +13,13 @@ import { fileURLToPath } from 'node:url';
 import workbench, {
   admin,
   annotatedText,
+  annotatedTextClientHandle,
   annotatedTextCreateAction,
-  annotation,
   entity,
   everyone,
   grant,
-  measurement,
   read,
   ref,
-  registerAnnotatedTextContract,
-  registerAnnotatedTextStructuralExtension,
   scope,
   subscribe,
   write,
@@ -38,17 +32,6 @@ const DB_PATH = process.env.ANNOTATED_DOC_DB
   || new URL('./annotated-doc.db', import.meta.url).pathname;
 const INDEX_HTML = new URL('./public/index.html', import.meta.url);
 
-// Grammar requires ≥1 annotation and ≥1 measurement with a structural adapter.
-// Both are stubs — the UI never surfaces them.
-registerAnnotatedTextContract('demoWords', Object.freeze({ kind: 'measurement' }));
-registerAnnotatedTextStructuralExtension('demoWords', Object.freeze({
-  version: 1,
-  validate() {},
-  edit() {},
-  partition() {},
-  combine() {},
-}));
-
 export const Project = entity('Project', {
   owner: ref('User', { role: 'owner' }),
   grant: [scope(() => everyone()).can(() => grant(read, write, subscribe, admin))],
@@ -57,14 +40,10 @@ export const Project = entity('Project', {
 export const Doc = entity('Doc', {
   project: ref('Project'),
   owner: ref('User', { role: 'owner' }),
-  body: annotatedText({
-    project: 'project',
-    owner: 'owner',
-    annotations: [annotation('note')],
-    measurements: [measurement('words', { extension: 'demoWords' })],
-  }),
+  body: annotatedText({ project: 'project', owner: 'owner' }),
   grant: [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
+const DocClient = annotatedTextClientHandle(Doc, Doc.body);
 
 const demoPrincipal = Object.freeze({ type: 'user', id: DEMO_USER });
 
@@ -114,6 +93,13 @@ export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
   const publicDir = new URL('./public', import.meta.url).pathname;
 
   app.attachLiveDelivery({ principalOf });
+
+  app.use('/client-handle.mjs', (req, res, next) => {
+    if (req.method !== 'GET') return next();
+    const handle = `export const DocClient = Object.freeze(${JSON.stringify(DocClient)});\n`;
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(handle) });
+    res.end(handle);
+  });
 
   // Thin read/create helpers so the page does not invent a second mutation
   // pipeline. Create still dispatches Doc.create through the package action.
