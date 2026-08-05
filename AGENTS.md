@@ -8,6 +8,20 @@ Accumulated agent memory: [`.agents/memory/MEMORY.md`](./.agents/memory/MEMORY.m
 shared across all agents; check before rediscovering incidents, rulings, or standing
 permissions.
 
+## Agent skills
+
+### Issue tracker
+
+Issues and specs live in this repository's GitHub Issues and are managed with `gh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the canonical Matt Pocock skill labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, and `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+This is a single-context repository. Read `CONTEXT.md` and relevant records under `docs/adr/`. See `docs/agents/domain.md`.
+
 ## Naming
 
 - **Be specific.** A name should say what a thing IS, not a generic category it
