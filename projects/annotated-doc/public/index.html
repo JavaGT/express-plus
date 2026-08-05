@@ -72,6 +72,12 @@
       $('status').className = kind;
     }
 
+    function reportError(error) {
+      const message = error?.message ?? String(error);
+      console.error(`[annotated-doc] ${message}`);
+      setStatus(message, 'error');
+    }
+
     function shortId(id) { return id.length > 12 ? `${id.slice(0, 8)}...` : id; }
 
     function renderDocList() {
@@ -154,13 +160,13 @@
         editorBinding = bindAnnotatedTextEditor({
           element: $('editor'),
           session,
-          onError: (error) => setStatus(error?.message ?? String(error), 'error'),
+          onError: reportError,
         });
         await withTimeout(session.ready, 10000, 'document is taking too long to open — try again');
         renderSessionStatus();
         editorBinding.focus();
       } catch (error) {
-        setStatus(error?.message ?? String(error), 'error');
+        reportError(error);
         closeSession();
       } finally {
         busy = false;
@@ -179,7 +185,7 @@
         await loadDocs();
         await openWhenFree(body.id);
       } catch (error) {
-        setStatus(error?.message ?? String(error), 'error');
+        reportError(error);
       } finally {
         $('create').disabled = false;
       }
@@ -190,7 +196,7 @@
       await loadDocs();
       if (docs[0]) await openDoc(docs[0].id);
     } catch (error) {
-      setStatus(error?.message ?? String(error), 'error');
+      reportError(error);
     }
   </script>
 </body>

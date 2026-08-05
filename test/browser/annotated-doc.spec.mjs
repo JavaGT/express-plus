@@ -68,6 +68,22 @@ test('Cmd+Backspace deletes to the start of the current line', async ({ page }) 
   await expect(page.locator('#editor')).toHaveText('');
 });
 
+test('operation errors are visible and logged to the browser console', async ({ page }) => {
+  await createDocument(page);
+  const errors = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  await page.route('**/workbench/actions', (route) => route.fulfill({
+    status: 400,
+    contentType: 'application/json',
+    body: JSON.stringify({ ok: false, failure: { message: 'Doc.body.operation invalid annotated-text value: offset is outside text bounds' } }),
+  }));
+  await page.locator('#editor').pressSequentially('x', { delay: 0 });
+  await expect(page.locator('#status')).toHaveText('Doc.body.operation invalid annotated-text value: offset is outside text bounds');
+  await expect.poll(() => errors).toContainEqual(expect.stringContaining('offset is outside text bounds'));
+});
+
 test('repeated reloads retain one authoring lease', async ({ page }) => {
   const id = await createDocument(page);
   for (let reload = 0; reload < 17; reload += 1) {
