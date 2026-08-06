@@ -62,6 +62,27 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     return visibleBlocks(document);
   }
 
+  function isLocallyPruned(block) {
+    if (block.kind !== 'visible') return false;
+    if (queued?.blockId === block.id && queued.text === '') return true;
+    if (submitted?.blockId === block.id && submitted.text === '') return true;
+    return false;
+  }
+
+  function moveCaretOffPrunedBlock(blockId) {
+    const blocks = orderedVisible();
+    const index = blocks.findIndex((block) => block.id === blockId);
+    if (index < 0) return;
+    const previous = [...blocks.slice(0, index)].reverse().find((block) => !isLocallyPruned(block));
+    if (previous) {
+      const text = pendingDraftText(previous.id) ?? previous.text;
+      setCaret(previous.id, text.length);
+      return;
+    }
+    const next = blocks.slice(index + 1).find((block) => !isLocallyPruned(block));
+    if (next) setCaret(next.id, 0);
+  }
+
   function endpoint(node, offset, document = session.document) {
     const blocks = orderedVisible(document);
     let span = node.nodeType === 3 ? node.parentElement : node;
@@ -178,8 +199,8 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
 
   function render(document = session.document) {
     if (closed || composing) return;
-    const blocks = document?.blocks ?? [];
-    const visible = orderedVisible(document);
+    const blocks = (document?.blocks ?? []).filter((block) => !(block.kind === 'visible' && isLocallyPruned(block)));
+    const visible = orderedVisible(document).filter((block) => !isLocallyPruned(block));
     const annotationFamilies = new Map((document?.annotations ?? []).map((annotation) => [annotation.id, annotation.family]));
     let caretAfterRender = null;
 
@@ -434,15 +455,25 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     element.setAttribute('aria-busy', 'true');
     rendering = true;
     const span = blockSpan(element, block.id);
-    if (span) span.textContent = queued.text;
-    setCaret(block.id, from + text.length);
+    if (queued.text === '') {
+      // Optimistic prune: drop the hollow span immediately; server confirms via v12.
+      if (span) span.remove();
+      moveCaretOffPrunedBlock(block.id);
+    } else {
+      if (span) span.textContent = queued.text;
+      setCaret(block.id, from + text.length);
+    }
     rendering = false;
     clearTimeout(queuedTimer);
     queuedTimer = setTimeout(flushQueued, 100);
   }
 
   function pendingBlockId() {
-    return submitted?.blockId ?? queued?.blockId ?? composing?.blockId ?? null;
+    if (composing) return composing.blockId;
+    // Empty drafts are already pruned locally and must not lock neighbors.
+    if (queued && queued.text !== '') return queued.blockId;
+    if (submitted && submitted.text !== '') return submitted.blockId;
+    return null;
   }
 
   function pendingDraftText(blockId) {
@@ -461,14 +492,10 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     return false;
   }
 
-  /** Boundary delete onto a neighbor while an empty draft is still settling. */
+  /** Boundary delete onto a neighbor while a locking draft is still settling. */
   function deferBoundaryEdit(edit) {
     const target = pendingBlockId();
     if (!target || target === edit.blockId) return false;
-    if (composing || pendingDraftText(target) !== '') {
-      onError(new Error('annotated text cannot edit another block while a local change is pending'));
-      return true;
-    }
     followOnEdit = edit;
     element.setAttribute('aria-busy', 'true');
     return true;
@@ -490,14 +517,26 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     const blocks = orderedVisible();
     const index = blocks.findIndex((candidate) => candidate.id === block.id);
     const previous = inputType === 'deleteContentBackward';
-    if ((previous && offset !== 0) || (!previous && offset !== block.text.length)) return null;
-    const adjacent = blocks[index + (previous ? -1 : 1)];
-    if (!adjacent) return null;
-    const text = queued?.blockId === adjacent.id ? queued.text : adjacent.text;
-    if (!text) return null;
-    return previous
-      ? { block: adjacent, from: scalarStart(text, text.length - 1), to: text.length }
-      : { block: adjacent, from: 0, to: scalarEnd(text, 1) };
+    const localText = pendingDraftText(block.id) ?? block.text;
+    if ((previous && offset !== 0) || (!previous && offset !== localText.length)) return null;
+    let step = previous ? -1 : 1;
+    let cursor = index + step;
+    while (cursor >= 0 && cursor < blocks.length) {
+      const adjacent = blocks[cursor];
+      if (isLocallyPruned(adjacent)) {
+        cursor += step;
+        continue;
+      }
+      const text = pendingDraftText(adjacent.id) ?? adjacent.text;
+      if (!text) {
+        cursor += step;
+        continue;
+      }
+      return previous
+        ? { block: adjacent, from: scalarStart(text, text.length - 1), to: text.length }
+        : { block: adjacent, from: 0, to: scalarEnd(text, 1) };
+    }
+    return null;
   }
 
   function beforeInput(event) {
@@ -528,7 +567,9 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       return;
     }
     const text = pendingDraftText(block.id) ?? block.text;
-    const range = deleteRange(event.inputType, text, selected.from.offset, selected.to.offset);
+    // Caret left on a hollow pruned block: hop immediately.
+    const onPrunedEmpty = text === '' && selected.from.offset === selected.to.offset;
+    const range = onPrunedEmpty ? null : deleteRange(event.inputType, text, selected.from.offset, selected.to.offset);
     if (range) {
       if (mutationIsBlocked(block.id)) return;
       bufferEdit(block, range.from, range.to, '');

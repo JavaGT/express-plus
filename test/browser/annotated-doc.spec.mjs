@@ -489,15 +489,13 @@ test('repeated backspace crosses comment edges without losing the editor selecti
     await expect(editor).toBeFocused();
   }
   await expect.poll(() => errors).not.toContainEqual(expect.stringContaining('cannot edit another block'));
-  await expect(page.locator('.annotation-card')).toHaveCount(1);
-  await expect(page.locator('.annotation-card')).toContainText('Attached text is not visible.');
-  // Unannotated empty split leftovers are pruned; the empty annotated block remains
-  // until the orphan comment is removed (empty: orphan policy).
-  const emptyUnannotated = await page.evaluate(() => {
-    const state = JSON.parse(document.querySelector('#live-state pre')?.textContent ?? 'null');
-    return (state?.blocks ?? []).filter((block) => block.kind === 'visible' && block.text === '' && !(block.annotationIds?.length));
-  });
-  expect(emptyUnannotated).toEqual([]);
+  // Emptying annotated text drops the comment (empty: orphan). Fully cleared
+  // docs keep exactly one empty editable block — never a hangover of splits.
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await expect(editor.locator('[data-block-id]')).toHaveCount(1);
+  const state = await page.evaluate(() => JSON.parse(document.querySelector('#live-state pre')?.textContent ?? 'null'));
+  expect(state.blocks).toEqual([expect.objectContaining({ kind: 'visible', text: '', annotationIds: [] })]);
+  expect(state.annotations ?? []).toEqual([]);
 });
 
 test('removing the final comment prunes empty split blocks but retains one editable block', async ({ page }) => {
@@ -507,10 +505,7 @@ test('removing the final comment prunes empty split blocks but retains one edita
     await editor.press('Backspace');
     await expect(editor).toHaveAttribute('aria-busy', 'false');
   }
-  // Unannotated empty leftovers are already gone from text deletes; only the
-  // empty annotated block remains until comment removal (empty: orphan).
-  await expect(editor.locator('[data-block-id]')).toHaveCount(1);
-  await page.getByRole('button', { name: 'Delete comment 1' }).click();
+  // Text deletes already pruned hollow blocks and orphaned the emptied comment.
   await expect(page.locator('.annotation-card')).toHaveCount(0);
   await expect(editor.locator('[data-block-id]')).toHaveCount(1);
   await expect(editor).toHaveText('');

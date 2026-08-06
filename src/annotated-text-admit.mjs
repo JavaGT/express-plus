@@ -82,7 +82,7 @@ async function assertV9AuthoringPrelude({ name, fieldName, prefix, descriptor, r
 
 /** text.insert | text.delete | text.replace */
 function admitTextEdit(ctx) {
-  const { name, fieldName, command, db, prefix, documentScope, lease, family, state, currentVisible, position, positionFamily, actor, lamport, edit, descriptor } = ctx;
+  const { name, fieldName, command, db, prefix, documentScope, lease, family, state, currentVisible, position, positionFamily, actor, lamport, edit, descriptor, compiledMeta } = ctx;
   const blockId = position.block_id;
   const toPosition = edit.kind === 'text.insert' ? null : resolvePosition({ db, prefix, positionToken: edit.to.positionToken, leaseId: lease.id });
   if (edit.kind !== 'text.insert' && !toPosition) throw new ValidationError(`${name}.${fieldName}.operation replacement end position token unavailable`, { code: 'position-token-unavailable' });
@@ -90,12 +90,41 @@ function admitTextEdit(ctx) {
   const sourceFields = sourceBlock ? Object.fromEntries(Object.keys(descriptor.block ?? {}).map((field) => [field, deserializeField(descriptor.block[field], sourceBlock[field])])) : undefined;
   const membershipBlockIds = new Set();
   for (const block of family.blocks) if (db.prepare(`SELECT 1 FROM ${prefix}_membership WHERE block_id = ?`).get(block.id)) membershipBlockIds.add(block.id);
+  const membershipRows = db.prepare(
+    `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point
+       FROM ${prefix}_membership AS membership
+       JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
+      WHERE annotation.document_id = ?
+      ORDER BY membership.annotation_id, membership.ordinal`,
+  ).all(command.id);
+  const memberships = membershipRows.map((membership) => ({
+    annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal,
+    start: JSON.parse(membership.start_point), end: JSON.parse(membership.end_point),
+  }));
+  const targets = db.prepare(
+    `SELECT annotation_id, target_annotation_id FROM ${prefix}_annotation_protected_target
+      WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)
+      ORDER BY annotation_id, target_annotation_id`,
+  ).all(command.id);
+  const targetsByAnnotation = new Map();
+  for (const target of targets) targetsByAnnotation.set(target.annotation_id, [...(targetsByAnnotation.get(target.annotation_id) ?? []), target.target_annotation_id]);
+  const annotations = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(command.id).map((annotation) => {
+    const metadata = compiledMeta.annotationHandles[annotation.family];
+    if (!metadata) throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family '${annotation.family}'`);
+    return { id: annotation.id, family: annotation.family, empty: metadata.empty, protectedTargetIds: targetsByAnnotation.get(annotation.id) ?? [] };
+  });
   const plannerEdit = edit.kind === 'text.insert'
     ? { kind: edit.kind, text: edit.text, at: { blockId, offset: edit.at.offset, affinity: edit.at.affinity, positionFamily } }
     : { kind: edit.kind, text: edit.text, from: { blockId, offset: edit.from.offset, affinity: edit.from.affinity, positionFamily }, to: { blockId: toPosition.block_id, offset: edit.to.offset, affinity: edit.to.affinity, positionFamily: restoreTextFamilyCheckpoint(JSON.parse(toPosition.family_checkpoint)) } };
   let plan;
-  try { plan = planTextOffsetEdit({ documentId: command.id, structureVersion: state.structure_version, family, actor, lamport, visibleBlockIds: currentVisible, membershipBlockIds, sourceBlocks: sourceBlock ? { [blockId]: { epoch: sourceBlock.epoch, fields: sourceFields } } : {}, mintBlockId: randomUUID, edit: plannerEdit }); }
-  catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`, error.code ? { code: error.code } : undefined); }
+  try {
+    plan = planTextOffsetEdit({
+      documentId: command.id, structureVersion: state.structure_version, family, actor, lamport,
+      visibleBlockIds: currentVisible, membershipBlockIds, annotations, memberships,
+      sourceBlocks: sourceBlock ? { [blockId]: { epoch: sourceBlock.epoch, fields: sourceFields } } : {},
+      mintBlockId: randomUUID, edit: plannerEdit,
+    });
+  } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`, error.code ? { code: error.code } : undefined); }
   const handle = eventHandles.native(name, fieldName, 'operated');
   return [{ handle, type: handle.type, scope: documentScope, data: plan }];
 }

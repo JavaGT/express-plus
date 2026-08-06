@@ -141,7 +141,7 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db, privateF
   if (data.version === 6) return applyR6AnnotatedTextOperation({ name, handle, db, data });
   if (data.version === 8) return applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact });
   if (data.version === 9) return applyR9AnnotatedTextOperation({ name, handle, db, descriptor, data });
-  if (data.version === 12) return applyR12AnnotatedTextOperation({ name, handle, db, data });
+  if (data.version === 12) return applyR12AnnotatedTextOperation({ name, handle, db, descriptor, data });
   throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
 }
 
@@ -505,21 +505,26 @@ function applyR1AnnotatedTextOperation({ name, handle, db, data }) {
   return true;
 }
 
-/** text.apply that also prunes empty unannotated blocks emptied by the delete. */
-function applyR12AnnotatedTextOperation({ name, handle, db, data }) {
+/** text.apply that prunes empty blocks and applies empty-policy to their annotations. */
+function applyR12AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
   const operation = data?.operation;
-  if (Object.keys(data).sort().join() !== 'after,before,family,id,operation,prunedBlockIds,version' || data.version !== 12 ||
+  const keys = Object.keys(data).sort().join();
+  if ((keys !== 'after,before,emptiedAnnotations,family,id,operation,prunedBlockIds,version'
+      && keys !== 'after,before,family,id,operation,prunedBlockIds,version')
+      || data.version !== 12 ||
       !isVersion(data.before) || !isVersion(data.after) ||
       !operation || typeof operation !== 'object' || Object.keys(operation).length !== 3 ||
       operation.kind !== 'text.apply' || typeof operation.blockId !== 'string' || operation.blockId.length === 0 ||
       !Object.hasOwn(operation, 'operation') || !data.family ||
       !Array.isArray(data.prunedBlockIds) || data.prunedBlockIds.length === 0 ||
       data.prunedBlockIds.some((id) => typeof id !== 'string' || !id) ||
-      new Set(data.prunedBlockIds).size !== data.prunedBlockIds.length) {
+      new Set(data.prunedBlockIds).size !== data.prunedBlockIds.length ||
+      (data.emptiedAnnotations !== undefined && !Array.isArray(data.emptiedAnnotations))) {
     throw new Error(`${name}.${handle.field}.operated v12 event has invalid composite data`);
   }
+  const emptiedAnnotations = data.emptiedAnnotations ?? [];
   let canonicalOperation;
   try {
     canonicalOperation = canonicalTextOp(operation.operation);
@@ -547,20 +552,88 @@ function applyR12AnnotatedTextOperation({ name, handle, db, data }) {
   } catch {
     throw new Error(`${name}.${handle.field}.operated v12 event text operation is not applicable to prior state`);
   }
-  const expectedPruned = [];
+  const sourceMemberships = db.prepare(
+    `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point
+       FROM ${prefix}_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
+      WHERE annotation.document_id = ?
+      ORDER BY membership.annotation_id, membership.ordinal`,
+  ).all(data.id).map((membership) => ({
+    annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal,
+    start: JSON.parse(membership.start_point), end: JSON.parse(membership.end_point),
+  }));
+  const targets = db.prepare(
+    `SELECT annotation_id, target_annotation_id FROM ${prefix}_annotation_protected_target
+      WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)
+      ORDER BY annotation_id, target_annotation_id`,
+  ).all(data.id);
+  const targetsByAnnotation = new Map();
+  for (const target of targets) targetsByAnnotation.set(target.annotation_id, [...(targetsByAnnotation.get(target.annotation_id) ?? []), target.target_annotation_id]);
+  const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
+  let pureAnnotations = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(data.id).map((annotation) => {
+    const metadata = compiledMeta.annotationHandles[annotation.family];
+    if (!metadata) throw new Error(`${name}.${handle.field}.operated v12 unknown annotation family`);
+    return { id: annotation.id, family: annotation.family, empty: metadata.empty, protectedTargetIds: targetsByAnnotation.get(annotation.id) ?? [] };
+  });
+  let pureMemberships = sourceMemberships;
+  const expectedEmptied = [];
   let prunedFamily = reduced;
+  const expectedPruned = [];
   for (const block of [...reduced.blocks]) {
     if (prunedFamily.blocks.length === 1) break;
-    if (db.prepare(`SELECT 1 FROM ${prefix}_membership WHERE block_id = ?`).get(block.id)) continue;
     if (materializeBlock(prunedFamily, block.id).length !== 0) continue;
+    const onBlock = [...new Set(pureMemberships.filter((membership) => membership.blockId === block.id).map((membership) => membership.annotationId))].sort();
+    for (const annotationId of onBlock) {
+      const target = pureAnnotations.find((annotation) => annotation.id === annotationId);
+      if (!target) continue;
+      let membershipResult;
+      try {
+        membershipResult = removeMembership(current, pureAnnotations, pureMemberships, annotationId, block.id, { structuralRevision: data.before.structuralRevision });
+      } catch {
+        throw new Error(`${name}.${handle.field}.operated v12 annotation empty-policy is not applicable`);
+      }
+      pureAnnotations = membershipResult.annotations;
+      pureMemberships = membershipResult.memberships;
+      const outcome = membershipResult.outcomes[0];
+      if (outcome) {
+        expectedEmptied.push({
+          annotationId,
+          empty: target.empty,
+          disposition: outcome.type === 'delete'
+            ? { kind: 'deleted', family: target.family, savedQuote: null, lastMemberships: null }
+            : { kind: 'orphaned', family: target.family, savedQuote: outcome.savedQuote, lastMemberships: outcome.lastMemberships },
+        });
+      }
+    }
     prunedFamily = removeEmptyBlock(prunedFamily, block.id);
     expectedPruned.push(block.id);
   }
   const next = restoreTextFamilyCheckpoint(data.family);
   if (JSON.stringify(data.prunedBlockIds) !== JSON.stringify(expectedPruned) ||
+      JSON.stringify(emptiedAnnotations) !== JSON.stringify(expectedEmptied) ||
       JSON.stringify(textFamilyCheckpoint(next)) !== JSON.stringify(textFamilyCheckpoint(prunedFamily)) ||
       JSON.stringify(data.after.frontier) !== JSON.stringify(prunedFamily.checkpoint.frontier)) {
     throw new Error(`${name}.${handle.field}.operated v12 prune facts do not match projection state`);
+  }
+  for (const entry of emptiedAnnotations) {
+    db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(entry.annotationId);
+    if (entry.disposition.kind === 'deleted') {
+      db.prepare(`DELETE FROM ${prefix}_annotation_protected_target WHERE target_annotation_id = ?`).run(entry.annotationId);
+      db.prepare(`DELETE FROM ${prefix}_annotation WHERE id = ?`).run(entry.annotationId);
+    } else if (entry.disposition.kind === 'orphaned') {
+      db.prepare(`INSERT INTO ${prefix}_annotation_orphan_state (annotation_id, saved_quote, last_memberships) VALUES (?, ?, ?)`)
+        .run(entry.annotationId, entry.disposition.savedQuote, JSON.stringify(entry.disposition.lastMemberships));
+    }
+  }
+  for (const annotation of pureAnnotations) {
+    const prior = targetsByAnnotation.get(annotation.id) ?? [];
+    const nextTargets = annotation.protectedTargetIds ?? [];
+    if (JSON.stringify(prior) !== JSON.stringify(nextTargets)) {
+      db.prepare(`DELETE FROM ${prefix}_annotation_protected_target WHERE annotation_id = ?`).run(annotation.id);
+      for (const targetId of nextTargets) {
+        db.prepare(`INSERT INTO ${prefix}_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)`)
+          .run(annotation.id, targetId);
+      }
+    }
   }
   const groups = data.prunedBlockIds.map((blockId) => db.prepare(`SELECT group_id FROM ${prefix}_block_group WHERE block_id = ?`).get(blockId)?.group_id);
   if (groups.some((groupId) => typeof groupId !== 'string' || !groupId)) {
@@ -568,7 +641,10 @@ function applyR12AnnotatedTextOperation({ name, handle, db, data }) {
   }
   const rows = db.prepare(`SELECT * FROM ${prefix}_block WHERE document_id = ?`).all(data.id);
   stageBlockPositions(db, prefix, Object.fromEntries(rows.map((row) => [row.id, row])));
-  for (const blockId of data.prunedBlockIds) db.prepare(`DELETE FROM ${prefix}_block WHERE id = ?`).run(blockId);
+  for (const blockId of data.prunedBlockIds) {
+    db.prepare(`DELETE FROM ${prefix}_membership WHERE block_id = ?`).run(blockId);
+    db.prepare(`DELETE FROM ${prefix}_block WHERE id = ?`).run(blockId);
+  }
   for (const groupId of new Set(groups)) {
     if (!db.prepare(`SELECT 1 FROM ${prefix}_block_group WHERE group_id = ?`).get(groupId)) {
       db.prepare(`DELETE FROM ${prefix}_group_membership WHERE group_id = ?`).run(groupId);

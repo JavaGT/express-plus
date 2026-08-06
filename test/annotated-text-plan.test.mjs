@@ -40,16 +40,29 @@ test('prunes empty unannotated blocks emptied by a delete', () => {
   const plan = input(split, { kind: 'text.delete', from: pos(split, 'block2', 0), to: pos(split, 'block2', 2) }, { membershipBlockIds: ['block1'] });
   assert.equal(plan.version, 12);
   assert.deepEqual(plan.prunedBlockIds, ['block2']);
+  assert.deepEqual(plan.emptiedAnnotations, []);
   assert.equal(plan.family.blocks.length, 1);
   assert.equal(materializeBlock(plan.family, 'block1'), 'ab');
 });
 
-test('retains empty annotated blocks emptied by a delete', () => {
+test('prunes empty annotated blocks and applies empty-policy on delete', () => {
   const split = splitBlock(familyFromText('abcd'), 'block1', 'block2', 2).family;
-  const plan = input(split, { kind: 'text.delete', from: pos(split, 'block2', 0), to: pos(split, 'block2', 2) }, { membershipBlockIds: ['block2'] });
-  assert.equal(plan.version, 1);
-  assert.equal(plan.family.blocks.length, 2);
-  assert.equal(materializeBlock(plan.family, 'block2'), '');
+  const annotation = { id: 'ann1', family: 'comment', empty: 'orphan', protectedTargetIds: [] };
+  const membership = addMembership(split, [annotation], [], 'ann1', 'block2',
+    resolvePositionToEndpoint(split, 'block2', 0, split.checkpoint.frontier, 'left'),
+    resolvePositionToEndpoint(split, 'block2', 2, split.checkpoint.frontier, 'right'));
+  const plan = input(split, { kind: 'text.delete', from: pos(split, 'block2', 0), to: pos(split, 'block2', 2) }, {
+    membershipBlockIds: ['block2'],
+    annotations: [annotation],
+    memberships: membership.memberships,
+  });
+  assert.equal(plan.version, 12);
+  assert.deepEqual(plan.prunedBlockIds, ['block2']);
+  assert.equal(plan.emptiedAnnotations.length, 1);
+  assert.equal(plan.emptiedAnnotations[0].annotationId, 'ann1');
+  assert.equal(plan.emptiedAnnotations[0].disposition.kind, 'orphaned');
+  assert.equal(plan.emptiedAnnotations[0].disposition.savedQuote, 'cd');
+  assert.equal(plan.family.blocks.length, 1);
 });
 
 test('plans annotation offsets and rejects inverted ranges', () => {

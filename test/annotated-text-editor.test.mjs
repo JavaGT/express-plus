@@ -697,7 +697,7 @@ function annotatedDocument() {
   };
 }
 
-test('annotated editor defers boundary backspace while an empty draft is still settling', async () => {
+test('annotated editor optimistically prunes an emptied block and continues backspace', async () => {
   const document = {
     version: 1,
     blocks: [
@@ -708,14 +708,17 @@ test('annotated editor defers boundary backspace while an empty draft is still s
   };
   const harness = setup('', document);
   harness.session.status = 'live';
-  let settle;
+  const settlements = [];
   harness.session.replace = async (input) => {
     harness.calls.push(['replace', input]);
-    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settle = resolve; }) } };
+    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settlements.push(resolve); }) } };
   };
 
   harness.selectBlock('after', 1);
   harness.beforeinput('deleteContentBackward');
+  assert.equal(harness.element.querySelector('[data-block-id="after"]'), null);
+  assert.equal(harness.element.textContent, '56');
+  assert.equal(harness.binding.getSelection()?.from.blockId, 'marked');
   await flushInput();
   assert.equal(harness.calls.length, 1);
   assert.deepEqual(harness.calls[0][1], {
@@ -724,18 +727,12 @@ test('annotated editor defers boundary backspace while an empty draft is still s
     text: '',
   });
 
-  // Snapshot has not landed yet; next boundary backspace must not error — it
-  // waits for the empty draft to settle, then deletes into the annotated block.
-  harness.element.focus();
-  const emptyAfter = harness.element.querySelector('[data-block-id="after"]');
-  const emptyRange = harness.dom.window.document.createRange();
-  emptyRange.setStart(emptyAfter, 0);
-  emptyRange.collapse(true);
-  harness.dom.window.getSelection().removeAllRanges();
-  harness.dom.window.getSelection().addRange(emptyRange);
+  // Empty draft does not lock the neighbor — next backspace applies immediately.
   harness.beforeinput('deleteContentBackward');
   assert.deepEqual(harness.errors, []);
-  assert.equal(harness.calls.length, 1);
+  assert.equal(harness.element.textContent, '5');
+  await flushInput();
+  assert.equal(harness.calls.length, 1, 'neighbor edit stays queued until predecessor settles');
 
   harness.publish({
     version: 1,
@@ -744,7 +741,7 @@ test('annotated editor defers boundary backspace while an empty draft is still s
     ],
     annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
   });
-  settle();
+  settlements.shift()?.();
   await flushInput();
   await flushInput();
 

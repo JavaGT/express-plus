@@ -18,7 +18,7 @@ import {
   textFamilyCheckpoint, textOperationForOffsetEdit,
 } from './annotated-text-family.mjs';
 import { canonicalTextOp } from './annotated-text.mjs';
-import { removeAnnotation } from './annotated-text-membership.mjs';
+import { removeAnnotation, removeMembership } from './annotated-text-membership.mjs';
 
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object') return value;
@@ -44,7 +44,8 @@ function before(family, structuralRevision) {
 }
 
 export function planTextOffsetEdit({ documentId, structureVersion, family, actor, lamport,
-  visibleBlockIds, membershipBlockIds, sourceBlocks, mintBlockId, edit }) {
+  visibleBlockIds, membershipBlockIds, sourceBlocks, mintBlockId, edit,
+  annotations = [], memberships = [] }) {
   const blockId = edit.kind === 'text.insert' ? edit.at.blockId : edit.from.blockId;
   const offset = positionOffset(family, edit.kind === 'text.insert' ? edit.at : edit.from);
   let toOffset;
@@ -90,14 +91,34 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
   }
   const operation = textOperationForOffsetEdit(family, textEdit, actor, lamport);
   let nextFamily = applyTextOperationToBlock(family, blockId, operation);
-  // Empty unannotated blocks are split leftovers. Prune them with the delete that
-  // emptied them so recipient snapshots do not keep hollow neighbors forever.
-  // Annotated empties stay until annotation.remove (empty: orphan|delete).
-  const membershipSet = new Set(membershipBlockIds);
+  // Empty blocks (annotated or not) are not kept. Drop memberships via empty
+  // policy, then prune the hollow block with the delete that emptied it.
+  // Orphan quotes use the pre-delete family so the saved quote is the text lost.
   const prunedBlockIds = [];
+  const emptiedAnnotations = [];
+  let nextAnnotations = annotations;
+  let nextMemberships = memberships;
   if (edit.kind === 'text.delete' || edit.kind === 'text.replace') {
     for (const block of [...nextFamily.blocks]) {
-      if (nextFamily.blocks.length === 1 || membershipSet.has(block.id) || materializeBlock(nextFamily, block.id).length !== 0) continue;
+      if (nextFamily.blocks.length === 1 || materializeBlock(nextFamily, block.id).length !== 0) continue;
+      const onBlock = [...new Set(nextMemberships.filter((membership) => membership.blockId === block.id).map((membership) => membership.annotationId))].sort();
+      for (const annotationId of onBlock) {
+        const target = nextAnnotations.find((annotation) => annotation.id === annotationId);
+        if (!target) continue;
+        const reduced = removeMembership(family, nextAnnotations, nextMemberships, annotationId, block.id, { structuralRevision: structureVersion });
+        nextAnnotations = reduced.annotations;
+        nextMemberships = reduced.memberships;
+        const outcome = reduced.outcomes[0];
+        if (outcome) {
+          emptiedAnnotations.push({
+            annotationId,
+            empty: target.empty,
+            disposition: outcome.type === 'delete'
+              ? { kind: 'deleted', family: target.family, savedQuote: null, lastMemberships: null }
+              : { kind: 'orphaned', family: target.family, savedQuote: outcome.savedQuote, lastMemberships: outcome.lastMemberships },
+          });
+        }
+      }
       nextFamily = removeEmptyBlock(nextFamily, block.id);
       prunedBlockIds.push(block.id);
     }
@@ -111,6 +132,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
       after: { structuralRevision: structureVersion + 1, frontier: nextFamily.checkpoint.frontier },
       family: textFamilyCheckpoint(nextFamily),
       prunedBlockIds: Object.freeze([...prunedBlockIds]),
+      emptiedAnnotations: Object.freeze(emptiedAnnotations.map((entry) => deepFreeze(entry))),
     });
   }
   return deepFreeze({ version: 1, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.apply', blockId, operation }, after: { structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily) });
