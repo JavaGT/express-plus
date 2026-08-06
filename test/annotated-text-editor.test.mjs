@@ -148,6 +148,37 @@ test('annotated editor rebases compatible buffered insertion over a foreign appe
   harness.binding.close();
 });
 
+test('annotated editor preserves later typing while the preceding replacement settles', async () => {
+  const harness = setup('a');
+  let settle;
+  harness.session.status = 'live';
+  harness.session.replace = async (input) => {
+    harness.calls.push(['replace', input]);
+    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settle = resolve; }) } };
+  };
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  await flushInput();
+  assert.equal(harness.calls.length, 1);
+  // The package session optimistically projects the first accepted replacement.
+  harness.publish(visible('ab'));
+  harness.element.focus();
+  harness.select(2);
+  harness.beforeinput('insertText', 'c');
+  await flushInput();
+  assert.equal(harness.element.textContent, 'abc');
+  assert.equal(harness.calls.length, 1, 'later input remains buffered while the first replacement settles');
+  settle();
+  await flushInput();
+  assert.deepEqual(harness.calls[1][1], {
+    from: { blockId: 'block-1', offset: 2, affinity: 'right' },
+    to: { blockId: 'block-1', offset: 2, affinity: 'right' },
+    text: 'c',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
 test('annotated editor conflict errors never include buffered or document text', () => {
   const harness = setup('private document text');
   harness.select(1);

@@ -359,7 +359,7 @@ test('positive receipt triggers snapshot fetch and authoring ack', async () => {
   session.close();
 });
 
-test('pending text is visible immediately, serialized, rolled back on rejection, and replaced without duplication', async () => {
+test('dependent text waits for settlement and reports a local conflict when its captured basis is not recovered', async () => {
   const actionRequests = [];
   const pendingResponses = [];
   let cursor = 0;
@@ -383,27 +383,26 @@ test('pending text is visible immediately, serialized, rolled back on rejection,
   await session.ready;
   const a = session.insert({ mutationId: 'a', at: { blockId: 'block-1', offset: 5, affinity: 'right' }, text: 'A' });
   const b = session.insert({ mutationId: 'b', at: { blockId: 'block-1', offset: 6, affinity: 'right' }, text: 'B' });
-  assert.equal(session.document.blocks[0].text, 'HelloAB');
+  assert.equal(session.document.blocks[0].text, 'HelloA');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(actionRequests.length, 1, 'second text action waits for first transport');
   pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: 1 }) });
   await a;
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(actionRequests.length, 2);
-  pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-2', confirmedThrough: 1 }) });
-  await b;
+  assert.equal(actionRequests.length, 1, 'a mismatched recovery must not send B against the old token');
+  assert.equal((await b).ok, false);
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(session.document.blocks[0].text, 'Hello', 'authoritative replacement removes confirmed placeholders');
   const failed = session.insert({ mutationId: 'bad', at: { blockId: 'block-1', offset: 5, affinity: 'right' }, text: 'X' });
-  assert.equal(session.document.blocks[0].text, 'HelloX');
   await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(session.document.blocks[0].text, 'HelloX');
   pendingResponses.shift()({ ok: false, status: 400, json: async () => ({ ok: false, failure: { message: 'rejected' } }) });
   assert.equal((await failed).ok, false);
   assert.equal(session.document.blocks[0].text, 'Hello');
   session.close();
 });
 
-test('queued action keeps its visible pending projection across token replacement of a settling peer', async () => {
+test('queued action waits for settlement and translates through the replacement token', async () => {
   const actionRequests = [];
   const ackRequests = [];
   const pendingResponses = [];
@@ -432,20 +431,20 @@ test('queued action keeps its visible pending projection across token replacemen
   await session.ready;
   const a = session.insert({ mutationId: 'a', at: { blockId: 'block-1', offset: 5, affinity: 'right' }, text: 'A' });
   const b = session.insert({ mutationId: 'b', at: { blockId: 'block-1', offset: 6, affinity: 'right' }, text: 'B' });
-  assert.equal(session.document.blocks[0].text, 'HelloAB');
+  assert.equal(session.document.blocks[0].text, 'HelloA');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(actionRequests.length, 1, 'second text action waits for first transport');
   const aAction = actionRequests[0];
   pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: aAction.actionId, confirmedThrough: 1 }) });
   await a;
   await new Promise((resolve) => setTimeout(resolve, 0));
-  // A's receipt installs a replacement snapshot that reconciles A and re-issues
-  // the position token while the still-unsettled B carries the old token.
-  assert.equal(actionRequests.length, 2, 'B dispatches immediately after A confirms');
-  assert.equal(actionRequests[1].payload.edit.at.positionToken, token('position1'), 'B keeps the token issued under the settled snapshot');
+  // A's settlement installs a replacement snapshot and re-issues its token.
+  // B is translated only after that binding is live.
+  assert.equal(actionRequests.length, 2, 'B dispatches after A settles');
+  assert.equal(actionRequests[1].payload.edit.at.positionToken, token('position2'), 'B uses the replacement token');
   assert.equal(session.document.blocks[0].text, 'HelloAB', 'B stays projected though its position token was replaced');
-  assert.equal(ackRequests.some((request) => request.snapshot === token('snapshot2')), false,
-    'covering snapshot is not acknowledged while B still carries its predecessor token');
+  assert.equal(ackRequests.some((request) => request.snapshot === token('snapshot2')), true,
+    'the recovered authoring fence may be acknowledged before B is translated');
   pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-2', confirmedThrough: 1 }) });
   await b;
   await new Promise((resolve) => setTimeout(resolve, 5));

@@ -77,6 +77,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
   let composing = null;
   let queued = null;
   let queuedTimer = null;
+  let submitting = false;
   let historyInputHandled = false;
 
   function render(document = session.document) {
@@ -97,6 +98,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
           return;
         }
       }
+      if (submitting || (session.status && session.status !== 'live')) return;
       clearTimeout(queuedTimer);
       queuedTimer = null;
       queued = null;
@@ -124,19 +126,26 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     return tracked;
   }
 
-  function replace(from, to, text) {
+  async function replace(from, to, text) {
     const block = firstVisibleBlock(session.document);
     if (!block) return;
-    report(session.replace({
+    submitting = true;
+    try {
+      await report(session.replace({
       from: { blockId: block.id, offset: from, affinity: 'right' },
       to: { blockId: block.id, offset: to, affinity: 'right' },
       text,
-    }));
-    setCaret(element, from + text.length);
+      }));
+      setCaret(element, from + text.length);
+    } finally {
+      submitting = false;
+      if (queued && (!session.status || session.status === 'live')) flushQueued();
+    }
   }
 
   function flushQueued() {
     if (!queued) return;
+    if (submitting || (session.status && session.status !== 'live')) return;
     const pending = queued;
     queued = null;
     queuedTimer = null;
@@ -147,7 +156,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       return;
     }
     const change = changedRange(pending.baseText, pending.text);
-    if (change.from !== change.to || change.text) replace(change.from, change.to, change.text);
+    if (change.from !== change.to || change.text) void replace(change.from, change.to, change.text);
   }
 
   function bufferEdit(block, from, to, text) {

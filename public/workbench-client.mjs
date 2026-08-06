@@ -2499,6 +2499,7 @@ export function createLiveDeliverySession({
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       finishRecoveryWarning();
       status = 'live';
+      publish();
       if (initialized && !reconnecting) settleAdmissions(true);
       return;
     }
@@ -2507,6 +2508,7 @@ export function createLiveDeliverySession({
       if (closed || status === 'revoked' || generation !== recoveryGeneration) return;
       finishRecoveryWarning();
       status = 'live';
+      publish();
       if (initialized && !reconnecting) settleAdmissions(true);
       return;
     }
@@ -3168,6 +3170,9 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   const blockGroupTokens = new WeakMap();
   const pendingActionPositionBlocks = new Map();
   const deferredAuthoringAcknowledgements = new Map();
+  let authoringMutationTail = null;
+  let sessionClosed = false;
+  let wakeAuthoringMutation = null;
   let translatedActions = 0;
   const snapshotBinding = createAnnotatedTextSnapshotSessionBinding((handle, serverId, generation) => {
     blockGroupTokens.set(handle, { serverId, generation });
@@ -3223,7 +3228,68 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       else deferredAuthoringAcknowledgements.set(authoring.snapshot, authoring);
     }
   });
-  async function dispatch(command) {
+  function capturedBlocks(command) {
+    const document = session.snapshot;
+    const blockIds = [command.at?.blockId, command.from?.blockId, command.to?.blockId,
+      command.leftBlockId, command.rightBlockId, command.blockId].filter((id) => typeof id === 'string');
+    const blocks = new Map();
+    for (const blockId of blockIds) {
+      const block = document?.blocks?.find((candidate) => candidate.kind === 'visible' && candidate.id === blockId);
+      if (!block) throw new ClientClosedError('Annotated text document is unavailable');
+      blocks.set(blockId, block.text);
+    }
+    for (const position of [command.at, command.from, command.to]) {
+      if (position && (!Number.isSafeInteger(position.offset) || position.offset < 0
+        || position.offset > blocks.get(position.blockId)?.length)) {
+        throw new TypeError('annotated text position is outside the current document');
+      }
+    }
+    return blocks;
+  }
+  function sameCapturedBlocks(blocks) {
+    return [...blocks].every(([blockId, text]) => session.snapshot?.blocks?.some(
+      (block) => block.kind === 'visible' && block.id === blockId && block.text === text,
+    ));
+  }
+  function localAuthoringConflict() {
+    return { ok: false, failure: new Error('annotated text changed before queued operation could be submitted') };
+  }
+  function queueAuthoringMutation(command, send) {
+    const blocks = capturedBlocks(command);
+    const predecessor = authoringMutationTail;
+    let release;
+    authoringMutationTail = new Promise((resolve) => { release = resolve; });
+    return (async () => {
+      try {
+        if (predecessor) await predecessor;
+        if (sessionClosed) throw new ClientClosedError('Annotated text document is unavailable');
+        // Tokens are snapshot-fenced capabilities. Never translate against a
+        // revoked binding or an optimistic/foreign basis that has since moved.
+        if (session.status !== 'live' || !session.snapshot || !snapshotBinding.authoring) {
+          await new Promise((resolve) => {
+            wakeAuthoringMutation = resolve;
+            const unsubscribe = session.subscribe(() => {
+              if (sessionClosed || ['revoked', 'unavailable'].includes(session.status)
+                || (session.status === 'live' && session.snapshot && snapshotBinding.authoring)) {
+                unsubscribe();
+                wakeAuthoringMutation = null;
+                resolve();
+              }
+            });
+          });
+        }
+        if (sessionClosed) throw new ClientClosedError('Annotated text document is unavailable');
+        if (['revoked', 'unavailable'].includes(session.status)) return localAuthoringConflict();
+        if (!sameCapturedBlocks(blocks)) return localAuthoringConflict();
+        const result = await send();
+        if (result?.ok && result.settlement?.wait) await result.settlement.wait();
+        return result;
+      } finally {
+        release();
+      }
+    })();
+  }
+  async function dispatchNow(command) {
     if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
     const tokenAt = (value) => {
       if (!value || typeof value !== 'object' || typeof value.blockId !== 'string') throw new TypeError('annotated text position is invalid');
@@ -3271,7 +3337,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       flushAuthoringAcknowledgements();
     }
   }
-  async function replace({ mutationId = randomToken(), from, to, text }) {
+  async function replaceNow({ mutationId = randomToken(), from, to, text }) {
     if (typeof text !== 'string') throw new TypeError('annotated text replacement text must be a string');
     if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
     const positionToken = snapshotBinding.authoring.positionTokens.get(from?.blockId);
@@ -3351,24 +3417,58 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     get history() { return session.history; },
     get status() { return session.status; },
     get ready() { return session.ready; },
-    insert({ mutationId, at, text }) { return dispatch({ kind: 'text.insert', mutationId, at, text }); },
-    delete({ mutationId, from, to }) { return dispatch({ kind: 'text.delete', mutationId, from, to }); },
-    replace,
-    split({ mutationId, at }) { return dispatch({ kind: 'block.split', mutationId, at }); },
-    merge({ mutationId, leftBlockId, rightBlockId }) { return dispatch({ kind: 'block.merge', mutationId, leftBlockId, rightBlockId }); },
-    applyAnnotation({ mutationId, annotation, from, to }) { return dispatch({ kind: 'annotation.apply', mutationId, annotation, from, to }); },
-    detachAnnotation({ mutationId, annotationId, blockId }) { return dispatch({ kind: 'annotation.detach', mutationId, annotationId, blockId }); },
-    continueBlock({ mutationId, at }) { return dispatch({ kind: 'block.continue', mutationId, at }); },
+    insert({ mutationId, at, text }) {
+      const command = { kind: 'text.insert', mutationId, at, text };
+      return queueAuthoringMutation(command, () => dispatchNow(command));
+    },
+    delete({ mutationId, from, to }) {
+      const command = { kind: 'text.delete', mutationId, from, to };
+      return queueAuthoringMutation(command, () => dispatchNow(command));
+    },
+    replace(input) {
+      const command = { from: input?.from, to: input?.to };
+      return queueAuthoringMutation(command, () => replaceNow(input));
+    },
+    split({ mutationId, at }) {
+      const command = { kind: 'block.split', mutationId, at };
+      return queueAuthoringMutation(command, () => dispatchNow(command));
+    },
+    merge({ mutationId, leftBlockId, rightBlockId }) {
+      const command = { kind: 'block.merge', mutationId, leftBlockId, rightBlockId };
+      return queueAuthoringMutation(command, () => dispatchNow(command));
+    },
+    applyAnnotation({ mutationId, annotation, from, to }) {
+      const command = { kind: 'annotation.apply', mutationId, annotation, from, to };
+      return queueAuthoringMutation(command, () => dispatchNow(command));
+    },
+    detachAnnotation({ mutationId, annotationId, blockId }) {
+      const command = { kind: 'annotation.detach', mutationId, annotationId, blockId };
+      return queueAuthoringMutation(command, () => dispatchNow(command));
+    },
+    continueBlock({ mutationId, at }) {
+      const command = { kind: 'block.continue', mutationId, at };
+      return queueAuthoringMutation(command, () => dispatchNow(command));
+    },
     setBlockGroupAssignment({ mutationId, selection, annotation }) {
-      return dispatch({ kind: 'block-group.assignment.set', mutationId, selection: resolveBlockGroupSelection(selection), annotation });
+      return queueAuthoringMutation({}, () => dispatchNow({
+        kind: 'block-group.assignment.set', mutationId, selection: resolveBlockGroupSelection(selection), annotation,
+      }));
     },
     clearBlockGroupAssignment({ mutationId, selection, family }) {
-      return dispatch({ kind: 'block-group.assignment.clear', mutationId, selection: resolveBlockGroupSelection(selection), family });
+      return queueAuthoringMutation({}, () => dispatchNow({
+        kind: 'block-group.assignment.clear', mutationId, selection: resolveBlockGroupSelection(selection), family,
+      }));
     },
-    splitAndAssign({ mutationId, at, annotation }) { return dispatch({ kind: 'block.split-and-assign', mutationId, at, annotation }); },
+    splitAndAssign({ mutationId, at, annotation }) {
+      const command = { kind: 'block.split-and-assign', mutationId, at, annotation };
+      return queueAuthoringMutation(command, () => dispatchNow(command));
+    },
     reconnect: () => session.reconnect(),
     subscribe: (listener) => session.subscribe(listener),
     close: () => {
+      sessionClosed = true;
+      wakeAuthoringMutation?.();
+      wakeAuthoringMutation = null;
       pendingActionPositionBlocks.clear();
       revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
       session.close();
