@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { assertWellFormedText } from './annotated-text.mjs';
 import { resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';
 import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
+import { annotatedTextAction as buildAnnotatedTextAction } from './annotated-text-action-builder.mjs';
 
 function validateEntityAndField(entity, field) {
   if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
@@ -33,106 +34,10 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-function selection(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error('annotatedTextAction: selection must be an object');
-  }
-  const keys = Object.keys(value);
-  if (value.kind === 'one' && keys.length === 2 && typeof value.groupToken === 'string' && value.groupToken.length > 0) {
-    return { kind: 'one', groupToken: value.groupToken };
-  }
-  if ((value.kind === 'consecutive' || value.kind === 'listed') && keys.length === 2 &&
-      Array.isArray(value.groupTokens) && value.groupTokens.length > 0 &&
-      value.groupTokens.every((id) => typeof id === 'string' && id.length > 0) &&
-       new Set(value.groupTokens).size === value.groupTokens.length) {
-    return { kind: value.kind, groupTokens: [...value.groupTokens] };
-  }
-  throw new Error('annotatedTextAction: selection must be one, consecutive, or listed with exact keys');
-}
-
-function annotation(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 3 ||
-      typeof value.id !== 'string' || value.id.length === 0 ||
-      typeof value.family !== 'string' || value.family.length === 0 ||
-      !value.fields || typeof value.fields !== 'object' || Array.isArray(value.fields)) {
-    throw new Error('annotatedTextAction: annotation must be { id, family, fields }');
-  }
-  return { id: value.id, family: value.family, fields: value.fields };
-}
-
 export function annotatedTextAction(entity, field, command) {
-  const fieldName = validateEntityAndField(entity, field);
-
-  if (!command || typeof command !== 'object' || Array.isArray(command)) {
-    throw new Error('annotatedTextAction: command must be a non-null object');
-  }
-  if (typeof command.id !== 'string' || command.id.length === 0) {
-    throw new Error('annotatedTextAction: command must include a non-empty document id');
-  }
-  if (!command.authoring || typeof command.authoring !== 'object' ||
-      command.authoring.version !== 1 || typeof command.authoring.stream !== 'string' || !command.authoring.stream ||
-      typeof command.authoring.lease !== 'string' || !command.authoring.lease ||
-      typeof command.authoring.mutationId !== 'string' || !command.authoring.mutationId) {
-    throw new Error('annotatedTextAction: command requires an authoring stream binding');
-  }
-  const kinds = new Set(['text.insert', 'text.delete', 'text.replace', 'block.split', 'block.merge', 'annotation.apply', 'annotation.detach', 'annotation.remove',
-    'block.continue', 'block-group.assignment.set', 'block-group.assignment.clear', 'block.split-and-assign']);
-  if (!kinds.has(command.kind)) throw new Error(`annotatedTextAction: unsupported command kind '${String(command.kind)}'`);
-  const position = (value, label) => {
-    if (!value || typeof value !== 'object' || Array.isArray(value) ||
-        typeof value.positionToken !== 'string' || value.positionToken.length === 0 ||
-        !Number.isSafeInteger(value.offset) || value.offset < 0 ||
-        (value.affinity !== 'left' && value.affinity !== 'right')) {
-       throw new Error(`annotatedTextAction: ${label} must be { positionToken, offset, affinity }`);
-    }
-    return { positionToken: value.positionToken, offset: value.offset, affinity: value.affinity };
-  };
-  let edit;
-  if (command.kind === 'text.insert') {
-    edit = (() => {
-      if (typeof command.text !== 'string' || command.text.length === 0) throw new Error('annotatedTextAction: inserted text must be non-empty');
-      return { kind: command.kind, at: position(command.at, 'at'), text: command.text };
-    })();
-  } else if (command.kind === 'text.delete') {
-    edit = { kind: command.kind, from: position(command.from, 'from'), to: position(command.to, 'to') };
-  } else if (command.kind === 'text.replace') {
-    if (typeof command.text !== 'string' || command.text.length === 0) throw new Error('annotatedTextAction: replacement text must be non-empty');
-    edit = { kind: command.kind, from: position(command.from, 'from'), to: position(command.to, 'to'), text: command.text };
-  } else if (command.kind === 'block.split') {
-    edit = { kind: command.kind, at: position(command.at, 'at'), temporaryBlock: typeof command.temporaryBlock === 'string' && command.temporaryBlock.length > 0 ? command.temporaryBlock : randomBytes(32).toString('base64url') };
-  } else if (command.kind === 'block.merge') {
-    if (typeof command.leftPositionToken !== 'string' || !command.leftPositionToken || typeof command.rightPositionToken !== 'string' || !command.rightPositionToken) {
-      throw new Error('annotatedTextAction: block.merge requires position tokens');
-    }
-    edit = { kind: command.kind, leftPositionToken: command.leftPositionToken, rightPositionToken: command.rightPositionToken };
-  } else if (command.kind === 'annotation.apply') {
-    if (!command.annotation || typeof command.annotation !== 'object' || Array.isArray(command.annotation)) throw new Error('annotatedTextAction: annotation.apply requires annotation');
-    edit = { kind: command.kind, annotation: command.annotation, from: position(command.from, 'from'), to: position(command.to, 'to') };
-  } else if (command.kind === 'annotation.detach') {
-    if (typeof command.annotationId !== 'string' || !command.annotationId || typeof command.positionToken !== 'string' || !command.positionToken) {
-      throw new Error('annotatedTextAction: annotation.detach requires annotationId and positionToken');
-    }
-    edit = { kind: command.kind, annotationId: command.annotationId, positionToken: command.positionToken };
-  } else if (command.kind === 'annotation.remove') {
-    if (typeof command.annotationId !== 'string' || !command.annotationId) throw new Error('annotatedTextAction: annotation.remove requires annotationId');
-    edit = { kind: command.kind, annotationId: command.annotationId };
-  } else if (command.kind === 'block.continue') {
-    edit = { kind: command.kind, at: position(command.at, 'at'), temporaryBlock: typeof command.temporaryBlock === 'string' && command.temporaryBlock.length > 0 ? command.temporaryBlock : randomBytes(32).toString('base64url') };
-  } else if (command.kind === 'block-group.assignment.set') {
-    edit = { kind: command.kind, selection: selection(command.selection), annotation: annotation(command.annotation) };
-  } else if (command.kind === 'block-group.assignment.clear') {
-    if (typeof command.family !== 'string' || command.family.length === 0) {
-      throw new Error('annotatedTextAction: block-group.assignment.clear requires a non-empty family');
-    }
-    edit = { kind: command.kind, selection: selection(command.selection), family: command.family };
-  } else {
-    edit = { kind: command.kind, at: position(command.at, 'at'), temporaryBlock: typeof command.temporaryBlock === 'string' && command.temporaryBlock.length > 0 ? command.temporaryBlock : randomBytes(32).toString('base64url'), annotation: annotation(command.annotation) };
-  }
-  const payload = deepFreeze({ version: 9, id: command.id, authoring: command.authoring, edit });
-
-  const type = `${entity.name}.${fieldName}.operation`;
-
-  return deepFreeze({ type, payload });
+  return buildAnnotatedTextAction(entity, field, command, {
+    mintTemporaryBlock: () => randomBytes(32).toString('base64url'),
+  });
 }
 
 export function annotatedTextRetireAction(entity, documentId) {

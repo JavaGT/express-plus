@@ -415,7 +415,7 @@ const ANNOTATED_TEXT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(
 const TEXT_EDIT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-text-edit.mjs';
 const ANNOTATED_TEXT_SNAPSHOT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot.mjs';
 const ANNOTATED_TEXT_SNAPSHOT_INTERNAL_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot-internal.mjs';
-const ANNOTATED_TEXT_ACTION_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-action.mjs';
+const ANNOTATED_TEXT_ACTION_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/src') + '/annotated-text-action-builder.mjs';
 const ANNOTATED_TEXT_EDITOR_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-editor.mjs';
 
 export function handleClientSdkRoute(app, req, res) {
