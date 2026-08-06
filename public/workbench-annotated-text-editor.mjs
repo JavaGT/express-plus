@@ -314,6 +314,21 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     return null;
   }
 
+  function adjacentDelete(block, offset, inputType) {
+    if (inputType !== 'deleteContentBackward' && inputType !== 'deleteContentForward' && inputType !== 'deleteContent') return null;
+    const blocks = orderedVisible();
+    const index = blocks.findIndex((candidate) => candidate.id === block.id);
+    const previous = inputType === 'deleteContentBackward';
+    if ((previous && offset !== 0) || (!previous && offset !== block.text.length)) return null;
+    const adjacent = blocks[index + (previous ? -1 : 1)];
+    if (!adjacent) return null;
+    const text = queued?.blockId === adjacent.id ? queued.text : adjacent.text;
+    if (!text) return null;
+    return previous
+      ? { block: adjacent, from: scalarStart(text, text.length - 1), to: text.length }
+      : { block: adjacent, from: 0, to: scalarEnd(text, 1) };
+  }
+
   function beforeInput(event) {
     if (closed || rendering) return;
     if (event.isComposing || event.inputType === 'insertCompositionText') return;
@@ -343,7 +358,12 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     }
     const text = queued?.blockId === block.id ? queued.text : block.text;
     const range = deleteRange(event.inputType, text, selected.from.offset, selected.to.offset);
-    if (range) bufferEdit(block, range.from, range.to, '');
+    if (range) {
+      bufferEdit(block, range.from, range.to, '');
+      return;
+    }
+    const adjacent = selected.from.offset === selected.to.offset && adjacentDelete(block, selected.from.offset, event.inputType);
+    if (adjacent && !mutationIsBlocked(adjacent.block.id)) bufferEdit(adjacent.block, adjacent.from, adjacent.to, '');
   }
 
   function compositionStart(event) {

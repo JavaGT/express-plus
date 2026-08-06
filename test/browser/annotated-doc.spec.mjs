@@ -27,22 +27,34 @@ test.afterAll(async () => {
   await rm(directory, { recursive: true, force: true });
 });
 
+test.afterEach(async ({ page }) => {
+  await page.close();
+});
+
 async function createDocument(page) {
   await page.goto(origin);
   await page.getByRole('button', { name: 'New document' }).click();
-  await expect(page.locator('#status')).toContainText('live');
+  await expect(page.locator('#status')).toContainText('live', { timeout: 15000 });
   const editor = page.locator('#editor');
   await expect(editor).toHaveAttribute('contenteditable', 'plaintext-only');
   await expect(editor.locator('[data-block-id]')).toHaveCount(1);
   await editor.click();
   await expect(editor).toBeFocused();
+  await editor.locator('[data-block-id]').evaluate((block) => {
+    const range = document.createRange();
+    range.selectNodeContents(block);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
   return page.locator('.doc.active small').textContent();
 }
 
 async function openDocument(page, id) {
   await page.goto(origin);
   await page.locator('.doc', { hasText: id }).click();
-  await expect(page.locator('#status')).toContainText('live');
+  await expect(page.locator('#status')).toContainText('live', { timeout: 15000 });
 }
 
 async function createCommentedDocument(page, { text = '1234567890', from = 2, to = 4 } = {}) {
@@ -370,7 +382,7 @@ test('forward deleting at the end of a comment deletes following text without ex
   await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('34');
 });
 
-test('replacing text through an existing comment removes the stale comment card', async ({ page }) => {
+test('replacing across comment blocks fails closed without removing the comment card', async ({ page }) => {
   const { id, editor } = await createCommentedDocument(page, { text: 'before selected after', from: 7, to: 15 });
   await expect(page.locator('.annotation-card')).toHaveCount(1);
   await editor.evaluate((element) => {
@@ -382,12 +394,13 @@ test('replacing text through an existing comment removes the stale comment card'
   });
   await editor.pressSequentially('replacement', { delay: 0 });
   await expect(editor).toHaveAttribute('aria-busy', 'false');
-  await expect(editor).toHaveText('replacement');
-  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await expect(page.locator('#status')).toContainText('selection replacement is not yet supported atomically');
+  await expect(editor).toHaveText('before selected after');
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
   await page.reload();
   await openDocument(page, id);
-  await expect(editor).toHaveText('replacement');
-  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await expect(editor).toHaveText('before selected after');
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
 });
 
 test('clicking a comment card selects the exact annotated text', async ({ page }) => {

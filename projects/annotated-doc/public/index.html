@@ -172,6 +172,22 @@
       return quote.length > 72 ? `${quote.slice(0, 69)}...` : quote;
     }
 
+    function selectAnnotation(annotationId) {
+      const spans = [...$('editor').querySelectorAll('[data-annotation-ids]')]
+        .filter((span) => span.dataset.annotationIds?.split(' ').includes(annotationId));
+      const first = spans[0];
+      const last = spans.at(-1);
+      if (!first || !last) return;
+      const range = document.createRange();
+      range.setStart(first.firstChild ?? first, 0);
+      if (last.firstChild?.nodeType === Node.TEXT_NODE) range.setEnd(last.firstChild, last.firstChild.data.length);
+      else range.setEnd(last, last.childNodes.length);
+      editorBinding?.focus();
+      const selection = window.getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+    }
+
     function renderAnnotations(snapshot = session?.document) {
       const annotations = (snapshot?.annotations ?? []).filter((annotation) => annotation.family === 'comment');
       $('annotations').replaceChildren();
@@ -180,6 +196,8 @@
         const card = document.createElement('article');
         card.className = 'annotation-card';
         card.dataset.annotationId = annotation.id;
+        card.tabIndex = 0;
+        card.setAttribute('aria-label', `Locate comment ${index + 1}`);
         const title = document.createElement('strong');
         title.textContent = `Comment ${index + 1}`;
         const quote = document.createElement('p');
@@ -192,6 +210,15 @@
         card.addEventListener('mouseleave', () => setActiveAnnotation(annotation.id, false));
         card.addEventListener('focusin', () => setActiveAnnotation(annotation.id, true));
         card.addEventListener('focusout', () => setActiveAnnotation(annotation.id, false));
+        card.addEventListener('click', (event) => {
+          if (event.target.closest('button')) return;
+          selectAnnotation(annotation.id);
+        });
+        card.addEventListener('keydown', (event) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return;
+          event.preventDefault();
+          selectAnnotation(annotation.id);
+        });
         remove.onclick = () => void removeAnnotation(annotation.id, remove);
         card.append(title, quote, remove);
         $('annotations').append(card);

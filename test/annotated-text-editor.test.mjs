@@ -92,6 +92,35 @@ test('annotated editor backspace and forward delete preserve surrogate pairs', a
   forward.binding.close();
 });
 
+test('annotated editor deletes into an adjacent block at a collapsed block boundary', async () => {
+  const document = { version: 1, blocks: [
+    { kind: 'visible', id: 'before', text: '12' },
+    { kind: 'visible', id: 'comment', text: '34' },
+    { kind: 'visible', id: 'after', text: '56' },
+  ] };
+  const backward = setup('', document);
+  backward.selectBlock('comment', 0);
+  backward.beforeinput('deleteContentBackward');
+  await flushInput();
+  assert.deepEqual(backward.calls[0][1], {
+    from: { blockId: 'before', offset: 1, affinity: 'right' },
+    to: { blockId: 'before', offset: 2, affinity: 'right' },
+    text: '',
+  });
+  backward.binding.close();
+
+  const forward = setup('', document);
+  forward.selectBlock('comment', 2);
+  forward.beforeinput('deleteContentForward');
+  await flushInput();
+  assert.deepEqual(forward.calls[0][1], {
+    from: { blockId: 'after', offset: 0, affinity: 'right' },
+    to: { blockId: 'after', offset: 1, affinity: 'right' },
+    text: '',
+  });
+  forward.binding.close();
+});
+
 test('annotated editor deletes to the start of the line for soft and hard line backward input', async () => {
   for (const inputType of ['deleteSoftLineBackward', 'deleteHardLineBackward']) {
     const harness = setup('a\nb');
