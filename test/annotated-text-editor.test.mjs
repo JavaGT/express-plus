@@ -681,3 +681,80 @@ test('annotated editor fails closed when its buffered block disappears', () => {
   assert.match(harness.errors[0].message, /changed before buffered input/);
   harness.binding.close();
 });
+
+function annotatedDocument() {
+  return {
+    version: 1,
+    blocks: [
+      { kind: 'visible', id: 'b1', text: 'ab', annotationIds: ['ann-1'] },
+      { kind: 'visible', id: 'b2', text: 'cd', annotationIds: ['ann-1', 'ann-2'] },
+      { kind: 'visible', id: 'b3', text: 'ef' },
+    ],
+    annotations: [
+      { id: 'ann-1', family: 'comment' },
+      { id: 'ann-2', family: 'comment' },
+    ],
+  };
+}
+
+test('setAnnotationHighlight toggles data-active-annotation on matching spans only', () => {
+  const harness = setup('', annotatedDocument());
+  const b1 = harness.element.querySelector('[data-block-id="b1"]');
+  const b2 = harness.element.querySelector('[data-block-id="b2"]');
+  const b3 = harness.element.querySelector('[data-block-id="b3"]');
+
+  harness.binding.setAnnotationHighlight('ann-1', true);
+  assert.equal(b1.dataset.activeAnnotation, 'true');
+  assert.equal(b2.dataset.activeAnnotation, 'true');
+  assert.equal(b3.hasAttribute('data-active-annotation'), false);
+
+  harness.binding.setAnnotationHighlight('ann-1', false);
+  assert.equal(b1.hasAttribute('data-active-annotation'), false);
+  assert.equal(b2.hasAttribute('data-active-annotation'), false);
+  assert.equal(b3.hasAttribute('data-active-annotation'), false);
+  harness.binding.close();
+});
+
+test('setAnnotationHighlight is a no-op for an unknown annotation id', () => {
+  const harness = setup('', annotatedDocument());
+  const before = harness.element.innerHTML;
+  harness.binding.setAnnotationHighlight('missing', true);
+  assert.equal(harness.element.innerHTML, before);
+  harness.binding.close();
+});
+
+test('selectAnnotation selects the contiguous range across all matching spans', () => {
+  const harness = setup('', annotatedDocument());
+  harness.binding.selectAnnotation('ann-1');
+  const selection = harness.dom.window.getSelection();
+  assert.equal(selection.rangeCount, 1);
+  const range = selection.getRangeAt(0);
+  const b1 = harness.element.querySelector('[data-block-id="b1"]');
+  const b2 = harness.element.querySelector('[data-block-id="b2"]');
+  assert.equal(range.startContainer, b1.firstChild);
+  assert.equal(range.startOffset, 0);
+  assert.equal(range.endContainer, b2.firstChild);
+  assert.equal(range.endOffset, b2.firstChild.data.length);
+  assert.equal(harness.element.ownerDocument.activeElement, harness.element);
+  harness.binding.close();
+});
+
+test('selectAnnotation is a no-op for an unknown annotation id', () => {
+  const harness = setup('', annotatedDocument());
+  harness.element.focus();
+  const selection = harness.dom.window.getSelection();
+  selection.removeAllRanges();
+  harness.binding.selectAnnotation('missing');
+  assert.equal(selection.rangeCount, 0);
+  harness.binding.close();
+});
+
+test('annotation helpers fail closed after close', () => {
+  const harness = setup('', annotatedDocument());
+  const b1 = harness.element.querySelector('[data-block-id="b1"]');
+  harness.binding.close();
+  harness.binding.setAnnotationHighlight('ann-1', true);
+  assert.equal(b1.hasAttribute('data-active-annotation'), false);
+  harness.binding.selectAnnotation('ann-1');
+  assert.equal(harness.dom.window.getSelection().rangeCount, 0);
+});

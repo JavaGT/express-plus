@@ -454,6 +454,36 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     });
   }
 
+  function annotationSpans(annotationId) {
+    if (closed || annotationId == null || annotationId === '') return [];
+    return [...element.querySelectorAll('[data-annotation-ids]')]
+      .filter((span) => (span.dataset.annotationIds?.split(' ') ?? []).includes(annotationId));
+  }
+
+  function setAnnotationHighlight(annotationId, active) {
+    for (const span of annotationSpans(annotationId)) {
+      if (active) span.dataset.activeAnnotation = 'true';
+      else delete span.dataset.activeAnnotation;
+    }
+  }
+
+  function selectAnnotation(annotationId) {
+    const spans = annotationSpans(annotationId);
+    const first = spans[0];
+    const last = spans.at(-1);
+    if (!first || !last) return;
+    const doc = element.ownerDocument;
+    const range = doc.createRange();
+    range.setStart(first.firstChild ?? first, 0);
+    if (last.firstChild?.nodeType === 3) range.setEnd(last.firstChild, last.firstChild.data.length);
+    else range.setEnd(last, last.childNodes.length);
+    element.focus();
+    const selection = doc.defaultView?.getSelection();
+    if (!selection) return;
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
   element.setAttribute('contenteditable', 'plaintext-only');
   element.setAttribute('aria-busy', 'false');
   element.addEventListener('beforeinput', beforeInput);
@@ -466,6 +496,8 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
   return Object.freeze({
     focus() { element.focus(); },
     getSelection,
+    setAnnotationHighlight,
+    selectAnnotation,
     close() {
       if (closed) return;
       closed = true;

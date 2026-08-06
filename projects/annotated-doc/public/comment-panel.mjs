@@ -2,6 +2,9 @@
 // Extracted from the inline script so index.html stays slim. Keeps the
 // Playwright-stable DOM (class names, aria-labels, button text, empty message,
 // quote truncation) identical to the previous inline implementation.
+// Annotation highlight and select delegate to the editor binding helpers
+// (setAnnotationHighlight / selectAnnotation); only color mixing stays
+// demo-local here, walking the DOM for --annotation-color.
 
 export async function awaitSettlement(result, { failMessage, unreconciledMessage } = {}) {
   if (result?.ok === false) throw (result.failure ?? new Error(failMessage ?? 'operation failed'));
@@ -40,29 +43,11 @@ export function createCommentPanel({
   getEditorBinding, // () => binding | null
 }) {
   function setActiveAnnotation(annotationId, active) {
-    for (const span of editorEl.querySelectorAll('[data-annotation-ids]')) {
-      const ids = span.dataset.annotationIds?.split(' ') ?? [];
-      if (ids.includes(annotationId)) {
-        if (active) span.dataset.activeAnnotation = 'true';
-        else delete span.dataset.activeAnnotation;
-      }
-    }
+    getEditorBinding()?.setAnnotationHighlight?.(annotationId, active);
   }
 
   function selectAnnotation(annotationId) {
-    const spans = [...editorEl.querySelectorAll('[data-annotation-ids]')]
-      .filter((span) => span.dataset.annotationIds?.split(' ').includes(annotationId));
-    const first = spans[0];
-    const last = spans.at(-1);
-    if (!first || !last) return;
-    const range = document.createRange();
-    range.setStart(first.firstChild ?? first, 0);
-    if (last.firstChild?.nodeType === Node.TEXT_NODE) range.setEnd(last.firstChild, last.firstChild.data.length);
-    else range.setEnd(last, last.childNodes.length);
-    getEditorBinding()?.focus();
-    const selection = window.getSelection();
-    selection.removeAllRanges();
-    selection.addRange(range);
+    getEditorBinding()?.selectAnnotation?.(annotationId);
   }
 
   function renderAnnotationColors(snapshot) {
