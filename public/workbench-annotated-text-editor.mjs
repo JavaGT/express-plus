@@ -77,6 +77,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
   let composing = null;
   let queued = null;
   let queuedTimer = null;
+  let submitted = null;
   let submitting = false;
   let historyInputHandled = false;
 
@@ -139,6 +140,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       setCaret(element, from + text.length);
     } finally {
       submitting = false;
+      submitted = null;
       if (queued && (!session.status || session.status === 'live')) flushQueued();
     }
   }
@@ -156,13 +158,24 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       return;
     }
     const change = changedRange(pending.baseText, pending.text);
-    if (change.from !== change.to || change.text) void replace(change.from, change.to, change.text);
+    if (change.from !== change.to || change.text) {
+      // Keep the full visible draft while its delta waits for settlement. New
+      // keystrokes must compose on it, not on the older recipient snapshot.
+      submitted = pending;
+      void replace(change.from, change.to, change.text);
+    }
   }
 
   function bufferEdit(block, from, to, text) {
-    if (!queued) queued = { blockId: block.id, baseText: block.text, text: block.text };
+    if (!queued) {
+      const baseText = submitting && submitted?.blockId === block.id ? submitted.text : block.text;
+      queued = { blockId: block.id, baseText, text: baseText };
+    }
     if (queued.blockId !== block.id || queued.text !== element.textContent) flushQueued();
-    if (!queued) queued = { blockId: block.id, baseText: block.text, text: block.text };
+    if (!queued) {
+      const baseText = submitting && submitted?.blockId === block.id ? submitted.text : block.text;
+      queued = { blockId: block.id, baseText, text: baseText };
+    }
     queued.text = `${queued.text.slice(0, from)}${text}${queued.text.slice(to)}`;
     element.setAttribute('aria-busy', 'true');
     rendering = true;

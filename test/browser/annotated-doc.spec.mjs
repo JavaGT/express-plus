@@ -54,6 +54,17 @@ test('rapid typing and scalar-safe deletion survive reload', async ({ page }) =>
   await expect(page.locator('#editor')).toHaveText('hello');
 });
 
+test('rapid sequential input persists every character', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('1234567890', { delay: 0 });
+  await expect(editor).toHaveText('1234567890');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(page.locator('#editor')).toHaveText('1234567890');
+});
+
 test('Cmd+Backspace deletes to the start of the current line', async ({ page }) => {
   const id = await createDocument(page);
   const editor = page.locator('#editor');

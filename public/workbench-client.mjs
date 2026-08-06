@@ -3251,6 +3251,16 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       (block) => block.kind === 'visible' && block.id === blockId && block.text === text,
     ));
   }
+  function rebaseQueuedInsertion(command, blocks) {
+    if (command.kind !== 'text.insert' || !command.at || blocks.size !== 1) return null;
+    const [blockId, before] = [...blocks][0];
+    const block = session.snapshot?.blocks?.find((candidate) => candidate.kind === 'visible' && candidate.id === blockId);
+    if (!block) return null;
+    const prefix = before.slice(0, command.at.offset);
+    const suffix = before.slice(command.at.offset);
+    if (!block.text.startsWith(prefix) || !block.text.endsWith(suffix)) return null;
+    return { ...command, at: { ...command.at, offset: block.text.length - suffix.length } };
+  }
   function localAuthoringConflict() {
     return { ok: false, failure: new Error('annotated text changed before queued operation could be submitted') };
   }
@@ -3280,8 +3290,9 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
         }
         if (sessionClosed) throw new ClientClosedError('Annotated text document is unavailable');
         if (['revoked', 'unavailable'].includes(session.status)) return localAuthoringConflict();
-        if (!sameCapturedBlocks(blocks)) return localAuthoringConflict();
-        const result = await send();
+        const rebased = sameCapturedBlocks(blocks) ? command : rebaseQueuedInsertion(command, blocks);
+        if (!rebased) return localAuthoringConflict();
+        const result = await send(rebased);
         if (result?.ok && result.settlement?.wait) await result.settlement.wait();
         return result;
       } finally {
@@ -3419,11 +3430,11 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     get ready() { return session.ready; },
     insert({ mutationId, at, text }) {
       const command = { kind: 'text.insert', mutationId, at, text };
-      return queueAuthoringMutation(command, () => dispatchNow(command));
+      return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     delete({ mutationId, from, to }) {
       const command = { kind: 'text.delete', mutationId, from, to };
-      return queueAuthoringMutation(command, () => dispatchNow(command));
+      return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     replace(input) {
       const command = { from: input?.from, to: input?.to };
@@ -3431,23 +3442,23 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     },
     split({ mutationId, at }) {
       const command = { kind: 'block.split', mutationId, at };
-      return queueAuthoringMutation(command, () => dispatchNow(command));
+      return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     merge({ mutationId, leftBlockId, rightBlockId }) {
       const command = { kind: 'block.merge', mutationId, leftBlockId, rightBlockId };
-      return queueAuthoringMutation(command, () => dispatchNow(command));
+      return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     applyAnnotation({ mutationId, annotation, from, to }) {
       const command = { kind: 'annotation.apply', mutationId, annotation, from, to };
-      return queueAuthoringMutation(command, () => dispatchNow(command));
+      return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     detachAnnotation({ mutationId, annotationId, blockId }) {
       const command = { kind: 'annotation.detach', mutationId, annotationId, blockId };
-      return queueAuthoringMutation(command, () => dispatchNow(command));
+      return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     continueBlock({ mutationId, at }) {
       const command = { kind: 'block.continue', mutationId, at };
-      return queueAuthoringMutation(command, () => dispatchNow(command));
+      return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     setBlockGroupAssignment({ mutationId, selection, annotation }) {
       return queueAuthoringMutation({}, () => dispatchNow({
@@ -3461,7 +3472,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     },
     splitAndAssign({ mutationId, at, annotation }) {
       const command = { kind: 'block.split-and-assign', mutationId, at, annotation };
-      return queueAuthoringMutation(command, () => dispatchNow(command));
+      return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     reconnect: () => session.reconnect(),
     subscribe: (listener) => session.subscribe(listener),

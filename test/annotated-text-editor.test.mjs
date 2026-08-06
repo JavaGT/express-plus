@@ -150,30 +150,44 @@ test('annotated editor rebases compatible buffered insertion over a foreign appe
 
 test('annotated editor preserves later typing while the preceding replacement settles', async () => {
   const harness = setup('a');
-  let settle;
+  const settlements = [];
   harness.session.status = 'live';
   harness.session.replace = async (input) => {
     harness.calls.push(['replace', input]);
-    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settle = resolve; }) } };
+    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settlements.push(resolve); }) } };
   };
   harness.select(1);
   harness.beforeinput('insertText', 'b');
   await flushInput();
   assert.equal(harness.calls.length, 1);
-  // The package session optimistically projects the first accepted replacement.
-  harness.publish(visible('ab'));
   harness.element.focus();
   harness.select(2);
   harness.beforeinput('insertText', 'c');
   await flushInput();
   assert.equal(harness.element.textContent, 'abc');
   assert.equal(harness.calls.length, 1, 'later input remains buffered while the first replacement settles');
-  settle();
+  // The package session projects the first replacement before its receipt settles.
+  harness.publish(visible('ab'));
+  settlements.shift()();
   await flushInput();
   assert.deepEqual(harness.calls[1][1], {
     from: { blockId: 'block-1', offset: 2, affinity: 'right' },
     to: { blockId: 'block-1', offset: 2, affinity: 'right' },
     text: 'c',
+  });
+  harness.element.focus();
+  harness.select(3);
+  harness.beforeinput('insertText', 'd');
+  await flushInput();
+  assert.equal(harness.element.textContent, 'abcd');
+  assert.equal(harness.calls.length, 2, 'the second in-flight draft remains the baseline for later input');
+  harness.publish(visible('abc'));
+  settlements.shift()();
+  await flushInput();
+  assert.deepEqual(harness.calls[2][1], {
+    from: { blockId: 'block-1', offset: 3, affinity: 'right' },
+    to: { blockId: 'block-1', offset: 3, affinity: 'right' },
+    text: 'd',
   });
   assert.deepEqual(harness.errors, []);
   harness.binding.close();
