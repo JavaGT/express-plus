@@ -4,7 +4,7 @@ import * as eventHandle from '../event-handle.mjs';
 import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
 import { CASCADE_DESCENDANT } from './removal-cascade.mjs';
 import { applyTextOp, assertUtf16Offset, assertWellFormedText, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
-import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, resolvePositionToEndpoint } from '../annotated-text-family.mjs';
+import { applyTextOperationToBlock, createTextFamily, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, resolvePositionToEndpoint, rgaTraversal } from '../annotated-text-family.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { deriveBlockPosition, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
@@ -136,7 +136,9 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db, privateF
    if (data.version === 2) return applyStructuralSplitProjection({ name, handle, db, descriptor, data });
   if (data.version === 3) return applyR3AnnotatedTextOperation({ name, handle, db, descriptor, data });
   if (data.version === 4) return applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data });
+  if (data.version === 7) return applyR7AnnotatedTextOperation({ name, handle, db, descriptor, data });
   if (data.version === 5) return applyR5AnnotatedTextOperation({ name, handle, db, descriptor, data });
+  if (data.version === 6) return applyR6AnnotatedTextOperation({ name, handle, db, data });
   if (data.version === 8) return applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact });
   throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
 }
@@ -393,6 +395,92 @@ function applyR1AnnotatedTextOperation({ name, handle, db, data }) {
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`)
     .run(data.after.structuralRevision, JSON.stringify(textFamilyCheckpoint(reduced)), data.id);
   getLog().debug('dispatch', `${name}.${handle.field}.operated`, { id: data.id });
+  return true;
+}
+
+function applyR6AnnotatedTextOperation({ name, handle, db, data }) {
+  const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
+  const operation = data?.operation;
+  if (Object.keys(data).length !== 6 || data.version !== 6 ||
+      !isVersion(data.before) || !isVersion(data.after) ||
+      !operation || typeof operation !== 'object' || Array.isArray(operation) ||
+      JSON.stringify(Object.keys(operation).sort()) !== JSON.stringify(['blockId', 'kind', 'operations']) ||
+      operation.kind !== 'text.replace' || typeof operation.blockId !== 'string' || operation.blockId.length === 0 ||
+      !Array.isArray(operation.operations) || operation.operations.length !== 2 || !data.family) {
+    throw new Error(`${name}.${handle.field}.operated v6 event has invalid composite data`);
+  }
+  const operations = operation.operations.map((candidate) => {
+    let canonical;
+    try { canonical = canonicalTextOp(candidate); } catch {
+      throw new Error(`${name}.${handle.field}.operated v6 event has invalid text operation`);
+    }
+    if (JSON.stringify(canonical) !== JSON.stringify(candidate)) {
+      throw new Error(`${name}.${handle.field}.operated v6 event text operation is not canonical`);
+    }
+    return canonical;
+  });
+  if (operations[0][5][0] !== 'delete' || operations[1][5][0] !== 'insert') {
+    throw new Error(`${name}.${handle.field}.operated v6 event must contain delete then insert`);
+  }
+
+  const prefix = `${name}_${handle.field}`;
+  const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
+  if (!state) throw new Error(`${name}.${handle.field}.operated document does not exist`);
+  const current = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+  if (state.structure_version !== data.before.structuralRevision ||
+      JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v6 event conflicts with projection state`);
+  }
+  const block = current.blocks.find((candidate) => candidate.id === operation.blockId);
+  if (!block) throw new Error(`${name}.${handle.field}.operated v6 event block does not exist`);
+  const deletedKeys = new Set();
+  for (const [opId, first, count] of operations[0][5][1]) {
+    for (let ordinal = first; ordinal < first + count; ordinal++) deletedKeys.add(`${opId[0]}:${opId[1]}:${ordinal}`);
+  }
+  const ownedKeys = new Set(block.elementKeys);
+  const visibleElements = rgaTraversal(current.checkpoint)
+    .filter(([, element]) => ownedKeys.has(`${element.op[0]}:${element.op[1]}:${element.ordinal}`) && element.deletedBy.length === 0);
+  const deletedIndexes = visibleElements.flatMap(([key], index) => deletedKeys.has(key) ? [index] : []);
+  if (deletedIndexes.length !== deletedKeys.size || deletedIndexes.length === 0 ||
+      deletedIndexes.some((index, offset) => index !== deletedIndexes[0] + offset)) {
+    throw new Error(`${name}.${handle.field}.operated v6 event deletion is not one contiguous visible range`);
+  }
+  const startOffset = visibleElements.slice(0, deletedIndexes[0]).reduce((total, [, element]) => total + element.scalar.length, 0);
+  let leftAnchor;
+  let rightAnchor;
+  try {
+    leftAnchor = resolvePositionToEndpoint(current, operation.blockId, startOffset, current.checkpoint.frontier, 'left').point[1];
+    rightAnchor = resolvePositionToEndpoint(current, operation.blockId, startOffset, current.checkpoint.frontier, 'right').point[1];
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v6 event replacement start cannot be resolved`);
+  }
+  const insertAnchor = operations[1][5][1];
+  if (JSON.stringify(insertAnchor) !== JSON.stringify(leftAnchor) && JSON.stringify(insertAnchor) !== JSON.stringify(rightAnchor)) {
+    throw new Error(`${name}.${handle.field}.operated v6 event insertion is not anchored at the deleted range start`);
+  }
+  if (data.after.structuralRevision !== data.before.structuralRevision ||
+      data.after.structuralRevision !== state.structure_version) {
+    throw new Error(`${name}.${handle.field}.operated v6 event has inconsistent structural revision`);
+  }
+
+  let reduced = current;
+  try {
+    for (const textOperation of operations) {
+      reduced = applyTextOperationToBlock(reduced, operation.blockId, textOperation);
+    }
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v6 event operations are not applicable to prior state`);
+  }
+  const next = restoreTextFamilyCheckpoint(data.family);
+  if (next.id !== data.id || JSON.stringify(textFamilyCheckpoint(next)) !== JSON.stringify(data.family) ||
+      JSON.stringify(textFamilyCheckpoint(reduced)) !== JSON.stringify(data.family) ||
+      JSON.stringify(data.after.frontier) !== JSON.stringify(reduced.checkpoint.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v6 event family does not match its operations`);
+  }
+  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`)
+    .run(data.after.structuralRevision, JSON.stringify(textFamilyCheckpoint(reduced)), data.id);
+  getLog().debug('dispatch', `${name}.${handle.field}.operated v6`, { id: data.id });
   return true;
 }
 
@@ -1494,6 +1582,560 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   getLog().debug('dispatch', `${name}.${handle.field}.operated v4`, { id: data.id, annotationId: evAnn.id, selectedBlockId });
   return true;
 }
+
+function applyR7AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+  const prefix = `${name}_${handle.field}`;
+  const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
+  const measurementConfigs = compiledMeta?.measurementConfigs ?? {};
+
+  const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
+
+  const operation = data.operation;
+   const generalized = Array.isArray(data.selectedBlockIds);
+   const expectedDataKeys = ['actorId', 'after', 'annotation', 'before', 'blocks', 'family', 'id', 'measurements', 'memberships', 'operation', 'selectedBlockId', 'selectedBlockIds', 'splitBlockIds', 'splitOps', 'version'];
+   if (JSON.stringify(Object.keys(data).sort()) !== JSON.stringify(expectedDataKeys.sort()) || data.version !== 7 ||
+       (data.actorId !== null && (typeof data.actorId !== 'string' || data.actorId.length === 0 || data.actorId.length > 200)) ||
+      !isVersion(data.before) || !isVersion(data.after) ||
+      !operation || typeof operation !== 'object' || Array.isArray(operation) ||
+       JSON.stringify(Object.keys(operation).sort()) !== JSON.stringify(['annotation', 'kind', 'selection']) ||
+      operation.kind !== 'annotation.apply' ||
+      !operation.selection || !operation.annotation ||
+       !data.family || !data.annotation || !data.splitBlockIds || !data.selectedBlockId || !data.selectedBlockIds ||
+      !data.splitOps || !data.blocks || !data.memberships || !data.measurements) {
+    throw new Error(`${name}.${handle.field}.operated v7 event has invalid composite data`);
+  }
+
+  const { blockId, startUtf16Offset, endUtf16Offset } = operation.selection;
+  const endBlockId = operation.selection.endBlockId;
+  if (typeof operation.selection !== 'object' || Array.isArray(operation.selection) ||
+       JSON.stringify(Object.keys(operation.selection).sort()) !== JSON.stringify(['blockId', 'endBlockId', 'endUtf16Offset', 'startBlockId', 'startUtf16Offset'].sort()) ||
+       operation.selection.startBlockId !== blockId ||
+      typeof blockId !== 'string' || blockId.length === 0 ||
+      !Number.isSafeInteger(startUtf16Offset) || startUtf16Offset < 0 ||
+      !Number.isSafeInteger(endUtf16Offset) || endUtf16Offset < 0) {
+    throw new Error(`${name}.${handle.field}.operated v7 event has invalid selection in operation`);
+  }
+
+  const annOp = operation.annotation;
+  if (typeof annOp !== 'object' || Array.isArray(annOp) ||
+      JSON.stringify(Object.keys(annOp).sort()) !== JSON.stringify(Object.keys(annOp).includes('protectedTargetIds') ? ['family', 'fields', 'id', 'protectedTargetIds'] : ['family', 'fields', 'id']) ||
+      typeof annOp.id !== 'string' || annOp.id.length === 0 ||
+      typeof annOp.family !== 'string' || annOp.family.length === 0 ||
+      !annOp.fields || typeof annOp.fields !== 'object' || Array.isArray(annOp.fields) ||
+      (annOp.protectedTargetIds !== undefined && (!Array.isArray(annOp.protectedTargetIds) || annOp.protectedTargetIds.some((id, index, ids) => typeof id !== 'string' || id.length === 0 || (index > 0 && ids[index - 1] >= id))))) {
+    throw new Error(`${name}.${handle.field}.operated v7 event has invalid annotation in operation`);
+  }
+
+  const evAnn = data.annotation;
+  if (!evAnn || typeof evAnn !== 'object' || Array.isArray(evAnn) ||
+      JSON.stringify(Object.keys(evAnn).sort()) !== JSON.stringify(Object.keys(evAnn).includes('protectedTargetIds') ? ['family', 'fields', 'id', 'protectedTargetIds'] : ['family', 'fields', 'id']) ||
+      evAnn.id !== annOp.id || evAnn.family !== annOp.family ||
+      JSON.stringify(evAnn.fields) !== JSON.stringify(annOp.fields) ||
+      JSON.stringify(evAnn.protectedTargetIds ?? []) !== JSON.stringify(annOp.protectedTargetIds ?? [])) {
+    throw new Error(`${name}.${handle.field}.operated v7 event annotation facts do not match operation`);
+  }
+
+  if (!Array.isArray(data.splitBlockIds)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event splitBlockIds must be an array`);
+  }
+  if (typeof data.selectedBlockId !== 'string' || data.selectedBlockId.length === 0) {
+    throw new Error(`${name}.${handle.field}.operated v7 event selectedBlockId must be a non-empty string`);
+  }
+  if (!Array.isArray(data.splitOps)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event splitOps must be an array`);
+  }
+  if (!Array.isArray(data.blocks)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event blocks must be an array`);
+  }
+  if (!Array.isArray(data.memberships)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event memberships must be an array`);
+  }
+  if (!Array.isArray(data.measurements)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event measurements must be an array`);
+  }
+
+  if (data.splitOps.length !== data.splitBlockIds.length) {
+    throw new Error(`${name}.${handle.field}.operated v7 event splitOps length does not match splitBlockIds`);
+  }
+
+  const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
+  if (!state) throw new Error(`${name}.${handle.field}.operated document does not exist`);
+  const currentFamily = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+  if (state.structure_version !== data.before.structuralRevision ||
+      JSON.stringify(currentFamily.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event conflicts with projection state`);
+  }
+
+  let sourceBlockText;
+  let endBlockText;
+  try {
+    sourceBlockText = materializeBlock(currentFamily, blockId);
+    endBlockText = materializeBlock(currentFamily, endBlockId);
+    assertUtf16Offset(sourceBlockText, startUtf16Offset);
+    assertUtf16Offset(endBlockText, endUtf16Offset);
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v7 event selection is not a valid UTF-16 range in its source block`);
+  }
+  const sourceIndex = currentFamily.blocks.findIndex((block) => block.id === blockId);
+  const endIndex = currentFamily.blocks.findIndex((block) => block.id === endBlockId);
+  if (sourceIndex < 0 || endIndex < sourceIndex || startUtf16Offset > sourceBlockText.length || endUtf16Offset > endBlockText.length ||
+      (sourceIndex === endIndex && startUtf16Offset >= endUtf16Offset)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event selection must be non-empty and within its source block`);
+  }
+
+  const anySplit = data.splitOps.length > 0;
+
+  const expectedSplitCount = (startUtf16Offset > 0 ? 1 : 0) + (endUtf16Offset < endBlockText.length ? 1 : 0);
+  if (data.splitOps.length !== expectedSplitCount || data.splitOps.length > 2 ||
+      new Set(data.splitBlockIds).size !== data.splitBlockIds.length ||
+      data.splitBlockIds.some((id) => typeof id !== 'string' || id.length === 0 || id === blockId)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event split count or IDs do not match selection topology`);
+  }
+
+  if (anySplit) {
+    const expectedAfterRevision = data.before.structuralRevision + 1;
+    if (data.after.structuralRevision !== expectedAfterRevision ||
+        JSON.stringify(data.after.frontier) !== JSON.stringify(data.before.frontier)) {
+      throw new Error(`${name}.${handle.field}.operated v7 event has inconsistent after revision`);
+    }
+  } else {
+    if (data.after.structuralRevision !== data.before.structuralRevision ||
+        JSON.stringify(data.after.frontier) !== JSON.stringify(data.before.frontier)) {
+      throw new Error(`${name}.${handle.field}.operated v7 event has inconsistent after revision (no splits)`);
+    }
+  }
+
+  const next = restoreTextFamilyCheckpoint(data.family);
+  if (next.id !== data.id || JSON.stringify(textFamilyCheckpoint(next)) !== JSON.stringify(data.family)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event family is not canonical`);
+  }
+
+  let reduced = currentFamily;
+  let selectedBlockId = blockId;
+  for (const [idx, sop] of data.splitOps.entries()) {
+    const newBlockId = data.splitBlockIds[idx];
+    const isStartSplit = idx === 0 && startUtf16Offset > 0;
+    const expectedBlockId = isStartSplit ? blockId : (blockId === endBlockId && startUtf16Offset > 0 ? selectedBlockId : endBlockId);
+    const expectedOffset = isStartSplit ? startUtf16Offset : (blockId === endBlockId && startUtf16Offset > 0 ? endUtf16Offset - startUtf16Offset : endUtf16Offset);
+    if (sop.newBlockId !== newBlockId) {
+      throw new Error(`${name}.${handle.field}.operated v7 event splitOp ${idx} newBlockId does not match splitBlockIds`);
+    }
+    if (!sop || typeof sop !== 'object' || Array.isArray(sop) ||
+        JSON.stringify(Object.keys(sop).sort()) !== JSON.stringify(['blockId', 'newBlockId', 'utf16Offset']) ||
+        typeof sop.blockId !== 'string' || sop.blockId.length === 0 ||
+        !Number.isSafeInteger(sop.utf16Offset) || sop.utf16Offset < 0 ||
+        sop.blockId !== expectedBlockId || sop.utf16Offset !== expectedOffset) {
+      throw new Error(`${name}.${handle.field}.operated v7 event splitOp ${idx} has invalid shape`);
+    }
+    try {
+      reduced = splitBlock(reduced, sop.blockId, newBlockId, sop.utf16Offset);
+    } catch {
+      throw new Error(`${name}.${handle.field}.operated v7 event split ${idx} is not applicable to prior state`);
+    }
+    if (reduced.type === 'unchanged') {
+      throw new Error(`${name}.${handle.field}.operated v7 event split ${idx} returned unchanged but event was emitted`);
+    }
+    reduced = reduced.family;
+    if (idx === 0 && startUtf16Offset > 0) selectedBlockId = newBlockId;
+  }
+
+  if (JSON.stringify(textFamilyCheckpoint(reduced)) !== JSON.stringify(data.family)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event family does not match its splits`);
+  }
+
+  if (data.selectedBlockId !== selectedBlockId) {
+    throw new Error(`${name}.${handle.field}.operated v7 event selectedBlockId does not match derived selected block`);
+  }
+  const selectedBlockIds = generalized
+    ? data.selectedBlockIds
+    : [selectedBlockId];
+  if (!Array.isArray(selectedBlockIds) || selectedBlockIds.length === 0 ||
+      selectedBlockIds.some((id) => typeof id !== 'string' || id.length === 0) ||
+      JSON.stringify(selectedBlockIds) !== JSON.stringify(reduced.blocks.slice(reduced.blocks.findIndex((b) => b.id === selectedBlockId), reduced.blocks.findIndex((b) => b.id === endBlockId) + 1).map((b) => b.id))) {
+    throw new Error(`${name}.${handle.field}.operated v7 event selected block postimage is invalid`);
+  }
+
+  if (data.blocks.length !== data.splitOps.length * 2) {
+    throw new Error(`${name}.${handle.field}.operated v7 event blocks count must be 2 per split`);
+  }
+
+  const blockFieldNames = Object.keys(descriptor.block ?? {});
+  for (let i = 0; i < data.blocks.length; i++) {
+    const bf = data.blocks[i];
+    if (!bf || typeof bf !== 'object' || Array.isArray(bf) ||
+        JSON.stringify(Object.keys(bf).sort()) !== JSON.stringify(['epoch', 'fields', 'id'].sort()) ||
+        typeof bf.id !== 'string' || bf.id.length === 0 ||
+        typeof bf.epoch !== 'number') {
+      throw new Error(`${name}.${handle.field}.operated v7 event block fact ${i} has invalid shape`);
+    }
+    if (!bf.fields || typeof bf.fields !== 'object' || Array.isArray(bf.fields)) {
+      throw new Error(`${name}.${handle.field}.operated v7 event block fact ${i} has no fields`);
+    }
+    const factFieldKeys = Object.keys(bf.fields).sort();
+    if (JSON.stringify(factFieldKeys) !== JSON.stringify([...blockFieldNames].sort())) {
+      throw new Error(`${name}.${handle.field}.operated v7 event block fact ${i} fields do not match declaration`);
+    }
+  }
+
+  const sourceMemberships = db.prepare(
+    `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point
+       FROM ${prefix}_membership AS membership
+       JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
+      WHERE annotation.document_id = ?`,
+  ).all(data.id);
+  const pureMemberships = sourceMemberships.map(m => ({
+    annotationId: m.annotation_id,
+    blockId: m.block_id,
+    ordinal: m.ordinal,
+    start: JSON.parse(m.start_point),
+    end: JSON.parse(m.end_point),
+  }));
+
+  const annotationRows = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ?`).all(data.id);
+  const protectedTargets = db.prepare(
+    `SELECT annotation_id, target_annotation_id FROM ${prefix}_annotation_protected_target WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?) ORDER BY annotation_id, target_annotation_id`,
+  ).all(data.id);
+  const targetsByAnnotation = new Map();
+  for (const target of protectedTargets) {
+    const ids = targetsByAnnotation.get(target.annotation_id) ?? [];
+    ids.push(target.target_annotation_id);
+    targetsByAnnotation.set(target.annotation_id, ids);
+  }
+  const pureAnnotations = annotationRows.map(a => ({ id: a.id, family: a.family, protectedTargetIds: targetsByAnnotation.get(a.id) ?? [] }));
+
+  let derivedMemberships = pureMemberships;
+  let derivedAnnotations = pureAnnotations;
+
+  for (const sop of data.splitOps) {
+    const mResult = splitBlockMemberships(reduced, derivedAnnotations, derivedMemberships, sop.blockId, sop.newBlockId);
+    derivedAnnotations = mResult.annotations;
+    derivedMemberships = mResult.memberships;
+  }
+
+  const basisFrontier = reduced.checkpoint.frontier;
+  const selectedBlockText = materializeBlock(reduced, selectedBlockId);
+  let startEndpoint;
+  let endEndpoint;
+  try {
+    startEndpoint = resolvePositionToEndpoint(reduced, selectedBlockId, 0, basisFrontier);
+    endEndpoint = resolvePositionToEndpoint(reduced, selectedBlockId, selectedBlockText.length, basisFrontier);
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v7 event failed to resolve selected block endpoints`);
+  }
+
+  const virtualAnnotations = [...derivedAnnotations, { id: evAnn.id, family: evAnn.family, protectedTargetIds: evAnn.protectedTargetIds ?? [] }];
+  let addMembershipResult = { memberships: derivedMemberships };
+  try {
+    for (const selectedId of selectedBlockIds) {
+      const selectedText = materializeBlock(reduced, selectedId);
+      addMembershipResult = addMembership(reduced, virtualAnnotations, addMembershipResult.memberships, evAnn.id, selectedId,
+        resolvePositionToEndpoint(reduced, selectedId, 0, basisFrontier),
+        resolvePositionToEndpoint(reduced, selectedId, selectedText.length, basisFrontier));
+    }
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v7 event membership addition is not applicable to derived state`);
+  }
+
+  const splitAffectedIds = new Set(
+    pureMemberships.filter((membership) => membership.blockId === blockId || data.splitOps.some((split) => split.blockId === membership.blockId)).map((membership) => membership.annotationId),
+  );
+  const expectedMemberships = addMembershipResult.memberships.filter(m => m.annotationId === evAnn.id || splitAffectedIds.has(m.annotationId)).map(m => ({
+    annotationId: m.annotationId,
+    blockId: m.blockId,
+    ordinal: m.ordinal,
+    start: m.start,
+    end: m.end,
+  }));
+
+  if (JSON.stringify(data.memberships) !== JSON.stringify(expectedMemberships)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event memberships do not match derived state`);
+  }
+
+  const annotationFamilyMeta = compiledMeta.annotationFields[evAnn.family];
+  const annotationDescriptor = descriptor.annotations.find((entry) => entry.annotationName === evAnn.family);
+  if (!annotationFamilyMeta || !annotationDescriptor) {
+    throw new Error(`${name}.${handle.field}.operated v7 event references unknown annotation family '${evAnn.family}'`);
+  }
+  if (compiledMeta.annotationHandles[evAnn.family]?.appliesTo !== 'block') {
+    throw new Error(`${name}.${handle.field}.operated v7 event annotation family '${evAnn.family}' must apply to blocks`);
+  }
+  const protectedTargetIds = evAnn.protectedTargetIds ?? [];
+  if (protectedTargetIds.length !== 0 &&
+      (annotationDescriptor.kind !== 'protectingAnnotation' || annotationDescriptor.protects === null)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event only protecting annotations with a declared target family may name protected targets`);
+  }
+  if (annotationDescriptor.kind === 'protectingAnnotation' && annotationDescriptor.protects !== null) {
+    for (const targetId of protectedTargetIds) {
+      const target = db.prepare(`SELECT family FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(targetId, data.id);
+      if (!target || target.family !== annotationDescriptor.protects) {
+        throw new Error(`${name}.${handle.field}.operated v7 event protected target '${targetId}' is invalid`);
+      }
+    }
+  }
+  const familyFieldNames = Object.keys(annotationDescriptor.fields).sort();
+  const evFieldNames = Object.keys(evAnn.fields).sort();
+  if (JSON.stringify(evFieldNames) !== JSON.stringify(familyFieldNames)) {
+    throw new Error(`${name}.${handle.field}.operated v7 event annotation fields do not match declaration for family '${evAnn.family}'`);
+  }
+  for (const key of familyFieldNames) {
+    const desc = annotationDescriptor.fields[key];
+    const strategy = resolveStrategy(desc.kind);
+    const validationResult = strategy.validate(evAnn.fields[key], desc);
+    if (validationResult !== true) {
+      throw new Error(`${name}.${handle.field}.operated v7 event annotation field '${key}' validation failed: ${validationResult}`);
+    }
+    if (typeof desc.validate === 'function' && desc.validate(evAnn.fields[key]) !== true) {
+      throw new Error(`${name}.${handle.field}.operated v7 event annotation field '${key}' failed declared validation`);
+    }
+  }
+
+  const existingAnn = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ?`).get(evAnn.id);
+  if (existingAnn) {
+    throw new Error(`${name}.${handle.field}.operated v7 event annotation id '${evAnn.id}' already exists`);
+  }
+
+  const measurementSourceIds = generalized
+    ? [...new Set(data.splitOps.map((split) => split.blockId))]
+    : [blockId];
+  const sourceMeasurements = measurementSourceIds.flatMap((sourceId) => db.prepare(
+    `SELECT id, family, format_version, block_id, payload FROM ${prefix}_measurement WHERE block_id = ? ORDER BY family, id`,
+  ).all(sourceId));
+  const measurementDescendantBlockIds = new Set(
+    data.splitOps.flatMap((split) => [split.blockId, split.newBlockId]),
+  );
+  if (!anySplit && data.measurements.length !== 0) {
+    throw new Error(`${name}.${handle.field}.operated v7 event has measurement facts without a split`);
+  }
+  const expectedMeasurementCount = generalized
+    ? sourceMeasurements.length * 2
+    : sourceMeasurements.length * (data.splitOps.length + 1);
+  if (anySplit && data.measurements.length !== expectedMeasurementCount) {
+    throw new Error(`${name}.${handle.field}.operated v7 event measurement count does not match split lineage`);
+  }
+  const sourceMeasurementIds = new Set(sourceMeasurements.map((row) => row.id));
+  const factsById = new Map();
+  const seenMeasurementIds = new Set();
+  const measKeys = ['blockId', 'family', 'formatVersion', 'id', 'payload'];
+  for (let i = 0; i < data.measurements.length; i++) {
+    const mf = data.measurements[i];
+    if (!mf || typeof mf !== 'object' || Array.isArray(mf) ||
+        JSON.stringify(Object.keys(mf).sort()) !== JSON.stringify(measKeys.sort()) ||
+        typeof mf.id !== 'string' || mf.id.length === 0 ||
+        typeof mf.blockId !== 'string' || !measurementDescendantBlockIds.has(mf.blockId) ||
+        typeof mf.family !== 'string' || typeof mf.formatVersion !== 'number' || seenMeasurementIds.has(mf.id)) {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement fact ${i} has invalid lineage`);
+    }
+    seenMeasurementIds.add(mf.id);
+    const config = measurementConfigs[mf.family];
+    if (!config || mf.formatVersion !== config.formatVersion) {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement fact ${i} has invalid family or format version`);
+    }
+    try {
+      frozenJsonSnapshot(mf.payload);
+    } catch {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement fact ${i} payload is not JSON`);
+    }
+    factsById.set(mf.id, mf);
+  }
+  for (const source of sourceMeasurements) {
+    const split = data.splitOps.find((candidate) => candidate.blockId === source.block_id);
+    const leftFact = factsById.get(source.id);
+    const rightFacts = split ? data.measurements.filter((fact) => fact.family === source.family && fact.blockId === split.newBlockId) : [];
+    if (!split || !leftFact || leftFact.blockId !== source.block_id || leftFact.family !== source.family ||
+        leftFact.formatVersion !== source.format_version || rightFacts.length !== 1) {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement facts do not preserve lineage for source '${source.id}'`);
+    }
+    const rightFact = rightFacts[0];
+    const config = measurementConfigs[source.family];
+    const extension = config && resolveDeclarationMeasurementExtension(config);
+    if (!extension || source.format_version !== config.formatVersion || rightFact.formatVersion !== config.formatVersion) {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement source '${source.id}' has no matching structural adapter`);
+    }
+    let sourcePayload;
+    try { sourcePayload = frozenJsonSnapshot(JSON.parse(source.payload)); } catch {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement source '${source.id}' is not JSON`);
+    }
+    const sourceText = materializeBlock(currentFamily, source.block_id);
+    const leftText = materializeBlock(reduced, source.block_id);
+    const rightText = materializeBlock(reduced, split.newBlockId);
+    const input = Object.freeze({ version: 1, formatVersion: config.formatVersion, blockText: sourceText, utf16Offset: split.utf16Offset, payload: sourcePayload });
+    let first;
+    let second;
+    try {
+      if (extension.validate(Object.freeze({ version: 1, formatVersion: config.formatVersion, blockText: sourceText, payload: sourcePayload })) !== undefined) throw new Error('returned a value');
+      first = extension.partition(input);
+      second = extension.partition(input);
+    } catch {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement source '${source.id}' cannot be partitioned`);
+    }
+    if (JSON.stringify(first) !== JSON.stringify(second) || !first || typeof first !== 'object' || Array.isArray(first) ||
+        JSON.stringify(Object.keys(first).sort()) !== JSON.stringify(['leftPayload', 'rightPayload', 'version']) || first.version !== 1) {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement source '${source.id}' has a non-canonical partition`);
+    }
+    let leftPayload;
+    let rightPayload;
+    try {
+      leftPayload = frozenJsonSnapshot(first.leftPayload);
+      rightPayload = frozenJsonSnapshot(first.rightPayload);
+      if (extension.validate(Object.freeze({ version: 1, formatVersion: config.formatVersion, blockText: leftText, payload: leftPayload })) !== undefined ||
+          extension.validate(Object.freeze({ version: 1, formatVersion: config.formatVersion, blockText: rightText, payload: rightPayload })) !== undefined) throw new Error('returned a value');
+    } catch {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement source '${source.id}' produced invalid descendants`);
+    }
+    if (JSON.stringify(leftFact.payload) !== JSON.stringify(leftPayload) || JSON.stringify(rightFact.payload) !== JSON.stringify(rightPayload)) {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement facts do not match partition for source '${source.id}'`);
+    }
+  }
+  for (const fact of data.measurements) {
+    const existing = db.prepare(`SELECT id FROM ${prefix}_measurement WHERE id = ?`).get(fact.id);
+    if ((sourceMeasurementIds.has(fact.id) && (!existing || fact.id !== existing.id)) ||
+        (!sourceMeasurementIds.has(fact.id) && existing)) {
+      throw new Error(`${name}.${handle.field}.operated v7 event measurement ID does not have fresh source lineage`);
+    }
+  }
+
+  const blockColumns = ['id', 'document_id', 'project_id', 'owner_id', 'position', 'epoch', 'structure_version', ...blockFieldNames];
+  const blockParamNames = blockColumns.map(c => `:${c}`).join(', ');
+  const blockColumnNames = blockColumns.join(', ');
+
+  const familyBlocks = reduced.blocks;
+  const blocksToUpdate = db.prepare(`SELECT * FROM ${prefix}_block WHERE document_id = ?`).all(data.id);
+  const existingById = {};
+  for (const b of blocksToUpdate) existingById[b.id] = b;
+
+  for (const bid of data.splitBlockIds) {
+    if (existingById[bid]) {
+      throw new Error(`${name}.${handle.field}.operated v7 block '${bid}' already exists`);
+    }
+  }
+  if (!existingById[blockId]) {
+    throw new Error(`${name}.${handle.field}.operated v7 source block '${blockId}' not found`);
+  }
+  const sourceBlock = existingById[blockId];
+  const sourceGroup = db.prepare(`SELECT group_id FROM ${prefix}_block_group WHERE block_id = ?`).get(blockId);
+  if (!sourceGroup || typeof sourceGroup.group_id !== 'string' || sourceGroup.group_id.length === 0) {
+    throw new Error(`${name}.${handle.field}.operated v7 source block group not found`);
+  }
+
+  const blockFactById = {};
+  for (const bf of data.blocks) blockFactById[bf.id] = bf;
+  const findSourceIdForBlock = (blockId) => {
+    const split = data.splitOps.find((candidate) => candidate.newBlockId === blockId);
+    return split ? split.blockId : blockId;
+  };
+
+  const virtualStoredBlocks = new Map([[blockId, sourceBlock]]);
+  for (const [index, split] of data.splitOps.entries()) {
+    const leftFact = data.blocks[index * 2];
+    const rightFact = data.blocks[index * 2 + 1];
+    const source = virtualStoredBlocks.get(split.blockId) ?? existingById[split.blockId];
+    if (!source || leftFact.id !== split.blockId || rightFact.id !== split.newBlockId ||
+        leftFact.epoch !== source.epoch || rightFact.epoch !== source.epoch) {
+      throw new Error(`${name}.${handle.field}.operated v7 event block facts do not match split ${index} source`);
+    }
+    for (const fieldName of blockFieldNames) {
+      const sourceValue = deserializeField(descriptor.block[fieldName], source[fieldName]);
+      if (JSON.stringify(leftFact.fields[fieldName]) !== JSON.stringify(sourceValue) ||
+          JSON.stringify(rightFact.fields[fieldName]) !== JSON.stringify(sourceValue)) {
+        throw new Error(`${name}.${handle.field}.operated v7 event block facts do not copy split ${index} source cells`);
+      }
+    }
+    virtualStoredBlocks.set(split.newBlockId, source);
+  }
+
+  if (anySplit) stageBlockPositions(db, prefix, existingById);
+
+  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`)
+    .run(data.after.structuralRevision, JSON.stringify(textFamilyCheckpoint(reduced)), data.id);
+
+  for (const [index, fb] of familyBlocks.entries()) {
+    const pos = deriveBlockPosition(index);
+    const bid = fb.id;
+    const existing = existingById[bid];
+    if (existing) {
+      if (!anySplit) continue;
+      if (existing.structure_version >= data.after.structuralRevision) {
+        throw new Error(`${name}.${handle.field}.operated v7 block '${bid}' structure_version already at or past target`);
+      }
+      db.prepare(`UPDATE ${prefix}_block SET position = ?, structure_version = ? WHERE id = ?`)
+        .run(pos, data.after.structuralRevision, bid);
+    } else {
+      const blockFact = blockFactById[bid];
+      if (!blockFact) {
+        throw new Error(`${name}.${handle.field}.operated v7 family references unknown block '${bid}'`);
+      }
+      const splitSource = existingById[findSourceIdForBlock(bid)] ?? sourceBlock;
+      const blockRow = {
+        id: bid,
+        document_id: data.id,
+        project_id: splitSource.project_id,
+        owner_id: splitSource.owner_id,
+        position: pos,
+        epoch: blockFact.epoch,
+        structure_version: data.after.structuralRevision,
+      };
+      for (const bf of blockFieldNames) {
+        blockRow[bf] = serializeField(descriptor.block[bf], blockFact.fields[bf]);
+      }
+      db.prepare(`INSERT INTO ${prefix}_block (${blockColumnNames}) VALUES (${blockParamNames})`).run(blockRow);
+      const group = db.prepare(`SELECT group_id FROM ${prefix}_block_group WHERE block_id = ?`).get(findSourceIdForBlock(bid));
+      if (!group) throw new Error(`${name}.${handle.field}.operated v7 source block group not found`);
+      db.prepare(`INSERT INTO ${prefix}_block_group (block_id, group_id) VALUES (?, ?)`).run(bid, group.group_id);
+    }
+  }
+
+  for (const annId of splitAffectedIds) {
+    db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(annId);
+  }
+
+  for (const m of addMembershipResult.memberships.filter(m => splitAffectedIds.has(m.annotationId))) {
+    db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES (?, ?, ?, ?, ?)`)
+      .run(m.annotationId, m.blockId, m.ordinal, JSON.stringify(m.start), JSON.stringify(m.end));
+  }
+
+  db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
+    .run(evAnn.id, data.id, sourceBlock.project_id, data.actorId != null && typeof data.actorId === 'string' && data.actorId.length > 0 ? data.actorId : sourceBlock.owner_id, evAnn.family);
+
+  for (const targetId of protectedTargetIds) {
+    db.prepare(`INSERT INTO ${prefix}_annotation_protected_target (annotation_id, target_annotation_id) VALUES (?, ?)`)
+      .run(evAnn.id, targetId);
+  }
+
+  const familyTable = `${prefix}_annotation_${evAnn.family}`;
+  const familyFieldNamesArray = Object.keys(annotationDescriptor.fields);
+  if (familyFieldNamesArray.length > 0) {
+    const famCols = ['annotation_id', ...familyFieldNamesArray];
+    const famValues = [evAnn.id];
+    for (const key of familyFieldNamesArray) {
+      famValues.push(serializeField(annotationDescriptor.fields[key], evAnn.fields[key]));
+    }
+    db.prepare(`INSERT INTO ${familyTable} (${famCols.join(', ')}) VALUES (${famValues.map(() => '?').join(', ')})`)
+      .run(...famValues);
+  }
+
+  for (const m of addMembershipResult.memberships.filter(m => m.annotationId === evAnn.id)) {
+    db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES (?, ?, ?, ?, ?)`)
+      .run(m.annotationId, m.blockId, m.ordinal, JSON.stringify(m.start), JSON.stringify(m.end));
+  }
+
+  for (let i = 0; i < data.measurements.length; i++) {
+    const mf = data.measurements[i];
+    const existingMeas = db.prepare(`SELECT id FROM ${prefix}_measurement WHERE id = ?`).get(mf.id);
+    if (existingMeas) {
+      db.prepare(`UPDATE ${prefix}_measurement SET block_id = ?, family = ?, format_version = ?, payload = ? WHERE id = ?`)
+        .run(mf.blockId, mf.family, mf.formatVersion, JSON.stringify(mf.payload), mf.id);
+    } else {
+      db.prepare(`INSERT INTO ${prefix}_measurement (id, block_id, family, format_version, payload) VALUES (?, ?, ?, ?, ?)`)
+        .run(mf.id, mf.blockId, mf.family, mf.formatVersion, JSON.stringify(mf.payload));
+    }
+  }
+
+  getLog().debug('dispatch', `${name}.${handle.field}.operated v7`, { id: data.id, annotationId: evAnn.id, selectedBlockId });
+  return true;
+}
+
+
 
 function buildProjectedComputeRow(storedRow, fields) {
   const row = { ...storedRow };

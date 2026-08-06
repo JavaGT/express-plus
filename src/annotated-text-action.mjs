@@ -75,7 +75,7 @@ export function annotatedTextAction(entity, field, command) {
       typeof command.authoring.mutationId !== 'string' || !command.authoring.mutationId) {
     throw new Error('annotatedTextAction: command requires an authoring stream binding');
   }
-  const kinds = new Set(['text.insert', 'text.delete', 'block.split', 'block.merge', 'annotation.apply', 'annotation.detach',
+  const kinds = new Set(['text.insert', 'text.delete', 'text.replace', 'block.split', 'block.merge', 'annotation.apply', 'annotation.detach',
     'block.continue', 'block-group.assignment.set', 'block-group.assignment.clear', 'block.split-and-assign']);
   if (!kinds.has(command.kind)) throw new Error(`annotatedTextAction: unsupported command kind '${String(command.kind)}'`);
   const position = (value, label) => {
@@ -95,6 +95,9 @@ export function annotatedTextAction(entity, field, command) {
     })();
   } else if (command.kind === 'text.delete') {
     edit = { kind: command.kind, from: position(command.from, 'from'), to: position(command.to, 'to') };
+  } else if (command.kind === 'text.replace') {
+    if (typeof command.text !== 'string' || command.text.length === 0) throw new Error('annotatedTextAction: replacement text must be non-empty');
+    edit = { kind: command.kind, from: position(command.from, 'from'), to: position(command.to, 'to'), text: command.text };
   } else if (command.kind === 'block.split') {
     edit = { kind: command.kind, at: position(command.at, 'at'), temporaryBlock: typeof command.temporaryBlock === 'string' && command.temporaryBlock.length > 0 ? command.temporaryBlock : randomBytes(32).toString('base64url') };
   } else if (command.kind === 'block.merge') {

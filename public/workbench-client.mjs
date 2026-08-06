@@ -3412,39 +3412,29 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
     const positionToken = snapshotBinding.authoring.positionTokens.get(from?.blockId);
     if (!positionToken || from.blockId !== to?.blockId) throw new TypeError('annotated text replacement requires one available block');
-    if (from.offset !== to.offset && text) throw new TypeError('annotated text selection replacement is not yet supported atomically');
     const authoring = { version: 1, stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease };
     const pendingPositionBlocks = new Map(snapshotBinding.authoring.positionTokens.entries());
     const position = (value) => ({ positionToken, offset: value.offset, affinity: value.affinity });
-    const actions = [];
-    if (from.offset !== to.offset) {
-      actions.push(annotatedTextAction(entity, field, {
-        kind: 'text.delete', id: documentId, authoring: { ...authoring, mutationId: `${mutationId}:delete` },
-        from: position(from), to: position(to),
-      }));
-    }
-    if (text) {
-      actions.push(annotatedTextAction(entity, field, {
-        kind: 'text.insert', id: documentId, authoring: { ...authoring, mutationId: `${mutationId}:insert` },
-        at: position(from), text,
-      }));
-    }
+    const actions = from.offset !== to.offset && text ? [annotatedTextAction(entity, field, { kind: 'text.replace', id: documentId, authoring: { ...authoring, mutationId }, from: position(from), to: position(to), text })]
+      : from.offset !== to.offset ? [annotatedTextAction(entity, field, { kind: 'text.delete', id: documentId, authoring: { ...authoring, mutationId }, from: position(from), to: position(to) })]
+        : text ? [annotatedTextAction(entity, field, { kind: 'text.insert', id: documentId, authoring: { ...authoring, mutationId }, at: position(from), text })] : [];
     if (actions.length === 0) return null;
     for (const action of actions) pendingActionPositionBlocks.set(action.payload.authoring.mutationId, pendingPositionBlocks);
+    const mutationIds = actions.map((action) => action.payload.authoring.mutationId);
+    const clearPendingPositions = () => {
+      for (const pendingMutationId of mutationIds) pendingActionPositionBlocks.delete(pendingMutationId);
+    };
     translatedActions += 1;
     try {
       const result = await session.dispatch(actions[0].type, actions[0].payload);
-      const mutationId = actions[0].payload.authoring.mutationId;
       if (result.status === 'failed-rolled-back') {
-        pendingActionPositionBlocks.delete(mutationId);
+        clearPendingPositions();
       } else if (result.settlement?.wait) {
-        void result.settlement.wait().finally(() => {
-          pendingActionPositionBlocks.delete(mutationId);
-        });
+        void result.settlement.wait().finally(clearPendingPositions);
       }
       return result;
     } catch (error) {
-      pendingActionPositionBlocks.delete(actions[0].payload.authoring.mutationId);
+      clearPendingPositions();
       throw error;
     } finally {
       translatedActions -= 1;
@@ -3496,7 +3486,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     replace(input) {
-      const command = { from: input?.from, to: input?.to };
+      const command = { kind: input?.text ? 'text.replace' : 'text.delete', mutationId: input?.mutationId, from: input?.from, to: input?.to, text: input?.text };
       return queueAuthoringMutation(command, () => replaceNow(input));
     },
     split({ mutationId, at }) {

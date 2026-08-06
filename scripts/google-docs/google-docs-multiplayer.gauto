@@ -1,0 +1,29 @@
+# Replace the document ID before running this fixture.
+URL https://docs.google.com/document/d/YOUR_DOC_ID/edit
+START_WAIT 2s
+WAIT 200ms
+
+ACTOR A TAB 1
+ACTOR B TAB 2
+
+A FOCUS
+A META+A
+A BACKSPACE
+A TYPE "hello!"
+A LEFT
+A SHIFT+LEFT
+A SHIFT+LEFT
+A COMMENT "comment should just be lo"
+EXPORT after-comment.json
+
+# Insert a file placeholder using the @placeholder menu flow.
+A RIGHT
+A INSERT_SMART_CHIP
+EXPORT after-placeholder.json
+
+PARALLEL
+  A TYPE " A"
+  B TYPE " B"
+END
+
+EXPORT final.json

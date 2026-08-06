@@ -123,6 +123,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     if (closed || composing) return;
     const blocks = document?.blocks ?? [];
     const visible = orderedVisible(document);
+    const annotationFamilies = new Map((document?.annotations ?? []).map((annotation) => [annotation.id, annotation.family]));
     const target = queued && visible.find((block) => block.id === queued.blockId);
     const submittedTarget = submitted && visible.find((block) => block.id === submitted.blockId);
     if (submitted && submittedTarget?.text === submitted.text) {
@@ -185,8 +186,12 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       if (block.kind === 'restricted') {
         span.textContent = block.placeholder ?? '';
         span.dataset.restricted = 'true';
+        delete span.dataset.annotationFamilies;
       } else {
         delete span.dataset.restricted;
+        const families = [...new Set((block.annotationIds ?? []).map((id) => annotationFamilies.get(id)).filter(Boolean))].sort();
+        if (families.length) span.dataset.annotationFamilies = families.join(' ');
+        else delete span.dataset.annotationFamilies;
         const text = displayed.has(block.id) ? displayed.get(block.id) : block.text;
         if (span.textContent !== text) span.textContent = text;
       }
@@ -329,10 +334,6 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     if (mutationIsBlocked(block.id)) return;
     if (event.inputType === 'insertText' || event.inputType === 'insertFromPaste' || event.inputType === 'insertFromDrop') {
       const text = event.dataTransfer?.getData?.('text/plain') ?? event.data ?? '';
-      if (text && selected.from.offset !== selected.to.offset) {
-        onError(new TypeError('annotated text selection replacement is not yet supported atomically'));
-        return;
-      }
       if (text) bufferEdit(block, selected.from.offset, selected.to.offset, text);
       return;
     }

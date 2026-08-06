@@ -27,6 +27,7 @@
     #marker-bar { display:flex; gap:8px; align-items:center; padding:6px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
     #add-comment:disabled { opacity:.5; cursor:default; }
     #editor { flex:1; overflow:auto; min-height:200px; margin:16px; padding:16px 18px; border:1px solid var(--line); border-radius:10px; outline:none; background:var(--panel); white-space:pre-wrap; font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
+    #editor [data-annotation-families~="comment"] { background:#fef08a; }
     #editor:empty::before { color:#98a2b3; content:attr(data-placeholder); }
     #empty { margin:40px auto; color:var(--muted); text-align:center; }
     .hidden { display:none !important; }
@@ -216,10 +217,6 @@
         setStatus('select a range of text to comment on', 'error');
         return;
       }
-      if (selection.from.blockId !== selection.to.blockId) {
-        setStatus('select text within one block to add a comment marker', 'error');
-        return;
-      }
       const annotation = {
         id: crypto.randomUUID(),
         family: 'comment',
@@ -246,8 +243,7 @@
     function updateCommentButton() {
       const selection = editorBinding?.getSelection();
       const enabled = selection !== null
-        && selection.from.blockId === selection.to.blockId
-        && selection.from.offset !== selection.to.offset;
+        && (selection.from.blockId !== selection.to.blockId || selection.from.offset !== selection.to.offset);
       $('add-comment').disabled = session?.status !== 'live' || !enabled;
     }
     document.addEventListener('selectionchange', updateCommentButton);

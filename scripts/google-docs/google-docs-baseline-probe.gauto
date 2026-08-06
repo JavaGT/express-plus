@@ -1,0 +1,54 @@
+# Narrow baseline probe for the comprehensive interaction matrix.
+# The CLI supplies the real document URL. This clears the document.
+URL https://docs.google.com/document/d/YOUR_DOC_ID/edit
+START_WAIT 3s
+WAIT 200ms
+
+ACTOR A TAB 1
+
+A FOCUS
+ASSERT A accessibility.screenReader.pageAnnouncements.0 = "On page 1."
+A META+A
+A BACKSPACE
+A TYPE "Alpha bravo charlie delta"
+A ENTER
+A TYPE "0123456789ABCDEFGHIJ"
+A ENTER
+A TYPE "0123456789ABCDEFGHIJ"
+A ENTER
+A TYPE "0123456789ABCDEFGHIJ"
+A ENTER
+A TYPE "0123456789ABCDEFGHIJ"
+A ENTER
+A TYPE "0123456789ABCDEFGHIJ"
+A ENTER
+A TYPE "Abcdefghijklmnopqrst"
+A ENTER
+A TYPE "Abcdefghijklmnopqrst"
+A ENTER
+A TYPE "Abcdefghijklmnopqrst"
+A ENTER
+A TYPE "Abcdefghijklmnopqrst"
+A ENTER
+A TYPE "Abcdefghijklmnopqrst"
+A ENTER
+A TYPE "Aaaaa bbbbb ccccc ddddd"
+A ENTER
+A TYPE "Select-one-line-0123456789"
+A ENTER
+A TYPE "Select-across-line-two"
+A ENTER
+A TYPE "Select-across-line-three"
+A ENTER
+A TYPE "Multiline-comment-start"
+A ENTER
+A TYPE "Multiline-comment-end"
+A ENTER
+A TYPE "Multiplayer-top-0123456789"
+A ENTER
+A TYPE "Multiplayer-bottom-0123456789"
+A ENTER
+A TYPE "chip-zone:"
+A META+A
+A META+C
+EXPORT baseline-copy.json

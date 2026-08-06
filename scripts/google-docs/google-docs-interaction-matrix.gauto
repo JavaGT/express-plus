@@ -1,0 +1,413 @@
+# Progressive Google Docs behavior recording. Paged mode is required.
+# Replace YOUR_DOC_ID. This clears the document and creates comment threads.
+URL https://docs.google.com/document/d/YOUR_DOC_ID/edit
+START_WAIT 3s
+WAIT 200ms
+
+ACTOR A TAB 1
+ACTOR B TAB 2
+
+# 01 — Establish independent short lines before adding metadata.
+A FOCUS
+ASSERT A accessibility.screenReader.pageAnnouncements.0 = "On page 1."
+A META+A
+A BACKSPACE
+A TYPE "Alpha bravo charlie delta"
+A ENTER
+A TYPE "0123456789ABCDEFGHIJ"
+A ENTER
+A TYPE "0123456789ABCDEFGHIJ"
+A ENTER
+A TYPE "0123456789ABCDEFGHIJ"
+A ENTER
+A TYPE "0123456789ABCDEFGHIJ"
+A ENTER
+A TYPE "0123456789ABCDEFGHIJ"
+A ENTER
+A TYPE "Abcdefghijklmnopqrst"
+A ENTER
+A TYPE "Abcdefghijklmnopqrst"
+A ENTER
+A TYPE "Abcdefghijklmnopqrst"
+A ENTER
+A TYPE "Abcdefghijklmnopqrst"
+A ENTER
+A TYPE "Abcdefghijklmnopqrst"
+A ENTER
+A TYPE "Aaaaa bbbbb ccccc ddddd"
+A ENTER
+A TYPE "Select-one-line-0123456789"
+A ENTER
+A TYPE "Select-across-line-two"
+A ENTER
+A TYPE "Select-across-line-three"
+A ENTER
+A TYPE "Multiline-comment-start"
+A ENTER
+A TYPE "Multiline-comment-end"
+A ENTER
+A TYPE "Multiplayer-top-0123456789"
+A ENTER
+A TYPE "Multiplayer-bottom-0123456789"
+A ENTER
+A TYPE "chip-zone:"
+EXPORT 01-placeholder-text.json
+
+# 02 — Comment separate words: first, middle, and last.
+A META+UP
+A HOME
+A SHIFT+RIGHT 5
+A COMMENT "word Alpha"
+A META+UP
+A HOME
+A RIGHT 6
+A SHIFT+RIGHT 5
+A COMMENT "word bravo"
+A META+UP
+A HOME
+A RIGHT 20
+A SHIFT+RIGHT 5
+A COMMENT "word delta"
+EXPORT 02-separate-word-comments.json
+
+# Probe both sides and the inside of the separate bravo annotation by arrowing
+# through it without mutating this reference line.
+A META+UP
+A HOME
+A RIGHT 5
+EXPORT 02a-before-word-comment.json
+A RIGHT
+EXPORT 02b-left-edge-word-comment.json
+A RIGHT 2
+EXPORT 02c-inside-word-comment.json
+A RIGHT 3
+EXPORT 02d-right-edge-word-comment.json
+A RIGHT
+EXPORT 02e-after-word-comment.json
+
+# 03 — Each typing relation gets an independent, identical annotated line.
+# Before the comment [5,15).
+A META+UP
+A DOWN
+A HOME
+A RIGHT 5
+A SHIFT+RIGHT 10
+A COMMENT "type-before range [5,15)"
+A META+UP
+A DOWN
+A HOME
+A RIGHT 5
+A TYPE "<BEFORE>"
+EXPORT 03a-type-before-comment.json
+
+# Just inside the left boundary.
+A META+UP
+A DOWN 2
+A HOME
+A RIGHT 5
+A SHIFT+RIGHT 10
+A COMMENT "type-left-inside range [5,15)"
+A META+UP
+A DOWN 2
+A HOME
+A RIGHT 6
+A TYPE "<LEFT-INSIDE>"
+EXPORT 03b-type-left-inside-comment.json
+
+# In the middle.
+A META+UP
+A DOWN 3
+A HOME
+A RIGHT 5
+A SHIFT+RIGHT 10
+A COMMENT "type-middle range [5,15)"
+A META+UP
+A DOWN 3
+A HOME
+A RIGHT 10
+A TYPE "<MIDDLE>"
+EXPORT 03c-type-inside-comment.json
+
+# Just inside the right boundary.
+A META+UP
+A DOWN 4
+A HOME
+A RIGHT 5
+A SHIFT+RIGHT 10
+A COMMENT "type-right-inside range [5,15)"
+A META+UP
+A DOWN 4
+A HOME
+A RIGHT 14
+A TYPE "<RIGHT-INSIDE>"
+EXPORT 03d-type-right-inside-comment.json
+
+# Immediately after the right boundary.
+A META+UP
+A DOWN 5
+A HOME
+A RIGHT 5
+A SHIFT+RIGHT 10
+A COMMENT "type-after range [5,15)"
+A META+UP
+A DOWN 5
+A HOME
+A RIGHT 15
+A TYPE "<AFTER>"
+EXPORT 03e-type-after-comment.json
+
+# 04 — Build every important overlap shape on untouched line 7.
+A META+UP
+A DOWN 6
+A HOME
+A RIGHT 2
+A SHIFT+RIGHT 8
+A COMMENT "base [2,10)"
+A META+UP
+A DOWN 6
+A HOME
+A RIGHT 2
+A SHIFT+RIGHT 8
+A COMMENT "identical [2,10)"
+A META+UP
+A DOWN 6
+A HOME
+A RIGHT 7
+A SHIFT+RIGHT 8
+A COMMENT "crossing [7,15)"
+A META+UP
+A DOWN 6
+A HOME
+A RIGHT 4
+A SHIFT+RIGHT 3
+A COMMENT "contained [4,7)"
+A META+UP
+A DOWN 6
+A HOME
+A SHIFT+RIGHT 18
+A COMMENT "containing [0,18)"
+A META+UP
+A DOWN 6
+A HOME
+A RIGHT 18
+A SHIFT+RIGHT 2
+A COMMENT "adjacent [18,20)"
+EXPORT 04-overlap-shapes.json
+
+# 05 — Each overlap mutation gets a fresh duplicate line with base [2,10),
+# crossing [7,15), and contained [4,7) comments.
+# Type in a genuine triple intersection at offset 6.
+A META+UP
+A DOWN 7
+A HOME
+A RIGHT 2
+A SHIFT+RIGHT 8
+A COMMENT "edit-contained base"
+A META+UP
+A DOWN 7
+A HOME
+A RIGHT 6
+A SHIFT+RIGHT 9
+A COMMENT "edit-contained crossing [6,15)"
+A META+UP
+A DOWN 7
+A HOME
+A RIGHT 4
+A SHIFT+RIGHT 4
+A COMMENT "edit-contained inner [4,8)"
+A META+UP
+A DOWN 7
+A HOME
+A RIGHT 6
+A TYPE "<TRIPLE>"
+EXPORT 05a-type-contained-intersection.json
+
+# Type in the crossing-only intersection at offset 8.
+A META+UP
+A DOWN 8
+A HOME
+A RIGHT 2
+A SHIFT+RIGHT 8
+A COMMENT "edit-crossing base"
+A META+UP
+A DOWN 8
+A HOME
+A RIGHT 7
+A SHIFT+RIGHT 8
+A COMMENT "edit-crossing crossing"
+A META+UP
+A DOWN 8
+A HOME
+A RIGHT 8
+A TYPE "<CROSSING>"
+EXPORT 05b-type-crossing-intersection.json
+
+# Replace a selected span shared by base and crossing.
+A META+UP
+A DOWN 9
+A HOME
+A RIGHT 2
+A SHIFT+RIGHT 8
+A COMMENT "replace base"
+A META+UP
+A DOWN 9
+A HOME
+A RIGHT 7
+A SHIFT+RIGHT 8
+A COMMENT "replace crossing"
+A META+UP
+A DOWN 9
+A HOME
+A RIGHT 7
+A SHIFT+RIGHT 3
+A TYPE "<REPLACED>"
+EXPORT 05c-replace-overlap.json
+
+# Backspace at an overlap boundary on a fresh line.
+A META+UP
+A DOWN 10
+A HOME
+A RIGHT 2
+A SHIFT+RIGHT 8
+A COMMENT "delete base"
+A META+UP
+A DOWN 10
+A HOME
+A RIGHT 7
+A SHIFT+RIGHT 8
+A COMMENT "delete crossing"
+A META+UP
+A DOWN 10
+A HOME
+A RIGHT 8
+A BACKSPACE
+EXPORT 05d-delete-overlap.json
+
+# 06 — Navigation follows all comment/edit experiments.
+A META+UP
+A DOWN 11
+A HOME
+A RIGHT 8
+A LEFT 3
+A RIGHT 2
+A ALT+LEFT
+A ALT+RIGHT
+A META+LEFT
+A META+RIGHT
+EXPORT 06a-plain-caret-navigation.json
+A META+UP
+A DOWN 6
+A HOME
+A RIGHT 6
+A LEFT 3
+A RIGHT 6
+A ALT+LEFT
+A ALT+RIGHT
+EXPORT 06b-comment-caret-navigation.json
+A META+UP
+EXPORT 06c-document-start-navigation.json
+A META+DOWN
+EXPORT 06d-document-end-navigation.json
+
+# 07 — Character, word, line, commented, and multiline selection.
+A META+UP
+A DOWN 12
+A HOME
+A RIGHT 4
+A SHIFT+RIGHT 5
+EXPORT 07a-character-selection.json
+A RIGHT
+A SHIFT+ALT+RIGHT
+EXPORT 07b-word-selection.json
+A HOME
+A SHIFT+END
+EXPORT 07c-whole-line-selection.json
+A META+UP
+A DOWN 6
+A HOME
+A RIGHT 4
+A SHIFT+RIGHT 12
+EXPORT 07d-commented-selection.json
+A META+UP
+A DOWN 13
+A HOME
+A RIGHT 7
+A SHIFT+DOWN 2
+A SHIFT+RIGHT 6
+EXPORT 07e-multiline-selection.json
+A META+C
+A META+X
+A META+V
+EXPORT 07f-multiline-clipboard.json
+
+# Create an actual multiline comment anchor on lines 16–17.
+A META+UP
+A DOWN 15
+A HOME
+A RIGHT 5
+A SHIFT+DOWN
+A SHIFT+RIGHT 8
+A COMMENT "comment spanning two lines"
+EXPORT 07g-multiline-comment.json
+
+# 08 — Two tabs type on separate lines concurrently.
+A META+UP
+A DOWN 17
+A HOME
+B FOCUS
+B META+UP
+B DOWN 18
+B HOME
+CONCURRENT
+  A TYPE "A-TOP:"
+  B TYPE "B-BOTTOM:"
+END
+WAIT 1s
+EXPORT 08a-multiplayer-different-lines.json
+
+# Two tabs edit distinct positions within the commented overlap reference line.
+A META+UP
+A DOWN 6
+A HOME
+A RIGHT 5
+A SHIFT+RIGHT 2
+B META+UP
+B DOWN 6
+B HOME
+B RIGHT 11
+B SHIFT+RIGHT 2
+CONCURRENT
+  A TYPE "ACTOR-A"
+  B TYPE "ACTOR-B"
+END
+WAIT 1s
+EXPORT 08b-multiplayer-commented-line.json
+
+# 09 — Attempt the requested file placeholder smart chip last, so any newlines
+# it creates cannot shift earlier absolute line targets. The insertion checkpoint
+# records whether Docs created a chip, literal text, a menu, or blank lines.
+A META+DOWN
+A END
+A INSERT_SMART_CHIP
+EXPORT 09a-smart-chip-insertion-outcome.json
+# INSERT_SMART_CHIP ends on the following line; return to and select the
+# chip-containing source line before navigation and clipboard operations.
+A UP
+A HOME
+A LEFT
+A RIGHT
+A ALT+LEFT
+A ALT+RIGHT
+A HOME
+A SHIFT+END
+A META+C
+A RIGHT
+A META+V
+EXPORT 09b-smart-chip-navigation-copy.json
+A HOME
+A SHIFT+END
+A META+X
+A META+V
+EXPORT 09c-smart-chip-cut-paste.json
+
+EXPORT final.json

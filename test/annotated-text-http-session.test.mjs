@@ -172,7 +172,7 @@ test('document session bootstraps when authoring client storage is unavailable',
   session.close();
 });
 
-test('document session owns mutation identity and rejects non-atomic selection replacement', async () => {
+test('document session owns mutation identity and sends selection replacement as one action', async () => {
   const { session, requests } = setup();
   await session.ready;
   await session.insert({ at: { blockId: 'block-1', offset: 1, affinity: 'right' }, text: 'x' });
@@ -198,11 +198,13 @@ test('document session owns mutation identity and rejects non-atomic selection r
     eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
   });
   await replacement.ready;
-  await assert.rejects(replacement.replace({
+  await replacement.replace({
     mutationId: 'replace-1', from: { blockId: 'block-1', offset: 1, affinity: 'right' },
     to: { blockId: 'block-1', offset: 4, affinity: 'right' }, text: 'i',
-  }), /not yet supported atomically/);
-  assert.equal(batchRequests.length, 0);
+  });
+  assert.equal(batchRequests.length, 1);
+  const replacementRequest = batchRequests[0];
+  assert.equal(replacementRequest.payload.edit.kind, 'text.replace');
   replacement.close();
 });
 

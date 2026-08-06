@@ -188,6 +188,79 @@ test('R4 annotation.apply on full block produces no splits, creates annotation w
   await app.close?.();
 });
 
+test('R4 annotation.apply spans contiguous visible blocks in one event', async () => {
+  const { app, db, blockId, positionMap, stream, lease, refreshPositionMap } = await setupDoc('hello world');
+  const split = await app.dispatch({
+    actionId: 'make-second-block', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-cross-split' },
+      edit: { kind: 'block.split', at: { positionToken: v9PositionTokenPayload(positionMap, blockId), offset: 5, affinity: 'right' }, temporaryBlock: 'tmp-second' } },
+  });
+  assert.equal(split.ok, true, split.failure?.message);
+  const nextMap = await refreshPositionMap();
+  const blocks = db.prepare('SELECT id FROM R4Doc_body_block WHERE document_id = ? ORDER BY position').all('d1');
+  assert.equal(blocks.length, 2);
+  const result = await app.dispatch({
+    actionId: 'cross-annotation', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-cross-annotation' },
+      edit: { kind: 'annotation.apply', annotation: { id: 'cross-ann', family: 'theme', fields: {} },
+        from: { positionToken: v9PositionTokenPayload(nextMap, blocks[0].id), offset: 2, affinity: 'left' },
+        to: { positionToken: v9PositionTokenPayload(nextMap, blocks[1].id), offset: 3, affinity: 'right' } } },
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM R4Doc_body_annotation WHERE id = ?').get('cross-ann').count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = ?').get('cross-ann').count, 2);
+});
+
+test('R7 annotation.apply may start at a block boundary and split only its end block', async () => {
+  const { app, db, blockId, positionMap, stream, lease, refreshPositionMap } = await setupDoc('hello world');
+  const split = await app.dispatch({
+    actionId: 'right-only-split', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-right-only-split' },
+      edit: { kind: 'block.split', at: { positionToken: v9PositionTokenPayload(positionMap, blockId), offset: 5, affinity: 'right' }, temporaryBlock: 'tmp-right-only' } },
+  });
+  assert.equal(split.ok, true, split.failure?.message);
+  const nextMap = await refreshPositionMap();
+  const blocks = db.prepare('SELECT id FROM R4Doc_body_block WHERE document_id = ? ORDER BY position').all('d1');
+  const existing = await app.dispatch({
+    actionId: 'right-only-existing', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-right-only-existing' },
+      edit: { kind: 'annotation.apply', annotation: { id: 'right-only-existing', family: 'theme', fields: {} },
+        from: { positionToken: v9PositionTokenPayload(nextMap, blocks[0].id), offset: 0, affinity: 'left' },
+        to: { positionToken: v9PositionTokenPayload(nextMap, blocks[0].id), offset: 5, affinity: 'right' } } },
+  });
+  assert.equal(existing.ok, true, existing.failure?.message);
+  const result = await app.dispatch({
+    actionId: 'right-only-annotation', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-right-only-annotation' },
+      edit: { kind: 'annotation.apply', annotation: { id: 'right-only-ann', family: 'theme', fields: {} },
+        from: { positionToken: v9PositionTokenPayload(nextMap, blocks[0].id), offset: 0, affinity: 'left' },
+        to: { positionToken: v9PositionTokenPayload(nextMap, blocks[1].id), offset: 3, affinity: 'right' } } },
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].data.version, 7);
+  assert.equal(result.events[0].data.splitOps.length, 1);
+  assert.equal(result.events[0].data.splitOps[0].blockId, blocks[1].id);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = ?').get('right-only-ann').count, 2);
+  await app.close?.();
+});
+
+test('v6 text.replace projects one atomic same-block event', async () => {
+  const { app, db, blockId, positionMap, stream, lease } = await setupDoc('Hello');
+  const token = v9PositionTokenPayload(positionMap, blockId);
+  const result = await app.dispatch({
+    actionId: 'replace-interior', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-replace-interior' },
+      edit: { kind: 'text.replace', from: { positionToken: token, offset: 1, affinity: 'left' }, to: { positionToken: token, offset: 4, affinity: 'right' }, text: 'i' } },
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  assert.equal(result.events.length, 1);
+  assert.equal(result.events[0].data.version, 6);
+  const state = db.prepare("SELECT family_checkpoint FROM R4Doc_body_state WHERE document_id = 'd1'").get();
+  assert.equal(materializeBlock(restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint)), blockId), 'Hio');
+  await app.close?.();
+});
+
 test('R4 annotation.apply persists sorted protecting targets through its sole event and projection path', async () => {
   const { app, db, blockId, positionMap, state, stream, lease } = await setupDoc('hello world');
   const token = v9PositionTokenPayload(positionMap, blockId);
@@ -571,7 +644,7 @@ test('R4 annotation.apply rejects target IDs on ordinary, standalone, and wrong-
   await app.close?.();
 });
 
-test('R4 annotation.apply on prefix, suffix, interior produces correct splits', async () => {
+test('R4 annotation.apply on a prefix produces the correct split', async () => {
   const { app, db, blockId, positionMap, stream, lease } = await setupDoc('hello world');
   const token = v9PositionTokenPayload(positionMap, blockId);
   const prefix = await app.dispatch({
@@ -579,6 +652,21 @@ test('R4 annotation.apply on prefix, suffix, interior produces correct splits', 
     payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-prefix' }, edit: { kind: 'annotation.apply', annotation: { id: 'ann-prefix', family: 'flag', fields: { flagged: true } }, from: { positionToken: token, offset: 0, affinity: 'left' }, to: { positionToken: token, offset: 5, affinity: 'right' } } },
   });
   assert.equal(prefix.ok, true, prefix.failure?.message);
+  await app.close?.();
+});
+
+test('R4 annotation.apply on an interior range persists the selected membership', async () => {
+  const { app, db, blockId, positionMap, stream, lease } = await setupDoc('before selected after');
+  const token = v9PositionTokenPayload(positionMap, blockId);
+  const result = await app.dispatch({
+    actionId: 'apply-interior', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-interior' }, edit: { kind: 'annotation.apply', annotation: { id: 'ann-interior', family: 'flag', fields: { flagged: true } }, from: { positionToken: token, offset: 7, affinity: 'left' }, to: { positionToken: token, offset: 15, affinity: 'right' } } },
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  const memberships = db.prepare("SELECT block_id FROM R4Doc_body_membership WHERE annotation_id = 'ann-interior' ORDER BY ordinal").all();
+  assert.equal(memberships.length, 1);
+  const selected = db.prepare('SELECT id FROM R4Doc_body_block WHERE id = ?').get(memberships[0].block_id);
+  assert.ok(selected);
   await app.close?.();
 });
 

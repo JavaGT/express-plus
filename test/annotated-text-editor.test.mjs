@@ -51,15 +51,20 @@ function setup(text = 'Hello', document = visible(text)) {
 
 const flushInput = () => new Promise((resolve) => setTimeout(resolve, 110));
 
-test('annotated editor rejects non-atomic selection replacement without changing visible text', async () => {
+test('annotated editor replaces a selection within one block', async () => {
   const harness = setup();
   assert.equal(harness.element.textContent, 'Hello');
   harness.select(1, 4);
   const event = harness.beforeinput('insertText', 'i');
   assert.equal(event.defaultPrevented, true);
-  assert.equal(harness.element.textContent, 'Hello');
-  assert.deepEqual(harness.calls, []);
-  assert.match(harness.errors[0].message, /not yet supported atomically/);
+  assert.equal(harness.element.textContent, 'Hio');
+  await flushInput();
+  assert.deepEqual(harness.calls[0][1], {
+    from: { blockId: 'block-1', offset: 1, affinity: 'right' },
+    to: { blockId: 'block-1', offset: 4, affinity: 'right' },
+    text: 'i',
+  });
+  assert.deepEqual(harness.errors, []);
   harness.binding.close();
 });
 
@@ -469,6 +474,21 @@ test('annotated editor renders ordered visible and restricted blocks as keyed sp
     ['left', 'Left'], ['secret', '[restricted]'], ['right', 'Right'],
   ]);
   assert.equal(harness.element.querySelector('[data-block-id="secret"]').contentEditable, 'false');
+  harness.binding.close();
+});
+
+test('annotated editor exposes visible annotation families on their block spans', () => {
+  const document = {
+    version: 1,
+    blocks: [{ kind: 'visible', id: 'marked', text: 'marked', annotationIds: ['comment-1'] }],
+    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
+  };
+  const harness = setup('', document);
+
+  assert.equal(
+    harness.element.querySelector('[data-block-id="marked"]').dataset.annotationFamilies,
+    'comment',
+  );
   harness.binding.close();
 });
 

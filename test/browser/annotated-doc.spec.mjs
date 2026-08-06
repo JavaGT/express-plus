@@ -130,6 +130,9 @@ test('adding a comment marker preserves the selected and following text', async 
   await page.getByRole('button', { name: 'Add comment marker' }).click();
   await expect(page.locator('#status')).toHaveText('comment marker added');
   await expect(editor).toHaveText(text);
+  const marked = editor.locator('[data-annotation-families~="comment"]');
+  await expect(marked).toHaveText('selected');
+  await expect(marked).toHaveCSS('background-color', 'rgb(254, 240, 138)');
   await editor.evaluate((element) => {
     const node = element.lastElementChild.firstChild;
     const range = document.createRange();
@@ -145,6 +148,28 @@ test('adding a comment marker preserves the selected and following text', async 
   await page.reload();
   await openDocument(page, id);
   await expect(editor).toHaveText(`${text}!`);
+});
+
+test('replacing selected text is atomic and survives reload', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('Hello', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.firstElementChild.firstChild;
+    const range = document.createRange();
+    range.setStart(node, 1);
+    range.setEnd(node, 4);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await editor.pressSequentially('i', { delay: 0 });
+  await expect(editor).toHaveText('Hio');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('Hio');
 });
 
 test('adding a marker while text is buffered fails closed without a page error', async ({ page }) => {

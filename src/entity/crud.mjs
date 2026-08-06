@@ -106,6 +106,9 @@ export function assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload)
     edit = Object.freeze({ kind: 'text.insert', at: pToken(e.at, 'insert position'), text: e.text });
   } else if (e.kind === 'text.delete' && Object.keys(e).length === 3) {
     edit = Object.freeze({ kind: 'text.delete', from: pToken(e.from, 'delete start'), to: pToken(e.to, 'delete end') });
+  } else if (e.kind === 'text.replace' && Object.keys(e).length === 4 && typeof e.text === 'string' && e.text.length > 0) {
+    try { assertWellFormedText(e.text); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation replacement text ${error.message}`); }
+    edit = Object.freeze({ kind: 'text.replace', from: pToken(e.from, 'replace start'), to: pToken(e.to, 'replace end'), text: e.text });
   } else if (e.kind === 'block.split' && Object.keys(e).length === 3 && typeof e.temporaryBlock === 'string' && e.temporaryBlock.length > 0) {
     edit = Object.freeze({ kind: 'block.split', at: pToken(e.at, 'split position'), temporaryBlock: e.temporaryBlock });
   } else if (e.kind === 'block.merge' && Object.keys(e).length === 3 && typeof e.leftPositionToken === 'string' && e.leftPositionToken && typeof e.rightPositionToken === 'string' && e.rightPositionToken) {
@@ -568,6 +571,27 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       else if (internal && payload.version === 2) command = assertR2BlockSplitPayload(name, fieldName, payload);
       else if (internal && payload.version === 3) command = assertR3BlockMergePayload(name, fieldName, payload);
       else if (internal && payload.version === 4) command = assertR4AnnotationApplyPayload(name, fieldName, payload);
+      else if (internal && payload.version === 7) {
+        const selection = payload.operation?.selection;
+        const keys = selection && typeof selection === 'object' && !Array.isArray(selection) ? Object.keys(selection).sort() : [];
+        if (keys.join() !== 'blockId,endBlockId,endUtf16Offset,startBlockId,startUtf16Offset' ||
+            selection.blockId !== selection.startBlockId || typeof selection.endBlockId !== 'string' || selection.endBlockId.length === 0) {
+          throw new ValidationError(`${name}.${fieldName}.operation requires the exact v7 multi-block selection`);
+        }
+        const normalized = assertR4AnnotationApplyPayload(name, fieldName, {
+          ...payload,
+          version: 4,
+          operation: { ...payload.operation, selection: {
+            blockId: selection.blockId,
+            startUtf16Offset: selection.startUtf16Offset,
+            endUtf16Offset: selection.endUtf16Offset,
+          } },
+        });
+        command = Object.freeze({ ...normalized, version: 7, operation: Object.freeze({
+          ...normalized.operation,
+          selection: Object.freeze({ ...selection }),
+        }) });
+      }
       else if (internal && payload.version === 5) command = assertR5AnnotationDetachPayload(name, fieldName, payload);
       else throw new ValidationError(`${name}.${fieldName}.operation requires version 9`);
       const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(command.id);
@@ -610,7 +634,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         const positionFamily = position ? restoreTextFamilyCheckpoint(JSON.parse(position.family_checkpoint)) : null;
         const mergePositions = editTokens(command.edit, db, prefix, lease.id);
         const referencedBlocks = groupAssignment ? [] : command.edit.kind === 'text.insert' || command.edit.kind === 'block.split' ? [position.block_id]
-          : command.edit.kind === 'text.delete' || command.edit.kind === 'annotation.apply' ? [position.block_id, command.edit.to?.positionToken ? resolvePosition({ db, prefix, positionToken: command.edit.to.positionToken, leaseId: lease.id })?.block_id : null].filter(Boolean)
+          : command.edit.kind === 'text.delete' || command.edit.kind === 'text.replace' || command.edit.kind === 'annotation.apply' ? [position.block_id, command.edit.to?.positionToken ? resolvePosition({ db, prefix, positionToken: command.edit.to.positionToken, leaseId: lease.id })?.block_id : null].filter(Boolean)
           : command.edit.kind === 'block.merge' ? mergePositions.map((p) => p?.block_id) : [position.block_id];
         if (referencedBlocks.some((blockId) => blockId && !currentVisible.has(blockId))) {
           throw new ValidationError(`${name}.${fieldName}.operation position no longer visible`, { code: 'position-no-longer-visible' });
@@ -618,8 +642,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${command.id}\u0000${principal?.id ?? ''}\u0000${command.authoring.mutationId}`).digest('hex').slice(0, 32);
         const lamport = Math.max(0, ...Object.values(family.checkpoint.elements).map((element) => element.lamport)) + 1;
         const edit = command.edit;
-        if (edit.kind === 'text.insert' || edit.kind === 'text.delete') {
+        if (edit.kind === 'text.insert' || edit.kind === 'text.delete' || edit.kind === 'text.replace') {
           const blockId = position.block_id;
+          const toPosition = edit.kind === 'text.insert' ? null : resolvePosition({ db, prefix, positionToken: edit.to.positionToken, leaseId: lease.id });
+          if (edit.kind !== 'text.insert' && !toPosition) throw new ValidationError(`${name}.${fieldName}.operation replacement end position token unavailable`, { code: 'position-token-unavailable' });
+          if (toPosition && toPosition.block_id !== blockId) throw new ValidationError(`${name}.${fieldName}.operation replacement endpoints must be on the same block`, { code: 'position-invalid' });
+          const toPositionFamily = toPosition ? restoreTextFamilyCheckpoint(JSON.parse(toPosition.family_checkpoint)) : null;
           let offset;
           try {
             const endpoint = resolvePositionToEndpoint(positionFamily, blockId, edit.kind === 'text.insert' ? edit.at.offset : edit.from.offset, positionFamily.checkpoint.frontier, edit.kind === 'text.insert' ? edit.at.affinity : edit.from.affinity);
@@ -629,7 +657,20 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           }
           const textEdit = edit.kind === 'text.insert'
             ? { kind: 'text.insert', at: { blockId, offset, affinity: edit.at.affinity }, text: edit.text }
-            : { kind: 'text.delete', from: { blockId, offset, affinity: edit.from.affinity }, to: { blockId, offset: (() => { try { const ep = resolvePositionToEndpoint(positionFamily, blockId, edit.to.offset, positionFamily.checkpoint.frontier, edit.to.affinity); return projectEndpointToBlockOffset(family, blockId, Object.freeze({ ...ep, basisFrontier: family.checkpoint.frontier })); } catch (e) { throw new ValidationError(`${name}.${fieldName}.operation ${e.message}`); } })(), affinity: edit.to.affinity } };
+            : { kind: 'text.delete', from: { blockId, offset, affinity: edit.from.affinity }, to: { blockId, offset: (() => { try { const ep = resolvePositionToEndpoint(toPositionFamily, blockId, edit.to.offset, toPositionFamily.checkpoint.frontier, edit.to.affinity); return projectEndpointToBlockOffset(family, blockId, Object.freeze({ ...ep, basisFrontier: family.checkpoint.frontier })); } catch (e) { throw new ValidationError(`${name}.${fieldName}.operation ${e.message}`); } })(), affinity: edit.to.affinity } };
+          if (edit.kind === 'text.replace') {
+            let deleteOperation, intermediate, insertOperation, nextFamily;
+            try {
+              deleteOperation = textOperationForOffsetEdit(family, textEdit, `${actor.slice(0, 30)}d0`, lamport);
+              intermediate = applyTextOperationToBlock(family, blockId, deleteOperation);
+              const start = resolvePositionToEndpoint(family, blockId, offset, family.checkpoint.frontier, edit.from.affinity).point[1];
+              insertOperation = ['workbench.text', 1, [`${actor.slice(0, 30)}e0`, 1], lamport + 1, intermediate.checkpoint.frontier, ['insert', start, edit.text]];
+              insertOperation = canonicalTextOp(insertOperation);
+              nextFamily = applyTextOperationToBlock(intermediate, blockId, insertOperation);
+            } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
+            const handle = eventHandles.native(name, fieldName, 'operated');
+            return [{ handle, type: handle.type, scope: documentScope, data: Object.freeze({ version: 6, id: command.id, before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }), operation: Object.freeze({ kind: 'text.replace', blockId, operations: Object.freeze([deleteOperation, insertOperation]) }), after: Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier }), family: textFamilyCheckpoint(nextFamily) }) }];
+          }
           let operation;
           try { operation = textOperationForOffsetEdit(family, textEdit, actor, lamport); } catch (error) {
             throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
@@ -666,7 +707,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (edit.kind === 'annotation.apply') {
           const fromPos = resolvePosition({ db, prefix, positionToken: edit.from.positionToken, leaseId: lease.id });
           const toPos = resolvePosition({ db, prefix, positionToken: edit.to.positionToken, leaseId: lease.id });
-          if (!fromPos || !toPos || fromPos.block_id !== toPos.block_id) throw new ValidationError(`${name}.${fieldName}.operation annotation positions must be on the same block`, { code: 'position-invalid' });
+          if (!fromPos || !toPos) throw new ValidationError(`${name}.${fieldName}.operation annotation position token unavailable`, { code: 'position-token-unavailable' });
           const fromFamily = restoreTextFamilyCheckpoint(JSON.parse(fromPos.family_checkpoint));
           const toFamily = restoreTextFamilyCheckpoint(JSON.parse(toPos.family_checkpoint));
           let startOffset, endOffset;
@@ -678,7 +719,20 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           } catch (error) {
             throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
           }
-          return r4Handler({ payload: { version: 4, id: command.id, expected: { structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }, operation: { kind: 'annotation.apply', annotation: edit.annotation, selection: { blockId: fromPos.block_id, startUtf16Offset: startOffset, endUtf16Offset: endOffset } } }, db, scope, principal });
+          const fromIndex = family.blocks.findIndex((block) => block.id === fromPos.block_id);
+          const toIndex = family.blocks.findIndex((block) => block.id === toPos.block_id);
+          if (fromIndex < 0 || toIndex < 0 || fromIndex > toIndex || (fromIndex === toIndex && startOffset >= endOffset)) {
+            throw new ValidationError(`${name}.${fieldName}.operation annotation selection must be a forward, non-empty range`, { code: 'position-invalid' });
+          }
+          const visibleBlocks = currentRecipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id);
+          const visibleSet = new Set(visibleBlocks);
+          if (family.blocks.slice(fromIndex, toIndex + 1).some((block) => !visibleSet.has(block.id))) {
+            throw new ValidationError(`${name}.${fieldName}.operation annotation selection crosses a restricted or hidden block`, { code: 'position-no-longer-visible' });
+          }
+          const crossBlock = fromPos.block_id !== toPos.block_id;
+          return r4Handler({ payload: { version: crossBlock ? 7 : 4, id: command.id, expected: { structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }, operation: { kind: 'annotation.apply', annotation: edit.annotation, selection: crossBlock
+            ? { blockId: fromPos.block_id, startBlockId: fromPos.block_id, endBlockId: toPos.block_id, startUtf16Offset: startOffset, endUtf16Offset: endOffset }
+            : { blockId: fromPos.block_id, startUtf16Offset: startOffset, endUtf16Offset: endOffset } } }, db, scope, principal });
         }
         if (edit.kind === 'annotation.detach') {
           const expected = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
@@ -1022,7 +1076,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }) : {
           kind: 'block.split', leftBlockId: blockId, rightBlockId: newBlockId, utf16Offset,
         }),
-         after: Object.freeze({ structuralRevision: afterRevision, frontier: family.checkpoint.frontier }),
+           after: Object.freeze({ structuralRevision: afterRevision, frontier: family.checkpoint.frontier }),
         family: textFamilyCheckpoint(splitResult.family),
         blocks: cleanBlocks,
         memberships: Object.freeze(membershipResult.memberships.filter(m => affectedAnnotationIds.has(m.annotationId)).map(m => ({
@@ -1280,18 +1334,28 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         throw new ValidationError(`${name}.${fieldName}.operation conflicts with the current structural revision or frontier`);
       }
 
-      const { blockId, startUtf16Offset, endUtf16Offset } = command.operation.selection;
+       const selection = command.operation.selection;
+       const blockId = selection.startBlockId ?? selection.blockId;
+       const endBlockId = selection.endBlockId ?? blockId;
+       const { startUtf16Offset, endUtf16Offset } = selection;
       const annInput = command.operation.annotation;
 
-      let blockText;
-      try {
-        blockText = materializeBlock(family, blockId);
+       let blockText;
+       let endBlockText;
+       try {
+         blockText = materializeBlock(family, blockId);
+         endBlockText = materializeBlock(family, endBlockId);
       } catch (error) {
         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
       }
-      if (startUtf16Offset < 0 || endUtf16Offset > blockText.length || startUtf16Offset >= endUtf16Offset) {
-        throw new ValidationError(`${name}.${fieldName}.operation invalid selection offsets`);
-      }
+       const startIndex = family.blocks.findIndex((block) => block.id === blockId);
+       const endIndex = family.blocks.findIndex((block) => block.id === endBlockId);
+       if (startIndex < 0 || endIndex < 0 || startIndex > endIndex ||
+           startUtf16Offset < 0 || startUtf16Offset > blockText.length ||
+           endUtf16Offset < 0 || endUtf16Offset > endBlockText.length ||
+           (startIndex === endIndex && startUtf16Offset >= endUtf16Offset)) {
+         throw new ValidationError(`${name}.${fieldName}.operation invalid selection offsets`);
+       }
 
       const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
       const annotationFamilyMeta = compiledMeta.annotationFields[annInput.family];
@@ -1345,8 +1409,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         throw new ValidationError(`${name}.${fieldName}.operation annotation id '${annInput.id}' already exists`);
       }
 
-      const needsLeftSplit = startUtf16Offset > 0;
-      const needsRightSplit = endUtf16Offset < blockText.length;
+       const needsLeftSplit = startUtf16Offset > 0;
+       const needsRightSplit = endUtf16Offset < endBlockText.length;
 
       let currentFamily = family;
       let selectedBlockId = blockId;
@@ -1381,10 +1445,15 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
 
       const blockFields = Object.keys(descriptor.block ?? {});
       const blockFacts = [];
-      const storedBlockById = new Map();
-      const sourceStoredBlock = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(blockId);
-      if (!sourceStoredBlock) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
-      storedBlockById.set(blockId, sourceStoredBlock);
+       const storedBlockById = new Map();
+       const sourceStoredBlock = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(blockId);
+       if (!sourceStoredBlock) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
+       storedBlockById.set(blockId, sourceStoredBlock);
+       if (endBlockId !== blockId) {
+         const endStoredBlock = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(endBlockId);
+         if (!endStoredBlock) throw new ValidationError(`${name}.${fieldName}.operation end block not found`);
+         storedBlockById.set(endBlockId, endStoredBlock);
+       }
 
       const readMeasurements = (bid) => {
         if (measurementFamilyList.length === 0) return [];
@@ -1392,10 +1461,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       };
 
       let measurementState = null;
-      const sourceMeas = readMeasurements(blockId);
-      if (sourceMeas.length > 0 && (needsLeftSplit || needsRightSplit)) {
-        measurementState = { [blockId]: sourceMeas };
-      }
+       const splitSources = new Set();
+       if (needsLeftSplit) splitSources.add(blockId);
+       if (needsRightSplit) splitSources.add(endBlockId);
+       if (splitSources.size > 0) {
+         measurementState = Object.fromEntries([...splitSources].map((id) => [id, readMeasurements(id)]));
+       }
 
       const partitionMeasurements = (sourceBlockId, newBlockId, offset, familyAtSplit, splitFamily) => {
         if (!measurementState || !measurementState[sourceBlockId]) return [];
@@ -1438,92 +1509,103 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         return [...leftFacts, ...rightFacts];
       };
 
-      if (needsLeftSplit) {
-        const newBlockId = randomUUID();
-        let splitResult;
-        try { splitResult = splitBlock(currentFamily, blockId, newBlockId, startUtf16Offset); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
+       const splitOne = (sourceId, offset, selectsRight) => {
+         const newBlockId = randomUUID();
+         let splitResult;
+         try { splitResult = splitBlock(currentFamily, sourceId, newBlockId, offset); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
         if (splitResult.type === 'unchanged') throw new ValidationError(`${name}.${fieldName}.operation split at start offset returned unchanged`);
         let membershipResult;
-        try { membershipResult = splitBlockMemberships(splitResult.family, pureAnnotations, pureMemberships, blockId, newBlockId); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
+         try { membershipResult = splitBlockMemberships(splitResult.family, pureAnnotations, pureMemberships, sourceId, newBlockId); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
         pureAnnotations = membershipResult.annotations;
         pureMemberships = membershipResult.memberships;
 
-        const leftBlockStored = storedBlockById.get(blockId);
+         const leftBlockStored = storedBlockById.get(sourceId);
         if (!leftBlockStored) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
         const leftBlockCells = {};
         for (const bf of blockFields) { const bd = descriptor.block[bf]; leftBlockCells[bf] = deserializeField(bd, leftBlockStored[bf]); }
         const rightBlockCells = {};
         for (const bf of blockFields) { const bd = descriptor.block[bf]; rightBlockCells[bf] = deserializeField(bd, leftBlockStored[bf]); }
-        blockFacts.push(Object.freeze({ id: blockId, epoch: leftBlockStored.epoch, fields: Object.freeze(leftBlockCells) }));
+         blockFacts.push(Object.freeze({ id: sourceId, epoch: leftBlockStored.epoch, fields: Object.freeze(leftBlockCells) }));
         blockFacts.push(Object.freeze({ id: newBlockId, epoch: leftBlockStored.epoch, fields: Object.freeze(rightBlockCells) }));
         storedBlockById.set(newBlockId, leftBlockStored);
 
-        partitionMeasurements(blockId, newBlockId, startUtf16Offset, currentFamily, splitResult.family);
+         partitionMeasurements(sourceId, newBlockId, offset, currentFamily, splitResult.family);
 
         currentFamily = splitResult.family;
         splitBlockIds.push(newBlockId);
-        splitOps.push({ blockId, newBlockId, utf16Offset: startUtf16Offset });
-        selectedBlockId = newBlockId;
-      }
+         splitOps.push({ blockId: sourceId, newBlockId, utf16Offset: offset });
+         return selectsRight ? newBlockId : sourceId;
+       };
 
-      if (needsRightSplit) {
-        const newBlockId = randomUUID();
-        const adjustedOffset = needsLeftSplit ? endUtf16Offset - startUtf16Offset : endUtf16Offset;
-        let splitResult;
-        try { splitResult = splitBlock(currentFamily, selectedBlockId, newBlockId, adjustedOffset); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
+       if (needsLeftSplit) {
+         selectedBlockId = splitOne(blockId, startUtf16Offset, true);
+       }
+
+       if (needsRightSplit) {
+         const newBlockId = randomUUID();
+         const adjustedOffset = endUtf16Offset;
+         // The end block is never changed by the start split unless the range is
+         // contained in one block (the legacy two-split case).
+         const endSourceId = blockId === endBlockId && needsLeftSplit ? selectedBlockId : endBlockId;
+         const splitSourceOffset = blockId === endBlockId && needsLeftSplit ? adjustedOffset - startUtf16Offset : adjustedOffset;
+         let splitResult;
+         try { splitResult = splitBlock(currentFamily, endSourceId, newBlockId, splitSourceOffset); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
         if (splitResult.type === 'unchanged') throw new ValidationError(`${name}.${fieldName}.operation split at end offset returned unchanged`);
         let membershipResult;
-        try { membershipResult = splitBlockMemberships(splitResult.family, pureAnnotations, pureMemberships, selectedBlockId, newBlockId); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
+         try { membershipResult = splitBlockMemberships(splitResult.family, pureAnnotations, pureMemberships, endSourceId, newBlockId); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
         pureAnnotations = membershipResult.annotations;
         pureMemberships = membershipResult.memberships;
 
-        const sourceBlockStored = storedBlockById.get(selectedBlockId);
+         const sourceBlockStored = storedBlockById.get(endSourceId);
         if (!sourceBlockStored) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
         const leftBlockCells = {};
         for (const bf of blockFields) { const bd = descriptor.block[bf]; leftBlockCells[bf] = deserializeField(bd, sourceBlockStored[bf]); }
         const rightBlockCells = {};
         for (const bf of blockFields) { const bd = descriptor.block[bf]; rightBlockCells[bf] = deserializeField(bd, sourceBlockStored[bf]); }
-        blockFacts.push(Object.freeze({ id: selectedBlockId, epoch: sourceBlockStored.epoch, fields: Object.freeze(leftBlockCells) }));
+         blockFacts.push(Object.freeze({ id: endSourceId, epoch: sourceBlockStored.epoch, fields: Object.freeze(leftBlockCells) }));
         blockFacts.push(Object.freeze({ id: newBlockId, epoch: sourceBlockStored.epoch, fields: Object.freeze(rightBlockCells) }));
         storedBlockById.set(newBlockId, sourceBlockStored);
 
-        partitionMeasurements(selectedBlockId, newBlockId, adjustedOffset, currentFamily, splitResult.family);
+         partitionMeasurements(endSourceId, newBlockId, splitSourceOffset, currentFamily, splitResult.family);
 
         currentFamily = splitResult.family;
         splitBlockIds.push(newBlockId);
-        splitOps.push({ blockId: selectedBlockId, newBlockId, utf16Offset: adjustedOffset });
-      }
+         splitOps.push({ blockId: endSourceId, newBlockId, utf16Offset: splitSourceOffset });
+         if (blockId === endBlockId) selectedBlockId = selectedBlockId;
+       }
 
       const anySplit = needsLeftSplit || needsRightSplit;
       if (anySplit) afterRevision = state.structure_version + 1;
 
-      const basisFrontier = currentFamily.checkpoint.frontier;
-      const selectedBlockText = materializeBlock(currentFamily, selectedBlockId);
-      let startEndpoint;
-      let endEndpoint;
-      try {
-        startEndpoint = resolvePositionToEndpoint(currentFamily, selectedBlockId, 0, basisFrontier);
-        endEndpoint = resolvePositionToEndpoint(currentFamily, selectedBlockId, selectedBlockText.length, basisFrontier);
-      } catch (error) {
-        throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
-      }
+       const basisFrontier = currentFamily.checkpoint.frontier;
+       const selectedBlockText = materializeBlock(currentFamily, selectedBlockId);
+       try { resolvePositionToEndpoint(currentFamily, selectedBlockId, 0, basisFrontier); } catch (error) {
+         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+       }
 
-      const annotationVirtual = { id: annInput.id, family: annInput.family, protectedTargetIds };
-      const virtualAnnotations = [...pureAnnotations, annotationVirtual];
-      let addMembershipResult;
-      try {
-        addMembershipResult = addMembership(currentFamily, virtualAnnotations, pureMemberships, annInput.id, selectedBlockId, startEndpoint, endEndpoint);
-      } catch (error) {
-        throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
-      }
+       const selectedEndBlockId = blockId === endBlockId ? selectedBlockId : endBlockId;
+       const selectedStartIndex = currentFamily.blocks.findIndex((block) => block.id === selectedBlockId);
+       const selectedEndIndex = currentFamily.blocks.findIndex((block) => block.id === selectedEndBlockId);
+       const selectedBlockIds = currentFamily.blocks.slice(selectedStartIndex, selectedEndIndex + 1).map((block) => block.id);
+       const annotationVirtual = { id: annInput.id, family: annInput.family, protectedTargetIds };
+       const virtualAnnotations = [...pureAnnotations, annotationVirtual];
+       let addMembershipResult = { annotations: virtualAnnotations, memberships: pureMemberships };
+       try {
+         for (const selectedId of selectedBlockIds) {
+           const selectedText = materializeBlock(currentFamily, selectedId);
+           const start = resolvePositionToEndpoint(currentFamily, selectedId, 0, basisFrontier);
+           const end = resolvePositionToEndpoint(currentFamily, selectedId, selectedText.length, basisFrontier);
+           addMembershipResult = addMembership(currentFamily, virtualAnnotations, addMembershipResult.memberships, annInput.id, selectedId, start, end);
+         }
+       } catch (error) {
+         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
+       }
 
-      const affectedAnnotationIds = new Set(sourceMemberships.filter(m => m.block_id === blockId).map(m => m.annotation_id));
-      if (needsRightSplit) {
-        for (const m of sourceMemberships) {
-          if (m.block_id === (needsLeftSplit ? splitBlockIds[0] : blockId)) affectedAnnotationIds.add(m.annotation_id);
-        }
-      }
-      const membershipFacts = addMembershipResult.memberships.filter(m => m.annotationId === annInput.id || affectedAnnotationIds.has(m.annotationId)).map(m => ({
+       const affectedAnnotationIds = new Set(sourceMemberships.filter(m => m.block_id === blockId).map(m => m.annotation_id));
+       for (const sourceId of splitSources) {
+         for (const m of sourceMemberships) if (m.block_id === sourceId) affectedAnnotationIds.add(m.annotation_id);
+       }
+       const membershipFacts = addMembershipResult.memberships.filter(m => m.annotationId === annInput.id || affectedAnnotationIds.has(m.annotationId)).map(m => ({
         annotationId: m.annotationId,
         blockId: m.blockId,
         ordinal: m.ordinal,
@@ -1553,19 +1635,22 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         type: handle.type,
         scope: documentScope,
         data: Object.freeze({
-          version: 4,
+          version: command.version,
           id: command.id,
           actorId,
           before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
-          operation: Object.freeze({
-            kind: 'annotation.apply',
-            selection: { blockId, startUtf16Offset, endUtf16Offset },
+             operation: Object.freeze({
+             kind: 'annotation.apply',
+             selection: blockId === endBlockId
+                ? { blockId, startUtf16Offset, endUtf16Offset }
+                : { blockId, startBlockId: blockId, endBlockId, startUtf16Offset, endUtf16Offset },
             annotation: Object.freeze({ id: annInput.id, family: annInput.family, fields: Object.freeze(canonicalFields), ...(protectedTargetIds.length ? { protectedTargetIds: Object.freeze([...protectedTargetIds]) } : {}) }),
           }),
           after: Object.freeze({ structuralRevision: afterRevision, frontier: family.checkpoint.frontier }),
           family: textFamilyCheckpoint(currentFamily),
           annotation: Object.freeze({ id: annInput.id, family: annInput.family, fields: Object.freeze(canonicalFields), ...(protectedTargetIds.length ? { protectedTargetIds: Object.freeze([...protectedTargetIds]) } : {}) }),
-          splitBlockIds: Object.freeze([...splitBlockIds]),
+           splitBlockIds: Object.freeze([...splitBlockIds]),
+            ...(blockId !== endBlockId ? { selectedBlockIds: Object.freeze([...selectedBlockIds]) } : {}),
           selectedBlockId,
           splitOps: Object.freeze(splitOps),
           blocks: Object.freeze(blockFacts),

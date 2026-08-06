@@ -62,6 +62,9 @@ export function annotatedTextAction(entity, field, command) {
     edit = Object.freeze({ kind: command.kind, at: position(command.at, 'insert position'), text: command.text });
   } else if (command.kind === 'text.delete') {
     edit = Object.freeze({ kind: command.kind, from: position(command.from, 'delete start'), to: position(command.to, 'delete end') });
+  } else if (command.kind === 'text.replace') {
+    if (typeof command.text !== 'string' || command.text.length === 0) throw new TypeError('replacement text must be non-empty');
+    edit = Object.freeze({ kind: command.kind, from: position(command.from, 'replace start'), to: position(command.to, 'replace end'), text: command.text });
   } else if (command.kind === 'block.split') {
     if (!opaqueToken(command.temporaryBlock)) throw new TypeError('split requires a private temporary block');
     edit = Object.freeze({ kind: command.kind, at: position(command.at, 'split position'), temporaryBlock: command.temporaryBlock });

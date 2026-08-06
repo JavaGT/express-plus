@@ -40,9 +40,9 @@ function fail(path, message) {
  */
 export function projectPendingAnnotatedTextDocument(document, action, positionBlocks) {
   const edit = action?.payload?.version === 9 ? action.payload.edit : null;
-  if (!edit || (edit.kind !== 'text.insert' && edit.kind !== 'text.delete')) return document;
+  if (!edit || (edit.kind !== 'text.insert' && edit.kind !== 'text.delete' && edit.kind !== 'text.replace')) return document;
   const blockId = positionBlocks.get(edit.kind === 'text.insert' ? edit.at.positionToken : edit.from.positionToken);
-  if (!blockId || (edit.kind === 'text.delete' && blockId !== positionBlocks.get(edit.to.positionToken))) return document;
+  if (!blockId || (edit.kind !== 'text.insert' && blockId !== positionBlocks.get(edit.to.positionToken))) return document;
   const index = document.blocks.findIndex((block) => block.kind === 'visible' && block.id === blockId);
   if (index === -1) return document;
   const block = document.blocks[index];
@@ -51,7 +51,7 @@ export function projectPendingAnnotatedTextDocument(document, action, positionBl
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > block.text.length) return document;
   const text = edit.kind === 'text.insert'
     ? `${block.text.slice(0, start)}${edit.text}${block.text.slice(start)}`
-    : `${block.text.slice(0, start)}${block.text.slice(end)}`;
+    : edit.kind === 'text.replace' ? `${block.text.slice(0, start)}${edit.text}${block.text.slice(end)}` : `${block.text.slice(0, start)}${block.text.slice(end)}`;
   const blocks = [...document.blocks];
   blocks[index] = Object.freeze({ ...block, text });
   return Object.freeze({ ...document, blocks: Object.freeze(blocks) });
