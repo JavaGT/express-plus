@@ -56,13 +56,13 @@ function buildChildren(checkpoint) {
 export function rgaTraversal(checkpoint) {
   const children = buildChildren(checkpoint);
   const order = [];
-  const visit = (parent) => {
-    for (const [key, element] of children.get(parent) ?? []) {
-      order.push([key, element]);
-      visit(key);
-    }
-  };
-  visit(ROOT_ID);
+  const stack = [...(children.get(ROOT_ID) ?? [])].reverse();
+  while (stack.length > 0) {
+    const entry = stack.pop();
+    order.push(entry);
+    const descendants = children.get(entry[0]);
+    if (descendants) stack.push(...descendants.slice().reverse());
+  }
   return order;
 }
 

@@ -6,7 +6,7 @@ import {
 } from '../src/annotated-text.mjs';
 import {
   createTextFamily, restoreTextFamilyCheckpoint, materializeBlock,
-  splitBlock, mergeBlocks, textFamilyCheckpoint, applyTextOperationToBlock,
+  splitBlock, mergeBlocks, textFamilyCheckpoint, applyTextOperationToBlock, rgaTraversal,
 } from '../src/annotated-text-family.mjs';
 
 const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
@@ -156,6 +156,16 @@ test('materialization preserves concurrent RGA descendant ordering', () => {
   const text = materializeBlock(family, 'block1');
   assert.equal(text, 'azyx');
   assert.equal(materializeText(restoreTextCheckpoint(cp)), text);
+});
+
+test('materializes a long linear RGA without consuming the call stack', () => {
+  const text = 'x'.repeat(20_000);
+  const cp = makeCheckpoint([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, text]]]);
+  const family = createTextFamily('long-document', cp, 'block1');
+
+  assert.equal(rgaTraversal(cp).length, text.length);
+  assert.equal(materializeText(restoreTextCheckpoint(cp)), text);
+  assert.equal(materializeBlock(family, 'block1'), text);
 });
 
 test('non-adjacent merge is rejected', () => {

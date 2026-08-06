@@ -393,13 +393,13 @@ export function materializeText(state) {
     list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpId(left.op, right.op));
   }
   let text = '';
-  const visit = (parent) => {
-    for (const [key, element] of children.get(parent) ?? []) {
-      if (element.deletedBy.length === 0) text += element.scalar;
-      visit(key);
-    }
-  };
-  visit(ROOT_ID);
+  const stack = [...(children.get(ROOT_ID) ?? [])].reverse();
+  while (stack.length > 0) {
+    const [key, element] = stack.pop();
+    if (element.deletedBy.length === 0) text += element.scalar;
+    const descendants = children.get(key);
+    if (descendants) stack.push(...descendants.slice().reverse());
+  }
   return text;
 }
 
