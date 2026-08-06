@@ -57,7 +57,7 @@ async function openDocument(page, id) {
   await expect(page.locator('#status')).toContainText('live', { timeout: 15000 });
 }
 
-async function createCommentedDocument(page, { text = '1234567890', from = 2, to = 4 } = {}) {
+async function createCommentedDocument(page, { text = '1234567890', from = 2, to = 4, color = '#fef08a' } = {}) {
   const id = await createDocument(page);
   const editor = page.locator('#editor');
   await editor.pressSequentially(text, { delay: 0 });
@@ -73,6 +73,7 @@ async function createCommentedDocument(page, { text = '1234567890', from = 2, to
     selection.removeAllRanges();
     selection.addRange(range);
   }, { from, to });
+  await page.getByRole('combobox', { name: 'Comment color' }).selectOption(color);
   await page.getByRole('button', { name: 'Add comment marker' }).click();
   await expect(page.locator('#status')).toHaveText('comment marker added');
   const marked = editor.locator('[data-annotation-families~="comment"]');
@@ -102,6 +103,16 @@ test('rapid typing and scalar-safe deletion survive reload', async ({ page }) =>
   await page.reload();
   await openDocument(page, id);
   await expect(page.locator('#editor')).toHaveText('hello');
+});
+
+test('the live JSON state mirrors the rendered document', async ({ page }) => {
+  await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('state', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  const state = page.getByLabel('Live JSON state');
+  await expect(state).toContainText('"text": "state"');
+  await expect(state).toContainText('"blocks"');
 });
 
 test('rapid sequential input persists every character', async ({ page }) => {
@@ -209,6 +220,43 @@ test('adding a comment marker restores editor focus and the selected range', asy
   const { editor } = await createCommentedDocument(page, { text: '1234567890', from: 3, to: 5 });
   await expect(editor).toBeFocused();
   await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('45');
+});
+
+test('overlapping comment colors mix and persist after reload', async ({ page }) => {
+  const { id, editor } = await createCommentedDocument(page, { from: 2, to: 6, color: '#fecaca' });
+  await editor.evaluate((element) => {
+    const nodes = [];
+    const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) nodes.push(node);
+    let offset = 0;
+    const pointAt = (target) => {
+      for (const node of nodes) {
+        const next = offset + node.data.length;
+        if (target <= next) return [node, target - offset];
+        offset = next;
+      }
+      throw new Error('selection offset is outside the editor');
+    };
+    const [startNode, startOffset] = pointAt(4);
+    offset = 0;
+    const [endNode, endOffset] = pointAt(8);
+    const range = document.createRange();
+    range.setStart(startNode, startOffset);
+    range.setEnd(endNode, endOffset);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('combobox', { name: 'Comment color' }).selectOption('#bfdbfe');
+  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  await expect(page.locator('.annotation-card')).toHaveCount(2);
+  const overlap = editor.locator('[data-annotation-ids]').filter({ hasText: '56' });
+  await expect(overlap).toHaveAttribute('data-annotation-ids', / /);
+  await expect(overlap).toHaveCSS('--annotation-color', 'rgb(223, 211, 228)');
+  await expect(overlap).toHaveCSS('background-color', 'rgb(223, 211, 228)');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(page.locator('#editor').locator('[data-annotation-ids]').filter({ hasText: '56' })).toHaveCSS('background-color', 'rgb(223, 211, 228)');
 });
 
 test('a comment can be deleted from the annotation list and stays deleted after reload', async ({ page }) => {

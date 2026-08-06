@@ -1,9 +1,31 @@
 // Floor-demo smoke: create + insert through the annotated-doc public seams.
 import assert from 'node:assert/strict';
+import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
 
 import { createAnnotatedTextHttpSession } from '../public/workbench-client.mjs';
 import { createAnnotatedDocApp } from '../projects/annotated-doc/server.mjs';
+
+test('annotated-doc migration adds a color for legacy comments', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const initial = createAnnotatedDocApp({ db });
+  await initial.app.prepareSchema();
+  db.exec(`
+    DROP TABLE _Migration;
+    DROP TABLE Doc_body_annotation_comment;
+    CREATE TABLE Doc_body_annotation_comment (
+      annotation_id TEXT PRIMARY KEY,
+      FOREIGN KEY (annotation_id) REFERENCES Doc_body_annotation(id) ON DELETE CASCADE
+    );
+  `);
+  const migrated = createAnnotatedDocApp({ db });
+  await migrated.app.start();
+  t.after(async () => migrated.app.shutdown());
+  assert.deepEqual(
+    db.prepare('PRAGMA table_info(Doc_body_annotation_comment)').all().map((column) => column.name),
+    ['annotation_id', 'color'],
+  );
+});
 
 test('annotated-doc demo creates a document and inserts via the document session', async (t) => {
   const { app, principalOf } = createAnnotatedDocApp({ db: ':memory:' });
@@ -73,7 +95,7 @@ test('annotated-doc demo creates a document and inserts via the document session
 
   const marked = await session.applyAnnotation({
     mutationId: 'smoke-comment',
-    annotation: { id: 'smoke-comment', family: 'comment', fields: {} },
+    annotation: { id: 'smoke-comment', family: 'comment', fields: { color: '#fef08a' } },
     from: { blockId, offset: 1, affinity: 'right' },
     to: { blockId, offset: 4, affinity: 'right' },
   });

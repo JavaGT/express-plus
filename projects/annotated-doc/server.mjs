@@ -24,6 +24,7 @@ import workbench, {
   ref,
   scope,
   subscribe,
+  text,
   write,
 } from 'workbench';
 
@@ -33,6 +34,7 @@ const PORT = Number(process.env.PORT) || 3460;
 const DB_PATH = process.env.ANNOTATED_DOC_DB
   || new URL('./annotated-doc.db', import.meta.url).pathname;
 const INDEX_HTML = new URL('./public/index.html', import.meta.url);
+const COMMENT_COLORS = Object.freeze(['#fef08a', '#fecaca', '#bfdbfe', '#bbf7d0', '#e9d5ff']);
 
 export const Project = entity('Project', {
   owner: ref('User', { role: 'owner' }),
@@ -45,7 +47,7 @@ export const Doc = entity('Doc', {
   body: annotatedText({
     project: 'project',
     owner: 'owner',
-    annotations: [annotation('comment', { empty: 'orphan' })],
+    annotations: [annotation('comment', { empty: 'orphan', fields: { color: text({ oneOf: COMMENT_COLORS }) } })],
   }),
   grant: [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
@@ -60,6 +62,18 @@ function seed(app) {
   app.db.prepare(
     `INSERT OR IGNORE INTO Project (id, owner) VALUES (?, ?)`,
   ).run(DEMO_PROJECT, DEMO_USER);
+}
+
+function migrateCommentColors(db) {
+  // Existing demo comments predate the required color field.
+  const columns = db.prepare('PRAGMA table_info(Doc_body_annotation_comment)').all();
+  if (!columns.some((column) => column.name === 'color')) {
+    db.exec(`ALTER TABLE Doc_body_annotation_comment ADD COLUMN color TEXT NOT NULL DEFAULT '${COMMENT_COLORS[0]}'`);
+  }
+  db.prepare(
+    `INSERT OR IGNORE INTO Doc_body_annotation_comment (annotation_id, color)
+     SELECT id, ? FROM Doc_body_annotation WHERE family = 'comment'`,
+  ).run(COMMENT_COLORS[0]);
 }
 
 function listDocs(app) {
@@ -94,7 +108,11 @@ function useTail(req) {
 }
 
 export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
-  const app = workbench({ db, entities: [Project, Doc] });
+  const app = workbench({
+    db,
+    entities: [Project, Doc],
+    migrations: [{ version: 1, up: migrateCommentColors }],
+  });
   const principalOf = () => demoPrincipal;
   const publicDir = new URL('./public', import.meta.url).pathname;
 

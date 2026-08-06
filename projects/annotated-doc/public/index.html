@@ -25,11 +25,14 @@
     #status.error { color:var(--danger); }
     #status.ok { color:var(--ok); }
     #marker-bar { display:flex; gap:8px; align-items:center; padding:6px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+    #marker-bar label { display:flex; gap:6px; align-items:center; color:var(--muted); font-size:12px; }
+    #comment-color { width:112px; padding:5px 7px; border:1px solid var(--line); border-radius:7px; background:var(--panel); color:inherit; }
     #add-comment:disabled { opacity:.5; cursor:default; }
     #document-workspace { display:grid; grid-template-columns:minmax(0,1fr) 260px; flex:1; min-height:0; }
-    #editor { overflow:auto; min-height:200px; margin:16px; padding:16px 18px; border:1px solid var(--line); border-radius:10px; outline:none; background:var(--panel); white-space:pre-wrap; font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
-    #editor [data-annotation-families~="comment"] { background:#fef08a; }
-    #editor [data-active-annotation="true"] { background:#f59e0b; box-shadow:inset 0 -2px #b45309; }
+    #editor-column { display:flex; flex-direction:column; min-width:0; overflow:auto; }
+    #editor { flex:1; overflow:auto; min-height:200px; margin:16px 16px 8px; padding:16px 18px; border:1px solid var(--line); border-radius:10px; outline:none; background:var(--panel); white-space:pre-wrap; font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
+    #editor [data-annotation-families~="comment"] { background:var(--annotation-color, #fef08a); }
+    #editor [data-active-annotation="true"] { background:#f59e0b !important; box-shadow:inset 0 -2px #b45309; }
     #editor:empty::before { color:#98a2b3; content:attr(data-placeholder); }
     #annotations-panel { overflow:auto; margin:16px 16px 16px 0; padding-left:16px; border-left:1px solid var(--line); }
     #annotations-panel h2 { margin:0 0 10px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
@@ -37,8 +40,12 @@
     .annotation-card { margin-bottom:8px; padding:10px; border:1px solid var(--line); border-radius:9px; background:var(--panel); }
     .annotation-card:hover, .annotation-card:focus-within { border-color:#f59e0b; }
     .annotation-card strong { display:block; margin-bottom:3px; }
+    .annotation-color { display:inline-block; width:10px; height:10px; margin-right:6px; border:1px solid color-mix(in srgb, #000 20%, transparent); border-radius:999px; vertical-align:-1px; }
     .annotation-card p { overflow:hidden; margin:0 0 8px; color:var(--muted); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
     .annotation-card button { padding:4px 7px; color:var(--danger); font-size:12px; }
+    #live-state { margin:0 16px 16px; border:1px solid var(--line); border-radius:9px; background:var(--panel); }
+    #live-state summary { padding:8px 10px; cursor:pointer; color:var(--muted); font-size:12px; }
+    #live-state pre { max-height:240px; overflow:auto; margin:0; padding:10px; border-top:1px solid var(--line); background:#f8fafc; color:#334155; font:11px/1.45 ui-monospace,SFMono-Regular,monospace; }
     #empty { margin:40px auto; color:var(--muted); text-align:center; }
     .hidden { display:none !important; }
     @media (max-width:700px) { main { grid-template-columns:1fr; grid-template-rows:auto 1fr; } aside { display:flex; gap:8px; overflow:auto; border-right:0; border-bottom:1px solid var(--line); } #create { width:auto; margin:0; } #list { display:flex; gap:4px; } .doc { min-width:140px; } #document-workspace { grid-template-columns:1fr; grid-template-rows:minmax(240px,1fr) auto; overflow:auto; } #editor { min-height:240px; } #annotations-panel { overflow:visible; margin:0 16px 16px; padding:14px 0 0; border-top:1px solid var(--line); border-left:0; } }
@@ -57,11 +64,26 @@
     <section id="editor-wrap">
       <div id="status">Select or create a document.</div>
       <div id="marker-bar">
+        <label for="comment-color">Color
+          <select id="comment-color" aria-label="Comment color">
+            <option value="#fef08a">Yellow</option>
+            <option value="#fecaca">Red</option>
+            <option value="#bfdbfe">Blue</option>
+            <option value="#bbf7d0">Green</option>
+            <option value="#e9d5ff">Purple</option>
+          </select>
+        </label>
         <button id="add-comment" disabled>Add comment marker</button>
       </div>
       <div id="empty">No document open.</div>
       <div id="document-workspace" class="hidden">
-        <div id="editor" spellcheck="true" data-placeholder="Type here" role="textbox" aria-multiline="true"></div>
+         <div id="editor-column">
+           <div id="editor" spellcheck="true" data-placeholder="Type here" role="textbox" aria-multiline="true"></div>
+           <details id="live-state">
+             <summary>Live JSON state</summary>
+             <pre aria-label="Live JSON state"></pre>
+           </details>
+         </div>
         <section id="annotations-panel" aria-label="Comments">
           <h2>Comments</h2>
           <p id="annotations-empty">No comments yet.</p>
@@ -140,6 +162,7 @@
       editorBinding = null;
       session = null;
       renderAnnotations();
+      $('live-state').querySelector('pre').textContent = 'null';
     }
 
     function renderSessionStatus(document = session?.document) {
@@ -157,6 +180,26 @@
           if (active) span.dataset.activeAnnotation = 'true';
           else delete span.dataset.activeAnnotation;
         }
+      }
+    }
+
+    function mixedAnnotationColor(colors) {
+      const channels = colors.map((color) => [
+        Number.parseInt(color.slice(1, 3), 16),
+        Number.parseInt(color.slice(3, 5), 16),
+        Number.parseInt(color.slice(5, 7), 16),
+      ]);
+      return `rgb(${[0, 1, 2].map((channel) => Math.round(channels.reduce((total, color) => total + color[channel], 0) / channels.length)).join(', ')})`;
+    }
+
+    function renderAnnotationColors(snapshot = session?.document) {
+      const colors = new Map((snapshot?.annotations ?? [])
+        .filter((annotation) => annotation.family === 'comment' && /^#[0-9a-f]{6}$/i.test(annotation.fields.color))
+        .map((annotation) => [annotation.id, annotation.fields.color]));
+      for (const span of $('editor').querySelectorAll('[data-annotation-ids]')) {
+        const visibleColors = (span.dataset.annotationIds?.split(' ') ?? []).map((id) => colors.get(id)).filter(Boolean);
+        if (visibleColors.length) span.style.setProperty('--annotation-color', mixedAnnotationColor(visibleColors));
+        else span.style.removeProperty('--annotation-color');
       }
     }
 
@@ -199,7 +242,11 @@
         card.tabIndex = 0;
         card.setAttribute('aria-label', `Locate comment ${index + 1}`);
         const title = document.createElement('strong');
-        title.textContent = `Comment ${index + 1}`;
+        const color = document.createElement('span');
+        color.className = 'annotation-color';
+        color.style.backgroundColor = annotation.fields.color;
+        color.setAttribute('aria-hidden', 'true');
+        title.append(color, `Comment ${index + 1}`);
         const quote = document.createElement('p');
         quote.textContent = annotationQuote(snapshot, annotation.id) || 'Attached text is not visible.';
         const remove = document.createElement('button');
@@ -228,6 +275,8 @@
     function renderSession(document = session?.document) {
       renderSessionStatus(document);
       renderAnnotations(document);
+      renderAnnotationColors(document);
+      $('live-state').querySelector('pre').textContent = JSON.stringify(document ?? null, null, 2);
     }
 
     function withTimeout(promise, ms, message) {
@@ -263,12 +312,12 @@
             if (delayed) setStatus('sync delayed - still retrying...');
           },
         });
-        unsubscribe = session.subscribe(renderSession);
         editorBinding = bindAnnotatedTextEditor({
           element: $('editor'),
           session,
           onError: reportError,
         });
+        unsubscribe = session.subscribe(renderSession);
         await withTimeout(session.ready, 10000, 'document is taking too long to open — try again');
         renderSession();
         updateCommentButton();
@@ -318,7 +367,7 @@
       const annotation = {
         id: crypto.randomUUID(),
         family: 'comment',
-        fields: {},
+        fields: { color: $('comment-color').value },
       };
       Promise.resolve().then(() => session.applyAnnotation({
         mutationId: crypto.randomUUID(),
