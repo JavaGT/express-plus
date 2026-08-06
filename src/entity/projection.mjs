@@ -141,6 +141,7 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db, privateF
   if (data.version === 6) return applyR6AnnotatedTextOperation({ name, handle, db, data });
   if (data.version === 8) return applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact });
   if (data.version === 9) return applyR9AnnotatedTextOperation({ name, handle, db, descriptor, data });
+  if (data.version === 12) return applyR12AnnotatedTextOperation({ name, handle, db, data });
   throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
 }
 
@@ -501,6 +502,85 @@ function applyR1AnnotatedTextOperation({ name, handle, db, data }) {
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`)
     .run(data.after.structuralRevision, JSON.stringify(textFamilyCheckpoint(reduced)), data.id);
   getLog().debug('dispatch', `${name}.${handle.field}.operated`, { id: data.id });
+  return true;
+}
+
+/** text.apply that also prunes empty unannotated blocks emptied by the delete. */
+function applyR12AnnotatedTextOperation({ name, handle, db, data }) {
+  const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
+  const operation = data?.operation;
+  if (Object.keys(data).sort().join() !== 'after,before,family,id,operation,prunedBlockIds,version' || data.version !== 12 ||
+      !isVersion(data.before) || !isVersion(data.after) ||
+      !operation || typeof operation !== 'object' || Object.keys(operation).length !== 3 ||
+      operation.kind !== 'text.apply' || typeof operation.blockId !== 'string' || operation.blockId.length === 0 ||
+      !Object.hasOwn(operation, 'operation') || !data.family ||
+      !Array.isArray(data.prunedBlockIds) || data.prunedBlockIds.length === 0 ||
+      data.prunedBlockIds.some((id) => typeof id !== 'string' || !id) ||
+      new Set(data.prunedBlockIds).size !== data.prunedBlockIds.length) {
+    throw new Error(`${name}.${handle.field}.operated v12 event has invalid composite data`);
+  }
+  let canonicalOperation;
+  try {
+    canonicalOperation = canonicalTextOp(operation.operation);
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v12 event has invalid text operation`);
+  }
+  if (JSON.stringify(canonicalOperation) !== JSON.stringify(operation.operation)) {
+    throw new Error(`${name}.${handle.field}.operated v12 event text operation is not canonical`);
+  }
+  const prefix = `${name}_${handle.field}`;
+  const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
+  if (!state) throw new Error(`${name}.${handle.field}.operated v12 document does not exist`);
+  const current = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+  if (state.structure_version !== data.before.structuralRevision ||
+      JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v12 event conflicts with projection state`);
+  }
+  if (data.after.structuralRevision !== data.before.structuralRevision + 1 ||
+      JSON.stringify(data.after.frontier) === JSON.stringify(data.before.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v12 revision is invalid`);
+  }
+  let reduced;
+  try {
+    reduced = applyTextOperationToBlock(current, operation.blockId, canonicalOperation);
+  } catch {
+    throw new Error(`${name}.${handle.field}.operated v12 event text operation is not applicable to prior state`);
+  }
+  const expectedPruned = [];
+  let prunedFamily = reduced;
+  for (const block of [...reduced.blocks]) {
+    if (prunedFamily.blocks.length === 1) break;
+    if (db.prepare(`SELECT 1 FROM ${prefix}_membership WHERE block_id = ?`).get(block.id)) continue;
+    if (materializeBlock(prunedFamily, block.id).length !== 0) continue;
+    prunedFamily = removeEmptyBlock(prunedFamily, block.id);
+    expectedPruned.push(block.id);
+  }
+  const next = restoreTextFamilyCheckpoint(data.family);
+  if (JSON.stringify(data.prunedBlockIds) !== JSON.stringify(expectedPruned) ||
+      JSON.stringify(textFamilyCheckpoint(next)) !== JSON.stringify(textFamilyCheckpoint(prunedFamily)) ||
+      JSON.stringify(data.after.frontier) !== JSON.stringify(prunedFamily.checkpoint.frontier)) {
+    throw new Error(`${name}.${handle.field}.operated v12 prune facts do not match projection state`);
+  }
+  const groups = data.prunedBlockIds.map((blockId) => db.prepare(`SELECT group_id FROM ${prefix}_block_group WHERE block_id = ?`).get(blockId)?.group_id);
+  if (groups.some((groupId) => typeof groupId !== 'string' || !groupId)) {
+    throw new Error(`${name}.${handle.field}.operated v12 prune group is missing`);
+  }
+  const rows = db.prepare(`SELECT * FROM ${prefix}_block WHERE document_id = ?`).all(data.id);
+  stageBlockPositions(db, prefix, Object.fromEntries(rows.map((row) => [row.id, row])));
+  for (const blockId of data.prunedBlockIds) db.prepare(`DELETE FROM ${prefix}_block WHERE id = ?`).run(blockId);
+  for (const groupId of new Set(groups)) {
+    if (!db.prepare(`SELECT 1 FROM ${prefix}_block_group WHERE group_id = ?`).get(groupId)) {
+      db.prepare(`DELETE FROM ${prefix}_group_membership WHERE group_id = ?`).run(groupId);
+    }
+  }
+  for (const [index, block] of prunedFamily.blocks.entries()) {
+    db.prepare(`UPDATE ${prefix}_block SET position = ?, structure_version = ? WHERE id = ?`)
+      .run(deriveBlockPosition(index), data.after.structuralRevision, block.id);
+  }
+  db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`)
+    .run(data.after.structuralRevision, JSON.stringify(textFamilyCheckpoint(prunedFamily)), data.id);
+  getLog().debug('dispatch', `${name}.${handle.field}.operated`, { id: data.id, version: 12 });
   return true;
 }
 

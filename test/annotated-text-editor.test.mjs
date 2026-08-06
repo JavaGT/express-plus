@@ -697,6 +697,67 @@ function annotatedDocument() {
   };
 }
 
+test('annotated editor defers boundary backspace while an empty draft is still settling', async () => {
+  const document = {
+    version: 1,
+    blocks: [
+      { kind: 'visible', id: 'marked', text: '56', annotationIds: ['comment-1'] },
+      { kind: 'visible', id: 'after', text: 'x' },
+    ],
+    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
+  };
+  const harness = setup('', document);
+  harness.session.status = 'live';
+  let settle;
+  harness.session.replace = async (input) => {
+    harness.calls.push(['replace', input]);
+    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settle = resolve; }) } };
+  };
+
+  harness.selectBlock('after', 1);
+  harness.beforeinput('deleteContentBackward');
+  await flushInput();
+  assert.equal(harness.calls.length, 1);
+  assert.deepEqual(harness.calls[0][1], {
+    from: { blockId: 'after', offset: 0, affinity: 'right' },
+    to: { blockId: 'after', offset: 1, affinity: 'right' },
+    text: '',
+  });
+
+  // Snapshot has not landed yet; next boundary backspace must not error — it
+  // waits for the empty draft to settle, then deletes into the annotated block.
+  harness.element.focus();
+  const emptyAfter = harness.element.querySelector('[data-block-id="after"]');
+  const emptyRange = harness.dom.window.document.createRange();
+  emptyRange.setStart(emptyAfter, 0);
+  emptyRange.collapse(true);
+  harness.dom.window.getSelection().removeAllRanges();
+  harness.dom.window.getSelection().addRange(emptyRange);
+  harness.beforeinput('deleteContentBackward');
+  assert.deepEqual(harness.errors, []);
+  assert.equal(harness.calls.length, 1);
+
+  harness.publish({
+    version: 1,
+    blocks: [
+      { kind: 'visible', id: 'marked', text: '56', annotationIds: ['comment-1'] },
+    ],
+    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
+  });
+  settle();
+  await flushInput();
+  await flushInput();
+
+  assert.deepEqual(harness.errors, []);
+  assert.equal(harness.calls.length, 2);
+  assert.deepEqual(harness.calls[1][1], {
+    from: { blockId: 'marked', offset: 1, affinity: 'right' },
+    to: { blockId: 'marked', offset: 2, affinity: 'right' },
+    text: '',
+  });
+  harness.binding.close();
+});
+
 test('annotated editor follows insert-block when boundary typing leaves the annotated block', async () => {
   const marked = {
     version: 1,

@@ -476,6 +476,10 @@ test('backspacing inside a comment shrinks the comment range and persists', asyn
 });
 
 test('repeated backspace crosses comment edges without losing the editor selection', async ({ page }) => {
+  const errors = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
   const { editor } = await createCommentedDocument(page, { text: '1234567890', from: 3, to: 5 });
   await placeCaret(editor.locator('[data-block-id]').last(), 5);
   for (const expected of ['123456789', '12345678', '1234567', '123456', '12345', '1234', '123', '12', '1', '']) {
@@ -484,8 +488,16 @@ test('repeated backspace crosses comment edges without losing the editor selecti
     await expect(editor).toHaveText(expected);
     await expect(editor).toBeFocused();
   }
+  await expect.poll(() => errors).not.toContainEqual(expect.stringContaining('cannot edit another block'));
   await expect(page.locator('.annotation-card')).toHaveCount(1);
   await expect(page.locator('.annotation-card')).toContainText('Attached text is not visible.');
+  // Unannotated empty split leftovers are pruned; the empty annotated block remains
+  // until the orphan comment is removed (empty: orphan policy).
+  const emptyUnannotated = await page.evaluate(() => {
+    const state = JSON.parse(document.querySelector('#live-state pre')?.textContent ?? 'null');
+    return (state?.blocks ?? []).filter((block) => block.kind === 'visible' && block.text === '' && !(block.annotationIds?.length));
+  });
+  expect(emptyUnannotated).toEqual([]);
 });
 
 test('removing the final comment prunes empty split blocks but retains one editable block', async ({ page }) => {
@@ -495,6 +507,9 @@ test('removing the final comment prunes empty split blocks but retains one edita
     await editor.press('Backspace');
     await expect(editor).toHaveAttribute('aria-busy', 'false');
   }
+  // Unannotated empty leftovers are already gone from text deletes; only the
+  // empty annotated block remains until comment removal (empty: orphan).
+  await expect(editor.locator('[data-block-id]')).toHaveCount(1);
   await page.getByRole('button', { name: 'Delete comment 1' }).click();
   await expect(page.locator('.annotation-card')).toHaveCount(0);
   await expect(editor.locator('[data-block-id]')).toHaveCount(1);
@@ -503,9 +518,10 @@ test('removing the final comment prunes empty split blocks but retains one edita
     (SELECT COUNT(*) FROM Doc_body_block WHERE document_id = ?) AS blocks,
     (SELECT COUNT(*) FROM Doc_body_block_group AS block_group JOIN Doc_body_block AS block ON block.id = block_group.block_id WHERE block.document_id = ?) AS groups,
     (SELECT COUNT(*) FROM Doc_body_annotation WHERE document_id = ?) AS annotations,
+    (SELECT COUNT(*) FROM Doc_body_annotation_orphan_state AS orphan JOIN Doc_body_annotation AS annotation ON annotation.id = orphan.annotation_id WHERE annotation.document_id = ?) AS orphans,
     (SELECT COUNT(*) FROM Doc_body_membership AS membership JOIN Doc_body_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ?) AS memberships,
-    (SELECT COUNT(*) FROM Doc_body_measurement AS measurement JOIN Doc_body_block AS block ON block.id = measurement.block_id WHERE block.document_id = ?) AS measurements`).get(id, id, id, id, id);
-  expect(state).toEqual({ blocks: 1, groups: 1, annotations: 0, memberships: 0, measurements: 0 });
+    (SELECT COUNT(*) FROM Doc_body_measurement AS measurement JOIN Doc_body_block AS block ON block.id = measurement.block_id WHERE block.document_id = ?) AS measurements`).get(id, id, id, id, id, id);
+  expect(state).toEqual({ blocks: 1, groups: 1, annotations: 1, orphans: 1, memberships: 0, measurements: 0 });
   await page.reload();
   await openDocument(page, id);
   await expect(page.locator('#editor').locator('[data-block-id]')).toHaveCount(1);

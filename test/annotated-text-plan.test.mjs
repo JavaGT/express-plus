@@ -35,6 +35,23 @@ test('uses insert-block at a boundary when no adjacent destination exists', () =
   assert.equal(plan.version, 9); assert.equal(plan.operation.kind, 'text.insert-block');
 });
 
+test('prunes empty unannotated blocks emptied by a delete', () => {
+  const split = splitBlock(familyFromText('abcd'), 'block1', 'block2', 2).family;
+  const plan = input(split, { kind: 'text.delete', from: pos(split, 'block2', 0), to: pos(split, 'block2', 2) }, { membershipBlockIds: ['block1'] });
+  assert.equal(plan.version, 12);
+  assert.deepEqual(plan.prunedBlockIds, ['block2']);
+  assert.equal(plan.family.blocks.length, 1);
+  assert.equal(materializeBlock(plan.family, 'block1'), 'ab');
+});
+
+test('retains empty annotated blocks emptied by a delete', () => {
+  const split = splitBlock(familyFromText('abcd'), 'block1', 'block2', 2).family;
+  const plan = input(split, { kind: 'text.delete', from: pos(split, 'block2', 0), to: pos(split, 'block2', 2) }, { membershipBlockIds: ['block2'] });
+  assert.equal(plan.version, 1);
+  assert.equal(plan.family.blocks.length, 2);
+  assert.equal(materializeBlock(plan.family, 'block2'), '');
+});
+
 test('plans annotation offsets and rejects inverted ranges', () => {
   const family = familyFromText('abc');
   const result = planAnnotationApplyOffsets({ family, structureVersion: 1, from: pos(family, 'block1', 0), to: pos(family, 'block1', 1), visibleBlockIds: ['block1'] });

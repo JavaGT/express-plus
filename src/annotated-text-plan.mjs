@@ -89,7 +89,30 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
     return deepFreeze({ version: 6, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.replace', blockId, operations: [deleteOperation, insertOperation] }, after: { structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily) });
   }
   const operation = textOperationForOffsetEdit(family, textEdit, actor, lamport);
-  const nextFamily = applyTextOperationToBlock(family, blockId, operation);
+  let nextFamily = applyTextOperationToBlock(family, blockId, operation);
+  // Empty unannotated blocks are split leftovers. Prune them with the delete that
+  // emptied them so recipient snapshots do not keep hollow neighbors forever.
+  // Annotated empties stay until annotation.remove (empty: orphan|delete).
+  const membershipSet = new Set(membershipBlockIds);
+  const prunedBlockIds = [];
+  if (edit.kind === 'text.delete' || edit.kind === 'text.replace') {
+    for (const block of [...nextFamily.blocks]) {
+      if (nextFamily.blocks.length === 1 || membershipSet.has(block.id) || materializeBlock(nextFamily, block.id).length !== 0) continue;
+      nextFamily = removeEmptyBlock(nextFamily, block.id);
+      prunedBlockIds.push(block.id);
+    }
+  }
+  if (prunedBlockIds.length) {
+    return deepFreeze({
+      version: 12,
+      id: documentId,
+      before: before(family, structureVersion),
+      operation: { kind: 'text.apply', blockId, operation },
+      after: { structuralRevision: structureVersion + 1, frontier: nextFamily.checkpoint.frontier },
+      family: textFamilyCheckpoint(nextFamily),
+      prunedBlockIds: Object.freeze([...prunedBlockIds]),
+    });
+  }
   return deepFreeze({ version: 1, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.apply', blockId, operation }, after: { structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily) });
 }
 

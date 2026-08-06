@@ -20,7 +20,7 @@ app-facing API.
 
 1. **Compile** — `annotatedText(...)` declaration → DDL, handlers, grants.
 2. **Commit** — public v9 (or internal planner output) → authorize → append
-   `operated` → projectors switch on durable `data.version` (v1–v11).
+   `operated` → projectors switch on durable `data.version` (v1–v12).
 3. **Deliver** — post-commit fan-out classifies annotated-text `operated` as
    `resync` / `annotated-text-snapshot-required`. Recipients recover through the
    projected snapshot; the client **materialize** path is the only fold.

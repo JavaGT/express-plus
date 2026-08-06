@@ -54,6 +54,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
   let queuedTimer = null;
   let submitted = null;
   let submitting = false;
+  let followOnEdit = null;
   let blockedComposition = false;
   let historyInputHandled = false;
 
@@ -187,6 +188,10 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       if (submittedTarget?.text === submitted.text) {
         submitted.ingested = true;
         if (!submitting) submitted = null;
+      } else if (!submittedTarget && submitted.text === '') {
+        // Empty unannotated block pruned with the delete that emptied it.
+        submitted.ingested = true;
+        if (!submitting) submitted = null;
       } else {
         const home = findBoundaryInsertHome(visible, submitted.blockId, submitted.baseText, submitted.text);
         if (home) {
@@ -262,21 +267,28 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     }
     if (queued && !visible.find((block) => block.id === queued.blockId)
       && !submitting && (!session.status || session.status === 'live')) {
-      const home = findBoundaryInsertHome(visible, queued.blockId, queued.baseText, queued.text);
-      const moved = home && moveDraftToBoundaryHome(queued, home);
-      if (moved) {
-        queued = moved;
-        caretAfterRender = {
-          blockId: queued.blockId,
-          offset: home.side === 'after' ? queued.text.length : Math.max(0, queued.text.length - home.neighborText.length),
-        };
-      } else {
+      if (queued.text === '') {
+        // Draft emptied a block that the server then pruned.
         clearTimeout(queuedTimer);
         queuedTimer = null;
         queued = null;
-        submitted = null;
-        element.setAttribute('aria-busy', 'false');
-        onError(new Error('annotated text changed before buffered input was submitted'));
+      } else {
+        const home = findBoundaryInsertHome(visible, queued.blockId, queued.baseText, queued.text);
+        const moved = home && moveDraftToBoundaryHome(queued, home);
+        if (moved) {
+          queued = moved;
+          caretAfterRender = {
+            blockId: queued.blockId,
+            offset: home.side === 'after' ? queued.text.length : Math.max(0, queued.text.length - home.neighborText.length),
+          };
+        } else {
+          clearTimeout(queuedTimer);
+          queuedTimer = null;
+          queued = null;
+          submitted = null;
+          element.setAttribute('aria-busy', 'false');
+          onError(new Error('annotated text changed before buffered input was submitted'));
+        }
       }
     }
     const displayed = new Map();
@@ -331,7 +343,10 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       const queuedTarget = visible.find((block) => block.id === queued.blockId);
       if (queuedTarget.text === queued.baseText && !submitting && (!session.status || session.status === 'live')) flushQueued();
     }
-    if (!queued && !submitted && !submitting) element.setAttribute('aria-busy', 'false');
+    if (!queued && !submitted && !submitting) {
+      element.setAttribute('aria-busy', 'false');
+      applyFollowOnEdit();
+    }
   }
 
   function report(work) {
@@ -347,6 +362,15 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     return tracked;
   }
 
+  function applyFollowOnEdit() {
+    if (!followOnEdit || submitting || queued || submitted || composing) return;
+    const next = followOnEdit;
+    followOnEdit = null;
+    const block = orderedVisible().find((candidate) => candidate.id === next.blockId);
+    if (!block) return;
+    bufferEdit(block, next.from, next.to, next.text);
+  }
+
   async function replace(block, from, to, text) {
     submitting = true;
     try {
@@ -358,6 +382,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       if (!result?.ok) {
         submitted = null;
         queued = null;
+        followOnEdit = null;
         clearTimeout(queuedTimer);
         queuedTimer = null;
         element.setAttribute('aria-busy', 'false');
@@ -370,7 +395,9 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
         submitted = null;
         if (queued) flushQueued();
       }
+      if (submitted && submitted.text === '' && submitted.ingested) submitted = null;
       render();
+      applyFollowOnEdit();
     }
   }
 
@@ -414,13 +441,37 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     queuedTimer = setTimeout(flushQueued, 100);
   }
 
+  function pendingBlockId() {
+    return submitted?.blockId ?? queued?.blockId ?? composing?.blockId ?? null;
+  }
+
+  function pendingDraftText(blockId) {
+    if (queued?.blockId === blockId) return queued.text;
+    if (submitted?.blockId === blockId) return submitted.text;
+    if (composing?.blockId === blockId) return composing.text;
+    return null;
+  }
+
   function mutationIsBlocked(blockId) {
-    const target = submitted?.blockId ?? queued?.blockId ?? composing?.blockId;
+    const target = pendingBlockId();
     if (target && target !== blockId) {
       onError(new Error('annotated text cannot edit another block while a local change is pending'));
       return true;
     }
     return false;
+  }
+
+  /** Boundary delete onto a neighbor while an empty draft is still settling. */
+  function deferBoundaryEdit(edit) {
+    const target = pendingBlockId();
+    if (!target || target === edit.blockId) return false;
+    if (composing || pendingDraftText(target) !== '') {
+      onError(new Error('annotated text cannot edit another block while a local change is pending'));
+      return true;
+    }
+    followOnEdit = edit;
+    element.setAttribute('aria-busy', 'true');
+    return true;
   }
 
   function deleteRange(inputType, text, from, to) {
@@ -470,20 +521,26 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     }
     const block = orderedVisible().find((candidate) => candidate.id === selected.from.blockId);
     if (!block) return;
-    if (mutationIsBlocked(block.id)) return;
     if (event.inputType === 'insertText' || event.inputType === 'insertFromPaste' || event.inputType === 'insertFromDrop') {
+      if (mutationIsBlocked(block.id)) return;
       const text = event.dataTransfer?.getData?.('text/plain') ?? event.data ?? '';
       if (text) bufferEdit(block, selected.from.offset, selected.to.offset, text);
       return;
     }
-    const text = queued?.blockId === block.id ? queued.text : block.text;
+    const text = pendingDraftText(block.id) ?? block.text;
     const range = deleteRange(event.inputType, text, selected.from.offset, selected.to.offset);
     if (range) {
+      if (mutationIsBlocked(block.id)) return;
       bufferEdit(block, range.from, range.to, '');
       return;
     }
     const adjacent = selected.from.offset === selected.to.offset && adjacentDelete(block, selected.from.offset, event.inputType);
-    if (adjacent && !mutationIsBlocked(adjacent.block.id)) bufferEdit(adjacent.block, adjacent.from, adjacent.to, '');
+    if (!adjacent) return;
+    if (pendingBlockId() && pendingBlockId() !== adjacent.block.id) {
+      if (deferBoundaryEdit({ blockId: adjacent.block.id, from: adjacent.from, to: adjacent.to, text: '' })) return;
+    }
+    if (mutationIsBlocked(adjacent.block.id)) return;
+    bufferEdit(adjacent.block, adjacent.from, adjacent.to, '');
   }
 
   function compositionStart(event) {
