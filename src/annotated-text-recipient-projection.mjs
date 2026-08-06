@@ -67,13 +67,17 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     if (!canonical.memberships.some((membership) => membership.annotationId === annotationId) && !groupMemberships.some((membership) => membership.annotationId === annotationId)) fail('canonical annotation has no membership');
   }
   const orphanIds = new Set();
+  const disclosableOrphans = [];
   for (const orphan of canonical.orphans ?? []) {
     exact(orphan, orphan?.owner === undefined ? ['id', 'family', 'fields', 'savedQuote', 'membershipBlockIds'] : ['id', 'family', 'fields', 'owner', 'savedQuote', 'membershipBlockIds'], 'orphan');
     if (orphan.owner !== undefined && (typeof orphan.owner !== 'string' || orphan.owner.length === 0)) fail('orphan owner is invalid');
     if (typeof orphan.id !== 'string' || orphanIds.has(orphan.id) || !Object.hasOwn(meta.annotationHandles, orphan.family) || meta.annotationHandles[orphan.family].appliesTo !== 'block' || typeof orphan.savedQuote !== 'string' ||
-        !Array.isArray(orphan.membershipBlockIds) || orphan.membershipBlockIds.length === 0 || orphan.membershipBlockIds.some((id) => typeof id !== 'string' || !blockIds.has(id)) || new Set(orphan.membershipBlockIds).size !== orphan.membershipBlockIds.length) fail('orphan is invalid');
+        !Array.isArray(orphan.membershipBlockIds) || orphan.membershipBlockIds.length === 0 || orphan.membershipBlockIds.some((id) => typeof id !== 'string' || id.length === 0) || new Set(orphan.membershipBlockIds).size !== orphan.membershipBlockIds.length) fail('orphan is invalid');
     if (annotations.has(orphan.id)) fail('orphan id conflicts with active annotation');
     orphanIds.add(orphan.id);
+    // last_memberships may still name blocks later pruned by another removal.
+    // Missing anchors are non-disclosable history, not a document-wide failure.
+    if (orphan.membershipBlockIds.every((id) => blockIds.has(id))) disclosableOrphans.push(orphan);
   }
   const canonicalMemberships = new Map();
   for (const membership of canonical.memberships) {

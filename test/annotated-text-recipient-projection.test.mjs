@@ -291,8 +291,10 @@ test('orphan fails closed when any source block is missing or restricted', () =>
   c.annotations = [];
   c.memberships = [];
   c.blocks = c.blocks.map((block) => ({ ...block, annotationIds: [] }));
+  // Pruned/missing membership anchors are non-disclosable history; they must
+  // not take down the whole recipient document (bootstrap would fail closed).
   c.orphans = [{ id: 'orphan-missing', family: 'coding', fields: {}, savedQuote: 'quote', membershipBlockIds: ['missing'] }];
-  assert.throws(() => projectAnnotatedTextForRecipient(c, descriptor(), { version: 1, protectors: [], capabilityHints: [] }), /orphan is invalid/);
+  assert.deepEqual(projectAnnotatedTextForRecipient(c, descriptor(), { version: 1, protectors: [], capabilityHints: [] }).orphans, []);
 
   c.orphans = [{ id: 'orphan-hidden', family: 'coding', fields: {}, savedQuote: 'quote', membershipBlockIds: ['a'] }];
   c.annotations = [
