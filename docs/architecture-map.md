@@ -97,6 +97,12 @@ authorization (`authz.mjs`, `scope-sql`, `row-grant`) stays outside this folder.
 | `public/workbench-ui*.mjs` + Svelte primitives | UI kit over the client store |
 | `public/workbench-local-*.mjs` | Local log / cross-tab (**demand-gated** — S6) |
 
+## Annotated text (field kind across loops)
+
+Public wire vs internal durable versions:
+[`annotated-text-public-v9-operated-lattice.md`](./annotated-text-public-v9-operated-lattice.md).
+RGA grammar: [`adr/0005-annotated-text-kernel.md`](./adr/0005-annotated-text-kernel.md).
+
 ## Structural rules of thumb
 
 1. Prefer navigating by **loop**, not by file prefix count.

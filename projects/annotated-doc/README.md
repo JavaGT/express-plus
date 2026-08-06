@@ -3,8 +3,9 @@
 The floor demo for Workbench **`annotatedText()`** — collaborative CRDT text
 with recipient-projected delivery, without Scope Studio chrome.
 
-This is deliberately smaller than chat/gdoc: one document field, a fixed demo
-principal, and browser **insert/delete** only.
+One document field, a fixed demo principal, browser typing via
+`createAnnotatedTextHttpSession` + `bindAnnotatedTextEditor`, and **comment**
+markers with colors (apply/delete). Optional live JSON debug on the page.
 
 ## Run
 
@@ -27,10 +28,12 @@ nginx -t && nginx -s reload
 The public URL is a reverse proxy to `127.0.0.1:3460` — the Node process must be
 running or nginx returns 502.
 
-1. Click **New document**
-2. Type in the editor
-3. Reload — text persists
-4. Open a second tab on the same document — edits converge over live delivery
+1. Click **New document** (or pick one from the list)
+2. Type in the editor — inserts/deletes go through the session binding
+3. Select a range → **Add comment marker** (choose a color first)
+4. Delete a marker from the Comments panel
+5. Expand **Live JSON state** for the folded document snapshot (optional)
+6. Reload — text and comments persist; a second tab converges over live delivery
 
 DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 `ANNOTATED_DOC_DB`).
@@ -40,15 +43,17 @@ DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 | Piece | Role |
 | --- | --- |
 | `Doc.body: annotatedText(...)` | Decision-0010 document field (blocks + CRDT bodies) |
-| Stub `note` annotation + `words` measurement | Satisfies declaration grammar; unused in UI |
+| `annotation('comment', { empty: 'orphan', fields: { color: text({ oneOf: [...] }) } })` | Comment family; color required, one of five palette hexes |
 | Fixed principal `demo` | No auth ceremony while refining the field |
-| `POST /docs` → `annotatedTextCreateAction` | Create through the package action only |
-| `createAnnotatedTextHttpSession` | Typed insert/delete; no raw CRDT ops |
-| `/live-delivery` | Recipient snapshot + ingest recovery |
+| `GET/POST /docs` → list + `annotatedTextCreateAction` | Doc list/create through package create only |
+| `createAnnotatedTextHttpSession` + `bindAnnotatedTextEditor` | Typed text + `applyAnnotation` / `removeAnnotation`; no raw CRDT ops |
+| `/live-delivery` | Recipient snapshot fold + ingest recovery |
+| Comments panel + color select | Marker apply/delete UI with highlight colors |
+| Live JSON state (`<details>`) | Optional debug of the session document snapshot |
 
 ## Non-goals (v1)
 
-- Annotation apply/detach UI
+- Comment thread/entity (markers only — no reply body)
 - Block split / merge / continue controls
 - Carets / multi-user presence
 - Login, sharing, or multi-principal grants
@@ -58,19 +63,20 @@ DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 ## Client handle
 
 `GET /client-handle.mjs` serializes the compiled `Doc.body` handle. The browser
-does not maintain a second declaration or manually mirror annotation and
-measurement families.
+does not maintain a second declaration or manually mirror annotation families.
 
 ## Mutation path
 
 ```text
 contenteditable beforeinput
   → bindAnnotatedTextEditor
-  → createAnnotatedTextHttpSession.replace
-  → POST /workbench/actions (package)
+  → createAnnotatedTextHttpSession (replace / applyAnnotation / removeAnnotation)
+  → package actions (one write path)
   → committed log + projection
-  → live delivery recipient snapshot
+  → live-delivery recipient snapshot fold
   → session.subscribe re-render
 ```
 
-There is no second write path and no hand-rolled CRDT reduce in the demo page.
+Doc create uses `POST /docs` → `annotatedTextCreateAction` on the same package
+dispatch surface. There is no second write path and no hand-rolled CRDT reduce
+in the demo page.

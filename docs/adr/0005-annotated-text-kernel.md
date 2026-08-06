@@ -91,3 +91,7 @@ than run beside it.
 The grammar module is dependency-free and shared verbatim with the browser
 client. It has no field, persistence, live, history, or declaration wiring in
 T1. Tests validate the grammar itself, not static field-law flags.
+
+Field operation **wire versions** (public v9 offset edits vs internal durable
+`operated` v1–v11) are separate from this RGA grammar — see
+[`../annotated-text-public-v9-operated-lattice.md`](../annotated-text-public-v9-operated-lattice.md).
