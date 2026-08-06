@@ -160,7 +160,6 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
         render();
         return;
       }
-      setCaret(element, from + text.length);
     } finally {
       submitting = false;
       // A settlement receipt and recipient ingest are separate fences. Only

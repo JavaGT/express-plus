@@ -208,3 +208,28 @@ test('two pages type concurrently and converge on identical final text', async (
   await expect(secondEditor).toHaveText(/^[AB]{2}$/);
   await context.close();
 });
+
+test('paced typing in a duplicated tab keeps both tabs live and survives reload', async ({ browser }) => {
+  const context = await browser.newContext();
+  const first = await context.newPage();
+  const id = await createDocument(first);
+  const popup = first.waitForEvent('popup');
+  await first.evaluate(() => window.open(location.href));
+  const second = await popup;
+  await openDocument(second, id);
+
+  const text = 'paced typing crosses drafts';
+  const firstEditor = first.locator('#editor');
+  const secondEditor = second.locator('#editor');
+  await firstEditor.click();
+  await firstEditor.pressSequentially(text, { delay: 125 });
+
+  await expect(firstEditor).toHaveText(text);
+  await expect(firstEditor).toHaveAttribute('aria-busy', 'false');
+  await expect(secondEditor).toHaveText(text);
+  await first.reload();
+  await openDocument(first, id);
+  await expect(firstEditor).toHaveText(text);
+  await expect(secondEditor).toHaveText(text);
+  await context.close();
+});

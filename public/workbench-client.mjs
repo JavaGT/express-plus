@@ -2216,6 +2216,14 @@ export function createLiveDeliverySession({
   const snapshotOnly = configuredFold === undefined;
   const fold = configuredFold ?? ((snapshot) => snapshot);
   let deliveryChain = Promise.resolve();
+  // Snapshot recovery is one coalesced package-owned operation.  In
+  // particular, an opaque resync must wait for every transmitted operation
+  // whose outcome is still unknown; otherwise its replacement snapshot can
+  // be projected over an action which may still commit.
+  let snapshotRecoveryFloor = null;
+  let snapshotRecoveryRequested = false;
+  let snapshotRecoveryRunning = false;
+  let snapshotRecoveryWaiters = [];
   const listeners = new Set();
   const operations = new Map();
   const recoveryRetryWaiters = new Set();
@@ -2357,6 +2365,84 @@ export function createLiveDeliverySession({
     }
   }
 
+  function hasUnknownTransmission() {
+    if (!snapshotOnly) return false;
+    for (const operation of operations.values()) {
+      if (operation.transmitted && operation.outcome === 'unknown') return true;
+    }
+    return false;
+  }
+
+  function cancelSnapshotRecovery(error = new ClientClosedError('Live delivery is unavailable')) {
+    snapshotRecoveryRequested = false;
+    snapshotRecoveryFloor = null;
+    for (const waiter of snapshotRecoveryWaiters.splice(0)) waiter.reject(error);
+  }
+
+  function requestSnapshotRecovery(floor, wait = !hasUnknownTransmission(), inline = false) {
+    snapshotRecoveryRequested = true;
+    if (floor != null) {
+      snapshotRecoveryFloor = snapshotRecoveryFloor == null
+        ? floor
+        : Math.max(snapshotRecoveryFloor, floor);
+    }
+    const promise = wait
+      ? new Promise((resolve, reject) => snapshotRecoveryWaiters.push({ resolve, reject }))
+      : Promise.resolve();
+    kickSnapshotRecovery(inline);
+    return promise;
+  }
+
+  function kickSnapshotRecovery(inline = false) {
+    if (!snapshotRecoveryRequested || snapshotRecoveryRunning || closed || status === 'revoked' || status === 'unavailable') return;
+    if (hasUnknownTransmission()) return;
+    snapshotRecoveryRunning = true;
+    const floor = snapshotRecoveryFloor;
+    snapshotRecoveryFloor = null;
+    snapshotRecoveryRequested = false;
+    const waiters = snapshotRecoveryWaiters.splice(0);
+    const snapshotGenerationAtStart = snapshotGeneration;
+    const run = async () => {
+      try {
+        await recover('snapshot', floor);
+        if (floor != null && !closed && status !== 'revoked' && status !== 'unavailable'
+          && snapshotGeneration === snapshotGenerationAtStart) {
+          // A reconnect may supersede this request without installing its
+          // result. Give the coalesced recovery one fresh attempt before
+          // treating an uncovered receipt fence as a terminal failure.
+          await recover('snapshot', floor);
+          if (snapshotGeneration === snapshotGenerationAtStart) {
+            throw new Error('replacement snapshot did not supersede the receipt');
+          }
+        }
+        if (floor != null && !closed && status !== 'revoked' && status !== 'unavailable'
+          && cursorAnchor(cursor) < floor) {
+          await recover('snapshot', floor);
+          if (cursorAnchor(cursor) < floor) {
+            throw new Error('replacement snapshot does not cover the receipt fence');
+          }
+        }
+        for (const waiter of waiters) waiter.resolve();
+      } catch (error) {
+        if (!closed && status !== 'revoked') becomeUnavailable();
+        for (const waiter of waiters) waiter.reject(error);
+        throw error;
+      } finally {
+        snapshotRecoveryRunning = false;
+        kickSnapshotRecovery();
+      }
+    };
+    // A delivery callback runs on deliveryChain.  Run its recovery inline so
+    // it cannot wait on the chain which is waiting on the callback.  Sender
+    // receipts, by contrast, join the chain and serialize with later delivery.
+    if (inline) {
+      void run().catch(() => {});
+    } else {
+      const attempt = deliveryChain.catch(() => {}).then(run);
+      deliveryChain = attempt.catch(() => {});
+    }
+  }
+
   function assertCursor(value, label) {
     if (Number.isSafeInteger(value) && value >= 0) return;
     if (value && typeof value === 'object'
@@ -2434,6 +2520,7 @@ export function createLiveDeliverySession({
 
   function becomeUnavailable() {
     if (closed || status === 'revoked') return;
+    cancelSnapshotRecovery();
     finishRecoveryWarning();
     status = 'unavailable';
     settleAdmissions(false);
@@ -2521,22 +2608,14 @@ export function createLiveDeliverySession({
       if (closed || status === 'revoked' || status === 'unavailable' || generation !== connectionGeneration) return;
       if (envelope?.type === 'resync') {
         // Recovery causes are intentionally opaque to applications.
-        try {
-          await recover('snapshot');
-        } catch (error) {
-          becomeUnavailable();
-          throw error;
-        }
+        const recovery = requestSnapshotRecovery(undefined, !hasUnknownTransmission(), true);
+        if (!hasUnknownTransmission()) await recovery;
         continue;
       }
       const applied = applyEvent(envelope);
       if (applied.status === 'resync') {
-        try {
-          await recover('snapshot');
-        } catch (error) {
-          becomeUnavailable();
-          throw error;
-        }
+        const recovery = requestSnapshotRecovery(undefined, !hasUnknownTransmission(), true);
+        if (!hasUnknownTransmission()) await recovery;
         continue;
       }
       if (applied.status === 'gap') {
@@ -2564,33 +2643,7 @@ export function createLiveDeliverySession({
   }
 
   function recoverReceiptSnapshot(operation) {
-    // Receipt recovery shares the delivery chain so an older replacement
-    // snapshot cannot install after a later live delivery has advanced state.
-    const attempt = deliveryChain.catch(() => {}).then(async () => {
-      if (status === 'unavailable' || operations.get(operation.actionId) !== operation) return;
-      try {
-        await recover('snapshot', operation.confirmedThrough);
-        if (!closed
-          && status !== 'revoked'
-          && operations.get(operation.actionId) === operation
-          && (snapshotGeneration <= operation.receiptSnapshotGeneration || cursorAnchor(cursor) < operation.confirmedThrough)) {
-          await recover('snapshot', operation.confirmedThrough);
-        }
-        if (!closed
-          && status !== 'revoked'
-          && operations.get(operation.actionId) === operation
-          && (snapshotGeneration <= operation.receiptSnapshotGeneration || cursorAnchor(cursor) < operation.confirmedThrough)) {
-          throw new Error('replacement snapshot does not cover snapshot-only action receipt');
-        }
-      } catch (error) {
-        becomeUnavailable();
-        throw error;
-      }
-    });
-    deliveryChain = attempt.catch(() => {});
-    // The sender receipt remains the dispatch result; recovery errors instead
-    // make the session unavailable and remove its unsafe optimistic overlay.
-    void attempt.catch(() => {});
+    requestSnapshotRecovery(operation.confirmedThrough, false);
   }
 
   async function connect() {
@@ -2665,6 +2718,7 @@ export function createLiveDeliverySession({
   function revoke(_reason) {
     if (closed || status === 'revoked') return;
     status = 'revoked';
+    cancelSnapshotRecovery();
     finishRecoveryWarning();
     settleAdmissions(false);
     cancelRecoveryRetries();
@@ -2696,7 +2750,7 @@ export function createLiveDeliverySession({
     const action = freezeClone(structuredClone({ actionId, type, payload }));
     const operation = {
       opId: actionId, actionId, action, status: 'pending', error: null,
-      delivered: false, confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null,
+      delivered: false, outcome: 'unknown', confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null,
     };
     const settlement = createSettlement(operation);
     if (!initialized || closed || status === 'unavailable' || status === 'revoked') {
@@ -2716,14 +2770,18 @@ export function createLiveDeliverySession({
 
   async function submitAction(operation) {
     try {
+      operation.transmitted = true;
       const receipt = await sendAction(operation.action);
       if (status === 'revoked') {
+        operation.outcome = 'rejected';
         settleOperation(operation, { status: 'revoked' });
         operations.delete(operation.actionId);
         publish();
         return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery access was revoked') };
       }
       if (receipt?.ok === false) {
+        operation.outcome = 'rejected';
+        kickSnapshotRecovery();
         // The matching committed envelope is authoritative when a request
         // failure races its delivery; never tell callers to retry that action.
         if (operation.echoCursor != null) {
@@ -2742,14 +2800,9 @@ export function createLiveDeliverySession({
       }
       const confirmedThrough = receipt?.confirmedThrough;
       if (snapshotOnly && (!Number.isSafeInteger(confirmedThrough) || confirmedThrough < 0 || receipt?.actionId !== operation.actionId)) {
-        const failure = new Error('snapshot-only action receipt must confirm its actionId through a nonnegative cursor');
-        operations.delete(operation.actionId);
-        operation.status = 'failed';
-        operation.error = failure;
-        settleOperation(operation, { status: 'failed', error: failure });
-        publish();
-        return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure };
+        throw new Error('snapshot-only action receipt must confirm its actionId through a nonnegative cursor');
       }
+      operation.outcome = 'positive';
       operation.delivered = true;
       const confirmedCursor = receipt?.cursor ?? receipt?.seq;
       if (Number.isSafeInteger(confirmedCursor) && confirmedCursor >= 0) operation.confirmedCursor = confirmedCursor;
@@ -2789,12 +2842,16 @@ export function createLiveDeliverySession({
 
   async function submitBatch(operation) {
     try {
+      operation.transmitted = true;
       const receipt = await sendBatch(operation.batch);
       if (status === 'revoked') {
+        operation.outcome = 'rejected';
         settleOperation(operation, { status: 'revoked' });
         return { ok: false, status: 'failed-rolled-back', opId: operation.actionId, settlement: operation.settlement, failure: new ClientClosedError('Live delivery access was revoked') };
       }
       if (receipt?.ok === false) {
+        operation.outcome = 'rejected';
+        kickSnapshotRecovery();
         if (operation.echoCursor != null) {
           settleOperation(operation, { status: 'reconciled' });
           operations.delete(operation.actionId);
@@ -2815,6 +2872,7 @@ export function createLiveDeliverySession({
       if (snapshotOnly && (!Number.isSafeInteger(confirmedThrough) || confirmedThrough < 0)) {
         throw new Error('snapshot-only batch receipt must confirm through a nonnegative cursor');
       }
+      operation.outcome = 'positive';
       operation.delivered = true;
       const confirmedCursor = receipt?.cursor ?? receipt?.seq;
       if (Number.isSafeInteger(confirmedCursor) && confirmedCursor >= 0) operation.confirmedCursor = confirmedCursor;
@@ -2871,7 +2929,7 @@ export function createLiveDeliverySession({
     }
     const retainedActions = freezeClone(structuredClone(actions));
     const batchEnvelope = Object.freeze({ actionId, actions: retainedActions });
-    const operation = { opId: actionId, actionId, batch: batchEnvelope, actions: retainedActions, status: 'pending', error: null, delivered: false, confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null };
+    const operation = { opId: actionId, actionId, batch: batchEnvelope, actions: retainedActions, status: 'pending', error: null, delivered: false, outcome: 'unknown', confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null };
     createSettlement(operation);
     operations.set(actionId, operation);
     publish();
@@ -2932,6 +2990,7 @@ export function createLiveDeliverySession({
     close() {
       if (closed) return;
       closed = true;
+      cancelSnapshotRecovery();
       finishRecoveryWarning();
       settleAdmissions(false);
       cancelRecoveryRetries();
