@@ -26,6 +26,7 @@ import { mayRow } from '../row-grant.mjs';
 import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority.mjs';
 import { clearAuthoringState } from '../annotated-text-authoring-stream.mjs';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.mjs';
+import { packOperatedFacts } from '../annotated-text-operated-facts.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 export const ANNOTATED_TEXT_COMPENSATION = Symbol('workbench.annotated-text-compensation');
@@ -1166,6 +1167,13 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }
       }
 
+      // A protective annotation applied to a same-block subrange is a span: it
+      // creates one partial membership at the requested [start,end) structural
+      // endpoints without carving the source block. Non-protecting families and
+      // cross-block (v7) selections keep the legacy split-to-block behavior.
+      const isProtectingAnnotation = annotationDescriptor.kind === 'protectingAnnotation';
+      const sameBlockProtecting = isProtectingAnnotation && blockId === endBlockId;
+
       const familyFieldDescs = annotationDescriptor.fields;
       const canonicalFields = { ...annInput.fields };
       for (const [key, desc] of Object.entries(familyFieldDescs)) {
@@ -1195,8 +1203,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         throw new ValidationError(`${name}.${fieldName}.operation annotation id '${annInput.id}' already exists`);
       }
 
-       const needsLeftSplit = startUtf16Offset > 0;
-       const needsRightSplit = endUtf16Offset < endBlockText.length;
+       const needsLeftSplit = !sameBlockProtecting && startUtf16Offset > 0;
+      const needsRightSplit = !sameBlockProtecting && endUtf16Offset < endBlockText.length;
 
       let currentFamily = family;
       let selectedBlockId = blockId;
@@ -1377,11 +1385,19 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
        const virtualAnnotations = [...pureAnnotations, annotationVirtual];
        let addMembershipResult = { annotations: virtualAnnotations, memberships: pureMemberships };
        try {
-         for (const selectedId of selectedBlockIds) {
-           const selectedText = materializeBlock(currentFamily, selectedId);
-           const start = resolvePositionToEndpoint(currentFamily, selectedId, 0, basisFrontier);
-           const end = resolvePositionToEndpoint(currentFamily, selectedId, selectedText.length, basisFrontier);
-           addMembershipResult = addMembership(currentFamily, virtualAnnotations, addMembershipResult.memberships, annInput.id, selectedId, start, end);
+         if (sameBlockProtecting) {
+           // Protective span: one partial membership at the requested
+           // [startUtf16Offset,endUtf16Offset) structural endpoints, no splits.
+           const start = resolvePositionToEndpoint(currentFamily, selectedBlockId, startUtf16Offset, basisFrontier);
+           const end = resolvePositionToEndpoint(currentFamily, selectedBlockId, endUtf16Offset, basisFrontier);
+           addMembershipResult = addMembership(currentFamily, virtualAnnotations, addMembershipResult.memberships, annInput.id, selectedBlockId, start, end);
+         } else {
+           for (const selectedId of selectedBlockIds) {
+             const selectedText = materializeBlock(currentFamily, selectedId);
+             const start = resolvePositionToEndpoint(currentFamily, selectedId, 0, basisFrontier);
+             const end = resolvePositionToEndpoint(currentFamily, selectedId, selectedText.length, basisFrontier);
+             addMembershipResult = addMembership(currentFamily, virtualAnnotations, addMembershipResult.memberships, annInput.id, selectedId, start, end);
+           }
          }
        } catch (error) {
          throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
@@ -1564,7 +1580,11 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         const handle = eventHandles.native(name, fieldName, 'operated');
         const compensation = { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'applied' }, contribution: { kind: 'text.insert', blockId: contribution.blockId, opId: operation[2], anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount } };
         if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', blockId: contribution.blockId, opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount };
-        return { events: [Object.freeze({ handle, type: handle.type, scope, data: Object.freeze({ version: 1, id: payload.id, before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }), operation: Object.freeze({ kind: 'text.apply', blockId: contribution.blockId, operation }), after: Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier }), family: textFamilyCheckpoint(nextFamily) }) })], privateFact: compensation, historyOutcome: 'applied' };
+        const before = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
+        const after = Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier });
+        const operationData = { id: payload.id, before, after, operation: Object.freeze({ kind: 'text.apply', blockId: contribution.blockId, operation }), family: textFamilyCheckpoint(nextFamily) };
+        const envelope = { id: payload.id, before, after, operation: operationData.operation, version: 13, facts: packOperatedFacts(operationData) };
+        return { events: [Object.freeze({ handle, type: handle.type, scope, data: Object.freeze(envelope) })], privateFact: compensation, historyOutcome: 'applied' };
       }
       if (payload.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
       return Promise.resolve(r1Handler({ payload, db, scope, principal, actionId })).then((events) => {

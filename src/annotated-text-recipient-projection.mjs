@@ -1,5 +1,14 @@
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 
+// The public projection deliberately exposes only zero-width visible markers.
+// Snapshot minting needs the corresponding canonical intervals to bind an
+// authoring token, but those intervals must never serialize with the recipient.
+const recipientRedactionIntervals = new WeakMap();
+
+export function authoringRedactionsForRecipient(recipient, blockId) {
+  return recipientRedactionIntervals.get(recipient)?.get(blockId) ?? [];
+}
+
 function fail(message) { throw new Error(`annotated-text recipient projection: ${message}`); }
 
 function freeze(value) {
@@ -53,9 +62,14 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   const blockFamilies = new Set(Object.entries(meta.annotationHandles).filter(([, handle]) => handle.appliesTo === 'block').map(([family]) => family));
   const groupFamilies = new Set(Object.entries(meta.annotationHandles).filter(([, handle]) => handle.appliesTo === 'block-group').map(([family]) => family));
   for (const membership of canonical.memberships) {
-    exact(membership, ['annotationId', 'blockId', 'ordinal'], 'membership');
+    const rangeKeys = membership?.start === undefined && membership?.end === undefined
+      ? ['annotationId', 'blockId', 'ordinal']
+      : ['annotationId', 'blockId', 'ordinal', 'start', 'end'];
+    exact(membership, rangeKeys, 'membership');
     const annotation = annotations.get(membership.annotationId);
-    if (!annotation || !blockFamilies.has(annotation.family) || !blockIds.has(membership.blockId) || !Number.isSafeInteger(membership.ordinal) || membership.ordinal < 0) fail('membership is invalid');
+    const block = canonical.blocks.find((candidate) => candidate.id === membership.blockId);
+    if (!annotation || !blockFamilies.has(annotation.family) || !block || !Number.isSafeInteger(membership.ordinal) || membership.ordinal < 0 ||
+        (membership.start !== undefined && (!Number.isSafeInteger(membership.start) || !Number.isSafeInteger(membership.end) || membership.start < 0 || membership.end <= membership.start || membership.end > block.text.length))) fail('membership is invalid');
   }
   const groupMemberships = canonical.groupMemberships;
   for (const membership of groupMemberships) {
@@ -116,10 +130,28 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   const active = new Map();
   for (const annotation of annotations.values()) {
     if (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !annotation.protectedTargetIds?.length) continue;
-    const own = new Set(canonical.memberships.filter((m) => m.annotationId === annotation.id).map((m) => m.blockId));
-    const target = new Set(canonical.memberships.filter((m) => annotation.protectedTargetIds.includes(m.annotationId)).map((m) => m.blockId));
-    const overlap = new Set([...own].filter((id) => target.has(id)));
-    if (overlap.size) active.set(annotation.id, overlap);
+    // A protector is active on a block only where it actually protects a target
+    // — the protector's range must intersect a protected target's range on the
+    // same block. Same-block co-membership alone is insufficient: a protector
+    // and a target on the same block with disjoint ranges protect nothing there.
+    // Range-less (whole-block) memberships are treated as covering the block.
+    const ownMemberships = canonical.memberships.filter((m) => m.annotationId === annotation.id);
+    const targetMemberships = canonical.memberships.filter((m) => annotation.protectedTargetIds.includes(m.annotationId));
+    const overlappingBlocks = new Set();
+    for (const own of ownMemberships) {
+      for (const target of targetMemberships) {
+        if (own.blockId !== target.blockId) continue;
+        const ownWhole = own.start === undefined || own.end === undefined;
+        const targetWhole = target.start === undefined || target.end === undefined;
+        const intersects = ownWhole || targetWhole
+          || (own.start < target.end && target.start < own.end);
+        if (intersects) {
+          overlappingBlocks.add(own.blockId);
+          break;
+        }
+      }
+    }
+    if (overlappingBlocks.size) active.set(annotation.id, overlappingBlocks);
   }
   const outcomes = new Map();
   for (const decision of decisions.protectors) {
@@ -134,7 +166,40 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     capabilityHints.add(hint);
   }
   const restricted = new Set();
-  for (const [id, blocks] of active) if (outcomes.get(id) === 'deny') for (const blockId of blocks) restricted.add(blockId);
+  const deniedIntervals = new Map();
+  for (const [id, blocks] of active) {
+    if (outcomes.get(id) !== 'deny') continue;
+    for (const blockId of blocks) {
+      const membership = canonicalMemberships.get(`${id}\u0000${blockId}`);
+      // Range-less memberships are legacy whole-block spans. Cross-block spans
+      // also stay on the existing whole-block path until their projection is
+      // designed; only a same-block explicit range is inline-redactable.
+      const protectorMemberships = canonical.memberships.filter((entry) => entry.annotationId === id);
+      const block = canonical.blocks.find((candidate) => candidate.id === blockId);
+      if (membership.start === undefined || protectorMemberships.length !== 1 ||
+          (membership.start === 0 && membership.end === block.text.length)) {
+        restricted.add(blockId);
+        continue;
+      }
+      const intervals = deniedIntervals.get(blockId) ?? [];
+      intervals.push({ start: membership.start, end: membership.end, placeholder: meta.protectingFamilies[annotations.get(id).family].placeholder });
+      deniedIntervals.set(blockId, intervals);
+    }
+  }
+  for (const blockId of restricted) deniedIntervals.delete(blockId);
+  const redactionsByBlock = new Map();
+  for (const [blockId, intervals] of deniedIntervals) {
+    const merged = [];
+    for (const interval of [...intervals].sort((left, right) => left.start - right.start || right.end - left.end)) {
+      const prior = merged.at(-1);
+      if (prior && interval.start <= prior.end) {
+        prior.end = Math.max(prior.end, interval.end);
+      } else {
+        merged.push({ ...interval });
+      }
+    }
+    redactionsByBlock.set(blockId, merged);
+  }
   const memberships = canonical.memberships.filter((m) => !restricted.has(m.blockId) && !Object.hasOwn(meta.protectingFamilies, annotations.get(m.annotationId).family));
   const groups = [];
   const groupsByCanonicalId = new Map();
@@ -162,22 +227,41 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   for (const group of groups.filter(Boolean)) { delete group.canonicalId; group.annotationIds = [...new Set(group.annotationIds)]; }
   const retainedIds = new Set([...memberships.map((m) => m.annotationId), ...groups.filter(Boolean).flatMap((group) => group.annotationIds)]);
   const visibleBlockIds = new Set(canonical.blocks.filter((block) => !restricted.has(block.id)).map((block) => block.id));
-  return freeze({
+  const authoringRedactions = new Map();
+  const result = {
     kind: 'workbench.annotatedText.recipient', version: 1,
     blockGroups: groups.filter(Boolean),
-    blocks: canonical.blocks.map((block) => restricted.has(block.id)
-      ? { kind: 'restricted', id: block.id, placeholder: meta.restrictedPlaceholder }
-      : { kind: 'visible', id: block.id, text: block.text, fields: { ...block.fields }, annotationIds: memberships.filter((m) => m.blockId === block.id).map((m) => m.annotationId) }),
+    blocks: canonical.blocks.map((block) => {
+      if (restricted.has(block.id)) return { kind: 'restricted', id: block.id, placeholder: meta.restrictedPlaceholder };
+      const intervals = redactionsByBlock.get(block.id) ?? [];
+      let offset = 0;
+      let text = '';
+      const authoring = [];
+      const redactions = intervals.map((interval) => {
+        text += block.text.slice(offset, interval.start);
+        const start = text.length;
+        offset = interval.end;
+        authoring.push(Object.freeze({ visibleStart: start, start: interval.start, end: interval.end }));
+        return { start, end: start, placeholder: interval.placeholder };
+      });
+      text += block.text.slice(offset);
+      if (authoring.length) authoringRedactions.set(block.id, Object.freeze(authoring));
+      return { kind: 'visible', id: block.id, text, fields: { ...block.fields }, annotationIds: memberships.filter((m) => m.blockId === block.id).map((m) => m.annotationId), ...(redactions.length ? { redactions } : {}) };
+    }),
     annotations: [...annotations.values()].filter((a) => retainedIds.has(a.id)).map(({ id, family, fields, owner }) => ({ id, family, fields: { ...fields }, ...(owner ? { owner } : {}) })),
-    memberships: memberships.map((m) => ({ ...m })),
-    measurements: canonical.measurements.filter((m) => !restricted.has(m.blockId)).map((m) => ({ ...m })),
-    capabilityHints: [...capabilityHints].filter((hint) => !restricted.size || hint !== 'body.read'),
+    // Recipient membership coordinates are not yet redaction-aware. Never send
+    // canonical ranges: their offsets would disclose omitted width and shape.
+    memberships: memberships.map(({ annotationId, blockId, ordinal }) => ({ annotationId, blockId, ordinal })),
+    measurements: canonical.measurements.filter((m) => !restricted.has(m.blockId) && !redactionsByBlock.has(m.blockId)).map((m) => ({ ...m })),
+    capabilityHints: [...capabilityHints].filter((hint) => (!restricted.size && !redactionsByBlock.size) || hint !== 'body.read'),
     // An orphan has no active membership. It is therefore disclosed only when
     // every block that formed its saved quote is currently recipient-visible.
     // Missing/deleted or restricted source blocks fail closed.
     orphans: (canonical.orphans ?? [])
       .filter((orphan) => !Object.hasOwn(meta.protectingFamilies, orphan.family))
-      .filter((orphan) => orphan.membershipBlockIds.every((id) => visibleBlockIds.has(id)))
+       .filter((orphan) => orphan.membershipBlockIds.every((id) => visibleBlockIds.has(id) && !redactionsByBlock.has(id)))
       .map(({ id, family, fields, savedQuote, owner }) => ({ id, family, fields: { ...fields }, savedQuote, ...(owner ? { owner } : {}) })),
-  });
+  };
+  recipientRedactionIntervals.set(result, authoringRedactions);
+  return freeze(result);
 }

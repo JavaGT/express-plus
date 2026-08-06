@@ -322,13 +322,13 @@ test('reversed range is rejected', () => {
   const family = makeFamily([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abc']]]);
   const start = assertStructuralEndpoint({ point: ['point', ['element', [[A, 1], 2]], 'right'], basisFrontier: family.checkpoint.frontier });
   const end = assertStructuralEndpoint({ point: ['point', ['element', [[A, 1], 0]], 'left'], basisFrontier: family.checkpoint.frontier });
-  assert.throws(() => assertMembershipRange(family, 'block1', start, end), /canonical block end/);
+  assert.throws(() => assertMembershipRange(family, 'block1', start, end), /right affinity/);
 });
 
 test('zero-width range is rejected', () => {
   const family = makeFamily([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abc']]]);
   const ep = assertStructuralEndpoint({ point: ['point', ['element', [[A, 1], 2]], 'right'], basisFrontier: family.checkpoint.frontier });
-  assert.throws(() => assertMembershipRange(family, 'block1', ep, ep), /not the canonical lower boundary/);
+  assert.throws(() => assertMembershipRange(family, 'block1', ep, ep), /before end/);
 });
 
 test('tombstone-only range is rejected', () => {
@@ -490,7 +490,7 @@ test('partial final-left end is rejected', () => {
   const family = makeFamily([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abc']]]);
   const start = assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier: family.checkpoint.frontier });
   const end = assertStructuralEndpoint({ point: ['point', ['element', [[A, 1], 2]], 'left'], basisFrontier: family.checkpoint.frontier });
-  assert.throws(() => assertMembershipRange(family, 'block1', start, end), /canonical block end/);
+  assert.throws(() => assertMembershipRange(family, 'block1', start, end), /right affinity/);
 });
 
 test('earlier prior anchor (non-final) rejected in projectEndpointToBlockOffset', () => {
@@ -596,11 +596,11 @@ test('root-right start rejected for membership', () => {
   assert.throws(() => assertMembershipRange(family, 'block1', start, end), /root start must have left affinity/);
 });
 
-test('owned non-lower-boundary start rejected', () => {
+test('owned non-lower-boundary start rejected when not right-affine', () => {
   const family = makeFamily([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abc']]]);
   const start = assertStructuralEndpoint({ point: ['point', ['element', [[A, 1], 0]], 'left'], basisFrontier: family.checkpoint.frontier });
   const end = assertStructuralEndpoint({ point: ['point', ['element', [[A, 1], 2]], 'right'], basisFrontier: family.checkpoint.frontier });
-  assert.throws(() => assertMembershipRange(family, 'block1', start, end), /start anchor owned by named block is not the canonical lower boundary/);
+  assert.throws(() => assertMembershipRange(family, 'block1', start, end), /interior start/);
 });
 
 test('concurrent siblings ordered by Lamport then op ID', () => {

@@ -501,9 +501,9 @@ export function assertMembershipRange(family, blockId, startEndpoint, endEndpoin
 
   if (endKey === ROOT_ID) fail('membership range end must not be a root anchor');
   if (!ownedSet.has(endKey)) fail('end anchor must be owned by named block');
-  if (!isCanonicalBlockEnd(family, ownedSet, endEndpoint)) {
-    fail('end must be canonical block end: final owned element with right affinity');
-  }
+  // Span-native model: an end is any owned right-affinity boundary within the
+  // block (interior or block end), not only the canonical block end.
+  if (endEndpoint.point[2] !== 'right') fail('membership range end must have right affinity');
 
   const blockIndex = family.blocks.findIndex((b) => b.id === blockId);
 
@@ -511,7 +511,8 @@ export function assertMembershipRange(family, blockId, startEndpoint, endEndpoin
     if (startEndpoint.point[2] !== 'left') fail('membership range root start must have left affinity');
     if (blockIndex !== 0) fail('root start only valid for first block');
   } else if (ownedSet.has(startKey)) {
-    fail('start anchor owned by named block is not the canonical lower boundary');
+    // Span-native model: an interior start anchored within the block is valid.
+    if (startEndpoint.point[2] !== 'right') fail('interior start within named block must have right affinity');
   } else {
     if (blockIndex === 0) fail('non-root start anchor must be in named block for first block');
 

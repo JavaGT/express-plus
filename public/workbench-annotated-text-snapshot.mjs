@@ -10,7 +10,7 @@
 // to annotatedText() — which have annotations as an array — are rejected.
 //
 // Public shapes:
-//   Block: visible {kind, id, text, fields, annotationIds}
+//   Block: visible {kind, id, text, fields, annotationIds, redactions?}
 //          | restricted {kind, id, placeholder}
 //   Annotation: {id, family, fields}
 //   Membership: {annotationId, blockId, ordinal}
@@ -46,6 +46,10 @@ export function projectPendingAnnotatedTextDocument(document, action, positionBl
   const index = document.blocks.findIndex((block) => block.kind === 'visible' && block.id === blockId);
   if (index === -1) return document;
   const block = document.blocks[index];
+  // Placeholder-bearing blocks have display offsets, while the public v9 wire
+  // names the zero-width marker offsets. Their optimistic view waits for the
+  // authoritative recipient snapshot instead of guessing that translation.
+  if (block.redactions?.length) return document;
   const start = edit.kind === 'text.insert' ? edit.at.offset : edit.from.offset;
   const end = edit.kind === 'text.insert' ? start : edit.to.offset;
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || end > block.text.length) return document;
@@ -117,8 +121,9 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
       blocks.push(Object.freeze({ kind: 'restricted', id: b.id, placeholder: b.placeholder }));
       continue;
     }
-    if (b.kind !== 'visible' || Object.keys(b).length !== 5 || typeof b.text !== 'string') {
-      fail(`blocks[${i}]`, 'visible block must contain only kind, id, text, fields, and annotationIds');
+    const hasRedactions = Object.hasOwn(b, 'redactions');
+    if (b.kind !== 'visible' || Object.keys(b).length !== (hasRedactions ? 6 : 5) || typeof b.text !== 'string') {
+      fail(`blocks[${i}]`, 'visible block must contain only kind, id, text, fields, annotationIds, and optional redactions');
     }
     const fields = b.fields && typeof b.fields === 'object' && !Array.isArray(b.fields)
       ? Object.freeze({ ...b.fields })
@@ -131,12 +136,34 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
         fail(`blocks[${i}].annotationIds`, 'each annotationId must be a non-empty string');
       }
     }
+    const redactions = [];
+    if (hasRedactions) {
+      if (!Array.isArray(b.redactions)) fail(`blocks[${i}].redactions`, 'must be an array');
+      let prior = -1;
+      for (let index = 0; index < b.redactions.length; index += 1) {
+        const redaction = b.redactions[index];
+        if (!redaction || typeof redaction !== 'object' || Array.isArray(redaction) || !exactKeys(redaction, ['start', 'end', 'placeholder'])
+          || !Number.isSafeInteger(redaction.start) || !Number.isSafeInteger(redaction.end)
+          || redaction.start < 0 || redaction.end !== redaction.start || redaction.start < prior || redaction.start > b.text.length
+          || typeof redaction.placeholder !== 'string' || redaction.placeholder.length === 0) {
+          fail(`blocks[${i}].redactions`, 'must contain ordered zero-width markers within visible text');
+        }
+        prior = redaction.start;
+        redactions.push(Object.freeze({ ...redaction }));
+      }
+    }
+    let text = b.text;
+    for (let index = redactions.length - 1; index >= 0; index -= 1) {
+      const redaction = redactions[index];
+      text = `${text.slice(0, redaction.start)}${redaction.placeholder}${text.slice(redaction.end)}`;
+    }
     blocks.push(Object.freeze({
       kind: 'visible',
       id: b.id,
-      text: b.text,
+      text,
       fields,
       annotationIds,
+      ...(redactions.length ? { redactions: Object.freeze(redactions) } : {}),
     }));
   }
 
@@ -364,7 +391,8 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
     positionTokens.set(frame.blockId, frame.positionToken);
     opaqueTokens.add(frame.positionToken);
   }
-  if (authoring && positionTokens.size !== visibleIds.size) fail('authoring.positionFrames', 'must exactly match visible blocks');
+  const editableVisibleIds = new Set(blocks.filter((block) => block.kind === 'visible').map((block) => block.id));
+  if (authoring && (positionTokens.size !== editableVisibleIds.size || [...editableVisibleIds].some((blockId) => !positionTokens.has(blockId)))) fail('authoring.positionFrames', 'must exactly match editable visible blocks');
   const groupTokens = new Map();
   for (let index = 0; index < (authoring?.groupFrames ?? []).length; index += 1) {
     const frame = authoring.groupFrames[index];

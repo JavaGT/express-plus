@@ -1,6 +1,6 @@
 import {
   assertMembershipRange, assertStructuralEndpoint, compareStructuralEndpoints,
-  materializeBlock, rgaTraversal, resolvePositionToEndpoint,
+  materializeBlock, projectEndpointToBlockOffset, rgaTraversal, resolvePositionToEndpoint,
 } from './annotated-text-family.mjs';
 
 function fail(message) {
@@ -220,12 +220,10 @@ export function addMembership(family, annotations, memberships, annotationId, bl
     fail('cannot add membership to fully tombstoned block');
   }
 
+  // Span-native model: a membership is a range (possibly sub-block) validated by
+  // assertMembershipRange. A block annotation is just a range covering the whole
+  // block. No canonical-whole-block enforcement — spans may be partial and overlap.
   assertMembershipRange(family, blockId, startEndpoint, endEndpoint);
-  const canonical = canonicalBlockEndpoints(family, blockId);
-  if (compareStructuralEndpoints(family, startEndpoint, canonical.start) !== 0 ||
-      compareStructuralEndpoints(family, endEndpoint, canonical.end) !== 0) {
-    fail('active membership must cover the canonical whole block');
-  }
 
   const existing = membershipsForAnnotation(memberships, annotationId);
   let ordinal = 0;
@@ -368,27 +366,51 @@ export function splitBlockMemberships(family, annotations, memberships, blockId,
   const filtered = memberships.filter(m => m.blockId !== blockId);
   const leftNonempty = isBlockNonempty(family, blockId);
   const rightNonempty = isBlockNonempty(family, newBlockId);
+  const leftEp = leftNonempty ? canonicalBlockEndpoints(family, blockId) : null;
+  const rightEp = rightNonempty ? canonicalBlockEndpoints(family, newBlockId) : null;
 
   for (const m of sourceMemberships) {
-    if (leftNonempty) {
-      const ep = canonicalBlockEndpoints(family, blockId);
-      filtered.push(assertMembership({
-        annotationId: m.annotationId,
-        blockId,
-        ordinal: 0,
-        start: ep.start,
-        end: ep.end,
-      }));
-    }
-    if (rightNonempty) {
-      const ep = canonicalBlockEndpoints(family, newBlockId);
-      filtered.push(assertMembership({
-        annotationId: m.annotationId,
-        blockId: newBlockId,
-        ordinal: 0,
-        start: ep.start,
-        end: ep.end,
-      }));
+    // The endpoints still name the same structural boundaries after a split.
+    // Classify against the new boundary, then resolve each retained endpoint
+    // in its new owning block so the membership remains range-valid.
+    const endsLeft = leftNonempty && compareStructuralEndpoints(family, m.end, leftEp.end) <= 0;
+    const startsRight = rightNonempty && compareStructuralEndpoints(family, m.start, rightEp.start) >= 0;
+    const add = (targetBlockId, start, end) => {
+      assertMembershipRange(family, targetBlockId, start, end);
+      filtered.push(assertMembership({ annotationId: m.annotationId, blockId: targetBlockId, ordinal: 0, start, end }));
+    };
+    // Compatibility with the historical helper contract: callers may pass a
+    // membership already projected to the left child while asking us to
+    // redistribute the original whole-block annotation.  A canonical left
+    // range is the only representation of that case available here.
+    const canonicalLeftRange = leftNonempty &&
+      compareStructuralEndpoints(family, m.start, leftEp.start) === 0 &&
+      compareStructuralEndpoints(family, m.end, leftEp.end) === 0;
+    if (canonicalLeftRange && rightNonempty) {
+      add(blockId, leftEp.start, leftEp.end);
+      add(newBlockId, rightEp.start, rightEp.end);
+    } else if (endsLeft && leftNonempty) {
+      // Span lies entirely in the left child: keep its own [start, end], not the
+      // whole left block. Forcing the block edge would expand confidential
+      // coverage beyond the protected interval.
+      const start = resolvePositionToEndpoint(family, blockId,
+        projectEndpointToBlockOffset(family, blockId, m.start), family.checkpoint.frontier);
+      const end = resolvePositionToEndpoint(family, blockId,
+        projectEndpointToBlockOffset(family, blockId, m.end), family.checkpoint.frontier);
+      add(blockId, start, end);
+    } else if (startsRight && rightNonempty) {
+      // Span lies entirely in the right child: keep its own [start, end].
+      const start = resolvePositionToEndpoint(family, newBlockId,
+        projectEndpointToBlockOffset(family, newBlockId, m.start), family.checkpoint.frontier);
+      const end = resolvePositionToEndpoint(family, newBlockId,
+        projectEndpointToBlockOffset(family, newBlockId, m.end), family.checkpoint.frontier);
+      add(newBlockId, start, end);
+    } else {
+      if (leftNonempty) add(blockId,
+        resolvePositionToEndpoint(family, blockId, projectEndpointToBlockOffset(family, blockId, m.start), family.checkpoint.frontier),
+        leftEp.end);
+      if (rightNonempty) add(newBlockId, rightEp.start,
+        resolvePositionToEndpoint(family, newBlockId, projectEndpointToBlockOffset(family, newBlockId, m.end), family.checkpoint.frontier));
     }
   }
 
@@ -409,42 +431,19 @@ export function mergeBlocksMemberships(family, annotations, memberships, leftBlo
   const leftMemberships = blockMemberships(memberships, leftBlockId);
   const rightMemberships = blockMemberships(memberships, rightBlockId);
 
-  const leftIds = new Set(leftMemberships.map(m => m.annotationId));
-  const rightIds = new Set(rightMemberships.map(m => m.annotationId));
-
-  if (leftIds.size !== rightIds.size) fail('annotation-ID membership sets must be exactly equal');
-  for (const id of leftIds) {
-    if (!rightIds.has(id)) fail('annotation-ID membership sets must be exactly equal');
-  }
-
-  const leftEp = canonicalBlockEndpoints(family, leftBlockId);
-  const rightEp = canonicalBlockEndpoints(family, rightBlockId);
-
+  const rightByAnnotation = new Map(rightMemberships.map(m => [m.annotationId, m]));
+  const merged = [];
   for (const m of leftMemberships) {
-    assertMembershipRange(family, leftBlockId, m.start, m.end);
-    if (compareStructuralEndpoints(family, m.start, leftEp.start) !== 0 ||
-        compareStructuralEndpoints(family, m.end, leftEp.end) !== 0) {
-      fail('left membership must be canonical full coverage');
+    const right = rightByAnnotation.get(m.annotationId);
+    if (right && compareStructuralEndpoints(family, m.end, right.start) === 0) {
+      merged.push(assertMembership({ annotationId: m.annotationId, blockId: leftBlockId, ordinal: 0, start: m.start, end: right.end }));
+      rightByAnnotation.delete(m.annotationId);
+    } else {
+      merged.push(assertMembership({ ...m, ordinal: 0 }));
     }
   }
   for (const m of rightMemberships) {
-    assertMembershipRange(family, rightBlockId, m.start, m.end);
-    if (compareStructuralEndpoints(family, m.start, rightEp.start) !== 0 ||
-        compareStructuralEndpoints(family, m.end, rightEp.end) !== 0) {
-      fail('right membership must be canonical full coverage');
-    }
-  }
-
-  const merged = [];
-
-  for (const m of leftMemberships) {
-    merged.push(assertMembership({
-      annotationId: m.annotationId,
-      blockId: leftBlockId,
-      ordinal: 0,
-      start: leftEp.start,
-      end: rightEp.end,
-    }));
+    if (rightByAnnotation.has(m.annotationId)) merged.push(assertMembership({ ...m, blockId: leftBlockId, ordinal: 0 }));
   }
 
   const filtered = memberships.filter(m => m.blockId !== leftBlockId && m.blockId !== rightBlockId);

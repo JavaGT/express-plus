@@ -86,6 +86,22 @@ test('materializes a compiled annotated-text snapshot into public immutable shap
   assert.equal('authoring' in document, false);
 });
 
+test('materializes redaction markers as placeholders without accepting hidden text', () => {
+  const Doc = entity('RedactedSnapshotDoc', {
+    project: ref('Project'), owner: ref('User'), body: declaration(),
+  });
+  const projected = snapshot();
+  projected.blocks[0] = {
+    kind: 'visible', id: 'block-1', text: 'before  after', fields: {}, annotationIds: ['annotation-1'],
+    redactions: [{ start: 7, end: 7, placeholder: '[Private]' }],
+  };
+  const document = materializeAnnotatedTextSnapshot(projected, Doc.body);
+  assert.equal(document.blocks[0].text, 'before [Private] after');
+  assert.deepEqual(document.blocks[0].redactions, [{ start: 7, end: 7, placeholder: '[Private]' }]);
+  projected.blocks[0].redactions[0].end = 1;
+  assert.throws(() => materializeAnnotatedTextSnapshot(projected, Doc.body), /zero-width markers/);
+});
+
 test('materializes annotation owner when present and rejects malformed owner', () => {
   const Doc = entity('SnapshotOwnerDoc', {
     project: ref('Project'), owner: ref('User'), body: declaration(),

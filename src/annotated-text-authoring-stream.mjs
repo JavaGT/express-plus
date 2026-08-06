@@ -179,15 +179,16 @@ function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }) {
   return id;
 }
 
-export function issuePositionFrame({ db, prefix, leaseId, blockId, fence, familyCheckpoint, visibleAtIssue }) {
+export function issuePositionFrame({ db, prefix, leaseId, blockId, fence, familyCheckpoint, visibleAtIssue, redactions = [] }) {
   const token = randomToken();
   const resolvedCheckpointId = ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint });
   const createdAt = now();
-  if (!hasCapacity({ db, prefix, leaseId, bytes: rowBytes([token, leaseId, fence, blockId, resolvedCheckpointId, visibleAtIssue ? 1 : 0, createdAt]) })) {
+  const redactionsJson = JSON.stringify(redactions);
+  if (!hasCapacity({ db, prefix, leaseId, bytes: rowBytes([token, leaseId, fence, blockId, resolvedCheckpointId, visibleAtIssue ? 1 : 0, redactionsJson, createdAt]) })) {
     db.prepare(`DELETE FROM ${prefix}_authoring_checkpoint AS checkpoint WHERE checkpoint.id = ? AND NOT EXISTS (SELECT 1 FROM ${prefix}_authoring_position WHERE checkpoint_id = checkpoint.id)`).run(resolvedCheckpointId);
     return null;
   }
-  db.prepare(`INSERT INTO ${prefix}_authoring_position (token, lease_id, issued_fence, block_id, checkpoint_id, visible_at_issue, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(token, leaseId, fence, blockId, resolvedCheckpointId, visibleAtIssue ? 1 : 0, createdAt);
+  db.prepare(`INSERT INTO ${prefix}_authoring_position (token, lease_id, issued_fence, block_id, checkpoint_id, visible_at_issue, redactions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(token, leaseId, fence, blockId, resolvedCheckpointId, visibleAtIssue ? 1 : 0, redactionsJson, createdAt);
   return { token, blockId };
 }
 
@@ -302,7 +303,7 @@ function retainedBytes(db, prefix, leaseId = null, streamId = null) {
     const parameter = leaseId ?? streamId;
     return Number(db.prepare(`SELECT COALESCE(SUM(${columns.map((column) => `COALESCE(length(CAST(${alias}.${column} AS BLOB)), 0)`).join(' + ')}), 0) AS bytes FROM ${prefix}_${table} AS ${alias}${filter}`).get(parameter).bytes);
   };
-  return total('authoring_position', 'position', ['token', 'lease_id', 'issued_fence', 'block_id', 'checkpoint_id', 'visible_at_issue', 'created_at'])
+  return total('authoring_position', 'position', ['token', 'lease_id', 'issued_fence', 'block_id', 'checkpoint_id', 'visible_at_issue', 'redactions', 'created_at'])
     + Number(db.prepare(`SELECT COALESCE(SUM(
           length(CAST(checkpoint.id AS BLOB))
         + length(CAST(checkpoint.lease_id AS BLOB))

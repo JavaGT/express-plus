@@ -38,6 +38,10 @@ export function projectAnnotatedTextCaretForRecipient(canonical, descriptor, dec
   const recipientBlock = projected.blocks.find((candidate) => candidate.id === caret.blockId);
   if (!recipientBlock) fail('recipient block is missing');
   if (recipientBlock.kind === 'visible') {
+    // The recipient shape deliberately omits hidden width. Until presence has a
+    // redaction-aware coordinate map, no canonical caret in such a block can be
+    // safely located, even when it appears to precede a marker.
+    if (recipientBlock.redactions?.length) return Object.freeze({ kind: 'edge', presence, blockId: caret.blockId, edge: 'start' });
     return Object.freeze({ kind: 'caret', presence, blockId: caret.blockId, offset: caret.offset });
   }
   if (recipientBlock.kind === 'restricted') {

@@ -20,6 +20,7 @@ import workbench, {
   entity,
   everyone,
   grant,
+  protectingAnnotation,
   read,
   ref,
   scope,
@@ -47,18 +48,50 @@ export const Doc = entity('Doc', {
   body: annotatedText({
     project: 'project',
     owner: 'owner',
-    annotations: [annotation('comment', { empty: 'orphan', fields: { color: text({ oneOf: COMMENT_COLORS }) } })],
+    annotations: [
+      annotation('comment', { empty: 'orphan', fields: { color: text({ oneOf: COMMENT_COLORS }) } }),
+      // `sensitive` is the protected target that a confidential span covers. It
+      // is projection-internal: it never renders as a comment card, so marking
+      // confidential does not surface a user-visible comment.
+      annotation('sensitive', { empty: 'delete' }),
+      protectingAnnotation('confidential', {
+        protects: 'sensitive',
+        placeholder: '[restricted]',
+        access: async ({ is }) => (await is.owner()) ? grant(read) : grant(),
+      }),
+    ],
   }),
   grant: [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
 const DocClient = annotatedTextClientHandle(Doc, Doc.body);
 
 const demoPrincipal = Object.freeze({ type: 'user', id: DEMO_USER });
+const readerPrincipal = Object.freeze({ type: 'user', id: 'reader' });
+
+/** The demo has a fixed owner (demo) and a fixed reader (reader). The reader is
+ * denied the `confidential` protecting annotation, so the same document shows
+ * the real text for demo and the redacted placeholder for reader.
+ *
+ * The view-as is per-request (each browser tab carries its own `viewAs` in its
+ * live-delivery query string / action document), NOT a shared cookie — two tabs
+ * in one browser can be owner and reader independently. The cookie is a fallback
+ * for plain page loads. */
+function principalOfFromRequest(req, { viewAs } = {}) {
+  const url = new URL(req.url, 'http://localhost');
+  const queryViewAs = url.searchParams.get('viewAs');
+  const cookies = req.headers?.cookie ?? '';
+  const cookieViewAs = /(?:^|;\s*)annotated-doc-view-as=reader(?:;|$)/.test(cookies) ? 'reader' : 'demo';
+  const resolved = viewAs ?? queryViewAs ?? cookieViewAs;
+  return resolved === 'reader' ? readerPrincipal : demoPrincipal;
+}
 
 function seed(app) {
   app.db.prepare(
     `INSERT OR IGNORE INTO User (id, username) VALUES (?, ?)`,
   ).run(DEMO_USER, DEMO_USER);
+  app.db.prepare(
+    `INSERT OR IGNORE INTO User (id, username) VALUES (?, ?)`,
+  ).run('reader', 'reader');
   app.db.prepare(
     `INSERT OR IGNORE INTO Project (id, owner) VALUES (?, ?)`,
   ).run(DEMO_PROJECT, DEMO_USER);
@@ -74,6 +107,57 @@ function migrateCommentColors(db) {
     `INSERT OR IGNORE INTO Doc_body_annotation_comment (annotation_id, color)
      SELECT id, ? FROM Doc_body_annotation WHERE family = 'comment'`,
   ).run(COMMENT_COLORS[0]);
+}
+
+// The demo declaration grew a `confidential` protecting annotation family. The
+// annotation table's CHECK constraint is baked in at first DDL; rebuild it so
+// the family column accepts both 'comment' and 'confidential', preserving rows.
+function migrateAnnotationFamilies(db) {
+  const existing = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'Doc_body_annotation'`).get();
+  if (!existing || existing.sql.includes("'confidential'")) return;
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    CREATE TABLE Doc_body_annotation_new (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      family TEXT NOT NULL CHECK (family IN ('comment', 'confidential')),
+      FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE,
+      FOREIGN KEY (project_id) REFERENCES Project(id) ON DELETE CASCADE,
+      FOREIGN KEY (owner_id) REFERENCES User(id) ON DELETE CASCADE
+    );
+    INSERT INTO Doc_body_annotation_new (id, document_id, project_id, owner_id, family)
+      SELECT id, document_id, project_id, owner_id, family FROM Doc_body_annotation;
+    DROP TABLE Doc_body_annotation;
+    ALTER TABLE Doc_body_annotation_new RENAME TO Doc_body_annotation;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+// v3: the declaration added the `sensitive` protected-target family. Rebuild the
+// annotation CHECK again when it predates `sensitive` (idempotent).
+function migrateSensitiveFamily(db) {
+  const existing = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'Doc_body_annotation'`).get();
+  if (!existing || existing.sql.includes("'sensitive'")) return;
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    CREATE TABLE Doc_body_annotation_new (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      family TEXT NOT NULL CHECK (family IN ('comment', 'sensitive', 'confidential')),
+      FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE,
+      FOREIGN KEY (project_id) REFERENCES Project(id) ON DELETE CASCADE,
+      FOREIGN KEY (owner_id) REFERENCES User(id) ON DELETE CASCADE
+    );
+    INSERT INTO Doc_body_annotation_new (id, document_id, project_id, owner_id, family)
+      SELECT id, document_id, project_id, owner_id, family FROM Doc_body_annotation;
+    DROP TABLE Doc_body_annotation;
+    ALTER TABLE Doc_body_annotation_new RENAME TO Doc_body_annotation;
+    PRAGMA foreign_keys = ON;
+  `);
 }
 
 function listDocs(app) {
@@ -111,9 +195,13 @@ export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
   const app = workbench({
     db,
     entities: [Project, Doc],
-    migrations: [{ version: 1, up: migrateCommentColors }],
+    migrations: [
+      { version: 1, up: migrateCommentColors },
+      { version: 2, up: migrateAnnotationFamilies },
+      { version: 3, up: migrateSensitiveFamily },
+    ],
   });
-  const principalOf = () => demoPrincipal;
+  const principalOf = principalOfFromRequest;
   const publicDir = new URL('./public', import.meta.url).pathname;
 
   app.attachLiveDelivery({ principalOf });

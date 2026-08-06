@@ -9,7 +9,7 @@ import workbench, {
   registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension,
 } from '../src/internal.mjs';
 import { exportAnnotatedText } from '../src/index.mjs';
-import { materializeBlock, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from '../src/annotated-text-family.mjs';
+import { materializeBlock, resolvePositionToEndpoint, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from '../src/annotated-text-family.mjs';
 import { native } from '../src/event-handle.mjs';
 import { ensureStream, ensureLease, hashClientNonce, issuePositionFrame, issueGroupFrame, issueSnapshot, buildAuthoringEnvelope } from '../src/annotated-text-authoring-stream.mjs';
 import { projectAnnotatedTextSnapshot } from '../src/internal.mjs';
@@ -238,9 +238,9 @@ test('R7 annotation.apply may start at a block boundary and split only its end b
   });
   assert.equal(result.ok, true, result.failure?.message);
   assert.equal(result.events.length, 1);
-  assert.equal(result.events[0].data.version, 7);
-  assert.equal(result.events[0].data.splitOps.length, 1);
-  assert.equal(result.events[0].data.splitOps[0].blockId, blocks[1].id);
+  assert.equal(result.events[0].data.version, 13);
+  assert.equal(result.events[0].data.facts.splitOps.length, 1);
+  assert.equal(result.events[0].data.facts.splitOps[0].blockId, blocks[1].id);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = ?').get('right-only-ann').count, 2);
   await app.close?.();
 });
@@ -255,7 +255,7 @@ test('v6 text.replace projects one atomic same-block event', async () => {
   });
   assert.equal(result.ok, true, result.failure?.message);
   assert.equal(result.events.length, 1);
-  assert.equal(result.events[0].data.version, 6);
+  assert.equal(result.events[0].data.version, 13);
   const state = db.prepare("SELECT family_checkpoint FROM R4Doc_body_state WHERE document_id = 'd1'").get();
   assert.equal(materializeBlock(restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint)), blockId), 'Hio');
   await app.close?.();
@@ -275,17 +275,17 @@ test('annotated document edges create nonempty unannotated blocks in one v9 even
     payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-edge-left' }, edit: { kind: 'text.insert', at: { positionToken: token, offset: 0, affinity: 'right' }, text: 'L' } },
   });
   assert.equal(left.ok, true, left.failure?.message);
-  assert.equal(left.events[0].data.version, 9);
+  assert.equal(left.events[0].data.version, 13);
   assert.equal(left.events[0].data.operation.kind, 'text.insert-block');
   assert.equal(left.events[0].data.operation.side, 'before');
-  assert.deepEqual(left.events[0].data.memberships, []);
+  assert.deepEqual(left.events[0].data.facts.memberships, []);
 
   const right = await app.dispatch({
     actionId: 'edge-right', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-edge-right' }, edit: { kind: 'text.insert', at: { positionToken: token, offset: 2, affinity: 'right' }, text: 'R' } },
   });
   assert.equal(right.ok, true, right.failure?.message);
-  assert.equal(right.events[0].data.version, 9);
+  assert.equal(right.events[0].data.version, 13);
   assert.equal(right.events[0].data.operation.side, 'after');
 
   const state = db.prepare("SELECT structure_version, family_checkpoint FROM R4Doc_body_state WHERE document_id = 'd1'").get();
@@ -436,7 +436,7 @@ test('R5 annotation.detach deletes a last annotation, cleans incoming edges, and
     payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-r5-detach' }, edit: { kind: 'annotation.detach', annotationId: 'r5-theme', positionToken: detachToken } },
   });
   assert.equal(detached.ok, true, detached.failure?.message);
-  assert.equal(detached.events[0].data.version, 5);
+  assert.equal(detached.events[0].data.version, 13);
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation WHERE id = 'r5-theme'").get().count, 0);
   const event = structuredClone(detached.events[0].data);
   db.deserialize(beforeDetach);
@@ -481,10 +481,10 @@ test('R5 annotation.detach persists an orphan outcome and rejects stale or tampe
     payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-r5-orphan' }, edit: { kind: 'annotation.detach', annotationId: 'r5-comment', positionToken: token } },
   });
   assert.equal(detached.ok, true, detached.failure?.message);
-  assert.equal(detached.events[0].data.result.disposition.kind, 'orphaned');
-  assert.equal(detached.events[0].data.result.disposition.savedQuote, 'comment');
+  assert.equal(detached.events[0].data.facts.result.disposition.kind, 'orphaned');
+  assert.equal(detached.events[0].data.facts.result.disposition.savedQuote, 'comment');
   const tampered = structuredClone(detached.events[0].data);
-  tampered.result.disposition.savedQuote = 'forged';
+  tampered.facts.result.disposition.savedQuote = 'forged';
   db.deserialize(preimage);
   assert.throws(() => app.entities.get('R4Doc').projection.apply({ handle: native('R4Doc', 'body', 'operated'), data: tampered }, db), /result does not match/);
   assert.deepEqual(db.serialize(), preimage);
@@ -537,9 +537,9 @@ test('v10 annotation.remove atomically orphans every visible membership with its
   });
   assert.equal(removed.ok, true, removed.failure?.message);
   assert.equal(removed.events.length, 1);
-  assert.equal(removed.events[0].data.version, 10);
+  assert.equal(removed.events[0].data.version, 13);
   assert.deepEqual(removed.events[0].data.operation.blockIds, blocks.map((block) => block.id));
-  assert.equal(removed.events[0].data.result.disposition.savedQuote, 'hello world');
+  assert.equal(removed.events[0].data.facts.result.disposition.savedQuote, 'hello world');
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = 'remove-comment'").get().count, 0);
   assert.equal(db.prepare("SELECT saved_quote FROM R4Doc_body_annotation_orphan_state WHERE annotation_id = 'remove-comment'").get().saved_quote, 'hello world');
 
@@ -724,6 +724,50 @@ test('R4 annotation.apply on a prefix produces the correct split', async () => {
     payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-prefix' }, edit: { kind: 'annotation.apply', annotation: { id: 'ann-prefix', family: 'flag', fields: { flagged: true } }, from: { positionToken: token, offset: 0, affinity: 'left' }, to: { positionToken: token, offset: 5, affinity: 'right' } } },
   });
   assert.equal(prefix.ok, true, prefix.failure?.message);
+  await app.close?.();
+});
+
+test('R4 protective annotation.apply on a same-block subrange creates one partial membership without splits', async () => {
+  const { app, db, blockId, positionMap, state, stream, lease } = await setupDoc('hello world');
+  const token = v9PositionTokenPayload(positionMap, blockId);
+  const result = await app.dispatch({
+    actionId: 'apply-protective-span', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-protective-span' }, edit: { kind: 'annotation.apply', annotation: { id: 'span-protect', family: 'confidential', fields: {} }, from: { positionToken: token, offset: 2, affinity: 'left' }, to: { positionToken: token, offset: 7, affinity: 'right' } } },
+  });
+  assert.equal(result.ok, true, result.failure?.message);
+  assert.equal(result.events.length, 1);
+  const event = result.events[0].data;
+  assert.equal(event.version, 13);
+  const facts = event.facts;
+  assert.equal(facts.splitBlockIds.length, 0);
+  assert.equal(facts.splitOps.length, 0);
+  assert.equal(facts.blocks.length, 0);
+  assert.equal(facts.measurements.length, 0);
+  assert.equal(facts.selectedBlockId, blockId);
+  assert.equal(facts.memberships.length, 1);
+  const membership = facts.memberships[0];
+  assert.equal(membership.annotationId, 'span-protect');
+  assert.equal(membership.blockId, blockId);
+  assert.ok(membership.start && membership.end);
+
+  // The event carries the exact structural endpoints for [2,7), not a
+  // whole-block range.
+  const family = restoreTextFamilyCheckpoint(facts.family);
+  const basisFrontier = family.checkpoint.frontier;
+  assert.deepEqual(membership.start, resolvePositionToEndpoint(family, blockId, 2, basisFrontier));
+  assert.deepEqual(membership.end, resolvePositionToEndpoint(family, blockId, 7, basisFrontier));
+
+  // DB membership JSON must equal the event facts membership range.
+  const dbMembership = db.prepare("SELECT start_point, end_point FROM R4Doc_body_membership WHERE annotation_id = 'span-protect'").get();
+  assert.deepEqual(JSON.parse(dbMembership.start_point), membership.start);
+  assert.deepEqual(JSON.parse(dbMembership.end_point), membership.end);
+
+  // No structural split: only one block remains and structural revision is unchanged.
+  const blocks = db.prepare('SELECT id FROM R4Doc_body_block WHERE document_id = ? ORDER BY position').all('d1');
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].id, blockId);
+  const afterState = db.prepare("SELECT structure_version FROM R4Doc_body_state WHERE document_id = 'd1'").get();
+  assert.equal(afterState.structure_version, state.structure_version);
   await app.close?.();
 });
 

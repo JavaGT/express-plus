@@ -759,3 +759,51 @@ test('paced typing in a duplicated tab keeps both tabs live and survives reload'
   await expect(secondEditor).toHaveText(text);
   await context.close();
 });
+
+test('a confidential span shows the real text to the owner and a redacted placeholder to the reader', async ({ page, browser }) => {
+  // Owner (demo) marks "secret" as confidential over a selection.
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('hello secret world', { delay: 0 });
+  await expect(editor).toHaveText('hello secret world');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.firstElementChild.firstChild;
+    const range = document.createRange();
+    range.setStart(node, 6);
+    range.setEnd(node, 12);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('button', { name: 'Mark confidential' }).click();
+  await expect(page.locator('#status')).toHaveText('confidential span marked');
+  // The protected target is projection-internal: no comment card is created for
+  // a confidential span (only explicit comments render as cards).
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+
+  // Owner still sees the real text, styled as confidential (black bg, white text).
+  await expect(editor).toHaveText('hello secret world');
+  const ownerSensitive = editor.locator('[data-annotation-families~="sensitive"]');
+  await expect(ownerSensitive).toHaveText('secret');
+  await expect(ownerSensitive).toHaveCSS('background-color', 'rgb(17, 17, 17)');
+  await expect(ownerSensitive).toHaveCSS('color', 'rgb(255, 255, 255)');
+
+  // Reader opens the same document and sees the redacted placeholder. The view
+  // is per-tab (sessionStorage), so set it via the toggle rather than a cookie.
+  const context = await browser.newContext();
+  await context.addInitScript(() => sessionStorage.setItem('annotated-doc-view-as', 'reader'));
+  const readerPage = await context.newPage();
+  await readerPage.goto(origin);
+  await readerPage.locator('.doc', { hasText: id }).click();
+  await expect(readerPage.locator('#status')).toContainText('live', { timeout: 15000 });
+  const readerEditor = readerPage.locator('#editor');
+  await expect(readerEditor).toHaveText('hello [restricted] world');
+  await expect(readerEditor).not.toContainText('secret');
+  // The redacted placeholder is styled black-on-white with its square brackets.
+  const readerRestricted = readerEditor.locator('[data-restricted="true"]');
+  await expect(readerRestricted).toHaveText('[restricted]');
+  await expect(readerRestricted).toHaveCSS('background-color', 'rgb(17, 17, 17)');
+  await expect(readerRestricted).toHaveCSS('color', 'rgb(255, 255, 255)');
+  await context.close();
+});

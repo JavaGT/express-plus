@@ -40,13 +40,23 @@ function isJsonValue(value, ancestors = new Set()) {
 function actionRequest(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const keys = Object.keys(body);
-  if (keys.length < 3 || keys.length > 5 || keys.some((key) => !['actionId', 'scope', 'type', 'payload', 'clientId'].includes(key))) return null;
-  const { actionId, scope, type, payload, clientId } = body;
+  if (keys.length < 3 || keys.length > 6 || keys.some((key) => !['actionId', 'scope', 'document', 'type', 'payload', 'clientId'].includes(key))) return null;
+  const { actionId, scope, document, type, payload, clientId } = body;
   if (![actionId, type].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)) return null;
   if (scope !== undefined && (typeof scope !== 'string' || scope.length === 0 || scope.length > MAX_STRING_LENGTH)) return null;
+  if (document !== undefined && !validDocumentIdentity(document)) return null;
   if (clientId !== undefined && (typeof clientId !== 'string' || clientId.length === 0 || clientId.length > MAX_STRING_LENGTH)) return null;
   if (!isJsonValue(payload)) return null;
-  return { actionId, ...(scope === undefined ? {} : { scope }), type, payload, ...(clientId === undefined ? {} : { clientId }) };
+  return { actionId, ...(scope === undefined ? {} : { scope }), ...(document === undefined ? {} : { document }), type, payload, ...(clientId === undefined ? {} : { clientId }) };
+}
+
+function validDocumentIdentity(document) {
+  if (!document || typeof document !== 'object' || Array.isArray(document)) return false;
+  if (Object.keys(document).some((key) => !['entity', 'field', 'documentId', 'authoringClient', 'viewAs'].includes(key))) return false;
+  if (!['entity', 'field', 'documentId'].every((key) => typeof document[key] === 'string' && document[key].length > 0)) return false;
+  if (document.authoringClient !== undefined && document.authoringClient !== null && (typeof document.authoringClient !== 'string' || document.authoringClient.length === 0)) return false;
+  if (document.viewAs !== undefined && document.viewAs !== null && typeof document.viewAs !== 'string') return false;
+  return true;
 }
 
 function batchActionRequest(body) {
@@ -57,9 +67,7 @@ function batchActionRequest(body) {
   if (typeof actionId !== 'string' || actionId.length === 0 || actionId.length > MAX_STRING_LENGTH) return null;
   if (scope === undefined && document === undefined) return null;
   if (scope !== undefined && (typeof scope !== 'string' || scope.length === 0 || scope.length > MAX_STRING_LENGTH)) return null;
-  if (document !== undefined && (!document || typeof document !== 'object' || Array.isArray(document)
-    || Object.keys(document).some((key) => !['entity', 'field', 'documentId', 'authoringClient'].includes(key))
-    || !['entity', 'field', 'documentId'].every((key) => typeof document[key] === 'string' && document[key].length > 0))) return null;
+  if (document !== undefined && !validDocumentIdentity(document)) return null;
   if (clientId !== undefined && (typeof clientId !== 'string' || clientId.length === 0 || clientId.length > MAX_STRING_LENGTH)) return null;
   if (!Array.isArray(actions) || actions.length === 0 || actions.some((action) => {
     if (!action || typeof action !== 'object' || Array.isArray(action) || Object.keys(action).length !== 2) return true;
@@ -84,8 +92,7 @@ function historyRequest(body) {
   if (!['undo', 'redo'].includes(command)
     || ![actionId, session].every((value) => typeof value === 'string' && value.length > 0 && value.length <= MAX_STRING_LENGTH)) return null;
   if (scope !== undefined && (typeof scope !== 'string' || !scope || scope.length > MAX_STRING_LENGTH)) return null;
-  if (document !== undefined && (!document || typeof document !== 'object' || Array.isArray(document)
-    || !['entity', 'field', 'documentId'].every((key) => typeof document[key] === 'string' && document[key].length > 0))) return null;
+  if (document !== undefined && !validDocumentIdentity(document)) return null;
   return { actionId, ...(scope === undefined ? {} : { scope }), ...(document === undefined ? {} : { document }), session };
 }
 
@@ -221,7 +228,12 @@ export async function handleApplicationActionHttp(app, req, res, principalOf, se
     return true;
   }
   let principal;
-  try { principal = await principalOf(req); } catch {
+  // The second argument is a demo-only principal hint carried in the client's
+  // document identity (the annotated-doc view-as toggle). The real authorization
+  // path (sessionPrincipalOf) ignores it and resolves the principal server-side;
+  // only demo-style `principalOf` implementations may read it. Never authorize a
+  // mutation on client-supplied identity.
+  try { principal = await principalOf(req, { viewAs: request.document?.viewAs ?? null }); } catch {
     sendFailure(sendJson, res, failure('denied', 'authentication required'));
     return true;
   }

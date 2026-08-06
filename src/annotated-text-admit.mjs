@@ -18,10 +18,12 @@ import { authorizeFieldOp } from './strategy/index.mjs';
 import { write } from './grant.mjs';
 import { restoreTextFamilyCheckpoint, materializeBlock, resolvePositionToEndpoint, projectEndpointToBlockOffset } from './annotated-text-family.mjs';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
+import { authoringRedactionsForRecipient } from './annotated-text-recipient-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { resolveStream, resolveLease, resolvePosition, resolveGroup, issuePositionFrame, recordSplit } from './annotated-text-authoring-stream.mjs';
 import { readSeq } from './committed-log.mjs';
 import { planAnnotationApplyOffsets, planAnnotationRemove, planTextOffsetEdit } from './annotated-text-plan.mjs';
+import { packOperatedFacts } from './annotated-text-operated-facts.mjs';
 
 /** Resolve the authoring stream + lease for a v9 command. */
 export function assertV9AuthoringBinding({ name, fieldName, prefix, command, db, principal }) {
@@ -37,6 +39,22 @@ function editTokens(edit, db, prefix, leaseId) {
   if (edit.kind !== 'block.merge') return [];
   return [edit.leftPositionToken, edit.rightPositionToken].map((token) =>
     resolvePosition({ db, prefix, positionToken: token, leaseId }));
+}
+
+function frameRedactions(position, currentRecipient) {
+  let redactions;
+  try { redactions = JSON.parse(position.redactions ?? '[]'); } catch { redactions = null; }
+  if (!Array.isArray(redactions) || redactions.some((entry) => !entry || !Number.isSafeInteger(entry.visibleStart) || !Number.isSafeInteger(entry.start) || !Number.isSafeInteger(entry.end) || entry.visibleStart < 0 || entry.start < 0 || entry.end <= entry.start)) {
+    throw new ValidationError('annotated-text authoring position redactions are invalid', { code: 'position-redacted' });
+  }
+  const block = currentRecipient.blocks.find((candidate) => candidate.kind === 'visible' && candidate.id === position.block_id);
+  const current = authoringRedactionsForRecipient(currentRecipient, position.block_id);
+  // A changed projection invalidates the frame rather than interpreting public
+  // offsets against a possibly newly-denied canonical interval.
+  if (!block || current.length !== redactions.length || current.some((entry, index) => entry.visibleStart !== redactions[index].visibleStart || entry.start !== redactions[index].start || entry.end !== redactions[index].end)) {
+    throw new ValidationError('annotated-text authoring position redactions changed', { code: 'position-redacted' });
+  }
+  return redactions;
 }
 
 /**
@@ -113,9 +131,11 @@ function admitTextEdit(ctx) {
     if (!metadata) throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family '${annotation.family}'`);
     return { id: annotation.id, family: annotation.family, empty: metadata.empty, protectedTargetIds: targetsByAnnotation.get(annotation.id) ?? [] };
   });
+  const fromRedactions = frameRedactions(position, ctx.currentRecipient);
+  const toRedactions = toPosition ? frameRedactions(toPosition, ctx.currentRecipient) : null;
   const plannerEdit = edit.kind === 'text.insert'
-    ? { kind: edit.kind, text: edit.text, at: { blockId, offset: edit.at.offset, affinity: edit.at.affinity, positionFamily } }
-    : { kind: edit.kind, text: edit.text, from: { blockId, offset: edit.from.offset, affinity: edit.from.affinity, positionFamily }, to: { blockId: toPosition.block_id, offset: edit.to.offset, affinity: edit.to.affinity, positionFamily: restoreTextFamilyCheckpoint(JSON.parse(toPosition.family_checkpoint)) } };
+    ? { kind: edit.kind, text: edit.text, at: { blockId, offset: edit.at.offset, affinity: edit.at.affinity, positionFamily, redactions: fromRedactions } }
+    : { kind: edit.kind, text: edit.text, from: { blockId, offset: edit.from.offset, affinity: edit.from.affinity, positionFamily, redactions: fromRedactions }, to: { blockId: toPosition.block_id, offset: edit.to.offset, affinity: edit.to.affinity, positionFamily: restoreTextFamilyCheckpoint(JSON.parse(toPosition.family_checkpoint)), redactions: toRedactions } };
   let plan;
   try {
     plan = planTextOffsetEdit({
@@ -283,6 +303,27 @@ function admitGroupEdit(ctx) {
   }) }];
 }
 
+// v13 is the one active durable representation. The public v9 authoring request
+// remains deliberately unchanged; this boundary turns the temporary
+// operation-specific facts produced by the admission helpers into one exact
+// envelope before anything is appended to the committed log. v1–v12 are no
+// longer replayed: the projection fails closed on any non-13 version.
+function unifiedOperatedEvent(event) {
+  const data = event.data;
+  if (data.version === 13) return event;
+  return Object.freeze({
+    ...event,
+    data: Object.freeze({
+      version: 13,
+      id: data.id,
+      before: data.before,
+      after: data.after,
+      operation: data.operation,
+      facts: packOperatedFacts(data),
+    }),
+  });
+}
+
 /**
  * Top entry for an already-validated v9 edit `command` (the caller runs
  * assertV9AnnotatedTextOffsetEditPayload first). Runs the shared prelude, then
@@ -291,9 +332,11 @@ function admitGroupEdit(ctx) {
 export async function admitV9AnnotatedTextEdit({ name, fieldName, prefix, descriptor, record, compiledMeta, command, db, scope, principal, actionId, handlers }) {
   const ctx = await assertV9AuthoringPrelude({ name, fieldName, prefix, descriptor, record, compiledMeta, command, db, scope, principal, actionId });
   const edit = ctx.edit;
-  if (edit.kind === 'text.insert' || edit.kind === 'text.delete' || edit.kind === 'text.replace') return admitTextEdit(ctx);
-  if (edit.kind === 'block.split' || edit.kind === 'block.merge' || edit.kind === 'block.continue' || edit.kind === 'block.split-and-assign') return admitStructureEdit(ctx, handlers);
-  if (edit.kind === 'annotation.apply' || edit.kind === 'annotation.detach' || edit.kind === 'annotation.remove') return admitAnnotationEdit(ctx, handlers);
-  if (edit.kind === 'block-group.assignment.set' || edit.kind === 'block-group.assignment.clear') return admitGroupEdit(ctx);
-  throw new ValidationError(`${name}.${fieldName}.operation v9 edit kind not supported`);
+  let events;
+  if (edit.kind === 'text.insert' || edit.kind === 'text.delete' || edit.kind === 'text.replace') events = admitTextEdit(ctx);
+  else if (edit.kind === 'block.split' || edit.kind === 'block.merge' || edit.kind === 'block.continue' || edit.kind === 'block.split-and-assign') events = admitStructureEdit(ctx, handlers);
+  else if (edit.kind === 'annotation.apply' || edit.kind === 'annotation.detach' || edit.kind === 'annotation.remove') events = admitAnnotationEdit(ctx, handlers);
+  else if (edit.kind === 'block-group.assignment.set' || edit.kind === 'block-group.assignment.clear') events = admitGroupEdit(ctx);
+  else throw new ValidationError(`${name}.${fieldName}.operation v9 edit kind not supported`);
+  return events.map(unifiedOperatedEvent);
 }

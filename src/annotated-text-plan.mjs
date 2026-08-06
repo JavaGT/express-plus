@@ -19,6 +19,7 @@ import {
 } from './annotated-text-family.mjs';
 import { canonicalTextOp } from './annotated-text.mjs';
 import { removeAnnotation, removeMembership } from './annotated-text-membership.mjs';
+import { packOperatedFacts } from './annotated-text-operated-facts.mjs';
 
 function deepFreeze(value) {
   if (value === null || typeof value !== 'object') return value;
@@ -30,8 +31,25 @@ function deepFreeze(value) {
 }
 
 function positionOffset(family, position) {
+  const redactions = position.redactions ?? [];
+  let publicOffset = position.offset;
+  let hiddenBefore = 0;
+  for (const redaction of redactions) {
+    if (!Number.isSafeInteger(redaction.visibleStart) || !Number.isSafeInteger(redaction.start) || !Number.isSafeInteger(redaction.end) ||
+        redaction.visibleStart < 0 || redaction.start < 0 || redaction.end <= redaction.start) {
+      const error = new Error('redaction position frame is invalid'); error.code = 'position-invalid'; throw error;
+    }
+    if (publicOffset < redaction.visibleStart) break;
+    if (publicOffset === redaction.visibleStart) {
+      publicOffset = position.affinity === 'left' ? redaction.start : redaction.end;
+      hiddenBefore = null;
+      break;
+    }
+    hiddenBefore += redaction.end - redaction.start;
+  }
+  if (hiddenBefore !== null) publicOffset += hiddenBefore;
   const endpoint = resolvePositionToEndpoint(
-    position.positionFamily, position.blockId, position.offset,
+    position.positionFamily, position.blockId, publicOffset,
     position.positionFamily.checkpoint.frontier, position.affinity,
   );
   return projectEndpointToBlockOffset(family, position.blockId, Object.freeze({
@@ -39,8 +57,30 @@ function positionOffset(family, position) {
   }));
 }
 
+function assertEditAvoidsRedactions(edit, blockId, fromOffset, toOffset) {
+  if (edit.kind === 'text.insert') return;
+  for (const redaction of edit.from.redactions ?? []) {
+    if (redaction.start < toOffset && redaction.end > fromOffset) {
+      const error = new Error('selection crosses a confidential redaction'); error.code = 'position-redacted'; throw error;
+    }
+  }
+}
+
 function before(family, structuralRevision) {
   return Object.freeze({ structuralRevision, frontier: family.checkpoint.frontier });
+}
+
+// Planner callers see the active durable contract too.  Admission may add facts
+// that only DB-backed structural handlers can know; absent facts are explicit.
+function unifiedPlan(data) {
+  return deepFreeze({
+    version: 13,
+    id: data.id,
+    before: data.before,
+    after: data.after,
+    operation: data.operation,
+    facts: packOperatedFacts(data),
+  });
 }
 
 export function planTextOffsetEdit({ documentId, structureVersion, family, actor, lamport,
@@ -52,6 +92,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
   if (edit.kind !== 'text.insert') {
     if (edit.to.blockId !== blockId) { const error = new Error('replacement endpoints must be on the same block'); error.code = 'position-invalid'; throw error; }
     toOffset = positionOffset(family, edit.to);
+    assertEditAvoidsRedactions(edit, blockId, offset, toOffset);
   }
 
   if (edit.kind === 'text.insert' && (offset === 0 || offset === materializeBlock(family, blockId).length) && new Set(membershipBlockIds).has(blockId)) {
@@ -64,7 +105,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
       const routedEdit = { kind: 'text.insert', at: { blockId: destination.id, offset: destinationOffset, affinity: offset === 0 ? 'left' : 'right' }, text: edit.text };
       const operation = textOperationForOffsetEdit(family, routedEdit, actor, lamport);
       const routedFamily = applyTextOperationToBlock(family, destination.id, operation);
-      return deepFreeze({ version: 1, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.apply', blockId: destination.id, operation }, after: { structuralRevision: structureVersion, frontier: routedFamily.checkpoint.frontier }, family: textFamilyCheckpoint(routedFamily) });
+      return unifiedPlan({ version: 1, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.apply', blockId: destination.id, operation }, after: { structuralRevision: structureVersion, frontier: routedFamily.checkpoint.frontier }, family: textFamilyCheckpoint(routedFamily) });
     }
     const newBlockId = mintBlockId();
     const side = offset === 0 ? 'before' : 'after';
@@ -74,7 +115,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
     const nextFamily = applyTextOperationToNewBlock(family, blockId, newBlockId, operation, side);
     const source = sourceBlocks?.[blockId];
     if (!source) throw new Error('source block not found');
-    return deepFreeze({ version: 9, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.insert-block', sourceBlockId: blockId, blockId: newBlockId, side, operation }, after: { structuralRevision: structureVersion + 1, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily), block: { id: newBlockId, epoch: source.epoch, fields: source.fields }, memberships: [], measurements: [] });
+    return unifiedPlan({ version: 9, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.insert-block', sourceBlockId: blockId, blockId: newBlockId, side, operation }, after: { structuralRevision: structureVersion + 1, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily), block: { id: newBlockId, epoch: source.epoch, fields: source.fields }, memberships: [], measurements: [] });
   }
 
   const textEdit = edit.kind === 'text.insert'
@@ -87,7 +128,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
     let insertOperation = ['workbench.text', 1, [`${actor.slice(0, 30)}e0`, 1], lamport + 1, intermediate.checkpoint.frontier, ['insert', start, edit.text]];
     insertOperation = canonicalTextOp(insertOperation);
     const nextFamily = applyTextOperationToBlock(intermediate, blockId, insertOperation);
-    return deepFreeze({ version: 6, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.replace', blockId, operations: [deleteOperation, insertOperation] }, after: { structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily) });
+    return unifiedPlan({ version: 6, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.replace', blockId, operations: [deleteOperation, insertOperation] }, after: { structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily) });
   }
   const operation = textOperationForOffsetEdit(family, textEdit, actor, lamport);
   let nextFamily = applyTextOperationToBlock(family, blockId, operation);
@@ -124,7 +165,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
     }
   }
   if (prunedBlockIds.length) {
-    return deepFreeze({
+    return unifiedPlan({
       version: 12,
       id: documentId,
       before: before(family, structureVersion),
@@ -135,7 +176,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
       emptiedAnnotations: Object.freeze(emptiedAnnotations.map((entry) => deepFreeze(entry))),
     });
   }
-  return deepFreeze({ version: 1, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.apply', blockId, operation }, after: { structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily) });
+  return unifiedPlan({ version: 1, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.apply', blockId, operation }, after: { structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily) });
 }
 
 export function planAnnotationApplyOffsets({ family, structureVersion, from, to, visibleBlockIds }) {
@@ -168,5 +209,5 @@ export function planAnnotationRemove({ documentId, structureVersion, family, ann
   const result = { memberships: { annotationId, postimage: [] }, disposition: outcome.type === 'delete' ? { kind: 'deleted', family: target.family, savedQuote: null, lastMemberships: null } : { kind: 'orphaned', family: target.family, savedQuote: outcome.savedQuote, lastMemberships: outcome.lastMemberships }, changedProtectors: reduced.annotations.filter((annotation) => JSON.stringify(annotation.protectedTargetIds ?? []) !== JSON.stringify(targets.get(annotation.id) ?? [])).map((annotation) => ({ annotationId: annotation.id, protectsPostimage: [...(annotation.protectedTargetIds ?? [])] })).sort((a, b) => a.annotationId.localeCompare(b.annotationId)) };
   let prunedFamily = family; const prunedBlockIds = []; const retained = new Set(reduced.memberships.map((membership) => membership.blockId));
   for (const block of family.blocks) { if (prunedFamily.blocks.length === 1 || retained.has(block.id) || materializeBlock(prunedFamily, block.id).length !== 0) continue; prunedFamily = removeEmptyBlock(prunedFamily, block.id); prunedBlockIds.push(block.id); }
-  return deepFreeze({ version: prunedBlockIds.length ? 11 : 10, id: documentId, before: before(family, structureVersion), operation: { kind: 'annotation.remove', annotationId, blockIds: removedBlockIds }, after: { structuralRevision: structureVersion + (prunedBlockIds.length ? 1 : 0), frontier: family.checkpoint.frontier }, lifecycle: { empty: target.empty }, result, ...(prunedBlockIds.length ? { family: textFamilyCheckpoint(prunedFamily), prunedBlockIds } : {}) });
+  return unifiedPlan({ version: prunedBlockIds.length ? 11 : 10, id: documentId, before: before(family, structureVersion), operation: { kind: 'annotation.remove', annotationId, blockIds: removedBlockIds }, after: { structuralRevision: structureVersion + (prunedBlockIds.length ? 1 : 0), frontier: family.checkpoint.frontier }, lifecycle: { empty: target.empty }, result, ...(prunedBlockIds.length ? { family: textFamilyCheckpoint(prunedFamily), prunedBlockIds } : {}) });
 }

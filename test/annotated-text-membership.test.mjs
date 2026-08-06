@@ -5,7 +5,7 @@ import {
 } from '../src/annotated-text.mjs';
 import {
   createTextFamily, materializeBlock, splitBlock, mergeBlocks, assertMembershipRange, assertStructuralEndpoint,
-  resolvePositionToEndpoint,
+  resolvePositionToEndpoint, projectEndpointToBlockOffset,
 } from '../src/annotated-text-family.mjs';
 import {
   assertAnnotation, assertMembership, addMembership, removeMembership,
@@ -165,14 +165,29 @@ test('addMembership rejects fully tombstoned block', () => {
   ), /tombstoned/);
 });
 
-test('addMembership rejects a partial structural range', () => {
+test('addMembership accepts a partial (sub-block) structural range', () => {
   const family = makeFamily([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abc']]]);
   const ann = sampleAnnotation();
   const frontier = family.checkpoint.frontier;
-  assert.throws(() => addMembership(family, [ann], [], 'ann1', 'block1',
+  const result = addMembership(family, [ann], [], 'ann1', 'block1',
     assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier: frontier }),
     resolvePositionToEndpoint(family, 'block1', 2, frontier),
-  ), /canonical (whole block|block end)/);
+  );
+  assert.equal(result.memberships.length, 1);
+  assert.equal(result.memberships[0].start.point[1][0], 'root');
+  assert.equal(projectEndpointToBlockOffset(family, 'block1', result.memberships[0].end), 2);
+});
+
+test('addMembership accepts a mid-block range (not touching either boundary)', () => {
+  const family = makeFamily([['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]]);
+  const ann = sampleAnnotation();
+  const frontier = family.checkpoint.frontier;
+  const start = resolvePositionToEndpoint(family, 'block1', 1, frontier);
+  const end = resolvePositionToEndpoint(family, 'block1', 4, frontier);
+  const result = addMembership(family, [ann], [], 'ann1', 'block1', start, end);
+  assert.equal(result.memberships.length, 1);
+  assert.equal(projectEndpointToBlockOffset(family, 'block1', result.memberships[0].start), 1);
+  assert.equal(projectEndpointToBlockOffset(family, 'block1', result.memberships[0].end), 4);
 });
 
 test('addMembership assigns ordinal dense by document block order', () => {
@@ -437,6 +452,56 @@ test('splitBlockMemberships splits full membership into both children', () => {
   assert.equal(result.outcomes.length, 0);
 });
 
+test('splitBlockMemberships preserves a partial span across the split', () => {
+  const cp = [['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]];
+  const state = applyAll(createTextState(), cp);
+  const family = createTextFamily('doc1', textCheckpoint(state), 'block1');
+  const ann = sampleAnnotation();
+  const frontier = family.checkpoint.frontier;
+  const start = resolvePositionToEndpoint(family, 'block1', 1, frontier);
+  const end = resolvePositionToEndpoint(family, 'block1', 5, frontier);
+  const membership = addMembership(family, [ann], [], 'ann1', 'block1', start, end).memberships;
+  const split = splitBlock(family, 'block1', 'block2', 3).family;
+  const result = splitBlockMemberships(split, [ann], membership, 'block1', 'block2');
+  assert.equal(result.memberships.length, 2);
+  assert.deepEqual(result.memberships.map(m => [m.blockId, materializeBlock(split, m.blockId)]), [['block1', 'abc'], ['block2', 'def']]);
+});
+
+test('splitBlockMemberships keeps a span entirely on the right', () => {
+  const cp = [['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]];
+  const state = applyAll(createTextState(), cp);
+  const family = createTextFamily('doc1', textCheckpoint(state), 'block1');
+  const ann = sampleAnnotation();
+  const frontier = family.checkpoint.frontier;
+  const start = resolvePositionToEndpoint(family, 'block1', 4, frontier);
+  const end = resolvePositionToEndpoint(family, 'block1', 6, frontier);
+  const membership = addMembership(family, [ann], [], 'ann1', 'block1', start, end).memberships;
+  const split = splitBlock(family, 'block1', 'block2', 3).family;
+  const result = splitBlockMemberships(split, [ann], membership, 'block1', 'block2');
+  assert.deepEqual(result.memberships.map(m => m.blockId), ['block2']);
+  // Retained offsets must be preserved, not expanded to the block edge.
+  const m = result.memberships[0];
+  assert.equal(projectEndpointToBlockOffset(split, m.blockId, m.start), 1);
+  assert.equal(projectEndpointToBlockOffset(split, m.blockId, m.end), 3);
+});
+
+test('splitBlockMemberships preserves an entirely-left partial span offsets', () => {
+  const cp = [['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]];
+  const state = applyAll(createTextState(), cp);
+  const family = createTextFamily('doc1', textCheckpoint(state), 'block1');
+  const ann = sampleAnnotation();
+  const frontier = family.checkpoint.frontier;
+  const start = resolvePositionToEndpoint(family, 'block1', 1, frontier);
+  const end = resolvePositionToEndpoint(family, 'block1', 2, frontier);
+  const membership = addMembership(family, [ann], [], 'ann1', 'block1', start, end).memberships;
+  const split = splitBlock(family, 'block1', 'block2', 3).family;
+  const result = splitBlockMemberships(split, [ann], membership, 'block1', 'block2');
+  assert.deepEqual(result.memberships.map(m => m.blockId), ['block1']);
+  const m = result.memberships[0];
+  assert.equal(projectEndpointToBlockOffset(split, m.blockId, m.start), 1);
+  assert.equal(projectEndpointToBlockOffset(split, m.blockId, m.end), 2);
+});
+
 test('edge split is unchanged and does not invoke membership redistribution', () => {
   const cp = [['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]];
   const state = applyAll(createTextState(), cp);
@@ -508,7 +573,7 @@ test('mergeBlocksMemberships merges equal membership sets', () => {
   ));
 });
 
-test('mergeBlocksMemberships rejects mismatched annotation ID sets', () => {
+test('mergeBlocksMemberships preserves annotations present on only one side', () => {
   const cp = [['workbench.text', 1, [A, 1], 1, [], ['insert', ROOT, 'abcdef']]];
   const state = applyAll(createTextState(), cp);
   const checkpoint = textCheckpoint(state);
@@ -523,7 +588,9 @@ test('mergeBlocksMemberships rejects mismatched annotation ID sets', () => {
   const e2 = resolvePositionToEndpoint(split, 'block2', 3, frontier);
   const r1 = addMembership(split, [ann1, ann2], [], 'ann1', 'block1', s1, e1);
   const r2 = addMembership(split, [ann1, ann2], r1.memberships, 'ann2', 'block2', s2, e2);
-  assert.throws(() => mergeBlocksMemberships(split, [ann1, ann2], r2.memberships, 'block1', 'block2'), /must be exactly equal/);
+  const result = mergeBlocksMemberships(split, [ann1, ann2], r2.memberships, 'block1', 'block2');
+  assert.deepEqual(result.memberships.map(m => m.annotationId).sort(), ['ann1', 'ann2']);
+  assert.ok(result.memberships.every(m => m.blockId === 'block1'));
 });
 
 test('mergeBlocksMemberships rejects non-adjacent blocks', () => {

@@ -83,7 +83,9 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
         return true;
       }
       let principal;
-      try { principal = await principalOf(req); } catch { reject(res, 403, 'access denied'); return true; }
+      // Demo-only principal hint (viewAs) is carried in the ack body alongside the
+      // document identity; the real sessionPrincipalOf ignores it.
+      try { principal = await principalOf(req, { viewAs: body.viewAs ?? null }); } catch { reject(res, 403, 'access denied'); return true; }
       if (!principal || typeof principal !== 'object') { reject(res, 403, 'access denied'); return true; }
       const documentIdentity = { entity: body.entity, field: body.field, documentId: body.documentId };
       const document = delivery.resolveAnnotatedTextDocument ? delivery.resolveAnnotatedTextDocument(documentIdentity) : null;

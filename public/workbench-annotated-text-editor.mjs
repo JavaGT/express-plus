@@ -1,3 +1,8 @@
+// Display-space walks over public recipient redaction markers. The editor must
+// treat placeholder interiors as non-editable and reject selections crossing
+// them; these helpers translate between display and wire coordinates.
+import { classifyDisplayOffset, selectionCrossesDisplayRedaction } from './workbench-annotated-text-redaction-coords.mjs';
+
 function visibleBlocks(document) {
   return document?.blocks?.filter((block) => block.kind === 'visible') ?? [];
 }
@@ -91,6 +96,11 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       const block = blocks.find((candidate) => candidate.id === span.dataset.blockId);
       const local = pointInSpan(span, node, offset);
       if (!block || local === null || local < 0 || local > (span.textContent ?? '').length) return null;
+      const classified = classifyDisplayOffset(local, block.redactions ?? []);
+      if (classified.kind === 'interior') return null;
+      if (classified.kind === 'left' || classified.kind === 'right') {
+        return { blockId: block.id, offset: classified.offset, affinity: classified.affinity };
+      }
       return { blockId: block.id, offset: local, affinity: 'right' };
     }
     if (node !== element) return null;
@@ -123,6 +133,10 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     const toIndex = orderedVisible().findIndex((block) => block.id === to.blockId);
     if (fromIndex > toIndex || (fromIndex === toIndex && from.offset > to.offset)) {
       return { from: to, to: from };
+    }
+    if (from.blockId === to.blockId) {
+      const block = orderedVisible().find((candidate) => candidate.id === from.blockId);
+      if (selectionCrossesDisplayRedaction(from.offset, to.offset, block?.redactions ?? [])) return null;
     }
     return { from, to };
   }

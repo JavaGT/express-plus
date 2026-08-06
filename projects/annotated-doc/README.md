@@ -44,19 +44,43 @@ DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 | --- | --- |
 | `Doc.body: annotatedText(...)` | Decision-0010 document field (blocks + CRDT bodies) |
 | `annotation('comment', { empty: 'orphan', fields: { color: text({ oneOf: [...] }) } })` | Comment family; color required, one of five palette hexes |
-| Fixed principal `demo` | No auth ceremony while refining the field |
+| `protectingAnnotation('confidential', { protects: 'sensitive', ... })` | Confidential span: a protecting annotation over a range; the reader principal sees the real text replaced by the placeholder |
+| Fixed principals `demo` (owner) + `reader` | The demo shows both sides of the per-recipient projection: owner sees real text, reader sees the redacted placeholder |
+| `?view-as` / **View as** toggle | Switch between the owner and reader views of the same document |
 | `GET/POST /docs` → list + `annotatedTextCreateAction` | Doc list/create through package create only |
 | `createAnnotatedTextHttpSession` + `bindAnnotatedTextEditor` | Typed text + `applyAnnotation` / `removeAnnotation`; no raw CRDT ops |
 | `/live-delivery` | Recipient snapshot fold + ingest recovery |
 | Comments panel + color select | Marker apply/delete UI with highlight colors |
 | Live JSON state (`<details>`) | Optional debug of the session document snapshot |
 
+## Confidential spans
+
+Select a range and click **Mark confidential**. This applies an invisible
+`sensitive` target annotation, then a `confidential` protecting annotation over
+the same range. The target is projection-internal — it never renders as a
+comment card, so marking confidential does not create a user-visible comment.
+Switch **View as** to `Reader` — the reader is denied the `confidential` access,
+so the same document renders the placeholder (`[restricted]`) where the owner
+sees the real text. The redaction is computed server-side in the recipient
+projection; the reader's client never receives the hidden text. Ordinary
+comments remain independent and deletable.
+
+The **View as** choice is **per tab** (kept in `sessionStorage` and carried in
+each tab's request identity), so you can open two tabs in one browser — one as
+Owner, one as Reader — and edit from the owner tab while the reader tab stays
+redacted. It is not a shared cookie; changing one tab does not flip the other.
+
+Confidential content is styled so the boundary is visible in both views: the
+owner sees the real text on a black background with white text, and the reader
+sees the `[restricted]` placeholder (square brackets kept) on the same black
+background — signalling that the placeholder is a redaction, not the content.
+
 ## Non-goals (v1)
 
 - Comment thread/entity (markers only — no reply body)
 - Block split / merge / continue controls
 - Carets / multi-user presence
-- Login, sharing, or multi-principal grants
+- Login, sharing, or multi-principal grants (the demo uses two fixed principals)
 - Scope entities, coding, speakers, or Studio
 - `text.crdt()` (see `projects/note.mjs` / `projects/gdoc.mjs` for that floor)
 

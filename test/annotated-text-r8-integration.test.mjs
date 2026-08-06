@@ -137,7 +137,7 @@ test('v9 assignment removal is scoped to the operated family', async (t) => {
   assert.equal(cleared.ok, true, cleared.failure?.message);
   assert.deepEqual(rows(ctx.db, 'SELECT annotation_id, group_id FROM R8IntegrationDocument_body_group_membership ORDER BY annotation_id').map((row) => ({ ...row })), [{ annotation_id: 'other-1', group_id: rows(ctx.db, 'SELECT group_id FROM R8IntegrationDocument_body_block_group LIMIT 1').at(0).group_id }]);
   assert.equal(rows(ctx.db, "SELECT id FROM R8IntegrationDocument_body_annotation WHERE family = 'tag'").length, 0);
-  assert.deepEqual(cleared.events[0].data.removedAnnotationIds, ['tag-1']);
+  assert.deepEqual(cleared.events[0].data.facts.removedAnnotationIds, ['tag-1']);
 });
 
 test('v9 rejects invalid consecutive selections, stale/partial bases, boundaries, and invalid families without partial writes', async (t) => {
@@ -214,7 +214,7 @@ test('v9 assignment projection rejects tampered set and clear facts without writ
   const clear = await dispatch(ctx, 'tamper-clear', (snapshot) => ({ kind: 'block-group.assignment.clear', selection: { kind: 'one', blockGroupId: snapshot.blockGroups[0].id }, family: 'tag' }));
   assert.equal(clear.ok, true);
   for (const tamper of [
-    (event) => { event.preimage[0].annotationId = 'forged'; },
+    (event) => { event.facts.preimage[0].annotationId = 'forged'; },
     (event) => { event.operation.groupIds[0] = 'forged'; },
   ]) {
     const before = durableAnnotatedTextState(ctx.db); const event = structuredClone(clear.events[0].data); tamper(event);
@@ -228,8 +228,8 @@ test('v9 split-and-assign projection rejects tampered annotation and group membe
   const result = await dispatch(ctx, 'tamper-split-assign', { kind: 'block.split-and-assign', at: { blockId: ctx.blockId, offset: 5, affinity: 'right' }, annotation: { id: 'split-ann', family: 'tag', fields: { value: true } } });
   assert.equal(result.ok, true);
   for (const tamper of [
-    (event) => { event.annotation.id = 'forged'; },
-    (event) => { event.groupMembership.groupId = 'forged'; },
+    (event) => { event.facts.annotation.id = 'forged'; },
+    (event) => { event.facts.groupMembership.groupId = 'forged'; },
   ]) {
     const before = durableAnnotatedTextState(ctx.db); const event = structuredClone(result.events[0].data); tamper(event);
     assert.throws(() => ctx.Document.projection.apply({ handle: native('R8IntegrationDocument', 'body', 'operated'), data: event }, ctx.db));

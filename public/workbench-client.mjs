@@ -17,6 +17,7 @@ import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument } from './workbench-annotated-text-snapshot.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
+import { displayToWirePosition } from './workbench-annotated-text-redaction-coords.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
 export { materializeAnnotatedTextSnapshot };
 
@@ -3095,7 +3096,7 @@ export function createLiveDeliveryHttpSession({
       method: 'POST',
       credentials: 'include',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify(historyRequest ?? { ...action, ...(requestIdentity ? {} : { scope }), clientId: historySession }),
+      body: JSON.stringify(historyRequest ?? { ...action, ...(requestIdentity ? { document: requestIdentity } : { scope }), clientId: historySession }),
     });
     let receipt;
     try { receipt = await response.json(); } catch {
@@ -3236,6 +3237,8 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   const snapshotBinding = createAnnotatedTextSnapshotSessionBinding((handle, serverId, generation) => {
     blockGroupTokens.set(handle, { serverId, generation });
   });
+  const requestIdentity = { entity: entity.name, field: field.fieldName, documentId, authoringClient };
+  if (typeof context.viewAs === 'string' && context.viewAs.length > 0) requestIdentity.viewAs = context.viewAs;
   const session = createLiveDeliveryHttpSession({
     baseUrl,
     scope,
@@ -3243,7 +3246,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     fetchImpl,
     eventSourceFactory,
     createActionId,
-    requestIdentity: { entity: entity.name, field: field.fieldName, documentId, authoringClient },
+    requestIdentity,
     onRecoveryStart: () => revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding),
     onRecoveryDelayed,
     optimistic(document, action) {
@@ -3271,7 +3274,8 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     void Promise.resolve().then(() => fetchImpl(`${baseUrl.replace(/\/$/, '')}/authoring/ack`, {
       method: 'POST', credentials: 'include', headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ version: 1, entity: entity.name, field: field.fieldName, documentId,
-        stream: authoring.stream, lease: authoring.lease, snapshot: authoring.snapshot }),
+        stream: authoring.stream, lease: authoring.lease, snapshot: authoring.snapshot,
+        ...(context.viewAs ? { viewAs: context.viewAs } : {}) }),
     })).catch(() => {});
   }
   function flushAuthoringAcknowledgements() {
@@ -3304,6 +3308,11 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       }
     }
     return blocks;
+  }
+  function wirePosition(value) {
+    const block = session.snapshot?.blocks?.find((candidate) => candidate.kind === 'visible' && candidate.id === value?.blockId);
+    if (!block || !Number.isSafeInteger(value.offset) || value.offset < 0 || value.offset > block.text.length) throw new TypeError('annotated text position is outside the current document');
+    return displayToWirePosition(value, block.redactions ?? []);
   }
   function sameCapturedBlocks(blocks) {
     return [...blocks].every(([blockId, text]) => session.snapshot?.blocks?.some(
@@ -3366,7 +3375,8 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       const positionToken = snapshotBinding.authoring.positionTokens.get(value.blockId);
       if (!positionToken) throw new TypeError('annotated text position is unavailable');
       if (value.affinity !== 'left' && value.affinity !== 'right') throw new TypeError('annotated text position requires an affinity');
-      return { positionToken, offset: value.offset, affinity: value.affinity };
+      const translated = wirePosition(value);
+      return { positionToken, offset: translated.offset, affinity: translated.affinity };
     };
     const temporaryBlock = command.kind === 'block.split' || command.kind === 'block.continue' || command.kind === 'block.split-and-assign'
       ? randomToken() : undefined;
@@ -3414,7 +3424,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     if (!positionToken || from.blockId !== to?.blockId) throw new TypeError('annotated text replacement requires one available block');
     const authoring = { version: 1, stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease };
     const pendingPositionBlocks = new Map(snapshotBinding.authoring.positionTokens.entries());
-    const position = (value) => ({ positionToken, offset: value.offset, affinity: value.affinity });
+    const position = (value) => {
+      const translated = wirePosition(value);
+      return { positionToken, offset: translated.offset, affinity: translated.affinity };
+    };
     const actions = from.offset !== to.offset && text ? [annotatedTextAction(entity, field, { kind: 'text.replace', id: documentId, authoring: { ...authoring, mutationId }, from: position(from), to: position(to), text })]
       : from.offset !== to.offset ? [annotatedTextAction(entity, field, { kind: 'text.delete', id: documentId, authoring: { ...authoring, mutationId }, from: position(from), to: position(to) })]
         : text ? [annotatedTextAction(entity, field, { kind: 'text.insert', id: documentId, authoring: { ...authoring, mutationId }, at: position(from), text })] : [];

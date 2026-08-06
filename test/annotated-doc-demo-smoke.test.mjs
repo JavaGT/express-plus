@@ -27,6 +27,31 @@ test('annotated-doc migration adds a color for legacy comments', async (t) => {
   );
 });
 
+test('annotated-doc migration rebuilds the annotation family CHECK to include sensitive and confidential', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const initial = createAnnotatedDocApp({ db });
+  await initial.app.prepareSchema();
+  db.exec(`
+    DROP TABLE _Migration;
+    DROP TABLE Doc_body_annotation;
+    CREATE TABLE Doc_body_annotation (
+      id TEXT PRIMARY KEY,
+      document_id TEXT NOT NULL,
+      project_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      family TEXT NOT NULL CHECK (family IN ('comment')),
+      FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE,
+      FOREIGN KEY (project_id) REFERENCES Project(id) ON DELETE CASCADE,
+      FOREIGN KEY (owner_id) REFERENCES User(id) ON DELETE CASCADE
+    );
+  `);
+  const migrated = createAnnotatedDocApp({ db });
+  await migrated.app.start();
+  t.after(async () => migrated.app.shutdown());
+  const sql = db.prepare(`SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'Doc_body_annotation'`).get().sql;
+  assert.match(sql, /family IN \('comment', 'sensitive', 'confidential'\)/);
+});
+
 test('annotated-doc demo creates a document and inserts via the document session', async (t) => {
   const { app, principalOf } = createAnnotatedDocApp({ db: ':memory:' });
   app.listen(0, { principalOf });
@@ -43,7 +68,7 @@ test('annotated-doc demo creates a document and inserts via the document session
   const handleSource = await (await fetch(`${origin}/client-handle.mjs`)).text();
   const handleUrl = `data:text/javascript;base64,${Buffer.from(handleSource).toString('base64')}`;
   const { DocClient } = await import(handleUrl);
-  assert.deepEqual(Object.keys(DocClient.body.annotations), ['comment']);
+  assert.deepEqual(Object.keys(DocClient.body.annotations), ['comment', 'sensitive', 'confidential']);
   assert.deepEqual(Object.keys(DocClient.body.measurements), []);
 
   const listEmpty = await fetch(`${origin}/docs`);
@@ -104,14 +129,21 @@ test('annotated-doc demo creates a document and inserts via the document session
   assert.equal(session.document.annotations.length, 1);
   assert.equal(session.document.annotations[0].id, 'smoke-comment');
 
-  const len = session.document.blocks[0].text.length;
-  const deleted = await session.delete({
-    mutationId: 'smoke-del-all',
-    from: { blockId, offset: 0, affinity: 'right' },
-    to: { blockId, offset: len, affinity: 'right' },
-  });
-  assert.equal(deleted.ok, true, deleted.failure?.message);
-  assert.equal((await deleted.settlement.wait()).status, 'reconciled');
+  // Select-all delete: clear every block (the comment splits the doc into
+  // multiple blocks). Deleting each block's full range from last to first
+  // empties the document and collapses back to one empty editable block.
+  const originalBlocks = [...session.document.blocks];
+  for (let index = originalBlocks.length - 1; index >= 0; index -= 1) {
+    const target = originalBlocks[index];
+    const deleted = await session.delete({
+      mutationId: `smoke-del-${index}`,
+      from: { blockId: target.id, offset: 0, affinity: 'right' },
+      to: { blockId: target.id, offset: target.text.length, affinity: 'right' },
+    });
+    assert.equal(deleted.ok, true, deleted.failure?.message);
+    assert.equal((await deleted.settlement.wait()).status, 'reconciled');
+  }
+  assert.equal(session.document.blocks.length, 1);
   assert.equal(session.document.blocks[0].text, '');
 
   const listed = await (await fetch(`${origin}/docs`)).json();

@@ -349,7 +349,7 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
 
   // Run the built-in Workbench migration (fresh apply).
   runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 2);
+  assert.equal(appliedWorkbenchVersion(db), 3);
 
   // Canonical shape: position has checkpoint_id NOT NULL, no family_checkpoint.
   const positionColumns = new Set(db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => r.name));
@@ -370,7 +370,7 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
 
   // Second startup is a no-op.
   runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 2);
+  assert.equal(appliedWorkbenchVersion(db), 3);
 });
 
 test('A8-rollback: induced migration failure rolls back and leaves legacy schema intact', () => {
@@ -399,7 +399,7 @@ test('A8-rollback: induced migration failure rolls back and leaves legacy schema
   // With the trigger removed, the same run succeeds (idempotent re-apply after rollback).
   db.exec(`DROP TRIGGER fail_migration`);
   runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 2);
+  assert.equal(appliedWorkbenchVersion(db), 3);
 });
 
 test('A8-v2: migration invalidates defective ephemeral state and preserves durable state', () => {
@@ -419,7 +419,7 @@ test('A8-v2: migration invalidates defective ephemeral state and preserves durab
   // Upgrade from the deployed v1 build invalidates every opaque authoring token.
   runWorkbenchMigrations(db);
   runWorkbenchMigrations(db);
-  assert.equal(appliedWorkbenchVersion(db), 2);
+  assert.equal(appliedWorkbenchVersion(db), 3);
   assert.equal(count(db, `${prefix}_authoring_stream`), 0, 'streams from the defective build are invalidated');
   assert.equal(count(db, `${prefix}_authoring_lease`), 0, 'leases from the defective build are invalidated');
   assert.equal(count(db, `${prefix}_authoring_position`), 0, 'defective position tokens are removed');
@@ -550,7 +550,7 @@ test('A10: app.prepareSchema upgrades a legacy authoring schema via the built-in
   assert.ok(positionColumns.has('checkpoint_id'), 'position has checkpoint_id after app boot');
   assert.ok(positionColumns.has('family_checkpoint') === false, 'legacy family_checkpoint column removed after app boot');
   const applied = db.prepare('SELECT MAX(version) AS v FROM _WorkbenchMigration').get();
-  assert.equal(applied.v, 2, 'Workbench migrations v1 and v2 recorded');
+  assert.equal(applied.v, 3, 'Workbench migrations v1–v3 recorded');
   assert.equal(count(db, `${prefix}_authoring_position`), 0, 'pre-migration legacy positions cleared');
   app.db.close();
 });

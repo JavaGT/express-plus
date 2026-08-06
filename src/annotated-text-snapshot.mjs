@@ -1,8 +1,8 @@
 import { deserializeField } from './field-strategy.mjs';
-import { materializeBlock, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from './annotated-text-family.mjs';
+import { materializeBlock, projectEndpointToBlockOffset, restoreTextFamilyCheckpoint, textFamilyCheckpoint } from './annotated-text-family.mjs';
 import { assertAnnotationLastMemberships } from './annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
-import { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
+import { projectAnnotatedTextForRecipient, authoringRedactionsForRecipient } from './annotated-text-recipient-projection.mjs';
 import { projectAnnotatedTextCaretForRecipient } from './annotated-text-caret-projection.mjs';
 import { mayRow, protectingAnnotationCapabilities } from './row-grant.mjs';
 import { read } from './grant.mjs';
@@ -101,7 +101,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     `SELECT annotation.id, annotation.family, annotation.owner_id FROM ${prefix}_annotation AS annotation WHERE annotation.document_id = ? AND (EXISTS (SELECT 1 FROM ${prefix}_membership AS membership WHERE membership.annotation_id = annotation.id) OR EXISTS (SELECT 1 FROM ${prefix}_group_membership AS membership WHERE membership.annotation_id = annotation.id)) ORDER BY annotation.id`,
   ).all(row.id);
   const memberships = db.prepare(
-    `SELECT membership.annotation_id, membership.block_id, membership.ordinal FROM ${prefix}_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ? ORDER BY membership.annotation_id, membership.ordinal`,
+    `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point FROM ${prefix}_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ? ORDER BY membership.annotation_id, membership.ordinal`,
   ).all(row.id);
   const groupMemberships = db.prepare(
     `SELECT membership.annotation_id, membership.group_id, membership.ordinal FROM ${prefix}_group_membership AS membership JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ? ORDER BY membership.annotation_id, membership.ordinal`,
@@ -118,7 +118,27 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
       WHERE a.document_id = ?
       ORDER BY a.id`,
   ).all(row.id);
-  const canonicalMemberships = memberships.map((membership) => ({ annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal }));
+  const canonicalMemberships = memberships.map((membership) => {
+    let start;
+    let end;
+    try {
+      start = projectEndpointToBlockOffset(family, membership.block_id, JSON.parse(membership.start_point));
+      end = projectEndpointToBlockOffset(family, membership.block_id, JSON.parse(membership.end_point));
+    } catch {
+      // A structural edit can leave an old membership anchor unprojectable.
+      // Keep it range-less: protectors then conservatively restrict the block.
+      return { annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal };
+    }
+    const text = materializeBlock(family, membership.block_id);
+    // A once-valid span can become tombstone-only after a text edit. It has no
+    // inline visible interval; omit its offsets so a denied protector uses the
+    // conservative whole-block path instead of failing an otherwise readable
+    // document or revealing stale range topology.
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > text.length) {
+      return { annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal };
+    }
+    return { annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal, start, end };
+  });
   const canonicalAnnotations = annotations.map((annotation) => {
     const declared = descriptor.annotations.find((entry) => entry.annotationName === annotation.family);
     if (!declared) fail(`annotation '${annotation.id}' has unknown family`);
@@ -166,10 +186,19 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     groupMemberships: [],
   };
   canonical.groupMemberships = groupMemberships.map((membership) => ({ annotationId: membership.annotation_id, groupId: membership.group_id, ordinal: membership.ordinal }));
+  // A protector is active only where it actually protects a target — the
+  // protector's range must intersect a protected target's range on the same
+  // block. This must agree with the recipient projection's `active` set.
   const active = canonicalAnnotations.filter((annotation) => Object.hasOwn(meta.protectingFamilies, annotation.family) && annotation.protectedTargetIds?.length)
     .filter((annotation) => {
-      const own = new Set(canonicalMemberships.filter((membership) => membership.annotationId === annotation.id).map((membership) => membership.blockId));
-      return canonicalMemberships.some((membership) => annotation.protectedTargetIds.includes(membership.annotationId) && own.has(membership.blockId));
+      const own = canonicalMemberships.filter((membership) => membership.annotationId === annotation.id);
+      const targets = canonicalMemberships.filter((membership) => annotation.protectedTargetIds.includes(membership.annotationId));
+      return own.some((protector) => targets.some((target) => {
+        if (protector.blockId !== target.blockId) return false;
+        const protectorWhole = protector.start === undefined || protector.end === undefined;
+        const targetWhole = target.start === undefined || target.end === undefined;
+        return protectorWhole || targetWhole || (protector.start < target.end && target.start < protector.end);
+      }));
     });
   const protectors = [];
   for (const annotation of active) {
@@ -184,6 +213,9 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
   if (caret !== null || !mintBasis) return recipient;
 
   const cursor = authoring?.fence ?? db.prepare(`SELECT lastSeq FROM _ProjectedCursor WHERE entity = ? AND field = ?`).get(entity.name, fieldName)?.lastSeq ?? 0;
+  // A frame binds its public zero-width markers to canonical denied intervals.
+  // This private token state lets admission translate visible surrounding text
+  // without ever disclosing the omitted width or content to the client.
   const visibleBlocks = recipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id);
 
   if (!authoring) {
@@ -198,7 +230,7 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
 
   const issued = issueAuthoringSnapshot({
     db, prefix, leaseId: lease.id, fence: cursor,
-    positions: visibleBlocks.map((blockId) => ({ blockId, familyCheckpoint: textFamilyCheckpoint(family), visibleAtIssue: true })),
+    positions: visibleBlocks.map((blockId) => ({ blockId, familyCheckpoint: textFamilyCheckpoint(family), visibleAtIssue: true, redactions: authoringRedactionsForRecipient(recipient, blockId) })),
     groups: recipient.blockGroups.map((group) => {
       const canonicalGroupId = groupIds.get(group.blockIds[0]);
       return { groupId: canonicalGroupId, visibleBlocks: group.blockIds, assignable: group.blockIds.every((blockId) => visibleBlocks.includes(blockId)) };

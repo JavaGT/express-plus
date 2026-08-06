@@ -81,6 +81,7 @@ function rebuildAuthoringFamily(db, prefix) {
        block_id TEXT,
        checkpoint_id TEXT NOT NULL,
        visible_at_issue INTEGER NOT NULL DEFAULT 1,
+       redactions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(redactions)),
        created_at TEXT NOT NULL,
        FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE,
        FOREIGN KEY (checkpoint_id) REFERENCES ${prefix}_authoring_checkpoint(id) ON DELETE RESTRICT
@@ -173,6 +174,17 @@ export const WORKBENCH_MIGRATIONS = Object.freeze([
           db.exec(`DELETE FROM ${prefix}_authoring_${table}`);
         }
         db.exec(`DELETE FROM ${prefix}_authoring_stream`);
+      }
+    },
+  },
+  {
+    // v3: bind redaction-aware public offsets to their canonical intervals.
+    version: 3,
+    transaction: 'exclusive',
+    up(db) {
+      for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_authoring_position'").all()) {
+        const columns = new Set(db.prepare(`PRAGMA table_info(${row.name})`).all().map((column) => column.name));
+        if (!columns.has('redactions')) db.exec(`ALTER TABLE ${row.name} ADD COLUMN redactions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(redactions))`);
       }
     },
   },

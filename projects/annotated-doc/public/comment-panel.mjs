@@ -62,7 +62,8 @@ export function createCommentPanel({
   }
 
   function renderAnnotations(snapshot, { onRemove } = {}) {
-    const annotations = (snapshot?.annotations ?? []).filter((annotation) => annotation.family === 'comment');
+    const annotations = (snapshot?.annotations ?? [])
+      .filter((annotation) => annotation.family === 'comment');
     annotationsEl.replaceChildren();
     emptyEl.classList.toggle('hidden', annotations.length > 0);
     for (const [index, annotation] of annotations.entries()) {

@@ -132,20 +132,82 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db, privateF
   if (!data || typeof data !== 'object' || typeof data.id !== 'string' || data.id.length === 0) {
     throw new Error(`${name}.${handle.field}.operated event has no data`);
   }
-  if (data.version === 1) return applyR1AnnotatedTextOperation({ name, handle, db, data });
-  if (data.version === 2) return applyStructuralSplitProjection({ name, handle, db, descriptor, data });
-  if (data.version === 3) return applyR3AnnotatedTextOperation({ name, handle, db, descriptor, data });
-  if (data.version === 4) return applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data });
-  if (data.version === 7) return applyR7AnnotatedTextOperation({ name, handle, db, descriptor, data });
-  if (data.version === 5 || data.version === 10 || data.version === 11) return applyAnnotationRemovalOperation({ name, handle, db, descriptor, data });
-  if (data.version === 6) return applyR6AnnotatedTextOperation({ name, handle, db, data });
-  if (data.version === 8) return applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact });
-  if (data.version === 9) return applyR9AnnotatedTextOperation({ name, handle, db, descriptor, data });
-  if (data.version === 12) return applyR12AnnotatedTextOperation({ name, handle, db, descriptor, data });
+  if (data.version === 13) return applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact });
   throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
 }
 
-function applyR9AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+// The active durable codec is one exact envelope.  The operation-specific
+// reducers below consume only the facts in this envelope; versions before 13
+// are deliberately not accepted by the projection.
+function applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact }) {
+  const prefix = `${name}.${handle.field}.operated v13`;
+  const factKeys = ['actorId', 'annotation', 'block', 'blocks', 'emptiedAnnotations', 'family', 'groupMembership', 'lifecycle', 'measurements', 'memberships', 'postimage', 'preimage', 'prunedBlockIds', 'removedAnnotationIds', 'result', 'selectedBlockId', 'selectedBlockIds', 'splitBlockIds', 'splitOps'];
+  const revision = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).sort().join() === 'frontier,structuralRevision' && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
+  if (!data || typeof data !== 'object' || Array.isArray(data) ||
+      Object.keys(data).sort().join() !== 'after,before,facts,id,operation,version' || data.version !== 13 ||
+      typeof data.id !== 'string' || !data.id || !revision(data.before) || !revision(data.after) ||
+      !data.operation || typeof data.operation !== 'object' || Array.isArray(data.operation) ||
+      !data.facts || typeof data.facts !== 'object' || Array.isArray(data.facts) ||
+      Object.keys(data.facts).sort().join() !== factKeys.join()) throw new Error(`${prefix} event has invalid envelope`);
+  const f = data.facts;
+  const arrayFacts = ['blocks', 'emptiedAnnotations', 'measurements', 'memberships', 'postimage', 'preimage', 'prunedBlockIds', 'removedAnnotationIds', 'selectedBlockIds', 'splitBlockIds', 'splitOps'];
+  if (arrayFacts.some((key) => !Array.isArray(f[key])) ||
+      (f.family !== null && (!f.family || typeof f.family !== 'object')) ||
+      (f.block !== null && (!f.block || typeof f.block !== 'object')) ||
+      (f.annotation !== null && (!f.annotation || typeof f.annotation !== 'object')) ||
+      (f.lifecycle !== null && (!f.lifecycle || typeof f.lifecycle !== 'object')) ||
+      (f.result !== null && (!f.result || typeof f.result !== 'object')) ||
+      (f.groupMembership !== null && (!f.groupMembership || typeof f.groupMembership !== 'object')) ||
+      (f.actorId !== null && (typeof f.actorId !== 'string' || !f.actorId)) ||
+      (f.selectedBlockId !== null && (typeof f.selectedBlockId !== 'string' || !f.selectedBlockId))) throw new Error(`${prefix} event has invalid facts`);
+  const base = { id: data.id, before: data.before, after: data.after, operation: data.operation };
+  let legacy;
+  switch (data.operation.kind) {
+    case 'text.apply':
+      legacy = { ...base, version: f.prunedBlockIds.length ? 12 : 1, family: f.family };
+      if (f.prunedBlockIds.length) { legacy.prunedBlockIds = f.prunedBlockIds; legacy.emptiedAnnotations = f.emptiedAnnotations; }
+      break;
+    case 'text.replace': legacy = { ...base, version: 6, family: f.family }; break;
+    case 'text.insert-block': legacy = { ...base, version: 9, family: f.family, block: f.block, memberships: f.memberships, measurements: f.measurements }; break;
+    case 'block.split': legacy = { ...base, version: 2, family: f.family, blocks: f.blocks, memberships: f.memberships, measurements: f.measurements }; break;
+    case 'block.merge': legacy = { ...base, version: 3, family: f.family, block: f.block, memberships: f.memberships, measurements: f.measurements }; break;
+    case 'block.continue':
+    case 'block.split-and-assign':
+      legacy = { ...base, version: 8, family: f.family, blocks: f.blocks, memberships: f.memberships, measurements: f.measurements };
+      if (data.operation.kind === 'block.split-and-assign') { legacy.annotation = f.annotation; legacy.groupMembership = f.groupMembership; }
+      break;
+    case 'annotation.apply':
+      legacy = { ...base, version: Object.hasOwn(data.operation.selection, 'endBlockId') ? 7 : 4, actorId: f.actorId, family: f.family, annotation: f.annotation, splitBlockIds: f.splitBlockIds, selectedBlockId: f.selectedBlockId, splitOps: f.splitOps, blocks: f.blocks, memberships: f.memberships, measurements: f.measurements };
+      if (legacy.version === 7) legacy.selectedBlockIds = f.selectedBlockIds;
+      break;
+    case 'annotation.detach': legacy = { ...base, version: 5, lifecycle: f.lifecycle, result: f.result }; break;
+    case 'annotation.remove':
+      legacy = { ...base, version: f.prunedBlockIds.length ? 11 : 10, lifecycle: f.lifecycle, result: f.result };
+      if (f.prunedBlockIds.length) { legacy.family = f.family; legacy.prunedBlockIds = f.prunedBlockIds; }
+      break;
+    case 'block-group.assignment.set':
+    case 'block-group.assignment.clear': legacy = { ...base, version: 8, preimage: f.preimage, postimage: f.postimage, removedAnnotationIds: f.removedAnnotationIds }; break;
+    default: throw new Error(`${prefix} event has unknown operation kind '${data.operation.kind}'`);
+  }
+  switch (legacy.version) {
+    case 1: return projectTextApplyOperation({ name, handle, db, data: legacy });
+    case 2: return projectBlockSplitOperation({ name, handle, db, descriptor, data: legacy });
+    case 3: return projectBlockMergeOperation({ name, handle, db, descriptor, data: legacy });
+    case 4: return projectAnnotationApplyOperation({ name, handle, db, descriptor, data: legacy });
+    case 7: return projectAnnotationRangeApplyOperation({ name, handle, db, descriptor, data: legacy });
+    case 5:
+    case 10:
+    case 11: return projectAnnotationRemovalOperation({ name, handle, db, descriptor, data: legacy });
+    case 6: return projectTextReplaceOperation({ name, handle, db, data: legacy });
+    case 8: return projectBlockAssignmentOperation({ name, handle, db, descriptor, data: legacy, privateFact });
+    case 9: return projectTextInsertBlockOperation({ name, handle, db, descriptor, data: legacy });
+    case 12: return projectTextPruneOperation({ name, handle, db, descriptor, data: legacy });
+    default: throw new Error(`${prefix} event has unsupported operation kind`);
+  }
+}
+
+function projectTextInsertBlockOperation({ name, handle, db, descriptor, data }) {
   const prefix = `${name}_${handle.field}`;
   const operation = data.operation;
   const revision = (value) => value && Object.keys(value).sort().join() === 'frontier,structuralRevision' && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
@@ -200,7 +262,7 @@ function stageBlockPositions(db, prefix, existingById) {
   }
 }
 
-function applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, privateFact }) {
+function projectBlockAssignmentOperation({ name, handle, db, descriptor, data, privateFact }) {
   const prefix = `${name}_${handle.field}`;
   const shape = data && typeof data === 'object' && !Array.isArray(data) ? Object.keys(data).sort().join() : '';
    const structuralShape = 'after,before,blocks,family,id,measurements,memberships,operation,version';
@@ -238,7 +300,7 @@ function applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, pri
        blocks: data.blocks, memberships: data.memberships, measurements: data.measurements,
        operation: { kind: 'block.split', leftBlockId: data.operation.leftBlockId, rightBlockId: data.operation.rightBlockId, utf16Offset: data.operation.utf16Offset },
      };
-    applyStructuralSplitProjection({ name, handle, db, descriptor, data: structural });
+    projectBlockSplitOperation({ name, handle, db, descriptor, data: structural });
     if (data.operation.kind === 'block.split-and-assign') db.prepare(`UPDATE ${prefix}_block_group SET group_id = ? WHERE block_id = ?`).run(data.operation.rightGroupId, data.operation.rightBlockId);
     if (data.operation.kind === 'block.split-and-assign') {
        const annotation = data.annotation;
@@ -308,7 +370,7 @@ function applyR8AnnotatedTextOperation({ name, handle, db, descriptor, data, pri
   return true;
 }
 
-function applyAnnotationRemovalOperation({ name, handle, db, descriptor, data }) {
+function projectAnnotationRemovalOperation({ name, handle, db, descriptor, data }) {
   const prefix = `${name}_${handle.field}`;
   const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
@@ -453,7 +515,7 @@ function applyAnnotationRemovalOperation({ name, handle, db, descriptor, data })
   return true;
 }
 
-function applyR1AnnotatedTextOperation({ name, handle, db, data }) {
+function projectTextApplyOperation({ name, handle, db, data }) {
   const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
   const operation = data?.operation;
@@ -506,7 +568,7 @@ function applyR1AnnotatedTextOperation({ name, handle, db, data }) {
 }
 
 /** text.apply that prunes empty blocks and applies empty-policy to their annotations. */
-function applyR12AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+function projectTextPruneOperation({ name, handle, db, descriptor, data }) {
   const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
   const operation = data?.operation;
@@ -660,7 +722,7 @@ function applyR12AnnotatedTextOperation({ name, handle, db, descriptor, data }) 
   return true;
 }
 
-function applyR6AnnotatedTextOperation({ name, handle, db, data }) {
+function projectTextReplaceOperation({ name, handle, db, data }) {
   const isVersion = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
     Object.keys(value).length === 2 && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
   const operation = data?.operation;
@@ -746,7 +808,7 @@ function applyR6AnnotatedTextOperation({ name, handle, db, data }) {
   return true;
 }
 
-function applyStructuralSplitProjection({ name, handle, db, descriptor, data }) {
+function projectBlockSplitOperation({ name, handle, db, descriptor, data }) {
   const prefix = `${name}_${handle.field}`;
   const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
   const measurementConfigs = compiledMeta?.measurementConfigs ?? {};
@@ -1011,7 +1073,7 @@ function applyStructuralSplitProjection({ name, handle, db, descriptor, data }) 
   return true;
 }
 
-function applyR3AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+function projectBlockMergeOperation({ name, handle, db, descriptor, data }) {
   const prefix = `${name}_${handle.field}`;
   const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
   const measurementConfigs = compiledMeta?.measurementConfigs ?? {};
@@ -1363,7 +1425,7 @@ function applyR3AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   return true;
 }
 
-function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+function projectAnnotationApplyOperation({ name, handle, db, descriptor, data }) {
   const prefix = `${name}_${handle.field}`;
   const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
   const measurementConfigs = compiledMeta?.measurementConfigs ?? {};
@@ -1457,13 +1519,31 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
     throw new Error(`${name}.${handle.field}.operated v4 event selection must be non-empty and within its source block`);
   }
 
+  // A protective annotation applied to a same-block subrange is a span: one
+  // partial membership at the requested [start,end) structural endpoints with
+  // no splits. This is only recognized when the event carries no split facts
+  // (splitOps empty); historical split-to-block events for the same family
+  // remain on the legacy split path for replay compatibility. Non-protecting
+  // families and whole-block protecting selections keep the legacy behavior.
+  const spanProtectingDesc = descriptor.annotations.find((entry) => entry.annotationName === evAnn.family);
+  const spanProtecting = spanProtectingDesc?.kind === 'protectingAnnotation' &&
+    (startUtf16Offset > 0 || endUtf16Offset < sourceBlockText.length) &&
+    data.splitOps.length === 0;
+
   const anySplit = data.splitOps.length > 0;
 
-  const expectedSplitCount = (startUtf16Offset > 0 ? 1 : 0) + (endUtf16Offset < sourceBlockText.length ? 1 : 0);
-  if (data.splitOps.length !== expectedSplitCount || data.splitOps.length > 2 ||
-      new Set(data.splitBlockIds).size !== data.splitBlockIds.length ||
-      data.splitBlockIds.some((id) => typeof id !== 'string' || id.length === 0 || id === blockId)) {
-    throw new Error(`${name}.${handle.field}.operated v4 event split count or IDs do not match selection topology`);
+  if (spanProtecting) {
+    if (data.splitOps.length !== 0 || data.splitBlockIds.length !== 0 ||
+        data.blocks.length !== 0 || data.measurements.length !== 0) {
+      throw new Error(`${name}.${handle.field}.operated v4 protective span must not carry split or block/measurement facts`);
+    }
+  } else {
+    const expectedSplitCount = (startUtf16Offset > 0 ? 1 : 0) + (endUtf16Offset < sourceBlockText.length ? 1 : 0);
+    if (data.splitOps.length !== expectedSplitCount || data.splitOps.length > 2 ||
+        new Set(data.splitBlockIds).size !== data.splitBlockIds.length ||
+        data.splitBlockIds.some((id) => typeof id !== 'string' || id.length === 0 || id === blockId)) {
+      throw new Error(`${name}.${handle.field}.operated v4 event split count or IDs do not match selection topology`);
+    }
   }
 
   if (anySplit) {
@@ -1584,8 +1664,13 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   let startEndpoint;
   let endEndpoint;
   try {
-    startEndpoint = resolvePositionToEndpoint(reduced, selectedBlockId, 0, basisFrontier);
-    endEndpoint = resolvePositionToEndpoint(reduced, selectedBlockId, selectedBlockText.length, basisFrontier);
+    if (spanProtecting) {
+      startEndpoint = resolvePositionToEndpoint(reduced, selectedBlockId, startUtf16Offset, basisFrontier);
+      endEndpoint = resolvePositionToEndpoint(reduced, selectedBlockId, endUtf16Offset, basisFrontier);
+    } else {
+      startEndpoint = resolvePositionToEndpoint(reduced, selectedBlockId, 0, basisFrontier);
+      endEndpoint = resolvePositionToEndpoint(reduced, selectedBlockId, selectedBlockText.length, basisFrontier);
+    }
   } catch {
     throw new Error(`${name}.${handle.field}.operated v4 event failed to resolve selected block endpoints`);
   }
@@ -1845,7 +1930,7 @@ function applyR4AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
   return true;
 }
 
-function applyR7AnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+function projectAnnotationRangeApplyOperation({ name, handle, db, descriptor, data }) {
   const prefix = `${name}_${handle.field}`;
   const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
   const measurementConfigs = compiledMeta?.measurementConfigs ?? {};
