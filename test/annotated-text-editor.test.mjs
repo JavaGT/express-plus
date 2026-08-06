@@ -41,7 +41,7 @@ function setup(text = 'Hello') {
   return { dom, element, session, calls, errors, binding, select, beforeinput, publish(document) { session.document = document; listener?.(document); } };
 }
 
-const flushInput = () => new Promise((resolve) => setTimeout(resolve, 35));
+const flushInput = () => new Promise((resolve) => setTimeout(resolve, 110));
 
 test('annotated editor rejects non-atomic selection replacement without changing visible text', async () => {
   const harness = setup();
@@ -190,6 +190,79 @@ test('annotated editor preserves later typing while the preceding replacement se
     text: 'd',
   });
   assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor reports an incompatible foreign update after submitted input ingests', async () => {
+  const harness = setup('a');
+  const settlements = [];
+  harness.session.status = 'live';
+  harness.session.replace = async (input) => {
+    harness.calls.push(['replace', input]);
+    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settlements.push(resolve); }) } };
+  };
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  await flushInput();
+  harness.publish(visible('ab'));
+  settlements.shift()();
+  await flushInput();
+  harness.element.focus();
+  harness.select(2);
+  harness.beforeinput('insertText', 'c');
+  harness.publish(visible('foreign replacement'));
+
+  assert.equal(harness.element.textContent, 'foreign replacement');
+  assert.equal(harness.element.getAttribute('aria-busy'), 'false');
+  assert.match(harness.errors.at(-1).message, /changed before buffered input/);
+  harness.binding.close();
+});
+
+test('annotated editor discards buffered successor after its predecessor is rejected', async () => {
+  const harness = setup('a');
+  let reject;
+  harness.session.status = 'live';
+  harness.session.replace = async (input) => {
+    harness.calls.push(['replace', input]);
+    return new Promise((resolve) => { reject = resolve; });
+  };
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  await flushInput();
+  harness.element.focus();
+  harness.select(2);
+  harness.beforeinput('insertText', 'c');
+  reject({ ok: false, failure: new Error('replacement rejected') });
+  await flushInput();
+
+  assert.equal(harness.element.textContent, 'a');
+  assert.match(harness.errors.at(-1).message, /replacement rejected/);
+  harness.binding.close();
+});
+
+test('annotated editor submits new input from a foreign snapshot after its predecessor settles', async () => {
+  const harness = setup('a');
+  let settle;
+  harness.session.status = 'live';
+  harness.session.replace = async (input) => {
+    harness.calls.push(['replace', input]);
+    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settle = resolve; }) } };
+  };
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  await flushInput();
+  harness.publish(visible('foreign'));
+  harness.element.focus();
+  harness.select(7);
+  harness.beforeinput('insertText', '!');
+  settle();
+  await flushInput();
+
+  assert.deepEqual(harness.calls[1][1], {
+    from: { blockId: 'block-1', offset: 7, affinity: 'right' },
+    to: { blockId: 'block-1', offset: 7, affinity: 'right' },
+    text: '!',
+  });
   harness.binding.close();
 });
 

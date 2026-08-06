@@ -84,9 +84,22 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
   function render(document = session.document) {
     if (closed || composing) return;
     const block = firstVisibleBlock(document);
+    if (submitted && block?.id === submitted.blockId && block.text === submitted.text) {
+      submitted.ingested = true;
+      if (!submitting) submitted = null;
+    }
     if (queued) {
-      if (block?.id === queued.blockId && block.text === queued.baseText) return;
+      if (block?.id === queued.blockId && block.text === queued.baseText) {
+        if (!submitting && (!session.status || session.status === 'live')) flushQueued();
+        return;
+      }
       if (block?.id === queued.blockId) {
+        // This edit was composed atop the most recently submitted draft. A
+        // receipt may settle before ingest publishes that draft, so the older
+        // recipient snapshot is a predecessor, not an external conflict.
+        if (submitted?.blockId === queued.blockId
+          && queued.baseText === submitted.text
+          && block.text === submitted.baseText) return;
         const intent = changedRange(queued.baseText, queued.text);
         if (intent.from === intent.to && intent.text && block.text.slice(0, intent.from) === queued.baseText.slice(0, intent.from)) {
           const delta = block.text.length - queued.baseText.length;
@@ -103,6 +116,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       clearTimeout(queuedTimer);
       queuedTimer = null;
       queued = null;
+      element.setAttribute('aria-busy', 'false');
       onError(new Error('annotated text changed before buffered input was submitted'));
     }
     const text = block?.text ?? '';
@@ -132,16 +146,30 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     if (!block) return;
     submitting = true;
     try {
-      await report(session.replace({
+      const result = await report(session.replace({
       from: { blockId: block.id, offset: from, affinity: 'right' },
       to: { blockId: block.id, offset: to, affinity: 'right' },
       text,
       }));
+      if (!result?.ok) {
+        submitted = null;
+        clearTimeout(queuedTimer);
+        queuedTimer = null;
+        queued = null;
+        element.setAttribute('aria-busy', 'false');
+        render();
+        return;
+      }
       setCaret(element, from + text.length);
     } finally {
       submitting = false;
-      submitted = null;
-      if (queued && (!session.status || session.status === 'live')) flushQueued();
+      // A settlement receipt and recipient ingest are separate fences. Only
+      // translate the successor after both have confirmed this draft.
+      const block = firstVisibleBlock(session.document);
+      if (submitted?.ingested || (queued && block?.id === queued.blockId && block.text === queued.baseText)) {
+        submitted = null;
+        if (queued && (!session.status || session.status === 'live')) flushQueued();
+      }
     }
   }
 
@@ -149,31 +177,36 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     if (!queued) return;
     if (submitting || (session.status && session.status !== 'live')) return;
     const pending = queued;
-    queued = null;
-    queuedTimer = null;
     const block = firstVisibleBlock(session.document);
     if (!block || block.id !== pending.blockId || block.text !== pending.baseText) {
-      render();
-      onError(new Error('annotated text changed before buffered input was submitted'));
+      // Receipt settlement can precede the recipient's ingest publication. The
+      // queued draft has an explicit authoritative base, so wait for that
+      // publication rather than interpreting the previous snapshot as conflict.
       return;
     }
+    queued = null;
+    queuedTimer = null;
     const change = changedRange(pending.baseText, pending.text);
     if (change.from !== change.to || change.text) {
       // Keep the full visible draft while its delta waits for settlement. New
       // keystrokes must compose on it, not on the older recipient snapshot.
-      submitted = pending;
+      submitted = { ...pending, ingested: false };
       void replace(change.from, change.to, change.text);
     }
   }
 
   function bufferEdit(block, from, to, text) {
     if (!queued) {
-      const baseText = submitting && submitted?.blockId === block.id ? submitted.text : block.text;
+      const baseText = submitting && submitted?.blockId === block.id && element.textContent === submitted.text
+        ? submitted.text
+        : block.text;
       queued = { blockId: block.id, baseText, text: baseText };
     }
     if (queued.blockId !== block.id || queued.text !== element.textContent) flushQueued();
     if (!queued) {
-      const baseText = submitting && submitted?.blockId === block.id ? submitted.text : block.text;
+      const baseText = submitting && submitted?.blockId === block.id && element.textContent === submitted.text
+        ? submitted.text
+        : block.text;
       queued = { blockId: block.id, baseText, text: baseText };
     }
     queued.text = `${queued.text.slice(0, from)}${text}${queued.text.slice(to)}`;
@@ -183,7 +216,9 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     setCaret(element, from + text.length);
     rendering = false;
     clearTimeout(queuedTimer);
-    queuedTimer = setTimeout(flushQueued, 25);
+    // Treat continuous typing as one local intent. This prevents normal key
+    // cadence from crossing a submission/reconciliation boundary mid-word.
+    queuedTimer = setTimeout(flushQueued, 100);
   }
 
   function deleteRange(inputType, text, from, to) {

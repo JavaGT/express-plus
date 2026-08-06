@@ -65,6 +65,22 @@ test('rapid sequential input persists every character', async ({ page }) => {
   await expect(page.locator('#editor')).toHaveText('1234567890');
 });
 
+test('paced sequential input never reports a buffered-input conflict', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  const errors = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  await editor.pressSequentially('1234567890', { delay: 35 });
+  await expect(editor).toHaveText('1234567890');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect.poll(() => errors).not.toContainEqual(expect.stringContaining('changed before buffered input'));
+  await page.reload();
+  await openDocument(page, id);
+  await expect(page.locator('#editor')).toHaveText('1234567890');
+});
+
 test('Cmd+Backspace deletes to the start of the current line', async ({ page }) => {
   const id = await createDocument(page);
   const editor = page.locator('#editor');
