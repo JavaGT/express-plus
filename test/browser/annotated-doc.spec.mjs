@@ -286,6 +286,58 @@ test('a comment can be deleted from the annotation list and stays deleted after 
   await expect(editor).toHaveText('before selected after');
 });
 
+test('typing after an end comment keeps caret on the new unannotated block', async ({ page }) => {
+  const errors = [];
+  page.on('console', (message) => {
+    if (message.type() === 'error') errors.push(message.text());
+  });
+  await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('1234567890', { delay: 0 });
+  await expect(editor).toHaveText('1234567890');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.firstElementChild.firstChild;
+    const range = document.createRange();
+    range.setStart(node, 8);
+    range.setEnd(node, 10);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  await expect(page.locator('#status')).toHaveText('comment marker added');
+  const marked = editor.locator('[data-annotation-families~="comment"]');
+  await expect(marked).toHaveText('90');
+
+  await marked.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, element.textContent.length);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await editor.pressSequentially('xy', { delay: 40 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('1234567890xy');
+  await expect(marked).toHaveText('90');
+  await expect.poll(() => page.evaluate(() => {
+    const editorEl = document.getElementById('editor');
+    const selection = window.getSelection();
+    if (!selection?.anchorNode) return null;
+    let span = selection.anchorNode.nodeType === 3 ? selection.anchorNode.parentElement : selection.anchorNode;
+    while (span && span.parentElement !== editorEl) span = span.parentElement;
+    return span ? { blockId: span.dataset.blockId, annotated: span.dataset.annotationFamilies?.includes('comment') === true, offset: selection.anchorOffset, text: span.textContent } : null;
+  })).toEqual(expect.objectContaining({ annotated: false, text: 'xy' }));
+  await expect.poll(() => errors).not.toContainEqual(expect.stringContaining('changed before buffered input'));
+  const emptyAnnotated = await page.evaluate(() => {
+    const state = JSON.parse(document.querySelector('#live-state pre')?.textContent ?? 'null');
+    return (state?.blocks ?? []).filter((block) => block.kind === 'visible' && block.text === '' && (block.annotationIds?.length ?? 0) > 0);
+  });
+  expect(emptyAnnotated).toEqual([]);
+});
+
 test('typing at comment edges stays outside while typing inside stays highlighted', async ({ page }) => {
   const id = await createDocument(page);
   const editor = page.locator('#editor');

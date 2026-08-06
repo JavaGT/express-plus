@@ -697,6 +697,98 @@ function annotatedDocument() {
   };
 }
 
+test('annotated editor follows insert-block when boundary typing leaves the annotated block', async () => {
+  const marked = {
+    version: 1,
+    blocks: [
+      { kind: 'visible', id: 'prefix', text: '12345678' },
+      { kind: 'visible', id: 'marked', text: '90', annotationIds: ['comment-1'] },
+    ],
+    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
+  };
+  const harness = setup('', marked);
+  harness.session.status = 'live';
+  let settle;
+  harness.session.replace = async (input) => {
+    harness.calls.push(['replace', input]);
+    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settle = resolve; }) } };
+  };
+
+  harness.selectBlock('marked', 2);
+  harness.beforeinput('insertText', 'x');
+  assert.equal(harness.element.textContent, '1234567890x');
+  await flushInput();
+  assert.deepEqual(harness.calls[0][1], {
+    from: { blockId: 'marked', offset: 2, affinity: 'right' },
+    to: { blockId: 'marked', offset: 2, affinity: 'right' },
+    text: 'x',
+  });
+
+  harness.publish({
+    version: 1,
+    blocks: [
+      { kind: 'visible', id: 'prefix', text: '12345678' },
+      { kind: 'visible', id: 'marked', text: '90', annotationIds: ['comment-1'] },
+      { kind: 'visible', id: 'after', text: 'x' },
+    ],
+    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
+  });
+  settle();
+  await flushInput();
+
+  assert.deepEqual(harness.errors, []);
+  assert.equal(harness.element.textContent, '1234567890x');
+  assert.equal(harness.element.querySelector('[data-block-id="marked"]').textContent, '90');
+  assert.equal(harness.element.querySelector('[data-block-id="after"]').textContent, 'x');
+  assert.deepEqual(harness.binding.getSelection(), {
+    from: { blockId: 'after', offset: 1, affinity: 'right' },
+    to: { blockId: 'after', offset: 1, affinity: 'right' },
+  });
+
+  harness.beforeinput('insertText', 'y');
+  await flushInput();
+  assert.deepEqual(harness.errors, []);
+  assert.equal(harness.calls[1][1].from.blockId, 'after');
+  assert.equal(harness.calls[1][1].text, 'y');
+  harness.binding.close();
+});
+
+test('annotated editor follows insert-block before an annotated block', async () => {
+  const marked = {
+    version: 1,
+    blocks: [
+      { kind: 'visible', id: 'marked', text: '34', annotationIds: ['comment-1'] },
+    ],
+    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
+  };
+  const harness = setup('', marked);
+  harness.session.status = 'live';
+  let settle;
+  harness.session.replace = async (input) => {
+    harness.calls.push(['replace', input]);
+    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settle = resolve; }) } };
+  };
+
+  harness.selectBlock('marked', 0);
+  harness.beforeinput('insertText', 'L');
+  await flushInput();
+  harness.publish({
+    version: 1,
+    blocks: [
+      { kind: 'visible', id: 'before', text: 'L' },
+      { kind: 'visible', id: 'marked', text: '34', annotationIds: ['comment-1'] },
+    ],
+    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
+  });
+  settle();
+  await flushInput();
+
+  assert.deepEqual(harness.errors, []);
+  assert.equal(harness.element.textContent, 'L34');
+  assert.deepEqual(harness.binding.getSelection()?.from.blockId, 'before');
+  harness.binding.close();
+});
+
 test('setAnnotationHighlight toggles data-active-annotation on matching spans only', () => {
   const harness = setup('', annotatedDocument());
   const b1 = harness.element.querySelector('[data-block-id="b1"]');

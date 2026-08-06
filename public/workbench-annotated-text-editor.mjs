@@ -119,17 +119,109 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     selection.addRange(range);
   }
 
+  /**
+   * Boundary typing on an annotated block is committed as text.insert-block on a
+   * new (or existing unannotated) neighbor. The source block stays at baseText.
+   * Return where the inserted run lives so local drafts can follow it.
+   */
+  function findBoundaryInsertHome(visible, sourceId, baseText, nextText) {
+    if (typeof baseText !== 'string' || typeof nextText !== 'string' || nextText === baseText) return null;
+    const sourceIndex = visible.findIndex((block) => block.id === sourceId);
+    if (sourceIndex < 0) return null;
+    const source = visible[sourceIndex];
+    if (source.text !== baseText) return null;
+
+    if (nextText.startsWith(baseText)) {
+      const inserted = nextText.slice(baseText.length);
+      const after = visible[sourceIndex + 1];
+      if (!after || after.annotationIds?.length || !after.text) return null;
+      if (inserted.startsWith(after.text) || after.text.startsWith(inserted)) {
+        const matched = inserted.startsWith(after.text) ? after.text : inserted;
+        return { blockId: after.id, matched, side: 'after', neighborText: after.text };
+      }
+      return null;
+    }
+    if (nextText.endsWith(baseText)) {
+      const inserted = nextText.slice(0, nextText.length - baseText.length);
+      const before = visible[sourceIndex - 1];
+      if (!before || before.annotationIds?.length || !before.text) return null;
+      if (inserted.endsWith(before.text) || before.text.endsWith(inserted)) {
+        const matched = inserted.endsWith(before.text) ? before.text : inserted;
+        return { blockId: before.id, matched, side: 'before', neighborText: before.text };
+      }
+    }
+    return null;
+  }
+
+  function moveDraftToBoundaryHome(draft, home) {
+    const inserted = draft.text.startsWith(draft.baseText)
+      ? draft.text.slice(draft.baseText.length)
+      : draft.text.endsWith(draft.baseText)
+        ? draft.text.slice(0, draft.text.length - draft.baseText.length)
+        : '';
+    if (!inserted.startsWith(home.matched) && !home.matched.startsWith(inserted)) return null;
+    const remainder = inserted.startsWith(home.matched) ? inserted.slice(home.matched.length) : '';
+    if (home.side === 'after') {
+      return {
+        blockId: home.blockId,
+        baseText: home.neighborText,
+        text: `${home.neighborText}${remainder}`,
+      };
+    }
+    return {
+      blockId: home.blockId,
+      baseText: home.neighborText,
+      text: `${remainder}${home.neighborText}`,
+    };
+  }
+
   function render(document = session.document) {
     if (closed || composing) return;
     const blocks = document?.blocks ?? [];
     const visible = orderedVisible(document);
     const annotationFamilies = new Map((document?.annotations ?? []).map((annotation) => [annotation.id, annotation.family]));
-    const target = queued && visible.find((block) => block.id === queued.blockId);
-    const submittedTarget = submitted && visible.find((block) => block.id === submitted.blockId);
-    if (submitted && submittedTarget?.text === submitted.text) {
-      submitted.ingested = true;
-      if (!submitting) submitted = null;
+    let caretAfterRender = null;
+
+    if (submitted) {
+      const submittedTarget = visible.find((block) => block.id === submitted.blockId);
+      if (submittedTarget?.text === submitted.text) {
+        submitted.ingested = true;
+        if (!submitting) submitted = null;
+      } else {
+        const home = findBoundaryInsertHome(visible, submitted.blockId, submitted.baseText, submitted.text);
+        if (home) {
+          const movedSubmitted = moveDraftToBoundaryHome(submitted, home);
+          if (queued?.blockId === submitted.blockId && queued.text.startsWith(submitted.text)) {
+            const tail = queued.text.slice(submitted.text.length);
+            const base = movedSubmitted ?? { blockId: home.blockId, baseText: home.neighborText, text: home.neighborText };
+            queued = {
+              blockId: base.blockId,
+              baseText: base.baseText,
+              text: home.side === 'after' ? `${base.text}${tail}` : `${tail}${base.text}`,
+            };
+            caretAfterRender = {
+              blockId: queued.blockId,
+              offset: home.side === 'after' ? queued.text.length : tail.length,
+            };
+          } else if (movedSubmitted && movedSubmitted.text !== movedSubmitted.baseText) {
+            queued = movedSubmitted;
+            caretAfterRender = {
+              blockId: queued.blockId,
+              offset: home.side === 'after' ? queued.text.length : Math.max(0, queued.text.length - home.neighborText.length),
+            };
+          } else {
+            caretAfterRender = {
+              blockId: home.blockId,
+              offset: home.side === 'after' ? home.neighborText.length : Math.max(0, home.neighborText.length - home.matched.length),
+            };
+          }
+          submitted.ingested = true;
+          if (!submitting) submitted = null;
+        }
+      }
     }
+
+    const target = queued && visible.find((block) => block.id === queued.blockId);
     if (queued && target && target.text !== queued.baseText) {
       const intent = changedRange(queued.baseText, queued.text);
       const prefix = queued.baseText.slice(0, intent.from);
@@ -148,8 +240,37 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
           && intent.text[overlap] === foreign[overlap]) overlap += 1;
         const from = prefix.length + foreign.length;
         queued = { ...queued, baseText: target.text, text: `${target.text.slice(0, from)}${intent.text.slice(overlap)}${target.text.slice(from)}` };
-      } else if (!submitting && !(submitted && target.text === submitted.baseText && queued.baseText === submitted.text)
-        && (!session.status || session.status === 'live')) {
+      } else {
+        const home = findBoundaryInsertHome(visible, queued.blockId, queued.baseText, queued.text);
+        const moved = home && moveDraftToBoundaryHome(queued, home);
+        if (moved) {
+          queued = moved;
+          caretAfterRender = {
+            blockId: queued.blockId,
+            offset: home.side === 'after' ? queued.text.length : Math.max(0, queued.text.length - home.neighborText.length),
+          };
+        } else if (!submitting && !(submitted && target.text === submitted.baseText && queued.baseText === submitted.text)
+          && (!session.status || session.status === 'live')) {
+          clearTimeout(queuedTimer);
+          queuedTimer = null;
+          queued = null;
+          submitted = null;
+          element.setAttribute('aria-busy', 'false');
+          onError(new Error('annotated text changed before buffered input was submitted'));
+        }
+      }
+    }
+    if (queued && !visible.find((block) => block.id === queued.blockId)
+      && !submitting && (!session.status || session.status === 'live')) {
+      const home = findBoundaryInsertHome(visible, queued.blockId, queued.baseText, queued.text);
+      const moved = home && moveDraftToBoundaryHome(queued, home);
+      if (moved) {
+        queued = moved;
+        caretAfterRender = {
+          blockId: queued.blockId,
+          offset: home.side === 'after' ? queued.text.length : Math.max(0, queued.text.length - home.neighborText.length),
+        };
+      } else {
         clearTimeout(queuedTimer);
         queuedTimer = null;
         queued = null;
@@ -158,19 +279,17 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
         onError(new Error('annotated text changed before buffered input was submitted'));
       }
     }
-    if (queued && !target && !submitting && (!session.status || session.status === 'live')) {
-      clearTimeout(queuedTimer);
-      queuedTimer = null;
-      queued = null;
-      submitted = null;
-      element.setAttribute('aria-busy', 'false');
-      onError(new Error('annotated text changed before buffered input was submitted'));
-    }
     const displayed = new Map();
     if (submitted) {
       const submittedBlock = visible.find((block) => block.id === submitted.blockId);
-      if (submittedBlock && (submittedBlock.text === submitted.text || submittedBlock.text === submitted.baseText)) {
+      if (submittedBlock && submittedBlock.text === submitted.text) {
         displayed.set(submitted.blockId, submitted.text);
+      } else if (submittedBlock && submittedBlock.text === submitted.baseText) {
+        // Source still at baseText: either still in-flight on-block edit, or a
+        // boundary insert-block already moved the insert to a neighbor. Only
+        // paint optimistic text when the insert has not found a home yet.
+        const home = findBoundaryInsertHome(visible, submitted.blockId, submitted.baseText, submitted.text);
+        if (!home) displayed.set(submitted.blockId, submitted.text);
       }
     }
     if (queued) displayed.set(queued.blockId, queued.text);
@@ -207,6 +326,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       if (!blockIds.has(child.dataset.blockId)) child.remove();
     }
     rendering = false;
+    if (caretAfterRender) setCaret(caretAfterRender.blockId, caretAfterRender.offset);
     if (queued && visible.some((block) => block.id === queued.blockId)) {
       const queuedTarget = visible.find((block) => block.id === queued.blockId);
       if (queuedTarget.text === queued.baseText && !submitting && (!session.status || session.status === 'live')) flushQueued();
