@@ -205,6 +205,12 @@ test('adding a comment marker preserves the selected and following text', async 
   await expect(editor).toHaveText(`${text}!`);
 });
 
+test('adding a comment marker restores editor focus and the selected range', async ({ page }) => {
+  const { editor } = await createCommentedDocument(page, { text: '1234567890', from: 3, to: 5 });
+  await expect(editor).toBeFocused();
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('45');
+});
+
 test('a comment can be deleted from the annotation list and stays deleted after reload', async ({ page }) => {
   const id = await createDocument(page);
   const editor = page.locator('#editor');
@@ -367,6 +373,19 @@ test('backspacing inside a comment shrinks the comment range and persists', asyn
   await openDocument(page, id);
   await expect(editor).toHaveText('124567890');
   await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('4');
+});
+
+test('repeated backspace crosses comment edges without losing the editor selection', async ({ page }) => {
+  const { editor } = await createCommentedDocument(page, { text: '1234567890', from: 3, to: 5 });
+  await placeCaret(editor.locator('[data-block-id]').last(), 5);
+  for (const expected of ['123456789', '12345678', '1234567', '123456', '12345', '1234', '123', '12', '1', '']) {
+    await editor.press('Backspace');
+    await expect(editor).toHaveAttribute('aria-busy', 'false');
+    await expect(editor).toHaveText(expected);
+    await expect(editor).toBeFocused();
+  }
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await expect(page.locator('.annotation-card')).toContainText('Attached text is not visible.');
 });
 
 test('forward deleting at the end of a comment deletes following text without expanding the comment', async ({ page }) => {

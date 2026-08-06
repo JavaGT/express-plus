@@ -331,6 +331,7 @@
           const settlement = await result.settlement.wait();
           if (settlement?.status !== 'reconciled') throw new Error('comment marker was not reconciled');
         }
+        selectAnnotation(annotation.id);
         setStatus('comment marker added', 'ok');
       }).catch((error) => {
         reportError(error);
