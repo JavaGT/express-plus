@@ -1,7 +1,8 @@
 // annotated-doc — the floor demo for Workbench annotatedText().
 //
-// One document field, fixed demo principal, browser insert/delete only.
-// No annotations UI, split/merge chrome, auth, or Scope domain nouns.
+// One document field, fixed demo principal, browser editing, and a generic
+// comment marker. No comment thread/entity, split/merge chrome, auth, or
+// Scope domain nouns.
 //
 //   node projects/annotated-doc/server.mjs
 //   open http://127.0.0.1:3460
@@ -15,6 +16,7 @@ import workbench, {
   annotatedText,
   annotatedTextClientHandle,
   annotatedTextCreateAction,
+  annotation,
   entity,
   everyone,
   grant,
@@ -40,7 +42,11 @@ export const Project = entity('Project', {
 export const Doc = entity('Doc', {
   project: ref('Project'),
   owner: ref('User', { role: 'owner' }),
-  body: annotatedText({ project: 'project', owner: 'owner' }),
+  body: annotatedText({
+    project: 'project',
+    owner: 'owner',
+    annotations: [annotation('comment', { empty: 'orphan' })],
+  }),
   grant: [scope(() => everyone()).can(() => grant(read, write, subscribe))],
 });
 const DocClient = annotatedTextClientHandle(Doc, Doc.body);

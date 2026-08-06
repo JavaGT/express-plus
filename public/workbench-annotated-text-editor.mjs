@@ -1,53 +1,20 @@
-function firstVisibleBlock(document) {
-  return document?.blocks?.find((block) => block.kind === 'visible') ?? null;
+function visibleBlocks(document) {
+  return document?.blocks?.filter((block) => block.kind === 'visible') ?? [];
 }
 
-function selectionOffsets(element) {
-  const selection = element.ownerDocument.defaultView?.getSelection();
-  if (!selection || selection.rangeCount === 0) return null;
-  const range = selection.getRangeAt(0);
-  if (!element.contains(range.startContainer) || !element.contains(range.endContainer)) return null;
-  const beforeStart = range.cloneRange();
-  beforeStart.selectNodeContents(element);
-  beforeStart.setEnd(range.startContainer, range.startOffset);
-  const beforeEnd = range.cloneRange();
-  beforeEnd.selectNodeContents(element);
-  beforeEnd.setEnd(range.endContainer, range.endOffset);
-  const start = beforeStart.toString().length;
-  const end = beforeEnd.toString().length;
-  return { from: Math.min(start, end), to: Math.max(start, end) };
-}
-
-function setCaret(element, offset) {
-  const selection = element.ownerDocument.defaultView?.getSelection();
-  if (!selection) return;
-  const range = element.ownerDocument.createRange();
-  const textNode = element.firstChild;
-  if (textNode?.nodeType === 3) {
-    range.setStart(textNode, Math.max(0, Math.min(offset, textNode.data.length)));
-  } else {
-    range.setStart(element, 0);
-  }
-  range.collapse(true);
-  selection.removeAllRanges();
-  selection.addRange(range);
+function blockSpan(element, blockId) {
+  return [...element.children].find((child) => child.dataset.blockId === blockId) ?? null;
 }
 
 function scalarStart(text, offset) {
-  if (offset > 0 && offset < text.length) {
-    const current = text.charCodeAt(offset);
-    const previous = text.charCodeAt(offset - 1);
-    if (current >= 0xdc00 && current <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff) return offset - 1;
-  }
+  if (offset > 0 && offset < text.length && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff
+    && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff) return offset - 1;
   return offset;
 }
 
 function scalarEnd(text, offset) {
-  if (offset > 0 && offset < text.length) {
-    const current = text.charCodeAt(offset);
-    const previous = text.charCodeAt(offset - 1);
-    if (current >= 0xdc00 && current <= 0xdfff && previous >= 0xd800 && previous <= 0xdbff) return offset + 1;
-  }
+  if (offset > 0 && offset < text.length && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff
+    && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff) return offset + 1;
   return offset;
 }
 
@@ -61,12 +28,20 @@ function changedRange(before, after) {
     beforeEnd -= 1;
     afterEnd -= 1;
   }
-  beforeEnd = scalarEnd(before, beforeEnd);
-  afterEnd = scalarEnd(after, afterEnd);
-  return { from, to: beforeEnd, text: after.slice(from, afterEnd) };
+  return { from, to: scalarEnd(before, beforeEnd), text: after.slice(from, scalarEnd(after, afterEnd)) };
 }
 
-/** Bind a plain-text contenteditable to the package-owned annotated-text session. */
+function pointInSpan(span, node, offset) {
+  if (node === span) {
+    if (offset === 0) return 0;
+    if (offset === span.childNodes.length) return (span.textContent ?? '').length;
+    return null;
+  }
+  if (node.nodeType === 3 && node.parentNode === span) return offset;
+  return null;
+}
+
+/** Bind a block-aware plain-text contenteditable to an annotated-text session. */
 export function bindAnnotatedTextEditor({ element, session, onError = () => {} }) {
   if (!element || typeof element.addEventListener !== 'function') throw new TypeError('annotated text editor requires an element');
   if (!session || typeof session.subscribe !== 'function' || typeof session.replace !== 'function') throw new TypeError('annotated text editor requires a session');
@@ -79,53 +54,155 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
   let queuedTimer = null;
   let submitted = null;
   let submitting = false;
+  let blockedComposition = false;
   let historyInputHandled = false;
+
+  function orderedVisible(document = session.document) {
+    return visibleBlocks(document);
+  }
+
+  function endpoint(node, offset, document = session.document) {
+    const blocks = orderedVisible(document);
+    let span = node.nodeType === 3 ? node.parentElement : node;
+    while (span && span.parentElement !== element) span = span.parentElement;
+    if (span?.dataset.blockId) {
+      const block = blocks.find((candidate) => candidate.id === span.dataset.blockId);
+      const local = pointInSpan(span, node, offset);
+      if (!block || local === null || local < 0 || local > (span.textContent ?? '').length) return null;
+      return { blockId: block.id, offset: local, affinity: 'right' };
+    }
+    if (node !== element) return null;
+    const children = [...element.children];
+    if (children[offset]?.dataset.restricted === 'true' || children[offset - 1]?.dataset.restricted === 'true') return null;
+    const visibleIds = new Set(blocks.map((block) => block.id));
+    const next = children.slice(offset).find((child) => visibleIds.has(child.dataset.blockId));
+    if (next) return { blockId: next.dataset.blockId, offset: 0, affinity: 'right' };
+    const previous = children.slice(0, offset).reverse().find((child) => visibleIds.has(child.dataset.blockId));
+    if (previous) {
+      const block = blocks.find((candidate) => candidate.id === previous.dataset.blockId);
+      return { blockId: block.id, offset: (previous.textContent ?? '').length, affinity: 'right' };
+    }
+    return null;
+  }
+
+  function getSelection() {
+    const selection = element.ownerDocument.defaultView?.getSelection();
+    if (!selection || selection.rangeCount === 0) return null;
+    const range = selection.getRangeAt(0);
+    const from = endpoint(range.startContainer, range.startOffset);
+    const to = endpoint(range.endContainer, range.endOffset);
+    if (!from || !to) return null;
+    const children = [...element.children];
+    const fromChild = children.findIndex((child) => child.dataset.blockId === from.blockId);
+    const toChild = children.findIndex((child) => child.dataset.blockId === to.blockId);
+    if (children.slice(Math.min(fromChild, toChild), Math.max(fromChild, toChild) + 1)
+      .some((child) => child.dataset.restricted === 'true')) return null;
+    const fromIndex = orderedVisible().findIndex((block) => block.id === from.blockId);
+    const toIndex = orderedVisible().findIndex((block) => block.id === to.blockId);
+    if (fromIndex > toIndex || (fromIndex === toIndex && from.offset > to.offset)) {
+      return { from: to, to: from };
+    }
+    return { from, to };
+  }
+
+  function setCaret(blockId, offset) {
+    const span = blockSpan(element, blockId);
+    if (!span) return;
+    const selection = element.ownerDocument.defaultView?.getSelection();
+    if (!selection) return;
+    const range = element.ownerDocument.createRange();
+    const textNode = span.firstChild;
+    if (textNode?.nodeType === 3) range.setStart(textNode, Math.max(0, Math.min(offset, textNode.data.length)));
+    else range.setStart(span, 0);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
 
   function render(document = session.document) {
     if (closed || composing) return;
-    const block = firstVisibleBlock(document);
-    if (submitted && block?.id === submitted.blockId && block.text === submitted.text) {
+    const blocks = document?.blocks ?? [];
+    const visible = orderedVisible(document);
+    const target = queued && visible.find((block) => block.id === queued.blockId);
+    const submittedTarget = submitted && visible.find((block) => block.id === submitted.blockId);
+    if (submitted && submittedTarget?.text === submitted.text) {
       submitted.ingested = true;
       if (!submitting) submitted = null;
     }
-    if (queued) {
-      if (block?.id === queued.blockId && block.text === queued.baseText) {
-        if (!submitting && (!session.status || session.status === 'live')) flushQueued();
-        return;
+    if (queued && target && target.text !== queued.baseText) {
+      const intent = changedRange(queued.baseText, queued.text);
+      const prefix = queued.baseText.slice(0, intent.from);
+      const suffix = queued.baseText.slice(intent.from);
+      if (intent.from === intent.to && intent.text && target.text.startsWith(queued.baseText)) {
+        const foreign = target.text.slice(queued.baseText.length);
+        let overlap = 0;
+        while (overlap < intent.text.length && overlap < foreign.length
+          && intent.text[overlap] === foreign[overlap]) overlap += 1;
+        const from = overlap ? target.text.length : intent.from;
+        queued = { ...queued, baseText: target.text, text: `${target.text.slice(0, from)}${intent.text.slice(overlap)}${target.text.slice(from)}` };
+      } else if (intent.from === intent.to && intent.text && target.text.startsWith(prefix) && target.text.endsWith(suffix)) {
+        const foreign = target.text.slice(prefix.length, target.text.length - suffix.length);
+        let overlap = 0;
+        while (overlap < intent.text.length && overlap < foreign.length
+          && intent.text[overlap] === foreign[overlap]) overlap += 1;
+        const from = prefix.length + foreign.length;
+        queued = { ...queued, baseText: target.text, text: `${target.text.slice(0, from)}${intent.text.slice(overlap)}${target.text.slice(from)}` };
+      } else if (!submitting && !(submitted && target.text === submitted.baseText && queued.baseText === submitted.text)
+        && (!session.status || session.status === 'live')) {
+        clearTimeout(queuedTimer);
+        queuedTimer = null;
+        queued = null;
+        submitted = null;
+        element.setAttribute('aria-busy', 'false');
+        onError(new Error('annotated text changed before buffered input was submitted'));
       }
-      if (block?.id === queued.blockId) {
-        // This edit was composed atop the most recently submitted draft. A
-        // receipt may settle before ingest publishes that draft, so the older
-        // recipient snapshot is a predecessor, not an external conflict.
-        if (submitted?.blockId === queued.blockId
-          && queued.baseText === submitted.text
-          && block.text === submitted.baseText) return;
-        const intent = changedRange(queued.baseText, queued.text);
-        if (intent.from === intent.to && intent.text && block.text.slice(0, intent.from) === queued.baseText.slice(0, intent.from)) {
-          const delta = block.text.length - queued.baseText.length;
-          const from = delta > 0 && block.text.endsWith(queued.baseText.slice(intent.from)) ? intent.from + delta : intent.from;
-          queued = { ...queued, baseText: block.text, text: `${block.text.slice(0, from)}${intent.text}${block.text.slice(from)}` };
-          rendering = true;
-          element.textContent = queued.text;
-          setCaret(element, from + intent.text.length);
-          rendering = false;
-          return;
-        }
-      }
-      if (submitting || (session.status && session.status !== 'live')) return;
+    }
+    if (queued && !target && !submitting && (!session.status || session.status === 'live')) {
       clearTimeout(queuedTimer);
       queuedTimer = null;
       queued = null;
+      submitted = null;
       element.setAttribute('aria-busy', 'false');
       onError(new Error('annotated text changed before buffered input was submitted'));
     }
-    const text = block?.text ?? '';
-    const focused = element.ownerDocument.activeElement === element;
-    const selection = focused ? selectionOffsets(element) : null;
+    const displayed = new Map();
+    if (submitted) {
+      const submittedBlock = visible.find((block) => block.id === submitted.blockId);
+      if (submittedBlock && (submittedBlock.text === submitted.text || submittedBlock.text === submitted.baseText)) {
+        displayed.set(submitted.blockId, submitted.text);
+      }
+    }
+    if (queued) displayed.set(queued.blockId, queued.text);
+    const existing = new Map([...element.children].map((child) => [child.dataset.blockId, child]));
     rendering = true;
-    if (element.textContent !== text) element.textContent = text;
-    if (focused) setCaret(element, Math.min(selection?.to ?? text.length, text.length));
+    for (const block of blocks) {
+      let span = existing.get(block.id);
+      if (!span) {
+        span = element.ownerDocument.createElement('span');
+        span.dataset.blockId = block.id;
+      }
+      span.contentEditable = block.kind === 'visible' ? 'true' : 'false';
+      if (block.kind === 'restricted') {
+        span.textContent = block.placeholder ?? '';
+        span.dataset.restricted = 'true';
+      } else {
+        delete span.dataset.restricted;
+        const text = displayed.has(block.id) ? displayed.get(block.id) : block.text;
+        if (span.textContent !== text) span.textContent = text;
+      }
+      const index = blocks.indexOf(block);
+      if (element.children[index] !== span) element.insertBefore(span, element.children[index] ?? null);
+    }
+    const blockIds = new Set(blocks.map((block) => block.id));
+    for (const child of [...element.children]) {
+      if (!blockIds.has(child.dataset.blockId)) child.remove();
+    }
     rendering = false;
+    if (queued && visible.some((block) => block.id === queued.blockId)) {
+      const queuedTarget = visible.find((block) => block.id === queued.blockId);
+      if (queuedTarget.text === queued.baseText && !submitting && (!session.status || session.status === 'live')) flushQueued();
+    }
+    if (!queued && !submitted && !submitting) element.setAttribute('aria-busy', 'false');
   }
 
   function report(work) {
@@ -135,106 +212,96 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       if (result?.ok && result.settlement?.wait) await result.settlement.wait();
       return result;
     }, onError).finally(() => {
-      if (!queued) element.setAttribute('aria-busy', 'false');
+      if (!queued && !submitted && !submitting) element.setAttribute('aria-busy', 'false');
     });
     void tracked;
     return tracked;
   }
 
-  async function replace(from, to, text) {
-    const block = firstVisibleBlock(session.document);
-    if (!block) return;
+  async function replace(block, from, to, text) {
     submitting = true;
     try {
       const result = await report(session.replace({
-      from: { blockId: block.id, offset: from, affinity: 'right' },
-      to: { blockId: block.id, offset: to, affinity: 'right' },
-      text,
+        from: { blockId: block.id, offset: from, affinity: 'right' },
+        to: { blockId: block.id, offset: to, affinity: 'right' },
+        text,
       }));
       if (!result?.ok) {
         submitted = null;
+        queued = null;
         clearTimeout(queuedTimer);
         queuedTimer = null;
-        queued = null;
         element.setAttribute('aria-busy', 'false');
         render();
-        return;
       }
     } finally {
       submitting = false;
-      // A settlement receipt and recipient ingest are separate fences. Only
-      // translate the successor after both have confirmed this draft.
-      const block = firstVisibleBlock(session.document);
-      if (submitted?.ingested || (queued && block?.id === queued.blockId && block.text === queued.baseText)) {
+      const current = orderedVisible().find((candidate) => candidate.id === block.id);
+      if (submitted?.ingested || (queued && current?.text === queued.baseText)) {
         submitted = null;
-        if (queued && (!session.status || session.status === 'live')) flushQueued();
+        if (queued) flushQueued();
       }
+      render();
     }
   }
 
   function flushQueued() {
-    if (!queued) return;
-    if (submitting || (session.status && session.status !== 'live')) return;
+    if (!queued || submitting || (session.status && session.status !== 'live')) return;
     const pending = queued;
-    const block = firstVisibleBlock(session.document);
-    if (!block || block.id !== pending.blockId || block.text !== pending.baseText) {
-      // Receipt settlement can precede the recipient's ingest publication. The
-      // queued draft has an explicit authoritative base, so wait for that
-      // publication rather than interpreting the previous snapshot as conflict.
-      return;
-    }
+    const block = orderedVisible().find((candidate) => candidate.id === pending.blockId);
+    if (!block || block.text !== pending.baseText) return;
     queued = null;
     queuedTimer = null;
     const change = changedRange(pending.baseText, pending.text);
     if (change.from !== change.to || change.text) {
-      // Keep the full visible draft while its delta waits for settlement. New
-      // keystrokes must compose on it, not on the older recipient snapshot.
       submitted = { ...pending, ingested: false };
-      void replace(change.from, change.to, change.text);
+      void replace(block, change.from, change.to, change.text);
+    } else {
+      element.setAttribute('aria-busy', 'false');
     }
   }
 
   function bufferEdit(block, from, to, text) {
-    if (!queued) {
-      const baseText = submitting && submitted?.blockId === block.id && element.textContent === submitted.text
+    if (!queued || queued.blockId !== block.id) {
+      if (queued) flushQueued();
+      if (queued) {
+        onError(new Error('annotated text changed before buffered input was submitted'));
+        return;
+      }
+      const span = blockSpan(element, block.id);
+      const baseline = submitting && submitted?.blockId === block.id && span?.textContent === submitted.text
         ? submitted.text
         : block.text;
-      queued = { blockId: block.id, baseText, text: baseText };
-    }
-    if (queued.blockId !== block.id || queued.text !== element.textContent) flushQueued();
-    if (!queued) {
-      const baseText = submitting && submitted?.blockId === block.id && element.textContent === submitted.text
-        ? submitted.text
-        : block.text;
-      queued = { blockId: block.id, baseText, text: baseText };
+      queued = { blockId: block.id, baseText: baseline, text: baseline };
     }
     queued.text = `${queued.text.slice(0, from)}${text}${queued.text.slice(to)}`;
     element.setAttribute('aria-busy', 'true');
     rendering = true;
-    element.textContent = queued.text;
-    setCaret(element, from + text.length);
+    const span = blockSpan(element, block.id);
+    if (span) span.textContent = queued.text;
+    setCaret(block.id, from + text.length);
     rendering = false;
     clearTimeout(queuedTimer);
-    // Treat continuous typing as one local intent. This prevents normal key
-    // cadence from crossing a submission/reconciliation boundary mid-word.
     queuedTimer = setTimeout(flushQueued, 100);
+  }
+
+  function mutationIsBlocked(blockId) {
+    const target = submitted?.blockId ?? queued?.blockId ?? composing?.blockId;
+    if (target && target !== blockId) {
+      onError(new Error('annotated text cannot edit another block while a local change is pending'));
+      return true;
+    }
+    return false;
   }
 
   function deleteRange(inputType, text, from, to) {
     if (from !== to) return { from: scalarStart(text, from), to: scalarEnd(text, to) };
     if (inputType === 'deleteSoftLineBackward' || inputType === 'deleteHardLineBackward') {
       const lineStart = text.lastIndexOf('\n', from - 1) + 1;
-      if (lineStart === from) return null;
-      return { from: lineStart, to: scalarEnd(text, from) };
+      return lineStart === from ? null : { from: lineStart, to: scalarEnd(text, from) };
     }
-    if (inputType === 'deleteContentBackward') {
-      if (from === 0) return null;
-      return { from: scalarStart(text, from - 1), to: from };
-    }
-    if (inputType === 'deleteContentForward' || inputType === 'deleteContent') {
-      if (to === text.length) return null;
-      return { from: to, to: scalarEnd(text, to + 1) };
-    }
+    if (inputType === 'deleteContentBackward') return from === 0 ? null : { from: scalarStart(text, from - 1), to: from };
+    if (inputType === 'deleteContentForward' || inputType === 'deleteContent') return to === text.length ? null : { from: to, to: scalarEnd(text, to + 1) };
     return null;
   }
 
@@ -243,48 +310,108 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     if (event.isComposing || event.inputType === 'insertCompositionText') return;
     event.preventDefault();
     if (event.inputType === 'historyUndo' || event.inputType === 'historyRedo') {
-      flushQueued();
+      if (queued || submitted || submitting || composing) {
+        onError(new Error('annotated text history is unavailable while a local change is pending'));
+        return;
+      }
       historyInputHandled = true;
       report(event.inputType === 'historyUndo' ? session.history.undo() : session.history.redo());
       return;
     }
-    const block = firstVisibleBlock(session.document);
-    const selected = selectionOffsets(element);
-    if (!block || !selected) return;
+    const selected = getSelection();
+    if (!selected) return;
+    if (selected.from.blockId !== selected.to.blockId) {
+      onError(new TypeError('annotated text selection replacement is not yet supported atomically'));
+      return;
+    }
+    const block = orderedVisible().find((candidate) => candidate.id === selected.from.blockId);
+    if (!block) return;
+    if (mutationIsBlocked(block.id)) return;
     if (event.inputType === 'insertText' || event.inputType === 'insertFromPaste' || event.inputType === 'insertFromDrop') {
       const text = event.dataTransfer?.getData?.('text/plain') ?? event.data ?? '';
-      if (text && selected.from !== selected.to) {
+      if (text && selected.from.offset !== selected.to.offset) {
         onError(new TypeError('annotated text selection replacement is not yet supported atomically'));
         return;
       }
-      if (text) bufferEdit(block, selected.from, selected.to, text);
+      if (text) bufferEdit(block, selected.from.offset, selected.to.offset, text);
       return;
     }
-    const visibleText = queued?.blockId === block.id ? queued.text : block.text;
-    const range = deleteRange(event.inputType, visibleText, selected.from, selected.to);
+    const text = queued?.blockId === block.id ? queued.text : block.text;
+    const range = deleteRange(event.inputType, text, selected.from.offset, selected.to.offset);
     if (range) bufferEdit(block, range.from, range.to, '');
   }
 
-  function compositionStart() {
-    const block = firstVisibleBlock(session.document);
-    const selected = selectionOffsets(element);
-    if (!block || !selected) return;
-    composing = { blockId: block.id, text: block.text };
-  }
-
-  function compositionEnd() {
-    if (!composing) return;
-    const base = composing;
-    composing = null;
-    const block = firstVisibleBlock(session.document);
-    const domText = element.textContent ?? '';
-    if (!block || block.id !== base.blockId || block.text !== base.text) {
+  function compositionStart(event) {
+    const selected = getSelection();
+    if (!selected || selected.from.blockId !== selected.to.blockId) {
+      blockedComposition = true;
+      event.preventDefault();
       render();
       return;
     }
-    const change = changedRange(base.text, domText);
+    if (mutationIsBlocked(selected.from.blockId)) {
+      blockedComposition = true;
+      event.preventDefault();
+      render();
+      return;
+    }
+    const block = orderedVisible().find((candidate) => candidate.id === selected.from.blockId);
+    if (block) {
+      if (submitted?.blockId === block.id) {
+        clearTimeout(queuedTimer);
+        queuedTimer = null;
+        queued = null;
+        composing = { blockId: block.id, text: submitted.text, afterSubmitted: true };
+        return;
+      }
+      // Keep buffered typing as the composition's predecessor. Composition
+      // end will turn the whole visible result into one queued draft, so a
+      // foreign update is rebased by the same path as ordinary typing.
+      clearTimeout(queuedTimer);
+      queuedTimer = null;
+      composing = {
+        blockId: block.id,
+        text: queued?.blockId === block.id ? queued.text : block.text,
+        queuedBaseText: queued?.blockId === block.id ? queued.baseText : block.text,
+      };
+    }
+  }
+
+  function compositionEnd() {
+    if (blockedComposition) {
+      blockedComposition = false;
+      render();
+      return;
+    }
+    if (!composing) return;
+    const base = composing;
+    composing = null;
+    const block = orderedVisible().find((candidate) => candidate.id === base.blockId);
+    const span = blockSpan(element, base.blockId);
+    const domText = span?.textContent ?? '';
+    if (!block) {
+      render();
+      return;
+    }
+    const queuedBaseText = base.queuedBaseText ?? base.text;
+    if (domText === base.text && queuedBaseText === base.text) {
+      queued = null;
+      render();
+      return;
+    }
+    queued = {
+      blockId: block.id,
+      baseText: queuedBaseText,
+      text: domText,
+    };
+    element.setAttribute('aria-busy', 'true');
     render();
-    if (change.from !== change.to || change.text) replace(change.from, change.to, change.text);
+  }
+
+  function historyIsBlocked() {
+    if (!queued && !submitted && !submitting && !composing) return false;
+    onError(new Error('annotated text history is unavailable while a local change is pending'));
+    return true;
   }
 
   function keyDown(event) {
@@ -297,6 +424,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     historyInputHandled = false;
     queueMicrotask(() => {
       if (closed || historyInputHandled) return;
+      if (historyIsBlocked()) return;
       report((redo || event.shiftKey) ? session.history.redo() : session.history.undo());
     });
   }
@@ -312,6 +440,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
 
   return Object.freeze({
     focus() { element.focus(); },
+    getSelection,
     close() {
       if (closed) return;
       closed = true;

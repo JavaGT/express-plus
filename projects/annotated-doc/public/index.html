@@ -24,6 +24,8 @@
     #status { min-height:34px; padding:8px 16px; border-bottom:1px solid var(--line); color:var(--muted); background:var(--panel); font-size:12px; }
     #status.error { color:var(--danger); }
     #status.ok { color:var(--ok); }
+    #marker-bar { display:flex; gap:8px; align-items:center; padding:6px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
+    #add-comment:disabled { opacity:.5; cursor:default; }
     #editor { flex:1; overflow:auto; min-height:200px; margin:16px; padding:16px 18px; border:1px solid var(--line); border-radius:10px; outline:none; background:var(--panel); white-space:pre-wrap; font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
     #editor:empty::before { color:#98a2b3; content:attr(data-placeholder); }
     #empty { margin:40px auto; color:var(--muted); text-align:center; }
@@ -43,6 +45,9 @@
     </aside>
     <section id="editor-wrap">
       <div id="status">Select or create a document.</div>
+      <div id="marker-bar">
+        <button id="add-comment" disabled>Add comment marker</button>
+      </div>
       <div id="empty">No document open.</div>
       <div id="editor" class="hidden" spellcheck="true" data-placeholder="Type here" role="textbox" aria-multiline="true"></div>
     </section>
@@ -167,6 +172,7 @@
         });
         await withTimeout(session.ready, 10000, 'document is taking too long to open — try again');
         renderSessionStatus();
+        updateCommentButton();
         editorBinding.focus();
       } catch (error) {
         reportError(error);
@@ -195,6 +201,56 @@
     }
 
     $('create').onclick = () => void createDoc();
+
+    function addCommentMarker() {
+      if ($('editor').getAttribute('aria-busy') === 'true') {
+        setStatus('wait for the local text change to finish before adding a marker', 'error');
+        return;
+      }
+      const selection = editorBinding?.getSelection();
+      if (!selection) {
+        setStatus('select text in the document first', 'error');
+        return;
+      }
+      if (selection.from.blockId === selection.to.blockId && selection.from.offset === selection.to.offset) {
+        setStatus('select a range of text to comment on', 'error');
+        return;
+      }
+      if (selection.from.blockId !== selection.to.blockId) {
+        setStatus('select text within one block to add a comment marker', 'error');
+        return;
+      }
+      const annotation = {
+        id: crypto.randomUUID(),
+        family: 'comment',
+        fields: {},
+      };
+      Promise.resolve().then(() => session.applyAnnotation({
+        mutationId: crypto.randomUUID(),
+        annotation,
+        from: selection.from,
+        to: selection.to,
+      })).then(async (result) => {
+        if (result?.ok === false) throw (result.failure ?? new Error('comment marker was not applied'));
+        if (result?.settlement?.wait) {
+          const settlement = await result.settlement.wait();
+          if (settlement?.status !== 'reconciled') throw new Error('comment marker was not reconciled');
+        }
+        setStatus('comment marker added', 'ok');
+      }).catch((error) => {
+        reportError(error);
+      });
+    }
+
+    $('add-comment').onclick = () => void addCommentMarker();
+    function updateCommentButton() {
+      const selection = editorBinding?.getSelection();
+      const enabled = selection !== null
+        && selection.from.blockId === selection.to.blockId
+        && selection.from.offset !== selection.to.offset;
+      $('add-comment').disabled = session?.status !== 'live' || !enabled;
+    }
+    document.addEventListener('selectionchange', updateCommentButton);
     try {
       await loadDocs();
       if (docs[0]) await openDoc(docs[0].id);

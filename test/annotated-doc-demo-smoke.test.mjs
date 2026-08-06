@@ -21,7 +21,7 @@ test('annotated-doc demo creates a document and inserts via the document session
   const handleSource = await (await fetch(`${origin}/client-handle.mjs`)).text();
   const handleUrl = `data:text/javascript;base64,${Buffer.from(handleSource).toString('base64')}`;
   const { DocClient } = await import(handleUrl);
-  assert.deepEqual(Object.keys(DocClient.body.annotations), []);
+  assert.deepEqual(Object.keys(DocClient.body.annotations), ['comment']);
   assert.deepEqual(Object.keys(DocClient.body.measurements), []);
 
   const listEmpty = await fetch(`${origin}/docs`);
@@ -70,6 +70,17 @@ test('annotated-doc demo creates a document and inserts via the document session
     assert.equal((await inserted.settlement.wait()).status, 'reconciled');
   }
   assert.equal(session.document.blocks[0].text, 'hello');
+
+  const marked = await session.applyAnnotation({
+    mutationId: 'smoke-comment',
+    annotation: { id: 'smoke-comment', family: 'comment', fields: {} },
+    from: { blockId, offset: 1, affinity: 'right' },
+    to: { blockId, offset: 4, affinity: 'right' },
+  });
+  assert.equal(marked.ok, true, marked.failure?.message);
+  assert.equal((await marked.settlement.wait()).status, 'reconciled');
+  assert.equal(session.document.annotations.length, 1);
+  assert.equal(session.document.annotations[0].id, 'smoke-comment');
 
   const len = session.document.blocks[0].text.length;
   const deleted = await session.delete({

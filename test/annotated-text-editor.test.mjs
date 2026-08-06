@@ -8,14 +8,14 @@ function visible(text, id = 'block-1') {
   return { version: 1, blocks: [{ kind: 'visible', id, text }] };
 }
 
-function setup(text = 'Hello') {
+function setup(text = 'Hello', document = visible(text)) {
   const dom = new JSDOM('<div id="editor"></div>');
   const element = dom.window.document.getElementById('editor');
   const calls = [];
   const errors = [];
   let listener = null;
   const session = {
-    document: visible(text),
+    document,
     history: {
       undo: async () => { calls.push(['undo']); },
       redo: async () => { calls.push(['redo']); },
@@ -27,18 +27,26 @@ function setup(text = 'Hello') {
   function select(from, to = from) {
     element.focus();
     const range = dom.window.document.createRange();
-    const node = element.firstChild;
+    const node = element.firstChild?.firstChild;
     range.setStart(node, from);
     range.setEnd(node, to);
     dom.window.getSelection().removeAllRanges();
     dom.window.getSelection().addRange(range);
+  }
+  function selectBlock(blockId, from, to = from) {
+    element.focus();
+    const span = element.querySelector(`[data-block-id="${blockId}"]`);
+    const range = dom.window.document.createRange();
+    const node = span.firstChild;
+    range.setStart(node, from); range.setEnd(node, to);
+    dom.window.getSelection().removeAllRanges(); dom.window.getSelection().addRange(range);
   }
   function beforeinput(inputType, data = null, extras = {}) {
     const event = new dom.window.InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType, data, ...extras });
     element.dispatchEvent(event);
     return event;
   }
-  return { dom, element, session, calls, errors, binding, select, beforeinput, publish(document) { session.document = document; listener?.(document); } };
+  return { dom, element, session, calls, errors, binding, select, selectBlock, beforeinput, publish(document) { session.document = document; listener?.(document); } };
 }
 
 const flushInput = () => new Promise((resolve) => setTimeout(resolve, 110));
@@ -116,7 +124,7 @@ test('annotated editor commits composition once and delegates history', async ()
   const harness = setup('ab');
   harness.select(1);
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
-  harness.element.textContent = 'a語b';
+  harness.element.firstChild.textContent = 'a語b';
   harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
   await Promise.resolve();
   assert.equal(harness.calls.length, 1);
@@ -128,8 +136,33 @@ test('annotated editor commits composition once and delegates history', async ()
   });
   harness.beforeinput('historyUndo');
   harness.beforeinput('historyRedo');
-  await Promise.resolve();
-  assert.deepEqual(harness.calls.slice(1), [['undo'], ['redo']]);
+  assert.deepEqual(harness.calls.slice(1), []);
+  assert.match(harness.errors.at(-1).message, /history is unavailable/);
+  harness.binding.close();
+});
+
+test('annotated editor clears busy state after an unchanged composition', () => {
+  const harness = setup('Hello');
+  harness.select(5);
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true }));
+
+  assert.equal(harness.element.getAttribute('aria-busy'), 'false');
+  assert.deepEqual(harness.calls, []);
+  harness.binding.close();
+});
+
+test('annotated editor accepts a foreign update during an unchanged composition', () => {
+  const harness = setup('Hello');
+  harness.select(5);
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
+  harness.publish(visible('Hello!'));
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true }));
+
+  assert.equal(harness.element.textContent, 'Hello!');
+  assert.equal(harness.element.getAttribute('aria-busy'), 'false');
+  assert.deepEqual(harness.calls, []);
+  assert.deepEqual(harness.errors, []);
   harness.binding.close();
 });
 
@@ -188,6 +221,154 @@ test('annotated editor preserves later typing while the preceding replacement se
     from: { blockId: 'block-1', offset: 3, affinity: 'right' },
     to: { blockId: 'block-1', offset: 3, affinity: 'right' },
     text: 'd',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor waits for receipt ingest before flushing a queued successor', async () => {
+  const harness = setup('a');
+  const settlements = [];
+  harness.session.status = 'live';
+  harness.session.replace = async (input) => {
+    harness.calls.push(['replace', input]);
+    return { ok: true, settlement: { wait: () => new Promise((resolve) => settlements.push(resolve)) } };
+  };
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  await flushInput();
+  harness.select(2);
+  harness.beforeinput('insertText', 'c');
+  await flushInput();
+  settlements.shift()();
+  await flushInput();
+  assert.equal(harness.element.textContent, 'abc');
+  assert.equal(harness.element.getAttribute('aria-busy'), 'true');
+  assert.equal(harness.calls.length, 1);
+  assert.deepEqual(harness.errors, []);
+
+  harness.publish(visible('ab'));
+  await flushInput();
+  assert.deepEqual(harness.calls[1][1], {
+    from: { blockId: 'block-1', offset: 2, affinity: 'right' },
+    to: { blockId: 'block-1', offset: 2, affinity: 'right' },
+    text: 'c',
+  });
+  harness.publish(visible('abc'));
+  settlements.shift()();
+  await flushInput();
+  assert.equal(harness.element.getAttribute('aria-busy'), 'false');
+  harness.binding.close();
+});
+
+test('annotated editor folds queued typing into one composition replacement', async () => {
+  const harness = setup('a');
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
+  harness.element.firstChild.textContent = 'ab語';
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
+  await Promise.resolve();
+
+  assert.equal(harness.calls.length, 1);
+  assert.deepEqual(harness.calls[0][1], {
+    from: { blockId: 'block-1', offset: 1, affinity: 'right' },
+    to: { blockId: 'block-1', offset: 1, affinity: 'right' },
+    text: 'b語',
+  });
+  harness.binding.close();
+});
+
+test('annotated editor rebases queued typing and composition over a compatible foreign append', () => {
+  const harness = setup('a');
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
+  harness.publish(visible('ac'));
+  harness.element.firstChild.textContent = 'ab語';
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
+
+  assert.equal(harness.element.textContent, 'ab語c');
+  assert.deepEqual(harness.calls[0][1], {
+    from: { blockId: 'block-1', offset: 1, affinity: 'right' },
+    to: { blockId: 'block-1', offset: 1, affinity: 'right' },
+    text: 'b語',
+  });
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor reports an incompatible update after queued composition instead of dropping it', () => {
+  const harness = setup('a');
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
+  harness.publish(visible('foreign replacement'));
+  harness.element.firstChild.textContent = 'ab語';
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
+
+  assert.equal(harness.element.textContent, 'foreign replacement');
+  assert.match(harness.errors.at(-1).message, /changed before buffered input/);
+  harness.binding.close();
+});
+
+test('annotated editor blocks history while queued and permits retry after ingest', async () => {
+  const harness = setup('a');
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  harness.beforeinput('historyUndo');
+  assert.deepEqual(harness.calls, []);
+
+  await flushInput();
+  harness.publish(visible('ab'));
+  await flushInput();
+  harness.beforeinput('historyUndo');
+  await Promise.resolve();
+  assert.deepEqual(harness.calls.slice(1), [['undo']]);
+  harness.binding.close();
+});
+
+test('annotated editor blocks keydown history while local work is pending', async () => {
+  const harness = setup('a');
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  const event = new harness.dom.window.KeyboardEvent('keydown', {
+    bubbles: true, cancelable: true, key: 'z', ctrlKey: true,
+  });
+  harness.element.dispatchEvent(event);
+  await Promise.resolve();
+  assert.equal(event.defaultPrevented, true);
+  assert.deepEqual(harness.calls, []);
+  assert.match(harness.errors.at(-1).message, /history is unavailable/);
+  harness.binding.close();
+});
+
+test('annotated editor queues composition behind a submitted replacement', async () => {
+  const harness = setup('a');
+  const settlements = [];
+  harness.session.status = 'live';
+  harness.session.replace = async (input) => {
+    harness.calls.push(['replace', input]);
+    return { ok: true, settlement: { wait: () => new Promise((resolve) => settlements.push(resolve)) } };
+  };
+  harness.select(1);
+  harness.beforeinput('insertText', 'b');
+  await flushInput();
+  harness.select(2);
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true }));
+  harness.element.firstChild.textContent = 'ab語';
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
+  await flushInput();
+
+  assert.equal(harness.element.textContent, 'ab語');
+  assert.equal(harness.calls.length, 1, 'composition waits for the submitted replacement to ingest');
+  harness.publish(visible('ab'));
+  settlements.shift()();
+  await flushInput();
+  assert.deepEqual(harness.calls[1][1], {
+    from: { blockId: 'block-1', offset: 2, affinity: 'right' },
+    to: { blockId: 'block-1', offset: 2, affinity: 'right' },
+    text: '語',
   });
   assert.deepEqual(harness.errors, []);
   harness.binding.close();
@@ -274,5 +455,176 @@ test('annotated editor conflict errors never include buffered or document text',
 
   assert.equal(harness.errors[0].message, 'annotated text changed before buffered input was submitted');
   assert.doesNotMatch(harness.errors[0].message, /private|secret|replacement/);
+  harness.binding.close();
+});
+
+test('annotated editor renders ordered visible and restricted blocks as keyed spans', () => {
+  const document = { version: 1, blocks: [
+    { kind: 'visible', id: 'left', text: 'Left' },
+    { kind: 'restricted', id: 'secret', placeholder: '[restricted]' },
+    { kind: 'visible', id: 'right', text: 'Right' },
+  ] };
+  const harness = setup('', document);
+  assert.deepEqual([...harness.element.children].map((span) => [span.dataset.blockId, span.textContent]), [
+    ['left', 'Left'], ['secret', '[restricted]'], ['right', 'Right'],
+  ]);
+  assert.equal(harness.element.querySelector('[data-block-id="secret"]').contentEditable, 'false');
+  harness.binding.close();
+});
+
+test('annotated editor routes middle and right edits with local offsets', async () => {
+  const document = { version: 1, blocks: [
+    { kind: 'visible', id: 'left', text: 'Left' },
+    { kind: 'visible', id: 'middle', text: 'Middle' },
+    { kind: 'visible', id: 'right', text: 'Right' },
+  ] };
+  const harness = setup('', document);
+  harness.selectBlock('middle', 2);
+  harness.beforeinput('insertText', 'X');
+  await flushInput();
+  harness.publish({ version: 1, blocks: [
+    { kind: 'visible', id: 'left', text: 'Left' },
+    { kind: 'visible', id: 'middle', text: 'MiXddle' },
+    { kind: 'visible', id: 'right', text: 'Right' },
+  ] });
+  harness.selectBlock('right', 1);
+  harness.beforeinput('deleteContentBackward');
+  await flushInput();
+  assert.equal(harness.calls[0][1].from.blockId, 'middle');
+  assert.equal(harness.calls[0][1].from.offset, 2);
+  assert.equal(harness.calls[1][1].from.blockId, 'right');
+  assert.deepEqual(harness.calls[1][1].from, { blockId: 'right', offset: 0, affinity: 'right' });
+  harness.binding.close();
+});
+
+test('annotated editor maps selections and rejects cross-block replacement without mutation', () => {
+  const document = { version: 1, blocks: [
+    { kind: 'visible', id: 'left', text: 'Left' },
+    { kind: 'visible', id: 'right', text: 'Right' },
+  ] };
+  const harness = setup('', document);
+  harness.selectBlock('right', 2, 4);
+  assert.deepEqual(harness.binding.getSelection(), { from: { blockId: 'right', offset: 2, affinity: 'right' }, to: { blockId: 'right', offset: 4, affinity: 'right' } });
+  const range = harness.dom.window.document.createRange();
+  range.setStart(harness.element.querySelector('[data-block-id="left"]').firstChild, 1);
+  range.setEnd(harness.element.querySelector('[data-block-id="right"]').firstChild, 2);
+  const selection = harness.dom.window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
+  const before = harness.element.innerHTML;
+  harness.beforeinput('insertText', 'nope');
+  assert.equal(harness.element.innerHTML, before);
+  assert.deepEqual(harness.calls, []);
+  assert.match(harness.errors[0].message, /not yet supported atomically/);
+  harness.binding.close();
+});
+
+test('annotated editor maps a span boundary to the end of that block', () => {
+  const document = { version: 1, blocks: [
+    { kind: 'visible', id: 'left', text: 'Left' },
+    { kind: 'visible', id: 'right', text: 'Right' },
+  ] };
+  const harness = setup('', document);
+  const span = harness.element.querySelector('[data-block-id="left"]');
+  const range = harness.dom.window.document.createRange();
+  range.setStart(span, span.childNodes.length);
+  range.collapse(true);
+  const selection = harness.dom.window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+
+  assert.deepEqual(harness.binding.getSelection(), {
+    from: { blockId: 'left', offset: 4, affinity: 'right' },
+    to: { blockId: 'left', offset: 4, affinity: 'right' },
+  });
+  harness.binding.close();
+});
+
+test('annotated editor rejects selections touching restricted spans, including root boundaries', () => {
+  const document = { version: 1, blocks: [
+    { kind: 'visible', id: 'left', text: 'Left' },
+    { kind: 'restricted', id: 'secret', placeholder: '[restricted]' },
+    { kind: 'visible', id: 'right', text: 'Right' },
+  ] };
+  const harness = setup('', document);
+  const left = harness.element.querySelector('[data-block-id="left"]');
+  const right = harness.element.querySelector('[data-block-id="right"]');
+  const secret = harness.element.querySelector('[data-block-id="secret"]');
+  const selection = harness.dom.window.getSelection();
+  const range = harness.dom.window.document.createRange();
+
+  range.setStart(left.firstChild, 4); range.setEnd(right.firstChild, 0);
+  selection.removeAllRanges(); selection.addRange(range);
+  assert.equal(harness.binding.getSelection(), null);
+  range.setStart(harness.element, 1); range.collapse(true);
+  selection.removeAllRanges(); selection.addRange(range);
+  assert.equal(harness.binding.getSelection(), null);
+  range.setStart(secret, 0); range.collapse(true);
+  selection.removeAllRanges(); selection.addRange(range);
+  assert.equal(harness.binding.getSelection(), null);
+  harness.binding.close();
+});
+
+test('annotated editor fails closed when another block is edited while one is pending', async () => {
+  const document = { version: 1, blocks: [
+    { kind: 'visible', id: 'left', text: 'Left' },
+    { kind: 'visible', id: 'right', text: 'Right' },
+  ] };
+  const harness = setup('', document);
+  harness.selectBlock('left', 4);
+  harness.beforeinput('insertText', '!');
+  harness.selectBlock('right', 5);
+  const before = harness.element.innerHTML;
+  const event = harness.beforeinput('insertText', '?');
+  assert.equal(event.defaultPrevented, true);
+  assert.equal(harness.element.innerHTML, before);
+  assert.equal(harness.calls.length, 0);
+  assert.match(harness.errors.at(-1).message, /another block/);
+  harness.binding.close();
+});
+
+test('annotated editor reverts cross-block composition while another block is pending', () => {
+  const document = { version: 1, blocks: [
+    { kind: 'visible', id: 'left', text: 'Left' },
+    { kind: 'visible', id: 'right', text: 'Right' },
+  ] };
+  const harness = setup('', document);
+  harness.selectBlock('left', 4);
+  harness.beforeinput('insertText', '!');
+  harness.selectBlock('right', 2, 4);
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true, cancelable: true }));
+  harness.element.querySelector('[data-block-id="right"]').firstChild.textContent = 'R語ght';
+  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
+  assert.equal(harness.element.textContent, 'Left!Right');
+  assert.equal(harness.calls.length, 1);
+  assert.equal(harness.calls[0][1].from.blockId, 'left');
+  harness.binding.close();
+});
+
+test('annotated editor preserves a buffered block when another block changes', () => {
+  const document = { version: 1, blocks: [
+    { kind: 'visible', id: 'left', text: 'Left' },
+    { kind: 'visible', id: 'right', text: 'Right' },
+  ] };
+  const harness = setup('', document);
+  harness.selectBlock('right', 5);
+  harness.beforeinput('insertText', '!');
+  harness.publish({ version: 1, blocks: [
+    { kind: 'visible', id: 'left', text: 'Changed' },
+    { kind: 'visible', id: 'right', text: 'Right' },
+  ] });
+
+  assert.equal(harness.element.textContent, 'ChangedRight!');
+  assert.deepEqual(harness.errors, []);
+  harness.binding.close();
+});
+
+test('annotated editor fails closed when its buffered block disappears', () => {
+  const harness = setup('Right');
+  harness.select(5);
+  harness.beforeinput('insertText', '!');
+  harness.publish({ version: 1, blocks: [{ kind: 'visible', id: 'replacement', text: 'Other' }] });
+
+  assert.equal(harness.element.textContent, 'Other');
+  assert.equal(harness.element.getAttribute('aria-busy'), 'false');
+  assert.match(harness.errors[0].message, /changed before buffered input/);
   harness.binding.close();
 });

@@ -736,7 +736,19 @@ export function createAnnotatedTextHttpSession(config: AnnotatedTextHttpSessionC
 
 export interface AnnotatedTextEditorBinding {
   focus(): void;
+  getSelection(): AnnotatedTextEditorSelection | null;
   close(): void;
+}
+
+export interface AnnotatedTextEditorPosition {
+  readonly blockId: string;
+  readonly offset: number;
+  readonly affinity: 'right';
+}
+
+export interface AnnotatedTextEditorSelection {
+  readonly from: AnnotatedTextEditorPosition;
+  readonly to: AnnotatedTextEditorPosition;
 }
 
 export function bindAnnotatedTextEditor(config: {

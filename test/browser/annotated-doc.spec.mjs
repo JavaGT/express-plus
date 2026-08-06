@@ -111,6 +111,64 @@ test('operation errors are visible and logged to the browser console', async ({ 
   await expect.poll(() => errors).toContainEqual(expect.stringContaining('offset is outside text bounds'));
 });
 
+test('adding a comment marker preserves the selected and following text', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  const text = 'before selected after';
+  await editor.pressSequentially(text, { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.firstElementChild.firstChild;
+    const range = document.createRange();
+    range.setStart(node, 7);
+    range.setEnd(node, 15);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+
+  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  await expect(page.locator('#status')).toHaveText('comment marker added');
+  await expect(editor).toHaveText(text);
+  await editor.evaluate((element) => {
+    const node = element.lastElementChild.firstChild;
+    const range = document.createRange();
+    range.setStart(node, node.data.length);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await editor.pressSequentially('!', { delay: 0 });
+  await expect(editor).toHaveText(`${text}!`);
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText(`${text}!`);
+});
+
+test('adding a marker while text is buffered fails closed without a page error', async ({ page }) => {
+  await createDocument(page);
+  const editor = page.locator('#editor');
+  const pageErrors = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+  await editor.pressSequentially('buffered text', { delay: 0 });
+  await editor.evaluate((element) => {
+    const node = element.firstElementChild.firstChild;
+    const range = document.createRange();
+    range.setStart(node, 0);
+    range.setEnd(node, node.data.length);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    document.dispatchEvent(new Event('selectionchange'));
+  });
+  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  await expect(page.locator('#status')).toHaveText('wait for the local text change to finish before adding a marker');
+  expect(pageErrors).toEqual([]);
+  await expect(editor).toHaveText('buffered text');
+});
+
 test('repeated reloads retain one authoring lease', async ({ page }) => {
   const id = await createDocument(page);
   for (let reload = 0; reload < 17; reload += 1) {
