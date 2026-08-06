@@ -45,6 +45,40 @@ async function openDocument(page, id) {
   await expect(page.locator('#status')).toContainText('live');
 }
 
+async function createCommentedDocument(page, { text = '1234567890', from = 2, to = 4 } = {}) {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially(text, { delay: 0 });
+  await expect(editor).toHaveText(text);
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element, rangeOffsets) => {
+    const block = element.querySelector('[data-block-id]');
+    const node = block.firstChild;
+    const range = document.createRange();
+    range.setStart(node, rangeOffsets.from);
+    range.setEnd(node, rangeOffsets.to);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, { from, to });
+  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  await expect(page.locator('#status')).toHaveText('comment marker added');
+  const marked = editor.locator('[data-annotation-families~="comment"]');
+  await expect(marked).toHaveText(text.slice(from, to));
+  return { id, editor, marked };
+}
+
+async function placeCaret(target, offset) {
+  await target.evaluate((element, caretOffset) => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, caretOffset);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, offset);
+}
+
 test('rapid typing and scalar-safe deletion survive reload', async ({ page }) => {
   const id = await createDocument(page);
   const editor = page.locator('#editor');
@@ -295,6 +329,99 @@ test('typing outside a whole-document comment creates unannotated edge text', as
   await openDocument(page, id);
   await expect(editor).toHaveText('L34R');
   await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('34');
+});
+
+test('backspacing at the start of a comment deletes preceding text without expanding the comment', async ({ page }) => {
+  const { id, editor, marked } = await createCommentedDocument(page);
+  await placeCaret(marked, 0);
+  await editor.press('Backspace');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('134567890');
+  await expect(marked).toHaveText('34');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('134567890');
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('34');
+});
+
+test('backspacing inside a comment shrinks the comment range and persists', async ({ page }) => {
+  const { id, editor, marked } = await createCommentedDocument(page);
+  await placeCaret(marked, 1);
+  await editor.press('Backspace');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('124567890');
+  await expect(marked).toHaveText('4');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('124567890');
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('4');
+});
+
+test('forward deleting at the end of a comment deletes following text without expanding the comment', async ({ page }) => {
+  const { id, editor, marked } = await createCommentedDocument(page);
+  await placeCaret(marked, 2);
+  await editor.press('Delete');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('123467890');
+  await expect(marked).toHaveText('34');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('123467890');
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('34');
+});
+
+test('replacing text through an existing comment removes the stale comment card', async ({ page }) => {
+  const { id, editor } = await createCommentedDocument(page, { text: 'before selected after', from: 7, to: 15 });
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await editor.evaluate((element) => {
+    const range = document.createRange();
+    range.selectNodeContents(element);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await editor.pressSequentially('replacement', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('replacement');
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('replacement');
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+});
+
+test('clicking a comment card selects the exact annotated text', async ({ page }) => {
+  const { editor } = await createCommentedDocument(page, { text: 'before selected after', from: 7, to: 15 });
+  await editor.evaluate((element) => {
+    element.blur();
+    window.getSelection()?.removeAllRanges();
+  });
+  await expect(editor).not.toBeFocused();
+  await page.locator('.annotation-card p').click();
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() ?? '')).toBe('selected');
+  await expect(editor).toBeFocused();
+});
+
+test('switching documents keeps commented text and comment cards isolated', async ({ page }) => {
+  const first = await createCommentedDocument(page, { text: 'first selected', from: 6, to: 14 });
+  await page.getByRole('button', { name: 'New document' }).click();
+  await expect(page.locator('#status')).toContainText('live');
+  const secondId = await page.locator('.doc.active small').textContent();
+  const secondEditor = page.locator('#editor');
+  await expect(secondEditor).toHaveText('');
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await secondEditor.pressSequentially('second text', { delay: 0 });
+  await expect(secondEditor).toHaveText('second text');
+  await expect(secondEditor).toHaveAttribute('aria-busy', 'false');
+
+  await openDocument(page, first.id);
+  await expect(page.locator('#editor')).toHaveText('first selected');
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await expect(page.locator('.annotation-card')).toContainText('selected');
+
+  await openDocument(page, secondId);
+  await expect(page.locator('#editor')).toHaveText('second text');
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
 });
 
 test('replacing selected text is atomic and survives reload', async ({ page }) => {
