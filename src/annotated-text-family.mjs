@@ -224,6 +224,24 @@ export function mergeBlocks(family, leftBlockId, rightBlockId) {
   return deepFreeze({ id: family.id, checkpoint: family.checkpoint, blocks: newBlocks });
 }
 
+// An empty block still owns tombstoned elements.  Move that ownership to an
+// adjacent surviving block before removing its durable identity.
+export function removeEmptyBlock(family, blockId) {
+  const blockIndex = family.blocks.findIndex((block) => block.id === blockId);
+  if (blockIndex === -1) fail(`block not found: ${blockId}`);
+  if (family.blocks.length === 1) fail('cannot remove the final block');
+  if (materializeBlock(family, blockId).length !== 0) fail('cannot remove a non-empty block');
+  const recipientIndex = blockIndex > 0 ? blockIndex - 1 : 1;
+  const recipient = family.blocks[recipientIndex];
+  const removed = family.blocks[blockIndex];
+  const blocks = family.blocks
+    .filter((block) => block.id !== blockId)
+    .map((block) => block.id === recipient.id
+      ? Object.freeze({ id: block.id, elementKeys: Object.freeze([...block.elementKeys, ...removed.elementKeys].sort()) })
+      : block);
+  return deepFreeze({ id: family.id, checkpoint: family.checkpoint, blocks });
+}
+
 export function textFamilyCheckpoint(family) {
   return deepFreeze({ id: family.id, checkpoint: family.checkpoint, blocks: family.blocks });
 }

@@ -436,6 +436,31 @@ test('repeated backspace crosses comment edges without losing the editor selecti
   await expect(page.locator('.annotation-card')).toContainText('Attached text is not visible.');
 });
 
+test('removing the final comment prunes empty split blocks but retains one editable block', async ({ page }) => {
+  const { id, editor } = await createCommentedDocument(page, { text: '1234567890', from: 3, to: 5 });
+  await placeCaret(editor.locator('[data-block-id]').last(), 5);
+  for (let index = 0; index < 10; index += 1) {
+    await editor.press('Backspace');
+    await expect(editor).toHaveAttribute('aria-busy', 'false');
+  }
+  await page.getByRole('button', { name: 'Delete comment 1' }).click();
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await expect(editor.locator('[data-block-id]')).toHaveCount(1);
+  await expect(editor).toHaveText('');
+  const state = app.db.prepare(`SELECT
+    (SELECT COUNT(*) FROM Doc_body_block WHERE document_id = ?) AS blocks,
+    (SELECT COUNT(*) FROM Doc_body_block_group AS block_group JOIN Doc_body_block AS block ON block.id = block_group.block_id WHERE block.document_id = ?) AS groups,
+    (SELECT COUNT(*) FROM Doc_body_annotation WHERE document_id = ?) AS annotations,
+    (SELECT COUNT(*) FROM Doc_body_membership AS membership JOIN Doc_body_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ?) AS memberships,
+    (SELECT COUNT(*) FROM Doc_body_measurement AS measurement JOIN Doc_body_block AS block ON block.id = measurement.block_id WHERE block.document_id = ?) AS measurements`).get(id, id, id, id, id);
+  expect(state).toEqual({ blocks: 1, groups: 1, annotations: 0, memberships: 0, measurements: 0 });
+  await page.reload();
+  await openDocument(page, id);
+  await expect(page.locator('#editor').locator('[data-block-id]')).toHaveCount(1);
+  await page.locator('#editor').pressSequentially('again', { delay: 0 });
+  await expect(page.locator('#editor')).toHaveText('again');
+});
+
 test('forward deleting at the end of a comment deletes following text without expanding the comment', async ({ page }) => {
   const { id, editor, marked } = await createCommentedDocument(page);
   await placeCaret(marked, 2);

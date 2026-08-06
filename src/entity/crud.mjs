@@ -13,7 +13,7 @@ import { validateMaterializedField, validateMutation, ValidationError, deseriali
 import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { assertFrontier, assertWellFormedText, canonicalTextOp, frontierDominates, scalarCount } from '../annotated-text.mjs';
-import { applyTextOperationToBlock, applyTextOperationToNewBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint, projectEndpointToBlockOffset, textOperationForOffsetEdit } from '../annotated-text-family.mjs';
+import { applyTextOperationToBlock, applyTextOperationToNewBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, removeEmptyBlock, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint, projectEndpointToBlockOffset, textOperationForOffsetEdit } from '../annotated-text-family.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership, removeAnnotation } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
@@ -825,13 +825,22 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
               .map((annotation) => Object.freeze({ annotationId: annotation.id, protectsPostimage: Object.freeze([...(annotation.protectedTargetIds ?? [])]) }))
               .sort((left, right) => left.annotationId.localeCompare(right.annotationId))),
           });
+          let prunedFamily = family;
+          const prunedBlockIds = [];
+          const retainedMembershipBlocks = new Set(reduced.memberships.map((membership) => membership.blockId));
+          for (const block of family.blocks) {
+            if (prunedFamily.blocks.length === 1 || retainedMembershipBlocks.has(block.id) || materializeBlock(prunedFamily, block.id).length !== 0) continue;
+            prunedFamily = removeEmptyBlock(prunedFamily, block.id);
+            prunedBlockIds.push(block.id);
+          }
           const handle = eventHandles.native(name, fieldName, 'operated');
           return [{ handle, type: handle.type, scope: documentScope, data: Object.freeze({
-            version: 10, id: command.id,
+            version: prunedBlockIds.length ? 11 : 10, id: command.id,
             before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
             operation: Object.freeze({ kind: 'annotation.remove', annotationId: edit.annotationId, blockIds: Object.freeze(removedBlockIds) }),
-            after: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
+            after: Object.freeze({ structuralRevision: state.structure_version + (prunedBlockIds.length ? 1 : 0), frontier: family.checkpoint.frontier }),
             lifecycle: Object.freeze({ empty: targetAnnotation.empty }), result,
+            ...(prunedBlockIds.length ? { family: textFamilyCheckpoint(prunedFamily), prunedBlockIds: Object.freeze(prunedBlockIds) } : {}),
           }) }];
         }
         if (groupAssignment) {
