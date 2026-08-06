@@ -13,8 +13,8 @@ import { validateMaterializedField, validateMutation, ValidationError, deseriali
 import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { assertFrontier, assertWellFormedText, canonicalTextOp, frontierDominates, scalarCount } from '../annotated-text.mjs';
-import { applyTextOperationToBlock, applyTextOperationToNewBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, removeEmptyBlock, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint, projectEndpointToBlockOffset, textOperationForOffsetEdit } from '../annotated-text-family.mjs';
-import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership, removeAnnotation } from '../annotated-text-membership.mjs';
+import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint, projectEndpointToBlockOffset } from '../annotated-text-family.mjs';
+import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { projectAnnotatedTextSnapshot } from '../annotated-text-snapshot.mjs';
 import { authorizeFieldOp } from '../strategy/index.mjs';
@@ -29,6 +29,7 @@ import { mayRow } from '../row-grant.mjs';
 import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority.mjs';
 import { resolveStream, resolveLease, resolvePosition, resolveGroup, issuePositionFrame, recordSplit, clearAuthoringState } from '../annotated-text-authoring-stream.mjs';
 import { readSeq } from '../committed-log.mjs';
+import { planAnnotationApplyOffsets, planAnnotationRemove, planTextOffsetEdit } from '../annotated-text-plan.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 export const ANNOTATED_TEXT_COMPENSATION = Symbol('workbench.annotated-text-compensation');
@@ -645,83 +646,21 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         const lamport = Math.max(0, ...Object.values(family.checkpoint.elements).map((element) => element.lamport)) + 1;
         const edit = command.edit;
         if (edit.kind === 'text.insert' || edit.kind === 'text.delete' || edit.kind === 'text.replace') {
-          const blockId = position.block_id;
-          const toPosition = edit.kind === 'text.insert' ? null : resolvePosition({ db, prefix, positionToken: edit.to.positionToken, leaseId: lease.id });
-          if (edit.kind !== 'text.insert' && !toPosition) throw new ValidationError(`${name}.${fieldName}.operation replacement end position token unavailable`, { code: 'position-token-unavailable' });
-          if (toPosition && toPosition.block_id !== blockId) throw new ValidationError(`${name}.${fieldName}.operation replacement endpoints must be on the same block`, { code: 'position-invalid' });
-          const toPositionFamily = toPosition ? restoreTextFamilyCheckpoint(JSON.parse(toPosition.family_checkpoint)) : null;
-          let offset;
-          try {
-            const endpoint = resolvePositionToEndpoint(positionFamily, blockId, edit.kind === 'text.insert' ? edit.at.offset : edit.from.offset, positionFamily.checkpoint.frontier, edit.kind === 'text.insert' ? edit.at.affinity : edit.from.affinity);
-            offset = projectEndpointToBlockOffset(family, blockId, Object.freeze({ ...endpoint, basisFrontier: family.checkpoint.frontier }));
-          } catch (error) {
-            throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
-          }
-
-          // A collapsed caret on an annotation boundary belongs outside the
-          // annotation.  Routing is deliberately done from the canonical
-          // database state and the recipient's visible snapshot, never from
-          // client-supplied annotation information.
-          if (edit.kind === 'text.insert' && (offset === 0 || offset === materializeBlock(family, blockId).length)) {
-            if (db.prepare(`SELECT 1 FROM ${prefix}_membership WHERE block_id = ?`).get(blockId)) {
-              const visibleIds = new Set(currentRecipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id));
-              const sourceIndex = family.blocks.findIndex((block) => block.id === blockId);
-              const candidate = family.blocks[sourceIndex + (offset === 0 ? -1 : 1)];
-              const destination = candidate && visibleIds.has(candidate.id) && materializeBlock(family, candidate.id).length > 0 && !db.prepare(`SELECT 1 FROM ${prefix}_membership WHERE block_id = ?`).get(candidate.id)
-                ? candidate
-                : null;
-              if (destination) {
-                const destinationOffset = offset === 0 ? materializeBlock(family, destination.id).length : 0;
-                const routedEdit = { kind: 'text.insert', at: { blockId: destination.id, offset: destinationOffset, affinity: offset === 0 ? 'left' : 'right' }, text: edit.text };
-                let routedOperation;
-                try { routedOperation = textOperationForOffsetEdit(family, routedEdit, actor, lamport); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
-                let routedFamily;
-                try { routedFamily = applyTextOperationToBlock(family, destination.id, routedOperation); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
-                const handle = eventHandles.native(name, fieldName, 'operated');
-                return [{ handle, type: handle.type, scope: documentScope, data: Object.freeze({ version: 1, id: command.id, before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }), operation: Object.freeze({ kind: 'text.apply', blockId: destination.id, operation: routedOperation }), after: Object.freeze({ structuralRevision: state.structure_version, frontier: routedFamily.checkpoint.frontier }), family: textFamilyCheckpoint(routedFamily) }) }];
-              }
-
-              const newBlockId = randomUUID();
-              const side = offset === 0 ? 'before' : 'after';
-              const destinationOffset = side === 'before' ? 0 : materializeBlock(family, blockId).length;
-              const routedEdit = { kind: 'text.insert', at: { blockId, offset: destinationOffset, affinity: side === 'before' ? 'left' : 'right' }, text: edit.text };
-              let routedOperation;
-              try { routedOperation = textOperationForOffsetEdit(family, routedEdit, actor, lamport); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
-              let nextFamily;
-              try { nextFamily = applyTextOperationToNewBlock(family, blockId, newBlockId, routedOperation, side); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
-              const sourceBlock = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(blockId);
-              if (!sourceBlock) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
-              const fields = Object.fromEntries(Object.keys(descriptor.block ?? {}).map((field) => [field, deserializeField(descriptor.block[field], sourceBlock[field])]));
-              const handle = eventHandles.native(name, fieldName, 'operated');
-              return [{ handle, type: handle.type, scope: documentScope, data: Object.freeze({ version: 9, id: command.id, before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }), operation: Object.freeze({ kind: 'text.insert-block', sourceBlockId: blockId, blockId: newBlockId, side, operation: routedOperation }), after: Object.freeze({ structuralRevision: state.structure_version + 1, frontier: nextFamily.checkpoint.frontier }), family: textFamilyCheckpoint(nextFamily), block: Object.freeze({ id: newBlockId, epoch: sourceBlock.epoch, fields: Object.freeze(fields) }), memberships: Object.freeze([]), measurements: Object.freeze([]) }) }];
-            }
-          }
-          const textEdit = edit.kind === 'text.insert'
-            ? { kind: 'text.insert', at: { blockId, offset, affinity: edit.at.affinity }, text: edit.text }
-            : { kind: 'text.delete', from: { blockId, offset, affinity: edit.from.affinity }, to: { blockId, offset: (() => { try { const ep = resolvePositionToEndpoint(toPositionFamily, blockId, edit.to.offset, toPositionFamily.checkpoint.frontier, edit.to.affinity); return projectEndpointToBlockOffset(family, blockId, Object.freeze({ ...ep, basisFrontier: family.checkpoint.frontier })); } catch (e) { throw new ValidationError(`${name}.${fieldName}.operation ${e.message}`); } })(), affinity: edit.to.affinity } };
-          if (edit.kind === 'text.replace') {
-            let deleteOperation, intermediate, insertOperation, nextFamily;
-            try {
-              deleteOperation = textOperationForOffsetEdit(family, textEdit, `${actor.slice(0, 30)}d0`, lamport);
-              intermediate = applyTextOperationToBlock(family, blockId, deleteOperation);
-              const start = resolvePositionToEndpoint(family, blockId, offset, family.checkpoint.frontier, edit.from.affinity).point[1];
-              insertOperation = ['workbench.text', 1, [`${actor.slice(0, 30)}e0`, 1], lamport + 1, intermediate.checkpoint.frontier, ['insert', start, edit.text]];
-              insertOperation = canonicalTextOp(insertOperation);
-              nextFamily = applyTextOperationToBlock(intermediate, blockId, insertOperation);
-            } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
-            const handle = eventHandles.native(name, fieldName, 'operated');
-            return [{ handle, type: handle.type, scope: documentScope, data: Object.freeze({ version: 6, id: command.id, before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }), operation: Object.freeze({ kind: 'text.replace', blockId, operations: Object.freeze([deleteOperation, insertOperation]) }), after: Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier }), family: textFamilyCheckpoint(nextFamily) }) }];
-          }
-          let operation;
-          try { operation = textOperationForOffsetEdit(family, textEdit, actor, lamport); } catch (error) {
-            throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
-          }
-          let nextFamily;
-          try { nextFamily = applyTextOperationToBlock(family, blockId, operation); } catch (error) {
-            throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
-          }
-          const handle = eventHandles.native(name, fieldName, 'operated');
-          return [{ handle, type: handle.type, scope: documentScope, data: Object.freeze({ version: 1, id: command.id, before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }), operation: Object.freeze({ kind: 'text.apply', blockId, operation }), after: Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier }), family: textFamilyCheckpoint(nextFamily) }) }];
+           const blockId = position.block_id;
+           const toPosition = edit.kind === 'text.insert' ? null : resolvePosition({ db, prefix, positionToken: edit.to.positionToken, leaseId: lease.id });
+           if (edit.kind !== 'text.insert' && !toPosition) throw new ValidationError(`${name}.${fieldName}.operation replacement end position token unavailable`, { code: 'position-token-unavailable' });
+           const sourceBlock = edit.kind === 'text.insert' ? db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(blockId) : null;
+           const sourceFields = sourceBlock ? Object.fromEntries(Object.keys(descriptor.block ?? {}).map((field) => [field, deserializeField(descriptor.block[field], sourceBlock[field])])) : undefined;
+           const membershipBlockIds = new Set();
+           for (const block of family.blocks) if (db.prepare(`SELECT 1 FROM ${prefix}_membership WHERE block_id = ?`).get(block.id)) membershipBlockIds.add(block.id);
+           const plannerEdit = edit.kind === 'text.insert'
+             ? { kind: edit.kind, text: edit.text, at: { blockId, offset: edit.at.offset, affinity: edit.at.affinity, positionFamily } }
+             : { kind: edit.kind, text: edit.text, from: { blockId, offset: edit.from.offset, affinity: edit.from.affinity, positionFamily }, to: { blockId: toPosition.block_id, offset: edit.to.offset, affinity: edit.to.affinity, positionFamily: restoreTextFamilyCheckpoint(JSON.parse(toPosition.family_checkpoint)) } };
+           let plan;
+           try { plan = planTextOffsetEdit({ documentId: command.id, structureVersion: state.structure_version, family, actor, lamport, visibleBlockIds: currentVisible, membershipBlockIds, sourceBlocks: sourceBlock ? { [blockId]: { epoch: sourceBlock.epoch, fields: sourceFields } } : {}, mintBlockId: randomUUID, edit: plannerEdit }); }
+           catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`, error.code ? { code: error.code } : undefined); }
+           const handle = eventHandles.native(name, fieldName, 'operated');
+           return [{ handle, type: handle.type, scope: documentScope, data: plan }];
         }
         if (edit.kind === 'block.split') {
           let offset;
@@ -749,31 +688,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           const fromPos = resolvePosition({ db, prefix, positionToken: edit.from.positionToken, leaseId: lease.id });
           const toPos = resolvePosition({ db, prefix, positionToken: edit.to.positionToken, leaseId: lease.id });
           if (!fromPos || !toPos) throw new ValidationError(`${name}.${fieldName}.operation annotation position token unavailable`, { code: 'position-token-unavailable' });
-          const fromFamily = restoreTextFamilyCheckpoint(JSON.parse(fromPos.family_checkpoint));
-          const toFamily = restoreTextFamilyCheckpoint(JSON.parse(toPos.family_checkpoint));
-          let startOffset, endOffset;
-          try {
-          const startEp = resolvePositionToEndpoint(fromFamily, fromPos.block_id, edit.from.offset, fromFamily.checkpoint.frontier, edit.from.affinity);
-            startOffset = projectEndpointToBlockOffset(family, fromPos.block_id, Object.freeze({ ...startEp, basisFrontier: family.checkpoint.frontier }));
-          const endEp = resolvePositionToEndpoint(toFamily, toPos.block_id, edit.to.offset, toFamily.checkpoint.frontier, edit.to.affinity);
-            endOffset = projectEndpointToBlockOffset(family, toPos.block_id, Object.freeze({ ...endEp, basisFrontier: family.checkpoint.frontier }));
-          } catch (error) {
-            throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
-          }
-          const fromIndex = family.blocks.findIndex((block) => block.id === fromPos.block_id);
-          const toIndex = family.blocks.findIndex((block) => block.id === toPos.block_id);
-          if (fromIndex < 0 || toIndex < 0 || fromIndex > toIndex || (fromIndex === toIndex && startOffset >= endOffset)) {
-            throw new ValidationError(`${name}.${fieldName}.operation annotation selection must be a forward, non-empty range`, { code: 'position-invalid' });
-          }
-          const visibleBlocks = currentRecipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id);
-          const visibleSet = new Set(visibleBlocks);
-          if (family.blocks.slice(fromIndex, toIndex + 1).some((block) => !visibleSet.has(block.id))) {
-            throw new ValidationError(`${name}.${fieldName}.operation annotation selection crosses a restricted or hidden block`, { code: 'position-no-longer-visible' });
-          }
-          const crossBlock = fromPos.block_id !== toPos.block_id;
-          return r4Handler({ payload: { version: crossBlock ? 7 : 4, id: command.id, expected: { structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }, operation: { kind: 'annotation.apply', annotation: edit.annotation, selection: crossBlock
-            ? { blockId: fromPos.block_id, startBlockId: fromPos.block_id, endBlockId: toPos.block_id, startUtf16Offset: startOffset, endUtf16Offset: endOffset }
-            : { blockId: fromPos.block_id, startUtf16Offset: startOffset, endUtf16Offset: endOffset } } }, db, scope, principal });
+           const fromFamily = restoreTextFamilyCheckpoint(JSON.parse(fromPos.family_checkpoint));
+           const toFamily = restoreTextFamilyCheckpoint(JSON.parse(toPos.family_checkpoint));
+           let planned;
+           try { planned = planAnnotationApplyOffsets({ family, structureVersion: state.structure_version, from: { blockId: fromPos.block_id, offset: edit.from.offset, affinity: edit.from.affinity, positionFamily: fromFamily }, to: { blockId: toPos.block_id, offset: edit.to.offset, affinity: edit.to.affinity, positionFamily: toFamily }, visibleBlockIds: currentRecipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id) }); }
+           catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`, error.code ? { code: error.code } : undefined); }
+           return r4Handler({ payload: { version: planned.crossBlock ? 7 : 4, id: command.id, expected: planned.expected, operation: { kind: 'annotation.apply', annotation: edit.annotation, selection: planned.selection } }, db, scope, principal });
         }
         if (edit.kind === 'annotation.detach') {
           const expected = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
@@ -782,10 +702,10 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           return r5Handler({ payload: { version: 5, id: command.id, expected, operation: { kind: 'annotation.detach', annotationId: edit.annotationId, blockId: detachPosition.block_id } }, db, scope });
         }
         if (edit.kind === 'annotation.remove') {
-          if (!currentRecipient.annotations.some((annotation) => annotation.id === edit.annotationId)) {
-            throw new ValidationError(`${name}.${fieldName}.operation annotation not found`);
-          }
-          const sourceMemberships = db.prepare(
+           if (!currentRecipient.annotations.some((annotation) => annotation.id === edit.annotationId)) {
+             throw new ValidationError(`${name}.${fieldName}.operation annotation not found`);
+           }
+           const sourceMemberships = db.prepare(
             `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point
                FROM ${prefix}_membership AS membership
                JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
@@ -810,38 +730,11 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           }));
           const targetAnnotation = annotations.find((annotation) => annotation.id === edit.annotationId);
           if (!targetAnnotation || !targetAnnotation.empty) throw new ValidationError(`${name}.${fieldName}.operation annotation family is invalid`);
-          let reduced;
-          try { reduced = removeAnnotation(family, annotations, memberships, edit.annotationId, { structuralRevision: state.structure_version }); } catch (error) {
-            throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
-          }
-          const outcome = reduced.outcomes[0];
-          const result = Object.freeze({
-            memberships: Object.freeze({ annotationId: edit.annotationId, postimage: Object.freeze([]) }),
-            disposition: outcome.type === 'delete'
-              ? Object.freeze({ kind: 'deleted', family: targetAnnotation.family, savedQuote: null, lastMemberships: null })
-              : Object.freeze({ kind: 'orphaned', family: targetAnnotation.family, savedQuote: outcome.savedQuote, lastMemberships: outcome.lastMemberships }),
-            changedProtectors: Object.freeze(reduced.annotations
-              .filter((annotation) => JSON.stringify(annotation.protectedTargetIds ?? []) !== JSON.stringify(targetsByAnnotation.get(annotation.id) ?? []))
-              .map((annotation) => Object.freeze({ annotationId: annotation.id, protectsPostimage: Object.freeze([...(annotation.protectedTargetIds ?? [])]) }))
-              .sort((left, right) => left.annotationId.localeCompare(right.annotationId))),
-          });
-          let prunedFamily = family;
-          const prunedBlockIds = [];
-          const retainedMembershipBlocks = new Set(reduced.memberships.map((membership) => membership.blockId));
-          for (const block of family.blocks) {
-            if (prunedFamily.blocks.length === 1 || retainedMembershipBlocks.has(block.id) || materializeBlock(prunedFamily, block.id).length !== 0) continue;
-            prunedFamily = removeEmptyBlock(prunedFamily, block.id);
-            prunedBlockIds.push(block.id);
-          }
-          const handle = eventHandles.native(name, fieldName, 'operated');
-          return [{ handle, type: handle.type, scope: documentScope, data: Object.freeze({
-            version: prunedBlockIds.length ? 11 : 10, id: command.id,
-            before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
-            operation: Object.freeze({ kind: 'annotation.remove', annotationId: edit.annotationId, blockIds: Object.freeze(removedBlockIds) }),
-            after: Object.freeze({ structuralRevision: state.structure_version + (prunedBlockIds.length ? 1 : 0), frontier: family.checkpoint.frontier }),
-            lifecycle: Object.freeze({ empty: targetAnnotation.empty }), result,
-            ...(prunedBlockIds.length ? { family: textFamilyCheckpoint(prunedFamily), prunedBlockIds: Object.freeze(prunedBlockIds) } : {}),
-          }) }];
+           let plan;
+           try { plan = planAnnotationRemove({ documentId: command.id, structureVersion: state.structure_version, family, annotationId: edit.annotationId, annotations, memberships, visibleBlockIds: currentVisible }); }
+           catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`, error.code ? { code: error.code } : undefined); }
+           const handle = eventHandles.native(name, fieldName, 'operated');
+           return [{ handle, type: handle.type, scope: documentScope, data: plan }];
         }
         if (groupAssignment) {
           const tokens = edit.selection.kind === 'one' ? [edit.selection.groupToken] : edit.selection.groupTokens;
