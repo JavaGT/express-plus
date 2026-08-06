@@ -31,7 +31,11 @@ async function createDocument(page) {
   await page.goto(origin);
   await page.getByRole('button', { name: 'New document' }).click();
   await expect(page.locator('#status')).toContainText('live');
-  await page.locator('#editor').click();
+  const editor = page.locator('#editor');
+  await expect(editor).toHaveAttribute('contenteditable', 'plaintext-only');
+  await expect(editor.locator('[data-block-id]')).toHaveCount(1);
+  await editor.click();
+  await expect(editor).toBeFocused();
   return page.locator('.doc.active small').textContent();
 }
 
@@ -116,6 +120,7 @@ test('adding a comment marker preserves the selected and following text', async 
   const editor = page.locator('#editor');
   const text = 'before selected after';
   await editor.pressSequentially(text, { delay: 0 });
+  await expect(editor).toHaveText(text);
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await editor.evaluate((element) => {
     const node = element.firstElementChild.firstChild;
@@ -133,6 +138,10 @@ test('adding a comment marker preserves the selected and following text', async 
   const marked = editor.locator('[data-annotation-families~="comment"]');
   await expect(marked).toHaveText('selected');
   await expect(marked).toHaveCSS('background-color', 'rgb(254, 240, 138)');
+  const comment = page.locator('.annotation-card');
+  await expect(comment).toContainText('selected');
+  await comment.hover();
+  await expect(marked).toHaveCSS('background-color', 'rgb(245, 158, 11)');
   await editor.evaluate((element) => {
     const node = element.lastElementChild.firstChild;
     const range = document.createRange();
@@ -148,6 +157,144 @@ test('adding a comment marker preserves the selected and following text', async 
   await page.reload();
   await openDocument(page, id);
   await expect(editor).toHaveText(`${text}!`);
+});
+
+test('a comment can be deleted from the annotation list and stays deleted after reload', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('before selected after', { delay: 0 });
+  await expect(editor).toHaveText('before selected after');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.firstElementChild.firstChild;
+    const range = document.createRange();
+    range.setStart(node, 7);
+    range.setEnd(node, 15);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Delete comment 1' }).click();
+  await expect(page.locator('#status')).toHaveText('comment marker deleted');
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveCount(0);
+  await page.reload();
+  await openDocument(page, id);
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await expect(editor).toHaveText('before selected after');
+});
+
+test('typing at comment edges stays outside while typing inside stays highlighted', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('1234567890', { delay: 0 });
+  await expect(editor).toHaveText('1234567890');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.firstElementChild.firstChild;
+    const range = document.createRange();
+    range.setStart(node, 2);
+    range.setEnd(node, 4);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  const marked = editor.locator('[data-annotation-families~="comment"]');
+  await expect(marked).toHaveText('34');
+
+  await marked.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, 0);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await editor.pressSequentially('L', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('12L34567890');
+  await expect(marked).toHaveText('34');
+
+  await marked.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, element.textContent.length);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await editor.pressSequentially('R', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('12L34R567890');
+  await expect(marked).toHaveText('34');
+
+  await marked.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, 1);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await editor.pressSequentially('I', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(marked).toHaveText('3I4');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('12L3I4R567890');
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('3I4');
+});
+
+test('typing outside a whole-document comment creates unannotated edge text', async ({ page }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('34', { delay: 0 });
+  await expect(editor).toHaveText('34');
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.firstElementChild.firstChild;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('button', { name: 'Add comment marker' }).click();
+  const marked = editor.locator('[data-annotation-families~="comment"]');
+  await expect(marked).toHaveText('34');
+
+  await marked.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, 0);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await editor.pressSequentially('L', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('L34');
+  await expect(marked).toHaveText('34');
+
+  await marked.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, element.textContent.length);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await editor.pressSequentially('R', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('L34R');
+  await expect(marked).toHaveText('34');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('L34R');
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('34');
 });
 
 test('replacing selected text is atomic and survives reload', async ({ page }) => {
@@ -178,6 +325,7 @@ test('adding a marker while text is buffered fails closed without a page error',
   const pageErrors = [];
   page.on('pageerror', (error) => pageErrors.push(error.message));
   await editor.pressSequentially('buffered text', { delay: 0 });
+  await expect(editor.locator('[data-block-id]')).toHaveCount(1);
   await editor.evaluate((element) => {
     const node = element.firstElementChild.firstChild;
     const range = document.createRange();

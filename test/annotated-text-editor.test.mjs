@@ -477,7 +477,7 @@ test('annotated editor renders ordered visible and restricted blocks as keyed sp
   harness.binding.close();
 });
 
-test('annotated editor exposes visible annotation families on their block spans', () => {
+test('annotated editor exposes visible annotation families and identities on their block spans', () => {
   const document = {
     version: 1,
     blocks: [{ kind: 'visible', id: 'marked', text: 'marked', annotationIds: ['comment-1'] }],
@@ -488,6 +488,10 @@ test('annotated editor exposes visible annotation families on their block spans'
   assert.equal(
     harness.element.querySelector('[data-block-id="marked"]').dataset.annotationFamilies,
     'comment',
+  );
+  assert.equal(
+    harness.element.querySelector('[data-block-id="marked"]').dataset.annotationIds,
+    'comment-1',
   );
   harness.binding.close();
 });

@@ -723,6 +723,7 @@ export interface AnnotatedTextHttpSession {
   merge(input: { readonly mutationId: string; readonly leftBlockId: string; readonly rightBlockId: string }): Promise<ScopeDispatchResult>;
   applyAnnotation(input: { readonly mutationId: string; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>>; readonly protectedTargetIds?: readonly string[] }; readonly from: AnnotatedTextPosition; readonly to: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
   detachAnnotation(input: { readonly mutationId: string; readonly annotationId: string; readonly blockId: string }): Promise<ScopeDispatchResult>;
+  removeAnnotation(input: { readonly mutationId: string; readonly annotationId: string }): Promise<ScopeDispatchResult>;
   continueBlock(input: { readonly mutationId: string; readonly at: AnnotatedTextPosition }): Promise<ScopeDispatchResult>;
   setBlockGroupAssignment(input: { readonly mutationId: string; readonly selection: AnnotatedTextBlockGroupSelection; readonly annotation: { readonly id: string; readonly family: string; readonly fields: Readonly<Record<string, unknown>> } }): Promise<ScopeDispatchResult>;
   clearBlockGroupAssignment(input: { readonly mutationId: string; readonly selection: AnnotatedTextBlockGroupSelection; readonly family: string }): Promise<ScopeDispatchResult>;

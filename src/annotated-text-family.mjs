@@ -603,6 +603,34 @@ export function applyTextOperationToBlock(family, blockId, operation) {
   });
 }
 
+// Apply an insertion whose destination block is created by the same structural
+// operation.  Keeping this here (rather than manufacturing an empty block) is
+// important: family checkpoints with live elements cannot contain empty blocks.
+export function applyTextOperationToNewBlock(family, sourceBlockId, newBlockId, operation, side) {
+  if (side !== 'before' && side !== 'after') fail('new block side must be before or after');
+  if (family.blocks.some((block) => block.id === newBlockId)) fail(`duplicate block id: ${newBlockId}`);
+  if (Object.keys(family.checkpoint.pending).length > 0) fail('cannot apply operation to family with pending entries');
+  if (family.checkpoint.rebootstrapRequired) fail('cannot apply operation to family requiring rebootstrap');
+  const sourceIndex = family.blocks.findIndex((block) => block.id === sourceBlockId);
+  if (sourceIndex < 0) fail(`block not found: ${sourceBlockId}`);
+  const op = canonicalTextOp(operation);
+  if (!frontierDominates(family.checkpoint.frontier, op[4])) fail('operation is not causally ready');
+  if (op[5][0] === 'insert' && op[5][1][0] === 'element' && !Object.hasOwn(family.checkpoint.elements, elementKey(op[5][1][1][0], op[5][1][1][1]))) fail('insert anchor element not found');
+  const state = restoreTextCheckpoint(family.checkpoint);
+  const nextState = applyTextOp(state, op);
+  if (nextState.rebootstrapRequired || Object.keys(nextState.pending).length > 0) fail('operation would not apply immediately');
+  const nextCheckpoint = textCheckpoint(nextState);
+  const oldKeys = new Set(Object.keys(family.checkpoint.elements));
+  const newKeys = Object.keys(nextCheckpoint.elements).filter((key) => !oldKeys.has(key));
+  if (newKeys.length === 0) fail('operation did not insert elements');
+  const blocks = family.blocks.map((block) => ({ id: block.id, elementKeys: [...block.elementKeys] }));
+  const newBlock = { id: newBlockId, elementKeys: newKeys.sort() };
+  const index = side === 'before' ? sourceIndex : sourceIndex + 1;
+  blocks.splice(index, 0, newBlock);
+  // The operation's new elements are deliberately owned only by the new block.
+  return restoreTextFamilyCheckpoint({ id: family.id, checkpoint: nextCheckpoint, blocks });
+}
+
 export function textOperationForOffsetEdit(family, edit, actor, lamport) {
   const basis = family.checkpoint.frontier;
   const op = [actor, 1];

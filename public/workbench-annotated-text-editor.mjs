@@ -187,11 +187,15 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
         span.textContent = block.placeholder ?? '';
         span.dataset.restricted = 'true';
         delete span.dataset.annotationFamilies;
+        delete span.dataset.annotationIds;
       } else {
         delete span.dataset.restricted;
-        const families = [...new Set((block.annotationIds ?? []).map((id) => annotationFamilies.get(id)).filter(Boolean))].sort();
+        const annotationIds = [...new Set(block.annotationIds ?? [])].sort();
+        const families = [...new Set(annotationIds.map((id) => annotationFamilies.get(id)).filter(Boolean))].sort();
         if (families.length) span.dataset.annotationFamilies = families.join(' ');
         else delete span.dataset.annotationFamilies;
+        if (annotationIds.length) span.dataset.annotationIds = annotationIds.join(' ');
+        else delete span.dataset.annotationIds;
         const text = displayed.has(block.id) ? displayed.get(block.id) : block.text;
         if (span.textContent !== text) span.textContent = text;
       }

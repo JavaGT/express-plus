@@ -261,6 +261,42 @@ test('v6 text.replace projects one atomic same-block event', async () => {
   await app.close?.();
 });
 
+test('annotated document edges create nonempty unannotated blocks in one v9 event', async () => {
+  const { app, db, blockId, positionMap, stream, lease } = await setupDoc('34');
+  const token = v9PositionTokenPayload(positionMap, blockId);
+  const applied = await app.dispatch({
+    actionId: 'edge-annotation', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-edge-annotation' }, edit: { kind: 'annotation.apply', annotation: { id: 'edge-ann', family: 'theme', fields: {} }, from: { positionToken: token, offset: 0, affinity: 'left' }, to: { positionToken: token, offset: 2, affinity: 'right' } } },
+  });
+  assert.equal(applied.ok, true, applied.failure?.message);
+
+  const left = await app.dispatch({
+    actionId: 'edge-left', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-edge-left' }, edit: { kind: 'text.insert', at: { positionToken: token, offset: 0, affinity: 'right' }, text: 'L' } },
+  });
+  assert.equal(left.ok, true, left.failure?.message);
+  assert.equal(left.events[0].data.version, 9);
+  assert.equal(left.events[0].data.operation.kind, 'text.insert-block');
+  assert.equal(left.events[0].data.operation.side, 'before');
+  assert.deepEqual(left.events[0].data.memberships, []);
+
+  const right = await app.dispatch({
+    actionId: 'edge-right', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-edge-right' }, edit: { kind: 'text.insert', at: { positionToken: token, offset: 2, affinity: 'right' }, text: 'R' } },
+  });
+  assert.equal(right.ok, true, right.failure?.message);
+  assert.equal(right.events[0].data.version, 9);
+  assert.equal(right.events[0].data.operation.side, 'after');
+
+  const state = db.prepare("SELECT structure_version, family_checkpoint FROM R4Doc_body_state WHERE document_id = 'd1'").get();
+  const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+  assert.deepEqual(family.blocks.map((block) => materializeBlock(family, block.id)), ['L', '34', 'R']);
+  assert.equal(state.structure_version, 3);
+  assert.deepEqual(db.prepare("SELECT block_id FROM R4Doc_body_membership WHERE annotation_id = 'edge-ann'").all().map((row) => row.block_id), [blockId]);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM R4Doc_body_block WHERE document_id = ?').get('d1').count, 3);
+  await app.close?.();
+});
+
 test('R4 annotation.apply persists sorted protecting targets through its sole event and projection path', async () => {
   const { app, db, blockId, positionMap, state, stream, lease } = await setupDoc('hello world');
   const token = v9PositionTokenPayload(positionMap, blockId);
@@ -475,6 +511,42 @@ test('R5 annotation.detach retains a non-last annotation and normalizes ordinals
   });
   assert.equal(detached.ok, true, detached.failure?.message);
   assert.equal(db.prepare("SELECT ordinal FROM R4Doc_body_membership WHERE annotation_id = 'r5-retain' AND block_id = ?").get(secondBlock.id).ordinal, 0);
+  await app.close?.();
+});
+
+test('v10 annotation.remove atomically orphans every visible membership with its full quote', async () => {
+  const { app, db, blockId, positionMap, refreshPositionMap, stream, lease } = await setupDoc('hello world');
+  const token = v9PositionTokenPayload(positionMap, blockId);
+  const split = await app.dispatch({
+    actionId: 'remove-split', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-remove-split' }, edit: { kind: 'block.split', at: { positionToken: token, offset: 5, affinity: 'right' }, temporaryBlock: 'tmp-remove-split' } },
+  });
+  assert.equal(split.ok, true, split.failure?.message);
+  const blocks = db.prepare("SELECT id FROM R4Doc_body_block WHERE document_id = 'd1' ORDER BY position").all();
+  const nextPositions = await refreshPositionMap();
+  const applied = await app.dispatch({
+    actionId: 'remove-apply', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-remove-apply' }, edit: { kind: 'annotation.apply', annotation: { id: 'remove-comment', family: 'comment', fields: {} }, from: { positionToken: v9PositionTokenPayload(nextPositions, blocks[0].id), offset: 0, affinity: 'left' }, to: { positionToken: v9PositionTokenPayload(nextPositions, blocks[1].id), offset: 6, affinity: 'right' } } },
+  });
+  assert.equal(applied.ok, true, applied.failure?.message);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = 'remove-comment'").get().count, 2);
+  const preimage = db.serialize();
+  const removed = await app.dispatch({
+    actionId: 'remove-all', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-remove-all' }, edit: { kind: 'annotation.remove', annotationId: 'remove-comment' } },
+  });
+  assert.equal(removed.ok, true, removed.failure?.message);
+  assert.equal(removed.events.length, 1);
+  assert.equal(removed.events[0].data.version, 10);
+  assert.deepEqual(removed.events[0].data.operation.blockIds, blocks.map((block) => block.id));
+  assert.equal(removed.events[0].data.result.disposition.savedQuote, 'hello world');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = 'remove-comment'").get().count, 0);
+  assert.equal(db.prepare("SELECT saved_quote FROM R4Doc_body_annotation_orphan_state WHERE annotation_id = 'remove-comment'").get().saved_quote, 'hello world');
+
+  const event = structuredClone(removed.events[0].data);
+  db.deserialize(preimage);
+  app.entities.get('R4Doc').projection.apply({ handle: native('R4Doc', 'body', 'operated'), data: event }, db);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = 'remove-comment'").get().count, 0);
   await app.close?.();
 });
 

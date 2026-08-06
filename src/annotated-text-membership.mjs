@@ -312,6 +312,51 @@ export function removeMembership(family, annotations, memberships, annotationId,
   }
 }
 
+export function removeAnnotation(family, annotations, memberships, annotationId, { structuralRevision } = {}) {
+  const annotation = findAnnotation(annotations, annotationId);
+  if (!annotation) fail(`annotation not found: ${annotationId}`);
+  const removedMemberships = membershipsForAnnotation(memberships, annotationId)
+    .sort((left, right) => blockIndex(family, left.blockId) - blockIndex(family, right.blockId));
+  if (removedMemberships.length === 0) fail(`annotation has no memberships: ${annotationId}`);
+  if (removedMemberships.some((membership) => hasProtectorOverlap(family, annotations, memberships, annotationId, membership.blockId))) {
+    fail(`annotation ${annotationId} is protected from deletion`);
+  }
+  if (annotation.empty === 'delete') {
+    return deepFreeze({
+      annotations: annotations
+        .filter((candidate) => candidate.id !== annotationId)
+        .map((candidate) => candidate.protectedTargetIds?.includes(annotationId)
+          ? { ...candidate, protectedTargetIds: candidate.protectedTargetIds.filter((id) => id !== annotationId) }
+          : candidate),
+      memberships: memberships.filter((membership) => membership.annotationId !== annotationId),
+      outcomes: [deepFreeze({ type: 'delete', annotationId })],
+    });
+  }
+  assertPositiveSafeInteger(structuralRevision, 'structural revision');
+  const lastMemberships = assertAnnotationLastMemberships([
+    'workbench.annotation-last-memberships',
+    1,
+    structuralRevision,
+    annotation.protectedTargetIds ?? [],
+    removedMemberships.map((membership, ordinal) => [
+      ordinal,
+      membership.blockId,
+      ['endpoint', membership.start.basisFrontier, membership.start.point],
+      ['endpoint', membership.end.basisFrontier, membership.end.point],
+    ]),
+  ]);
+  return deepFreeze({
+    annotations,
+    memberships: memberships.filter((membership) => membership.annotationId !== annotationId),
+    outcomes: [deepFreeze({
+      type: 'orphan',
+      annotationId,
+      savedQuote: removedMemberships.map((membership) => materializeBlock(family, membership.blockId)).join(''),
+      lastMemberships,
+    })],
+  });
+}
+
 export function splitBlockMemberships(family, annotations, memberships, blockId, newBlockId) {
   const bIdx = blockIndex(family, blockId);
   if (bIdx === -1) fail(`block not found: ${blockId}`);

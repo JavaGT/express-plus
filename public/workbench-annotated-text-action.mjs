@@ -76,7 +76,10 @@ export function annotatedTextAction(entity, field, command) {
     edit = Object.freeze({ kind: command.kind, annotation: command.annotation, from: position(command.from, 'annotation start'), to: position(command.to, 'annotation end') });
    } else if (command.kind === 'annotation.detach') {
       if (typeof command.annotationId !== 'string' || command.annotationId.length === 0 || !opaqueToken(command.positionToken)) throw new TypeError('annotation detach requires annotation and position token');
-     edit = Object.freeze({ kind: command.kind, annotationId: command.annotationId, positionToken: command.positionToken });
+      edit = Object.freeze({ kind: command.kind, annotationId: command.annotationId, positionToken: command.positionToken });
+  } else if (command.kind === 'annotation.remove') {
+    if (typeof command.annotationId !== 'string' || command.annotationId.length === 0) throw new TypeError('annotation remove requires annotation');
+    edit = Object.freeze({ kind: command.kind, annotationId: command.annotationId });
   } else if (command.kind === 'block.continue') {
     if (!opaqueToken(command.temporaryBlock)) throw new TypeError('continue requires a private temporary block');
     edit = Object.freeze({ kind: command.kind, at: position(command.at, 'continue position'), temporaryBlock: command.temporaryBlock });

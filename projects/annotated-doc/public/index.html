@@ -26,12 +26,22 @@
     #status.ok { color:var(--ok); }
     #marker-bar { display:flex; gap:8px; align-items:center; padding:6px 16px; border-bottom:1px solid var(--line); background:var(--panel); }
     #add-comment:disabled { opacity:.5; cursor:default; }
-    #editor { flex:1; overflow:auto; min-height:200px; margin:16px; padding:16px 18px; border:1px solid var(--line); border-radius:10px; outline:none; background:var(--panel); white-space:pre-wrap; font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
+    #document-workspace { display:grid; grid-template-columns:minmax(0,1fr) 260px; flex:1; min-height:0; }
+    #editor { overflow:auto; min-height:200px; margin:16px; padding:16px 18px; border:1px solid var(--line); border-radius:10px; outline:none; background:var(--panel); white-space:pre-wrap; font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
     #editor [data-annotation-families~="comment"] { background:#fef08a; }
+    #editor [data-active-annotation="true"] { background:#f59e0b; box-shadow:inset 0 -2px #b45309; }
     #editor:empty::before { color:#98a2b3; content:attr(data-placeholder); }
+    #annotations-panel { overflow:auto; margin:16px 16px 16px 0; padding-left:16px; border-left:1px solid var(--line); }
+    #annotations-panel h2 { margin:0 0 10px; font-size:12px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); }
+    #annotations-empty { margin:0; color:var(--muted); font-size:12px; }
+    .annotation-card { margin-bottom:8px; padding:10px; border:1px solid var(--line); border-radius:9px; background:var(--panel); }
+    .annotation-card:hover, .annotation-card:focus-within { border-color:#f59e0b; }
+    .annotation-card strong { display:block; margin-bottom:3px; }
+    .annotation-card p { overflow:hidden; margin:0 0 8px; color:var(--muted); font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+    .annotation-card button { padding:4px 7px; color:var(--danger); font-size:12px; }
     #empty { margin:40px auto; color:var(--muted); text-align:center; }
     .hidden { display:none !important; }
-    @media (max-width:700px) { main { grid-template-columns:1fr; grid-template-rows:auto 1fr; } aside { display:flex; gap:8px; overflow:auto; border-right:0; border-bottom:1px solid var(--line); } #create { width:auto; margin:0; } #list { display:flex; gap:4px; } .doc { min-width:140px; } }
+    @media (max-width:700px) { main { grid-template-columns:1fr; grid-template-rows:auto 1fr; } aside { display:flex; gap:8px; overflow:auto; border-right:0; border-bottom:1px solid var(--line); } #create { width:auto; margin:0; } #list { display:flex; gap:4px; } .doc { min-width:140px; } #document-workspace { grid-template-columns:1fr; grid-template-rows:minmax(240px,1fr) auto; overflow:auto; } #editor { min-height:240px; } #annotations-panel { overflow:visible; margin:0 16px 16px; padding:14px 0 0; border-top:1px solid var(--line); border-left:0; } }
   </style>
 </head>
 <body>
@@ -50,7 +60,14 @@
         <button id="add-comment" disabled>Add comment marker</button>
       </div>
       <div id="empty">No document open.</div>
-      <div id="editor" class="hidden" spellcheck="true" data-placeholder="Type here" role="textbox" aria-multiline="true"></div>
+      <div id="document-workspace" class="hidden">
+        <div id="editor" spellcheck="true" data-placeholder="Type here" role="textbox" aria-multiline="true"></div>
+        <section id="annotations-panel" aria-label="Comments">
+          <h2>Comments</h2>
+          <p id="annotations-empty">No comments yet.</p>
+          <div id="annotations"></div>
+        </section>
+      </div>
     </section>
   </main>
   <script type="module">
@@ -122,6 +139,7 @@
       unsubscribe = null;
       editorBinding = null;
       session = null;
+      renderAnnotations();
     }
 
     function renderSessionStatus(document = session?.document) {
@@ -130,6 +148,59 @@
         document ? `${session.status} - ${block ? `${block.id.slice(0, 8)}...` : 'no visible block'}` : 'document unavailable',
         document && session.status === 'live' ? 'ok' : document ? '' : 'error',
       );
+    }
+
+    function setActiveAnnotation(annotationId, active) {
+      for (const span of $('editor').querySelectorAll('[data-annotation-ids]')) {
+        const ids = span.dataset.annotationIds?.split(' ') ?? [];
+        if (ids.includes(annotationId)) {
+          if (active) span.dataset.activeAnnotation = 'true';
+          else delete span.dataset.activeAnnotation;
+        }
+      }
+    }
+
+    function annotationQuote(document, annotationId) {
+      const memberIds = new Set((document.memberships ?? [])
+        .filter((membership) => membership.annotationId === annotationId)
+        .sort((left, right) => left.ordinal - right.ordinal)
+        .map((membership) => membership.blockId));
+      const quote = (document.blocks ?? [])
+        .filter((block) => block.kind === 'visible' && memberIds.has(block.id))
+        .map((block) => block.text)
+        .join('');
+      return quote.length > 72 ? `${quote.slice(0, 69)}...` : quote;
+    }
+
+    function renderAnnotations(snapshot = session?.document) {
+      const annotations = (snapshot?.annotations ?? []).filter((annotation) => annotation.family === 'comment');
+      $('annotations').replaceChildren();
+      $('annotations-empty').classList.toggle('hidden', annotations.length > 0);
+      for (const [index, annotation] of annotations.entries()) {
+        const card = document.createElement('article');
+        card.className = 'annotation-card';
+        card.dataset.annotationId = annotation.id;
+        const title = document.createElement('strong');
+        title.textContent = `Comment ${index + 1}`;
+        const quote = document.createElement('p');
+        quote.textContent = annotationQuote(snapshot, annotation.id) || 'Attached text is not visible.';
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.textContent = 'Delete';
+        remove.setAttribute('aria-label', `Delete comment ${index + 1}`);
+        card.addEventListener('mouseenter', () => setActiveAnnotation(annotation.id, true));
+        card.addEventListener('mouseleave', () => setActiveAnnotation(annotation.id, false));
+        card.addEventListener('focusin', () => setActiveAnnotation(annotation.id, true));
+        card.addEventListener('focusout', () => setActiveAnnotation(annotation.id, false));
+        remove.onclick = () => void removeAnnotation(annotation.id, remove);
+        card.append(title, quote, remove);
+        $('annotations').append(card);
+      }
+    }
+
+    function renderSession(document = session?.document) {
+      renderSessionStatus(document);
+      renderAnnotations(document);
     }
 
     function withTimeout(promise, ms, message) {
@@ -154,7 +225,7 @@
       currentId = id;
       renderDocList();
       $('empty').classList.add('hidden');
-      $('editor').classList.remove('hidden');
+      $('document-workspace').classList.remove('hidden');
       setStatus(`opening ${shortId(id)}...`);
       try {
         session = createAnnotatedTextHttpSession({
@@ -165,14 +236,14 @@
             if (delayed) setStatus('sync delayed - still retrying...');
           },
         });
-        unsubscribe = session.subscribe(renderSessionStatus);
+        unsubscribe = session.subscribe(renderSession);
         editorBinding = bindAnnotatedTextEditor({
           element: $('editor'),
           session,
           onError: reportError,
         });
         await withTimeout(session.ready, 10000, 'document is taking too long to open — try again');
-        renderSessionStatus();
+        renderSession();
         updateCommentButton();
         editorBinding.focus();
       } catch (error) {
@@ -237,6 +308,22 @@
       }).catch((error) => {
         reportError(error);
       });
+    }
+
+    async function removeAnnotation(annotationId, button) {
+      button.disabled = true;
+      try {
+        const result = await session.removeAnnotation({ mutationId: crypto.randomUUID(), annotationId });
+        if (result?.ok === false) throw (result.failure ?? new Error('comment marker was not removed'));
+        if (result?.settlement?.wait) {
+          const settlement = await result.settlement.wait();
+          if (settlement?.status !== 'reconciled') throw new Error('comment marker removal was not reconciled');
+        }
+        setStatus('comment marker deleted', 'ok');
+      } catch (error) {
+        button.disabled = false;
+        reportError(error);
+      }
     }
 
     $('add-comment').onclick = () => void addCommentMarker();

@@ -3505,6 +3505,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       const command = { kind: 'annotation.detach', mutationId, annotationId, blockId };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
+    removeAnnotation({ mutationId, annotationId }) {
+      const command = { kind: 'annotation.remove', mutationId, annotationId };
+      return queueAuthoringMutation(command, (current) => dispatchNow(current));
+    },
     continueBlock({ mutationId, at }) {
       const command = { kind: 'block.continue', mutationId, at };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
