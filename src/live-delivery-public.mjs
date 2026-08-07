@@ -4,6 +4,7 @@
 
 import { createLiveDeliveryCore } from './live-delivery-core.mjs';
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
+import { tryBuildAnnotatedTextFoldEnvelopes } from './annotated-text-fold-envelope.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 import { readSeq } from './committed-log.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
@@ -88,12 +89,24 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
     db,
     entities,
     mayVerb,
-    projectRecipient: (context) => {
+    projectRecipient: async (context) => {
       // The public projector must never receive raw _Log eventData. The
       // envelope grammar uses only metadata plus the recipient-hydrated row.
       const { data: _data, eventData: _eventData, ...event } = context.event;
       const handle = tryParseScopeKey(context.scope);
-      return envelopes.buildEnvelope({ ...context, event, composite: !!handle && composites.has(handle.entity) });
+      const base = { ...context, event, composite: !!handle && composites.has(handle.entity) };
+      // Document-bound annotated-text operated events may fold as a single
+      // recipient-safe CRDT transition instead of an opaque snapshot recovery.
+      // tryBuildAnnotatedTextFoldEnvelopes returns null to fall through to the
+      // ordinary envelope grammar (snapshot/resync) for non-foldable events.
+      // The fold builder needs the full committed event (including data);
+      // buildEnvelope must keep the stripped event (raw eventData never leaves).
+      const document = base.document;
+      if (document && context.event?.eventType?.startsWith(`${document.entity?.name}.`)) {
+        const folded = await tryBuildAnnotatedTextFoldEnvelopes({ ...base, event: context.event }, { db, document });
+        if (folded) return folded;
+      }
+      return envelopes.buildEnvelope(base);
     },
     scopeVisible: ({ entity, principal, scope: handle }) => {
       const declaration = composites.get(entity.name);

@@ -501,6 +501,71 @@ test('declared annotated text owns generated HTTP admission and package delivery
   session.close();
 });
 
+test('annotated text text-insert is delivered as a fold envelope over the live SSE stream (no snapshot)', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY, owner TEXT); CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO Project VALUES (\'p1\', \'u1\'); INSERT INTO User VALUES (\'u1\'); INSERT INTO User VALUES (\'u2\')');
+  const Document = entity('FoldDeliverDoc', {
+    project: ref('Project'), owner: ref('User', { role: 'owner' }),
+    body: annotatedText({ project: 'project', owner: 'owner', annotations: [annotation('note')] }),
+    grant: [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  executeDDL(Document, db);
+  const Project = entity('Project', {
+    owner: ref('User', { role: 'owner' }),
+    grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not project owner'))],
+  });
+  const app = workbench({ db, entities: [Project, Document], history: (await import('../src/index.mjs')).durableHistory({ authorize: () => true }) });
+  app.attachLiveDelivery({ principalOf: () => user });
+  app.listen(0, { principalOf: () => user });
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const create = annotatedTextCreateAction(Document, Document.body, { id: 'd1', projectId: 'p1', ownerId: 'u1' });
+  const createRes = await fetch(`${origin}/workbench/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ actionId: 'create-fold', type: create.type, payload: create.payload, scope: 'Project:p1', clientId: 'tab-a' }),
+  });
+  assert.equal(createRes.status, 200);
+  const initialBlockId = db.prepare('SELECT id FROM FoldDeliverDoc_body_block WHERE document_id = ?').get('d1').id;
+
+  // Open a real SSE events stream as the owner, with document identity so the
+  // delivery can resolve the annotated-text document and emit a fold envelope.
+  const clientNonce = 'x'.repeat(43);
+  const streamController = new AbortController();
+  const eventsUrl = `${origin}/live-delivery/events?entity=FoldDeliverDoc&field=body&documentId=d1&authoringClient=${clientNonce}&after=1`;
+  const streamResponse = await fetch(eventsUrl, { signal: streamController.signal });
+  assert.equal(streamResponse.status, 200);
+  const reader = streamResponse.body.getReader();
+  await reader.read(); // package-owned connection comment
+
+  // Dispatch a text insert through the authoring transport.
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: `${origin}/live-delivery`, context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'typed-fold',
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready.catch((error) => { error.message = `fold-ready: ${error.message}`; throw error; });
+  const inserted = await session.insert({ mutationId: 'fold-insert', at: { blockId: initialBlockId, offset: 0, affinity: 'right' }, text: 'hello' });
+  assert.equal(inserted.ok, true);
+  await inserted.settlement.wait();
+
+  const [envelope] = await Promise.race([
+    nextSseJson(reader),
+    new Promise((_, reject) => setTimeout(() => reject(new Error('fold delivery timed out')), 2000)),
+  ]);
+  assert.equal(envelope.type, 'event');
+  assert.ok(envelope.fold, 'annotated text text-insert must deliver a fold envelope, not a snapshot recovery');
+  assert.equal(envelope.fold.kind, 'annotatedText');
+  assert.equal(envelope.fold.fence, envelope.seq);
+  assert.equal(envelope.fold.authoring?.acknowledgementFence, envelope.seq);
+  assert.equal(envelope.event?.actionId, 'typed-fold');
+  session.close();
+  await reader.cancel();
+  streamController.abort();
+});
+
 test('HTTP delivery session uses package action transport by default and retains explicit senders', async () => {
   const calls = [];
   const session = createLiveDeliveryHttpSession({

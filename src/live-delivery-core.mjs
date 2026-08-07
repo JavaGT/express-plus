@@ -293,7 +293,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  async function subscribe({ principal, scope, after = 0, signal, deliver, revoke = null, paused = false, allowTerminal = false }) {
+  async function subscribe({ principal, scope, after = 0, signal, deliver, revoke = null, paused = false, allowTerminal = false, document = null }) {
     if (closed) throw new Error('live-delivery-core is closed');
     if (signal?.aborted) return;
     const handle = tryParseScopeKey(scope);
@@ -331,7 +331,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
       throw deniedError(scope);
     }
     const subId = generateSubId();
-    const sub = { entityRec, principal, deliver, revoke, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true };
+    const sub = { entityRec, principal, deliver, revoke, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true, document };
     subs.set(subId, sub);
     let set = byScope.get(scope);
     if (!set) { set = new Set(); byScope.set(scope, set); }
