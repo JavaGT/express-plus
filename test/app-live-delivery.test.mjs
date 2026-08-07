@@ -915,5 +915,15 @@ test('shutdown completes without client abort or closeAllConnections while an SS
     )),
   ]);
   assert.ok(Date.now() - beforeShutdown < 2000);
+  // The SSE response must have ENDED cleanly (core.close -> revoke -> res.end):
+  // drain any already-buffered frames, then the stream must report done rather
+  // than hanging open (proving the transport released the connection, not just
+  // that the process force-closed sockets).
+  let streamEnded = false;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const chunk = await reader.read().catch(() => ({ done: true }));
+    if (chunk.done) { streamEnded = true; break; }
+  }
+  assert.equal(streamEnded, true, 'the SSE stream must be closed by shutdown without client abort');
 });
 

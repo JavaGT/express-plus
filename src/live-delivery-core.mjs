@@ -29,9 +29,9 @@
 // them and should not re-deliver on reconnect.
 
 import { readSeq, readSince } from './committed-log.mjs';
-import { EventKind, parseEventType } from './event-handle.ts';
+import { EventKind, parseEventType } from './event-handle.mjs';
 import { mayRow } from './row-grant.mjs';
-import { tryParseScopeKey } from './scope-handle.ts';
+import { tryParseScopeKey } from './scope-handle.mjs';
 
 let nextSubId = 1;
 
