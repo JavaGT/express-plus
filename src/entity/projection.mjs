@@ -2835,6 +2835,21 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         // atomic, so a committed removal can never leave the anchor missing.
         const existingRow = id ? db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) : undefined;
         if (existingRow) captureDeletedRowAnchor(db, name, id, existingRow, event.committedAt);
+        // A protecting annotation's target edge is ON DELETE RESTRICT. The row
+        // delete cascades into the annotation rows, so tear down the document's
+        // protected-target edges first or removing a document that carries a
+        // protecting span fails the FK constraint.
+        if (id) {
+          for (const [fieldName, descriptor] of Object.entries(fields)) {
+            if (descriptor.kind !== 'annotatedText') continue;
+            const prefix = `${name}_${fieldName}`;
+            db.prepare(
+              `DELETE FROM ${prefix}_annotation_protected_target
+               WHERE annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)
+                  OR target_annotation_id IN (SELECT id FROM ${prefix}_annotation WHERE document_id = ?)`,
+            ).run(id, id);
+          }
+        }
         db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(id);
         getLog().debug('dispatch', `${name}.removed`, { id });
       }

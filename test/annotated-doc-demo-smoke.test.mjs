@@ -196,3 +196,78 @@ test('annotated-doc demo deletes a document via DELETE /docs/:id', async (t) => 
   const again = await fetch(`${origin}/docs/${id}`, { method: 'DELETE' });
   assert.equal(again.status, 400);
 });
+
+test('annotated-doc demo deletes a document that carries a confidential span', async (t) => {
+  const { app, principalOf } = createAnnotatedDocApp({ db: ':memory:' });
+  app.listen(0, { principalOf });
+  await app.ready;
+  t.after(async () => {
+    app.httpServer.closeAllConnections?.();
+    await app.shutdown();
+  });
+
+  app.db.prepare(`INSERT OR IGNORE INTO User (id, username) VALUES ('demo', 'demo')`).run();
+  app.db.prepare(`INSERT OR IGNORE INTO Project (id, owner) VALUES ('p1', 'demo')`).run();
+
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const handleSource = await (await fetch(`${origin}/client-handle.mjs`)).text();
+  const handleUrl = `data:text/javascript;base64,${Buffer.from(handleSource).toString('base64')}`;
+  const { DocClient } = await import(handleUrl);
+
+  const created = await fetch(`${origin}/docs`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ clientId: 'conf-delete' }),
+  });
+  const { id } = await created.json();
+
+  let actionNumber = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: `${origin}/live-delivery`,
+    context: { entity: DocClient, field: DocClient.body, documentId: id },
+    historySession: 'conf-delete',
+    createActionId: () => `conf-delete-${++actionNumber}`,
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  t.after(() => session.close());
+  await session.ready;
+
+  const text = 'classified secret';
+  const block = session.document.blocks[0];
+  const inserted = await session.insert({
+    mutationId: 'conf-insert',
+    at: { blockId: block.id, offset: 0, affinity: 'right' },
+    text,
+  });
+  assert.equal(inserted.ok, true, inserted.failure?.message);
+  assert.equal((await inserted.settlement.wait()).status, 'reconciled');
+
+  const range = { blockId: block.id, offset: 0, affinity: 'right' };
+  const sensitive = await session.applyAnnotation({
+    mutationId: 'conf-sensitive',
+    annotation: { id: 'conf-sensitive', family: 'sensitive', fields: {} },
+    from: range,
+    to: { blockId: block.id, offset: text.length, affinity: 'right' },
+  });
+  assert.equal(sensitive.ok, true, sensitive.failure?.message);
+  assert.equal((await sensitive.settlement.wait()).status, 'reconciled');
+  const sensitiveMembership = session.document.memberships.find((membership) => membership.annotationId === 'conf-sensitive');
+  const memberBlock = session.document.blocks.find((candidate) => candidate.kind === 'visible' && candidate.id === sensitiveMembership?.blockId);
+  assert.ok(memberBlock);
+  const confidential = await session.applyAnnotation({
+    mutationId: 'conf-confidential',
+    annotation: { id: 'conf-confidential', family: 'confidential', fields: {}, protectedTargetIds: ['conf-sensitive'] },
+    from: { blockId: memberBlock.id, offset: 0, affinity: 'right' },
+    to: { blockId: memberBlock.id, offset: memberBlock.text.length, affinity: 'right' },
+  });
+  assert.equal(confidential.ok, true, confidential.failure?.message);
+  assert.equal((await confidential.settlement.wait()).status, 'reconciled');
+  assert.equal(app.db.prepare(
+    'SELECT COUNT(*) AS count FROM Doc_body_annotation_protected_target',
+  ).get().count, 1);
+
+  const deleted = await fetch(`${origin}/docs/${id}`, { method: 'DELETE' });
+  assert.equal(deleted.status, 200, (await deleted.text()));
+  assert.equal(app.db.prepare("SELECT COUNT(*) AS count FROM Doc WHERE id = ?").get(id).count, 0);
+  assert.equal(app.db.prepare('SELECT COUNT(*) AS count FROM Doc_body_annotation').get().count, 0);
+});

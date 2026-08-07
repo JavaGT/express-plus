@@ -716,8 +716,29 @@ test('R4 annotation.apply rejects target IDs on ordinary, standalone, and wrong-
   await app.close?.();
 });
 
-test('R4 annotation.apply on a prefix produces the correct split', async () => {
-  const { app, db, blockId, positionMap, stream, lease } = await setupDoc('hello world');
+test('retire removes a document that carries protecting annotations', async () => {
+  const { app, db, blockId, positionMap, stream, lease } = await setupDoc('secret text');
+  const token = v9PositionTokenPayload(positionMap, blockId);
+  assert.equal((await app.dispatch({
+    actionId: 'retire-theme', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-retire-theme' }, edit: { kind: 'annotation.apply', annotation: { id: 'retire-theme', family: 'theme', fields: {} }, from: { positionToken: token, offset: 0, affinity: 'left' }, to: { positionToken: token, offset: 11, affinity: 'right' } } },
+  })).ok, true);
+  assert.equal((await app.dispatch({
+    actionId: 'retire-confidential', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: 'm-retire-confidential' }, edit: { kind: 'annotation.apply', annotation: { id: 'retire-confidential', family: 'confidential', fields: {}, protectedTargetIds: ['retire-theme'] }, from: { positionToken: token, offset: 0, affinity: 'left' }, to: { positionToken: token, offset: 11, affinity: 'right' } } },
+  })).ok, true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM R4Doc_body_annotation_protected_target').get().count, 1);
+
+  const retired = await app.dispatch({
+    actionId: 'retire-protected', type: 'R4Doc.annotatedText.retire', scope: 'Project:p1', principal: { id: 'u1' }, payload: { id: 'd1' },
+  });
+  assert.equal(retired.ok, true, retired.failure?.message);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc WHERE id = 'd1'").get().count, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_retired WHERE document_id = 'd1'").get().count, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM R4Doc_body_annotation').get().count, 0);
+});
+
+test('R4 annotation.apply on a prefix produces the correct split', async () => {  const { app, db, blockId, positionMap, stream, lease } = await setupDoc('hello world');
   const token = v9PositionTokenPayload(positionMap, blockId);
   const prefix = await app.dispatch({
     actionId: 'apply-prefix', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
