@@ -12,6 +12,7 @@ import { durableHistory } from '../src/internal.mjs';
 import { annotatedTextCreateAction } from '../src/annotated-text-action.mjs';
 import { tryBuildAnnotatedTextFoldEnvelopes } from '../src/annotated-text-fold-envelope.mjs';
 import { createAnnotatedTextHttpSession } from '../public/workbench-client.mjs';
+import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 registerAnnotatedTextContract('httpDeliveryMeasurement', Object.freeze({ kind: 'measurement' }));
 registerAnnotatedTextStructuralExtension('httpDeliveryMeasurement', Object.freeze({
@@ -32,10 +33,10 @@ const CLIENT_APPLY_WARN_MS = 2;
 const CLIENT_APPLY_FAIL_MS = 150;
 
 const WORDS = Array.from({ length: 10 }, (_, index) => `word${index}`).join(' ');
-const BLOCK_COUNT = 96;
+const SEGMENT_COUNT = 96;
 
-function largeBlocks(count = BLOCK_COUNT) {
-  return Array.from({ length: count }, (_, index) => ({ text: `${WORDS} ${index}` }));
+function largeText(count = SEGMENT_COUNT) {
+  return Array.from({ length: count }, (_, index) => `${WORDS} ${index}`).join('\n');
 }
 
 async function setupLargeDocument(t) {
@@ -60,39 +61,29 @@ async function setupLargeDocument(t) {
   const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
 
   const create = annotatedTextCreateAction(Document, Document.body, {
-    id: 'd1', projectId: 'p1', ownerId: 'u1', source: { blocks: largeBlocks() },
+    id: 'd1', projectId: 'p1', ownerId: 'u1', source: { blocks: [{ text: largeText() }] },
   });
   const createRes = await fetch(`${origin}/workbench/actions`, {
     method: 'POST', headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ actionId: 'latency-create', type: create.type, payload: create.payload, scope: 'Project:p1', clientId: 'tab-a' }),
   });
   assert.equal(createRes.status, 200, await createRes.text());
-  const initialBlockId = db.prepare('SELECT id FROM LatencyDoc_body_block WHERE document_id = ? ORDER BY position LIMIT 1').get('d1').id;
-  return { app, db, Document, origin, initialBlockId, blockCount: BLOCK_COUNT };
+  return { app, db, Document, origin, segmentCount: SEGMENT_COUNT, textLength: largeText().length };
 }
 
 async function buildFoldForInsert(ctx, text) {
-  const { ensureStream, ensureLease, hashClientNonce } = await import('../src/annotated-text-authoring-stream.mjs');
-  const { projectAnnotatedTextSnapshot } = await import('../src/internal.mjs');
-  const prefix = 'LatencyDoc_body';
-  const stream = ensureStream({ db: ctx.db, prefix, documentId: 'd1', principalType: 'principal', principalId: 'u1' });
-  const lease = ensureLease({ db: ctx.db, prefix, streamId: stream.id, clientNonceHash: hashClientNonce('z'.repeat(43)) });
   const row = ctx.db.prepare('SELECT * FROM LatencyDoc WHERE id = ?').get('d1');
-  const lastSeq = () => ctx.db.prepare('SELECT lastSeq FROM _ProjectedCursor WHERE entity = ? AND field = ?').get('LatencyDoc', 'body')?.lastSeq ?? 0;
-  const snap = await projectAnnotatedTextSnapshot({
-    db: ctx.db, entity: ctx.Document, row, principal: { id: 'u1' }, fieldName: 'body', descriptor: ctx.Document.fields.body,
-    authoring: { streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, fence: lastSeq() },
+  const binding = await withAuthoringBinding({
+    db: ctx.db, entity: ctx.Document, Document: ctx.Document, row,
+    principal: { id: 'u1' }, fieldName: 'body', descriptor: ctx.Document.fields.body,
   });
-  const auth = snap.body?.authoring ?? snap.authoring;
-  const token = new Map((auth?.positionFrames ?? []).map((f) => [f.blockId, f.positionToken])).get(ctx.initialBlockId);
-  assert.ok(token, 'expected a position token for the initial block');
   const result = await ctx.app.dispatch({
     actionId: `latency-insert-${Math.random().toString(36).slice(2)}`, principal: { id: 'u1' }, scope: 'Project:p1',
     type: 'LatencyDoc.body.operation',
     payload: {
       version: 9, id: 'd1',
-      authoring: { version: 1, stream: stream.id, lease: lease.id, mutationId: `m-${Math.random().toString(36).slice(2)}` },
-      edit: { kind: 'text.insert', at: { positionToken: token, offset: 0, affinity: 'right' }, text },
+      authoring: { version: 1, stream: binding.streamToken, lease: binding.leaseToken, mutationId: `m-${Math.random().toString(36).slice(2)}` },
+      edit: { kind: 'text.insert', at: { positionToken: binding.documentPositionToken, offset: 0, affinity: 'right' }, text },
     },
   });
   assert.equal(result.ok, true, result.failure?.message);
@@ -135,10 +126,10 @@ test('server fold build on a large document stays inside the typing budget (warn
   durations.sort((a, b) => a - b);
   const median = durations[durations.length >> 1];
   if (median > SERVER_BUILD_FAIL_MS) {
-    assert.fail(`server fold build median ${median.toFixed(1)}ms on a ${ctx.blockCount}-block doc is over the ${SERVER_BUILD_FAIL_MS}ms hard budget`);
+    assert.fail(`server fold build median ${median.toFixed(1)}ms on a ${ctx.textLength}-char doc is over the ${SERVER_BUILD_FAIL_MS}ms hard budget`);
   }
   if (median > SERVER_BUILD_WARN_MS) {
-    console.warn(`[latency] server fold build median ${median.toFixed(1)}ms on a ${ctx.blockCount}-block doc exceeds the ${SERVER_BUILD_WARN_MS}ms perceived-instant warning. Likely: full-family re-issue in mintFoldAuthoring or the recipient re-projection.`);
+    console.warn(`[latency] server fold build median ${median.toFixed(1)}ms on a ${ctx.textLength}-char doc exceeds the ${SERVER_BUILD_WARN_MS}ms perceived-instant warning. Likely: full-family re-issue in mintFoldAuthoring or the recipient re-projection.`);
   }
 });
 
@@ -191,7 +182,7 @@ test('client fold apply on a large document stays inside the typing budget (warn
   assert.equal(foldTimings.length, 0);
 
   for (let index = 0; index < 10; index += 1) {
-    const inserted = await session.insert({ mutationId: `latency-${index}`, at: { blockId: ctx.initialBlockId, offset: 0, affinity: 'right' }, text: 'x' });
+    const inserted = await session.insert({ mutationId: `latency-${index}`, at: { offset: 0, affinity: 'right' }, text: 'x' });
     assert.equal(inserted.ok, true, inserted.failure?.message);
     await inserted.settlement.wait();
   }
@@ -199,10 +190,10 @@ test('client fold apply on a large document stays inside the typing budget (warn
   const sorted = [...foldTimings].sort((a, b) => a - b);
   const median = sorted[sorted.length >> 1];
   if (median > CLIENT_APPLY_FAIL_MS) {
-    assert.fail(`client fold apply median ${median.toFixed(1)}ms on a ${ctx.blockCount}-block doc is over the ${CLIENT_APPLY_FAIL_MS}ms hard budget`);
+    assert.fail(`client fold apply median ${median.toFixed(1)}ms on a ${ctx.textLength}-char doc is over the ${CLIENT_APPLY_FAIL_MS}ms hard budget`);
   }
   if (median > CLIENT_APPLY_WARN_MS) {
-    console.warn(`[latency] client fold apply median ${median.toFixed(1)}ms on a ${ctx.blockCount}-block doc exceeds the ${CLIENT_APPLY_WARN_MS}ms perceived-instant warning. Likely: full-family restore/stringify in the client fold.`);
+    console.warn(`[latency] client fold apply median ${median.toFixed(1)}ms on a ${ctx.textLength}-char doc exceeds the ${CLIENT_APPLY_WARN_MS}ms perceived-instant warning. Likely: full-family restore/stringify in the client fold.`);
   }
   session.close();
   for (const source of eventSources) source.close();

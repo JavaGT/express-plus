@@ -55,8 +55,14 @@ test('recipient read returns a deeply frozen, cursor-bound public projection and
   assert.equal(snapshot.kind, 'snapshot');
   assert.equal(typeof snapshot.owningScopeCursor, 'number');
   assert.equal(Object.hasOwn(snapshot, 'cursor'), false);
-  assert.ok(Object.isFrozen(snapshot)); assert.ok(Object.isFrozen(snapshot.document)); assert.ok(Object.isFrozen(snapshot.document.blocks));
-  assert.equal(snapshot.document.blocks[0].text, 'visible');
+  assert.ok(Object.isFrozen(snapshot));
+  assert.ok(Object.isFrozen(snapshot.document));
+  assert.equal(snapshot.document.kind, 'workbench.annotatedText.recipient');
+  assert.equal(snapshot.document.version, 1);
+  assert.equal(snapshot.document.text, 'visible');
+  assert.equal(Object.hasOwn(snapshot.document, 'blocks'), false);
+  assert.ok(Object.isFrozen(snapshot.document.ranges));
+  assert.ok(Object.isFrozen(snapshot.document.annotations));
   assert.deepEqual(await readAnnotatedTextForRecipient({ ...c.request, documentId: 'missing' }), { kind: 'unavailable' });
   assert.deepEqual(await readAnnotatedTextForRecipient({ ...c.request, expectedOwningScope: { entity: c.Project, id: 'p2' } }), { kind: 'unavailable' });
   const retired = await c.app.dispatch({ actionId: 'recipient-read-retire', principal: { ...principal, id: 'owner' }, scope: 'RecipientReadProject:p1', ...annotatedTextRetireAction(c.Transcript, 'd1') });
@@ -151,9 +157,14 @@ test('stable projection corruption is sanitized, and an annotated operation adva
   const clean = await setup(); t.after(clean.close);
   const row = clean.db.prepare('SELECT * FROM RecipientReadTranscript WHERE id = ?').get('d1');
   const binding = await withAuthoringBinding({ db: clean.db, entity: clean.Transcript, Document: clean.Transcript, row, principal: { ...principal, id: 'owner' }, fieldName: 'body', descriptor: clean.Transcript.fields.body });
-  const blockId = clean.db.prepare('SELECT id FROM RecipientReadTranscript_body_block WHERE document_id = ?').get('d1').id;
   const beforeProject = clean.db.prepare("SELECT lastSeq FROM _Cursor WHERE scope = 'RecipientReadProject:p1'").get().lastSeq;
-  const operation = annotatedTextAction(clean.Transcript, clean.Transcript.body, { id: 'd1', authoring: { version: 1, stream: binding.streamToken, lease: binding.leaseToken, mutationId: 'recipient-read-operation' }, kind: 'text.insert', at: { positionToken: binding.positionTokens.get(blockId), offset: 0, affinity: 'right' }, text: 'x' });
+  const operation = annotatedTextAction(clean.Transcript, clean.Transcript.body, {
+    id: 'd1',
+    authoring: { version: 1, stream: binding.streamToken, lease: binding.leaseToken, mutationId: 'recipient-read-operation' },
+    kind: 'text.insert',
+    at: { positionToken: binding.documentPositionToken, offset: 0, affinity: 'right' },
+    text: 'x',
+  });
   const result = await clean.app.dispatch({ actionId: 'recipient-read-operation', principal: { ...principal, id: 'owner' }, scope: 'RecipientReadProject:p1', ...operation });
   assert.equal(result.ok, true, result.failure?.message);
   assert.equal(clean.db.prepare("SELECT lastSeq FROM _Cursor WHERE scope = 'RecipientReadProject:p1'").get().lastSeq, beforeProject + 1);
