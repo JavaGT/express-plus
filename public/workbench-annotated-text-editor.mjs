@@ -217,6 +217,12 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     const visible = orderedVisible(document).filter((block) => !isLocallyPruned(block));
     const annotationFamilies = new Map((document?.annotations ?? []).map((annotation) => [annotation.id, annotation.family]));
     let caretAfterRender = null;
+    // A render that merely confirms the already-displayed optimistic state must
+    // not move the caret. Browsers collapse a selection to the start of a
+    // contentEditable node the moment its text node is replaced, so capture the
+    // caret before touching the DOM and restore it when the render did not
+    // intentionally relocate it (a draft move sets caretAfterRender instead).
+    const caretBeforeRender = closed ? null : getSelection();
 
     if (submitted) {
       const submittedTarget = visible.find((block) => block.id === submitted.blockId);
@@ -342,15 +348,24 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     if (queued) displayed.set(queued.blockId, queued.text);
     const existing = new Map([...element.children].map((child) => [child.dataset.blockId, child]));
     rendering = true;
+    let domMutated = false;
     for (const block of blocks) {
       let span = existing.get(block.id);
       if (!span) {
         span = element.ownerDocument.createElement('span');
         span.dataset.blockId = block.id;
+        domMutated = true;
       }
-      span.contentEditable = block.kind === 'visible' ? 'true' : 'false';
+      const editable = block.kind === 'visible' ? 'true' : 'false';
+      if (span.contentEditable !== editable) {
+        span.contentEditable = editable;
+        domMutated = true;
+      }
       if (block.kind === 'restricted') {
-        span.textContent = block.placeholder ?? '';
+        if (span.textContent !== (block.placeholder ?? '')) {
+          span.textContent = block.placeholder ?? '';
+          domMutated = true;
+        }
         span.dataset.restricted = 'true';
         delete span.dataset.annotationFamilies;
         delete span.dataset.annotationIds;
@@ -363,17 +378,36 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
         if (annotationIds.length) span.dataset.annotationIds = annotationIds.join(' ');
         else delete span.dataset.annotationIds;
         const text = displayed.has(block.id) ? displayed.get(block.id) : block.text;
-        if (span.textContent !== text) span.textContent = text;
+        if (span.textContent !== text) {
+          span.textContent = text;
+          domMutated = true;
+        }
       }
       const index = blocks.indexOf(block);
-      if (element.children[index] !== span) element.insertBefore(span, element.children[index] ?? null);
+      if (element.children[index] !== span) {
+        element.insertBefore(span, element.children[index] ?? null);
+        domMutated = true;
+      }
     }
     const blockIds = new Set(blocks.map((block) => block.id));
     for (const child of [...element.children]) {
-      if (!blockIds.has(child.dataset.blockId)) child.remove();
+      if (!blockIds.has(child.dataset.blockId)) {
+        child.remove();
+        domMutated = true;
+      }
     }
     rendering = false;
     if (caretAfterRender) setCaret(caretAfterRender.blockId, caretAfterRender.offset);
+    else if (domMutated && caretBeforeRender?.from && caretBeforeRender.to
+      && caretBeforeRender.from.blockId === caretBeforeRender.to.blockId
+      && caretBeforeRender.from.offset === caretBeforeRender.to.offset) {
+      const caretBlock = visible.find((candidate) => candidate.id === caretBeforeRender.from.blockId);
+      if (caretBlock) {
+        const span = blockSpan(element, caretBlock.id);
+        const length = span ? (span.textContent ?? '').length : caretBlock.text.length;
+        setCaret(caretBeforeRender.from.blockId, Math.max(0, Math.min(caretBeforeRender.from.offset, length)));
+      }
+    }
     if (queued && visible.some((block) => block.id === queued.blockId)) {
       const queuedTarget = visible.find((block) => block.id === queued.blockId);
       if (queuedTarget.text === queued.baseText && !submitting && (!session.status || session.status === 'live')) flushQueued();
