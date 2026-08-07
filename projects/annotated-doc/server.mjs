@@ -16,6 +16,7 @@ import workbench, {
   annotatedText,
   annotatedTextClientHandle,
   annotatedTextCreateAction,
+  annotatedTextRetireAction,
   annotation,
   entity,
   everyone,
@@ -218,7 +219,8 @@ export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
   // Handlers use the Express-style facade (res.json / res.status); return values
   // are ignored — ending the response marks the intercept handled.
   app.use('/docs', async (req, res) => {
-    if (useTail(req) !== '') return;
+    const tail = useTail(req);
+    if (tail !== '' && req.method !== 'DELETE') return;
     if (req.method === 'GET') {
       res.status(200).json({ docs: listDocs(app) });
       return;
@@ -248,6 +250,27 @@ export function createAnnotatedDocApp({ db = DB_PATH } = {}) {
         return;
       }
       res.status(201).json({ ok: true, id });
+      return;
+    }
+    if (req.method === 'DELETE') {
+      if (tail === '') {
+        res.status(400).json({ error: 'missing document id' });
+        return;
+      }
+      const id = decodeURIComponent(tail);
+      const action = annotatedTextRetireAction(Doc, id);
+      const result = await app.dispatch({
+        actionId: `retire-${id}`,
+        principal: principalOf(req),
+        clientId: 'demo-tab',
+        ...action,
+      });
+      if (!result.ok) {
+        res.status(result.failure?.category === 'denied' ? 403 : 400)
+          .json({ ok: false, failure: result.failure ?? null });
+        return;
+      }
+      res.status(200).json({ ok: true, id });
     }
   });
 
@@ -279,6 +302,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   seed(app);
   console.log(`annotated-doc listening on http://127.0.0.1:${PORT}`);
   console.log('  fixed principal: demo');
-  console.log('  GET/POST /docs');
+  console.log('  GET/POST /docs, DELETE /docs/:id');
   console.log('  package actions + /live-delivery for body edits');
 }

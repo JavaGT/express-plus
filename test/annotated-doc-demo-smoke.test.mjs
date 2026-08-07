@@ -150,3 +150,49 @@ test('annotated-doc demo creates a document and inserts via the document session
   assert.equal(listed.docs.length, 1);
   assert.equal(listed.docs[0].id, id);
 });
+
+test('annotated-doc demo deletes a document via DELETE /docs/:id', async (t) => {
+  const { app, principalOf } = createAnnotatedDocApp({ db: ':memory:' });
+  app.listen(0, { principalOf });
+  await app.ready;
+  t.after(async () => {
+    app.httpServer.closeAllConnections?.();
+    await app.shutdown();
+  });
+
+  app.db.prepare(`INSERT OR IGNORE INTO User (id, username) VALUES ('demo', 'demo')`).run();
+  app.db.prepare(`INSERT OR IGNORE INTO User (id, username) VALUES ('reader', 'reader')`).run();
+  app.db.prepare(`INSERT OR IGNORE INTO Project (id, owner) VALUES ('p1', 'demo')`).run();
+
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const created = await fetch(`${origin}/docs`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ clientId: 'delete-smoke' }),
+  });
+  assert.equal(created.status, 201);
+  const { id } = await created.json();
+
+  // The fixed reader principal is not the owner — delete is denied.
+  const denied = await fetch(`${origin}/docs/${id}?viewAs=reader`, { method: 'DELETE' });
+  assert.equal(denied.status, 403);
+
+  // The owner (demo, default) can delete; the document leaves the list and the
+  // erasure directive removes its receipts and events.
+  const deleted = await fetch(`${origin}/docs/${id}`, { method: 'DELETE' });
+  assert.equal(deleted.status, 200);
+  assert.deepEqual(await deleted.json(), { ok: true, id });
+
+  const listed = await (await fetch(`${origin}/docs`)).json();
+  assert.equal(listed.docs.length, 0);
+
+  const receipts = app.db.prepare(
+    `SELECT COUNT(*) AS count FROM _ActionReceipt WHERE json_extract(actionData, '$.id') = ?`,
+  ).get(id).count;
+  assert.equal(receipts, 0);
+
+  // Re-deleting an already-deleted document fails cleanly.
+  const again = await fetch(`${origin}/docs/${id}`, { method: 'DELETE' });
+  assert.equal(again.status, 400);
+});

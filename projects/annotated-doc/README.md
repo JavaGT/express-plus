@@ -33,7 +33,8 @@ running or nginx returns 502.
 3. Select a range → **Add comment marker** (choose a color first)
 4. Delete a marker from the Comments panel
 5. Expand **Live JSON state** for the folded document snapshot (optional)
-6. Reload — text and comments persist; a second tab converges over live delivery
+6. Delete a document from the list (owner view) — erases the document and its log
+7. Reload — text and comments persist; a second tab converges over live delivery
 
 DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 `ANNOTATED_DOC_DB`).
@@ -47,7 +48,7 @@ DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 | `protectingAnnotation('confidential', { protects: 'sensitive', ... })` | Confidential span: a protecting annotation over a range; the reader principal sees the real text replaced by the placeholder |
 | Fixed principals `demo` (owner) + `reader` | The demo shows both sides of the per-recipient projection: owner sees real text, reader sees the redacted placeholder |
 | `?view-as` / **View as** toggle | Switch between the owner and reader views of the same document |
-| `GET/POST /docs` → list + `annotatedTextCreateAction` | Doc list/create through package create only |
+| `GET/POST /docs`, `DELETE /docs/:id` → list, create + `annotatedTextRetireAction` | Doc list/create/delete through package actions only |
 | `createAnnotatedTextHttpSession` + `bindAnnotatedTextEditor` | Typed text + `applyAnnotation` / `removeAnnotation`; no raw CRDT ops |
 | `/live-delivery` | Recipient snapshot fold + ingest recovery |
 | Comments panel + color select | Marker apply/delete UI with highlight colors |
@@ -101,6 +102,7 @@ contenteditable beforeinput
   → session.subscribe re-render
 ```
 
-Doc create uses `POST /docs` → `annotatedTextCreateAction` on the same package
+Doc create/delete use `POST /docs` / `DELETE /docs/:id` →
+`annotatedTextCreateAction` / `annotatedTextRetireAction` on the same package
 dispatch surface. There is no second write path and no hand-rolled CRDT reduce
 in the demo page.
