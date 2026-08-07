@@ -1,6 +1,6 @@
 import {
   assertFrontier, assertStructuralPoint, assertUtf16Offset,
-  compareOpId, frontierDominates, restoreTextCheckpoint,
+  compareOpId, createTextState, frontierDominates, restoreTextCheckpoint,
   textCheckpoint, canonicalTextOp, applyTextOp,
 } from './annotated-text.mjs';
 
@@ -129,6 +129,38 @@ export function createTextFamily(id, checkpoint, blockId) {
     checkpoint: canonical,
     blocks: [deepFreeze({ id: blockId, elementKeys: Object.freeze(allKeys) })],
   });
+}
+
+/**
+ * Deterministically rebuild the post-create text family for a create event's
+ * source blocks: insert the concatenated text as one RGA operation, then split
+ * at each block boundary. Used by the create projection reducer and by the
+ * committed-log word-timing consumer to resolve word spans to immutable RGA
+ * anchors without consulting later document state (Sol D2).
+ */
+export function importTextFamilyFromBlocks(documentId, actor, blocks) {
+  if (typeof documentId !== 'string' || documentId.length === 0) fail('document id must be a non-empty string');
+  if (typeof actor !== 'string' || !/^[0-9a-f]{32}$/.test(actor)) fail('import actor must be a 32-hex id');
+  if (!Array.isArray(blocks) || blocks.length === 0) fail('import blocks must be non-empty');
+  for (const block of blocks) {
+    if (!block || typeof block !== 'object' || Array.isArray(block) || typeof block.id !== 'string' || block.id.length === 0 || typeof block.text !== 'string') {
+      fail('import block must carry id and text');
+    }
+  }
+  const fullText = blocks.map((block) => block.text).join('');
+  let textState = createTextState();
+  if (fullText.length > 0) {
+    textState = applyTextOp(textState, ['workbench.text', 1, [actor, 1], 1, [], ['insert', ['root'], fullText]]);
+  }
+  let family = createTextFamily(documentId, textCheckpoint(textState), blocks[0].id);
+  let currentBlockId = blocks[0].id;
+  for (let index = 0; index < blocks.length - 1; index++) {
+    const split = splitBlock(family, currentBlockId, blocks[index + 1].id, blocks[index].text.length);
+    if (split.type !== 'split') fail('import block boundary did not produce a split');
+    family = split.family;
+    currentBlockId = blocks[index + 1].id;
+  }
+  return family;
 }
 
 export function restoreTextFamilyCheckpoint(familyCheckpoint) {

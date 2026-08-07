@@ -4,7 +4,8 @@ import * as eventHandle from '../event-handle.mjs';
 import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
 import { CASCADE_DESCENDANT } from './removal-cascade.mjs';
 import { applyTextOp, assertUtf16Offset, assertWellFormedText, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
-import { applyTextOperationToBlock, applyTextOperationToNewBlock, createTextFamily, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock, mergeBlocks, removeEmptyBlock, materializeBlock, resolvePositionToEndpoint, rgaTraversal } from '../annotated-text-family.mjs';
+import { applyTextOperationToBlock, applyTextOperationToNewBlock, importTextFamilyFromBlocks, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock, mergeBlocks, removeEmptyBlock, materializeBlock, resolvePositionToEndpoint, rgaTraversal } from '../annotated-text-family.mjs';
+import { assertWordTimingPayload } from '../annotated-text-action.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership, removeAnnotation } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { deriveBlockPosition, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
@@ -45,30 +46,19 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
       throw new Error(`${name}.${fieldName} created event is missing initial block metadata`);
     }
     const prefix = `${name}_${fieldName}`;
-    let textState = createTextState();
-    const fullText = imported.blocks.map((block, index) => {
-      if (!block || typeof block !== 'object' || Array.isArray(block) ||
-          (Object.keys(block).length < 3 || Object.keys(block).length > 5) ||
-          typeof block.id !== 'string' || block.id.length === 0 || typeof block.text !== 'string' ||
-          (block.fields !== null && (!block.fields || typeof block.fields !== 'object' || Array.isArray(block.fields)))) {
-        throw new Error(`${name}.${fieldName} created event has invalid imported block ${index}`);
+    for (const [blockIndex, importedBlock] of imported.blocks.entries()) {
+      if (!importedBlock || typeof importedBlock !== 'object' || Array.isArray(importedBlock) ||
+          (Object.keys(importedBlock).length < 3 || Object.keys(importedBlock).length > 6) ||
+          typeof importedBlock.id !== 'string' || importedBlock.id.length === 0 || typeof importedBlock.text !== 'string' ||
+          (importedBlock.fields !== null && (!importedBlock.fields || typeof importedBlock.fields !== 'object' || Array.isArray(importedBlock.fields)))) {
+        throw new Error(`${name}.${fieldName} created event has invalid imported block ${blockIndex}`);
       }
-      for (const key of Object.keys(block)) if (!['id', 'text', 'fields', 'measurements'].includes(key)) throw new Error(`${name}.${fieldName} created event has unknown imported block key '${key}'`);
-      assertWellFormedText(block.text);
-      if (block.text.length === 0 && imported.blocks.some((candidate) => candidate.fields !== null)) throw new Error(`${name}.${fieldName} created event has an empty imported block`);
-      return block.text;
-    }).join('');
-    if (fullText.length > 0) {
-      textState = applyTextOp(textState, ['workbench.text', 1, [imported.actor, 1], 1, [], ['insert', ['root'], fullText]]);
+      for (const key of Object.keys(importedBlock)) if (!['id', 'text', 'fields', 'measurements', 'words'].includes(key)) throw new Error(`${name}.${fieldName} created event has unknown imported block key '${key}'`);
+      assertWellFormedText(importedBlock.text);
+      if (importedBlock.text.length === 0 && imported.blocks.some((candidate) => candidate.fields !== null)) throw new Error(`${name}.${fieldName} created event has an empty imported block`);
+      if (importedBlock.words !== undefined && !assertWordTimingPayload(importedBlock.words)) throw new Error(`${name}.${fieldName} created event block ${blockIndex} has invalid word timing payload`);
     }
-    let family = createTextFamily(row.id, textCheckpoint(textState), initialBlockId);
-    let currentBlockId = initialBlockId;
-    for (let index = 0; index < imported.blocks.length - 1; index++) {
-      const split = splitBlock(family, currentBlockId, imported.blocks[index + 1].id, imported.blocks[index].text.length);
-      if (split.type !== 'split') throw new Error(`${name}.${fieldName} created event import did not produce a block split`);
-      family = split.family;
-      currentBlockId = imported.blocks[index + 1].id;
-    }
+    const family = importTextFamilyFromBlocks(row.id, imported.actor, imported.blocks);
     const checkpoint = JSON.stringify(textFamilyCheckpoint(family));
     const state = db.prepare(`SELECT * FROM ${prefix}_state WHERE document_id = ?`).get(row.id);
     const blocks = db.prepare(`SELECT * FROM ${prefix}_block WHERE document_id = ?`).all(row.id);
