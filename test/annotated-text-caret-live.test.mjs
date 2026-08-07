@@ -7,8 +7,7 @@ import { createAnnotatedTextCaretLive } from '../src/annotated-text-caret-live.m
 import { createLiveFanout } from '../src/live-fanout.mjs';
 import { registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
 import { executeDDL } from '../src/ddl.mjs';
-import { createTextState, textCheckpoint } from '../src/annotated-text.mjs';
-import { createTextFamily } from '../src/annotated-text-family.mjs';
+import { importTextToFamily, textFamilyCheckpoint } from '../src/annotated-text-continuous.mjs';
 
 const ext = 'caretLiveT5';
 registerAnnotatedTextContract(ext, Object.freeze({ kind: 'measurement' }));
@@ -35,17 +34,13 @@ function makeEntity() {
   return Doc;
 }
 
-function seedAnnotatedTextTables(db, entityName, fieldName, docId, blockId, projectId, ownerId) {
+const ACTOR = 'a'.repeat(32);
+
+function seedAnnotatedTextTables(db, entityName, fieldName, docId, text) {
   const prefix = `${entityName}_${fieldName}`;
-  const state = createTextState();
-  const cp = textCheckpoint(state);
-  const family = createTextFamily(docId, cp, blockId);
-  db.prepare(`INSERT INTO ${prefix}_state (document_id, structure_version, family_checkpoint) VALUES (?, ?, ?)`)
-    .run(docId, 0, JSON.stringify(family));
-  db.prepare(`INSERT INTO ${prefix}_block (id, document_id, project_id, owner_id, position, epoch, structure_version) VALUES (?, ?, ?, ?, ?, ?, ?)`)
-    .run(blockId, docId, projectId, ownerId, 'a', 1, 1);
-  db.prepare(`INSERT INTO ${prefix}_block_group (block_id, group_id) VALUES (?, ?)`)
-    .run(blockId, blockId);
+  const family = importTextToFamily(docId, ACTOR, text);
+  db.prepare(`INSERT INTO ${prefix}_state (document_id, structure_version, family_checkpoint) VALUES (?, 1, ?)`)
+    .run(docId, JSON.stringify(textFamilyCheckpoint(family)));
 }
 
 function setup() {
@@ -55,7 +50,7 @@ function setup() {
   db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY); INSERT INTO Project VALUES (\'p1\');');
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO User VALUES (\'u1\'), (\'u2\');');
   db.prepare('INSERT INTO CaretDoc (id, project, owner) VALUES (?, ?, ?)').run('d1', 'p1', 'u1');
-  seedAnnotatedTextTables(db, 'CaretDoc', 'body', 'd1', 'b1', 'p1', 'u1');
+  seedAnnotatedTextTables(db, 'CaretDoc', 'body', 'd1', '');
 
   const sent = [];
   const writer = { id: 'writer', principal: { id: 'u1' }, closed: false, send: (frame) => sent.push(frame) };
@@ -98,7 +93,7 @@ test('successful visible upsert projects and delivers to all recipients', async 
   const { db, live, writer, sent } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const upserts = sent.filter(isCaretUpsert);
     assert.equal(upserts.length, 2, 'both recipients should receive upsert');
     for (const frame of upserts) {
@@ -108,7 +103,6 @@ test('successful visible upsert projects and delivers to all recipients', async 
       assert.equal(frame.field, 'body');
       assert.ok(frame.change.value);
       assert.equal(frame.change.value.kind, 'caret');
-      assert.equal(frame.change.value.blockId, 'b1');
       assert.equal(frame.change.value.offset, 0);
       assert.ok(typeof frame.change.value.presence === 'string');
     }
@@ -120,7 +114,7 @@ test('clear sends remove to all recipients', async () => {
   const { db, live, writer, sent } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const presence = sent.filter(isCaretUpsert)[0]?.change?.value?.presence;
     assert.ok(presence);
     sent.length = 0;
@@ -137,13 +131,13 @@ test('source removal (row deleted) retracts prior visible presence', async () =>
   const { db, live, writer, sent } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const presence = sent.filter(isCaretUpsert)[0]?.change?.value?.presence;
     assert.ok(presence);
     sent.length = 0;
     db.prepare('DELETE FROM CaretDoc WHERE id = ?').run('d1');
     await assert.rejects(
-      () => live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 }),
+      () => live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 }),
       /Caret update is denied/,
     );
     const removes = sent.filter(isCaretRemove);
@@ -158,11 +152,11 @@ test('closed recipient is skipped but open recipient still receives upsert', asy
   const { db, live, writer, sent, recipientA } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     assert.equal(sent.filter(isCaretUpsert).length, 2, 'initial upsert to both');
     sent.length = 0;
     recipientA.closed = true;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const removes = sent.filter(isCaretRemove);
     assert.equal(removes.length, 0, 'no remove sent to closed recipient');
     const upserts = sent.filter(isCaretUpsert);
@@ -175,13 +169,13 @@ test('recipient revocation retraction sends remove without closing connection', 
   const { db, live, writer, sent, recipientA, recipientB } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     assert.equal(sent.filter(isCaretUpsert).length, 2);
     sent.length = 0;
     assert.equal(recipientA.closed, false);
     db.prepare('DELETE FROM CaretDoc WHERE id = ?').run('d1');
     await assert.rejects(
-      () => live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 }),
+      () => live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 }),
       /Caret update is denied/,
     );
     const removes = sent.filter(isCaretRemove);
@@ -205,7 +199,7 @@ test('no delivery without explicit declared interest in carets', async () => {
       mayVerb: async () => true, fanout: fanoutNoInterest,
     });
     await assert.rejects(
-      () => liveNoInterest.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 }),
+      () => liveNoInterest.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 }),
       /Caret subscription is required/,
     );
     assert.equal(sent.length, 0);
@@ -219,9 +213,9 @@ test('malformed input is rejected', async () => {
       null,
       'string',
       [],
-      { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: -1 },
-      { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 1.5 },
-      { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0, extra: true },
+      { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: -1 },
+      { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 1.5 },
+      { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0, extra: true },
       { type: 'caret.clear', entity: 'CaretDoc', id: 'd1' },
       { type: 'caret.clear', entity: 'CaretDoc', id: 'd1', field: 'body', extra: true },
     ];
@@ -240,7 +234,7 @@ test('no _Log mutation', async () => {
   const { db, live, writer, sent } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const hasLog = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='_Log'").get();
     assert.equal(hasLog, undefined, '_Log table should not exist');
     await live.clear(writer, { type: 'caret.clear', entity: 'CaretDoc', id: 'd1', field: 'body' });
@@ -252,7 +246,7 @@ test('generation race: stale update cannot overtake clear', async () => {
   const { db, live, writer, sent } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const upserts = sent.filter(isCaretUpsert);
     assert.equal(upserts.length, 2);
     const presence1 = upserts[0]?.change?.value?.presence;
@@ -264,7 +258,7 @@ test('generation race: stale update cannot overtake clear', async () => {
     const presence2 = removes[0]?.change?.presence;
     assert.equal(presence2, presence1);
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const upserts2 = sent.filter(isCaretUpsert);
     assert.equal(upserts2.length, 2);
     assert.notEqual(upserts2[0]?.change?.value?.presence, presence1, 'stale presence should not reappear after clear');
@@ -275,10 +269,10 @@ test('generation race: stale update cannot overtake newer update', async () => {
   const { db, live, writer, sent } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const firstPresence = sent.filter(isCaretUpsert)[0]?.change?.value?.presence;
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const secondPresence = sent.filter(isCaretUpsert)[0]?.change?.value?.presence;
     assert.equal(firstPresence, secondPresence, 'presence is stable across updates for same session');
     const offsetValues = sent.filter(isCaretUpsert).map((f) => f.change.value.offset);
@@ -290,7 +284,7 @@ test('multi-recipient projection: each recipient gets correct projection', async
   const { db, live, writer, sent } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const upserts = sent.filter(isCaretUpsert);
     assert.equal(upserts.length, 2);
     const entities = new Set(upserts.map((f) => f.entity));
@@ -310,7 +304,7 @@ test('source disconnect removes caret presence', async () => {
   const { db, live, writer, sent } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const presence = sent.filter(isCaretUpsert)[0]?.change?.value?.presence;
     assert.ok(presence);
     sent.length = 0;
@@ -327,14 +321,14 @@ test('recipient-scoped remove: revoked recipient does not see canonical offset',
   const { db, live, writer, sent } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const upserts = sent.filter(isCaretUpsert);
     const presence = upserts[0]?.change?.value?.presence;
     assert.ok(presence);
     sent.length = 0;
     db.prepare('DELETE FROM CaretDoc WHERE id = ?').run('d1');
     await assert.rejects(
-      () => live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 }),
+      () => live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 }),
       /Caret update is denied/,
     );
     const removes = sent.filter(isCaretRemove);
@@ -362,12 +356,12 @@ test('delayed first update then clear: stale upsert is suppressed', async () => 
     fanout.addSubscription('CaretDoc:d1', recipientB, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
     sent.length = 0;
     // Establish baseline presence
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const baselinePresence = sent.filter(isCaretUpsert)[0]?.change?.value?.presence;
     assert.ok(baselinePresence);
     sent.length = 0;
     // Start a delayed update, then clear while it's in-flight
-    const updatePromise = live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 5 }).then(
+    const updatePromise = live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 5 }).then(
       () => assert.fail('stale update must reject'),
       (error) => error,
     );
@@ -394,12 +388,12 @@ test('delayed first update then disconnect: stale upsert suppressed', async () =
     fanout.addSubscription('CaretDoc:d1', recipientB, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
     sent.length = 0;
     // Establish baseline presence
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const baselinePresence = sent.filter(isCaretUpsert)[0]?.change?.value?.presence;
     assert.ok(baselinePresence);
     sent.length = 0;
     // Start a delayed update, then disconnect while in-flight
-    const updatePromise = live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 5 }).then(
+    const updatePromise = live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 5 }).then(
       () => assert.fail('stale update must reject'),
       (error) => error,
     );
@@ -425,16 +419,16 @@ test('delayed first update then newer update: stale upsert suppressed', async ()
     fanout.addSubscription('CaretDoc:d1', recipientB, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
     sent.length = 0;
     // Establish baseline
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const baselinePresence = sent.filter(isCaretUpsert)[0]?.change?.value?.presence;
     assert.ok(baselinePresence);
     sent.length = 0;
     // Start a delayed update, then issue a newer update while in-flight
-    const update1 = live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 5 }).then(
+    const update1 = live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 5 }).then(
       () => assert.fail('stale update must reject'),
       (error) => error,
     );
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     // Second update uses the same presence, so stale one is rejected
     assert.match((await update1).message, /Caret update is denied/);
     const upserts = sent.filter(isCaretUpsert);
@@ -459,14 +453,14 @@ test('delayed projection failure after newer upsert: stale remove suppressed', a
     fanout.addSubscription('CaretDoc:d1', recipientB, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
     sent.length = 0;
     // Establish baseline
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     sent.length = 0;
     // Delayed update races with newer update — stale one is rejected
-    const update1 = live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 5 }).then(
+    const update1 = live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 5 }).then(
       () => assert.fail('stale update must reject'),
       (error) => error,
     );
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     assert.match((await update1).message, /Caret update is denied/);
     const upserts = sent.filter(isCaretUpsert);
     assert.equal(upserts.length, 3, 'only second (newer) update should produce upsert');
@@ -493,7 +487,7 @@ test('interest removal sends remove to recipient that previously saw token', asy
     fanout.addSubscription('CaretDoc:d1', recipientA, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
     fanout.addSubscription('CaretDoc:d1', recipientB, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     assert.equal(sent.filter(isCaretUpsert).length, 3);
     const presence = sent.filter(isCaretUpsert)[0]?.change?.value?.presence;
     sent.length = 0;
@@ -518,7 +512,7 @@ test('publisher interest removal retracts its token from every recipient', async
     fanout.addSubscription('CaretDoc:d1', writer, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
     fanout.addSubscription('CaretDoc:d1', recipientA, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
     fanout.addSubscription('CaretDoc:d1', recipientB, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     const presence = sent.filter(isCaretUpsert)[0]?.change?.value?.presence;
     sent.length = 0;
     fanout.addSubscription('CaretDoc:d1', writer, null, null, { entity: 'CaretDoc', id: 'd1', carets: [] });
@@ -540,7 +534,7 @@ test('publisher interest removal fences an in-flight update', async () => {
     });
     fanout.addSubscription('CaretDoc:d1', writer, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
     fanout.addSubscription('CaretDoc:d1', recipientA, null, null, { entity: 'CaretDoc', id: 'd1', carets: ['body'] });
-    const pending = live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 }).then(
+    const pending = live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 }).then(
       () => assert.fail('withdrawn publisher update must reject'),
       (error) => error,
     );
@@ -556,7 +550,7 @@ test('recipient disconnect removes its refs without sending after connection alr
   const { db, live, writer, sent, recipientA } = setup();
   try {
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     sent.length = 0;
     recipientA.closed = true;
     // Remove connection — should not send to already-closed recipient
@@ -591,7 +585,7 @@ test('restricted recipient gets only edge, no offset, no canonical facts', async
       fanout,
     });
     sent.length = 0;
-    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', blockId: 'b1', offset: 0 });
+    await live.update(writer, { type: 'caret.update', entity: 'CaretDoc', id: 'd1', field: 'body', offset: 0 });
     // recipientB (u2) may get restricted block — project will produce edge
     const recipientBFrames = sent.filter((f) => f.entity === 'CaretDoc' && f.id === 'd1' && f.field === 'body');
     // recipientB should get either edge or remove based on projection

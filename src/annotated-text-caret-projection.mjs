@@ -1,5 +1,4 @@
 import { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
-import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 
 function fail(message) { throw new Error(`annotated-text caret projection: ${message}`); }
 
@@ -18,35 +17,27 @@ function splitsSurrogate(text, offset) {
 }
 
 // Converts an internal caret location to its only recipient-visible form. The
-// snapshot projector is deliberately reused so protection decisions cannot drift.
+// caret is ONE absolute UTF-16 offset into the canonical text; there are no
+// blocks. The snapshot projector is deliberately reused so protection decisions
+// cannot drift. When any redaction is present, the visible text cannot safely
+// locate the caret, so only a deterministic edge (start/end) with the opaque
+// presence token is disclosed — never the offset or any protected text.
 export function projectAnnotatedTextCaretForRecipient(canonical, descriptor, decisions, caret, presence) {
-  const meta = getAnnotatedTextCompiledMetadata(descriptor);
-  if (!meta?.caret) fail('descriptor has no compiled caret declaration');
-  exact(caret, ['blockId', 'offset'], 'caret');
-  if (typeof caret.blockId !== 'string' || !Number.isSafeInteger(caret.offset) || caret.offset < 0) {
+  exact(caret, ['offset'], 'caret');
+  if (!Number.isSafeInteger(caret.offset) || caret.offset < 0) {
     fail('caret location is invalid');
   }
   if (typeof presence !== 'string' || presence.length === 0 || presence.length > 256) {
     fail('presence token is invalid');
   }
-  const block = canonical?.blocks?.find((candidate) => candidate?.id === caret.blockId);
-  if (!block || typeof block.text !== 'string' || caret.offset > block.text.length || splitsSurrogate(block.text, caret.offset)) {
-    fail('caret location is outside the canonical block');
+  if (typeof canonical?.text !== 'string' || caret.offset > canonical.text.length || splitsSurrogate(canonical.text, caret.offset)) {
+    fail('caret location is outside the canonical text');
   }
 
   const projected = projectAnnotatedTextForRecipient(canonical, descriptor, decisions);
-  const recipientBlock = projected.blocks.find((candidate) => candidate.id === caret.blockId);
-  if (!recipientBlock) fail('recipient block is missing');
-  if (recipientBlock.kind === 'visible') {
-    // The recipient shape deliberately omits hidden width. Until presence has a
-    // redaction-aware coordinate map, no canonical caret in such a block can be
-    // safely located, even when it appears to precede a marker.
-    if (recipientBlock.redactions?.length) return Object.freeze({ kind: 'edge', presence, blockId: caret.blockId, edge: 'start' });
-    return Object.freeze({ kind: 'caret', presence, blockId: caret.blockId, offset: caret.offset });
+  if (projected.restricted || projected.redactions?.length) {
+    const edge = caret.offset <= canonical.text.length - caret.offset ? 'start' : 'end';
+    return Object.freeze({ kind: 'edge', presence, edge });
   }
-  if (recipientBlock.kind === 'restricted') {
-    const edge = caret.offset <= block.text.length - caret.offset ? 'start' : 'end';
-    return Object.freeze({ kind: 'edge', presence, blockId: caret.blockId, edge });
-  }
-  fail('recipient block is invalid');
+  return Object.freeze({ kind: 'caret', presence, offset: caret.offset });
 }

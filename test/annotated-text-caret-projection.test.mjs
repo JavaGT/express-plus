@@ -24,16 +24,16 @@ function descriptor() {
 function canonical(text = 'secret') {
   return {
     kind: 'workbench.annotatedText.canonical', version: 1,
-    blocks: [{ id: 'b1', groupId: 'b1', text, fields: {}, annotationIds: ['a1', 'p1'] }],
+    text,
     annotations: [
       { id: 'a1', family: 'coding', fields: {} },
       { id: 'p1', family: 'confidential', fields: {}, protectedTargetIds: ['a1'] },
     ],
-    memberships: [
-      { annotationId: 'a1', blockId: 'b1', ordinal: 0 },
-      { annotationId: 'p1', blockId: 'b1', ordinal: 0 },
+    ranges: [
+      { annotationId: 'a1', start: 0, end: text.length },
+      { annotationId: 'p1', start: 0, end: text.length },
     ],
-    measurements: [], capabilities: [], groupMemberships: [], orphans: [],
+    orphans: [], measurements: [], capabilityHints: [],
   };
 }
 
@@ -41,8 +41,8 @@ test('caret declaration links an annotated field to a declared ephemeral cell', 
   const body = descriptor();
   const projected = projectAnnotatedTextCaretForRecipient(canonical(), body,
     { version: 1, protectors: [{ protectorId: 'p1', outcome: 'allow' }], capabilityHints: [] },
-    { blockId: 'b1', offset: 2 }, 'session-1');
-  assert.deepEqual(projected, { kind: 'caret', presence: 'session-1', blockId: 'b1', offset: 2 });
+    { offset: 2 }, 'session-1');
+  assert.deepEqual(projected, { kind: 'caret', presence: 'session-1', offset: 2 });
 });
 
 test('caret declaration rejects unknown cells, non-ephemeral fields, and duplicate links', () => {
@@ -69,12 +69,12 @@ test('restricted caret exposes only a deterministic edge and opaque presence ide
   const body = descriptor();
   const left = projectAnnotatedTextCaretForRecipient(canonical('secret'), body,
     { version: 1, protectors: [{ protectorId: 'p1', outcome: 'deny' }], capabilityHints: [] },
-    { blockId: 'b1', offset: 1 }, 'session-1');
+    { offset: 1 }, 'session-1');
   const right = projectAnnotatedTextCaretForRecipient(canonical('much longer secret'), body,
     { version: 1, protectors: [{ protectorId: 'p1', outcome: 'deny' }], capabilityHints: [] },
-    { blockId: 'b1', offset: 17 }, 'session-1');
-  assert.deepEqual(left, { kind: 'edge', presence: 'session-1', blockId: 'b1', edge: 'start' });
-  assert.deepEqual(right, { kind: 'edge', presence: 'session-1', blockId: 'b1', edge: 'end' });
+    { offset: 17 }, 'session-1');
+  assert.deepEqual(left, { kind: 'edge', presence: 'session-1', edge: 'start' });
+  assert.deepEqual(right, { kind: 'edge', presence: 'session-1', edge: 'end' });
   assert.equal(JSON.stringify([left, right]).includes('secret'), false);
   assert.equal(JSON.stringify([left, right]).includes('offset'), false);
 });
@@ -82,8 +82,8 @@ test('restricted caret exposes only a deterministic edge and opaque presence ide
 test('caret projection rejects malformed, stale, and surrogate-splitting locations', () => {
   const body = descriptor();
   const decisions = { version: 1, protectors: [{ protectorId: 'p1', outcome: 'allow' }], capabilityHints: [] };
-  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, decisions, { blockId: 'missing', offset: 0 }, 'session-1'), /outside/);
-  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, decisions, { blockId: 'b1', offset: 99 }, 'session-1'), /outside/);
-  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical('a😀b'), body, decisions, { blockId: 'b1', offset: 2 }, 'session-1'), /outside/);
-  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, { version: 1, protectors: [], capabilityHints: [] }, { blockId: 'b1', offset: 0 }, 'session-1'), /exactly match/);
+  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, decisions, { blockId: 'b1', offset: 0 }, 'session-1'), /caret has invalid shape/);
+  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, decisions, { offset: 99 }, 'session-1'), /outside the canonical text/);
+  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical('a😀b'), body, decisions, { offset: 2 }, 'session-1'), /outside the canonical text/);
+  assert.throws(() => projectAnnotatedTextCaretForRecipient(canonical(), body, { version: 1, protectors: [], capabilityHints: [] }, { offset: 0 }, 'session-1'), /exactly match/);
 });

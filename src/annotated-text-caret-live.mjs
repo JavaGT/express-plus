@@ -9,10 +9,10 @@ function invalid(message) { throw Object.assign(new Error(message), { status: 40
 function parse(message) {
   if (!message || typeof message !== 'object' || Array.isArray(message)) invalid('Invalid caret message.');
   const keys = Object.keys(message).sort();
-  const required = ['blockId', 'entity', 'field', 'id', 'offset', 'type'];
+  const required = ['entity', 'field', 'id', 'offset', 'type'];
   if (keys.length !== required.length || keys.some((key, index) => key !== required[index]) ||
     message.type !== 'caret.update' || typeof message.entity !== 'string' || typeof message.id !== 'string' ||
-    typeof message.field !== 'string' || typeof message.blockId !== 'string' || !Number.isSafeInteger(message.offset) || message.offset < 0) {
+    typeof message.field !== 'string' || !Number.isSafeInteger(message.offset) || message.offset < 0) {
     invalid('Invalid caret message.');
   }
   return message;
@@ -91,7 +91,7 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
         continue;
       }
       try {
-        const value = await projectAnnotatedTextCaretSnapshot({ db, entity, row: recipientState.row, principal: recipient.principal, fieldName: input.field, descriptor, caret: { blockId: input.blockId, offset: input.offset }, presence: slot.presence });
+        const value = await projectAnnotatedTextCaretSnapshot({ db, entity, row: recipientState.row, principal: recipient.principal, fieldName: input.field, descriptor, caret: { offset: input.offset }, presence: slot.presence });
         if (slots.get(slotKey) !== slot || slot.generation !== generation || recipient.closed || !fanout.hasCaretInterest(recipient, scope, input.field)) continue;
         recipient.send({ type: 'annotated-text-caret', version: 1, entity: entity.name, id: input.id, field: input.field, change: { op: 'upsert', value } });
         slot.recipients.add(recipient);
