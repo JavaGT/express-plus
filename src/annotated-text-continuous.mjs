@@ -107,7 +107,10 @@ function endpointVirtualPosition(family, endpoint) {
     const [, element] = order[i];
     if (element.parent === anchorKey && frontierDominates(basis, [[...element.op]])) return i;
   }
-  return order.length;
+  // No basis-known child: the boundary sits right after the anchor's own scalar
+  // (before any following sibling, old or new). It must NOT fall through to
+  // document end — that would silently move the boundary past unrelated text.
+  return anchorIdx + 1;
 }
 
 function assertDominatingBasis(family, endpoint, label) {
@@ -143,7 +146,9 @@ export function compareStructuralEndpoints(family, left, right) {
   const leftPos = endpointVirtualPosition(family, left);
   const rightPos = endpointVirtualPosition(family, right);
   if (leftPos !== rightPos) return leftPos - rightPos;
-  return leftKey < rightKey ? -1 : 1;
+  // Same virtual position = the same boundary; do not fall back to an arbitrary
+  // key order (which would be unrelated to document position).
+  return 0;
 }
 
 /** Materialize the visible text between two structural endpoints (zero-width allowed). */
@@ -227,7 +232,7 @@ export function projectEndpointToOffset(family, endpoint) {
   return offset;
 }
 
-/** An absolute-offset insert/delete/replace against the whole document. */
+/** An absolute-offset insert/delete against the whole document (unique actor per edit). */
 export function textOperationForOffsetEdit(family, edit, actor, lamport) {
   const basis = family.checkpoint.frontier;
   const text = materializeText(family);
@@ -238,7 +243,7 @@ export function textOperationForOffsetEdit(family, edit, actor, lamport) {
       : resolveOffsetToEndpoint(family, edit.at.offset, basis, edit.at.affinity).point[1];
     return canonicalTextOp(['workbench.text', 1, [actor, 1], lamport, basis, ['insert', anchor, edit.text]]);
   }
-  if (edit.kind !== 'text.delete' && edit.kind !== 'text.replace') fail(`unsupported edit kind: ${edit.kind}`);
+  if (edit.kind !== 'text.delete') fail('text.replace is not supported by this builder — compose delete + insert operations; emitting a delete-only op would silently drop the replacement text');
   if (edit.from.offset >= edit.to.offset) fail('delete range must be non-empty and forward');
   assertUtf16Offset(text, edit.from.offset);
   assertUtf16Offset(text, edit.to.offset);
