@@ -187,8 +187,19 @@ test('an orphan whose saved range is redacted is NOT disclosed', () => {
   assert.deepEqual(r.orphans, [], 'orphan quote overlapping a redaction must not be disclosed');
 });
 
-test('an orphan whose saved range is fully visible IS disclosed', () => {
-  const c = canonical({
+test('an orphan is disclosed only when the document has NO redactions for this recipient', () => {
+  // No redaction -> disclosed.
+  const clean = canonical({
+    text: 'SECRET tail',
+    annotations: [ann('a1', 'comment')],
+    ranges: [{ annotationId: 'a1', start: 0, end: 11 }],
+    orphans: [{ id: 'o1', family: 'comment', fields: {}, savedQuote: 'tail', savedRange: [7, 11] }],
+  });
+  const cleanRecipient = projectAnnotatedTextForRecipient(clean, Doc.fields.body, decisions([]));
+  assert.deepEqual(cleanRecipient.orphans.map((o) => o.savedQuote), ['tail']);
+
+  // Any redaction -> suppressed (the historical quote cannot be provenance-checked).
+  const redacted = canonical({
     text: 'SECRET tail',
     annotations: [ann('s1', 'sensitive'), ann('c1', 'confidential', { protectedTargetIds: ['s1'] })],
     ranges: [
@@ -197,8 +208,20 @@ test('an orphan whose saved range is fully visible IS disclosed', () => {
     ],
     orphans: [{ id: 'o1', family: 'comment', fields: {}, savedQuote: 'tail', savedRange: [7, 11] }],
   });
-  const r = projectAnnotatedTextForRecipient(c, Doc.fields.body, decisions([{ protectorId: 'c1', outcome: 'deny' }]));
-  assert.deepEqual(r.orphans.map((o) => o.savedQuote), ['tail']);
+  const redactedRecipient = projectAnnotatedTextForRecipient(redacted, Doc.fields.body, decisions([{ protectorId: 'c1', outcome: 'deny' }]));
+  assert.deepEqual(redactedRecipient.orphans, [], 'orphans are suppressed when any redaction is present');
+});
+
+test('a stale protected target id fails closed even when another target is valid', () => {
+  const c = canonical({
+    text: 'SECRET tail',
+    annotations: [ann('s1', 'sensitive'), ann('c1', 'confidential', { protectedTargetIds: ['missing', 's1'] })],
+    ranges: [
+      { annotationId: 's1', start: 0, end: 6 },
+      { annotationId: 'c1', start: 0, end: 11 },
+    ],
+  });
+  assert.throws(() => projectAnnotatedTextForRecipient(c, Doc.fields.body, decisions([])), /unknown protected target/);
 });
 
 test('a stale protected target id fails closed', () => {

@@ -91,7 +91,14 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
 
   // Protector activation: a protector range must intersect a protected target's
   // range. Whole-document (0..textLength) protectors cover everything. A stale
-  // protectedTargetIds entry is invalid canonical state and fails closed.
+  // protectedTargetIds entry is invalid canonical state and fails closed —
+  // validate EVERY target id before any intersection break.
+  for (const annotation of annotations.values()) {
+    if (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !annotation.protectedTargetIds?.length) continue;
+    for (const targetId of annotation.protectedTargetIds) {
+      if (!rangeByAnnotation.has(targetId)) fail(`protector '${annotation.id}' names an unknown protected target '${targetId}'`);
+    }
+  }
   const active = new Set();
   for (const annotation of annotations.values()) {
     if (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !annotation.protectedTargetIds?.length) continue;
@@ -99,7 +106,6 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     const wholeDocument = own.start === 0 && own.end === textLength;
     for (const targetId of annotation.protectedTargetIds) {
       const target = rangeByAnnotation.get(targetId);
-      if (!target) fail(`protector '${annotation.id}' names an unknown protected target '${targetId}'`);
       if (wholeDocument || (own.start < target.end && target.start < own.end)) {
         active.add(annotation.id);
         break;
@@ -198,13 +204,11 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     capabilityHints: [...capabilityHints].filter((hint) => (!redactions.length) || hint !== 'body.read'),
     orphans: (canonical.orphans ?? [])
       .filter((orphan) => !Object.hasOwn(meta.protectingFamilies, orphan.family))
-      // An orphan's saved quote is disclosed only when its source range is
-      // fully recipient-visible. A saved range overlapping a denied interval
-      // could carry confidential text — omit it (fail closed).
-      .filter((orphan) => {
-        const [start, end] = orphan.savedRange;
-        return !merged.some((interval) => start < interval.end && interval.start < end);
-      })
+      // An orphan's savedQuote is HISTORICAL text (the range it lived in is
+      // gone) and cannot be provenance-checked against the current text. Any
+      // redaction for this recipient could have come to cover where that quote
+      // originated, so fail closed: no redacted document discloses orphans.
+      .filter(() => redactions.length === 0)
       .map(({ id, family, fields, savedQuote, owner }) => ({ id, family, fields: { ...fields }, savedQuote, ...(owner ? { owner } : {}) })),
     ...(redactions.length ? { redactions } : {}),
   };
