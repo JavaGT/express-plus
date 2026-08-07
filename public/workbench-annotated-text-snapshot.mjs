@@ -17,6 +17,25 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
   }
   if (snapshot.orphans !== undefined && !Array.isArray(snapshot.orphans)) throw new Error('annotatedText snapshot: orphans must be an array');
   if (snapshot.redactions !== undefined && !Array.isArray(snapshot.redactions)) throw new Error('annotatedText snapshot: redactions must be an array');
+  for (const marker of snapshot.redactions ?? []) {
+    if (!marker || typeof marker !== 'object' || Array.isArray(marker)
+      || !Number.isSafeInteger(marker.start) || !Number.isSafeInteger(marker.end)
+      || marker.start < 0 || marker.end < marker.start || marker.end > snapshot.text.length
+      || typeof marker.placeholder !== 'string') {
+      throw new Error('annotatedText snapshot: redaction markers must be in-bounds { start, end, placeholder } intervals');
+    }
+  }
+  // Fail closed on an undeclared annotation family: the handle names the
+  // declared families, and a hostile/malformed stream must not smuggle an
+  // annotation the application never declared.
+  const declaredFamilies = handle?.annotations ? new Set(Object.keys(handle.annotations)) : null;
+  if (declaredFamilies !== null) {
+    for (const annotation of snapshot.annotations) {
+      if (!declaredFamilies.has(annotation.family)) {
+        throw new Error(`annotatedText snapshot: annotation family '${annotation.family}' is not declared`);
+      }
+    }
+  }
   const document = deepFreeze({
     kind: 'workbench.annotatedText.recipient', version: 1,
     text: snapshot.text,

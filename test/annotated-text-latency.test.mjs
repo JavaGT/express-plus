@@ -68,6 +68,12 @@ async function setupLargeDocument(t) {
     body: JSON.stringify({ actionId: 'latency-create', type: create.type, payload: create.payload, scope: 'Project:p1', clientId: 'tab-a' }),
   });
   assert.equal(createRes.status, 200, await createRes.text());
+  // The RGA import splits the source text into PER-CHARACTER elements, so the
+  // family is realistically many-element; assert the workload is not a single
+  // scalar node.
+  const importedState = db.prepare('SELECT family_checkpoint FROM LatencyDoc_body_state WHERE document_id = ?').get('d1');
+  const elementCount = Object.keys(JSON.parse(importedState.family_checkpoint).checkpoint.elements).length;
+  assert.ok(elementCount >= 1000, `expected a many-element family, got ${elementCount}`);
   return { app, db, Document, origin, segmentCount: SEGMENT_COUNT, textLength: largeText().length };
 }
 

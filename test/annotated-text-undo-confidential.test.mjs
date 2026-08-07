@@ -162,6 +162,17 @@ test('undo of a text insert inside a confidential span never leaks to an unautho
   const undone = await undoLast(ctx, 'u1', 'tab-u1');
   assert.equal(undone.ok, true, undone.failure?.message);
 
+  // The compensation fact must carry the BLOCKLESS contribution shape:
+  // { kind: 'text.insert', opId, anchor, text, scalarCount } with NO blockId.
+  const undoFact = JSON.parse(ctx.db.prepare("SELECT fact FROM _PrivateActionFact ORDER BY originOrder DESC LIMIT 1").get().fact);
+  assert.equal(undoFact.kind, 'annotated-text.compensation');
+  assert.equal(undoFact.contribution.kind, 'text.insert');
+  assert.ok(Array.isArray(undoFact.contribution.opId));
+  assert.ok(Array.isArray(undoFact.contribution.anchor));
+  assert.equal(typeof undoFact.contribution.text, 'string');
+  assert.ok(Number.isSafeInteger(undoFact.contribution.scalarCount));
+  assert.equal('blockId' in undoFact.contribution, false);
+
   // After undo, the unauthorized recipient STILL never sees the secret.
   const deniedAfter = await recipientSnapshot(ctx, 'u2');
   assert.equal(deniedAfter.kind, 'workbench.annotatedText.recipient');

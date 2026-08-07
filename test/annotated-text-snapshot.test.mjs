@@ -84,8 +84,31 @@ test('materializes document-level redactions without expanding text', () => {
   assert.ok(Object.isFrozen(document.redactions[0]));
 
   assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ redactions: 'nope' })), /redactions must be an array/);
+  // Malformed markers (non-integer, negative, reversed, out-of-bounds, missing
+  // placeholder) are rejected fail-closed.
+  for (const bad of [
+    [{ start: '7', end: 7, placeholder: 'x' }],
+    [{ start: -1, end: 0, placeholder: 'x' }],
+    [{ start: 7, end: 5, placeholder: 'x' }],
+    [{ start: 0, end: 999, placeholder: 'x' }],
+    [{ start: 0, end: 1 }],
+  ]) {
+    assert.throws(() => materializeAnnotatedTextSnapshot(recipient({ text: 'abcdef', redactions: bad })), /redaction markers must be in-bounds/);
+  }
   // Empty redactions array produces no redactions key at all.
   assert.equal('redactions' in materializeAnnotatedTextSnapshot(recipient({ redactions: [] })), false);
+});
+
+test('materializer rejects annotation families the handle does not declare', () => {
+  const handle = Doc().body;
+  assert.throws(() => materializeAnnotatedTextSnapshot(recipient({
+    annotations: [{ id: 'x', family: 'undeclared', fields: {} }],
+  }), handle), /family 'undeclared' is not declared/);
+  // Declared families pass.
+  const document = materializeAnnotatedTextSnapshot(recipient({
+    annotations: [{ id: 'a1', family: 'coding', fields: {} }],
+  }), handle);
+  assert.equal(document.annotations[0].family, 'coding');
 });
 
 test('materializes annotation owner when present (pass-through)', () => {
@@ -129,8 +152,9 @@ test('materializes restricted flag and orphans without savedRange', () => {
 
 test('strips authoring from public document', () => {
   const authoring = {
-    version: 1, stream: 's', lease: 'l', snapshot: 'snap', acknowledgementFence: 0,
-    positionFrames: [{ positionToken: 'x' }],
+    version: 1, stream: 'stream-token', lease: 'lease-token', snapshot: 'snapshot-token', acknowledgementFence: 7,
+    positionFrames: [{ positionToken: 'position-token' }],
+    family: { id: 'd1', checkpoint: { version: 1, frontier: [], elements: {}, operations: {}, pending: {}, rebootstrapRequired: false } },
   };
   const document = materializeAnnotatedTextSnapshot(recipient({ authoring }));
   assert.equal(document.version, 1);

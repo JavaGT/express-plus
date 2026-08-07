@@ -214,6 +214,14 @@ test('annotation.apply persists sorted protecting targets through its sole event
     },
   });
   assert.equal(protectedResult.ok, true, protectedResult.failure?.message);
+  // The emitted v13 operation + facts must carry the annotation and its sorted
+  // protected targets (not just a SQL row).
+  const opData = protectedResult.events[0].data;
+  assert.equal(opData.operation.kind, 'annotation.apply-range');
+  assert.deepEqual(opData.operation.annotation.protectedTargetIds, ['theme-1']);
+  assert.deepEqual(opData.facts.annotation.protectedTargetIds, ['theme-1']);
+  assert.equal(opData.operation.annotation.id, 'protect-1');
+  assert.ok(opData.facts.ranges.some((range) => range.annotationId === 'protect-1'));
   const targets = db.prepare('SELECT annotation_id, target_annotation_id FROM R4Doc_body_annotation_protected_target').all();
   assert.equal(targets.length, 1);
   assert.equal(targets[0].annotation_id, 'protect-1');
@@ -279,8 +287,7 @@ test('annotation.remove denies a non-writer before log or projection changes', a
     },
   })).ok, true);
   const next = await refreshBinding();
-  const beforeLogCount = db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count;
-  const beforeMembershipCount = db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = 'r5-denied-theme'").get().count;
+  const preimage = db.serialize();
   const denied = await app.dispatch({
     actionId: 'r5-denied-remove', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u2' },
     payload: {
@@ -291,8 +298,9 @@ test('annotation.remove denies a non-writer before log or projection changes', a
   });
   assert.equal(denied.ok, false);
   assert.equal(denied.failure?.category, 'denied');
-  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log').get().count, beforeLogCount);
-  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = 'r5-denied-theme'").get().count, beforeMembershipCount);
+  // The denied operation must leave the ENTIRE durable state untouched
+  // (annotation row, membership, orphan state, cursor, and log alike).
+  assert.deepEqual(db.serialize(), preimage);
   await app.close?.();
 });
 
@@ -361,6 +369,8 @@ test('v9 position token confidentiality: foreign and stale tokens are rejected',
   const { app, db, binding, authoringOf, documentPositionToken } = await setupDoc('secret', 'u1');
   t.after(async () => { await app.shutdown(); db.close(); });
   const foreignToken = randomBytes(32).toString('base64url');
+  const beforeText = familyText(db);
+  const beforeLog = db.prepare('SELECT COUNT(*) AS c FROM _Log').get().c;
   const result = await app.dispatch({
     actionId: 'foreign-token', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: {
@@ -370,6 +380,9 @@ test('v9 position token confidentiality: foreign and stale tokens are rejected',
     },
   });
   assert.equal(result.ok, false);
+  // The rejected operation must leave durable state untouched.
+  assert.equal(familyText(db), beforeText);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM _Log').get().c, beforeLog);
   const goodResult = await app.dispatch({
     actionId: 'good-insert', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: {
@@ -697,6 +710,7 @@ test('v9 receipt dedupe requires the original principal stream and lease binding
     },
   });
   assert.equal(first.ok, true, first.failure?.message);
+  const firstSeq = first.events?.[0]?.seq;
   const again = await app.dispatch({
     actionId: 'dedupe-insert', type: 'R4Doc.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
     payload: {
@@ -705,8 +719,14 @@ test('v9 receipt dedupe requires the original principal stream and lease binding
       edit: { kind: 'text.insert', at: { positionToken: documentPositionToken, offset: 5, affinity: 'right' }, text: '!' },
     },
   });
-  assert.equal(again.ok, true);
-  assert.equal(again.deduped === true || again.events?.length === 0 || familyText(db) === 'hello!', true);
+  // A duplicate mutation is DEDUPED: the receipt re-echoes the ORIGINAL event
+  // (never a new commit), the text is not double-applied, and no higher seq
+  // exists in the committed log.
+  assert.equal(again.ok, true, again.failure?.message);
+  assert.equal(again.deduped, true, JSON.stringify(again));
+  const logMaxSeq = db.prepare("SELECT MAX(seq) AS maxSeq FROM _Log").get().maxSeq;
+  assert.equal(logMaxSeq, firstSeq);
+  assert.equal(familyText(db), 'hello!');
 });
 
 test('block-era structure edits are rejected', async () => {
@@ -736,7 +756,7 @@ test('orphan-policy annotations survive text delete that empties their range', a
       edit: {
         kind: 'annotation.apply', annotation: { id: 'keep-comment', family: 'comment', fields: {} },
         from: { positionToken: documentPositionToken, offset: 0, affinity: 'left' },
-        to: { positionToken: documentPositionToken, offset: 5, affinity: 'right' },
+        to: { positionToken: documentPositionToken, offset: 11, affinity: 'right' },
       },
     },
   })).ok, true);
@@ -749,14 +769,18 @@ test('orphan-policy annotations survive text delete that empties their range', a
       edit: {
         kind: 'text.delete',
         from: { positionToken: next.documentPositionToken, offset: 0, affinity: 'left' },
-        to: { positionToken: next.documentPositionToken, offset: 5, affinity: 'right' },
+        to: { positionToken: next.documentPositionToken, offset: 11, affinity: 'right' },
       },
     },
   });
   assert.equal(deleted.ok, true, deleted.failure?.message);
-  assert.equal(familyText(db), ' world');
+  assert.equal(familyText(db), '');
+  // The whole-document range empties at once: the annotation survives as an
+  // orphan, its membership is gone, and the saved quote is the COMPLETE text.
   assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_annotation WHERE id = 'keep-comment'").get().count, 1);
-  assert.equal(db.prepare("SELECT saved_quote FROM R4Doc_body_annotation_orphan_state WHERE annotation_id = 'keep-comment'").get().saved_quote, 'hello');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R4Doc_body_membership WHERE annotation_id = 'keep-comment'").get().count, 0);
+  assert.equal(db.prepare("SELECT saved_quote FROM R4Doc_body_annotation_orphan_state WHERE annotation_id = 'keep-comment'").get().saved_quote, 'hello world');
+  assert.equal(db.prepare("SELECT last_range FROM R4Doc_body_annotation_orphan_state WHERE annotation_id = 'keep-comment'").get().last_range, 'null');
   await app.close?.();
 });
 

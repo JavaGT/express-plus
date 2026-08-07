@@ -115,9 +115,30 @@ test('annotated text create atomically initializes continuous family state and i
   assert.equal(ctx.db.prepare('SELECT COUNT(*) AS count FROM InitDoc_body_state WHERE document_id = ?').get('d1').count, 1);
 
   // Create via annotatedTextCreateAction concatenates source block texts into one family.
-  // Measurements are document-scoped, one-per-family (only the first block may carry them).
+  // Measurements are merged DOCUMENT-SCOPED across source blocks (one per family;
+  // a family may be carried by any block, not just the first).
   const imported = await ctx.app.dispatch({
     actionId: 'import',
+    principal: { id: 'u1' },
+    ...annotatedTextCreateAction(ctx.Document, ctx.Document.body, {
+      id: 'imported',
+      projectId: 'p1',
+      ownerId: 'u1',
+      source: {
+        blocks: [
+          { text: 'first', measurements: [{ family: 'source', payload: { text: 'firstsecond' } }] },
+          { text: 'second', measurements: [{ family: 'source', payload: { text: 'firstsecond' } }] },
+        ],
+      },
+    }),
+  });
+  // A duplicate family across blocks is rejected (one measurement per
+  // (document, family)); the create must fail closed rather than pick one.
+  assert.equal(imported.ok, false);
+  assert.match(imported.failure?.message ?? '', /duplicate measurement family/);
+
+  const importedTwo = await ctx.app.dispatch({
+    actionId: 'import-two',
     principal: { id: 'u1' },
     ...annotatedTextCreateAction(ctx.Document, ctx.Document.body, {
       id: 'imported',
@@ -131,7 +152,7 @@ test('annotated text create atomically initializes continuous family state and i
       },
     }),
   });
-  assert.equal(imported.ok, true, imported.failure?.message);
+  assert.equal(importedTwo.ok, true, importedTwo.failure?.message);
   const importedText = materializeText(restoreTextFamily(JSON.parse(
     ctx.db.prepare('SELECT family_checkpoint FROM InitDoc_body_state WHERE document_id = ?').get('imported').family_checkpoint,
   )));

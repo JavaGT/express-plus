@@ -173,6 +173,10 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
   }
   const blockFieldNames = descriptor.block ? Object.keys(descriptor.block) : [];
   const canonicalBlocks = [];
+  // Blockless (issue #33): measurements are DOCUMENT-scoped, one per family
+  // across the whole document — a family carried by more than one source block
+  // is a client error, caught at admission.
+  const importedMeasurementFamilies = new Set();
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
     if (!block || typeof block !== 'object' || Array.isArray(block)) {
@@ -232,6 +236,8 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
         }
         if (families.has(measurement.family)) throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] has duplicate measurement family '${measurement.family}'`);
         families.add(measurement.family);
+        if (importedMeasurementFamilies.has(measurement.family)) throw new ValidationError(`${name}.${fieldName} annotated-text import has duplicate measurement family '${measurement.family}' across source blocks`);
+        importedMeasurementFamilies.add(measurement.family);
         const config = descriptor.measurements.find((entry) => entry.measurementName === measurement.family);
         if (!config) throw new ValidationError(`${name}.${fieldName} annotated-text import has unknown measurement family '${measurement.family}'`);
         let payload;
