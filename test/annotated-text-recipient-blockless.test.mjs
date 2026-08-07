@@ -154,3 +154,78 @@ test('duplicate or out-of-bounds ranges are rejected', () => {
   });
   assert.throws(() => projectAnnotatedTextForRecipient(c2, Doc.fields.body, decisions([])), /range is invalid/);
 });
+
+test('a restricted projection never carries the canonical text (fail closed)', () => {
+  const c = canonical({
+    text: 'SECRET',
+    annotations: [ann('s1', 'sensitive'), ann('c1', 'confidential', { protectedTargetIds: ['s1'] })],
+    ranges: [
+      { annotationId: 's1', start: 0, end: 6 },
+      { annotationId: 'c1', start: 0, end: 6 },
+    ],
+  });
+  const r = projectAnnotatedTextForRecipient(c, Doc.fields.body, decisions([{ protectorId: 'c1', outcome: 'deny' }]));
+  assert.equal(r.restricted, true);
+  assert.equal(r.text, '');
+  assert.deepEqual(r.ranges, []);
+  assert.deepEqual(r.annotations, []);
+  assert.deepEqual(authoringRedactionsForRecipient(r), []);
+});
+
+test('an orphan whose saved range is redacted is NOT disclosed', () => {
+  const c = canonical({
+    text: 'SECRET tail',
+    annotations: [ann('s1', 'sensitive'), ann('c1', 'confidential', { protectedTargetIds: ['s1'] })],
+    ranges: [
+      { annotationId: 's1', start: 0, end: 6 },
+      { annotationId: 'c1', start: 0, end: 6 },
+    ],
+    orphans: [{ id: 'o1', family: 'comment', fields: {}, savedQuote: 'SECRET', savedRange: [0, 6] }],
+  });
+  const r = projectAnnotatedTextForRecipient(c, Doc.fields.body, decisions([{ protectorId: 'c1', outcome: 'deny' }]));
+  assert.equal(r.text, ' tail');
+  assert.deepEqual(r.orphans, [], 'orphan quote overlapping a redaction must not be disclosed');
+});
+
+test('an orphan whose saved range is fully visible IS disclosed', () => {
+  const c = canonical({
+    text: 'SECRET tail',
+    annotations: [ann('s1', 'sensitive'), ann('c1', 'confidential', { protectedTargetIds: ['s1'] })],
+    ranges: [
+      { annotationId: 's1', start: 0, end: 6 },
+      { annotationId: 'c1', start: 0, end: 6 },
+    ],
+    orphans: [{ id: 'o1', family: 'comment', fields: {}, savedQuote: 'tail', savedRange: [7, 11] }],
+  });
+  const r = projectAnnotatedTextForRecipient(c, Doc.fields.body, decisions([{ protectorId: 'c1', outcome: 'deny' }]));
+  assert.deepEqual(r.orphans.map((o) => o.savedQuote), ['tail']);
+});
+
+test('a stale protected target id fails closed', () => {
+  const c = canonical({
+    text: 'SECRET tail',
+    annotations: [ann('s1', 'sensitive'), ann('c1', 'confidential', { protectedTargetIds: ['missing'] })],
+    ranges: [
+      { annotationId: 's1', start: 0, end: 6 },
+      { annotationId: 'c1', start: 0, end: 11 },
+    ],
+  });
+  assert.throws(() => projectAnnotatedTextForRecipient(c, Doc.fields.body, decisions([])), /unknown protected target/);
+});
+
+test('a range starting inside a redaction clamps to the marker, not an unrelated offset', () => {
+  const c = canonical({
+    text: '0123456789',
+    annotations: [ann('s1', 'sensitive'), ann('c1', 'confidential', { protectedTargetIds: ['s1'] }), ann('a1', 'comment')],
+    ranges: [
+      { annotationId: 's1', start: 2, end: 5 },
+      { annotationId: 'c1', start: 2, end: 5 },
+      { annotationId: 'a1', start: 3, end: 8 },
+    ],
+  });
+  const r = projectAnnotatedTextForRecipient(c, Doc.fields.body, decisions([{ protectorId: 'c1', outcome: 'deny' }]));
+  assert.equal(r.text, '0156789');
+  // Canonical 3 (inside the redaction) clamps to the marker at visible 2;
+  // canonical 8 maps to visible 5.
+  assert.deepEqual(r.ranges, [{ annotationId: 'a1', start: 2, end: 5 }]);
+});

@@ -90,7 +90,8 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   }
 
   // Protector activation: a protector range must intersect a protected target's
-  // range. Whole-document (0..textLength) protectors cover everything.
+  // range. Whole-document (0..textLength) protectors cover everything. A stale
+  // protectedTargetIds entry is invalid canonical state and fails closed.
   const active = new Set();
   for (const annotation of annotations.values()) {
     if (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !annotation.protectedTargetIds?.length) continue;
@@ -98,7 +99,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     const wholeDocument = own.start === 0 && own.end === textLength;
     for (const targetId of annotation.protectedTargetIds) {
       const target = rangeByAnnotation.get(targetId);
-      if (!target) continue;
+      if (!target) fail(`protector '${annotation.id}' names an unknown protected target '${targetId}'`);
       if (wholeDocument || (own.start < target.end && target.start < own.end)) {
         active.add(annotation.id);
         break;
@@ -119,19 +120,23 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     capabilityHints.add(hint);
   }
 
-  // A denied protector redacts its own range. If the range is unprojectable or
-  // whole-document, restrict the whole document (fail closed).
-  const restricted = new Set();
+  // A denied protector redacts its own range. If the range is the whole
+  // document, restrict the document (fail closed) and return NO text.
   const deniedIntervals = [];
-  for (const [id, blocks] of []) { void id; void blocks; }
+  let restricted = false;
   for (const id of active) {
     if (outcomes.get(id) !== 'deny') continue;
     const range = rangeByAnnotation.get(id);
     if (range.start === 0 && range.end === textLength) {
-      restricted.add('*');
+      restricted = true;
       break;
     }
     deniedIntervals.push({ start: range.start, end: range.end, placeholder: meta.protectingFamilies[annotations.get(id).family].placeholder });
+  }
+  if (restricted) {
+    const result = { kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [] };
+    recipientRedactionIntervals.set(result, []);
+    return freeze(result);
   }
   deniedIntervals.sort((left, right) => left.start - right.start || right.end - left.end);
   const merged = [];
@@ -161,12 +166,11 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   const visibleOffsetFor = (canonicalOffset) => {
     let hidden = 0;
     for (const interval of authoring) {
-      if (canonicalOffset > interval.start) {
-        hidden += interval.end - interval.start;
-        continue;
-      }
-      if (canonicalOffset === interval.start) return interval.visibleStart;
-      break;
+      if (canonicalOffset < interval.start) break;
+      // An offset at or inside a hidden interval maps to the interval's visible
+      // marker position (zero-width); never to an unrelated earlier offset.
+      if (canonicalOffset <= interval.end) return interval.visibleStart;
+      hidden += interval.end - interval.start;
     }
     return canonicalOffset - hidden;
   };
@@ -190,14 +194,20 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     text,
     ranges: recipientRanges,
     annotations: [...annotations.values()].filter((a) => retainedAnnotationIds.has(a.id)).map(({ id, family, fields, owner }) => ({ id, family, fields: { ...fields }, ...(owner ? { owner } : {}) })),
-    measurements: restricted.size ? [] : canonical.measurements.map((m) => ({ ...m })),
-    capabilityHints: [...capabilityHints].filter((hint) => (!restricted.size && !redactions.length) || hint !== 'body.read'),
+    measurements: canonical.measurements.map((m) => ({ ...m })),
+    capabilityHints: [...capabilityHints].filter((hint) => (!redactions.length) || hint !== 'body.read'),
     orphans: (canonical.orphans ?? [])
       .filter((orphan) => !Object.hasOwn(meta.protectingFamilies, orphan.family))
+      // An orphan's saved quote is disclosed only when its source range is
+      // fully recipient-visible. A saved range overlapping a denied interval
+      // could carry confidential text — omit it (fail closed).
+      .filter((orphan) => {
+        const [start, end] = orphan.savedRange;
+        return !merged.some((interval) => start < interval.end && interval.start < end);
+      })
       .map(({ id, family, fields, savedQuote, owner }) => ({ id, family, fields: { ...fields }, savedQuote, ...(owner ? { owner } : {}) })),
     ...(redactions.length ? { redactions } : {}),
   };
-  if (restricted.size) result.restricted = true;
   recipientRedactionIntervals.set(result, authoring);
   return freeze(result);
 }
