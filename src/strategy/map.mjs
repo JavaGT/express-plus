@@ -1,9 +1,8 @@
 import { read, write } from '../grant.mjs';
-import { mayFieldOp } from '../row-grant.mjs';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from '../scope-sql.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { scopeOf } from '../scope-handle.mjs';
-import { authorizeFieldOp, requireFieldDispatch, dispatchFieldMutation, mapMutationAction } from './index.mjs';
+import { authorizeFieldOp, dispatchFieldMutation, mapMutationAction } from './shared.mjs';
 
 function mapHandle({ record, entityName, fieldName, descriptor, row, principal, dispatch, db, entityOf }) {
   const table = membershipTable(entityName, fieldName);
@@ -190,10 +189,4 @@ const MAP_SIDE_TABLE_STRATEGY = Object.freeze({
   ddl: mapDDL,
 });
 
-export {
-  MAP_SIDE_TABLE_STRATEGY,
-  mapHandle,
-  mapMutateHandlers,
-  mapProjectionApply,
-  mapDDL,
-};
+export { MAP_SIDE_TABLE_STRATEGY };

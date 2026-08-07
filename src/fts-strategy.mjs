@@ -81,10 +81,4 @@ const FTS_STRATEGY = Object.freeze({
   ddl: ftsDDL,
 });
 
-export {
-  FTS_STRATEGY,
-  ftsTableName,
-  ftsOwnerCol,
-  ftsDDL,
-  ftsProjectionApply,
-};
+export { FTS_STRATEGY };

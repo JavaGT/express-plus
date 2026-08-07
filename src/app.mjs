@@ -54,7 +54,7 @@ import { config, resolveConfig } from './config.mjs';
 import path from 'node:path';
 import { mkdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
-import { joinPath, buildImperativeRoute, makeMountable, resolveMount, resolveResource, buildEntityRoutes, RESOURCE_VERBS, IMPERATIVE_VERBS } from './router.mjs';
+import { makeMountable } from './router.mjs';
 
 // router(opts) — a mini-app mounted bare into a parent app with
 // `app.mount(path, router)`. `{ mergeParams: true }` lets a child read a parent

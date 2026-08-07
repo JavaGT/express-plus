@@ -1,11 +1,10 @@
 import { randomUUID } from 'node:crypto';
 
 import { read, write } from '../grant.mjs';
-import { mayFieldOp } from '../row-grant.mjs';
-import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from '../scope-sql.mjs';
+import { membershipTable, membershipOwnerCol } from '../scope-sql.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { scopeOf } from '../scope-handle.mjs';
-import { authorizeFieldOp, requireFieldDispatch, dispatchFieldMutation } from './index.mjs';
+import { authorizeFieldOp, dispatchFieldMutation } from './shared.mjs';
 
 function orderedHandle({ record, entityName, fieldName, row, principal, dispatch, db }) {
   const table = membershipTable(entityName, fieldName);
@@ -210,8 +209,4 @@ const ORDERED_SIDE_TABLE_STRATEGY = Object.freeze({
 
 export {
   ORDERED_SIDE_TABLE_STRATEGY,
-  orderedHandle,
-  orderedMutateHandlers,
-  orderedProjectionApply,
-  orderedDDL,
 };

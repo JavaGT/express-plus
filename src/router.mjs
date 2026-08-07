@@ -290,13 +290,4 @@ async function buildEntityRoutes(entity, base, entityOf) {
   return r.routes;
 }
 
-export {
-  joinPath,
-  buildImperativeRoute,
-  makeMountable,
-  resolveMount,
-  resolveResource,
-  buildEntityRoutes,
-  RESOURCE_VERBS,
-  IMPERATIVE_VERBS,
-};
+export { makeMountable };

@@ -1,10 +1,9 @@
-import { read, write } from '../grant.mjs';
-import { mayFieldOp } from '../row-grant.mjs';
-import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from '../scope-sql.mjs';
+import { write } from '../grant.mjs';
+import { membershipTable, membershipOwnerCol } from '../scope-sql.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { scopeOf } from '../scope-handle.mjs';
 import { upsert } from '../driver.mjs';
-import { authorizeFieldOp, requireFieldDispatch, dispatchFieldMutation } from './index.mjs';
+import { authorizeFieldOp, dispatchFieldMutation } from './shared.mjs';
 
 function ephemeralHandle({ record, entityName, fieldName, row, principal, dispatch, db }) {
   const table = membershipTable(entityName, fieldName);
@@ -96,8 +95,4 @@ const EPHEMERAL_SIDE_TABLE_STRATEGY = Object.freeze({
 
 export {
   EPHEMERAL_SIDE_TABLE_STRATEGY,
-  ephemeralHandle,
-  ephemeralMutateHandlers,
-  ephemeralProjectionApply,
-  ephemeralDDL,
 };
