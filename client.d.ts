@@ -711,6 +711,8 @@ export interface AnnotatedTextHttpSessionConfig {
   readonly fetchImpl?: typeof globalThis.fetch;
   readonly eventSourceFactory?: (url: string, options: EventSourceInit) => EventSource;
   readonly createActionId?: () => string;
+  /** Opt-in fold timing hook: called after each client-side fold with its applied duration in ms. */
+  readonly onFoldApplied?: (fold: unknown, elapsedMs: number) => void;
 }
 
 export interface AnnotatedTextHttpSession {

@@ -603,6 +603,7 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
 
   const snapshotRequests = [];
   const ackRequests = [];
+  const foldTimings = [];
   let number = 0;
   let actionNumber = 0;
   const sources = [];
@@ -612,6 +613,7 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
     baseUrl: 'https://example.test/live-delivery',
     context: { entity: Document, field: Document.body, documentId: 'd1' },
     historySession: 'tab-a', createActionId: () => `action-${++actionNumber}`,
+    onFoldApplied: (fold, elapsedMs) => foldTimings.push({ kind: fold.kind, elapsedMs }),
     fetchImpl: async (url, options) => {
       if (options?.method === 'POST') {
         if (url.includes('/authoring/ack')) {
@@ -666,6 +668,9 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
   assert.equal(session.document.blocks[0].text, nextText);
   assert.equal(snapshotRequests.length, 1, 'fold must not force a covering snapshot');
   assert.ok(ackRequests.some((request) => request.snapshot === token('snapshot2')), 'fold authoring is acknowledged');
+  assert.equal(foldTimings.length, 1, 'onFoldApplied must fire once for the folded edit');
+  assert.equal(foldTimings[0].kind, 'annotatedText');
+  assert.ok(Number.isFinite(foldTimings[0].elapsedMs) && foldTimings[0].elapsedMs >= 0);
   session.close();
 });
 

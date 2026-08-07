@@ -3227,7 +3227,7 @@ export function createPrincipalSnapshotHttpSession({
  * A document-bound annotated-text session. The document context owns scope,
  * action grammar, and private authoring bindings; callers only name positions.
  */
-export function createAnnotatedTextHttpSession({ baseUrl, context, historySession, fetchImpl, eventSourceFactory, createActionId, onRecoveryDelayed }) {
+export function createAnnotatedTextHttpSession({ baseUrl, context, historySession, fetchImpl, eventSourceFactory, createActionId, onRecoveryDelayed, onFoldApplied }) {
   if (!context || typeof context !== 'object' || typeof context.documentId !== 'string' || context.documentId.length === 0) {
     throw new TypeError('annotated text context requires a documentId');
   }
@@ -3302,6 +3302,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   }
 
   function foldAnnotatedTextDocument(currentDocument, envelope) {
+    const startedAt = onFoldApplied ? performance.now() : 0;
     const fold = envelope?.fold;
     if (!fold || fold.kind !== 'annotatedText' || fold.version !== 1 || fold.field !== field.fieldName) {
       throw new Error('annotated text fold envelope is missing or unsupported');
@@ -3366,6 +3367,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
 
     familyCheckpoint = textFamilyCheckpoint(nextFamily);
     installAuthoringFromFold(fold.authoring, fence);
+    if (onFoldApplied) onFoldApplied(fold, performance.now() - startedAt);
     return Object.freeze({ ...currentDocument, blocks: Object.freeze(blocks) });
   }
 
