@@ -74,7 +74,7 @@ test('restricted caret exposes only a deterministic edge and opaque presence ide
     { version: 1, protectors: [{ protectorId: 'p1', outcome: 'deny' }], capabilityHints: [] },
     { offset: 17 }, 'session-1');
   assert.deepEqual(left, { kind: 'edge', presence: 'session-1', edge: 'start' });
-  assert.deepEqual(right, { kind: 'edge', presence: 'session-1', edge: 'end' });
+  assert.deepEqual(right, { kind: 'edge', presence: 'session-1', edge: 'start' });
   assert.equal(JSON.stringify([left, right]).includes('secret'), false);
   assert.equal(JSON.stringify([left, right]).includes('offset'), false);
 });

@@ -93,6 +93,16 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
       try {
         const value = await projectAnnotatedTextCaretSnapshot({ db, entity, row: recipientState.row, principal: recipient.principal, fieldName: input.field, descriptor, caret: { offset: input.offset }, presence: slot.presence });
         if (slots.get(slotKey) !== slot || slot.generation !== generation || recipient.closed || !fanout.hasCaretInterest(recipient, scope, input.field)) continue;
+        // Re-authorize immediately before delivery: a subscription/row revoke
+        // that landed during the projection window must not deliver on stale
+        // access. (The projection itself authorizes against a fresh row, but
+        // the send races any revocation between that read and this moment.)
+        if (!(await rowFor(entity, input.id, recipient.principal))) {
+          if (slot.recipients.delete(recipient) && !recipient.closed) {
+            recipient.send({ type: 'annotated-text-caret', version: 1, entity: entity.name, id: input.id, field: input.field, change: { op: 'remove', presence: slot.presence } });
+          }
+          continue;
+        }
         recipient.send({ type: 'annotated-text-caret', version: 1, entity: entity.name, id: input.id, field: input.field, change: { op: 'upsert', value } });
         slot.recipients.add(recipient);
       } catch {
@@ -121,6 +131,15 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
 
   async function clear(conn, message) {
     const input = parseClear(message);
+    // A clear fans out removes to tracked recipients, so it must carry the
+    // same declared caret interest and source row authorization as an update
+    // (a caller cannot clear presence it never had a right to set).
+    const entity = resolveEntity(input.entity);
+    const descriptor = entity?.fields?.[input.field];
+    if (!descriptor || descriptor.kind !== 'annotatedText' || !getAnnotatedTextCompiledMetadata(descriptor)?.caret) invalid('Invalid caret message.');
+    const scope = scopeOf(entity.name, input.id).key;
+    if (!fanout.hasCaretInterest(conn, scope, input.field)) invalid('Caret subscription is required.');
+    if (!(await rowFor(entity, input.id, conn.principal))) invalid('Caret clear is denied.');
     // Allocate/fence even on clear so a concurrent stale update cannot
     // resurrect after the slot is removed. If no slot exists, creating a
     // throwaway slot with a new generation still prevents delayed updates.

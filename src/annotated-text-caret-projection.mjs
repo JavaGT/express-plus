@@ -36,8 +36,11 @@ export function projectAnnotatedTextCaretForRecipient(canonical, descriptor, dec
 
   const projected = projectAnnotatedTextForRecipient(canonical, descriptor, decisions);
   if (projected.restricted || projected.redactions?.length) {
-    const edge = caret.offset <= canonical.text.length - caret.offset ? 'start' : 'end';
-    return Object.freeze({ kind: 'edge', presence, edge });
+    // The caret exists but cannot be safely located in the visible text. The
+    // edge MUST be recipient-independent: a half-split decision would leak a
+    // midpoint oracle against the hidden canonical length. Always pin 'start'
+    // (fail closed); the recipient only learns that a presence exists.
+    return Object.freeze({ kind: 'edge', presence, edge: 'start' });
   }
   return Object.freeze({ kind: 'caret', presence, offset: caret.offset });
 }
