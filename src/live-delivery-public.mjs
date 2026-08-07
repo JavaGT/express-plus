@@ -49,6 +49,17 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
     ? createPrincipalSnapshotDelivery({ db, declarations: principalSnapshots })
     : null;
   const requiredEntities = composites.requiredEntities ?? new Set();
+
+  // A composite snapshot output reads a bounded set of member fields. Resync is
+  // only warranted when a committed event can change one of those fields (or the
+  // anchor / tombstone identity itself). Without this, EVERY member event in the
+  // scope — including annotated-text body edits that touch no selected field —
+  // forces a full composite re-bootstrap.
+  const resyncRelevance = buildSnapshotResyncRelevance(composites);
+  function eventTouchesComposite(declaration, event) {
+    return snapshotEventTouchesComposite(resyncRelevance, declaration, event);
+  }
+
   const aggregateRevision = () => Number(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get().revision);
   async function aggregateSnapshot({ principal, scope, declaration }) {
     const handle = tryParseScopeKey(scope);
@@ -330,9 +341,13 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
         const handle = tryParseScopeKey(event?.scope);
         if (!handle) continue;
         for (const [anchorName, declaration] of composites) {
-          // Declaration-wide resync is deliberately conservative: it covers
-          // deletes and reparenting without retaining pre-image state.
-          if (declaration.output) invalidatedAnchors.add(anchorName);
+          // Resync only when the event can actually change the composite output
+          // (anchor/tombstone identity, member presence, or a selected field).
+          // This keeps per-keystroke annotated-text body edits from forcing a
+          // full composite snapshot re-bootstrap for every shell subscriber.
+          if (declaration.output && eventTouchesComposite(declaration, event)) {
+            invalidatedAnchors.add(anchorName);
+          }
         }
       }
       // Member events invalidate every live aggregate of that declaration. The
@@ -350,6 +365,71 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       principalDelivery?.close();
     },
   };
+}
+
+/**
+ * Build the per-anchor resync-relevance map for a compiled snapshot set: which
+ * member entities appear in the composite output and which of their fields the
+ * output reads. The composite resync gate uses this so member events that touch
+ * no selected field (e.g. annotated-text body edits) do not force a full
+ * composite snapshot re-bootstrap.
+ */
+export function buildSnapshotResyncRelevance(composites) {
+  const resyncRelevance = new Map();
+  for (const [anchorName, declaration] of composites) {
+    const relevantFields = new Map();
+    const collect = (branch, isRoot) => {
+      for (const entry of branch?.entries ?? []) {
+        const entityName = entry.entity?.name;
+        if (entityName) {
+          const fields = relevantFields.get(entityName) ?? new Set();
+          for (const field of entry.selected ?? []) fields.add(field);
+          relevantFields.set(entityName, fields);
+        } else if (isRoot && entry.kind === 'select') {
+          const fields = relevantFields.get(anchorName) ?? new Set();
+          for (const field of entry.fields ?? []) fields.add(field);
+          relevantFields.set(anchorName, fields);
+        }
+        if (entry.nested) collect(entry.nested, false);
+      }
+    };
+    collect(declaration.output, true);
+    const tombstone = declaration.tombstone;
+    // Tombstone identity events always resync; the anchor's own selected fields
+    // are captured in relevantFields (its create/remove also resync via
+    // presence, and identity-only updates are covered by the field gate below).
+    const alwaysRelevant = new Set();
+    if (tombstone?.entity?.name) alwaysRelevant.add(tombstone.entity.name);
+    if (tombstone?.terminalScope?.name) alwaysRelevant.add(tombstone.terminalScope.name);
+    resyncRelevance.set(anchorName, Object.freeze({ relevantFields, alwaysRelevant }));
+  }
+  return resyncRelevance;
+}
+
+/**
+ * Decide whether a committed event can change a composite's output. Anchor and
+ * tombstone identity events always resync; member create/remove resync when the
+ * member appears in the output; member update/native events resync only when
+ * they touch a field the output reads.
+ */
+export function snapshotEventTouchesComposite(relevance, declaration, event) {
+  const handle = tryParseScopeKey(event?.scope);
+  const entityName = handle?.entity;
+  if (!entityName) return false;
+  const anchorRelevance = relevance.get(declaration.anchor.name);
+  if (!anchorRelevance) return true;
+  const kind = event.eventType ?? event.type ?? '';
+  const isPresence = kind.endsWith('.created') || kind.endsWith('.removed');
+  // Tombstone identity events always resync.
+  if (isPresence && anchorRelevance.alwaysRelevant.has(entityName)) return true;
+  // An entity entirely absent from the output never resyncs.
+  const fields = anchorRelevance.relevantFields.get(entityName);
+  if (fields === undefined) return false;
+  // A member create/remove changes presence in the composite tree; always
+  // resync when that entity appears in the output at all.
+  if (isPresence) return true;
+  // Update/native events resync only when they touch a selected field.
+  return Object.keys(event.data ?? {}).some((field) => fields.has(field));
 }
 
 /**

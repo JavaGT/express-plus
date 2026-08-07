@@ -5,7 +5,7 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   annotatedText, annotatedTextCreateAction, annotatedTextRetireAction, annotation,
   deny, entity, everyone, exportAnnotatedText, inherit,
-  admin, grant, measurement, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write, principalSnapshot, projectionSource,
+  admin, grant, keyed, measurement, object, read, ref, registerAnnotatedTextContract, scope, select, snapshot, subscribe, text, write, principalSnapshot, projectionSource,
 } from '../src/index.mjs';
 import { executeDDL, executeFrameworkDDL, registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
 import { defineSqliteSchema } from '../src/sqlite-schema.mjs';
@@ -696,3 +696,63 @@ test('HTTP delivery session reserves history commands for the package history en
   });
   session.close();
 });
+
+test('composite snapshot resync gate: member events resync only when they touch output', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec("CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO User VALUES ('u1')");
+  const Project = entity('Project', {
+    name: text(), description: text({ optional: true }), owner: ref('User', { role: 'owner' }),
+    grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not project owner'))],
+  });
+  executeDDL(Project, db);
+  db.exec("INSERT INTO Project (id, name, owner) VALUES ('p1', 'proj', 'u1')");
+  const Codebook = entity('Codebook', {
+    projectId: ref(Project, { immutable: true, physical: true, onRemove: 'cascade' }), name: text(), description: text({ optional: true }),
+    grant: inherit(Project, { via: 'projectId' }),
+    applicationHttpActions: ['create', 'update', 'remove'],
+  });
+  executeDDL(Codebook, db);
+  const app = workbench({ db, entities: [Project, Codebook] });
+  app.attachLiveDelivery({
+    principalOf: () => user,
+    snapshots: [snapshot(Project, {
+      output: object({
+        name: select(Project.field.name),
+        codebooks: keyed(Codebook, { via: Codebook.field.projectId, select: select(Codebook.field.name) }),
+      }),
+    })],
+  });
+  t.after(async () => { await app.shutdown(); db.close(); });
+
+  const { buildSnapshotResyncRelevance, snapshotEventTouchesComposite } = await import('../src/live-delivery-public.mjs');
+  const { tryParseScopeKey } = await import('../src/scope-handle.mjs');
+  const compiled = await (async () => {
+    const { compileSnapshots } = await import('../src/snapshot-projection.mjs');
+    const resolveEntity = (name) => name === 'Project' ? app.entities.get('Project') : name === 'Codebook' ? app.entities.get('Codebook') : undefined;
+    return compileSnapshots([snapshot(Project, {
+      output: object({
+        name: select(Project.field.name),
+        codebooks: keyed(Codebook, { via: Codebook.field.projectId, select: select(Codebook.field.name) }),
+      }),
+    })], resolveEntity, db);
+  })();
+  const declaration = compiled.get('Project');
+  const relevance = buildSnapshotResyncRelevance(compiled);
+  const touches = (eventType, scope, data) => snapshotEventTouchesComposite(relevance, declaration, { eventType, scope, data });
+
+  // Anchor selected-field update resyncs.
+  assert.equal(touches('Project.updated', 'Project:p1', { id: 'p1', name: 'x' }), true);
+  // Anchor non-selected-field update does NOT resync.
+  assert.equal(touches('Project.updated', 'Project:p1', { id: 'p1', description: 'x' }), false);
+  // Member selected-field update resyncs.
+  assert.equal(touches('Codebook.updated', 'Codebook:cb-1', { id: 'cb-1', name: 'x' }), true);
+  // Member non-selected-field update does NOT resync.
+  assert.equal(touches('Codebook.updated', 'Codebook:cb-1', { id: 'cb-1', description: 'x' }), false);
+  // Member create resyncs (presence).
+  assert.equal(touches('Codebook.created', 'Codebook:cb-1', { id: 'cb-1', name: 'x' }), true);
+  // An entity absent from the output never resyncs.
+  assert.equal(touches('Foreign.updated', 'Foreign:f1', { id: 'f1', anything: 1 }), false);
+  void tryParseScopeKey;
+});
+
