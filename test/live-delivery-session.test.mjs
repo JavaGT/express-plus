@@ -1428,4 +1428,60 @@ describe('LiveDeliverySession', () => {
     await deliver([event(3, 'late')]);
     assert.equal(session.status, 'revoked');
   });
+
+  it('resyncs when fold baseCursor mismatches the accepted cursor', async () => {
+    let snapshots = 0;
+    let delivery;
+    const session = createLiveDeliverySession({
+      bootstrap: async ({ mode }) => {
+        if (mode === 'snapshot') {
+          snapshots += 1;
+          return { kind: 'snapshot', snapshot: { values: [] }, cursor: snapshots === 1 ? 1 : 2 };
+        }
+        return { kind: 'catchup', envelopes: [], cursor: 1 };
+      },
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      validateSnapshot: (snapshot) => snapshot,
+      fold: (snapshot, envelope) => ({ values: [...snapshot.values, envelope.event.data.value] }),
+      sendAction: async () => ({ ok: true }),
+      createActionId: () => 'own-action',
+    });
+    await session.ready;
+    assert.equal(snapshots, 1);
+    // Contiguous seq but fold.baseCursor names the wrong predecessor.
+    await delivery([{
+      type: 'event', seq: 2, seqSpan: [2, 2],
+      event: { type: 'Value.updated', data: { value: 'skip' }, actionId: 'a2' },
+      fold: { baseCursor: 0 },
+    }]);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(snapshots >= 2, 'baseCursor mismatch recovers via snapshot');
+    assert.deepEqual(session.snapshot, { values: [] });
+    session.close();
+  });
+
+  it('does not apply state when fold throws and recovers via snapshot', async () => {
+    let delivery;
+    let snapshots = 0;
+    const session = createLiveDeliverySession({
+      bootstrap: async ({ mode }) => {
+        if (mode === 'snapshot') {
+          snapshots += 1;
+          return { kind: 'snapshot', snapshot: { values: [] }, cursor: snapshots === 1 ? 1 : 2 };
+        }
+        return { kind: 'catchup', envelopes: [], cursor: 1 };
+      },
+      subscribe: async ({ deliver }) => { delivery = deliver; return { close() {} }; },
+      validateSnapshot: (snapshot) => snapshot,
+      fold: () => { throw new Error('fold failed'); },
+      sendAction: async () => ({ ok: true }),
+      createActionId: () => 'own-action',
+    });
+    await session.ready;
+    await delivery([event(2, 'x')]).catch(() => {});
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.deepEqual(session.snapshot?.values ?? [], []);
+    assert.ok(snapshots >= 2, 'failed fold recovers via snapshot without applying');
+    session.close();
+  });
 });

@@ -346,13 +346,14 @@ test('session translates public merge and detach block IDs only through its priv
   detach.session.close();
 });
 
-test('positive receipt triggers snapshot fetch and authoring ack', async () => {
+test('positive receipt without fold echo falls back to covering snapshot and authoring ack', async () => {
   const { session, actionRequests, ackRequests, snapshotRequests } = v9Setup();
   await session.ready;
   const result = await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 0, affinity: 'right' }, text: 'x' });
   assert.equal(result.ok, true);
   assert.equal(actionRequests.length, 1);
-  assert.equal(snapshotRequests.length, 2, 'should fetch covering snapshot after receipt');
+  // Mock SSE never delivers a fold envelope, so receipt recovery still covers.
+  assert.equal(snapshotRequests.length, 2, 'should fetch covering snapshot after receipt without echo');
   assert.ok(ackRequests.length >= 2, `expected at least 2 acks, got ${ackRequests.length}`);
   assert.equal(ackRequests[0].version, 1);
   assert.equal(ackRequests[0].stream, token('stream'));
@@ -588,4 +589,124 @@ test('dispatch fails closed after revoke and close', async () => {
     assert.ok(err);
   }
   assert.equal('dispatch' in session, false);
+});
+
+test('own-echo fold installs text without a second bootstrap snapshot', async () => {
+  const { createTextState, applyTextOp, textCheckpoint } = await import('../src/annotated-text.mjs');
+  const { createTextFamily, applyTextOperationToBlock, textFamilyCheckpoint, materializeBlock } = await import('../src/annotated-text-family.mjs');
+  const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'Hello']];
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)), 'block-1');
+  const nextOp = ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['insert', ['element', [[A, 1], 4]], 'x']];
+  const nextFamily = applyTextOperationToBlock(baseFamily, 'block-1', nextOp);
+  const nextText = materializeBlock(nextFamily, 'block-1');
+
+  const snapshotRequests = [];
+  const ackRequests = [];
+  let number = 0;
+  let actionNumber = 0;
+  const sources = [];
+  let releaseReceipt;
+  const receiptGate = new Promise((resolve) => { releaseReceipt = resolve; });
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => `action-${++actionNumber}`,
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) {
+          ackRequests.push(JSON.parse(options.body));
+          return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        }
+        const body = JSON.parse(options.body);
+        await receiptGate;
+        return { ok: true, status: 200, json: async () => ({ ok: true, actionId: body.actionId, confirmedThrough: 2 }) };
+      }
+      const cursor = ++number;
+      snapshotRequests.push({ cursor });
+      const body = {
+        ...snapshot(cursor).body,
+        blocks: [{ kind: 'visible', id: 'block-1', text: cursor === 1 ? 'Hello' : nextText, fields: {}, annotationIds: [] }],
+      };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  assert.equal(snapshotRequests.length, 1);
+  assert.equal(session.document.blocks[0].text, 'Hello');
+
+  const inserted = session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 5, affinity: 'right' }, text: 'x' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const actionId = 'action-1';
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId },
+    fold: {
+      kind: 'annotatedText', version: 1, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [nextOp] },
+      projection: { changedBlocks: [{ id: 'block-1', text: nextText }], removedBlockIds: [] },
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionBlocks: [{ blockId: 'block-1', positionToken: token('position2') }],
+      },
+      family: textFamilyCheckpoint(nextFamily),
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  releaseReceipt();
+  const result = await inserted;
+  assert.equal(result.ok, true);
+  assert.equal((await result.settlement.wait()).status, 'reconciled');
+  assert.equal(session.document.blocks[0].text, nextText);
+  assert.equal(snapshotRequests.length, 1, 'fold must not force a covering snapshot');
+  assert.ok(ackRequests.some((request) => request.snapshot === token('snapshot2')), 'fold authoring is acknowledged');
+  session.close();
+});
+
+test('baseCursor mismatch forces snapshot recovery rather than applying fold', async () => {
+  const snapshotRequests = [];
+  let number = 0;
+  const sources = [];
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const cursor = ++number;
+      snapshotRequests.push({ cursor });
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: snapshot(cursor), cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  assert.equal(snapshotRequests.length, 1);
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'foreign' },
+    fold: {
+      kind: 'annotatedText', version: 1, field: 'body', baseCursor: 0, fence: 2,
+      text: { reducer: 'workbench.text', operations: [['workbench.text', 1, ['a'.repeat(32), 1], 1, [], ['insert', ['root'], 'x']]] },
+      projection: { changedBlocks: [{ id: 'block-1', text: 'x' }], removedBlockIds: [] },
+      authoring: { acknowledgementFence: 2, positionBlocks: [] },
+      family: { id: 'd1', checkpoint: { version: 1, frontier: [], elements: {}, pending: {}, maxPending: 1024, rebootstrapRequired: false, operations: {} }, blocks: [{ id: 'block-1', elementKeys: [] }] },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(snapshotRequests.length >= 2, 'baseCursor mismatch recovers via snapshot');
+  assert.equal(session.document.blocks[0].text, 'Hello');
+  session.close();
 });

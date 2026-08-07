@@ -31,6 +31,8 @@ export function attachApplicationLiveDelivery(app, {
     schema: app.schema,
     log: app.log,
     maxCatchupEvents,
+    // Ordinary lifecycle envelopes omit actionId (public receipt privacy).
+    // Annotated-text fold envelopes attach actionId themselves for own-echo.
     includeActionId: false,
   });
   const handler = createLiveDeliveryHttpHandler({

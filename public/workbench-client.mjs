@@ -18,6 +18,12 @@ import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotS
 import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument } from './workbench-annotated-text-snapshot.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 import { displayToWirePosition } from './workbench-annotated-text-redaction-coords.mjs';
+import {
+  applyTextOperationToBlock,
+  restoreTextFamilyCheckpoint,
+  textFamilyCheckpoint,
+  materializeBlock,
+} from './workbench-annotated-text-family.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
 export { materializeAnnotatedTextSnapshot };
 
@@ -2481,8 +2487,21 @@ export function createLiveDeliverySession({
     const decision = decideReplay(cursor, seqSpan);
     if (decision.kind === 'duplicate') return { status: 'duplicate' };
     if (decision.kind === 'gap') return { status: 'gap' };
+    // Fold envelopes name the predecessor cursor explicitly. A mismatch means
+    // the payload cannot be applied against the client's accepted base.
+    if (envelope.fold
+      && Number.isSafeInteger(envelope.fold.baseCursor)
+      && envelope.fold.baseCursor !== cursorAnchor(cursor)) {
+      return { status: 'resync' };
+    }
 
-    const nextSnapshot = fold(baseSnapshot, envelope);
+    let nextSnapshot;
+    try {
+      nextSnapshot = fold(baseSnapshot, envelope);
+    } catch {
+      // A failed fold must not advance the cursor or acknowledgement fence.
+      return { status: 'resync' };
+    }
     // A fold callback may synchronously trigger terminal revocation through a
     // host lifecycle reaction. Do not restore state after that fail-closed turn.
     if (closed || status === 'revoked') return { status: 'revoked' };
@@ -2503,10 +2522,11 @@ export function createLiveDeliverySession({
   }
 
   function settleSnapshotConfirmations(receiptGenerationAtStart) {
-    // Composite streams intentionally do not disclose event identity. A
-    // positive sender receipt plus an authorized replacement snapshot is the
-    // package-owned equivalent of a direct-stream action echo.
-    if (!snapshotOnly) return;
+    // Composite streams and non-foldable annotated-text ops intentionally do
+    // not disclose a foldable echo. A positive sender receipt plus an
+    // authorized replacement snapshot is the package-owned equivalent of a
+    // direct-stream action echo. Fold-mode sessions still use this path when
+    // recovery installs a snapshot (split/merge/redacted/gap).
     for (const [actionId, operation] of operations) {
       if (operation.delivered
         && operation.confirmedThrough != null
@@ -2811,9 +2831,14 @@ export function createLiveDeliverySession({
       operation.receiptGeneration = ++receiptGeneration;
       operation.receiptSnapshotGeneration = snapshotGeneration;
       settleSnapshotConfirmations(receiptGeneration);
-      // Composite streams hide event identity. Every positive receipt needs a
-      // replacement snapshot after that receipt before its overlay can settle.
-      if (snapshotOnly) recoverReceiptSnapshot(operation);
+      // Prefer fold echo settlement. Snapshot recovery covers (a) snapshot-only
+      // composites and (b) fold-mode actions whose receipt names a fence but
+      // whose fold echo has not arrived (non-foldable ops, delayed SSE).
+      // Ordinary fold sessions without a confirmation fence keep echo-only settle.
+      if (operation.echoCursor == null
+        && (snapshotOnly || Number.isSafeInteger(operation.confirmedThrough))) {
+        recoverReceiptSnapshot(operation);
+      }
       if (operation.echoCursor != null
         && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
         settleOperation(operation, { status: 'reconciled' });
@@ -2881,7 +2906,10 @@ export function createLiveDeliverySession({
       operation.receiptGeneration = ++receiptGeneration;
       operation.receiptSnapshotGeneration = snapshotGeneration;
       settleSnapshotConfirmations(receiptGeneration);
-      if (snapshotOnly) recoverReceiptSnapshot(operation);
+      if (operation.echoCursor == null
+        && (snapshotOnly || Number.isSafeInteger(operation.confirmedThrough))) {
+        recoverReceiptSnapshot(operation);
+      }
       if (operation.echoCursor != null && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
         settleOperation(operation, { status: 'reconciled' });
         operations.delete(operation.actionId);
@@ -3234,11 +3262,113 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   let sessionClosed = false;
   let wakeAuthoringMutation = null;
   let translatedActions = 0;
+  // Annotated-text family checkpoint is session-private. Snapshots replace it;
+  // fold envelopes advance it. It is not a text.crdt reducer seed.
+  let familyCheckpoint = null;
   const snapshotBinding = createAnnotatedTextSnapshotSessionBinding((handle, serverId, generation) => {
     blockGroupTokens.set(handle, { serverId, generation });
   });
   const requestIdentity = { entity: entity.name, field: field.fieldName, documentId, authoringClient };
   if (typeof context.viewAs === 'string' && context.viewAs.length > 0) requestIdentity.viewAs = context.viewAs;
+
+  function installAuthoringFromFold(foldAuthoring, fence) {
+    if (!foldAuthoring || foldAuthoring.acknowledgementFence !== fence) {
+      throw new Error('annotated text fold authoring fence mismatch');
+    }
+    const positionTokens = new Map();
+    for (const entry of foldAuthoring.positionBlocks ?? []) {
+      if (!entry || typeof entry.blockId !== 'string' || typeof entry.positionToken !== 'string') {
+        throw new Error('annotated text fold position block is invalid');
+      }
+      positionTokens.set(entry.blockId, entry.positionToken);
+    }
+    if (foldAuthoring.stream && foldAuthoring.lease && foldAuthoring.snapshot) {
+      snapshotBinding.authoring = Object.freeze({
+        stream: foldAuthoring.stream,
+        lease: foldAuthoring.lease,
+        snapshot: foldAuthoring.snapshot,
+        acknowledgementFence: fence,
+        positionTokens,
+        groupTokens: snapshotBinding.authoring?.groupTokens ?? new Map(),
+        splitResolutions: Object.freeze([]),
+      });
+    } else if (snapshotBinding.authoring) {
+      snapshotBinding.authoring = Object.freeze({
+        ...snapshotBinding.authoring,
+        acknowledgementFence: fence,
+        positionTokens: positionTokens.size ? positionTokens : snapshotBinding.authoring.positionTokens,
+      });
+    }
+  }
+
+  function foldAnnotatedTextDocument(currentDocument, envelope) {
+    const fold = envelope?.fold;
+    if (!fold || fold.kind !== 'annotatedText' || fold.version !== 1 || fold.field !== field.fieldName) {
+      throw new Error('annotated text fold envelope is missing or unsupported');
+    }
+    const fence = envelope.seq ?? envelope.seqSpan?.[1];
+    if (fold.fence !== fence || fold.authoring?.acknowledgementFence !== fence) {
+      throw new Error('annotated text fold fence mismatch');
+    }
+    // baseCursor must equal the client's accepted cursor before folding. The
+    // generic session applies decideReplay first; the envelope still names the
+    // expected predecessor so a mis-built payload cannot half-apply.
+    if (!Number.isSafeInteger(fold.baseCursor) || fold.baseCursor < 0) {
+      throw new Error('annotated text fold baseCursor is invalid');
+    }
+    if (fold.text?.reducer !== 'workbench.text' || !Array.isArray(fold.text.operations) || fold.text.operations.length === 0) {
+      throw new Error('annotated text fold text operations are invalid');
+    }
+    if (!fold.family || typeof fold.family !== 'object') {
+      throw new Error('annotated text fold family is missing');
+    }
+    if (!fold.projection || !Array.isArray(fold.projection.changedBlocks) || !Array.isArray(fold.projection.removedBlockIds)) {
+      throw new Error('annotated text fold projection is invalid');
+    }
+    if (fold.projection.removedBlockIds.length) {
+      throw new Error('annotated text fold structural removal requires snapshot recovery');
+    }
+
+    let nextFamily;
+    if (familyCheckpoint) {
+      let family = restoreTextFamilyCheckpoint(familyCheckpoint);
+      for (const operation of fold.text.operations) {
+        const blockId = fold.projection.changedBlocks[0]?.id;
+        if (typeof blockId !== 'string') throw new Error('annotated text fold changed block is missing');
+        family = applyTextOperationToBlock(family, blockId, operation);
+      }
+      if (JSON.stringify(textFamilyCheckpoint(family)) !== JSON.stringify(fold.family)) {
+        throw new Error('annotated text fold family disagrees with applied operations');
+      }
+      nextFamily = family;
+    } else {
+      nextFamily = restoreTextFamilyCheckpoint(fold.family);
+    }
+
+    for (const changed of fold.projection.changedBlocks) {
+      if (!changed || typeof changed.id !== 'string' || typeof changed.text !== 'string') {
+        throw new Error('annotated text fold changed block is invalid');
+      }
+      if (materializeBlock(nextFamily, changed.id) !== changed.text) {
+        throw new Error('annotated text fold projection disagrees with family');
+      }
+    }
+
+    const changedById = new Map(fold.projection.changedBlocks.map((entry) => [entry.id, entry.text]));
+    const blocks = currentDocument.blocks.map((block) => {
+      if (!changedById.has(block.id)) return block;
+      if (block.kind !== 'visible') throw new Error('annotated text fold cannot update a non-visible block');
+      return Object.freeze({ ...block, text: changedById.get(block.id) });
+    });
+    if (changedById.size && blocks.every((block) => !changedById.has(block.id))) {
+      throw new Error('annotated text fold changed block is absent from document');
+    }
+
+    familyCheckpoint = textFamilyCheckpoint(nextFamily);
+    installAuthoringFromFold(fold.authoring, fence);
+    return Object.freeze({ ...currentDocument, blocks: Object.freeze(blocks) });
+  }
+
   const session = createLiveDeliveryHttpSession({
     baseUrl,
     scope,
@@ -3247,8 +3377,12 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     eventSourceFactory,
     createActionId,
     requestIdentity,
-    onRecoveryStart: () => revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding),
+    onRecoveryStart: () => {
+      familyCheckpoint = null;
+      revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
+    },
     onRecoveryDelayed,
+    fold: foldAnnotatedTextDocument,
     optimistic(document, action) {
       const positionBlocks = new Map();
       const bound = pendingActionPositionBlocks.get(action.payload?.authoring?.mutationId);
@@ -3266,6 +3400,9 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('annotated text delivery snapshot must be an object');
       const authoring = delivery?.authoring;
       if (!authoring || authoring.acknowledgementFence !== delivery.cursor) throw new Error('annotated text delivery authoring envelope is invalid');
+      // A later snapshot wins over prior folds: clear the family checkpoint so
+      // the next fold installs from its post-state family facts.
+      familyCheckpoint = null;
       const result = materializeAnnotatedTextSnapshot({ ...snapshot[field?.fieldName], authoring }, field, snapshotBinding);
       return result;
     },

@@ -160,7 +160,10 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
             revoke?.();
             return { activate: async () => undefined };
           }
-          return core.subscribe({ ...subscription, after, signal, paused: true, revoke });
+          // Document-bound subscriptions carry the resolved document (including
+          // optional authoring client nonce) so fold emission can mint frames.
+          const document = Object.freeze({ ...input.document, row });
+          return core.subscribe({ ...subscription, after, signal, paused: true, revoke, document });
         })
         : core.subscribe({ ...subscription, after, signal, paused: true, revoke });
       const activation = Promise.resolve(authorizeDocument).then((value) => value).catch((error) => {
@@ -243,7 +246,17 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       if ((input.document && requiredEntities.has(input.document.entity.name)) || (handle && requiredEntities.has(handle.entity))) {
         return { kind: 'revoked' };
       }
-      if (input.document) return this.bootstrap({ principal: input.principal, scope: input.scope, document: input.document });
+      if (input.document) {
+        // Document-bound catch-up may still fold sequential text envelopes when
+        // the core can project them; long gaps and non-foldable ops bootstrap.
+        if (core.exceedsCatchupLimit(input.scope, typeof input.after === 'object' ? input.after?.anchor ?? 0 : input.after ?? 0, maxCatchupEvents)) {
+          return this.bootstrap({ principal: input.principal, scope: input.scope, document: input.document });
+        }
+        const row = await this.authorizeAnnotatedTextDocument(input.document, input.principal);
+        if (!row) return { kind: 'revoked' };
+        const document = Object.freeze({ ...input.document, row });
+        return core.catchup({ ...input, document });
+      }
       const declaration = handle && composites.get(handle.entity);
       if (declaration) {
         const cursor = input.after;

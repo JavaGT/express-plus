@@ -222,10 +222,11 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
             principal: sub.principal,
             row: auth?.row,
             scope: sub.scope,
+            document: sub.document ?? null,
           });
           let projected;
           try {
-            projected = projectRecipient(ctx);
+            projected = await projectRecipient(ctx);
           } catch (err) {
             log?.error?.('live', 'projectRecipient threw', { scope: sub.scope, seq: event.seq, err: String(err) });
             removeSub(subId);
@@ -416,7 +417,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     byScope.clear();
   }
 
-  async function catchup({ principal, scope, after = 0 }) {
+  async function catchup({ principal, scope, after = 0, document = null }) {
     if (!Number.isSafeInteger(after) || after < 0) {
       throw new Error(`after must be a nonnegative safe integer, got ${after}`);
     }
@@ -443,6 +444,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         deliver: async (batch) => { envelopes.push(...batch); },
         revoke: () => { revoked = true; },
         allowTerminal: true,
+        document,
       });
     } catch (error) {
       controller.abort();

@@ -412,6 +412,7 @@ export async function handleJobRoute(app, req, res) {
 // Returns true when handled; false to fall through.
 const CLIENT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-client.mjs';
 const ANNOTATED_TEXT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/src') + '/annotated-text.mjs';
+const ANNOTATED_TEXT_FAMILY_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/src') + '/annotated-text-family.mjs';
 const TEXT_EDIT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-text-edit.mjs';
 const ANNOTATED_TEXT_SNAPSHOT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot.mjs';
 const ANNOTATED_TEXT_SNAPSHOT_INTERNAL_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot-internal.mjs';
@@ -427,6 +428,17 @@ export function handleClientSdkRoute(app, req, res) {
     const body = readFileSync(ANNOTATED_TEXT_SDK_PATH);
     res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
     res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-annotated-text-family.mjs') {
+    if (!app || !app.db) return false;
+    // Family source imports ./annotated-text.mjs; rewrite to the browser SDK path
+    // so the same module folds under Node (public re-export) and HTTP delivery.
+    const body = readFileSync(ANNOTATED_TEXT_FAMILY_SDK_PATH, 'utf8')
+      .replaceAll("from './annotated-text.mjs'", "from './workbench-annotated-text.mjs'");
+    const bytes = Buffer.from(body);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': bytes.byteLength });
+    res.end(bytes);
     return true;
   }
   if (url.pathname === '/workbench-text-edit.mjs') {
