@@ -16,13 +16,17 @@ const Document = entity('LiveDocument', {
   }),
 });
 
-function snapshot(_number = 1) {
+const BLOCK_ERA_ERROR = /annotated-text: block-era command is not supported \(issue #33\)/;
+
+function snapshot(text = 'Hello') {
   return {
     body: {
       kind: 'workbench.annotatedText.recipient', version: 1,
-      blockGroups: [{ id: 'group-1', blockIds: ['block-1'], annotationIds: [] }],
-      blocks: [{ kind: 'visible', id: 'block-1', text: 'Hello', fields: {}, annotationIds: [] }],
-      annotations: [], memberships: [], measurements: [], capabilityHints: null,
+      text,
+      ranges: [],
+      annotations: [],
+      orphans: [],
+      measurements: [],
     },
   };
 }
@@ -34,8 +38,7 @@ function token(label) {
 function authoringEnvelope(cursor, family = null) {
   return {
     version: 1, stream: token('stream'), lease: token('lease'), snapshot: token(`snapshot${cursor}`), acknowledgementFence: cursor,
-    positionFrames: [{ blockId: 'block-1', positionToken: token(`position${cursor}`) }],
-    groupFrames: [{ groupToken: token(`group${cursor}`) }], splitResolutions: [],
+    positionFrames: [{ positionToken: token(`position${cursor}`) }],
     ...(family ? { family } : {}),
   };
 }
@@ -60,7 +63,9 @@ function setup({ revoked = false } = {}) {
         return { ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: 2 }) };
       }
       if (accessRevoked) return { ok: false, status: 403, json: async () => ({}) };
-      const cursor = ++number; const body = snapshot(cursor); return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body: body.body }, cursor, authoring: authoringEnvelope(cursor) }) };
+      const cursor = ++number;
+      const body = snapshot();
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body: body.body }, cursor, authoring: authoringEnvelope(cursor) }) };
     },
     eventSourceFactory: () => {
       const source = { close() {}, onmessage: null, onerror: null };
@@ -75,7 +80,8 @@ test('document session bootstraps recipient snapshot and derives typed insert fr
   const { session, requests } = setup();
   await session.ready;
   assert.equal(session.document.version, 1);
-  assert.equal((await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 1, affinity: 'right' }, text: 'x' })).ok, true);
+  assert.equal(session.document.text, 'Hello');
+  assert.equal((await session.insert({ mutationId: 'm1', at: { offset: 1, affinity: 'right' }, text: 'x' })).ok, true);
   const actionBody = requests[0];
   assert.equal(actionBody.type, 'LiveDocument.body.operation');
   assert.deepEqual(actionBody.payload, {
@@ -176,7 +182,7 @@ test('document session bootstraps when authoring client storage is unavailable',
 test('document session owns mutation identity and sends selection replacement as one action', async () => {
   const { session, requests } = setup();
   await session.ready;
-  await session.insert({ at: { blockId: 'block-1', offset: 1, affinity: 'right' }, text: 'x' });
+  await session.insert({ at: { offset: 1, affinity: 'right' }, text: 'x' });
   assert.match(requests[0].payload.authoring.mutationId, /^[A-Za-z0-9_-]{43}$/);
   session.close();
 
@@ -194,14 +200,14 @@ test('document session owns mutation identity and sends selection replacement as
         return { ok: true, status: 200, json: async () => ({ ok: true, actionId: body.actionId, confirmedThrough: cursor }) };
       }
       cursor += 1;
-      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: snapshot(cursor), cursor, authoring: authoringEnvelope(cursor) }) };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: snapshot(), cursor, authoring: authoringEnvelope(cursor) }) };
     },
     eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
   });
   await replacement.ready;
   await replacement.replace({
-    mutationId: 'replace-1', from: { blockId: 'block-1', offset: 1, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 4, affinity: 'right' }, text: 'i',
+    mutationId: 'replace-1', from: { offset: 1, affinity: 'right' },
+    to: { offset: 4, affinity: 'right' }, text: 'i',
   });
   assert.equal(batchRequests.length, 1);
   const replacementRequest = batchRequests[0];
@@ -212,10 +218,10 @@ test('document session owns mutation identity and sends selection replacement as
 test('document session confirms through authorized replacement and refreshes its token after opaque recovery', async () => {
   const { session, requests, sources } = setup();
   await session.ready;
-  await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 0, affinity: 'right' }, text: 'x' });
+  await session.insert({ mutationId: 'm1', at: { offset: 0, affinity: 'right' }, text: 'x' });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(session.document.version, 1);
-  await session.delete({ mutationId: 'm2', from: { blockId: 'block-1', offset: 0, affinity: 'right' }, to: { blockId: 'block-1', offset: 1, affinity: 'right' } });
+  await session.delete({ mutationId: 'm2', from: { offset: 0, affinity: 'right' }, to: { offset: 1, affinity: 'right' } });
   assert.equal(requests[1].payload.version, 9);
   sources[0].onmessage({ data: JSON.stringify([{ type: 'resync', seq: 3, reason: 'opaque' }]) });
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -232,12 +238,18 @@ test('document session fails closed on revoked bootstrap and exposes no raw disp
   session.close();
 });
 
-test('document session exposes structural grammar without canonical revision or frontier payloads', async () => {
+test('document session rejects block-era commands and still sends v9 annotation without basis or frontier', async () => {
   const { session, requests } = setup();
   await session.ready;
-  await session.split({ mutationId: 'split-1', at: { blockId: 'block-1', offset: 2, affinity: 'right' } });
+  assert.throws(() => session.split({ mutationId: 'split-1', at: { offset: 2, affinity: 'right' } }), BLOCK_ERA_ERROR);
+  await session.applyAnnotation({
+    mutationId: 'ann-1',
+    annotation: { id: 'a1', family: 'note', fields: {} },
+    from: { offset: 0, affinity: 'right' },
+    to: { offset: 2, affinity: 'right' },
+  });
   await new Promise((resolve) => setTimeout(resolve, 5));
-  await session.applyAnnotation({ mutationId: 'ann-1', annotation: { id: 'a1', family: 'note', fields: {} }, from: { blockId: 'block-1', offset: 0, affinity: 'right' }, to: { blockId: 'block-1', offset: 2, affinity: 'right' } });
+  assert.equal(requests.length, 1);
   for (const request of requests) {
     assert.equal(request.payload.version, 9);
     assert.equal('basis' in request.payload, false);
@@ -247,35 +259,17 @@ test('document session exposes structural grammar without canonical revision or 
   session.close();
 });
 
-test('document session translates opaque group selections into one v9 action each', async () => {
-  const cases = [
-    ['continueBlock', { mutationId: 'continue-1', at: { blockId: 'block-1', offset: 2, affinity: 'right' } }, { kind: 'block.continue', at: { blockId: 'block-1', offset: 2 } }],
-    ['setBlockGroupAssignment', { mutationId: 'assign-1', annotation: { id: 'group-ann-1', family: 'grouping', fields: {} } }],
-    ['clearBlockGroupAssignment', { mutationId: 'clear-1', family: 'grouping' }],
-    ['splitAndAssign', { mutationId: 'split-assign-1', at: { blockId: 'block-1', offset: 3, affinity: 'right' }, annotation: { id: 'group-ann-2', family: 'grouping', fields: {} } }, { kind: 'block.split-and-assign', at: { blockId: 'block-1', offset: 3 }, annotation: { id: 'group-ann-2', family: 'grouping', fields: {} } }],
-  ];
-  for (const [method, input, edit] of cases) {
-    const { session, requests } = setup();
-    await session.ready;
-    if (method === 'setBlockGroupAssignment') {
-      const blockGroup = session.document.blockGroups[0];
-      assert.equal(JSON.stringify(blockGroup).includes('group-1'), false);
-      input.selection = { kind: 'one', blockGroup };
-    }
-    if (method === 'clearBlockGroupAssignment') {
-      const blockGroup = session.document.blockGroups[0];
-      assert.equal(JSON.stringify(blockGroup).includes('group-1'), false);
-      input.selection = { kind: 'listed', blockGroups: [blockGroup] };
-    }
-    await session[method](input);
-    const actionBody = requests[0];
-    assert.equal(actionBody.payload.version, 9);
-    if (edit) {
-      assert.equal(actionBody.payload.edit.kind, edit.kind);
-      if (edit.at) assert.equal(actionBody.payload.edit.at.positionToken, token('position1'));
-    }
-    session.close();
-  }
+test('document session rejects block-group and structural block-era methods', async () => {
+  const { session } = setup();
+  await session.ready;
+  assert.throws(() => session.continueBlock({ mutationId: 'continue-1', at: { offset: 2, affinity: 'right' } }), BLOCK_ERA_ERROR);
+  assert.throws(() => session.setBlockGroupAssignment({ mutationId: 'assign-1', annotation: { id: 'g1', family: 'grouping', fields: {} } }), BLOCK_ERA_ERROR);
+  assert.throws(() => session.clearBlockGroupAssignment({ mutationId: 'clear-1', family: 'grouping' }), BLOCK_ERA_ERROR);
+  assert.throws(() => session.splitAndAssign({
+    mutationId: 'split-assign-1', at: { offset: 3, affinity: 'right' },
+    annotation: { id: 'g2', family: 'grouping', fields: {} },
+  }), BLOCK_ERA_ERROR);
+  session.close();
 });
 
 function v9Setup() {
@@ -300,7 +294,7 @@ function v9Setup() {
         return { ok: true, status: 200, json: async () => ({ ok: true, actionId: body.actionId, confirmedThrough: number }) };
       }
       const cursor = ++number;
-      const body = snapshot(number).body;
+      const body = snapshot().body;
       snapshotRequests.push({ cursor });
       return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
     },
@@ -316,7 +310,7 @@ function v9Setup() {
 test('session sends token-only v9 actions without basis or block identifiers', async () => {
   const { session, actionRequests } = v9Setup();
   await session.ready;
-  await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 2, affinity: 'right' }, text: 'XY' });
+  await session.insert({ mutationId: 'm1', at: { offset: 2, affinity: 'right' }, text: 'XY' });
   const payload = actionRequests[0].payload;
   assert.equal(payload.version, 9);
   assert.equal('basis' in payload, false);
@@ -327,30 +321,24 @@ test('session sends token-only v9 actions without basis or block identifiers', a
   session.close();
 });
 
-test('session translates public merge and detach block IDs only through its private binding', async () => {
+test('session rejects public merge and detach block-era methods', async () => {
   const merge = v9Setup();
   await merge.session.ready;
-  await merge.session.merge({ mutationId: 'merge-1', leftBlockId: 'block-1', rightBlockId: 'block-1' });
-  assert.deepEqual(merge.actionRequests[0].payload.edit, {
-    kind: 'block.merge', leftPositionToken: token('position1'), rightPositionToken: token('position1'),
-  });
-  assert.equal(JSON.stringify(merge.actionRequests[0].payload).includes('blockId'), false);
+  assert.throws(() => merge.session.merge({ mutationId: 'merge-1', leftBlockId: 'block-1', rightBlockId: 'block-1' }), BLOCK_ERA_ERROR);
+  assert.equal(merge.actionRequests.length, 0);
   merge.session.close();
 
   const detach = v9Setup();
   await detach.session.ready;
-  await detach.session.detachAnnotation({ mutationId: 'detach-1', annotationId: 'annotation-1', blockId: 'block-1' });
-  assert.deepEqual(detach.actionRequests[0].payload.edit, {
-    kind: 'annotation.detach', annotationId: 'annotation-1', positionToken: token('position1'),
-  });
-  assert.equal(JSON.stringify(detach.actionRequests[0].payload).includes('blockId'), false);
+  assert.throws(() => detach.session.detachAnnotation({ mutationId: 'detach-1', annotationId: 'annotation-1', blockId: 'block-1' }), BLOCK_ERA_ERROR);
+  assert.equal(detach.actionRequests.length, 0);
   detach.session.close();
 });
 
 test('positive receipt without fold echo falls back to covering snapshot and authoring ack', async () => {
   const { session, actionRequests, ackRequests, snapshotRequests } = v9Setup();
   await session.ready;
-  const result = await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 0, affinity: 'right' }, text: 'x' });
+  const result = await session.insert({ mutationId: 'm1', at: { offset: 0, affinity: 'right' }, text: 'x' });
   assert.equal(result.ok, true);
   assert.equal(actionRequests.length, 1);
   // Mock SSE never delivers a fold envelope, so receipt recovery still covers.
@@ -379,15 +367,15 @@ test('dependent text waits for settlement and reports a local conflict when its 
         return new Promise((resolve) => pendingResponses.push(resolve));
       }
       cursor += 1;
-      const body = snapshot(cursor).body;
+      const body = snapshot().body;
       return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
     },
     eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
   });
   await session.ready;
-  const a = session.insert({ mutationId: 'a', at: { blockId: 'block-1', offset: 5, affinity: 'right' }, text: 'A' });
-  const b = session.insert({ mutationId: 'b', at: { blockId: 'block-1', offset: 6, affinity: 'right' }, text: 'B' });
-  assert.equal(session.document.blocks[0].text, 'HelloA');
+  const a = session.insert({ mutationId: 'a', at: { offset: 5, affinity: 'right' }, text: 'A' });
+  const b = session.insert({ mutationId: 'b', at: { offset: 6, affinity: 'right' }, text: 'B' });
+  assert.equal(session.document.text, 'HelloA');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(actionRequests.length, 1, 'second text action waits for first transport');
   pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: 1 }) });
@@ -396,13 +384,13 @@ test('dependent text waits for settlement and reports a local conflict when its 
   assert.equal(actionRequests.length, 1, 'a mismatched recovery must not send B against the old token');
   assert.equal((await b).ok, false);
   await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.equal(session.document.blocks[0].text, 'Hello', 'authoritative replacement removes confirmed placeholders');
-  const failed = session.insert({ mutationId: 'bad', at: { blockId: 'block-1', offset: 5, affinity: 'right' }, text: 'X' });
+  assert.equal(session.document.text, 'Hello', 'authoritative replacement removes confirmed placeholders');
+  const failed = session.insert({ mutationId: 'bad', at: { offset: 5, affinity: 'right' }, text: 'X' });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(session.document.blocks[0].text, 'HelloX');
+  assert.equal(session.document.text, 'HelloX');
   pendingResponses.shift()({ ok: false, status: 400, json: async () => ({ ok: false, failure: { message: 'rejected' } }) });
   assert.equal((await failed).ok, false);
-  assert.equal(session.document.blocks[0].text, 'Hello');
+  assert.equal(session.document.text, 'Hello');
   session.close();
 });
 
@@ -427,15 +415,15 @@ test('queued action waits for settlement and translates through the replacement 
       }
       cursor += 1;
       const text = cursor === 1 ? 'Hello' : cursor === 2 ? 'HelloA' : 'HelloAB';
-      const body = { ...snapshot(cursor).body, blocks: [{ ...snapshot(cursor).body.blocks[0], text }] };
+      const body = { ...snapshot().body, text };
       return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
     },
     eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
   });
   await session.ready;
-  const a = session.insert({ mutationId: 'a', at: { blockId: 'block-1', offset: 5, affinity: 'right' }, text: 'A' });
-  const b = session.insert({ mutationId: 'b', at: { blockId: 'block-1', offset: 6, affinity: 'right' }, text: 'B' });
-  assert.equal(session.document.blocks[0].text, 'HelloA');
+  const a = session.insert({ mutationId: 'a', at: { offset: 5, affinity: 'right' }, text: 'A' });
+  const b = session.insert({ mutationId: 'b', at: { offset: 6, affinity: 'right' }, text: 'B' });
+  assert.equal(session.document.text, 'HelloA');
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(actionRequests.length, 1, 'second text action waits for first transport');
   const aAction = actionRequests[0];
@@ -446,13 +434,13 @@ test('queued action waits for settlement and translates through the replacement 
   // B is translated only after that binding is live.
   assert.equal(actionRequests.length, 2, 'B dispatches after A settles');
   assert.equal(actionRequests[1].payload.edit.at.positionToken, token('position2'), 'B uses the replacement token');
-  assert.equal(session.document.blocks[0].text, 'HelloAB', 'B stays projected though its position token was replaced');
+  assert.equal(session.document.text, 'HelloAB', 'B stays projected though its position token was replaced');
   assert.equal(ackRequests.some((request) => request.snapshot === token('snapshot2')), true,
     'the recovered authoring fence may be acknowledged before B is translated');
   pendingResponses.shift()({ ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-2', confirmedThrough: 1 }) });
   await b;
   await new Promise((resolve) => setTimeout(resolve, 5));
-  assert.equal(session.document.blocks[0].text, 'HelloAB', 'authoritative replacement clears B without duplicating A');
+  assert.equal(session.document.text, 'HelloAB', 'authoritative replacement clears B without duplicating A');
   assert.equal(ackRequests.some((request) => request.snapshot === token('snapshot2')), true,
     'covering snapshot is acknowledged after every predecessor-token action is terminal');
   assert.ok(ackRequests.length >= 2);
@@ -477,13 +465,13 @@ test('known rejection releases deferred authoring acknowledgement', async () => 
       }
       cursor += 1;
       return { ok: true, status: 200, json: async () => ({
-        kind: 'snapshot', snapshot: snapshot(cursor), cursor, authoring: authoringEnvelope(cursor),
+        kind: 'snapshot', snapshot: snapshot(), cursor, authoring: authoringEnvelope(cursor),
       }) };
     },
     eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
   });
   await session.ready;
-  const pending = session.insert({ mutationId: 'bad', at: { blockId: 'block-1', offset: 1, affinity: 'right' }, text: 'X' });
+  const pending = session.insert({ mutationId: 'bad', at: { offset: 1, affinity: 'right' }, text: 'X' });
   await new Promise((resolve) => setTimeout(resolve, 0));
   // Model a replacement arriving while the translated action is still in flight.
   const sourceSnapshot = authoringEnvelope(2);
@@ -517,7 +505,7 @@ test('stale position-token-unavailable surfaces without basis retry', async () =
         }) };
       }
       const cursor = ++number;
-      const body = snapshot(number).body;
+      const body = snapshot().body;
       return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
     },
     eventSourceFactory: () => {
@@ -527,7 +515,7 @@ test('stale position-token-unavailable surfaces without basis retry', async () =
     },
   });
   await session.ready;
-  const result = await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 1, affinity: 'right' }, text: 'x' });
+  const result = await session.insert({ mutationId: 'm1', at: { offset: 1, affinity: 'right' }, text: 'x' });
   assert.equal(result.ok, false);
   assert.equal(result.failure?.details?.code, 'position-token-unavailable');
   assert.equal(actionRequests.length, 1, 'no retry on stale token');
@@ -547,7 +535,7 @@ test('receipt covering snapshot acknowledgement fence is validated on ingest', a
         return { ok: true, status: 200, json: async () => ({ ok: true, actionId: 'action-1', confirmedThrough: 2 }) };
       }
       const cursor = ++number;
-      const body = snapshot(number).body;
+      const body = snapshot().body;
       return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: { ...authoringEnvelope(cursor), acknowledgementFence: cursor === 1 ? 999 : cursor } }) };
     },
     eventSourceFactory: () => {
@@ -584,7 +572,7 @@ test('dispatch fails closed after revoke and close', async () => {
   await session.ready;
   session.close();
   try {
-    await session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 0, affinity: 'right' }, text: 'x' });
+    await session.insert({ mutationId: 'm1', at: { offset: 0, affinity: 'right' }, text: 'x' });
     assert.fail('should have thrown');
   } catch (err) {
     assert.ok(err);
@@ -594,13 +582,13 @@ test('dispatch fails closed after revoke and close', async () => {
 
 test('own-echo fold installs text without a second bootstrap snapshot', async () => {
   const { createTextState, applyTextOp, textCheckpoint } = await import('../src/annotated-text.mjs');
-  const { createTextFamily, applyTextOperationToBlock, textFamilyCheckpoint, materializeBlock } = await import('../src/annotated-text-family.mjs');
+  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText } = await import('../src/annotated-text-continuous.mjs');
   const A = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
   const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'Hello']];
-  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)), 'block-1');
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
   const nextOp = ['workbench.text', 1, [A, 2], 2, [[A, 1]], ['insert', ['element', [[A, 1], 4]], 'x']];
-  const nextFamily = applyTextOperationToBlock(baseFamily, 'block-1', nextOp);
-  const nextText = materializeBlock(nextFamily, 'block-1');
+  const nextFamily = applyTextOperation(baseFamily, nextOp);
+  const nextText = materializeText(nextFamily);
 
   const snapshotRequests = [];
   const ackRequests = [];
@@ -628,8 +616,8 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
       const cursor = ++number;
       snapshotRequests.push({ cursor });
       const body = {
-        ...snapshot(cursor).body,
-        blocks: [{ kind: 'visible', id: 'block-1', text: cursor === 1 ? 'Hello' : nextText, fields: {}, annotationIds: [] }],
+        ...snapshot().body,
+        text: cursor === 1 ? 'Hello' : nextText,
       };
       const seed = cursor === 1 ? textFamilyCheckpoint(baseFamily) : textFamilyCheckpoint(nextFamily);
       return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor, seed) }) };
@@ -642,23 +630,23 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
   });
   await session.ready;
   assert.equal(snapshotRequests.length, 1);
-  assert.equal(session.document.blocks[0].text, 'Hello');
+  assert.equal(session.document.text, 'Hello');
 
-  const inserted = session.insert({ mutationId: 'm1', at: { blockId: 'block-1', offset: 5, affinity: 'right' }, text: 'x' });
+  const inserted = session.insert({ mutationId: 'm1', at: { offset: 5, affinity: 'right' }, text: 'x' });
   await new Promise((resolve) => setTimeout(resolve, 0));
   const actionId = 'action-1';
   sources[0].onmessage({ data: JSON.stringify([{
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId },
     fold: {
-      kind: 'annotatedText', version: 2, field: 'body', baseCursor: 1, fence: 2,
+      kind: 'annotatedText', version: 3, field: 'body', baseCursor: 1, fence: 2,
       text: { reducer: 'workbench.text', operations: [nextOp] },
-      projection: { changedBlocks: [{ id: 'block-1', text: nextText }], removedBlockIds: [] },
+      projection: { text: nextText },
       familyElementCount: Object.keys(textFamilyCheckpoint(nextFamily).checkpoint.elements).length,
       authoring: {
         acknowledgementFence: 2,
         stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
-        positionBlocks: [{ blockId: 'block-1', positionToken: token('position2') }],
+        positionFrames: [{ positionToken: token('position2') }],
       },
     },
   }]) });
@@ -667,7 +655,7 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
   const result = await inserted;
   assert.equal(result.ok, true);
   assert.equal((await result.settlement.wait()).status, 'reconciled');
-  assert.equal(session.document.blocks[0].text, nextText);
+  assert.equal(session.document.text, nextText);
   assert.equal(snapshotRequests.length, 1, 'fold must not force a covering snapshot');
   assert.ok(ackRequests.some((request) => request.snapshot === token('snapshot2')), 'fold authoring is acknowledged');
   assert.equal(foldTimings.length, 1, 'onFoldApplied must fire once for the folded edit');
@@ -691,7 +679,7 @@ test('baseCursor mismatch forces snapshot recovery rather than applying fold', a
       }
       const cursor = ++number;
       snapshotRequests.push({ cursor });
-      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: snapshot(cursor), cursor, authoring: authoringEnvelope(cursor) }) };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: snapshot(), cursor, authoring: authoringEnvelope(cursor) }) };
     },
     eventSourceFactory: () => {
       const source = { close() {}, onmessage: null, onerror: null };
@@ -705,15 +693,19 @@ test('baseCursor mismatch forces snapshot recovery rather than applying fold', a
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'foreign' },
     fold: {
-      kind: 'annotatedText', version: 1, field: 'body', baseCursor: 0, fence: 2,
+      kind: 'annotatedText', version: 3, field: 'body', baseCursor: 0, fence: 2,
       text: { reducer: 'workbench.text', operations: [['workbench.text', 1, ['a'.repeat(32), 1], 1, [], ['insert', ['root'], 'x']]] },
-      projection: { changedBlocks: [{ id: 'block-1', text: 'x' }], removedBlockIds: [] },
-      authoring: { acknowledgementFence: 2, positionBlocks: [] },
-      family: { id: 'd1', checkpoint: { version: 1, frontier: [], elements: {}, pending: {}, maxPending: 1024, rebootstrapRequired: false, operations: {} }, blocks: [{ id: 'block-1', elementKeys: [] }] },
+      projection: { text: 'x' },
+      familyElementCount: 1,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
     },
   }]) });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.ok(snapshotRequests.length >= 2, 'baseCursor mismatch recovers via snapshot');
-  assert.equal(session.document.blocks[0].text, 'Hello');
+  assert.equal(session.document.text, 'Hello');
   session.close();
 });
