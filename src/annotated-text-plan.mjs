@@ -1,24 +1,21 @@
-// Pure commit planning for annotated-text offset and annotation operations.
+// Pure commit planning for annotated-text operations (issue #33 blockless).
 //
-// Position tokens are issued against a family checkpoint frozen at issue time
-// (`positionFamily`). The document's authoritative family is `family` (current
-// checkpoint). Offset → endpoint resolution MUST use the position's family +
-// that family's frontier; then re-project the endpoint onto the CURRENT family
-// via projectEndpointToBlockOffset with basisFrontier replaced by
-// family.checkpoint.frontier. Never trust client-supplied annotation bounds for
-// boundary routing — only server-visible snapshot + membership presence.
+// One continuous RGA text per document; annotations are document-scoped
+// character ranges. Positions are ABSOLUTE UTF-16 offsets (the authoring
+// position frame resolves to an absolute offset — there are no blocks).
 //
 // This planner does not write DB, mint authoring frames, or fold client ops.
-// Live delivery remains snapshot-resync. One write authority stays the entity
-// commit handler.
+// One write authority stays the entity commit handler.
 
 import {
-  applyTextOperationToBlock, applyTextOperationToNewBlock, materializeBlock,
-  projectEndpointToBlockOffset, removeEmptyBlock, resolvePositionToEndpoint,
-  textFamilyCheckpoint, textOperationForOffsetEdit,
-} from './annotated-text-family.mjs';
+  applyTextOperation,
+  materializeText,
+  resolveOffsetToEndpoint,
+  textFamilyCheckpoint,
+  textOperationForOffsetEdit,
+  projectEndpointToOffset,
+} from './annotated-text-continuous.mjs';
 import { canonicalTextOp } from './annotated-text.mjs';
-import { addMembership, removeAnnotation, removeMembership } from './annotated-text-membership.mjs';
 import { packOperatedFacts } from './annotated-text-operated-facts.mjs';
 
 function deepFreeze(value) {
@@ -30,48 +27,10 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-function positionOffset(family, position) {
-  const redactions = position.redactions ?? [];
-  let publicOffset = position.offset;
-  let hiddenBefore = 0;
-  for (const redaction of redactions) {
-    if (!Number.isSafeInteger(redaction.visibleStart) || !Number.isSafeInteger(redaction.start) || !Number.isSafeInteger(redaction.end) ||
-        redaction.visibleStart < 0 || redaction.start < 0 || redaction.end <= redaction.start) {
-      const error = new Error('redaction position frame is invalid'); error.code = 'position-invalid'; throw error;
-    }
-    if (publicOffset < redaction.visibleStart) break;
-    if (publicOffset === redaction.visibleStart) {
-      publicOffset = position.affinity === 'left' ? redaction.start : redaction.end;
-      hiddenBefore = null;
-      break;
-    }
-    hiddenBefore += redaction.end - redaction.start;
-  }
-  if (hiddenBefore !== null) publicOffset += hiddenBefore;
-  const endpoint = resolvePositionToEndpoint(
-    position.positionFamily, position.blockId, publicOffset,
-    position.positionFamily.checkpoint.frontier, position.affinity,
-  );
-  return projectEndpointToBlockOffset(family, position.blockId, Object.freeze({
-    ...endpoint, basisFrontier: family.checkpoint.frontier,
-  }));
-}
-
-function assertEditAvoidsRedactions(edit, blockId, fromOffset, toOffset) {
-  if (edit.kind === 'text.insert') return;
-  for (const redaction of edit.from.redactions ?? []) {
-    if (redaction.start < toOffset && redaction.end > fromOffset) {
-      const error = new Error('selection crosses a confidential redaction'); error.code = 'position-redacted'; throw error;
-    }
-  }
-}
-
 function before(family, structuralRevision) {
   return Object.freeze({ structuralRevision, frontier: family.checkpoint.frontier });
 }
 
-// Planner callers see the active durable contract too.  Admission may add facts
-// that only DB-backed structural handlers can know; absent facts are explicit.
 function unifiedPlan(data) {
   return deepFreeze({
     version: 13,
@@ -83,182 +42,139 @@ function unifiedPlan(data) {
   });
 }
 
-export function planTextOffsetEdit({ documentId, structureVersion, family, actor, lamport,
-  visibleBlockIds, membershipBlockIds, sourceBlocks, mintBlockId, edit,
-  annotations = [], memberships = [] }) {
-  const blockId = edit.kind === 'text.insert' ? edit.at.blockId : edit.from.blockId;
-  const offset = positionOffset(family, edit.kind === 'text.insert' ? edit.at : edit.from);
-  let toOffset;
-  if (edit.kind !== 'text.insert') {
-    if (edit.to.blockId !== blockId) { const error = new Error('replacement endpoints must be on the same block'); error.code = 'position-invalid'; throw error; }
-    toOffset = positionOffset(family, edit.to);
-    assertEditAvoidsRedactions(edit, blockId, offset, toOffset);
+function assertForwardOffset(text, fromOffset, toOffset) {
+  if (!Number.isSafeInteger(fromOffset) || !Number.isSafeInteger(toOffset) || fromOffset < 0 || toOffset < fromOffset || toOffset > text.length) {
+    const error = new Error('selection must be a forward, in-bounds range'); error.code = 'position-invalid'; throw error;
   }
-
-  if (edit.kind === 'text.insert' && (offset === 0 || offset === materializeBlock(family, blockId).length) && new Set(membershipBlockIds).has(blockId)) {
-    const visibleIds = new Set(visibleBlockIds);
-    const sourceIndex = family.blocks.findIndex((block) => block.id === blockId);
-    const candidate = family.blocks[sourceIndex + (offset === 0 ? -1 : 1)];
-    const destination = candidate && visibleIds.has(candidate.id) && materializeBlock(family, candidate.id).length > 0 && !new Set(membershipBlockIds).has(candidate.id) ? candidate : null;
-    if (destination) {
-      const destinationOffset = offset === 0 ? materializeBlock(family, destination.id).length : 0;
-      const routedEdit = { kind: 'text.insert', at: { blockId: destination.id, offset: destinationOffset, affinity: offset === 0 ? 'left' : 'right' }, text: edit.text };
-      const operation = textOperationForOffsetEdit(family, routedEdit, actor, lamport);
-      const routedFamily = applyTextOperationToBlock(family, destination.id, operation);
-      return unifiedPlan({ version: 1, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.apply', blockId: destination.id, operation }, after: { structuralRevision: structureVersion, frontier: routedFamily.checkpoint.frontier }, family: textFamilyCheckpoint(routedFamily) });
-    }
-    const newBlockId = mintBlockId();
-    const side = offset === 0 ? 'before' : 'after';
-    const destinationOffset = side === 'before' ? 0 : materializeBlock(family, blockId).length;
-    const routedEdit = { kind: 'text.insert', at: { blockId, offset: destinationOffset, affinity: side === 'before' ? 'left' : 'right' }, text: edit.text };
-    const operation = textOperationForOffsetEdit(family, routedEdit, actor, lamport);
-    const nextFamily = applyTextOperationToNewBlock(family, blockId, newBlockId, operation, side);
-    const source = sourceBlocks?.[blockId];
-    if (!source) throw new Error('source block not found');
-    return unifiedPlan({ version: 9, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.insert-block', sourceBlockId: blockId, blockId: newBlockId, side, operation }, after: { structuralRevision: structureVersion + 1, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily), block: { id: newBlockId, epoch: source.epoch, fields: source.fields }, memberships: [], measurements: [] });
-  }
-
-  const textEdit = edit.kind === 'text.insert'
-    ? { kind: 'text.insert', at: { blockId, offset, affinity: edit.at.affinity }, text: edit.text }
-    : { kind: 'text.delete', from: { blockId, offset, affinity: edit.from.affinity }, to: { blockId, offset: toOffset, affinity: edit.to.affinity } };
-  if (edit.kind === 'text.replace') {
-    const deleteOperation = textOperationForOffsetEdit(family, textEdit, `${actor.slice(0, 30)}d0`, lamport);
-    const intermediate = applyTextOperationToBlock(family, blockId, deleteOperation);
-    const start = resolvePositionToEndpoint(family, blockId, offset, family.checkpoint.frontier, edit.from.affinity).point[1];
-    let insertOperation = ['workbench.text', 1, [`${actor.slice(0, 30)}e0`, 1], lamport + 1, intermediate.checkpoint.frontier, ['insert', start, edit.text]];
-    insertOperation = canonicalTextOp(insertOperation);
-    const nextFamily = applyTextOperationToBlock(intermediate, blockId, insertOperation);
-    return unifiedPlan({ version: 6, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.replace', blockId, operations: [deleteOperation, insertOperation] }, after: { structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily) });
-  }
-  const operation = textOperationForOffsetEdit(family, textEdit, actor, lamport);
-  let nextFamily = applyTextOperationToBlock(family, blockId, operation);
-  // Empty blocks (annotated or not) are not kept. Drop memberships via empty
-  // policy, then prune the hollow block with the delete that emptied it.
-  // Orphan quotes use the pre-delete family so the saved quote is the text lost.
-  const prunedBlockIds = [];
-  const emptiedAnnotations = [];
-  let nextAnnotations = annotations;
-  let nextMemberships = memberships;
-  if (edit.kind === 'text.delete' || edit.kind === 'text.replace') {
-    for (const block of [...nextFamily.blocks]) {
-      if (nextFamily.blocks.length === 1 || materializeBlock(nextFamily, block.id).length !== 0) continue;
-      const onBlock = [...new Set(nextMemberships.filter((membership) => membership.blockId === block.id).map((membership) => membership.annotationId))].sort();
-      for (const annotationId of onBlock) {
-        const target = nextAnnotations.find((annotation) => annotation.id === annotationId);
-        if (!target) continue;
-        const reduced = removeMembership(family, nextAnnotations, nextMemberships, annotationId, block.id, { structuralRevision: structureVersion });
-        nextAnnotations = reduced.annotations;
-        nextMemberships = reduced.memberships;
-        const outcome = reduced.outcomes[0];
-        if (outcome) {
-          emptiedAnnotations.push({
-            annotationId,
-            empty: target.empty,
-            disposition: outcome.type === 'delete'
-              ? { kind: 'deleted', family: target.family, savedQuote: null, lastMemberships: null }
-              : { kind: 'orphaned', family: target.family, savedQuote: outcome.savedQuote, lastMemberships: outcome.lastMemberships },
-          });
-        }
-      }
-      nextFamily = removeEmptyBlock(nextFamily, block.id);
-      prunedBlockIds.push(block.id);
-    }
-  }
-  if (prunedBlockIds.length) {
-    return unifiedPlan({
-      version: 12,
-      id: documentId,
-      before: before(family, structureVersion),
-      operation: { kind: 'text.apply', blockId, operation },
-      after: { structuralRevision: structureVersion + 1, frontier: nextFamily.checkpoint.frontier },
-      family: textFamilyCheckpoint(nextFamily),
-      prunedBlockIds: Object.freeze([...prunedBlockIds]),
-      emptiedAnnotations: Object.freeze(emptiedAnnotations.map((entry) => deepFreeze(entry))),
-    });
-  }
-  return unifiedPlan({ version: 1, id: documentId, before: before(family, structureVersion), operation: { kind: 'text.apply', blockId, operation }, after: { structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }, family: textFamilyCheckpoint(nextFamily) });
 }
 
-export function planAnnotationApplyOffsets({ family, structureVersion, from, to, visibleBlockIds }) {
-  const startOffset = positionOffset(family, from);
-  const endOffset = positionOffset(family, to);
-  const fromIndex = family.blocks.findIndex((block) => block.id === from.blockId);
-  const toIndex = family.blocks.findIndex((block) => block.id === to.blockId);
-  if (fromIndex < 0 || toIndex < 0 || fromIndex > toIndex || (fromIndex === toIndex && startOffset >= endOffset)) {
-    const error = new Error('annotation selection must be a forward, non-empty range'); error.code = 'position-invalid'; throw error;
+/** A range becomes empty when its visible width drops to zero after an edit. */
+function emptiedRanges({ beforeFamily, afterFamily, ranges, annotations, structureVersion }) {
+  const emptied = [];
+  for (const range of ranges) {
+    if (projectEndpointToOffset(afterFamily, range.start) < projectEndpointToOffset(afterFamily, range.end)) continue;
+    const annotation = annotations.find((candidate) => candidate.id === range.annotationId);
+    if (!annotation) continue;
+    emptied.push({
+      annotationId: range.annotationId,
+      empty: annotation.empty,
+      disposition: annotation.empty === 'orphan'
+        ? { kind: 'orphaned', family: annotation.family, savedQuote: materializeRangeBetween(beforeFamily, range), lastRange: null }
+        : { kind: 'deleted', family: annotation.family, savedQuote: null, lastRange: null },
+    });
   }
-  const visible = new Set(visibleBlockIds);
-  if (family.blocks.slice(fromIndex, toIndex + 1).some((block) => !visible.has(block.id))) {
-    const error = new Error('annotation selection crosses a restricted or hidden block'); error.code = 'position-no-longer-visible'; throw error;
-  }
-  const crossBlock = from.blockId !== to.blockId;
-  const selection = crossBlock
-    ? { blockId: from.blockId, startBlockId: from.blockId, endBlockId: to.blockId, startUtf16Offset: startOffset, endUtf16Offset: endOffset }
-    : { blockId: from.blockId, startUtf16Offset: startOffset, endUtf16Offset: endOffset };
-  return deepFreeze({ crossBlock, selection, expected: { structuralRevision: structureVersion, frontier: family.checkpoint.frontier } });
+  void structureVersion;
+  return emptied;
+}
+
+function materializeRangeBetween(family, range) {
+  let text = '';
+  const startPos = projectEndpointToOffset(family, range.start);
+  const endPos = projectEndpointToOffset(family, range.end);
+  const full = materializeText(family);
+  if (startPos >= endPos) return text;
+  return full.slice(startPos, endPos);
 }
 
 /**
- * Plan a text-range annotation.apply: one sub-block range membership per
- * intersected block, resolved to structural endpoints, with no block splitting
- * and no family change. The emitted facts carry the exact membership set so the
- * fold can re-derive and deep-equal it (tamper check).
+ * Plan a document-wide text insert/delete/replace. The edit names ABSOLUTE
+ * offsets; the operation applies to the whole continuous family.
  */
-export function planTextRangeApply({ documentId, structureVersion, family, actor, lamport, annotation, from, to, visibleBlockIds, annotations = [], memberships = [], mintBlockId, actorId }) {
-  const startOffset = positionOffset(family, from);
-  const endOffset = positionOffset(family, to);
-  const fromIndex = family.blocks.findIndex((block) => block.id === from.blockId);
-  const toIndex = family.blocks.findIndex((block) => block.id === to.blockId);
-  if (fromIndex < 0 || toIndex < 0 || fromIndex > toIndex || (fromIndex === toIndex && startOffset >= endOffset)) {
+export function planTextOffsetEdit({ documentId, structureVersion, family, actor, lamport, edit, annotations = [], ranges = [] }) {
+  const text = materializeText(family);
+  if (edit.kind === 'text.insert') {
+    assertForwardOffset(text, edit.at.offset, edit.at.offset);
+    const operation = textOperationForOffsetEdit(family, { kind: 'text.insert', at: edit.at, text: edit.text }, actor, lamport);
+    const nextFamily = applyTextOperation(family, operation);
+    return unifiedPlan({
+      id: documentId,
+      before: before(family, structureVersion),
+      operation: { kind: 'text.apply', operation },
+      after: Object.freeze({ structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }),
+      family: textFamilyCheckpoint(nextFamily),
+    });
+  }
+  if (edit.kind === 'text.delete' || edit.kind === 'text.replace') {
+    assertForwardOffset(text, edit.from.offset, edit.to.offset);
+    if (edit.from.offset === edit.to.offset) {
+      const error = new Error('delete range must be non-empty'); error.code = 'position-invalid'; throw error;
+    }
+    if (edit.kind === 'text.replace') {
+      const deleteOperation = textOperationForOffsetEdit(family, { kind: 'text.delete', from: edit.from, to: edit.to }, `${actor.slice(0, 30)}d0`, lamport);
+      const intermediate = applyTextOperation(family, deleteOperation);
+      const anchor = resolveOffsetToEndpoint(intermediate, edit.from.offset, intermediate.checkpoint.frontier, edit.from.affinity).point[1];
+      let insertOperation = ['workbench.text', 1, [`${actor.slice(0, 30)}e0`, 1], lamport + 1, intermediate.checkpoint.frontier, ['insert', anchor, edit.text]];
+      insertOperation = canonicalTextOp(insertOperation);
+      const nextFamily = applyTextOperation(intermediate, insertOperation);
+      return unifiedPlan({
+        id: documentId,
+        before: before(family, structureVersion),
+        operation: { kind: 'text.replace', operations: [deleteOperation, insertOperation] },
+        after: Object.freeze({ structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }),
+        family: textFamilyCheckpoint(nextFamily),
+      });
+    }
+    const operation = textOperationForOffsetEdit(family, { kind: 'text.delete', from: edit.from, to: edit.to }, actor, lamport);
+    const nextFamily = applyTextOperation(family, operation);
+    const emptied = emptiedRanges({ beforeFamily: family, afterFamily: nextFamily, ranges, annotations, structureVersion });
+    return unifiedPlan({
+      id: documentId,
+      before: before(family, structureVersion),
+      operation: { kind: 'text.apply', operation },
+      after: Object.freeze({ structuralRevision: structureVersion + (emptied.length ? 1 : 0), frontier: nextFamily.checkpoint.frontier }),
+      family: textFamilyCheckpoint(nextFamily),
+      emptiedAnnotations: Object.freeze(emptied),
+    });
+  }
+  const error = new Error(`unsupported edit kind: ${edit.kind}`); error.code = 'position-invalid'; throw error;
+}
+
+/** Plan a document-range annotation.apply: one contiguous range, no blocks. */
+export function planTextRangeApply({ documentId, structureVersion, family, actor, lamport, annotation, from, to, annotations = [], ranges = [], actorId }) {
+  const text = materializeText(family);
+  const startOffset = from.offset;
+  const endOffset = to.offset;
+  assertForwardOffset(text, startOffset, endOffset);
+  if (startOffset === endOffset) {
     const error = new Error('annotation selection must be a forward, non-empty range'); error.code = 'position-invalid'; throw error;
   }
-  const visible = new Set(visibleBlockIds);
-  if (family.blocks.slice(fromIndex, toIndex + 1).some((block) => !visible.has(block.id))) {
-    const error = new Error('annotation selection crosses a restricted or hidden block'); error.code = 'position-no-longer-visible'; throw error;
-  }
-  const intersected = family.blocks.slice(fromIndex, toIndex + 1);
-  const virtualAnnotations = [...annotations, { id: annotation.id, family: annotation.family, protectedTargetIds: [] }];
-  let nextMemberships = memberships;
-  for (let index = 0; index < intersected.length; index++) {
-    const block = intersected[index];
-    const len = materializeBlock(family, block.id).length;
-    const spanStart = index === 0 ? startOffset : 0;
-    const spanEnd = index === intersected.length - 1 ? endOffset : len;
-    if (spanStart >= spanEnd) continue;
-    const start = resolvePositionToEndpoint(family, block.id, spanStart, family.checkpoint.frontier, index === 0 ? from.affinity : 'left');
-    const end = resolvePositionToEndpoint(family, block.id, spanEnd, family.checkpoint.frontier, index === intersected.length - 1 ? to.affinity : 'right');
-    const result = addMembership(family, virtualAnnotations, nextMemberships, annotation.id, block.id, start, end);
-    nextMemberships = result.memberships;
-  }
-  const rangeMemberships = nextMemberships.filter((membership) => membership.annotationId === annotation.id)
-    .map((membership) => ({ annotationId: membership.annotationId, blockId: membership.blockId, ordinal: membership.ordinal, start: membership.start, end: membership.end }));
-  if (rangeMemberships.length === 0) {
-    const error = new Error('annotation selection must be a forward, non-empty range'); error.code = 'position-invalid'; throw error;
-  }
+  const start = resolveOffsetToEndpoint(family, startOffset, family.checkpoint.frontier, from.affinity);
+  const end = resolveOffsetToEndpoint(family, endOffset, family.checkpoint.frontier, to.affinity);
+  const range = { annotationId: annotation.id, start, end };
+  const existing = ranges.filter((entry) => entry.annotationId === annotation.id);
+  const nextRanges = [...ranges.filter((entry) => entry.annotationId !== annotation.id), range];
+  void existing;
   return unifiedPlan({
     id: documentId,
     before: before(family, structureVersion),
     after: Object.freeze({ structuralRevision: structureVersion, frontier: family.checkpoint.frontier }),
-    operation: { kind: 'annotation.apply-range', annotation, selection: { fromBlockId: from.blockId, toBlockId: to.blockId, startOffset, endOffset } },
+    operation: { kind: 'annotation.apply-range', annotation, selection: { startOffset, endOffset } },
     family: textFamilyCheckpoint(family),
     annotation,
-    memberships: Object.freeze(rangeMemberships),
+    ranges: Object.freeze(nextRanges.map((entry) => deepFreeze({ annotationId: entry.annotationId, start: entry.start, end: entry.end }))),
     actorId,
-    splitOps: [], splitBlockIds: [], blocks: [], measurements: [],
-    selectedBlockIds: Object.freeze(intersected.map((block) => block.id)),
+    selectedRange: Object.freeze({ annotationId: annotation.id, start, end }),
+    measurements: [],
   });
 }
 
-export function planAnnotationRemove({ documentId, structureVersion, family, annotationId, annotations, memberships, visibleBlockIds }) {
+/** Plan a document-range annotation.remove. */
+export function planAnnotationRemove({ documentId, structureVersion, family, annotationId, annotations, ranges }) {
   const target = annotations.find((annotation) => annotation.id === annotationId);
   if (!target) throw new Error('annotation not found');
-  const removedBlockIds = memberships.filter((membership) => membership.annotationId === annotationId).map((membership) => membership.blockId);
-  if (!removedBlockIds.length || removedBlockIds.some((id) => !new Set(visibleBlockIds).has(id))) { const error = new Error('annotation is not fully visible'); error.code = 'position-no-longer-visible'; throw error; }
-  const reduced = removeAnnotation(family, annotations, memberships, annotationId, { structuralRevision: structureVersion });
-  const outcome = reduced.outcomes[0];
-  const targets = new Map(annotations.map((annotation) => [annotation.id, annotation.protectedTargetIds ?? []]));
-  const result = { memberships: { annotationId, postimage: [] }, disposition: outcome.type === 'delete' ? { kind: 'deleted', family: target.family, savedQuote: null, lastMemberships: null } : { kind: 'orphaned', family: target.family, savedQuote: outcome.savedQuote, lastMemberships: outcome.lastMemberships }, changedProtectors: reduced.annotations.filter((annotation) => JSON.stringify(annotation.protectedTargetIds ?? []) !== JSON.stringify(targets.get(annotation.id) ?? [])).map((annotation) => ({ annotationId: annotation.id, protectsPostimage: [...(annotation.protectedTargetIds ?? [])] })).sort((a, b) => a.annotationId.localeCompare(b.annotationId)) };
-  let prunedFamily = family; const prunedBlockIds = []; const retained = new Set(reduced.memberships.map((membership) => membership.blockId));
-  for (const block of family.blocks) { if (prunedFamily.blocks.length === 1 || retained.has(block.id) || materializeBlock(prunedFamily, block.id).length !== 0) continue; prunedFamily = removeEmptyBlock(prunedFamily, block.id); prunedBlockIds.push(block.id); }
-  return unifiedPlan({ version: prunedBlockIds.length ? 11 : 10, id: documentId, before: before(family, structureVersion), operation: { kind: 'annotation.remove', annotationId, blockIds: removedBlockIds }, after: { structuralRevision: structureVersion + (prunedBlockIds.length ? 1 : 0), frontier: family.checkpoint.frontier }, lifecycle: { empty: target.empty }, result, ...(prunedBlockIds.length ? { family: textFamilyCheckpoint(prunedFamily), prunedBlockIds } : {}) });
+  const retained = ranges.filter((entry) => entry.annotationId !== annotationId);
+  return unifiedPlan({
+    id: documentId,
+    before: before(family, structureVersion),
+    operation: { kind: 'annotation.remove', annotationId },
+    after: Object.freeze({ structuralRevision: structureVersion, frontier: family.checkpoint.frontier }),
+    lifecycle: { empty: target.empty },
+    result: { memberships: { annotationId, postimage: [] }, disposition: { kind: 'deleted', family: target.family, savedQuote: null, lastRange: null }, changedProtectors: [] },
+    ranges: Object.freeze(retained.map((entry) => deepFreeze({ annotationId: entry.annotationId, start: entry.start, end: entry.end }))),
+    removedAnnotationIds: Object.freeze([annotationId]),
+  });
+}
+
+export function planAnnotationApplyOffsets() {
+  const error = new Error('planAnnotationApplyOffsets is block-era; use planTextRangeApply'); error.code = 'position-invalid'; throw error;
 }
