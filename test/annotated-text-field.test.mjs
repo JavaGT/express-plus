@@ -24,10 +24,7 @@ function makeFields() {
   };
 }
 
-function fd(blockAnnotations, annotations, measurements) {
-  const frozenBlock = {};
-  for (const [k, v] of Object.entries(blockAnnotations || {})) frozenBlock[k] = Object.freeze({ ...v });
-
+function fd(_blockAnnotations, annotations, measurements) {
   const annList = [];
   for (const [family, fields] of Object.entries(annotations || {})) {
     const ff = {};
@@ -43,7 +40,6 @@ function fd(blockAnnotations, annotations, measurements) {
   return {
     project: 'project',
     owner: 'owner',
-    block: frozenBlock,
     annotations: annList,
     measurements: measList,
   };
@@ -87,23 +83,22 @@ test('annotatedTextClientHandle derives browser metadata from the compiled entit
 });
 
 test('valid entity declaration with annotatedText, owner/project refs', () => {
-  const block = { source: { kind: 'value', type: 'text' }, score: { kind: 'value', type: 'number' } };
   const annotations = [
     annotation('highlight', { fields: { col1: Object.freeze({ kind: 'value', type: 'text' }) } }),
     annotation('tag', { fields: { col2: Object.freeze({ kind: 'value', type: 'text' }) } }),
   ];
   const measurements = [measurement('audio', { extension: 'testFieldExt', formatVersion: 1 }), measurement('sentiment', { extension: 'testFieldExt', formatVersion: 2 })];
-  const descriptor = fd(block, { highlight: { col1: Object.freeze({ kind: 'value', type: 'text' }) }, tag: { col2: Object.freeze({ kind: 'value', type: 'text' }) } }, { audio: { formatVersion: 1 }, sentiment: { formatVersion: 2 } });
+  const descriptor = fd(null, { highlight: { col1: Object.freeze({ kind: 'value', type: 'text' }) }, tag: { col2: Object.freeze({ kind: 'value', type: 'text' }) } }, { audio: { formatVersion: 1 }, sentiment: { formatVersion: 2 } });
   const fields = makeFields();
   const result = validateAnnotatedTextDeclaration('Doc', 'body', descriptor, fields);
-  assert.deepEqual(result.blockFields, ['score', 'source']);
+  assert.deepEqual(result.blockFields, []);
   assert.deepEqual(result.families, ['highlight', 'tag']);
   assert.deepEqual(result.measurements, ['audio', 'sentiment']);
 });
 
 test('DDL generates correct table count and names', () => {
   const descriptor = fd(
-    { source: { kind: 'value', type: 'text' }, score: { kind: 'value', type: 'number' } },
+    null,
     { highlight: { col1: { kind: 'value', type: 'text' } }, tag: { col2: { kind: 'value', type: 'text' } } },
   );
   const fields = makeFields();
@@ -111,40 +106,94 @@ test('DDL generates correct table count and names', () => {
   const tables = ddl.filter(s => s.startsWith('CREATE TABLE'));
   const indexes = ddl.filter(s => s.startsWith('CREATE INDEX') || s.startsWith('CREATE UNIQUE INDEX'));
 
-  assert.equal(tables.length, 12);
-  assert.ok(tables.some(s => s.includes('Doc_body_block')));
-  assert.ok(tables.some(s => s.includes('Doc_body_state')));
+  assert.equal(tables.length, 9);
   assert.ok(tables.some(s => s.includes('Doc_body_retired')));
+  assert.ok(tables.some(s => s.includes('Doc_body_state')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_highlight')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_tag')));
-  assert.ok(tables.some(s => s.includes('Doc_body_membership')));
-  assert.ok(tables.some(s => s.includes('Doc_body_group_membership')));
-  assert.ok(tables.some(s => s.includes('Doc_body_measurement')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_orphan_state')));
   assert.ok(tables.some(s => s.includes('Doc_body_annotation_protected_target')));
-  assert.equal(indexes.length, 8);
+  assert.ok(tables.some(s => s.includes('Doc_body_membership')));
+  assert.ok(tables.some(s => s.includes('Doc_body_measurement')));
+  assert.ok(!tables.some(s => s.includes('Doc_body_block')));
+  assert.ok(!tables.some(s => s.includes('Doc_body_block_group')));
+  assert.ok(!tables.some(s => s.includes('Doc_body_group_membership')));
+  assert.equal(indexes.length, 2);
+  assert.ok(indexes.some(s => s.includes('idx_Doc_body_annotation_protected_target_target')));
+  assert.ok(indexes.some(s => s.includes('idx_Doc_body_measurement_once')));
 });
 
-test('block table has correct columns, constraints, and FKs', () => {
+test('membership table has correct columns, PK, and FK cascade', () => {
   const ddl = annotatedTextDDL('Doc', 'body', fd(
-    { source: { kind: 'value', type: 'text' }, score: { kind: 'value', type: 'number' } },
-    { highlight: { col1: { kind: 'value', type: 'text' } } },
+    null, { highlight: { col1: { kind: 'value', type: 'text' } } },
   ), makeFields());
-  const block = ddl.find(s => s.includes('Doc_body_block'));
-  assert.ok(block.includes('id TEXT PRIMARY KEY'));
-  assert.ok(block.includes('document_id TEXT NOT NULL'));
-  assert.ok(block.includes('project_id TEXT NOT NULL'));
-  assert.ok(block.includes('owner_id TEXT NOT NULL'));
-  assert.ok(block.includes('position TEXT NOT NULL'));
-  assert.ok(block.includes('epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0)'));
-  assert.ok(block.includes('structure_version INTEGER NOT NULL DEFAULT 1 CHECK (structure_version > 0)'));
-  assert.ok(block.includes('source TEXT NOT NULL'));
-  assert.ok(block.includes('score REAL NOT NULL'));
-  assert.ok(block.includes('FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE'));
-  assert.ok(block.includes('FOREIGN KEY (project_id) REFERENCES Project(id) ON DELETE CASCADE'));
-  assert.ok(block.includes('FOREIGN KEY (owner_id) REFERENCES User(id) ON DELETE CASCADE'));
-  assert.ok(!block.includes('body_checkpoint'));
+  const mem = ddl.find(s => s.includes('Doc_body_membership'));
+  assert.ok(mem.includes('annotation_id TEXT PRIMARY KEY'));
+  assert.ok(mem.includes('start_point TEXT NOT NULL CHECK (json_valid(start_point))'));
+  assert.ok(mem.includes('end_point TEXT NOT NULL CHECK (json_valid(end_point))'));
+  assert.ok(mem.includes('FOREIGN KEY (annotation_id) REFERENCES Doc_body_annotation(id) ON DELETE CASCADE'));
+  assert.ok(!mem.includes('block_id'));
+  assert.ok(!mem.includes('ordinal'));
+});
+
+test('membership table has no block-era indexes', () => {
+  const ddl = annotatedTextDDL('Doc', 'body', fd(
+    null, { highlight: { col1: { kind: 'value', type: 'text' } } },
+  ), makeFields());
+  assert.ok(!ddl.some(s => s.includes('idx_Doc_body_membership')));
+});
+
+test('measurement table has correct columns, constraints, and FK', () => {
+  const ddl = annotatedTextDDL('Doc', 'body', fd(
+    null, { highlight: { col1: { kind: 'value', type: 'text' } } },
+    { audio: { formatVersion: 1 }, sentiment: { formatVersion: 2 } },
+  ), makeFields());
+  const meas = ddl.find(s => s.includes('Doc_body_measurement'));
+  assert.ok(meas.includes('id TEXT PRIMARY KEY'));
+  assert.ok(meas.includes('document_id TEXT NOT NULL'));
+  assert.ok(!meas.includes('block_id'));
+  assert.ok(meas.includes('family TEXT NOT NULL CHECK (family IN'));
+  assert.ok(meas.includes("'audio'"));
+  assert.ok(meas.includes("'sentiment'"));
+  assert.ok(meas.includes('format_version INTEGER NOT NULL CHECK (format_version > 0)'));
+  assert.ok(meas.includes('payload TEXT NOT NULL CHECK (json_valid(payload))'));
+  assert.ok(meas.includes('FOREIGN KEY (document_id) REFERENCES Doc(id) ON DELETE CASCADE'));
+});
+
+test('measurement unique index on (document_id, family) rejects duplicates in SQLite', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  for (const sql of annotatedTextDDL('Doc', 'body', fd(null, { highlight: {} }, { audio: { formatVersion: 1 } }), makeFields())) db.exec(sql);
+  db.exec("INSERT INTO Project VALUES ('p')");
+  db.exec("INSERT INTO User VALUES ('u')");
+  db.exec("INSERT INTO Doc VALUES ('d')");
+  db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m1', 'd', 'audio', 1, '{}')");
+  assert.throws(() => db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m2', 'd', 'audio', 1, '{}')"));
+  db.exec("INSERT INTO Doc VALUES ('d2')");
+  db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m3', 'd2', 'audio', 1, '{}')");
+});
+
+test('measurement document FK rejects nonexistent documents in SQLite', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON');
+  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  for (const sql of annotatedTextDDL('Doc', 'body', fd(null, { highlight: {} }, { audio: { formatVersion: 1 } }), makeFields())) db.exec(sql);
+  assert.throws(() => db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m', 'missing', 'audio', 1, '{}')"));
+});
+
+test('measurement index exists', () => {
+  const ddl = annotatedTextDDL('Doc', 'body', fd(
+    null, { highlight: { col1: { kind: 'value', type: 'text' } } },
+  ), makeFields());
+  const once = ddl.find(s => s.includes('idx_Doc_body_measurement_once'));
+  assert.ok(once.includes('UNIQUE INDEX'));
+  assert.ok(once.includes('(document_id, family)'));
 });
 
 test('family state is the sole canonical checkpoint relation', () => {
@@ -215,97 +264,6 @@ test('annotation family table with no extension fields has annotation_id PK and 
   assert.ok(bare.includes('FOREIGN KEY (annotation_id) REFERENCES Doc_body_annotation(id) ON DELETE CASCADE'));
 });
 
-test('membership table has correct columns, PK, and FK cascades', () => {
-  const ddl = annotatedTextDDL('Doc', 'body', fd(
-    {}, { highlight: { col1: { kind: 'value', type: 'text' } } },
-  ), makeFields());
-  const mem = ddl.find(s => s.includes('Doc_body_membership'));
-  assert.ok(mem.includes('annotation_id TEXT NOT NULL'));
-  assert.ok(mem.includes('block_id TEXT NOT NULL'));
-  assert.ok(mem.includes('ordinal INTEGER NOT NULL CHECK (ordinal >= 0)'));
-  assert.ok(mem.includes('start_point TEXT NOT NULL CHECK (json_valid(start_point))'));
-  assert.ok(mem.includes('end_point TEXT NOT NULL CHECK (json_valid(end_point))'));
-  assert.ok(mem.includes('PRIMARY KEY (annotation_id, ordinal)'));
-  assert.ok(mem.includes('FOREIGN KEY (annotation_id) REFERENCES Doc_body_annotation(id) ON DELETE CASCADE'));
-  assert.ok(mem.includes('FOREIGN KEY (block_id) REFERENCES Doc_body_block(id) ON DELETE CASCADE'));
-});
-
-test('membership tables have block-once unique index and by-block index', () => {
-  const ddl = annotatedTextDDL('Doc', 'body', fd(
-    {}, { highlight: { col1: { kind: 'value', type: 'text' } } },
-  ), makeFields());
-  const once = ddl.find(s => s.includes('idx_Doc_body_membership_block_once'));
-  assert.ok(once.includes('UNIQUE INDEX'));
-  assert.ok(once.includes('(annotation_id, block_id)'));
-
-  const byBlock = ddl.find(s => s.includes('idx_Doc_body_membership_by_block'));
-  assert.ok(byBlock.includes('INDEX'));
-  assert.ok(byBlock.includes('(block_id, annotation_id)'));
-});
-
-test('block order index and project index exist', () => {
-  const ddl = annotatedTextDDL('Doc', 'body', fd(
-    {}, { highlight: { col1: { kind: 'value', type: 'text' } } },
-  ), makeFields());
-  const order = ddl.find(s => s.includes('idx_Doc_body_block_order'));
-  assert.ok(order.includes('(document_id, position)'));
-
-  const proj = ddl.find(s => s.includes('idx_Doc_body_block_project'));
-  assert.ok(proj.includes('(project_id, document_id, position, id)'));
-});
-
-test('block order index rejects duplicate positions in one document', () => {
-  const db = new DatabaseSync(':memory:');
-  db.exec('PRAGMA foreign_keys = ON');
-  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
-  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
-  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
-  for (const sql of annotatedTextDDL('Doc', 'body', fd({}, { highlight: {} }), makeFields())) db.exec(sql);
-  db.exec("INSERT INTO Project VALUES ('p')");
-  db.exec("INSERT INTO User VALUES ('u')");
-  db.exec("INSERT INTO Doc VALUES ('d')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position) VALUES ('b1', 'd', 'p', 'u', 'a0')");
-  assert.throws(() => db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position) VALUES ('b2', 'd', 'p', 'u', 'a0')"));
-});
-
-test('measurement table has correct columns, constraints, and FK', () => {
-  const ddl = annotatedTextDDL('Doc', 'body', fd(
-    {}, { highlight: { col1: { kind: 'value', type: 'text' } } },
-    { audio: { formatVersion: 1 }, sentiment: { formatVersion: 2 } },
-  ), makeFields());
-  const meas = ddl.find(s => s.includes('Doc_body_measurement'));
-  assert.ok(meas.includes('id TEXT PRIMARY KEY'));
-  assert.ok(meas.includes('block_id TEXT NOT NULL'));
-  assert.ok(meas.includes('family TEXT NOT NULL CHECK (family IN'));
-  assert.ok(meas.includes("'audio'"));
-  assert.ok(meas.includes("'sentiment'"));
-  assert.ok(meas.includes('format_version INTEGER NOT NULL CHECK (format_version > 0)'));
-  assert.ok(meas.includes('payload TEXT NOT NULL CHECK (json_valid(payload))'));
-  assert.ok(meas.includes('FOREIGN KEY (block_id) REFERENCES Doc_body_block(id) ON DELETE CASCADE'));
-});
-
-test('measurement block FK rejects nonexistent blocks in SQLite', () => {
-  const db = new DatabaseSync(':memory:');
-  db.exec('PRAGMA foreign_keys = ON');
-  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
-  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
-  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
-  for (const sql of annotatedTextDDL('Doc', 'body', fd({}, { highlight: {} }, { audio: { formatVersion: 1 } }), makeFields())) db.exec(sql);
-  assert.throws(() => db.exec("INSERT INTO Doc_body_measurement VALUES ('m', 'missing', 'audio', 1, '{}')"));
-});
-
-test('measurement index exists', () => {
-  const ddl = annotatedTextDDL('Doc', 'body', fd(
-    {}, { highlight: { col1: { kind: 'value', type: 'text' } } },
-  ), makeFields());
-  const once = ddl.find(s => s.includes('idx_Doc_body_measurement_once'));
-  assert.ok(once.includes('UNIQUE INDEX'));
-  assert.ok(once.includes('(block_id, family)'));
-
-  const idx = ddl.find(s => s.includes('idx_Doc_body_measurement_block'));
-  assert.ok(idx.includes('(block_id, family, id)'));
-});
-
 test('orphan rows are one-to-one annotation state and cascade on annotation deletion', () => {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
@@ -360,31 +318,6 @@ test('reserved orphan state family cannot collide with the generic orphan table'
   assert.throws(() => annotatedTextDDL('Doc', 'body', fd({}, { orphan_state: {} }), makeFields()), /reserved internal annotation family name/);
 });
 
-test('structure_version cannot be declared as a block extension field', () => {
-  assert.throws(() => annotatedTextDDL('Doc', 'body', annotatedText({
-    project: 'project', owner: 'owner', block: { structure_version: text() },
-    annotations: [annotation('note')], measurements: [measurement('m', { extension: 'testFieldExt' })],
-  }), makeFields()), /reserved/);
-});
-
-test('structure version and measurement family uniqueness are enforced by SQLite', () => {
-  const db = new DatabaseSync(':memory:');
-  db.exec('PRAGMA foreign_keys = ON');
-  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY)');
-  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
-  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
-  for (const sql of annotatedTextDDL('Doc', 'body', fd({}, { note: {} }, { audio: { formatVersion: 1 }, words: { formatVersion: 1 } }), makeFields())) db.exec(sql);
-  db.exec("INSERT INTO Project VALUES ('p')");
-  db.exec("INSERT INTO User VALUES ('u')");
-  db.exec("INSERT INTO Doc VALUES ('d')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position) VALUES ('b', 'd', 'p', 'u', '1')");
-  assert.equal(db.prepare('SELECT structure_version FROM Doc_body_block WHERE id = ?').get('b').structure_version, 1);
-  assert.throws(() => db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, structure_version) VALUES ('bad', 'd', 'p', 'u', '2', 0)"));
-  db.exec("INSERT INTO Doc_body_measurement VALUES ('m1', 'b', 'audio', 1, '{}')");
-  assert.throws(() => db.exec("INSERT INTO Doc_body_measurement VALUES ('m2', 'b', 'audio', 1, '{}')"));
-  db.exec("INSERT INTO Doc_body_measurement VALUES ('m3', 'b', 'words', 1, '{}')");
-});
-
 test('main entity table has no annotatedText column', () => {
   const Doc = entity('Doc', {
     title: text(),
@@ -392,7 +325,6 @@ test('main entity table has no annotatedText column', () => {
     owner: ref('User'),
     body: annotatedText({
       project: 'project', owner: 'owner',
-      block: { source: text() },
       annotations: [annotation('hl')],
       measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }),
@@ -411,7 +343,7 @@ test('generated tables execute against real SQLite and accept inserts', () => {
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
 
   const descriptor = fd(
-    { source: { kind: 'value', type: 'text' }, score: { kind: 'value', type: 'number' } },
+    null,
     { highlight: { col1: { kind: 'value', type: 'text' } }, tag: { col2: { kind: 'value', type: 'text' } } },
   );
   const fields = makeFields();
@@ -422,19 +354,16 @@ test('generated tables execute against real SQLite and accept inserts', () => {
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
 
-  db.exec([
-    "INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source, score)",
-    "VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src1', 0.5)",
-  ].join(' '));
-
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
-  db.exec("INSERT INTO Doc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', 'b1', 'audio', 1, '{}')");
+  db.exec("INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES ('a1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m1', 'd1', 'audio', 1, '{}')");
 
-  const rows = db.prepare('SELECT id, document_id, project_id, owner_id FROM Doc_body_block').all();
+  const rows = db.prepare('SELECT id, document_id, project_id, owner_id FROM Doc_body_annotation').all();
   assert.equal(rows.length, 1);
-  assert.equal(rows[0].id, 'b1');
+  assert.equal(rows[0].id, 'a1');
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_membership').get().c, 1);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_measurement').get().c, 1);
 });
 
 test('ON DELETE CASCADE removes child rows when parent document is deleted', () => {
@@ -445,7 +374,7 @@ test('ON DELETE CASCADE removes child rows when parent document is deleted', () 
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
 
   const descriptor = fd(
-    { source: { kind: 'value', type: 'text' } },
+    null,
     { highlight: { col1: { kind: 'value', type: 'text' } } },
   );
   for (const sql of annotatedTextDDL('Doc', 'body', descriptor, makeFields())) db.exec(sql);
@@ -453,15 +382,13 @@ test('ON DELETE CASCADE removes child rows when parent document is deleted', () 
   db.exec("INSERT INTO Project (id) VALUES ('p1')");
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
-  db.exec("INSERT INTO Doc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', 'b1', 'audio', 1, '{}')");
+  db.exec("INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES ('a1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m1', 'd1', 'audio', 1, '{}')");
 
   db.exec("DELETE FROM Doc WHERE id = 'd1'");
 
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_block').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_state').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_annotation').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_annotation_highlight').get().c, 0);
@@ -477,49 +404,21 @@ test('ON DELETE CASCADE removes annotation family and membership when annotation
   db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
 
   for (const sql of annotatedTextDDL('Doc', 'body', fd(
-    { source: { kind: 'value', type: 'text' } },
+    null,
     { highlight: { col1: { kind: 'value', type: 'text' } } },
   ), makeFields())) db.exec(sql);
 
   db.exec("INSERT INTO Project (id) VALUES ('p1')");
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES ('a1', '[1,2]', '[1,3]')");
 
   db.exec("DELETE FROM Doc_body_annotation WHERE id = 'a1'");
 
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_annotation_highlight').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_membership').get().c, 0);
-});
-
-test('ON DELETE CASCADE removes membership and measurement when block is deleted', () => {
-  const db = new DatabaseSync(':memory:');
-  db.exec('PRAGMA foreign_keys = ON');
-  db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY, title TEXT)');
-  db.exec('CREATE TABLE Project (id TEXT PRIMARY KEY)');
-  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
-
-  for (const sql of annotatedTextDDL('Doc', 'body', fd(
-    { source: { kind: 'value', type: 'text' } },
-    { highlight: { col1: { kind: 'value', type: 'text' } } },
-  ), makeFields())) db.exec(sql);
-
-  db.exec("INSERT INTO Project (id) VALUES ('p1')");
-  db.exec("INSERT INTO User (id) VALUES ('u1')");
-  db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src')");
-  db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
-  db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
-  db.exec("INSERT INTO Doc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', 'b1', 'audio', 1, '{}')");
-
-  db.exec("DELETE FROM Doc_body_block WHERE id = 'b1'");
-
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_membership').get().c, 0);
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_measurement').get().c, 0);
 });
 
 test('rejects: project field does not name an existing ref field', () => {
@@ -562,61 +461,6 @@ test('rejects: project field is a ref without a target', () => {
       measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
     }), fields);
   }, /must name an enclosing ref field with a target/);
-});
-
-test('rejects: block field with unsupported non-scalar kind', () => {
-  assert.throws(() => {
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      block: { nested: Object.freeze({ kind: 'store', type: 'map' }) },
-      annotations: [annotation('hl')],
-      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
-    }), makeFields());
-  }, /must be a frozen persisted scalar Workbench field descriptor/);
-});
-
-test('rejects: block field with fts index', () => {
-  assert.throws(() => {
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      block: { content: Object.freeze({ kind: 'value', type: 'text', indexed: 'fts' }) },
-      annotations: [annotation('hl')],
-      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
-    }), makeFields());
-  }, /uses behavior unsupported/);
-});
-
-test('rejects: block field with reserved column name id', () => {
-  assert.throws(() => {
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      block: { id: text() },
-      annotations: [annotation('hl')],
-      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
-    }), makeFields());
-  }, /invalid or reserved identifier/);
-});
-
-test('rejects: block field with reserved column name document_id', () => {
-  assert.throws(() => {
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      block: { document_id: text() },
-      annotations: [annotation('hl')],
-      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
-    }), makeFields());
-  }, /invalid or reserved identifier/);
-});
-
-test('rejects: block field with reserved column name position', () => {
-  assert.throws(() => {
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      block: { position: text() },
-      annotations: [annotation('hl')],
-      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
-    }), makeFields());
-  }, /invalid or reserved identifier/);
 });
 
 test('rejects: annotation family with reserved column name annotation_id', () => {
@@ -679,85 +523,6 @@ test('rejects: annotation family name with invalid identifier', () => {
   }, /valid identifier/);
 });
 
-test('rejects: block field name with invalid identifier', () => {
-  assert.throws(() => {
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      block: { 'bad-name': text() },
-      annotations: [annotation('hl')],
-      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
-    }), makeFields());
-  }, /invalid or reserved identifier/);
-});
-
-test('rejects: block field with role access', () => {
-  assert.throws(() => {
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      block: { secret: Object.freeze({ kind: 'value', type: 'text', role: 'owner' }) },
-      annotations: [annotation('hl')],
-      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
-    }), makeFields());
-  }, /uses behavior unsupported/);
-});
-
-test('rejects: block field with blob type', () => {
-  assert.throws(() => {
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      block: { data: Object.freeze({ kind: 'value', type: 'text', blob: true }) },
-      annotations: [annotation('hl')],
-      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
-    }), makeFields());
-  }, /uses behavior unsupported/);
-});
-
-test('rejects: block field with access function', () => {
-  assert.throws(() => {
-    const withAccess = Object.freeze({ kind: 'value', type: 'text', access: () => true });
-    validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
-      project: 'project', owner: 'owner',
-      block: { secret: withAccess },
-      annotations: [annotation('hl')],
-      measurements: [measurement('m', { extension: 'testFieldExt', formatVersion: 1 })],
-    }), makeFields());
-  }, /uses behavior unsupported/);
-});
-
-test('valid: empty block fields produce no extension columns', () => {
-  const descriptor = fd({}, { hl: { col1: { kind: 'value', type: 'text' } } });
-  const ddl = annotatedTextDDL('Doc', 'body', descriptor, makeFields());
-  const block = ddl.find(s => s.includes('Doc_body_block'));
-  const standardCols = ['id', 'document_id', 'project_id', 'owner_id', 'position', 'epoch'];
-  for (const col of standardCols) {
-    assert.ok(block.includes(col), `block should have standard column ${col}`);
-  }
-  assert.ok(!block.includes('col1'));
-  assert.ok(!block.includes('extra'));
-});
-
-test('valid: nullable block field produces nullable column', () => {
-  const descriptor = fd(
-    { note: Object.freeze({ kind: 'value', type: 'text', nullable: true }) },
-    { hl: { col1: { kind: 'value', type: 'text' } } },
-  );
-  const ddl = annotatedTextDDL('Doc', 'body', descriptor, makeFields());
-  const block = ddl.find(s => s.includes('Doc_body_block'));
-  assert.ok(block.includes('note TEXT'));
-  assert.ok(!block.includes('note TEXT NOT NULL'));
-});
-
-test('valid: optional block field produces nullable column', () => {
-  const descriptor = fd(
-    { note: Object.freeze({ kind: 'value', type: 'text', optional: true }) },
-    { hl: { col1: { kind: 'value', type: 'text' } } },
-  );
-  const ddl = annotatedTextDDL('Doc', 'body', descriptor, makeFields());
-  const block = ddl.find(s => s.includes('Doc_body_block'));
-  assert.ok(block.includes('note TEXT'));
-  assert.ok(!block.includes('note TEXT NOT NULL'));
-});
-
 test('valid: annotation family fields produce extension columns', () => {
   const descriptor = fd(
     {},
@@ -777,7 +542,6 @@ test('valid: entity() compiles with annotatedText field', () => {
     owner: ref('User'),
     body: annotatedText({
       project: 'project', owner: 'owner',
-      block: { source: text() },
       annotations: [annotation('hl', { fields: { severity: number() } })],
       measurements: [measurement('audio', { extension: 'testFieldExt', formatVersion: 1 })],
     }),
@@ -785,7 +549,7 @@ test('valid: entity() compiles with annotatedText field', () => {
   assert.ok(Doc.fields.body);
   assert.equal(Doc.fields.body.kind, 'annotatedText');
   const ddl = generateDDL(Doc);
-  assert.ok(ddl.some(s => s.includes('Doc_body_block')));
+  assert.ok(ddl.some(s => s.includes('Doc_body_membership')));
   assert.ok(ddl.some(s => s.includes('Doc_body_annotation_hl')));
   assert.ok(ddl.some(s => s.includes('Doc_body_measurement')));
 });
@@ -801,19 +565,19 @@ test('annotation() returns a frozen descriptor with correct shape', () => {
   assert.deepEqual(Object.keys(a.fields), ['col1']);
   assert.deepEqual(a.actions, []);
   assert.equal(a.empty, 'delete');
-  assert.equal(a.appliesTo, 'block');
+  assert.equal(a.appliesTo, 'text-range');
   assert.equal(a.cardinality, 'many');
 });
 
-test('annotation() accepts and compiles block-group one declarations', () => {
+test('annotation() compiles text-range one cardinality declarations', () => {
   const d = annotatedText({
     project: 'project', owner: 'owner',
-    annotations: [annotation('groupCode', { appliesTo: 'block-group', cardinality: 'one', fields: { value: text() } })],
+    annotations: [annotation('groupCode', { cardinality: 'one', fields: { value: text() } })],
     measurements: [measurement('m', { extension: 'testFieldExt' })],
   });
   validateAnnotatedTextDeclaration('Doc', 'body', d, makeFields());
   const handle = getAnnotatedTextCompiledMetadata(d).annotationHandles.groupCode;
-  assert.equal(handle.appliesTo, 'block-group');
+  assert.equal(handle.appliesTo, 'text-range');
   assert.equal(handle.cardinality, 'one');
 });
 
@@ -830,12 +594,13 @@ test('annotation() accepts and compiles text-range declarations', () => {
 });
 
 test('annotation() rejects invalid appliesTo and cardinality declarations', () => {
-  assert.throws(() => annotation('bad', { appliesTo: 'document' }), /appliesTo must be 'block', 'block-group', or 'text-range'/);
+  assert.throws(() => annotation('bad', { appliesTo: 'document' }), /appliesTo must be 'text-range'/);
+  assert.throws(() => annotation('bad', { appliesTo: 'block' }), /appliesTo must be 'text-range'/);
   assert.throws(() => annotation('bad', { cardinality: 'some' }), /cardinality must be 'many' or 'one'/);
-  assert.throws(() => annotation('bad', { cardinality: 'one' }), /requires appliesTo 'block-group' or 'text-range'/);
 
   for (const [key, value, message] of [
-    ['appliesTo', 'document', /must be 'block', 'block-group', or 'text-range'/],
+    ['appliesTo', 'document', /must be 'text-range'/],
+    ['appliesTo', 'block-group', /must be 'text-range'/],
     ['cardinality', 'some', /must be 'many' or 'one'/],
   ]) {
     const bad = Object.freeze({ ...annotation('bad'), [key]: value });
@@ -846,15 +611,15 @@ test('annotation() rejects invalid appliesTo and cardinality declarations', () =
   }
 });
 
-test('declaration validation rejects invalid block-one annotation descriptors', () => {
+test('declaration validation rejects block-era appliesTo descriptors', () => {
   const bad = Object.freeze({
     ...annotation('bad'),
-    cardinality: 'one',
+    appliesTo: 'block-group',
   });
   assert.throws(() => validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
     project: 'project', owner: 'owner', annotations: [bad],
     measurements: [measurement('m', { extension: 'testFieldExt' })],
-  }), makeFields()), /'one' requires appliesTo 'block-group' or 'text-range'/);
+  }), makeFields()), /must be 'text-range'/);
 });
 
 test('annotation empty policy is closed and compiled into its static handle', () => {
@@ -1573,7 +1338,7 @@ test('T8 rejects measurement extension with measurement-query kind contract', ()
 
 // ---- ON DELETE CASCADE tests for project/owner deletion ----
 
-test('ON DELETE CASCADE removes block and annotation rows when project is deleted', () => {
+test('ON DELETE CASCADE removes annotation and measurement rows when project is deleted', () => {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY, title TEXT)');
@@ -1589,22 +1354,22 @@ test('ON DELETE CASCADE removes block and annotation rows when project is delete
   db.exec("INSERT INTO Project (id) VALUES ('p1')");
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
-  db.exec("INSERT INTO Doc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', 'b1', 'audio', 1, '{}')");
+  db.exec("INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES ('a1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m1', 'd1', 'audio', 1, '{}')");
 
   db.exec("DELETE FROM Project WHERE id = 'p1'");
 
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_block').get().c, 0);
+  // Annotation/membership cascade via project_id; the DOCUMENT-scoped
+  // measurement references Doc (not Project) and survives the project delete.
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_annotation').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_annotation_highlight').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_membership').get().c, 0);
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_measurement').get().c, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_measurement').get().c, 1);
 });
 
-test('ON DELETE CASCADE removes block and annotation rows when owner is deleted', () => {
+test('ON DELETE CASCADE removes annotation and measurement rows when owner is deleted', () => {
   const db = new DatabaseSync(':memory:');
   db.exec('PRAGMA foreign_keys = ON');
   db.exec('CREATE TABLE Doc (id TEXT PRIMARY KEY, title TEXT)');
@@ -1620,17 +1385,15 @@ test('ON DELETE CASCADE removes block and annotation rows when owner is deleted'
   db.exec("INSERT INTO Project (id) VALUES ('p1')");
   db.exec("INSERT INTO User (id) VALUES ('u1')");
   db.exec("INSERT INTO Doc (id, title) VALUES ('d1', 'test')");
-  db.exec("INSERT INTO Doc_body_block (id, document_id, project_id, owner_id, position, source) VALUES ('b1', 'd1', 'p1', 'u1', '0001', 'src')");
   db.exec("INSERT INTO Doc_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('a1', 'd1', 'p1', 'u1', 'highlight')");
   db.exec("INSERT INTO Doc_body_annotation_highlight (annotation_id, col1) VALUES ('a1', 'v1')");
-  db.exec("INSERT INTO Doc_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES ('a1', 'b1', 0, '[1,2]', '[1,3]')");
-  db.exec("INSERT INTO Doc_body_measurement (id, block_id, family, format_version, payload) VALUES ('m1', 'b1', 'audio', 1, '{}')");
+  db.exec("INSERT INTO Doc_body_membership (annotation_id, start_point, end_point) VALUES ('a1', '[1,2]', '[1,3]')");
+  db.exec("INSERT INTO Doc_body_measurement (id, document_id, family, format_version, payload) VALUES ('m1', 'd1', 'audio', 1, '{}')");
 
   db.exec("DELETE FROM User WHERE id = 'u1'");
 
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_block').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_annotation').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_annotation_highlight').get().c, 0);
   assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_membership').get().c, 0);
-  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_measurement').get().c, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS c FROM Doc_body_measurement').get().c, 1);
 });
