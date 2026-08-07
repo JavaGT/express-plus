@@ -456,8 +456,12 @@ test('declared annotated text owns generated HTTP admission and package delivery
   const splitInsert = await session.insert({ mutationId: 'split-insert', at: { blockId: initialBlockId, offset: 2, affinity: 'right' }, text: ' there' });
   assert.equal(splitInsert.ok, true);
   assert.equal((await splitInsert.settlement.wait()).status, 'reconciled');
+  // The fake SSE source delivers NO fold envelope, so the settlement can only
+  // converge by fetching a recipient snapshot: the EXACT canonical text proves
+  // the committed edit recovered through snapshot ingest — not merely the
+  // optimistic splice being retained.
   assert.equal(session.document.blocks.length, 1);
-  assert.ok(session.document.blocks[0].text.includes(' there'));
+  assert.equal(session.document.blocks[0].text, 'he therello');
   assert.equal('dispatch' in session, false);
 
   assert.equal((await post(annotatedTextCreateAction(Document, Document.body, {
@@ -563,6 +567,16 @@ test('annotated text text-insert is delivered as a fold envelope over the live S
   assert.equal(envelope.type, 'event');
   assert.ok(envelope.fold, 'annotated text text-insert must deliver a fold envelope, not a snapshot recovery');
   assert.equal(envelope.fold.kind, 'annotatedText');
+  // The complete blockless v3 fold shape: a malformed fold — or one with the
+  // wrong projected text — must not pass as "usable fold delivery".
+  assert.equal(envelope.fold.version, 3);
+  assert.equal(envelope.fold.field, 'body');
+  assert.ok(Number.isSafeInteger(envelope.fold.baseCursor) && envelope.fold.baseCursor >= 0);
+  assert.equal(envelope.fold.text?.reducer, 'workbench.text');
+  assert.ok(Array.isArray(envelope.fold.text?.operations) && envelope.fold.text.operations.length > 0);
+  assert.equal(envelope.fold.projection?.text, 'hello');
+  assert.ok(Number.isSafeInteger(envelope.fold.familyElementCount) && envelope.fold.familyElementCount > 0);
+  assert.ok(typeof envelope.fold.authoring?.positionFrames?.[0]?.positionToken === 'string');
   assert.equal(envelope.fold.fence, envelope.seq);
   assert.equal(envelope.fold.authoring?.acknowledgementFence, envelope.seq);
   assert.equal(envelope.event?.actionId, 'typed-fold');
