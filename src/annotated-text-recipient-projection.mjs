@@ -60,6 +60,8 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     canonicalGroupIds.add(block.groupId);
   }
   const blockFamilies = new Set(Object.entries(meta.annotationHandles).filter(([, handle]) => handle.appliesTo === 'block').map(([family]) => family));
+  const rangeFamilies = new Set(Object.entries(meta.annotationHandles).filter(([, handle]) => handle.appliesTo === 'text-range').map(([family]) => family));
+  const blockCarriedFamilies = new Set([...blockFamilies, ...rangeFamilies]);
   const groupFamilies = new Set(Object.entries(meta.annotationHandles).filter(([, handle]) => handle.appliesTo === 'block-group').map(([family]) => family));
   for (const membership of canonical.memberships) {
     const rangeKeys = membership?.start === undefined && membership?.end === undefined
@@ -68,7 +70,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     exact(membership, rangeKeys, 'membership');
     const annotation = annotations.get(membership.annotationId);
     const block = canonical.blocks.find((candidate) => candidate.id === membership.blockId);
-    if (!annotation || !blockFamilies.has(annotation.family) || !block || !Number.isSafeInteger(membership.ordinal) || membership.ordinal < 0 ||
+    if (!annotation || !blockCarriedFamilies.has(annotation.family) || !block || !Number.isSafeInteger(membership.ordinal) || membership.ordinal < 0 ||
         (membership.start !== undefined && (!Number.isSafeInteger(membership.start) || !Number.isSafeInteger(membership.end) || membership.start < 0 || membership.end <= membership.start || membership.end > block.text.length))) fail('membership is invalid');
   }
   const groupMemberships = canonical.groupMemberships;
@@ -118,7 +120,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   for (const block of canonical.blocks) {
     const expected = canonical.memberships.filter((m) => m.blockId === block.id).map((m) => m.annotationId).sort();
     const actual = [...block.annotationIds].sort();
-    if (new Set(actual).size !== actual.length || actual.some((id) => !annotations.has(id) || !blockFamilies.has(annotations.get(id).family)) || JSON.stringify(actual) !== JSON.stringify(expected)) fail('canonical block memberships disagree');
+    if (new Set(actual).size !== actual.length || actual.some((id) => !annotations.has(id) || !blockCarriedFamilies.has(annotations.get(id).family)) || JSON.stringify(actual) !== JSON.stringify(expected)) fail('canonical block memberships disagree');
   }
   const measurementIds = new Set();
   for (const measurement of canonical.measurements) {
@@ -228,30 +230,73 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   const retainedIds = new Set([...memberships.map((m) => m.annotationId), ...groups.filter(Boolean).flatMap((group) => group.annotationIds)]);
   const visibleBlockIds = new Set(canonical.blocks.filter((block) => !restricted.has(block.id)).map((block) => block.id));
   const authoringRedactions = new Map();
+  const visibleLengthByBlock = new Map();
+  const visibleBlocks = canonical.blocks.map((block) => {
+    if (restricted.has(block.id)) return { kind: 'restricted', id: block.id, placeholder: meta.restrictedPlaceholder };
+    const intervals = redactionsByBlock.get(block.id) ?? [];
+    let offset = 0;
+    let text = '';
+    const authoring = [];
+    const redactions = intervals.map((interval) => {
+      text += block.text.slice(offset, interval.start);
+      const start = text.length;
+      offset = interval.end;
+      authoring.push(Object.freeze({ visibleStart: start, start: interval.start, end: interval.end }));
+      return { start, end: start, placeholder: interval.placeholder };
+    });
+    text += block.text.slice(offset);
+    visibleLengthByBlock.set(block.id, text.length);
+    if (authoring.length) authoringRedactions.set(block.id, Object.freeze(authoring));
+    return { kind: 'visible', id: block.id, text, fields: { ...block.fields }, annotationIds: memberships.filter((m) => m.blockId === block.id).map((m) => m.annotationId), ...(redactions.length ? { redactions } : {}) };
+  });
+
+  /** Canonical → recipient-visible offset map for one block, derived from the
+   *  inline-redaction compression already applied to its visible text. */
+  const visibleOffsetFor = (blockId) => {
+    const authoring = authoringRedactions.get(blockId) ?? [];
+    return (canonicalOffset) => {
+      let hidden = 0;
+      for (const interval of authoring) {
+        if (canonicalOffset > interval.start) {
+          hidden += interval.end - interval.start;
+          continue;
+        }
+        if (canonicalOffset === interval.start) return interval.visibleStart;
+        break;
+      }
+      return canonicalOffset - hidden;
+    };
+  };
+
+  const rangeMemberships = [];
+  for (const membership of memberships) {
+    const family = annotations.get(membership.annotationId).family;
+    if (!rangeFamilies.has(family)) continue;
+    const visibleLength = visibleLengthByBlock.get(membership.blockId);
+    if (visibleLength === undefined) continue;
+    const toVisible = visibleOffsetFor(membership.blockId);
+    if (membership.start === undefined || membership.end === undefined) {
+      rangeMemberships.push({ annotationId: membership.annotationId, blockId: membership.blockId, ordinal: membership.ordinal, start: 0, end: visibleLength });
+      continue;
+    }
+    const start = toVisible(membership.start);
+    const end = toVisible(membership.end);
+    // Fully inside a redaction → no positive visible span. T2 deliberately
+    // omits these memberships (ADR 0008 show-through for fully-redacted text
+    // ranges is deferred); the annotation drops out of delivery.
+    if (end <= start) continue;
+    rangeMemberships.push({ annotationId: membership.annotationId, blockId: membership.blockId, ordinal: membership.ordinal, start, end });
+  }
+
   const result = {
     kind: 'workbench.annotatedText.recipient', version: 1,
     blockGroups: groups.filter(Boolean),
-    blocks: canonical.blocks.map((block) => {
-      if (restricted.has(block.id)) return { kind: 'restricted', id: block.id, placeholder: meta.restrictedPlaceholder };
-      const intervals = redactionsByBlock.get(block.id) ?? [];
-      let offset = 0;
-      let text = '';
-      const authoring = [];
-      const redactions = intervals.map((interval) => {
-        text += block.text.slice(offset, interval.start);
-        const start = text.length;
-        offset = interval.end;
-        authoring.push(Object.freeze({ visibleStart: start, start: interval.start, end: interval.end }));
-        return { start, end: start, placeholder: interval.placeholder };
-      });
-      text += block.text.slice(offset);
-      if (authoring.length) authoringRedactions.set(block.id, Object.freeze(authoring));
-      return { kind: 'visible', id: block.id, text, fields: { ...block.fields }, annotationIds: memberships.filter((m) => m.blockId === block.id).map((m) => m.annotationId), ...(redactions.length ? { redactions } : {}) };
-    }),
+    blocks: visibleBlocks,
     annotations: [...annotations.values()].filter((a) => retainedIds.has(a.id)).map(({ id, family, fields, owner }) => ({ id, family, fields: { ...fields }, ...(owner ? { owner } : {}) })),
-    // Recipient membership coordinates are not yet redaction-aware. Never send
-    // canonical ranges: their offsets would disclose omitted width and shape.
-    memberships: memberships.map(({ annotationId, blockId, ordinal }) => ({ annotationId, blockId, ordinal })),
+    // Text-range memberships expose recipient-visible sub-block offsets; all
+    // other memberships stay whole-block (coordinates stripped). Canonical
+    // ranges and redaction widths never cross this seam.
+    memberships: [...memberships.filter((m) => !rangeFamilies.has(annotations.get(m.annotationId).family)).map(({ annotationId, blockId, ordinal }) => ({ annotationId, blockId, ordinal })), ...rangeMemberships],
     measurements: canonical.measurements.filter((m) => !restricted.has(m.blockId) && !redactionsByBlock.has(m.blockId)).map((m) => ({ ...m })),
     capabilityHints: [...capabilityHints].filter((hint) => (!restricted.size && !redactionsByBlock.size) || hint !== 'body.read'),
     // An orphan has no active membership. It is therefore disclosed only when

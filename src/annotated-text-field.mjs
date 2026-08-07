@@ -194,14 +194,14 @@ export function annotation(name, { appliesTo = 'block', cardinality = 'many', fi
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`annotation name '${name}' is not a valid identifier`);
   }
-  if (appliesTo !== 'block' && appliesTo !== 'block-group') {
-    throw new Error(`annotation '${name}' appliesTo must be 'block' or 'block-group'`);
+  if (appliesTo !== 'block' && appliesTo !== 'block-group' && appliesTo !== 'text-range') {
+    throw new Error(`annotation '${name}' appliesTo must be 'block', 'block-group', or 'text-range'`);
   }
   if (cardinality !== 'many' && cardinality !== 'one') {
     throw new Error(`annotation '${name}' cardinality must be 'many' or 'one'`);
   }
-  if (cardinality === 'one' && appliesTo !== 'block-group') {
-    throw new Error(`annotation '${name}' cardinality 'one' requires appliesTo 'block-group'`);
+  if (cardinality === 'one' && appliesTo !== 'block-group' && appliesTo !== 'text-range') {
+    throw new Error(`annotation '${name}' cardinality 'one' requires appliesTo 'block-group' or 'text-range'`);
   }
   if (empty !== 'delete' && empty !== 'orphan') {
     throw new Error(`annotation '${name}' empty policy must be 'delete' or 'orphan'`);
@@ -349,15 +349,15 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
       fail(entity, field, `annotations.${name}.empty`, "must be 'delete' or 'orphan'");
     }
     const appliesTo = ann.appliesTo === undefined ? 'block' : ann.appliesTo;
-    if (appliesTo !== 'block' && appliesTo !== 'block-group') {
-      fail(entity, field, `annotations.${name}.appliesTo`, "must be 'block' or 'block-group'");
+    if (appliesTo !== 'block' && appliesTo !== 'block-group' && appliesTo !== 'text-range') {
+      fail(entity, field, `annotations.${name}.appliesTo`, "must be 'block', 'block-group', or 'text-range'");
     }
     const cardinality = ann.cardinality === undefined ? 'many' : ann.cardinality;
     if (cardinality !== 'many' && cardinality !== 'one') {
       fail(entity, field, `annotations.${name}.cardinality`, "must be 'many' or 'one'");
     }
-    if (cardinality === 'one' && appliesTo !== 'block-group') {
-      fail(entity, field, `annotations.${name}.cardinality`, "'one' requires appliesTo 'block-group'");
+    if (cardinality === 'one' && appliesTo !== 'block-group' && appliesTo !== 'text-range') {
+      fail(entity, field, `annotations.${name}.cardinality`, "'one' requires appliesTo 'block-group' or 'text-range'");
     }
     if (annotationNames.has(name)) {
       fail(entity, field, `annotations.${name}`, 'duplicate annotation name');

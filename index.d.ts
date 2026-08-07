@@ -192,7 +192,7 @@ export const text: TextFieldFactory;
 export interface AnnotatedTextAnnotationDescriptor {
   readonly kind: 'annotation';
   readonly annotationName: string;
-  readonly appliesTo: 'block' | 'block-group';
+  readonly appliesTo: 'block' | 'block-group' | 'text-range';
   readonly cardinality: 'many' | 'one';
   readonly fields: Readonly<Record<string, FieldDescriptor>>;
   readonly actions: readonly AnnotatedTextActionDescriptor[];
@@ -220,7 +220,7 @@ export interface AnnotatedTextActionDescriptor {
   readonly actionName: string;
 }
 export function annotation(name: string, options?: {
-  appliesTo?: 'block' | 'block-group';
+  appliesTo?: 'block' | 'block-group' | 'text-range';
   cardinality?: 'many' | 'one';
   fields?: Record<string, FieldDescriptor>;
   actions?: readonly AnnotatedTextActionDescriptor[];
@@ -253,7 +253,7 @@ export interface AnnotatedTextOptions {
 export interface AnnotatedTextAnnotationHandle {
   readonly family: string;
   readonly annotationName: string;
-  readonly appliesTo: 'block' | 'block-group';
+  readonly appliesTo: 'block' | 'block-group' | 'text-range';
   readonly cardinality: 'many' | 'one';
   readonly actions: readonly string[];
   readonly empty: 'delete' | 'orphan';
@@ -424,6 +424,8 @@ export interface AnnotatedTextMembership {
   readonly annotationId: string;
   readonly blockId: string;
   readonly ordinal: number;
+  readonly start?: number;
+  readonly end?: number;
 }
 export interface AnnotatedTextGroupMembership {
   readonly annotationId: string;

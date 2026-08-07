@@ -305,7 +305,21 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
       const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${annotation.family} WHERE annotation_id = ?`).get(annotation.id) ?? {};
       return { id: annotation.id, family: annotation.family, fields: Object.fromEntries(Object.entries(declared.fields).map(([name, desc]) => [name, deserializeField(desc, stored[name])])), owner: annotation.owner_id, ...(targetMap.has(annotation.id) ? { protectedTargetIds: targetMap.get(annotation.id) } : {}) };
     }),
-    memberships: memberships.map((membership) => ({ annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal })),
+    memberships: memberships.map((membership) => {
+      let start;
+      let end;
+      try {
+        start = projectEndpointToBlockOffset(family, membership.block_id, JSON.parse(membership.start_point));
+        end = projectEndpointToBlockOffset(family, membership.block_id, JSON.parse(membership.end_point));
+      } catch {
+        return { annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal };
+      }
+      const text = materializeBlock(family, membership.block_id);
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > text.length) {
+        return { annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal };
+      }
+      return { annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal, start, end };
+    }),
     measurements: db.prepare(`SELECT measurement.* FROM ${prefix}_measurement AS measurement JOIN ${prefix}_block AS block ON block.id = measurement.block_id WHERE block.document_id = ? ORDER BY measurement.id`).all(documentId).map((measurement) => ({ id: measurement.id, blockId: measurement.block_id, family: measurement.family, formatVersion: measurement.format_version, payload: JSON.parse(measurement.payload) })),
     capabilities: [],
     groupMemberships: groupMemberships.map((membership) => ({ annotationId: membership.annotation_id, groupId: membership.group_id, ordinal: membership.ordinal })),

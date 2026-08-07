@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { applyTextOp, createTextState, textCheckpoint } from '../src/annotated-text.mjs';
 import { createTextFamily, materializeBlock, resolvePositionToEndpoint, splitBlock } from '../src/annotated-text-family.mjs';
 import { addMembership } from '../src/annotated-text-membership.mjs';
-import { planTextOffsetEdit, planAnnotationApplyOffsets, planAnnotationRemove } from '../src/annotated-text-plan.mjs';
+import { planTextOffsetEdit, planAnnotationApplyOffsets, planAnnotationRemove, planTextRangeApply } from '../src/annotated-text-plan.mjs';
 
 const ACTOR = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 function familyFromText(text, blockId = 'block1') {
@@ -95,4 +95,58 @@ test('removes a delete-empty annotation and freezes the v10 result', () => {
     resolvePositionToEndpoint(family, 'block1', end.offset, family.checkpoint.frontier, end.affinity));
   const plan = planAnnotationRemove({ documentId: 'doc1', structureVersion: 1, family, annotationId: 'ann1', annotations: [annotation], memberships: membership.memberships, visibleBlockIds: ['block1'] });
   assert.equal(plan.version, 13); assert.equal(plan.facts.result.disposition.kind, 'deleted'); assert(Object.isFrozen(plan));
+});
+
+test('plans a same-block text-range apply as one partial membership with no family change', () => {
+  const family = familyFromText('A diarized transcript');
+  const annotation = { id: 'code1', family: 'code', fields: {} };
+  const plan = planTextRangeApply({
+    documentId: 'doc1', structureVersion: 1, family,
+    annotation,
+    from: pos(family, 'block1', 2), to: pos(family, 'block1', 12),
+    visibleBlockIds: ['block1'],
+  });
+  assert.equal(plan.version, 13);
+  assert.equal(plan.operation.kind, 'annotation.apply-range');
+  assert.equal(plan.facts.family.blocks.length, 1, 'no block split');
+  assert.equal(plan.facts.splitOps.length, 0);
+  assert.equal(plan.after.structuralRevision, 1, 'revision unchanged');
+  assert.deepEqual(plan.facts.selectedBlockIds, ['block1']);
+  assert.equal(plan.facts.memberships.length, 1);
+  assert.equal(plan.facts.memberships[0].blockId, 'block1');
+  assert.equal(plan.facts.memberships[0].annotationId, 'code1');
+  assert.ok(plan.facts.memberships[0].start.point, 'carries structural start endpoint');
+  assert.ok(plan.facts.memberships[0].end.point, 'carries structural end endpoint');
+});
+
+test('plans a cross-block text-range apply as one membership per intersected block', () => {
+  let split = splitBlock(familyFromText('First block words'), 'block1', 'block2', 5).family;
+  const annotation = { id: 'code1', family: 'code', fields: {} };
+  const plan = planTextRangeApply({
+    documentId: 'doc1', structureVersion: 1, family: split,
+    annotation,
+    from: pos(split, 'block1', 2), to: pos(split, 'block2', 3),
+    visibleBlockIds: split.blocks.map((b) => b.id),
+  });
+  assert.equal(plan.version, 13);
+  assert.equal(plan.operation.kind, 'annotation.apply-range');
+  assert.equal(plan.facts.family.blocks.length, 2, 'no splits');
+  assert.deepEqual(plan.facts.selectedBlockIds, ['block1', 'block2']);
+  assert.equal(plan.facts.memberships.length, 2);
+  assert.deepEqual(plan.facts.memberships.map((m) => m.blockId), ['block1', 'block2']);
+});
+
+test('text-range apply rejects non-visible or empty selections', () => {
+  const family = familyFromText('hello world');
+  const annotation = { id: 'code1', family: 'code', fields: {} };
+  assert.throws(() => planTextRangeApply({
+    documentId: 'doc1', structureVersion: 1, family, annotation,
+    from: pos(family, 'block1', 2), to: pos(family, 'block1', 2),
+    visibleBlockIds: ['block1'],
+  }), /forward, non-empty range/);
+  assert.throws(() => planTextRangeApply({
+    documentId: 'doc1', structureVersion: 1, family, annotation,
+    from: pos(family, 'block1', 0), to: pos(family, 'block1', 5),
+    visibleBlockIds: ['other'],
+  }), /restricted or hidden block/);
 });

@@ -22,7 +22,7 @@ import { authoringRedactionsForRecipient } from './annotated-text-recipient-proj
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { resolveStream, resolveLease, resolvePosition, resolveGroup, issuePositionFrame, recordSplit } from './annotated-text-authoring-stream.mjs';
 import { readSeq } from './committed-log.mjs';
-import { planAnnotationApplyOffsets, planAnnotationRemove, planTextOffsetEdit } from './annotated-text-plan.mjs';
+import { planAnnotationApplyOffsets, planAnnotationRemove, planTextOffsetEdit, planTextRangeApply } from './annotated-text-plan.mjs';
 import { packOperatedFacts } from './annotated-text-operated-facts.mjs';
 
 /** Resolve the authoring stream + lease for a v9 command. */
@@ -194,6 +194,8 @@ function admitStructureEdit(ctx, deps) {
 function admitAnnotationEdit(ctx, deps) {
   const { name, fieldName, command, db, scope, prefix, documentScope, lease, family, state, currentVisible, currentRecipient, edit, compiledMeta } = ctx;
   const { r4Handler, r5Handler } = deps;
+  const familyMeta = compiledMeta.annotationHandles[edit.annotation?.family];
+  if (familyMeta?.appliesTo === 'text-range') return admitTextRangeApply(ctx);
   if (edit.kind === 'annotation.detach') {
     const expected = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
     const detachPosition = resolvePosition({ db, prefix, positionToken: edit.positionToken, leaseId: lease.id });
@@ -244,6 +246,95 @@ function admitAnnotationEdit(ctx, deps) {
   try { planned = planAnnotationApplyOffsets({ family, structureVersion: state.structure_version, from: { blockId: fromPos.block_id, offset: edit.from.offset, affinity: edit.from.affinity, positionFamily: fromFamily }, to: { blockId: toPos.block_id, offset: edit.to.offset, affinity: edit.to.affinity, positionFamily: toFamily }, visibleBlockIds: currentRecipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id) }); }
   catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`, error.code ? { code: error.code } : undefined); }
   return r4Handler({ payload: { version: planned.crossBlock ? 7 : 4, id: command.id, expected: planned.expected, operation: { kind: 'annotation.apply', annotation: edit.annotation, selection: planned.selection } }, db, scope, principal: ctx.principal });
+}
+
+/** annotation.apply for a declared `appliesTo: 'text-range'` family. Creates
+ * sub-block range memberships without splitting blocks. The persisted event is
+ * a v13 `annotation.apply-range` whose facts record the exact membership set,
+ * so replay is independent of the current declaration. */
+function admitTextRangeApply(ctx) {
+  const { name, fieldName, command, db, prefix, documentScope, lease, family, state, currentVisible, currentRecipient, edit, compiledMeta, descriptor } = ctx;
+  const familyMeta = compiledMeta.annotationHandles[edit.annotation.family];
+  const annotationDescriptor = descriptor.annotations.find((entry) => entry.annotationName === edit.annotation.family);
+  if (!familyMeta || !annotationDescriptor || familyMeta.appliesTo !== 'text-range') {
+    throw new ValidationError(`${name}.${fieldName}.operation annotation family '${edit.annotation.family}' must apply to text ranges`);
+  }
+  if (annotationDescriptor.kind === 'protectingAnnotation') {
+    throw new ValidationError(`${name}.${fieldName}.operation protecting annotations cannot be text ranges`);
+  }
+  if (familyMeta.cardinality === 'one') {
+    throw new ValidationError(`${name}.${fieldName}.operation text-range cardinality 'one' is not implemented`);
+  }
+  if (edit.annotation.protectedTargetIds !== undefined && edit.annotation.protectedTargetIds.length !== 0) {
+    throw new ValidationError(`${name}.${fieldName}.operation text-range annotations cannot name protected targets`);
+  }
+  const familyFieldDescs = annotationDescriptor.fields;
+  const canonicalFields = { ...edit.annotation.fields };
+  for (const [key, desc] of Object.entries(familyFieldDescs)) {
+    if (key in canonicalFields) {
+      const strategy = resolveStrategy(desc.kind);
+      const validationResult = strategy.validate(canonicalFields[key], desc);
+      if (validationResult !== true) {
+        throw new ValidationError(`${name}.${fieldName}.operation field '${key}' validation failed: ${validationResult}`);
+      }
+      if (typeof desc.validate === 'function' && desc.validate(canonicalFields[key]) !== true) {
+        throw new ValidationError(`${name}.${fieldName}.operation field '${key}' failed declared validation`);
+      }
+    } else if (desc.default !== undefined) {
+      canonicalFields[key] = typeof desc.default === 'function' ? desc.default() : structuredClone(desc.default);
+    } else if (!desc.nullable && !desc.optional) {
+      throw new ValidationError(`${name}.${fieldName}.operation missing required field '${key}' for family '${edit.annotation.family}'`);
+    }
+  }
+  for (const key of Object.keys(canonicalFields)) {
+    if (!familyFieldDescs[key]) {
+      throw new ValidationError(`${name}.${fieldName}.operation unexpected field '${key}' for family '${edit.annotation.family}'`);
+    }
+  }
+  if (db.prepare(`SELECT 1 FROM ${prefix}_annotation WHERE id = ?`).get(edit.annotation.id)) {
+    throw new ValidationError(`${name}.${fieldName}.operation annotation id '${edit.annotation.id}' already exists`);
+  }
+  const fromPos = resolvePosition({ db, prefix, positionToken: edit.from.positionToken, leaseId: lease.id });
+  const toPos = resolvePosition({ db, prefix, positionToken: edit.to.positionToken, leaseId: lease.id });
+  if (!fromPos || !toPos) throw new ValidationError(`${name}.${fieldName}.operation annotation position token unavailable`, { code: 'position-token-unavailable' });
+  const fromFamily = restoreTextFamilyCheckpoint(JSON.parse(fromPos.family_checkpoint));
+  const toFamily = restoreTextFamilyCheckpoint(JSON.parse(toPos.family_checkpoint));
+  const from = { blockId: fromPos.block_id, offset: edit.from.offset, affinity: edit.from.affinity, positionFamily: fromFamily, redactions: frameRedactions(fromPos, currentRecipient) };
+  const to = { blockId: toPos.block_id, offset: edit.to.offset, affinity: edit.to.affinity, positionFamily: toFamily, redactions: frameRedactions(toPos, currentRecipient) };
+  const membershipRows = db.prepare(
+    `SELECT membership.annotation_id, membership.block_id, membership.ordinal, membership.start_point, membership.end_point
+       FROM ${prefix}_membership AS membership
+       JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
+      WHERE annotation.document_id = ?
+      ORDER BY membership.annotation_id, membership.ordinal`,
+  ).all(command.id);
+  const memberships = membershipRows.map((membership) => ({
+    annotationId: membership.annotation_id, blockId: membership.block_id, ordinal: membership.ordinal,
+    start: JSON.parse(membership.start_point), end: JSON.parse(membership.end_point),
+  }));
+  const annotationRows = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ? ORDER BY id`).all(command.id);
+  const annotations = annotationRows.map((annotation) => ({
+    id: annotation.id, family: annotation.family, empty: compiledMeta.annotationHandles[annotation.family]?.empty,
+    protectedTargetIds: [],
+  }));
+  let plan;
+  try {
+    plan = planTextRangeApply({
+      documentId: command.id,
+      structureVersion: state.structure_version,
+      family,
+      annotation: { id: edit.annotation.id, family: edit.annotation.family, fields: Object.freeze(canonicalFields) },
+      from,
+      to,
+      visibleBlockIds: currentVisible,
+      annotations,
+      memberships,
+      mintBlockId: randomUUID,
+      actorId: ctx.principal?.id ?? null,
+    });
+  } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`, error.code ? { code: error.code } : undefined); }
+  const handle = eventHandles.native(name, fieldName, 'operated');
+  return [{ handle, type: handle.type, scope: documentScope, data: plan }];
 }
 
 /** block-group.assignment.set | block-group.assignment.clear */

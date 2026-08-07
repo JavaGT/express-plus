@@ -18,7 +18,7 @@ import {
   textFamilyCheckpoint, textOperationForOffsetEdit,
 } from './annotated-text-family.mjs';
 import { canonicalTextOp } from './annotated-text.mjs';
-import { removeAnnotation, removeMembership } from './annotated-text-membership.mjs';
+import { addMembership, removeAnnotation, removeMembership } from './annotated-text-membership.mjs';
 import { packOperatedFacts } from './annotated-text-operated-facts.mjs';
 
 function deepFreeze(value) {
@@ -196,6 +196,57 @@ export function planAnnotationApplyOffsets({ family, structureVersion, from, to,
     ? { blockId: from.blockId, startBlockId: from.blockId, endBlockId: to.blockId, startUtf16Offset: startOffset, endUtf16Offset: endOffset }
     : { blockId: from.blockId, startUtf16Offset: startOffset, endUtf16Offset: endOffset };
   return deepFreeze({ crossBlock, selection, expected: { structuralRevision: structureVersion, frontier: family.checkpoint.frontier } });
+}
+
+/**
+ * Plan a text-range annotation.apply: one sub-block range membership per
+ * intersected block, resolved to structural endpoints, with no block splitting
+ * and no family change. The emitted facts carry the exact membership set so the
+ * fold can re-derive and deep-equal it (tamper check).
+ */
+export function planTextRangeApply({ documentId, structureVersion, family, actor, lamport, annotation, from, to, visibleBlockIds, annotations = [], memberships = [], mintBlockId, actorId }) {
+  const startOffset = positionOffset(family, from);
+  const endOffset = positionOffset(family, to);
+  const fromIndex = family.blocks.findIndex((block) => block.id === from.blockId);
+  const toIndex = family.blocks.findIndex((block) => block.id === to.blockId);
+  if (fromIndex < 0 || toIndex < 0 || fromIndex > toIndex || (fromIndex === toIndex && startOffset >= endOffset)) {
+    const error = new Error('annotation selection must be a forward, non-empty range'); error.code = 'position-invalid'; throw error;
+  }
+  const visible = new Set(visibleBlockIds);
+  if (family.blocks.slice(fromIndex, toIndex + 1).some((block) => !visible.has(block.id))) {
+    const error = new Error('annotation selection crosses a restricted or hidden block'); error.code = 'position-no-longer-visible'; throw error;
+  }
+  const intersected = family.blocks.slice(fromIndex, toIndex + 1);
+  const virtualAnnotations = [...annotations, { id: annotation.id, family: annotation.family, protectedTargetIds: [] }];
+  let nextMemberships = memberships;
+  for (let index = 0; index < intersected.length; index++) {
+    const block = intersected[index];
+    const len = materializeBlock(family, block.id).length;
+    const spanStart = index === 0 ? startOffset : 0;
+    const spanEnd = index === intersected.length - 1 ? endOffset : len;
+    if (spanStart >= spanEnd) continue;
+    const start = resolvePositionToEndpoint(family, block.id, spanStart, family.checkpoint.frontier, index === 0 ? from.affinity : 'left');
+    const end = resolvePositionToEndpoint(family, block.id, spanEnd, family.checkpoint.frontier, index === intersected.length - 1 ? to.affinity : 'right');
+    const result = addMembership(family, virtualAnnotations, nextMemberships, annotation.id, block.id, start, end);
+    nextMemberships = result.memberships;
+  }
+  const rangeMemberships = nextMemberships.filter((membership) => membership.annotationId === annotation.id)
+    .map((membership) => ({ annotationId: membership.annotationId, blockId: membership.blockId, ordinal: membership.ordinal, start: membership.start, end: membership.end }));
+  if (rangeMemberships.length === 0) {
+    const error = new Error('annotation selection must be a forward, non-empty range'); error.code = 'position-invalid'; throw error;
+  }
+  return unifiedPlan({
+    id: documentId,
+    before: before(family, structureVersion),
+    after: Object.freeze({ structuralRevision: structureVersion, frontier: family.checkpoint.frontier }),
+    operation: { kind: 'annotation.apply-range', annotation, selection: { fromBlockId: from.blockId, toBlockId: to.blockId, startOffset, endOffset } },
+    family: textFamilyCheckpoint(family),
+    annotation,
+    memberships: Object.freeze(rangeMemberships),
+    actorId,
+    splitOps: [], splitBlockIds: [], blocks: [], measurements: [],
+    selectedBlockIds: Object.freeze(intersected.map((block) => block.id)),
+  });
 }
 
 export function planAnnotationRemove({ documentId, structureVersion, family, annotationId, annotations, memberships, visibleBlockIds }) {

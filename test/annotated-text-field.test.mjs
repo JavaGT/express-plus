@@ -817,13 +817,25 @@ test('annotation() accepts and compiles block-group one declarations', () => {
   assert.equal(handle.cardinality, 'one');
 });
 
+test('annotation() accepts and compiles text-range declarations', () => {
+  const d = annotatedText({
+    project: 'project', owner: 'owner',
+    annotations: [annotation('code', { appliesTo: 'text-range', cardinality: 'many', fields: { value: text() } })],
+    measurements: [measurement('m', { extension: 'testFieldExt' })],
+  });
+  validateAnnotatedTextDeclaration('Doc', 'body', d, makeFields());
+  const handle = getAnnotatedTextCompiledMetadata(d).annotationHandles.code;
+  assert.equal(handle.appliesTo, 'text-range');
+  assert.equal(handle.cardinality, 'many');
+});
+
 test('annotation() rejects invalid appliesTo and cardinality declarations', () => {
-  assert.throws(() => annotation('bad', { appliesTo: 'document' }), /appliesTo must be 'block' or 'block-group'/);
+  assert.throws(() => annotation('bad', { appliesTo: 'document' }), /appliesTo must be 'block', 'block-group', or 'text-range'/);
   assert.throws(() => annotation('bad', { cardinality: 'some' }), /cardinality must be 'many' or 'one'/);
-  assert.throws(() => annotation('bad', { cardinality: 'one' }), /requires appliesTo 'block-group'/);
+  assert.throws(() => annotation('bad', { cardinality: 'one' }), /requires appliesTo 'block-group' or 'text-range'/);
 
   for (const [key, value, message] of [
-    ['appliesTo', 'document', /must be 'block' or 'block-group'/],
+    ['appliesTo', 'document', /must be 'block', 'block-group', or 'text-range'/],
     ['cardinality', 'some', /must be 'many' or 'one'/],
   ]) {
     const bad = Object.freeze({ ...annotation('bad'), [key]: value });
@@ -842,7 +854,7 @@ test('declaration validation rejects invalid block-one annotation descriptors', 
   assert.throws(() => validateAnnotatedTextDeclaration('Doc', 'body', annotatedText({
     project: 'project', owner: 'owner', annotations: [bad],
     measurements: [measurement('m', { extension: 'testFieldExt' })],
-  }), makeFields()), /'one' requires appliesTo 'block-group'/);
+  }), makeFields()), /'one' requires appliesTo 'block-group' or 'text-range'/);
 });
 
 test('annotation empty policy is closed and compiled into its static handle', () => {

@@ -184,7 +184,7 @@ test('rejects group annotations in visible block ids and memberships', () => {
   const membership = snapshot();
   membership.annotations[0].family = 'grouping';
   membership.blocks[0].annotationIds = ['annotation-1'];
-  assert.throws(() => materializeAnnotatedTextSnapshot(membership, Doc.body), /must reference a block annotation/);
+  assert.throws(() => materializeAnnotatedTextSnapshot(membership, Doc.body), /must reference a block or text-range annotation/);
 });
 
 test('rejects empty groups and duplicate group block or annotation ids', () => {

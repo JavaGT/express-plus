@@ -102,6 +102,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
   }
   const seenBlockIds = new Set();
   const blocks = [];
+  const redactionsByBlock = new Map();
   for (let i = 0; i < snapshot.blocks.length; i++) {
     const b = snapshot.blocks[i];
     if (!b || typeof b !== 'object' || Array.isArray(b)) {
@@ -157,6 +158,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
       const redaction = redactions[index];
       text = `${text.slice(0, redaction.start)}${redaction.placeholder}${text.slice(redaction.end)}`;
     }
+    if (redactions.length) redactionsByBlock.set(b.id, redactions);
     blocks.push(Object.freeze({
       kind: 'visible',
       id: b.id,
@@ -205,7 +207,11 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
     }));
   }
 
-  // Validate memberships — public shape is whole-block {blockId, ordinal}
+  // Validate memberships — public shape is {annotationId, blockId, ordinal}
+  // plus optional recipient-visible sub-block {start, end} for text-range
+  // annotations. start/end arrive in the compressed (pre-placeholder) block
+  // text coordinates and are remapped through inline-redaction placeholders so
+  // the client document's offsets match its materialized block text.
   if (!Array.isArray(snapshot.memberships)) {
     fail('memberships', 'must be an array');
   }
@@ -219,8 +225,8 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
       fail(`memberships[${i}].annotationId`, `must reference a declared annotation`);
     }
     const annotation = annotations.find((candidate) => candidate.id === m.annotationId);
-    if (handle.annotations[annotation.family]?.appliesTo !== 'block') {
-      fail(`memberships[${i}].annotationId`, `must reference a block annotation`);
+    if (handle.annotations[annotation.family]?.appliesTo !== 'block' && handle.annotations[annotation.family]?.appliesTo !== 'text-range') {
+      fail(`memberships[${i}].annotationId`, `must reference a block or text-range annotation`);
     }
     if (typeof m.blockId !== 'string' || !seenBlockIds.has(m.blockId)) {
       fail(`memberships[${i}].blockId`, `must reference a declared block`);
@@ -228,10 +234,34 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
     if (typeof m.ordinal !== 'number' || !Number.isSafeInteger(m.ordinal) || m.ordinal < 0) {
       fail(`memberships[${i}].ordinal`, 'must be a non-negative safe integer');
     }
+    const hasOffsets = m.start !== undefined || m.end !== undefined;
+    if (hasOffsets && (typeof m.start !== 'number' || typeof m.end !== 'number' || !Number.isSafeInteger(m.start) || !Number.isSafeInteger(m.end))) {
+      fail(`memberships[${i}]`, 'start and end must both be safe integers when present');
+    }
+    const rawBlock = blocks.find((candidate) => candidate.id === m.blockId);
+    if (hasOffsets && (m.start < 0 || m.end <= m.start || m.end > rawBlock.text.length)) {
+      fail(`memberships[${i}]`, `start/end must satisfy 0 <= start < end <= block text length`);
+    }
+    let start;
+    let end;
+    if (hasOffsets) {
+      // Remap compressed → materialized offsets through inline redactions.
+      const redactions = redactionsByBlock.get(m.blockId) ?? [];
+      const remap = (offset) => {
+        let shifted = offset;
+        for (const redaction of redactions) {
+          if (redaction.start <= offset) shifted += redaction.placeholder.length;
+        }
+        return shifted;
+      };
+      start = remap(m.start);
+      end = remap(m.end);
+    }
     memberships.push(Object.freeze({
       annotationId: m.annotationId,
       blockId: m.blockId,
       ordinal: m.ordinal,
+      ...(hasOffsets ? { start, end } : {}),
     }));
   }
 
@@ -244,7 +274,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
         fail('blocks', `block '${block.id}' annotationIds references unknown annotation '${aid}'`);
       }
       const annotation = annotations.find((candidate) => candidate.id === aid);
-      if (handle.annotations[annotation.family]?.appliesTo !== 'block') {
+      if (handle.annotations[annotation.family]?.appliesTo !== 'block' && handle.annotations[annotation.family]?.appliesTo !== 'text-range') {
         fail('blocks', `block '${block.id}' annotationIds references a non-block annotation '${aid}'`);
       }
     }

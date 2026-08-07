@@ -662,6 +662,8 @@ export interface AnnotatedTextMembership {
   readonly annotationId: string;
   readonly blockId: string;
   readonly ordinal: number;
+  readonly start?: number;
+  readonly end?: number;
 }
 
 export interface AnnotatedTextMeasurement {
