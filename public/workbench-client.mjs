@@ -21,7 +21,7 @@ import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
 export { materializeAnnotatedTextSnapshot };
 
-// --- BEGIN GENERATED from src/replay-decision.mjs (keep in sync; zero-import) ---
+// --- BEGIN GENERATED from src/replay-decision.ts (keep in sync; zero-import) ---
 function normalizeSeqSpan(seqOrSpan) {
   if (Array.isArray(seqOrSpan) && seqOrSpan.length >= 2) {
     const lo = Number(seqOrSpan[0]);
@@ -45,7 +45,7 @@ function decideReplay(cursor, seqOrSpan) {
   if (lo > expected) return { kind: 'gap' };
   return { kind: 'next', cursor: hi };
 }
-// --- END GENERATED from src/replay-decision.mjs ---
+// --- END GENERATED from src/replay-decision.ts ---
 
 function normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent) {
   if (typeof optionsOrOnEvent === 'function' || optionsOrOnEvent === undefined || optionsOrOnEvent === null) {

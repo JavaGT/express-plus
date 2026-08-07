@@ -9,7 +9,7 @@ import { scryptSync, timingSafeEqual } from 'node:crypto';
 
 // Try verifying a password hash using better-auth's legacy scrypt profile.
 // Called only after the native scrypt profile has already failed.
-export function tryBetterAuthHash(candidate        , stored        , expected        )          {
+export function tryBetterAuthHash(candidate: string, stored: string, expected: Buffer): boolean {
   const sep = stored.indexOf(':');
   const legacy = scryptSync(candidate.normalize('NFKC'), stored.slice(0, sep), expected.length, {
     N: 16384,

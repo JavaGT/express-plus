@@ -3,11 +3,33 @@
     "target": "ES2024",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "lib": ["ES2024"],
     "strict": true,
     "noEmit": true,
     "allowJs": false,
     "checkJs": false,
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "isolatedModules": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noFallthroughCasesInSwitch": true,
+    "types": ["node"],
+    "paths": {
+      "workbench": ["./index.d.ts"],
+      "workbench/client": ["./client.d.ts"],
+      "workbench/server": ["./src/server.d.ts"],
+      "workbench/annotated-text": ["./annotated-text.d.ts"]
+    }
   },
-  "include": ["index.d.ts", "client.d.ts", "annotated-text.d.ts", "src/server.d.ts"]
+  "include": [
+    "index.d.ts",
+    "client.d.ts",
+    "annotated-text.d.ts",
+    "src/server.d.ts",
+    "src/**/*.ts",
+    "type-test/**/*.ts"
+  ],
+  "exclude": ["node_modules", "coverage", "public", "projects"]
 }

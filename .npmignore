@@ -1,0 +1,5 @@
+# Typed sources are git source-of-truth; runtime ships emitted .mjs (Node will not strip types under node_modules).
+src/**/*.ts
+!src/**/*.d.ts
+type-test/
+scripts/emit-ts.mjs

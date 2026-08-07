@@ -1,23 +1,23 @@
 const DOUBLE_RESPONSE_WARNING_CODE = 'WB_DOUBLE_RESPONSE';
 
-                                   
-                        
-                          
-                      
-                                                 
-                                                                       
-                               
- 
+export interface HttpResponseLike {
+  headersSent?: boolean;
+  writableEnded?: boolean;
+  destroyed?: boolean;
+  req?: { method?: string; url?: string } | null;
+  writeHead(status: number, headers: Record<string, unknown>): unknown;
+  end(body?: unknown): unknown;
+}
 
-export function responseHasStarted(res                  )          {
+export function responseHasStarted(res: HttpResponseLike): boolean {
   return Boolean(res.headersSent || res.writableEnded || res.destroyed);
 }
 
 export function warnLateResponse(
-  res                  ,
-  operation        ,
-  cause                  ,
-)       {
+  res: HttpResponseLike,
+  operation: string,
+  cause?: Error | unknown,
+): void {
   const req = res.req;
   const method = req?.method ?? 'UNKNOWN';
   const url = req?.url ?? 'UNKNOWN_URL';
@@ -40,31 +40,31 @@ export function warnLateResponse(
 }
 
 export function canWriteResponse(
-  res                  ,
-  operation        ,
-  cause                  ,
-)          {
+  res: HttpResponseLike,
+  operation: string,
+  cause?: Error | unknown,
+): boolean {
   if (!responseHasStarted(res)) return true;
   warnLateResponse(res, operation, cause);
   return false;
 }
 
-                                  
-                         
- 
+export interface SendJsonHeaders {
+  [key: string]: unknown;
+}
 
-                                  
-                     
-                          
- 
+export interface SendJsonOptions {
+  operation?: string;
+  cause?: Error | unknown;
+}
 
 export function sendJson(
-  res                  ,
-  status        ,
-  body         ,
-  headers                  = {},
-  options                  = {},
-)          {
+  res: HttpResponseLike,
+  status: number,
+  body: unknown,
+  headers: SendJsonHeaders = {},
+  options: SendJsonOptions = {},
+): boolean {
   if (!canWriteResponse(res, options.operation ?? 'sendJson', options.cause)) return false;
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -76,20 +76,20 @@ export function sendJson(
   return true;
 }
 
-                          
-                 
-               
- 
+interface CommittedEvent {
+  scope?: string;
+  seq?: number;
+}
 
 export function committedEventHeaders(
-  result                                                           ,
-  actionId        ,
-  scope                = null,
-)                         {
+  result: { events?: readonly CommittedEvent[] } | null | undefined,
+  actionId: string,
+  scope: string | null = null,
+): Record<string, string> {
   const events = Array.isArray(result?.events) ? result.events : [];
   const relevantEvents = scope ? events.filter((event) => event.scope === scope) : events;
   const seq = relevantEvents.reduce(
-    (max, event) => Number.isFinite(event.seq) ? Math.max(max, event.seq          ) : max,
+    (max, event) => Number.isFinite(event.seq) ? Math.max(max, event.seq as number) : max,
     -Infinity,
   );
   return {
@@ -99,10 +99,10 @@ export function committedEventHeaders(
 }
 
 export function projectedCursorHeaders(
-  cursors                                                                  ,
-)                         {
+  cursors: readonly { field: string; lastSeq: number }[] | null | undefined,
+): Record<string, string> {
   if (!cursors || cursors.length === 0) return {};
-  const headers                         = {};
+  const headers: Record<string, string> = {};
   for (const { field, lastSeq } of cursors) {
     headers[`x-workbench-projected-${field}`] = String(lastSeq);
   }

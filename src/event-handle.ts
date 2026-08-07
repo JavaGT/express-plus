@@ -4,9 +4,9 @@ export const EventKind = Object.freeze({
   removed: 'removed',
   fieldSet: 'fieldSet',
   native: 'native',
-}         );
+} as const);
 
-                                                                 
+export type EventKind = typeof EventKind[keyof typeof EventKind];
 
 const LIFECYCLE_TYPES = new Set([
   EventKind.created,
@@ -17,60 +17,60 @@ const LIFECYCLE_VERBS = Object.freeze({
   [EventKind.created]: 'create',
   [EventKind.updated]: 'update',
   [EventKind.removed]: 'remove',
-}         );
+} as const);
 
-                           
-                                 
-                          
-                     
- 
+interface EventHandleBase {
+  readonly brand: 'event-handle';
+  readonly entity: string;
+  toString(): string;
+}
 
-                                 
-                        
-                                              
-                            
-      
-                        
-                                              
-                            
-      
-                        
-                                              
-                            
-      
-                        
-                                               
-                             
-                            
-      
-                        
-                                             
-                             
-                                  
-                            
-       
+export type EventIdentityHandle =
+  | (EventHandleBase & {
+      readonly kind: typeof EventKind.created;
+      readonly type: string;
+    })
+  | (EventHandleBase & {
+      readonly kind: typeof EventKind.updated;
+      readonly type: string;
+    })
+  | (EventHandleBase & {
+      readonly kind: typeof EventKind.removed;
+      readonly type: string;
+    })
+  | (EventHandleBase & {
+      readonly kind: typeof EventKind.fieldSet;
+      readonly field: string;
+      readonly type: string;
+    })
+  | (EventHandleBase & {
+      readonly kind: typeof EventKind.native;
+      readonly field: string;
+      readonly nativeName: string;
+      readonly type: string;
+    });
 
-function assertName(label        , value         )       {
+function assertName(label: string, value: unknown): void {
   if (typeof value !== 'string' || value.length === 0 || value.includes('.')) {
     throw new Error(`${label} must be a non-empty dot-free string`);
   }
 }
 
-                       
-                 
-                  
-                 
-                      
-               
- 
-
-function freezeHandle(parts             )                      {
-  const handle                          = { brand: 'event-handle', ...parts };
-  Object.defineProperty(handle, 'toString', { value: () => handle.type });
-  return Object.freeze(handle)                                  ;
+interface HandleParts {
+  entity: string;
+  kind: EventKind;
+  field?: string;
+  nativeName?: string;
+  type: string;
 }
 
-export function created(entity        )                      {
+function freezeHandle(parts: HandleParts): EventIdentityHandle {
+  const handle: Record<string, unknown> = { brand: 'event-handle', ...parts };
+  Object.defineProperty(handle, 'toString', { value: () => handle.type });
+  return Object.freeze(handle) as unknown as EventIdentityHandle;
+}
+
+export function created(entity: string): EventIdentityHandle {
   assertName('event entity', entity);
   return freezeHandle({
     entity,
@@ -79,7 +79,7 @@ export function created(entity        )                      {
   });
 }
 
-export function updated(entity        )                      {
+export function updated(entity: string): EventIdentityHandle {
   assertName('event entity', entity);
   return freezeHandle({
     entity,
@@ -88,7 +88,7 @@ export function updated(entity        )                      {
   });
 }
 
-export function removed(entity        )                      {
+export function removed(entity: string): EventIdentityHandle {
   assertName('event entity', entity);
   return freezeHandle({
     entity,
@@ -97,7 +97,7 @@ export function removed(entity        )                      {
   });
 }
 
-export function fieldSet(entity        , field        )                      {
+export function fieldSet(entity: string, field: string): EventIdentityHandle {
   assertName('event entity', entity);
   assertName('event field', field);
   return freezeHandle({
@@ -109,10 +109,10 @@ export function fieldSet(entity        , field        )                      {
 }
 
 export function native(
-  entity        ,
-  field        ,
-  nativeName        ,
-)                      {
+  entity: string,
+  field: string,
+  nativeName: string,
+): EventIdentityHandle {
   assertName('event entity', entity);
   assertName('event field', field);
   assertName('event native name', nativeName);
@@ -126,14 +126,14 @@ export function native(
   });
 }
 
-export function parseEventType(type        )                      {
+export function parseEventType(type: string): EventIdentityHandle {
   if (typeof type !== 'string') {
     throw new Error(`event type must be a string, got ${typeof type}`);
   }
   const parts = type.split('.');
   if (parts.length === 2) {
     const [entity, kind] = parts;
-    if (LIFECYCLE_TYPES.has(kind                            )) {
+    if (LIFECYCLE_TYPES.has(kind as typeof EventKind.created)) {
       if (kind === EventKind.created) return created(entity);
       if (kind === EventKind.updated) return updated(entity);
       return removed(entity);
@@ -147,14 +147,14 @@ export function parseEventType(type        )                      {
 }
 
 export function lifecycleVerb(
-  handle                                        ,
-)                                             {
+  handle: EventIdentityHandle | undefined | null,
+): 'create' | 'update' | 'remove' | undefined {
   if (!handle || handle.brand !== 'event-handle') return undefined;
   // Native field mutations change an existing entity row just like an update.
   // Routing them through the lifecycle admission keeps field actions on the
   // same row-grant authorization path as PATCH.
   if (handle.kind === EventKind.native) return 'update';
   return LIFECYCLE_VERBS[
-    handle.kind                                                                                  
+    handle.kind as typeof EventKind.created | typeof EventKind.updated | typeof EventKind.removed
   ];
 }

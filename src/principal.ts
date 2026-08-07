@@ -18,83 +18,83 @@
 // checks (e.g. `published`), never by a flag — so it is a value here, the
 // canonical instance every unauthenticated request shares.
 
-                                                                                
+export type PrincipalType = 'user' | 'link' | 'system' | 'anonymous' | 'apiKey';
 
-                                
-                               
-                             
-                                                         
- 
+export interface PrincipalBase {
+  readonly type: PrincipalType;
+  readonly id: string | null;
+  readonly attributes: Readonly<Record<string, unknown>>;
+}
 
-                                                           
-                             
-                    
- 
+export interface AnonymousPrincipal extends PrincipalBase {
+  readonly type: 'anonymous';
+  readonly id: null;
+}
 
-                                                            
-                                                     
-                      
- 
+export interface AttributedPrincipal extends PrincipalBase {
+  readonly type: Exclude<PrincipalType, 'anonymous'>;
+  readonly id: string;
+}
 
 // A principal carries an id for every type except `anonymous` (identity-free).
-                                                                 
+export type Principal = AnonymousPrincipal | AttributedPrincipal;
 
 // A typed construction-time failure, sibling to NonCompilableError and
 // UnawaitedCheckError. Raised when a principal's declared type is outside the
 // closed union, or when a type's invariant (anonymous ⇒ id null) is violated.
 export class UnknownPrincipalTypeError extends Error {
-  constructor(message        ) {
+  constructor(message: string) {
     super(message);
     this.name = 'UnknownPrincipalTypeError';
   }
 }
 
-const PRINCIPAL_TYPES = Object.freeze(['user', 'link', 'system', 'anonymous', 'apiKey']         );
+const PRINCIPAL_TYPES = Object.freeze(['user', 'link', 'system', 'anonymous', 'apiKey'] as const);
 
-export function principalKeyOf(value         )                {
-  const candidate = value                                                       ;
+export function principalKeyOf(value: unknown): string | null {
+  const candidate = value as { type?: unknown; id?: unknown } | null | undefined;
   if (candidate?.id == null) return null;
   if (
-    !PRINCIPAL_TYPES.includes(candidate.type                                  )
+    !PRINCIPAL_TYPES.includes(candidate.type as typeof PRINCIPAL_TYPES[number])
     || typeof candidate.id !== 'string'
-    || (candidate.id          ).length === 0
+    || (candidate.id as string).length === 0
   ) {
     throw new UnknownPrincipalTypeError('an attributed principal requires a closed type and non-empty string id');
   }
   return `${String(candidate.type)}:${candidate.id}`;
 }
 
-                                   
-                                                     
-                     
-                                       
- 
+export interface PrincipalOptions {
+  type: Exclude<PrincipalType, 'anonymous' | 'user'>;
+  id?: string | null;
+  attributes?: Record<string, unknown>;
+}
 
 // Build a frozen principal from a declared shape. `attributes` defaults to an
 // empty frozen object (a link principal carries `{ token }`; a user typically
 // carries none at this layer). The id/type invariants are checked here so an
 // ill-formed principal can never reach the grant engine.
-                                     
-               
-             
-                                       
-                        
-                                    
-                    
-            
-                                       
-                       
-                                     
-                       
-                     
-                                       
-              
-export function principal({ type, id = null, attributes = {} }   
-                 
-                     
-                                       
-  = {})            {
-  if (!PRINCIPAL_TYPES.includes(type                                  )) {
+export function principal(options?: {
+  type: 'user';
+  id: string;
+  attributes?: Record<string, unknown>;
+}): AttributedPrincipal;
+export function principal(options: {
+  type: 'anonymous';
+  id?: null;
+  attributes?: Record<string, unknown>;
+}): AnonymousPrincipal;
+export function principal(options?: {
+  type?: PrincipalType;
+  id?: string | null;
+  attributes?: Record<string, unknown>;
+}): Principal;
+export function principal({ type, id = null, attributes = {} }: {
+  type?: unknown;
+  id?: string | null;
+  attributes?: Record<string, unknown>;
+} = {}): Principal {
+  if (!PRINCIPAL_TYPES.includes(type as typeof PRINCIPAL_TYPES[number])) {
     throw new UnknownPrincipalTypeError(
       `unknown principal type '${String(type)}'. The union is closed: ` +
         `${PRINCIPAL_TYPES.join(' | ')}. Domain identities are sub-accounts ` +
@@ -109,21 +109,21 @@ export function principal({ type, id = null, attributes = {} }
   }
   return Object.freeze({
     type,
-    id: id                 ,
+    id: id as string | null,
     attributes: Object.freeze({ ...attributes }),
-  })             ;
+  }) as Principal;
 }
 
 // The canonical unauthenticated principal. Every anonymous request shares this
 // frozen value; there is nothing per-request to vary (it has no identity).
-export const anonymous            = principal({ type: 'anonymous', id: null });
+export const anonymous: Principal = principal({ type: 'anonymous', id: null });
 
 // Mint a bounded system principal tagged with a source identifier. Used by the
 // scheduler/tick analogue to re-enter dispatch with a traceable system identity.
 // Fail-closed: source must be a non-empty string (Error otherwise).
 // NOTE: This uses `attributes.source` — distinct from effects which use
 // `attributes.effect` (effect-compiler.mjs:282) to avoid breaking effect tests.
-export function principalFrom(source        )            {
+export function principalFrom(source: string): Principal {
   if (typeof source !== 'string' || source === '') {
     throw new Error('principalFrom(source): source must be a non-empty string');
   }
@@ -136,13 +136,13 @@ export function principalFrom(source        )            {
 // returns false for nullish principal, non-system principal, or mismatched source.
 // Intended use inside admitsEffects:
 //   admitsEffects: ({principal}) => effectSource('Blog.publish')({principal})
-export function effectSource(source        )                                                     {
+export function effectSource(source: string): (ctx: { principal?: Principal | null }) => boolean {
   if (typeof source !== 'string' || source === '') {
     throw new Error('effectSource(source): source must be a non-empty string');
   }
   return ({ principal: p }) => {
     if (!p || typeof p !== 'object') return false;
     if (p.type !== 'system') return false;
-    return (p.attributes                           )?.effect === source;
+    return (p.attributes as Record<string, unknown>)?.effect === source;
   };
 }

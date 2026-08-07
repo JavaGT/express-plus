@@ -6,17 +6,17 @@
 //
 // Span-aware: a single seq is treated as [seq, seq]. Advance to hi on next.
 
-                                                
+export type SeqSpan = readonly [number, number];
 
-                            
-                                  
-                            
-                                                       
+export type ReplayDecision =
+  | { readonly kind: 'duplicate' }
+  | { readonly kind: 'gap' }
+  | { readonly kind: 'next'; readonly cursor: number };
 
 /** Normalize a seq or [lo, hi] span to a frozen [lo, hi] pair. */
 export function normalizeSeqSpan(
-  seqOrSpan                                               ,
-)          {
+  seqOrSpan: number | readonly [number, number] | number[],
+): SeqSpan {
   if (Array.isArray(seqOrSpan) && seqOrSpan.length >= 2) {
     const lo = Number(seqOrSpan[0]);
     const hi = Number(seqOrSpan[1]);
@@ -39,9 +39,9 @@ export function normalizeSeqSpan(
  * @param seqOrSpan - event seq or [lo, hi] span
  */
 export function decideReplay(
-  cursor        ,
-  seqOrSpan                                               ,
-)                 {
+  cursor: number,
+  seqOrSpan: number | readonly [number, number] | number[],
+): ReplayDecision {
   const [lo, hi] = normalizeSeqSpan(seqOrSpan);
   const expected = (Number(cursor) || 0) + 1;
   if (hi < expected) return { kind: 'duplicate' };

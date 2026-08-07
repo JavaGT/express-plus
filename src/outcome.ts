@@ -1,10 +1,10 @@
-                             
-                   
-            
-                    
-               
-              
-               
+export type FailureCategory =
+  | 'invalid-input'
+  | 'denied'
+  | 'unknown-action'
+  | 'not-found'
+  | 'conflict'
+  | 'internal';
 
 export const FAILURE_CATEGORIES = Object.freeze([
   'invalid-input',
@@ -13,28 +13,28 @@ export const FAILURE_CATEGORIES = Object.freeze([
   'not-found',
   'conflict',
   'internal',
-]         );
+] as const);
 
-                                   
-                                     
-                           
-                                                       
- 
+export interface WorkbenchFailure {
+  readonly category: FailureCategory;
+  readonly message: string;
+  readonly details?: Readonly<Record<string, unknown>>;
+}
 
-                                 
-                     
-                                     
- 
+export interface FailureOutcome {
+  readonly ok: false;
+  readonly failure: WorkbenchFailure;
+}
 
-const failureCategories = new Set                 (FAILURE_CATEGORIES);
+const failureCategories = new Set<FailureCategory>(FAILURE_CATEGORIES);
 
-function isPlainRecord(value         )                                   {
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
 
-function cloneJsonValue(value         , ancestors               = new Set())          {
+function cloneJsonValue(value: unknown, ancestors: Set<unknown> = new Set()): unknown {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value !== 'object' || ancestors.has(value)) {
@@ -42,11 +42,11 @@ function cloneJsonValue(value         , ancestors               = new Set())    
   }
 
   ancestors.add(value);
-  let clone         ;
+  let clone: unknown;
   if (Array.isArray(value)) {
     clone = value.map((item) => cloneJsonValue(item, ancestors));
   } else if (isPlainRecord(value)) {
-    const record                          = {};
+    const record: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
       record[key] = cloneJsonValue(item, ancestors);
     }
@@ -59,7 +59,7 @@ function cloneJsonValue(value         , ancestors               = new Set())    
   return Object.freeze(clone);
 }
 
-function isJsonRecord(value         )          {
+function isJsonRecord(value: unknown): boolean {
   if (!isPlainRecord(value)) return false;
   try {
     cloneJsonValue(value);
@@ -70,10 +70,10 @@ function isJsonRecord(value         )          {
 }
 
 export function failure(
-  category                 ,
-  message        ,
-  details                                    ,
-)                   {
+  category: FailureCategory,
+  message: string,
+  details?: Readonly<Record<string, unknown>>,
+): WorkbenchFailure {
   if (!failureCategories.has(category)) {
     throw new TypeError(`unknown failure category '${category}'`);
   }
@@ -81,43 +81,43 @@ export function failure(
     throw new TypeError('failure message must be a non-empty string');
   }
 
-  const result                                                           = { category, message };
+  const result: WorkbenchFailure & { details?: Record<string, unknown> } = { category, message };
   if (details !== undefined) {
     if (!isPlainRecord(details)) {
       throw new TypeError('failure details must be a record');
     }
-    result.details = cloneJsonValue(details)                           ;
+    result.details = cloneJsonValue(details) as Record<string, unknown>;
   }
   return Object.freeze(result);
 }
 
-export function failureOutcome(workbenchFailure                  )                 {
+export function failureOutcome(workbenchFailure: WorkbenchFailure): FailureOutcome {
   if (!isWorkbenchFailure(workbenchFailure)) {
     throw new TypeError('failureOutcome requires a WorkbenchFailure');
   }
   return Object.freeze({ ok: false, failure: workbenchFailure });
 }
 
-export function isWorkbenchFailure(value         )                            {
+export function isWorkbenchFailure(value: unknown): value is WorkbenchFailure {
   return Boolean(
     value
     && typeof value === 'object'
     && value !== null
-    && failureCategories.has((value                    ).category)
-    && typeof (value                    ).message === 'string'
-    && (value                    ).message.length > 0
-    && ((value                    ).details === undefined || isJsonRecord((value                    ).details)),
+    && failureCategories.has((value as WorkbenchFailure).category)
+    && typeof (value as WorkbenchFailure).message === 'string'
+    && (value as WorkbenchFailure).message.length > 0
+    && ((value as WorkbenchFailure).details === undefined || isJsonRecord((value as WorkbenchFailure).details)),
   );
 }
 
-export function sanitizeUnexpectedFailure(_value          )                   {
+export function sanitizeUnexpectedFailure(_value?: unknown): WorkbenchFailure {
   return failure('internal', 'Internal error.');
 }
 
 // Older kernel seams still use status-bearing errors to mark deliberate
 // validation and authorization failures. Keep their normalization here until
 // those producers emit WorkbenchFailure directly.
-const categoryByLegacyStatus = new Map                         ([
+const categoryByLegacyStatus = new Map<number, FailureCategory>([
   [400, 'invalid-input'],
   [401, 'denied'],
   [403, 'denied'],
@@ -130,25 +130,25 @@ const categoryByLegacyStatus = new Map                         ([
   [503, 'conflict'],
 ]);
 
-                       
-                   
-                    
-                 
-                    
-                             
- 
+interface StatusError {
+  status?: unknown;
+  message?: unknown;
+  code?: unknown;
+  details?: unknown;
+  failure?: WorkbenchFailure;
+}
 
-export function failureFromError(error         )                   {
+export function failureFromError(error: unknown): WorkbenchFailure {
   if (isWorkbenchFailure(error)) return error;
-  if (isWorkbenchFailure((error               )?.failure)) return (error               ).failure                    ;
+  if (isWorkbenchFailure((error as StatusError)?.failure)) return (error as StatusError).failure as WorkbenchFailure;
 
-  const e = error                                  ;
-  const legacyCategory = e && categoryByLegacyStatus.get(e.status          );
+  const e = error as StatusError | null | undefined;
+  const legacyCategory = e && categoryByLegacyStatus.get(e.status as number);
   if (legacyCategory) {
     return failure(
       legacyCategory,
       String(e?.message || 'Request failed.'),
-      e?.details                                                 ,
+      e?.details as Readonly<Record<string, unknown>> | undefined,
     );
   }
 

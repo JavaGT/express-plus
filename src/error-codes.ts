@@ -1,8 +1,8 @@
-                              
-                        
-                          
-                           
-  
+export type ErrorCodeEntry = {
+  readonly code: string;
+  readonly status: number;
+  readonly message: string;
+};
 
 export const ERROR_CODES = Object.freeze({
   'auth.denied.grant':       Object.freeze({ code: 'auth.denied.grant',       status: 403, message: 'Principal lacks required grant.' }),
@@ -19,12 +19,12 @@ export const ERROR_CODES = Object.freeze({
   'position-no-longer-visible':   Object.freeze({ code: 'position-no-longer-visible',   status: 409, message: 'Position is no longer visible.' }),
   'position-invalid':            Object.freeze({ code: 'position-invalid',            status: 400, message: 'Position is invalid.' }),
   'authoring-stream-capacity':   Object.freeze({ code: 'authoring-stream-capacity',   status: 409, message: 'Authoring stream capacity exceeded.' }),
-}         );
+} as const);
 
-                                             
+type ErrorCodeKey = keyof typeof ERROR_CODES;
 
-export function errorCode(code                       )                 {
-  const entry = (ERROR_CODES                                            )[code];
+export function errorCode(code: ErrorCodeKey | string): ErrorCodeEntry {
+  const entry = (ERROR_CODES as Readonly<Record<string, ErrorCodeEntry>>)[code];
   if (!entry) throw new TypeError(`unknown error code '${code}'`);
   return entry;
 }

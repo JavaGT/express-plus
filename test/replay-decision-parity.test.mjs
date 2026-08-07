@@ -9,7 +9,8 @@ import { decideReplay, normalizeSeqSpan } from '../src/replay-decision.mjs';
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 test('workbench-client embeds the same replay-decision body as src', () => {
-  const src = readFileSync(join(root, 'src/replay-decision.mjs'), 'utf8');
+  // Typed source is authoritative; emitted .mjs is the Node runtime sibling.
+  const src = readFileSync(join(root, 'src/replay-decision.ts'), 'utf8');
   const client = readFileSync(join(root, 'public/workbench-client.mjs'), 'utf8');
 
   // Extract the pure function bodies from the source module (strip exports).
@@ -18,8 +19,8 @@ test('workbench-client embeds the same replay-decision body as src', () => {
     .replace(/export /g, '')
     .trim();
   // The client must contain the GENERATED block markers and the core predicates.
-  assert.match(client, /BEGIN GENERATED from src\/replay-decision\.mjs/);
-  assert.match(client, /END GENERATED from src\/replay-decision\.mjs/);
+  assert.match(client, /BEGIN GENERATED from src\/replay-decision\.ts/);
+  assert.match(client, /END GENERATED from src\/replay-decision\.ts/);
   assert.match(client, /function decideReplay\(cursor, seqOrSpan\)/);
   assert.match(client, /function normalizeSeqSpan\(seqOrSpan\)/);
   // Load-bearing predicates must match the source module verbatim.

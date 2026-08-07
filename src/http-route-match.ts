@@ -1,20 +1,20 @@
-                                                 
+export type RouteParams = Record<string, string>;
 
-                                  
-                 
-               
-                         
- 
+export interface RouteDefinition {
+  method: string;
+  path: string;
+  [key: string]: unknown;
+}
 
-                        
-                                                   
-                                                        
+export type RouteMatch =
+  | { route: RouteDefinition; params: RouteParams }
+  | { route: null; params: null; pathMatched: boolean };
 
-function matchPath(template        , actual        )                     {
+function matchPath(template: string, actual: string): RouteParams | null {
   const t = template.split('/').filter(Boolean);
   const a = actual.split('/').filter(Boolean);
   if (t.length !== a.length) return null;
-  const params              = {};
+  const params: RouteParams = {};
   for (let i = 0; i < t.length; i += 1) {
     if (t[i].startsWith(':')) {
       params[t[i].slice(1)] = decodeURIComponent(a[i]);
@@ -25,23 +25,23 @@ function matchPath(template        , actual        )                     {
   return params;
 }
 
-function specificity(template        )         {
+function specificity(template: string): number {
   return template.split('/').filter((s) => s && !s.startsWith(':')).length;
 }
 
-                       
-                         
-                      
-                
- 
+interface ScoredMatch {
+  route: RouteDefinition;
+  params: RouteParams;
+  score: number;
+}
 
 export function matchRoute(
-  routes                            ,
-  method        ,
-  pathname        ,
-)             {
+  routes: readonly RouteDefinition[],
+  method: string,
+  pathname: string,
+): RouteMatch {
   let pathMatched = false;
-  let best                     = null;
+  let best: ScoredMatch | null = null;
   for (const route of routes) {
     const params = matchPath(route.path, pathname);
     if (params === null) continue;

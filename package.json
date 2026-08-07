@@ -24,8 +24,9 @@
 		}
 	},
 	"scripts": {
+		"emit:ts": "node --disable-warning=ExperimentalWarning scripts/emit-ts.mjs",
 		"lint": "eslint .",
-		"test": "node scripts/run-tests.mjs",
+		"test": "pnpm emit:ts && node scripts/run-tests.mjs",
 		"test:playwright": "playwright test",
 		"test:coverage": "node scripts/check-coverage.mjs 0",
 		"typecheck": "tsc --noEmit",
