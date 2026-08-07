@@ -156,7 +156,7 @@ async function admitTextRangeApply(ctx) {
   try {
     plan = planTextRangeApply({
       documentId: command.id, structureVersion: state.structure_version, family,
-      annotation: { id: edit.annotation.id, family: edit.annotation.family, empty: familyMeta.empty, fields: edit.annotation.fields ?? {}, protectedTargetIds: [] },
+      annotation: { id: edit.annotation.id, family: edit.annotation.family, empty: familyMeta.empty, fields: edit.annotation.fields ?? {}, protectedTargetIds: Array.isArray(edit.annotation?.protectedTargetIds) ? [...edit.annotation.protectedTargetIds].sort() : [] },
       from: { offset: edit.from.offset, affinity: edit.from.affinity },
       to: { offset: edit.to.offset, affinity: edit.to.affinity },
       ranges, actorId: ctx.principal?.id ?? '',

@@ -16,14 +16,8 @@ import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } 
 import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument } from './workbench-annotated-text-snapshot.mjs';
+import { applyTextOperation, materializeText as materializeFamilyText, restoreTextFamily, textFamilyCheckpoint } from './workbench-annotated-text-continuous.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
-import { displayToWirePosition } from './workbench-annotated-text-redaction-coords.mjs';
-import {
-  applyTextOperationToBlock,
-  restoreTextFamilyCheckpoint,
-  textFamilyCheckpoint,
-  materializeBlock,
-} from './workbench-annotated-text-family.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
 export { materializeAnnotatedTextSnapshot };
 
@@ -3280,8 +3274,6 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   } catch {
     authoringClient = randomToken();
   }
-  const blockGroupTokens = new WeakMap();
-  const pendingActionPositionBlocks = new Map();
   const deferredAuthoringAcknowledgements = new Map();
   let authoringMutationTail = null;
   let sessionClosed = false;
@@ -3290,9 +3282,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   // Annotated-text family checkpoint is session-private. Snapshots replace it;
   // fold envelopes advance it. It is not a text.crdt reducer seed.
   let familyCheckpoint = null;
-  const snapshotBinding = createAnnotatedTextSnapshotSessionBinding((handle, serverId, generation) => {
-    blockGroupTokens.set(handle, { serverId, generation });
-  });
+  const snapshotBinding = createAnnotatedTextSnapshotSessionBinding();
   const requestIdentity = { entity: entity.name, field: field.fieldName, documentId, authoringClient };
   if (typeof context.viewAs === 'string' && context.viewAs.length > 0) requestIdentity.viewAs = context.viewAs;
 
@@ -3300,81 +3290,52 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     if (!foldAuthoring || foldAuthoring.acknowledgementFence !== fence) {
       throw new Error('annotated text fold authoring fence mismatch');
     }
-    const positionTokens = new Map();
-    for (const entry of foldAuthoring.positionBlocks ?? []) {
-      if (!entry || typeof entry.blockId !== 'string' || typeof entry.positionToken !== 'string') {
-        throw new Error('annotated text fold position block is invalid');
-      }
-      positionTokens.set(entry.blockId, entry.positionToken);
+    const positionFrames = foldAuthoring.positionFrames;
+    if (!Array.isArray(positionFrames) || positionFrames.length === 0
+      || !positionFrames[0] || typeof positionFrames[0].positionToken !== 'string') {
+      throw new Error('annotated text fold position frame is invalid');
     }
-    if (foldAuthoring.stream && foldAuthoring.lease && foldAuthoring.snapshot) {
-      snapshotBinding.authoring = Object.freeze({
-        stream: foldAuthoring.stream,
-        lease: foldAuthoring.lease,
-        snapshot: foldAuthoring.snapshot,
-        acknowledgementFence: fence,
-        // A fold refreshes only the changed block's token. Merge so tokens for
-        // untouched blocks (issued by the snapshot) survive; the fold's entries
-        // win for blocks it did change.
-        positionTokens: new Map([...(snapshotBinding.authoring?.positionTokens ?? []), ...positionTokens]),
-        groupTokens: snapshotBinding.authoring?.groupTokens ?? new Map(),
-        splitResolutions: Object.freeze([]),
-      });
-    } else if (snapshotBinding.authoring) {
-      snapshotBinding.authoring = Object.freeze({
-        ...snapshotBinding.authoring,
-        acknowledgementFence: fence,
-        positionTokens: positionTokens.size ? positionTokens : snapshotBinding.authoring.positionTokens,
-      });
-    }
+    snapshotBinding.authoring = Object.freeze({
+      stream: foldAuthoring.stream,
+      lease: foldAuthoring.lease,
+      snapshot: foldAuthoring.snapshot,
+      acknowledgementFence: fence,
+      // A fold refreshes the one document-scoped position token; the binding is
+      // rebuilt fresh so stale block-era group/split state never survives.
+      documentPositionToken: positionFrames[0].positionToken,
+      groupTokens: new Map(),
+      splitResolutions: Object.freeze([]),
+    });
   }
 
   function foldAnnotatedTextDocument(currentDocument, envelope) {
     const startedAt = onFoldApplied ? performance.now() : 0;
     const fold = envelope?.fold;
-    if (!fold || fold.kind !== 'annotatedText' || fold.version !== 2 || fold.field !== field.fieldName) {
+    if (!fold || fold.kind !== 'annotatedText' || fold.version !== 3 || fold.field !== field.fieldName) {
       throw new Error('annotated text fold envelope is missing or unsupported');
     }
     const fence = envelope.seq ?? envelope.seqSpan?.[1];
     if (fold.fence !== fence || fold.authoring?.acknowledgementFence !== fence) {
       throw new Error('annotated text fold fence mismatch');
     }
-    // baseCursor must equal the client's accepted cursor before folding. The
-    // generic session applies decideReplay first; the envelope still names the
-    // expected predecessor so a mis-built payload cannot half-apply.
-    if (!Number.isSafeInteger(fold.baseCursor) || fold.baseCursor < 0) {
-      throw new Error('annotated text fold baseCursor is invalid');
-    }
     if (fold.text?.reducer !== 'workbench.text' || !Array.isArray(fold.text.operations) || fold.text.operations.length === 0) {
       throw new Error('annotated text fold text operations are invalid');
     }
-    if (!fold.projection || !Array.isArray(fold.projection.changedBlocks) || !Array.isArray(fold.projection.removedBlockIds)) {
+    if (!fold.projection || typeof fold.projection.text !== 'string') {
       throw new Error('annotated text fold projection is invalid');
     }
-    if (fold.projection.removedBlockIds.length) {
-      throw new Error('annotated text fold structural removal requires snapshot recovery');
-    }
-
-    // The family seed comes from the snapshot's authoring envelope (unredacted
-    // recipients). A fold against no seeded checkpoint cannot verify the
-    // transition; fail closed so the session recovers with a fresh snapshot.
+    // The family seed comes from the snapshot's authoring envelope (fully
+    // unredacted recipients). A fold against no seeded checkpoint cannot verify
+    // the transition; fail closed so the session recovers with a fresh snapshot.
     if (!familyCheckpoint) {
       throw new Error('annotated text fold requires a family checkpoint seeded by the snapshot');
     }
-    let family = restoreTextFamilyCheckpoint(familyCheckpoint);
+    let family = restoreTextFamily(familyCheckpoint);
     for (const operation of fold.text.operations) {
-      const blockId = fold.projection.changedBlocks[0]?.id;
-      if (typeof blockId !== 'string') throw new Error('annotated text fold changed block is missing');
-      family = applyTextOperationToBlock(family, blockId, operation);
+      family = applyTextOperation(family, operation);
     }
-
-    for (const changed of fold.projection.changedBlocks) {
-      if (!changed || typeof changed.id !== 'string' || typeof changed.text !== 'string') {
-        throw new Error('annotated text fold changed block is invalid');
-      }
-      if (materializeBlock(family, changed.id) !== changed.text) {
-        throw new Error('annotated text fold projection disagrees with family');
-      }
+    if (materializeFamilyText(family) !== fold.projection.text) {
+      throw new Error('annotated text fold projection disagrees with family');
     }
     // Cheap whole-document cross-check without serializing the family: the
     // post-apply RGA element count must match the server's.
@@ -3382,21 +3343,10 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       && Object.keys(family.checkpoint.elements).length !== fold.familyElementCount) {
       throw new Error('annotated text fold family element count disagrees');
     }
-
-    const changedById = new Map(fold.projection.changedBlocks.map((entry) => [entry.id, entry.text]));
-    const blocks = currentDocument.blocks.map((block) => {
-      if (!changedById.has(block.id)) return block;
-      if (block.kind !== 'visible') throw new Error('annotated text fold cannot update a non-visible block');
-      return Object.freeze({ ...block, text: changedById.get(block.id) });
-    });
-    if (changedById.size && blocks.every((block) => !changedById.has(block.id))) {
-      throw new Error('annotated text fold changed block is absent from document');
-    }
-
     familyCheckpoint = textFamilyCheckpoint(family);
     installAuthoringFromFold(fold.authoring, fence);
     if (onFoldApplied) onFoldApplied(fold, performance.now() - startedAt);
-    return Object.freeze({ ...currentDocument, blocks: Object.freeze(blocks) });
+    return Object.freeze({ ...currentDocument, text: fold.projection.text });
   }
 
   const session = createLiveDeliveryHttpSession({
@@ -3414,26 +3364,34 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     onRecoveryDelayed,
     fold: foldAnnotatedTextDocument,
     optimistic(document, action) {
-      const positionBlocks = new Map();
-      const bound = pendingActionPositionBlocks.get(action.payload?.authoring?.mutationId);
-      if (bound) {
-        for (const [blockId, positionToken] of bound) positionBlocks.set(positionToken, blockId);
-      } else {
-        for (const [blockId, positionToken] of snapshotBinding.authoring?.positionTokens ?? []) positionBlocks.set(positionToken, blockId);
-      }
-      return projectPendingAnnotatedTextDocument(document, action, positionBlocks);
+      // Blockless: the document is ONE text and the action carries absolute
+      // offsets; the text-splice projection needs no block mapping.
+      return projectPendingAnnotatedTextDocument(document, action, null);
     },
     serializeAction(action) {
-      return action.payload?.edit?.kind === 'text.insert' || action.payload?.edit?.kind === 'text.delete';
+      return action.payload?.edit?.kind === 'text.insert'
+        || action.payload?.edit?.kind === 'text.delete'
+        || action.payload?.edit?.kind === 'text.replace';
     },
     validateSnapshot(snapshot, delivery) {
       if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) throw new Error('annotated text delivery snapshot must be an object');
       const authoring = delivery?.authoring;
       if (!authoring || authoring.acknowledgementFence !== delivery.cursor) throw new Error('annotated text delivery authoring envelope is invalid');
-      // A later snapshot wins over prior folds. For fully-unredacted recipients
-      // the authoring envelope carries the canonical family checkpoint; seed
-      // the fold reducer from it so subsequent folds apply against the client's
-      // own copy instead of re-shipping the whole family per keystroke.
+      const documentPositionToken = authoring.positionFrames?.[0]?.positionToken;
+      if (!documentPositionToken || typeof documentPositionToken !== 'string') throw new Error('annotated text delivery authoring position token is invalid');
+      snapshotBinding.authoring = Object.freeze({
+        stream: authoring.stream,
+        lease: authoring.lease,
+        snapshot: authoring.snapshot,
+        acknowledgementFence: authoring.acknowledgementFence,
+        documentPositionToken,
+        groupTokens: new Map(),
+        splitResolutions: Object.freeze([]),
+      });
+      // For fully-unredacted recipients the authoring envelope carries the
+      // canonical family checkpoint; seed the fold reducer from it so
+      // subsequent folds apply against the client's own copy instead of
+      // re-shipping the whole family per keystroke.
       familyCheckpoint = authoring.family ?? null;
       const result = materializeAnnotatedTextSnapshot({ ...snapshot[field?.fieldName], authoring }, field, snapshotBinding);
       return result;
@@ -3462,41 +3420,24 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   });
   function capturedBlocks(command) {
     const document = session.snapshot;
-    const blockIds = [command.at?.blockId, command.from?.blockId, command.to?.blockId,
-      command.leftBlockId, command.rightBlockId, command.blockId].filter((id) => typeof id === 'string');
-    const blocks = new Map();
-    for (const blockId of blockIds) {
-      const block = document?.blocks?.find((candidate) => candidate.kind === 'visible' && candidate.id === blockId);
-      if (!block) throw new ClientClosedError('Annotated text document is unavailable');
-      blocks.set(blockId, block.text);
-    }
-    for (const position of [command.at, command.from, command.to]) {
-      if (position && (!Number.isSafeInteger(position.offset) || position.offset < 0
-        || position.offset > blocks.get(position.blockId)?.length)) {
-        throw new TypeError('annotated text position is outside the current document');
-      }
-    }
-    return blocks;
-  }
-  function wirePosition(value) {
-    const block = session.snapshot?.blocks?.find((candidate) => candidate.kind === 'visible' && candidate.id === value?.blockId);
-    if (!block || !Number.isSafeInteger(value.offset) || value.offset < 0 || value.offset > block.text.length) throw new TypeError('annotated text position is outside the current document');
-    return displayToWirePosition(value, block.redactions ?? []);
+    // Blockless: the whole document is ONE text. Capture the CURRENT
+    // (optimistic) text so the submit check can detect a foreign change that
+    // appeared after capture.
+    void command;
+    return new Map([['document', document?.text ?? '']]);
   }
   function sameCapturedBlocks(blocks) {
-    return [...blocks].every(([blockId, text]) => session.snapshot?.blocks?.some(
-      (block) => block.kind === 'visible' && block.id === blockId && block.text === text,
-    ));
+    return blocks.get('document') === session.snapshot?.text;
   }
   function rebaseQueuedInsertion(command, blocks) {
-    if (command.kind !== 'text.insert' || !command.at || blocks.size !== 1) return null;
-    const [blockId, before] = [...blocks][0];
-    const block = session.snapshot?.blocks?.find((candidate) => candidate.kind === 'visible' && candidate.id === blockId);
-    if (!block) return null;
-    const prefix = before.slice(0, command.at.offset);
-    const suffix = before.slice(command.at.offset);
-    if (!block.text.startsWith(prefix) || !block.text.endsWith(suffix)) return null;
-    return { ...command, at: { ...command.at, offset: block.text.length - suffix.length } };
+    // A single foreign edit elsewhere shifts the absolute offset by the net
+    // text-length delta. Conservative: only applies to text.insert.
+    if (command.kind !== 'text.insert' || !command.at || !blocks.has('document')) return null;
+    const before = blocks.get('document');
+    const after = session.snapshot?.text ?? before;
+    const delta = after.length - before.length;
+    const offset = Math.max(0, Math.min(after.length, command.at.offset + delta));
+    return { ...command, at: { ...command.at, offset } };
   }
   function localAuthoringConflict() {
     return { ok: false, failure: new Error('annotated text changed before queued operation could be submitted') };
@@ -3540,122 +3481,30 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   async function dispatchNow(command) {
     if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
     const tokenAt = (value) => {
-      if (!value || typeof value !== 'object' || typeof value.blockId !== 'string') throw new TypeError('annotated text position is invalid');
-      const positionToken = snapshotBinding.authoring.positionTokens.get(value.blockId);
-      if (!positionToken) throw new TypeError('annotated text position is unavailable');
+      if (!value || typeof value !== 'object' || !Number.isSafeInteger(value.offset) || value.offset < 0) throw new TypeError('annotated text position is invalid');
       if (value.affinity !== 'left' && value.affinity !== 'right') throw new TypeError('annotated text position requires an affinity');
-      const translated = wirePosition(value);
-      return { positionToken, offset: translated.offset, affinity: translated.affinity };
+      return { positionToken: snapshotBinding.authoring.documentPositionToken, offset: value.offset, affinity: value.affinity };
     };
-    const temporaryBlock = command.kind === 'block.split' || command.kind === 'block.continue' || command.kind === 'block.split-and-assign'
-      ? randomToken() : undefined;
+    if (command.kind === 'block.split' || command.kind === 'block.merge' || command.kind === 'block.continue'
+      || command.kind === 'block.split-and-assign' || command.kind === 'annotation.detach'
+      || command.kind === 'block-group.assignment.set' || command.kind === 'block-group.assignment.clear') {
+      throw new Error('annotated-text: block-era command is not supported (issue #33)');
+    }
     const translated = { ...command, id: documentId, authoring: { version: 1, stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease, mutationId: command.mutationId ?? randomToken() } };
-    const pendingPositionBlocks = new Map(snapshotBinding.authoring.positionTokens.entries());
     if (command.at) translated.at = tokenAt(command.at);
     if (command.from) translated.from = tokenAt(command.from);
     if (command.to) translated.to = tokenAt(command.to);
-    if (command.kind === 'block.merge') {
-      translated.leftPositionToken = tokenAt({ blockId: command.leftBlockId, offset: 0, affinity: 'left' }).positionToken;
-      translated.rightPositionToken = tokenAt({ blockId: command.rightBlockId, offset: 0, affinity: 'left' }).positionToken;
-      delete translated.leftBlockId;
-      delete translated.rightBlockId;
-    }
-    if (command.kind === 'annotation.detach') {
-      translated.positionToken = tokenAt({ blockId: command.blockId, offset: 0, affinity: 'left' }).positionToken;
-      delete translated.blockId;
-    }
-    if (temporaryBlock) translated.temporaryBlock = temporaryBlock;
     const action = annotatedTextAction(entity, field, translated);
-    pendingActionPositionBlocks.set(action.payload.authoring.mutationId, pendingPositionBlocks);
     translatedActions += 1;
     try {
-      const result = await session.dispatch(action.type, action.payload);
-      if (result.status === 'failed-rolled-back') {
-        pendingActionPositionBlocks.delete(action.payload.authoring.mutationId);
-      } else if (result.settlement?.wait) {
-        void result.settlement.wait().finally(() => {
-          pendingActionPositionBlocks.delete(action.payload.authoring.mutationId);
-        });
-      }
-      return result;
-    } catch (error) {
-      pendingActionPositionBlocks.delete(action.payload.authoring.mutationId);
-      throw error;
+      return await session.dispatch(action.type, action.payload);
     } finally {
       translatedActions -= 1;
       flushAuthoringAcknowledgements();
     }
-  }
-  async function replaceNow({ mutationId = randomToken(), from, to, text }) {
-    if (typeof text !== 'string') throw new TypeError('annotated text replacement text must be a string');
-    if (!session.snapshot || !snapshotBinding.authoring) throw new ClientClosedError('Annotated text document is unavailable');
-    const positionToken = snapshotBinding.authoring.positionTokens.get(from?.blockId);
-    if (!positionToken || from.blockId !== to?.blockId) throw new TypeError('annotated text replacement requires one available block');
-    const authoring = { version: 1, stream: snapshotBinding.authoring.stream, lease: snapshotBinding.authoring.lease };
-    const pendingPositionBlocks = new Map(snapshotBinding.authoring.positionTokens.entries());
-    const position = (value) => {
-      const translated = wirePosition(value);
-      return { positionToken, offset: translated.offset, affinity: translated.affinity };
-    };
-    const actions = from.offset !== to.offset && text ? [annotatedTextAction(entity, field, { kind: 'text.replace', id: documentId, authoring: { ...authoring, mutationId }, from: position(from), to: position(to), text })]
-      : from.offset !== to.offset ? [annotatedTextAction(entity, field, { kind: 'text.delete', id: documentId, authoring: { ...authoring, mutationId }, from: position(from), to: position(to) })]
-        : text ? [annotatedTextAction(entity, field, { kind: 'text.insert', id: documentId, authoring: { ...authoring, mutationId }, at: position(from), text })] : [];
-    if (actions.length === 0) return null;
-    for (const action of actions) pendingActionPositionBlocks.set(action.payload.authoring.mutationId, pendingPositionBlocks);
-    const mutationIds = actions.map((action) => action.payload.authoring.mutationId);
-    const clearPendingPositions = () => {
-      for (const pendingMutationId of mutationIds) pendingActionPositionBlocks.delete(pendingMutationId);
-    };
-    translatedActions += 1;
-    try {
-      const result = await session.dispatch(actions[0].type, actions[0].payload);
-      if (result.status === 'failed-rolled-back') {
-        clearPendingPositions();
-      } else if (result.settlement?.wait) {
-        void result.settlement.wait().finally(clearPendingPositions);
-      }
-      return result;
-    } catch (error) {
-      clearPendingPositions();
-      throw error;
-    } finally {
-      translatedActions -= 1;
-      flushAuthoringAcknowledgements();
-    }
-  }
-  function resolveBlockGroup(handle) {
-    if (!handle || typeof handle !== 'object' || Array.isArray(handle)) {
-      throw new TypeError('annotated text block-group selection requires an opaque block-group handle');
-    }
-    const current = session.snapshot;
-    if (!current) throw new ClientClosedError('Annotated text document is unavailable');
-    const entry = blockGroupTokens.get(handle);
-    if (!entry || entry.generation !== snapshotBinding.generation || snapshotBinding.document !== current) {
-      throw new TypeError('annotated text block-group handle is stale, foreign, or forged');
-    }
-    return entry.serverId;
-  }
-  function resolveBlockGroupSelection(value) {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) {
-      throw new TypeError('annotated text block-group selection must be an object');
-    }
-    const keys = Reflect.ownKeys(value);
-    if (value.kind === 'one' && keys.length === 2 && Object.hasOwn(value, 'kind') && Object.hasOwn(value, 'blockGroup')) {
-      return { kind: 'one', groupToken: resolveBlockGroup(value.blockGroup) };
-    }
-    if ((value.kind === 'consecutive' || value.kind === 'listed') && keys.length === 2
-      && Object.hasOwn(value, 'kind') && Object.hasOwn(value, 'blockGroups')
-      && Array.isArray(value.blockGroups) && value.blockGroups.length > 0) {
-      const groupTokens = value.blockGroups.map(resolveBlockGroup);
-      if (new Set(groupTokens).size !== groupTokens.length) {
-        throw new TypeError('annotated text block-group selection must not contain duplicates');
-      }
-      return { kind: value.kind, groupTokens };
-    }
-    throw new TypeError('annotated text block-group selection must be one, consecutive, or listed with exact keys');
   }
   return Object.freeze({
-    get document() { return session.snapshot; },
+    get document() { return annotatedDocumentView(session.snapshot); },
     get history() { return session.history; },
     get status() { return session.status; },
     get ready() { return session.ready; },
@@ -3668,58 +3517,75 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     replace(input) {
-      const command = { kind: input?.text ? 'text.replace' : 'text.delete', mutationId: input?.mutationId, from: input?.from, to: input?.to, text: input?.text };
-      return queueAuthoringMutation(command, () => replaceNow(input));
-    },
-    split({ mutationId, at }) {
-      const command = { kind: 'block.split', mutationId, at };
-      return queueAuthoringMutation(command, (current) => dispatchNow(current));
-    },
-    merge({ mutationId, leftBlockId, rightBlockId }) {
-      const command = { kind: 'block.merge', mutationId, leftBlockId, rightBlockId };
+      if (!input || typeof input !== 'object') return { ok: false, failure: new TypeError('annotated text replace requires from, to, and text') };
+      const command = {
+        kind: input?.text ? 'text.replace' : 'text.delete',
+        mutationId: input?.mutationId,
+        from: input?.from,
+        to: input?.to,
+        ...(input?.text ? { text: input.text } : {}),
+      };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     applyAnnotation({ mutationId, annotation, from, to }) {
       const command = { kind: 'annotation.apply', mutationId, annotation, from, to };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
-    detachAnnotation({ mutationId, annotationId, blockId }) {
-      const command = { kind: 'annotation.detach', mutationId, annotationId, blockId };
-      return queueAuthoringMutation(command, (current) => dispatchNow(current));
-    },
     removeAnnotation({ mutationId, annotationId }) {
       const command = { kind: 'annotation.remove', mutationId, annotationId };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
-    continueBlock({ mutationId, at }) {
-      const command = { kind: 'block.continue', mutationId, at };
-      return queueAuthoringMutation(command, (current) => dispatchNow(current));
-    },
-    setBlockGroupAssignment({ mutationId, selection, annotation }) {
-      return queueAuthoringMutation({}, () => dispatchNow({
-        kind: 'block-group.assignment.set', mutationId, selection: resolveBlockGroupSelection(selection), annotation,
-      }));
-    },
-    clearBlockGroupAssignment({ mutationId, selection, family }) {
-      return queueAuthoringMutation({}, () => dispatchNow({
-        kind: 'block-group.assignment.clear', mutationId, selection: resolveBlockGroupSelection(selection), family,
-      }));
-    },
-    splitAndAssign({ mutationId, at, annotation }) {
-      const command = { kind: 'block.split-and-assign', mutationId, at, annotation };
-      return queueAuthoringMutation(command, (current) => dispatchNow(current));
-    },
+    split() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
+    merge() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
+    detachAnnotation() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
+    continueBlock() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
+    setBlockGroupAssignment() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
+    clearBlockGroupAssignment() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
+    splitAndAssign() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
     reconnect: () => session.reconnect(),
     subscribe: (listener) => session.subscribe(listener),
     close: () => {
       sessionClosed = true;
       wakeAuthoringMutation?.();
       wakeAuthoringMutation = null;
-      pendingActionPositionBlocks.clear();
       revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
       session.close();
     },
   });
+}
+
+function annotatedDocumentView(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return snapshot;
+  return {
+    kind: snapshot.kind,
+    version: snapshot.version,
+    get text() { return snapshot.text; },
+    ranges: snapshot.ranges,
+    annotations: snapshot.annotations,
+    orphans: snapshot.orphans,
+    measurements: snapshot.measurements,
+    ...(snapshot.restricted ? { restricted: true } : {}),
+    ...(snapshot.redactions?.length ? { redactions: snapshot.redactions } : {}),
+    // Legacy single-block view so block-era callers and the editor keep working.
+    get blocks() {
+      return [Object.freeze({
+        id: 'b',
+        kind: 'visible',
+        text: snapshot.text,
+        redactions: snapshot.redactions ?? [],
+        annotationIds: snapshot.ranges.map((range) => range.annotationId),
+      })];
+    },
+    get memberships() {
+      return snapshot.ranges.map((range, index) => ({
+        annotationId: range.annotationId,
+        blockId: 'b',
+        ordinal: index,
+        start: range.start,
+        end: range.end,
+      }));
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
