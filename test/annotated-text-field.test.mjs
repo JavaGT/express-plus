@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 
-import { annotatedText, annotatedTextClientHandle, text, boolean, number, ref, date, json, annotation, protectingAnnotation, measurement, annotationAction, grant, read } from '../src/index.mjs';
+import { annotatedText, annotatedTextClientHandle, text, number, ref, annotation, protectingAnnotation, measurement, annotationAction, grant, read } from '../src/index.mjs';
 import { entity, generateDDL } from '../src/internal.mjs';
 import { validateAnnotatedTextDeclaration, annotatedTextDDL, getAnnotatedTextCompiledMetadata, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, resolveDeclarationMeasurementExtension } from '../src/annotated-text-field.mjs';
 
@@ -83,11 +83,6 @@ test('annotatedTextClientHandle derives browser metadata from the compiled entit
 });
 
 test('valid entity declaration with annotatedText, owner/project refs', () => {
-  const annotations = [
-    annotation('highlight', { fields: { col1: Object.freeze({ kind: 'value', type: 'text' }) } }),
-    annotation('tag', { fields: { col2: Object.freeze({ kind: 'value', type: 'text' }) } }),
-  ];
-  const measurements = [measurement('audio', { extension: 'testFieldExt', formatVersion: 1 }), measurement('sentiment', { extension: 'testFieldExt', formatVersion: 2 })];
   const descriptor = fd(null, { highlight: { col1: Object.freeze({ kind: 'value', type: 'text' }) }, tag: { col2: Object.freeze({ kind: 'value', type: 'text' }) } }, { audio: { formatVersion: 1 }, sentiment: { formatVersion: 2 } });
   const fields = makeFields();
   const result = validateAnnotatedTextDeclaration('Doc', 'body', descriptor, fields);
