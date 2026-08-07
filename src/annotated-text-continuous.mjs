@@ -101,16 +101,16 @@ function endpointVirtualPosition(family, endpoint) {
   const anchorIdx = order.findIndex(([key]) => key === anchorKey);
   if (anchorIdx === -1) fail('anchor element not found in checkpoint');
 
-  if (affinity === 'left') return anchorIdx + 1;
-
-  for (let i = anchorIdx + 1; i < order.length; i += 1) {
-    const [, element] = order[i];
-    if (element.parent === anchorKey && frontierDominates(basis, [[...element.op]])) return i;
-  }
-  // No basis-known child: the boundary sits right after the anchor's own scalar
-  // (before any following sibling, old or new). It must NOT fall through to
-  // document end — that would silently move the boundary past unrelated text.
-  return anchorIdx + 1;
+  // Clean boundary semantics for the continuous model:
+  //   [element, left]  = the boundary BEFORE element K       (index of K)
+  //   [element, right] = the boundary AFTER element K's own
+  //                      scalar, BEFORE its children (old or
+  //                      new)                                (index of K + 1)
+  // This keeps historical endpoints STABLE: a new child inserted at the
+  // boundary always lands after a right-affinity boundary (it joins the
+  // following region) regardless of lamport ordering, and never moves the
+  // boundary across unrelated text.
+  return affinity === 'left' ? anchorIdx : anchorIdx + 1;
 }
 
 function assertDominatingBasis(family, endpoint, label) {

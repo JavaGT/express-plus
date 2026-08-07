@@ -136,21 +136,18 @@ test('a zero-width range is accepted and reported empty', () => {
   assert.equal(rangeIsEmpty(family, range), true);
 });
 
-test('a zero-width orphan range stays zero-width when text is re-inserted at its exact boundary', () => {
+test('a zero-width orphan range re-opens when text is re-inserted at its boundary', () => {
   let family = familyWith('hello world');
   const range = rangeAt(family, 5, 11, 'a1'); // ' world'
   const del = textOperationForOffsetEdit(family, { kind: 'text.delete', from: { offset: 5, affinity: 'left' }, to: { offset: 11, affinity: 'right' } }, editActor(), 2);
   family = applyTextOperation(family, del);
   assert.equal(rangeIsEmpty(family, range), true);
-  // Re-insert at the orphan's position. With historical-basis endpoints the new
-  // elements are not part of the orphan's basis, so they do NOT join the range.
-  // OPEN QUESTION (issue #33): affinity-aware boundary inclusion is required for
-  // the 'orphan' policy to actually re-open at an exact boundary; until then the
-  // conservative behavior (range stays zero-width) is the safe default.
+  // The orphan boundary `[o, right]` is defined AFTER the anchor's scalar, so a
+  // re-insert at that position becomes the anchor's child and re-opens the range.
   const insert = textOperationForOffsetEdit(family, { kind: 'text.insert', at: { offset: 5, affinity: 'right' }, text: 'XY' }, editActor(), 3);
   family = applyTextOperation(family, insert);
   assert.equal(materializeText(family), 'helloXY');
-  assert.equal(rangeText(family, range), '');
-  assert.equal(rangeIsEmpty(family, range), true);
+  assert.equal(rangeText(family, range), 'XY');
+  assert.equal(rangeIsEmpty(family, range), false);
   void projectEndpointToOffset;
 });

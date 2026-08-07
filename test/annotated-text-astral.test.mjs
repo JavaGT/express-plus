@@ -71,6 +71,14 @@ test('insert before and after an astral scalar lands on the right side', () => {
   assert.equal(materializeText(family), 'AX😀YB');
 });
 
+test('an offset that splits a surrogate pair is rejected', () => {
+  const family = seed(createTextFamily('d1', textCheckpoint(createTextState())), 'A😀B');
+  assert.throws(
+    () => textOperationForOffsetEdit(family, { kind: 'text.insert', at: { offset: 2, affinity: 'right' }, text: 'X' }, editActor(), 2),
+    /surrogate pair/,
+  );
+});
+
 test('delete the astral scalar and a BMP neighbor resolves correctly', () => {
   let family = seed(createTextFamily('d1', textCheckpoint(createTextState())), 'A😀B');
   // Delete 😀 (offsets 1..3).

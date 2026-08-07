@@ -107,19 +107,20 @@ test('boundary affinity decides whether a later insertion joins the range', () =
   const end = resolveOffsetToEndpoint(family, 11, family.checkpoint.frontier, 'right');
   assert.equal(materializeRange(family, start, end), ' world');
 
-  // A later insert at the boundary anchors as a sibling ordered before the
-  // range's known elements. The range is defined over its HISTORICAL basis, so
-  // the insert does NOT join it — the range does not silently grow. (Conservative:
-  // extending the annotation is an explicit user action, not a boundary-typed char.)
+  // A later insert at the start boundary (right affinity) becomes the anchor's
+  // child ordered right after it, and the boundary `[o, right]` is defined as
+  // AFTER the anchor's own scalar (before its children), so the insert JOINS
+  // the range — matching the block-era boundary-grow behavior.
   const rightInsert = textOperationForOffsetEdit(family, { kind: 'text.insert', at: { offset: 5, affinity: 'right' }, text: '[' }, editActor(), 2);
   family = applyTextOperation(family, rightInsert);
   assert.equal(materializeText(family), 'hello[ world');
-  assert.equal(materializeRange(family, start, end), ' world');
+  assert.equal(materializeRange(family, start, end), '[ world');
 
-  // An insert INSIDE the range (mid-range offset, not a boundary) does join it.
+  // An insert INSIDE the range joins it too ('hello[ world' -> X before 'world').
   const inside = textOperationForOffsetEdit(family, { kind: 'text.insert', at: { offset: 7, affinity: 'right' }, text: 'X' }, editActor(), 3);
   family = applyTextOperation(family, inside);
-  assert.equal(materializeRange(family, start, end), ' Xworld');
+  assert.equal(materializeText(family), 'hello[ Xworld');
+  assert.equal(materializeRange(family, start, end), '[ Xworld');
 });
 
 test('full-range deletion yields a zero-width range (empty lifecycle)', () => {
