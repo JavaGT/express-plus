@@ -1,11 +1,21 @@
-// Recipient-safe annotated-text fold envelopes for live delivery.
-// Emits only contiguous text.apply / text.replace ops when the recipient's
-// view of every affected block is fully visible and unredacted. All other
-// operated shapes stay on the opaque snapshot/resync path.
+// Recipient-safe annotated-text fold envelopes for live delivery (issue #33
+// blockless model).
+//
+// The server emits BLOCKLESS state: one continuous RGA family per document.
+// This projector emits a single v3 fold envelope for a contiguous whole-document
+// text.apply / text.replace transition when the recipient's view of the ENTIRE
+// document is fully visible and unredacted. The fully-visible client folds the
+// text operations onto its own family copy (seeded from its snapshot's authoring
+// envelope) and verifies the resulting text, so the server never re-ships a
+// whole snapshot per keystroke. Restricted or any-way redacted recipients never
+// fold — they stay on snapshot recovery because they can neither seed nor
+// verify a fold. Annotation edits change no text and fall through to the
+// ordinary envelope grammar; block-era operation shapes fall through with them.
 
 import { parseEventType, EventKind } from './event-handle.mjs';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
-import { textFamilyCheckpoint, restoreTextFamilyCheckpoint, materializeBlock } from './annotated-text-family.mjs';
+import { restoreTextFamily, textFamilyCheckpoint, materializeText } from './annotated-text-continuous.mjs';
+import { frontierDominates } from './annotated-text.mjs';
 import {
   ensureStream,
   ensureLease,
@@ -14,6 +24,11 @@ import {
   buildAuthoringEnvelope,
 } from './annotated-text-authoring-stream.mjs';
 import { authoringRedactionsForRecipient } from './annotated-text-recipient-projection.mjs';
+
+// The v13 operated-event facts bag is one exact key set (mirrors
+// annotated-text-operated-facts.mjs and the row projection). Anything else —
+// including a block-era facts bag — fails closed and falls through.
+const OPERATED_FACTS_KEYS = ['actorId', 'annotation', 'emptiedAnnotations', 'family', 'lifecycle', 'measurements', 'ranges', 'removedAnnotationIds', 'result', 'selectedRange'];
 
 function recovery(ctx, entity, id, reason) {
   return [{ type: 'resync', entity, id, seq: ctx.event.seq, reason }];
@@ -25,22 +40,50 @@ function exactKeys(value, keys) {
     && keys.every((key) => Object.hasOwn(value, key));
 }
 
-function foldableOperation(operation) {
-  if (!operation || typeof operation !== 'object') return null;
-  if (operation.kind === 'text.apply'
-    && typeof operation.blockId === 'string'
-    && operation.blockId
-    && Array.isArray(operation.operation)) {
-    return { kind: 'text.apply', blockId: operation.blockId, operations: [operation.operation] };
+function revision(value) {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join() === 'frontier,structuralRevision'
+    && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1
+    && Array.isArray(value.frontier);
+}
+
+function deepFreeze(value) {
+  if (value && typeof value === 'object' && !Object.isFrozen(value)) {
+    for (const child of Object.values(value)) deepFreeze(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
+// A foldable edit is a whole-document text transition only. `operations` is
+// always an array of RGA ops applied in sequence: one op for text.apply, the
+// delete+insert pair for text.replace.
+function foldableTextEdit(operation) {
+  if (!operation || typeof operation !== 'object' || Array.isArray(operation)) return null;
+  if (operation.kind === 'text.apply' && Array.isArray(operation.operation)) {
+    return { kind: 'text.apply', operations: [operation.operation] };
   }
   if (operation.kind === 'text.replace'
-    && typeof operation.blockId === 'string'
-    && operation.blockId
     && Array.isArray(operation.operations)
-    && operation.operations.length === 2) {
-    return { kind: 'text.replace', blockId: operation.blockId, operations: operation.operations };
+    && operation.operations.length === 2
+    && operation.operations.every((candidate) => Array.isArray(candidate))) {
+    return { kind: 'text.replace', operations: operation.operations };
   }
   return null;
+}
+
+function opsWellFormed(operations, beforeFrontier) {
+  if (!Array.isArray(operations) || operations.length === 0) return false;
+  for (const operation of operations) {
+    if (!Array.isArray(operation) || operation.length !== 6
+      || operation[0] !== 'workbench.text' || operation[1] !== 1
+      || !Array.isArray(operation[4])) {
+      return false;
+    }
+  }
+  // The fold applies against the client's PRE-commit copy, so the first
+  // operation must name exactly the pre-commit frontier as its basis.
+  return JSON.stringify(operations[0][4]) === JSON.stringify(beforeFrontier);
 }
 
 function scopeParts(scope) {
@@ -75,34 +118,25 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
     return null;
   }
 
-  const facts = data.facts;
-  if (!facts || !exactKeys(facts, [
-    'family', 'block', 'blocks', 'annotation', 'memberships', 'measurements',
-    'lifecycle', 'result', 'prunedBlockIds', 'emptiedAnnotations', 'actorId',
-    'selectedBlockId', 'selectedBlockIds', 'splitBlockIds', 'splitOps',
-    'groupMembership', 'preimage', 'postimage', 'removedAnnotationIds',
-  ])) {
+  // The v13 envelope is one exact shape; anything else (including block-era
+  // operated envelopes) falls through to the ordinary envelope grammar.
+  if (!exactKeys(data, ['after', 'before', 'facts', 'id', 'operation', 'version'])
+    || !revision(data.before) || !revision(data.after)
+    || !exactKeys(data.facts, OPERATED_FACTS_KEYS)) {
     return null;
   }
-  // First slice: contiguous text only. Structural consequences force snapshot.
-  if (facts.prunedBlockIds.length
-    || facts.emptiedAnnotations.length
-    || facts.block
-    || facts.blocks.length
-    || facts.annotation
-    || facts.memberships.length
-    || facts.measurements.length
-    || facts.splitBlockIds.length
-    || facts.splitOps.length
-    || facts.groupMembership
-    || facts.preimage.length
-    || facts.postimage.length
-    || facts.removedAnnotationIds.length) {
+  const facts = data.facts;
+  if (!facts.family || typeof facts.family !== 'object' || Array.isArray(facts.family)) {
     return null;
   }
 
-  const foldable = foldableOperation(data.operation);
-  if (!foldable || !facts.family || typeof facts.family !== 'object') return null;
+  // Only contiguous whole-document text edits fold. annotation.apply-range and
+  // annotation.remove change no text (before.frontier === after.frontier) and
+  // fall through to the ordinary envelope grammar, which delivers a snapshot/
+  // resync so the client's annotation view stays correct. Block-era operation
+  // kinds fall through and are rejected with them.
+  const foldable = foldableTextEdit(data.operation);
+  if (!foldable) return null;
 
   const { entity: scopeEntity, id: scopeId } = scopeParts(ctx.scope);
   const entityName = scopeEntity ?? document.entity.name;
@@ -126,43 +160,45 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
   }
 
-  const block = recipient.blocks.find((candidate) => candidate.id === foldable.blockId);
-  if (!block || block.kind !== 'visible' || block.redactions?.length) {
+  // A fold is only safe for a recipient that reads the ENTIRE document
+  // unredacted: it must be able to verify every transition it folds against its
+  // own family copy, and its authoring position frame binds the canonical
+  // family. Restricted or any-way redacted recipients never receive a family
+  // seed, so they stay on snapshot recovery (fail closed).
+  if (recipient.restricted
+    || (recipient.redactions?.length ?? 0) > 0
+    || authoringRedactionsForRecipient(recipient).length > 0) {
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
-  }
-  // The client folds each text transition against the family checkpoint it
-  // seeded from its snapshot's authoring envelope (unredacted recipients only).
-  // The fold itself ships only the operation, projection, and authoring tokens,
-  // never the full family — a 96-block transcript family is megabytes, which
-  // would blow the SSE frame limit and silently demote every fold to a resync.
-  // A recipient whose view is redacted ANYWHERE receives no family (neither in
-  // the snapshot nor in a fold), so it stays on snapshot recovery and never
-  // needs a seed; the checks below keep that contract fail-closed.
-  if (recipient.blocks.some((candidate) => candidate.kind !== 'visible' || (candidate.redactions?.length ?? 0) > 0)) {
-    return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
-  }
-  for (const candidate of recipient.blocks) {
-    if ((authoringRedactionsForRecipient(recipient, candidate.id) ?? []).length) {
-      return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
-    }
   }
 
   const prefix = `${document.entity.name}_${document.fieldName}`;
-  let family;
+  let committed;
   try {
     const state = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(document.documentId);
     if (!state) return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
-    family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
-    if (JSON.stringify(textFamilyCheckpoint(family)) !== JSON.stringify(facts.family)) {
+    committed = restoreTextFamily(JSON.parse(state.family_checkpoint));
+  } catch {
+    return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
+  }
+
+  // Verify the fold against the committed family. Live delivery runs after the
+  // in-txn projection, so `${prefix}_state.family_checkpoint` already holds the
+  // family THIS operated event produced — the same family facts.family names,
+  // and the projection itself replayed the operations into it (it throws when
+  // they do not reproduce facts.family / data.after). The client applies these
+  // operations to its own pre-commit copy; the checks below guarantee they are
+  // the exact transition the committed family records, the materialized text
+  // equals the recipient's projection, and the after frontier equals the
+  // applied (committed) family's frontier.
+  try {
+    if (facts.family.id !== document.documentId
+      || JSON.stringify(textFamilyCheckpoint(committed)) !== JSON.stringify(facts.family)
+      || JSON.stringify(committed.checkpoint.frontier) !== JSON.stringify(data.after.frontier)
+      || JSON.stringify(committed.checkpoint.frontier) === JSON.stringify(data.before.frontier)
+      || !frontierDominates(committed.checkpoint.frontier, data.before.frontier)
+      || !opsWellFormed(foldable.operations, data.before.frontier)
+      || materializeText(committed) !== recipient.text) {
       return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
-    }
-    if (materializeBlock(family, foldable.blockId) !== block.text) {
-      return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
-    }
-    for (const operation of foldable.operations) {
-      if (!Array.isArray(operation) || operation[0] !== 'workbench.text' || operation[1] !== 1) {
-        return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
-      }
     }
   } catch {
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
@@ -179,11 +215,13 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
     document,
     principal: ctx.principal,
     fence,
-    recipient,
-    family,
-    prefix,
-    changedBlockIds: [foldable.blockId],
+    family: committed,
   });
+  if (!authoring) {
+    // Without a refreshed authoring envelope the client cannot name a fresh
+    // position frame against the post-commit family; it must snapshot-recover.
+    return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
+  }
 
   const loggedEvent = {
     type: event.eventType ?? event.type,
@@ -195,31 +233,28 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
 
   const fold = Object.freeze({
     kind: 'annotatedText',
-    version: 2,
+    version: 3,
     field: document.fieldName,
     baseCursor,
     fence,
     text: Object.freeze({
       reducer: 'workbench.text',
-      operations: Object.freeze(foldable.operations.map((operation) => Object.freeze(structuredClone(operation)))),
+      operations: Object.freeze(foldable.operations.map((operation) => deepFreeze(structuredClone(operation)))),
     }),
     projection: Object.freeze({
-      changedBlocks: Object.freeze([Object.freeze({ id: foldable.blockId, text: block.text })]),
-      removedBlockIds: Object.freeze([]),
+      text: recipient.text,
     }),
     // Compact cross-check the client can verify against its own post-apply
     // family without serializing the whole checkpoint.
-    familyElementCount: Object.keys(family.checkpoint.elements).length,
+    familyElementCount: Object.keys(committed.checkpoint.elements).length,
     authoring: Object.freeze({
       acknowledgementFence: fence,
-      positionBlocks: authoring?.positionBlocks ?? Object.freeze([]),
-      ...(authoring?.envelope
-        ? {
-          stream: authoring.envelope.stream,
-          lease: authoring.envelope.lease,
-          snapshot: authoring.envelope.snapshot,
-        }
-        : {}),
+      stream: authoring.stream,
+      lease: authoring.lease,
+      snapshot: authoring.snapshot,
+      positionFrames: Object.freeze((authoring.positionFrames ?? []).map((frame) => Object.freeze({
+        positionToken: frame.positionToken,
+      }))),
     }),
   });
 
@@ -234,7 +269,16 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
   })];
 }
 
-function mintFoldAuthoring({ db, document, principal, fence, recipient, family, prefix, changedBlockIds }) {
+/**
+ * Mint the authoring envelope a fold ships. One DOCUMENT-scoped position frame
+ * binds the whole post-commit family basis: the fully-visible recipient seeds
+ * its fold reducer from that same family, so its next absolute offset resolves
+ * against this exact checkpoint. Redactions are empty here by construction (the
+ * caller gates redacted recipients before minting). Returns null when the
+ * client nonce is missing or authoring capacity is exhausted.
+ */
+function mintFoldAuthoring({ db, document, principal, fence, family }) {
+  const prefix = `${document.entity.name}_${document.fieldName}`;
   if (typeof document.clientNonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(document.clientNonce)) {
     return null;
   }
@@ -253,46 +297,23 @@ function mintFoldAuthoring({ db, document, principal, fence, recipient, family, 
   });
   if (!lease) return null;
 
-  // A fold refreshes authoring only for the block(s) it changed. Every other
-  // block's text is identical between the previous basis and the current
-  // family, so the client's existing tokens for them stay valid — re-issuing
-  // the whole visible set per keystroke serializes the full family checkpoint
-  // into N position frames and burns a hasCapacity pass per frame (hundreds of
-  // ms on a large document). The snapshot mint still issues every visible block
-  // once, so the client has a full token map to start from.
-  const visibleIds = new Set(recipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id));
-  const affected = changedBlockIds.filter((blockId) => visibleIds.has(blockId));
   const issued = issueAuthoringSnapshot({
     db,
     prefix,
     leaseId: lease.id,
     fence,
-    positions: affected.map((blockId) => ({
-      blockId,
+    positions: [{
       familyCheckpoint: textFamilyCheckpoint(family),
       visibleAtIssue: true,
-      redactions: authoringRedactionsForRecipient(recipient, blockId),
-    })),
-    groups: [],
+      redactions: [],
+    }],
   });
   if (!issued) return null;
-  const envelope = buildAuthoringEnvelope({
-    db,
-    prefix,
+  return buildAuthoringEnvelope({
     streamToken: stream.id,
     leaseToken: lease.id,
-    leaseId: lease.id,
     snapshotToken: issued.snapshot.id,
     fence,
     positionFrames: issued.positionFrames,
-    groupFrames: issued.groupFrames,
-    splitResolutions: [],
   });
-  return {
-    envelope,
-    positionBlocks: Object.freeze(issued.positionFrames.map((frame) => Object.freeze({
-      blockId: frame.blockId,
-      positionToken: frame.token,
-    }))),
-  };
 }
