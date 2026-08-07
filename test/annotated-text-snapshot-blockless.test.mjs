@@ -99,3 +99,28 @@ test('export produces the blockless canonical', async () => {
   assert.equal(exported.kind, 'workbench.annotatedText.canonical');
   await app.shutdown(); db.close();
 });
+
+test('orphan with no recorded last range survives as [0, 0]', async () => {
+  const { db, app, Doc, Project } = setup();
+  await app.ready;
+  seedDocument(db, Doc, 'orphaned word', [{ id: 'o1', family: 'comment', start: 0, end: 7 }]);
+  // A deletion can orphan without a recorded range; the orphan state carries a
+  // JSON null saved range which must project to [0, 0], not brick the document.
+  db.prepare("UPDATE Doc_body_annotation SET id = 'o1' WHERE id = 'a1'").run();
+  db.prepare("DELETE FROM Doc_body_membership WHERE annotation_id = 'o1'").run();
+  db.prepare("INSERT INTO Doc_body_annotation_orphan_state (annotation_id, saved_quote, last_range) VALUES ('o1', 'orphaned', 'null')").run();
+  const principal = { type: 'user', id: 'u1', attributes: {} };
+  const row = db.prepare('SELECT * FROM Doc WHERE id = ?').get('d1');
+  const snap = await projectAnnotatedTextSnapshot({ db, entity: Doc, row, principal, fieldName: 'body', descriptor: Doc.fields.body, mintBasis: false });
+  assert.equal(snap.text, 'orphaned word');
+  // The recipient view discloses the orphan identity + saved quote but not the
+  // last range; the CANONICAL export carries the tolerated [0, 0].
+  assert.deepEqual(snap.orphans, [{
+    id: 'o1', family: 'comment', fields: {}, owner: 'u1', savedQuote: 'orphaned',
+  }]);
+  const exported = await exportAnnotatedText({ app, entity: Doc, field: Doc.body, documentId: 'd1', expectedOwningScope: { entity: Project, id: 'p1' }, principal });
+  assert.deepEqual(exported.orphans, [{
+    id: 'o1', family: 'comment', fields: {}, owner: 'u1', savedQuote: 'orphaned', savedRange: [0, 0],
+  }]);
+  await app.shutdown(); db.close();
+});

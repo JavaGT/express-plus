@@ -134,10 +134,11 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     if (!declared) fail(`orphan '${o.id}' has unknown family`);
     let savedRange;
     try {
-      savedRange = JSON.parse(o.last_range);
+      savedRange = JSON.parse(o.last_range ?? 'null');
     } catch {
       fail(`orphan '${o.id}' has malformed last range`);
     }
+    if (savedRange === null) savedRange = [0, 0];
     if (!Array.isArray(savedRange) || savedRange.length !== 2 || !Number.isSafeInteger(savedRange[0]) || !Number.isSafeInteger(savedRange[1]) || savedRange[0] < 0 || savedRange[1] < savedRange[0]) {
       fail(`orphan '${o.id}' has malformed last range`);
     }
@@ -148,10 +149,11 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     return { id: o.id, family: o.family, fields, owner: o.owner_id, savedQuote: o.saved_quote, savedRange };
   });
 
+  const orphanIds = new Set(orphans.map((orphan) => orphan.id));
   const canonical = {
     kind: 'workbench.annotatedText.canonical', version: 1,
     text,
-    annotations: annotations.filter((annotation) => !droppedAnnotationIds.has(annotation.id)),
+    annotations: annotations.filter((annotation) => !droppedAnnotationIds.has(annotation.id) && !orphanIds.has(annotation.id)),
     ranges,
     orphans,
     measurements: db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE document_id = ? ORDER BY id`).all(row.id)
@@ -224,18 +226,36 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
   const fieldName = field.fieldName;
   const descriptor = entity.fields?.[fieldName];
   if (!descriptor || descriptor.kind !== 'annotatedText') fail('export field is not annotatedText');
-  const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(documentId);
-  if (!row) fail('document is missing');
-  const owningScope = resolveAnnotatedTextOwningScope(descriptor, entity.fields, row);
-  if (owningScope.entity !== expectedOwningScope.entity.name || owningScope.id !== expectedOwningScope.id) {
-    fail('expected owning scope does not match document');
+  for (let attempt = 0; attempt < RECIPIENT_READ_ATTEMPTS; attempt += 1) {
+    const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(documentId);
+    if (!row) fail('document is missing');
+    const owningScope = resolveAnnotatedTextOwningScope(descriptor, entity.fields, row);
+    if (owningScope.entity !== expectedOwningScope.entity.name || owningScope.id !== expectedOwningScope.id) {
+      fail('expected owning scope does not match document');
+    }
+    // Authorization and the canonical read must be ONE consistent view. Capture
+    // the owning-scope cursor before authorizing and verify it is unchanged
+    // after the read; a commit landing in between retries the whole attempt.
+    const owningScopeCursorBefore = readSeq(db, owningScope.key);
+    let attemptResult;
+    try {
+      const scopeEntity = app.entities.get(owningScope.entity);
+      if (!scopeEntity) fail('declared owning scope entity is not registered with the application');
+      const scopeRow = db.prepare(`SELECT * FROM ${scopeEntity.name} WHERE id = ?`).get(owningScope.id);
+      if (!scopeRow || !await mayRow(scopeEntity, 'admin', scopeRow, principal)) {
+        fail('owning scope admin authorization failed');
+      }
+      attemptResult = projectCanonicalExport({ db, entity, fieldName, descriptor, documentId });
+    } catch (error) {
+      if (unchangedCursor(db, owningScope.key, owningScopeCursorBefore)) throw error;
+      continue;
+    }
+    if (unchangedCursor(db, owningScope.key, owningScopeCursorBefore)) return attemptResult;
   }
-  const scopeEntity = app.entities.get(owningScope.entity);
-  if (!scopeEntity) fail('declared owning scope entity is not registered with the application');
-  const scopeRow = db.prepare(`SELECT * FROM ${scopeEntity.name} WHERE id = ?`).get(owningScope.id);
-  if (!scopeRow || !await mayRow(scopeEntity, 'admin', scopeRow, principal)) {
-    fail('owning scope admin authorization failed');
-  }
+  fail('export could not obtain a consistent document view');
+}
+
+function projectCanonicalExport({ db, entity, fieldName, descriptor, documentId }) {
   const prefix = `${entity.name}_${fieldName}`;
   if (db.prepare(`SELECT 1 FROM ${prefix}_retired WHERE document_id = ?`).get(documentId)) fail('document is retired');
   const state = db.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(documentId);
@@ -260,7 +280,8 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
     const declared = descriptor.annotations.find((entry) => entry.annotationName === o.family);
     if (!declared) fail(`orphan '${o.id}' has unknown family`);
     let savedRange;
-    try { savedRange = JSON.parse(o.last_range); } catch { fail(`orphan '${o.id}' has malformed last range`); }
+    try { savedRange = JSON.parse(o.last_range ?? 'null'); } catch { fail(`orphan '${o.id}' has malformed last range`); }
+    if (savedRange === null) savedRange = [0, 0];
     if (!Array.isArray(savedRange) || savedRange.length !== 2 || !Number.isSafeInteger(savedRange[0]) || !Number.isSafeInteger(savedRange[1]) || savedRange[0] < 0 || savedRange[1] < savedRange[0]) fail(`orphan '${o.id}' has malformed last range`);
     const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${o.family} WHERE annotation_id = ?`).get(o.id) ?? {};
     return { id: o.id, family: o.family, fields: Object.fromEntries(Object.entries(declared.fields).map(([name, desc]) => [name, deserializeField(desc, stored[name])])), owner: o.owner_id, savedQuote: o.saved_quote, savedRange };

@@ -78,7 +78,6 @@ function rebuildAuthoringFamily(db, prefix) {
        token TEXT PRIMARY KEY,
        lease_id TEXT NOT NULL,
        issued_fence INTEGER NOT NULL,
-       block_id TEXT,
        checkpoint_id TEXT NOT NULL,
        visible_at_issue INTEGER NOT NULL DEFAULT 1,
        redactions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(redactions)),
@@ -96,17 +95,6 @@ function rebuildAuthoringFamily(db, prefix) {
        FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE
      );
      CREATE INDEX idx_${prefix}_authoring_snapshot_lease ON ${prefix}_authoring_snapshot (lease_id, fence);
-     CREATE TABLE ${prefix}_authoring_group (
-       token TEXT PRIMARY KEY,
-       lease_id TEXT NOT NULL,
-       issued_fence INTEGER NOT NULL,
-       group_id TEXT,
-       visible_blocks TEXT NOT NULL CHECK (json_valid(visible_blocks)),
-       assignable INTEGER NOT NULL,
-       created_at TEXT NOT NULL,
-       FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE
-     );
-     CREATE INDEX idx_${prefix}_authoring_group_lease ON ${prefix}_authoring_group (lease_id, issued_fence);
      CREATE TABLE ${prefix}_authoring_snapshot_position (
        snapshot_id TEXT NOT NULL,
        position_token TEXT NOT NULL,
@@ -114,20 +102,7 @@ function rebuildAuthoringFamily(db, prefix) {
        FOREIGN KEY (snapshot_id) REFERENCES ${prefix}_authoring_snapshot(id) ON DELETE CASCADE,
        FOREIGN KEY (position_token) REFERENCES ${prefix}_authoring_position(token) ON DELETE CASCADE
      );
-     CREATE INDEX idx_${prefix}_authoring_snapshot_position_token ON ${prefix}_authoring_snapshot_position (position_token, snapshot_id);
-     CREATE TABLE ${prefix}_authoring_split (
-       lease_id TEXT NOT NULL,
-       temporary_block TEXT NOT NULL,
-       authoritative_block_id TEXT NOT NULL,
-       position_token TEXT NOT NULL,
-       action_id TEXT NOT NULL,
-       mutation_id TEXT NOT NULL,
-       fence INTEGER NOT NULL,
-       created_at TEXT NOT NULL,
-       PRIMARY KEY (lease_id, temporary_block),
-       UNIQUE (lease_id, action_id, temporary_block),
-       FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE
-     );`
+     CREATE INDEX idx_${prefix}_authoring_snapshot_position_token ON ${prefix}_authoring_snapshot_position (position_token, snapshot_id);`
   );
 }
 
