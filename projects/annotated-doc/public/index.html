@@ -198,8 +198,12 @@
       }
     }
 
+    const deleting = new Set();
+
     async function deleteDoc(id) {
+      if (deleting.has(id)) return;
       if (!window.confirm('Delete this document? This cannot be undone.')) return;
+      deleting.add(id);
       const wasCurrent = id === currentId;
       if (wasCurrent) {
         closeSession();
@@ -209,7 +213,10 @@
         setStatus('deleting...');
       }
       try {
-        const response = await fetch(`/docs/${encodeURIComponent(id)}`, { method: 'DELETE', credentials: 'include' });
+        const response = await fetch(
+          `/docs/${encodeURIComponent(id)}${viewAs === 'reader' ? '?viewAs=reader' : ''}`,
+          { method: 'DELETE', credentials: 'include' },
+        );
         const body = await response.json().catch(() => ({}));
         if (!response.ok) throw new Error(body.failure?.message ?? body.error ?? `delete failed (${response.status})`);
         await loadDocs();
@@ -217,11 +224,13 @@
       } catch (error) {
         reportError(error);
         if (wasCurrent) await enqueueOpen(id);
+      } finally {
+        deleting.delete(id);
       }
     }
 
     async function loadDocs() {
-      const response = await fetch('/docs', { credentials: 'include' });
+      const response = await fetch(`/docs${viewAs === 'reader' ? '?viewAs=reader' : ''}`, { credentials: 'include' });
       if (!response.ok) throw new Error(`list failed (${response.status})`);
       docs = (await response.json()).docs ?? [];
       renderDocList();

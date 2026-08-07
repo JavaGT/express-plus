@@ -75,14 +75,11 @@ const readerPrincipal = Object.freeze({ type: 'user', id: 'reader' });
  *
  * The view-as is per-request (each browser tab carries its own `viewAs` in its
  * live-delivery query string / action document), NOT a shared cookie — two tabs
- * in one browser can be owner and reader independently. The cookie is a fallback
- * for plain page loads. */
+ * in one browser can be owner and reader independently. */
 function principalOfFromRequest(req, { viewAs } = {}) {
   const url = new URL(req.url, 'http://localhost');
   const queryViewAs = url.searchParams.get('viewAs');
-  const cookies = req.headers?.cookie ?? '';
-  const cookieViewAs = /(?:^|;\s*)annotated-doc-view-as=reader(?:;|$)/.test(cookies) ? 'reader' : 'demo';
-  const resolved = viewAs ?? queryViewAs ?? cookieViewAs;
+  const resolved = viewAs ?? queryViewAs;
   return resolved === 'reader' ? readerPrincipal : demoPrincipal;
 }
 
