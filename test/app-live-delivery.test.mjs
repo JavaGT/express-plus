@@ -434,7 +434,7 @@ test('declared annotated text owns generated HTTP admission and package delivery
   const spoofedProject = annotatedTextCreateAction(Document, Document.body, { id: 'forbidden-project', projectId: 'p2', ownerId: 'u1' });
   assert.equal((await post(spoofedProject)).status, 403, 'declared project ownership, not caller-supplied document ownership, authorizes create');
   assert.equal(db.prepare('SELECT 1 FROM HttpAnnotatedDocument WHERE id = ?').get('forbidden-project'), undefined);
-  const initialBlockId = db.prepare('SELECT id FROM HttpAnnotatedDocument_body_block WHERE document_id = ?').get('d1').id;
+  const initialBlockId = 'b';
 
   const sources = [];
   let actionNumber = 0;
@@ -449,10 +449,15 @@ test('declared annotated text owns generated HTTP admission and package delivery
   assert.equal(inserted.ok, true);
   assert.equal((await inserted.settlement.wait()).status, 'reconciled');
   assert.equal(session.document.blocks[0].text, 'hello', 'committed receipt recovers through recipient snapshot ingest');
-  const split = await session.split({ mutationId: 'split-1', at: { blockId: initialBlockId, offset: 2, affinity: 'right' } });
-  assert.equal(split.ok, true);
-  assert.equal((await split.settlement.wait()).status, 'reconciled');
-  assert.equal(session.document.blocks.length, 2);
+  assert.throws(
+    () => session.split({ mutationId: 'split-1', at: { blockId: initialBlockId, offset: 2, affinity: 'right' } }),
+    /block-era command is not supported/,
+  );
+  const splitInsert = await session.insert({ mutationId: 'split-insert', at: { blockId: initialBlockId, offset: 2, affinity: 'right' }, text: ' there' });
+  assert.equal(splitInsert.ok, true);
+  assert.equal((await splitInsert.settlement.wait()).status, 'reconciled');
+  assert.equal(session.document.blocks.length, 1);
+  assert.ok(session.document.blocks[0].text.includes(' there'));
   assert.equal('dispatch' in session, false);
 
   assert.equal((await post(annotatedTextCreateAction(Document, Document.body, {
@@ -473,12 +478,12 @@ test('declared annotated text owns generated HTTP admission and package delivery
   assert.equal(undoneSecond.ok, true);
   assert.equal((await undoneSecond.settlement.wait()).status, 'reconciled');
   assert.equal(second.document.blocks[0].text, '');
-  assert.equal(session.document.blocks.map((block) => block.text).join(''), 'hello', 'same-project document history is isolated');
+  assert.equal(session.document.blocks.map((block) => block.text).join(''), 'he therello', 'same-project document history is isolated');
   second.close();
 
   const exportRequest = { app, entity: Document, field: Document.body, documentId: 'd1', expectedOwningScope: { entity: Project, id: 'p1' } };
   const exported = await exportAnnotatedText({ ...exportRequest, principal });
-  assert.equal(exported.blocks.map((block) => block.text).join(''), 'hello');
+  assert.equal(exported.text, 'he therello');
   await assert.rejects(exportAnnotatedText({ ...exportRequest, principal: { ...user, id: 'u2' } }), /owning scope admin authorization failed/);
 
   const committedBeforeForbidden = db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE scope = ?').get('Project:p1').count;
@@ -486,7 +491,7 @@ test('declared annotated text owns generated HTTP admission and package delivery
     { type: 'HttpAnnotatedDocument.update', scope: 'Project:p1', payload: { id: 'd1', project: 'p1' } },
     { type: 'HttpAnnotatedDocument.body.apply', scope: 'Project:p1', payload: { id: 'd1', operation: {} } },
     { type: 'HttpAnnotatedDocument.body.operation', scope: 'HttpAnnotatedDocument:other', payload: { id: 'd1', version: 99 } },
-    { type: 'HttpAnnotatedDocument.body.operation', scope: 'Project:p1', payload: { version: 1, id: 'd1', expected: { structuralRevision: 2, frontier: [] }, operation: { kind: 'text.apply', blockId: initialBlockId, operation: ['workbench.text', 1, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1], 1, [], ['insert', ['root'], 'raw']] } } },
+    { type: 'HttpAnnotatedDocument.body.operation', scope: 'Project:p1', payload: { version: 1, id: 'd1', expected: { structuralRevision: 2, frontier: [] }, operation: { kind: 'text.apply', operation: ['workbench.text', 1, ['aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1], 1, [], ['insert', ['root'], 'raw']] } } },
   ]) assert.equal((await post(forbidden)).status, 404);
   assert.equal(db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE scope = ?').get('Project:p1').count, committedBeforeForbidden);
 
@@ -528,7 +533,7 @@ test('annotated text text-insert is delivered as a fold envelope over the live S
     body: JSON.stringify({ actionId: 'create-fold', type: create.type, payload: create.payload, scope: 'Project:p1', clientId: 'tab-a' }),
   });
   assert.equal(createRes.status, 200);
-  const initialBlockId = db.prepare('SELECT id FROM FoldDeliverDoc_body_block WHERE document_id = ?').get('d1').id;
+  const initialBlockId = 'b';
 
   // Open a real SSE events stream as the owner, with document identity so the
   // delivery can resolve the annotated-text document and emit a fold envelope.
@@ -799,7 +804,7 @@ test('composite shell subscriber does not resync for annotated-text body edits o
     body: JSON.stringify({ actionId: 'create-shell', type: create.type, payload: create.payload, scope: 'Project:p1', clientId: 'tab-a' }),
   });
   assert.equal(createRes.status, 200);
-  const initialBlockId = db.prepare('SELECT id FROM ShellDoc_body_block WHERE document_id = ?').get('d1').id;
+  const initialBlockId = 'b';
 
   const anchor = Number(db.prepare("SELECT MAX(seq) AS s FROM _Log WHERE scope = 'Project:p1'").get().s ?? 0);
   const aggregate = Number(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get().revision);
