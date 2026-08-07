@@ -65,9 +65,12 @@ async function assertV9AuthoringPrelude({ name, fieldName, prefix, descriptor, r
   if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
   const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
   const cursor = readSeq(db, documentScope) + 1;
-  const position = resolvePosition({ db, prefix, positionToken: command.edit?.at?.positionToken ?? command.edit?.from?.positionToken ?? command.edit?.positionToken, leaseId: lease.id }) ?? null;
-  if (!position) throw new ValidationError(`${name}.${fieldName}.operation position token unavailable`, { code: 'position-token-unavailable' });
-  if (!position.visible_at_issue) throw new ValidationError(`${name}.${fieldName}.operation position no longer visible`, { code: 'position-no-longer-visible' });
+  const token = command.edit?.at?.positionToken ?? command.edit?.from?.positionToken ?? command.edit?.to?.positionToken ?? command.edit?.positionToken;
+  const position = token
+    ? resolvePosition({ db, prefix, positionToken: token, leaseId: lease.id }) ?? null
+    : null;
+  if (token && !position) throw new ValidationError(`${name}.${fieldName}.operation position token unavailable`, { code: 'position-token-unavailable' });
+  if (position && !position.visible_at_issue) throw new ValidationError(`${name}.${fieldName}.operation position no longer visible`, { code: 'position-no-longer-visible' });
   const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${command.id}\u0000${principal?.id ?? ''}\u0000${command.authoring.mutationId}`).digest('hex').slice(0, 32);
   const lamport = Math.max(0, ...Object.values(family.checkpoint.elements).map((element) => element.lamport)) + 1;
   return Object.freeze({
@@ -119,7 +122,7 @@ async function admitTextEdit(ctx) {
 
 /** annotation.apply (document range) */
 async function admitTextRangeApply(ctx) {
-  const { name, fieldName, command, db, prefix, documentScope, lease, family, state, actor, lamport, edit, compiledMeta } = ctx;
+  const { name, fieldName, command, db, prefix, documentScope, lease, family, state, edit, compiledMeta } = ctx;
   const fromToken = edit.from?.positionToken;
   const toToken = edit.to?.positionToken;
   if (!fromToken || !toToken) throw new ValidationError(`${name}.${fieldName}.operation annotation selection tokens unavailable`, { code: 'position-token-unavailable' });
@@ -128,16 +131,15 @@ async function admitTextRangeApply(ctx) {
   if (!fromPos || !toPos) throw new ValidationError(`${name}.${fieldName}.operation annotation selection tokens unavailable`, { code: 'position-token-unavailable' });
   const familyMeta = compiledMeta.annotationHandles[edit.annotation?.family];
   if (!familyMeta) throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family`, { code: 'position-invalid' });
-  const annotations = loadAnnotations({ db, prefix, compiledMeta, documentId: command.id });
   const ranges = loadRanges({ db, prefix, documentId: command.id });
   let plan;
   try {
     plan = planTextRangeApply({
-      documentId: command.id, structureVersion: state.structure_version, family, actor, lamport,
-      annotation: { id: edit.annotation.id, family: edit.annotation.family, empty: familyMeta.empty, protectedTargetIds: [] },
+      documentId: command.id, structureVersion: state.structure_version, family,
+      annotation: { id: edit.annotation.id, family: edit.annotation.family, empty: familyMeta.empty, fields: edit.annotation.fields ?? {}, protectedTargetIds: [] },
       from: { offset: edit.from.offset, affinity: edit.from.affinity },
       to: { offset: edit.to.offset, affinity: edit.to.affinity },
-      annotations, ranges, actorId: ctx.principal?.id ?? '',
+      ranges, actorId: ctx.principal?.id ?? '',
     });
   } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`, error.code ? { code: error.code } : undefined); }
   const handle = eventHandles.native(name, fieldName, 'operated');

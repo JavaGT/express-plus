@@ -41,9 +41,12 @@ function exactKeys(value, keys) {
 }
 
 function annotatedContribution(value) {
+  // Blockless (issue #33): a contribution is one document-scoped text.insert
+  // operation — no blockId. A block-era contribution (with blockId) is still
+  // recognized so stored history remains readable until migration.
   return value && typeof value === 'object' && !Array.isArray(value)
-    && exactKeys(value, ['kind', 'blockId', 'opId', 'anchor', 'text', 'scalarCount'])
-    && value.kind === 'text.insert' && typeof value.blockId === 'string' && value.blockId.length > 0
+    && (exactKeys(value, ['kind', 'opId', 'anchor', 'text', 'scalarCount']) || exactKeys(value, ['kind', 'blockId', 'opId', 'anchor', 'text', 'scalarCount']))
+    && value.kind === 'text.insert' && (!Object.hasOwn(value, 'blockId') || (typeof value.blockId === 'string' && value.blockId.length > 0))
     && Array.isArray(value.opId) && Array.isArray(value.anchor) && typeof value.text === 'string'
     && Number.isSafeInteger(value.scalarCount) && value.scalarCount > 0;
 }

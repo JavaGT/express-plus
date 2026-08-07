@@ -25,9 +25,10 @@ import { erasureDirectivePreparation } from '../erasure-directive.mjs';
 import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.mjs';
 import { mayRow } from '../row-grant.mjs';
 import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority.mjs';
-import { clearAuthoringState } from '../annotated-text-authoring-stream.mjs';
+import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope } from '../annotated-text-authoring-stream.mjs';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.mjs';
 import { packOperatedFacts } from '../annotated-text-operated-facts.mjs';
+import { restoreTextFamily, textFamilyCheckpoint as continuousTextFamilyCheckpoint } from '../annotated-text-continuous.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 export const ANNOTATED_TEXT_COMPENSATION = Symbol('workbench.annotated-text-compensation');
@@ -1607,14 +1608,28 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         return {
           events,
           privateFact: command.edit.kind === 'text.insert'
-            ? { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', blockId: events[0].data.operation.blockId, opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } }
+            ? { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } }
             : { version: 2, kind: 'annotated-text.barrier', documentId: command.id },
           authoringReceipt: ({ db: receiptDb, confirmedThrough }) => {
-            const splits = receiptDb.prepare(`SELECT temporary_block, authoritative_block_id, position_token FROM ${prefix}_authoring_split WHERE lease_id = ? AND action_id = ? AND mutation_id = ? ORDER BY temporary_block`).all(command.authoring.lease, actionId, command.authoring.mutationId);
+            // Blockless (issue #33): issue ONE document-scoped position frame
+            // bound to the post-commit family so the authoring client can keep
+            // typing. The snapshot insert joins this origin transaction.
+            const postState = receiptDb.prepare(`SELECT family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
+            const postFamily = restoreTextFamily(JSON.parse(postState.family_checkpoint));
+            const issued = issueAuthoringSnapshot({
+              db: receiptDb, prefix, leaseId: command.authoring.lease, fence: confirmedThrough,
+              positions: [{ familyCheckpoint: continuousTextFamilyCheckpoint(postFamily), visibleAtIssue: true, redactions: [] }],
+            });
+            const envelope = buildAuthoringEnvelope({
+              streamToken: command.authoring.stream,
+              leaseToken: command.authoring.lease,
+              snapshotToken: issued.snapshot.id,
+              fence: confirmedThrough,
+              positionFrames: issued.positionFrames,
+            });
             return Object.freeze({ version: 1, actionId, confirmedThrough, authoring: Object.freeze({
-              version: 1, stream: command.authoring.stream, lease: command.authoring.lease, acknowledgementFence: confirmedThrough,
-              positionFrames: Object.freeze(splits.map((split) => Object.freeze({ temporaryBlock: split.temporary_block, positionToken: split.position_token }))),
-              splitResolutions: Object.freeze(splits.map((split) => Object.freeze({ temporaryBlock: split.temporary_block, blockId: split.authoritative_block_id }))),
+              ...envelope,
+              family: continuousTextFamilyCheckpoint(postFamily),
             }) });
           },
         };

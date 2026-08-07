@@ -130,7 +130,7 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
 }
 
 /** Plan a document-range annotation.apply: one contiguous range, no blocks. */
-export function planTextRangeApply({ documentId, structureVersion, family, actor, lamport, annotation, from, to, annotations = [], ranges = [], actorId }) {
+export function planTextRangeApply({ documentId, structureVersion, family, annotation, from, to, ranges = [], actorId }) {
   const text = materializeText(family);
   const startOffset = from.offset;
   const endOffset = to.offset;
@@ -168,6 +168,7 @@ export function planAnnotationRemove({ documentId, structureVersion, family, ann
     before: before(family, structureVersion),
     operation: { kind: 'annotation.remove', annotationId },
     after: Object.freeze({ structuralRevision: structureVersion, frontier: family.checkpoint.frontier }),
+    family: textFamilyCheckpoint(family),
     lifecycle: { empty: target.empty },
     result: { memberships: { annotationId, postimage: [] }, disposition: { kind: 'deleted', family: target.family, savedQuote: null, lastRange: null }, changedProtectors: [] },
     ranges: Object.freeze(retained.map((entry) => deepFreeze({ annotationId: entry.annotationId, start: entry.start, end: entry.end }))),
