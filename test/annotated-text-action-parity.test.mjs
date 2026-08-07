@@ -7,16 +7,18 @@ import { annotatedTextAction as publicBuilder } from '../public/workbench-annota
 import { annotatedTextAction as builder } from '../src/annotated-text-action-builder.mjs';
 import { annotatedTextAction as serverAction } from '../src/annotated-text-action.mjs';
 import { annotatedText, annotation } from '../src/field.mjs';
-import { entity, ref, grant, read } from '../src/index.mjs';
+import { annotatedTextClientHandle, entity, ref, grant, read } from '../src/index.mjs';
 
 const token = (label) => `${label}${'x'.repeat(43)}`.slice(0, 43);
 
 const Document = entity('BuilderParityDocument', {
   project: ref('Project'),
   owner: ref('User'),
-  body: annotatedText({ project: 'project', owner: 'owner', block: {}, annotations: [annotation('coding')], measurements: [] }),
+  body: annotatedText({ project: 'project', owner: 'owner', annotations: [annotation('coding')], measurements: [] }),
   grant: grant(read),
 });
+
+const ClientDocument = annotatedTextClientHandle(Document, Document.body);
 
 const authoring = { version: 1, stream: token('stream'), lease: token('lease'), mutationId: 'm1' };
 
@@ -24,39 +26,45 @@ test('public browser re-export IS the pure builder function reference', () => {
   assert.equal(publicBuilder, builder);
 });
 
-test('server annotatedTextAction matches the pure builder on representative operations (mint unused)', () => {
+test('server annotatedTextAction matches the pure builder on representative blockless operations', () => {
   const commands = [
     {
       kind: 'text.insert', id: 'doc-1', authoring,
       at: { positionToken: token('pos'), offset: 0, affinity: 'right' }, text: 'hello',
     },
     {
-      kind: 'block-group.assignment.set', id: 'doc-1', authoring,
-      selection: { kind: 'listed', groupTokens: [token('g2'), token('g1')] },
-      annotation: { id: 'ann-1', family: 'coding', fields: { value: 'x' } },
-    },
-    {
-      kind: 'block.split', id: 'doc-1', authoring,
-      at: { positionToken: token('pos'), offset: 1, affinity: 'right' }, temporaryBlock: token('temp'),
-    },
-    {
-      kind: 'block.split-and-assign', id: 'doc-1', authoring,
-      at: { positionToken: token('pos'), offset: 1, affinity: 'right' }, temporaryBlock: token('temp'),
-      annotation: { id: 'ann-2', family: 'coding', fields: {} },
-    },
-    {
       kind: 'text.delete', id: 'doc-1', authoring,
       from: { positionToken: token('p1'), offset: 0, affinity: 'left' },
       to: { positionToken: token('p2'), offset: 1, affinity: 'right' },
     },
+    {
+      kind: 'text.replace', id: 'doc-1', authoring,
+      from: { positionToken: token('p1'), offset: 0, affinity: 'left' },
+      to: { positionToken: token('p2'), offset: 1, affinity: 'right' },
+      text: 'x',
+    },
+    {
+      kind: 'annotation.apply', id: 'doc-1', authoring,
+      annotation: { id: 'ann-1', family: 'coding', fields: { value: 'x' } },
+      from: { positionToken: token('p1'), offset: 0, affinity: 'left' },
+      to: { positionToken: token('p2'), offset: 5, affinity: 'right' },
+    },
+    {
+      kind: 'annotation.remove', id: 'doc-1', authoring,
+      annotationId: 'ann-1',
+    },
   ];
   for (const command of commands) {
-    assert.deepEqual(serverAction(Document, Document.body, command), builder(Document, Document.body, command), command.kind);
+    assert.deepEqual(
+      serverAction(Document, Document.body, command),
+      builder(ClientDocument, ClientDocument.body, command),
+      command.kind,
+    );
   }
 });
 
-test('pure builder serves the package contract (v9, no scope)', () => {
-  const request = builder(Document, Document.body, {
+test('pure builder serves the package contract (v9, no scope) on the client handle', () => {
+  const request = builder(ClientDocument, ClientDocument.body, {
     kind: 'text.insert', id: 'doc-1', authoring,
     at: { positionToken: token('pos'), offset: 0, affinity: 'right' }, text: 'hello',
   });
@@ -70,20 +78,12 @@ test('pure builder serves the package contract (v9, no scope)', () => {
 
 test('pure builder throws on a non-annotatedText field', () => {
   assert.throws(
-    () => builder(Document, Document.project, {
+    () => builder(ClientDocument, ClientDocument.fields.project, {
       kind: 'text.insert', id: 'doc-1', authoring,
       at: { positionToken: token('pos'), offset: 0, affinity: 'right' }, text: 'hello',
     }),
-    /not an annotatedText field/,
+    /field must be an annotatedText field handle|not an annotatedText field/,
   );
-});
-
-test('server mints a private temporary block via its npm crypto when none supplied', () => {
-  const request = builder(Document, Document.body, {
-    kind: 'block.split', id: 'doc-1', authoring,
-    at: { positionToken: token('pos'), offset: 1, affinity: 'right' },
-  }, { mintTemporaryBlock: () => 'a'.repeat(43) });
-  assert.equal(request.payload.edit.temporaryBlock, 'a'.repeat(43));
 });
 
 test('builder has zero import statements (browser serve-safe)', () => {

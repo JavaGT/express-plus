@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { randomBytes } from 'node:crypto';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
@@ -7,10 +6,9 @@ import workbench, {
   annotatedText, annotation, entity, everyone, executeDDL, executeFrameworkDDL,
   protectingAnnotation, grant, admin, read, write, ref, scope,
 } from '../src/internal.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/internal.mjs';
-import { ensureStream, ensureLease, hashClientNonce } from '../src/annotated-text-authoring-stream.mjs';
 import { durableHistory } from '../src/internal.mjs';
 import { tryBuildAnnotatedTextFoldEnvelopes } from '../src/annotated-text-fold-envelope.mjs';
+import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 // The fold envelope no longer ships the canonical family (the snapshot's
 // authoring envelope carries it, unredacted recipients only). A recipient whose
@@ -56,64 +54,55 @@ async function setup() {
   });
   await app.start();
   await app.ready;
+  // Continuous document: confidential span + visible tail (no block table).
   const created = await app.dispatch({
     actionId: 'create', type: 'FoldRedactDoc.create',
     payload: {
       id: 'd1', project: 'p1', owner: 'u1',
-      body: { version: 1, blocks: [{ text: 'SECRET alpha' }, { text: 'visible beta' }] },
+      body: { version: 1, blocks: [{ text: 'SECRET alpha visible beta' }] },
     },
     principal: { id: 'u1' },
   });
   assert.equal(created.ok, true, created.failure?.message);
-  const blockIds = db.prepare('SELECT id FROM FoldRedactDoc_body_block WHERE document_id = ? ORDER BY position').all('d1').map((row) => row.id);
-  assert.equal(blockIds.length, 2);
-  const prefix = 'FoldRedactDoc_body';
-  const stream = ensureStream({ db, prefix, documentId: 'd1', principalType: 'principal', principalId: 'u1' });
-  const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: hashClientNonce(randomBytes(32).toString('base64url')) });
-  return { app, db, Doc, Project, blockIds, stream, lease, prefix, scope: 'Project:p1' };
+  return { app, db, Doc, Project, scope: 'Project:p1' };
 }
 
-function readLastSeq(db) {
-  return db.prepare('SELECT lastSeq FROM _ProjectedCursor WHERE entity = ? AND field = ?').get('FoldRedactDoc', 'body')?.lastSeq ?? 0;
-}
-
-async function authoringMap(ctx, principalId) {
-  const { db, Doc } = ctx;
-  const row = db.prepare('SELECT * FROM FoldRedactDoc WHERE id = ?').get('d1');
-  const snap = await projectAnnotatedTextSnapshot({
-    db, entity: Doc, row, principal: { id: principalId }, fieldName: 'body', descriptor: Doc.fields.body,
-    authoring: { streamToken: ctx.stream.id, leaseToken: ctx.lease.id, leaseId: ctx.lease.id, fence: readLastSeq(db) },
-  });
-  const auth = snap.body?.authoring ?? snap.authoring;
-  return new Map((auth?.positionFrames ?? []).map((f) => [f.blockId, f.positionToken]));
-}
-
-async function dispatchTextInsert(ctx, actionId, blockId, principalId, session, offset, text, positionMap) {
-  const token = positionMap.get(blockId);
-  return ctx.app.dispatch({
-    actionId, principal: { id: principalId }, scope: ctx.scope, history: { session },
-    type: 'FoldRedactDoc.body.operation',
-    payload: {
-      version: 9, id: 'd1',
-      authoring: { version: 1, stream: ctx.stream.id, lease: ctx.lease.id, mutationId: actionId },
-      edit: { kind: 'text.insert', at: { positionToken: token, offset, affinity: 'right' }, text },
-    },
+async function binding(ctx, principalId = 'u1') {
+  const row = ctx.db.prepare('SELECT * FROM FoldRedactDoc WHERE id = ?').get('d1');
+  return withAuthoringBinding({
+    db: ctx.db, entity: ctx.Doc, Document: ctx.Doc, row,
+    principal: { id: principalId }, fieldName: 'body', descriptor: ctx.Doc.fields.body,
   });
 }
 
-async function applyConfidentialSpan(ctx, actionId, blockId, annotation, fromOffset, toOffset, positionMap) {
-  const token = positionMap.get(blockId);
+async function applyRange(ctx, actionId, annotation, fromOffset, toOffset, auth) {
   return ctx.app.dispatch({
     actionId, principal: { id: 'u1' }, scope: ctx.scope,
     type: 'FoldRedactDoc.body.operation',
     payload: {
       version: 9, id: 'd1',
-      authoring: { version: 1, stream: ctx.stream.id, lease: ctx.lease.id, mutationId: actionId },
+      authoring: { version: 1, stream: auth.streamToken, lease: auth.leaseToken, mutationId: actionId },
       edit: {
         kind: 'annotation.apply',
         annotation,
-        from: { positionToken: token, offset: fromOffset, affinity: 'left' },
-        to: { positionToken: token, offset: toOffset, affinity: 'right' },
+        from: { positionToken: auth.documentPositionToken, offset: fromOffset, affinity: 'left' },
+        to: { positionToken: auth.documentPositionToken, offset: toOffset, affinity: 'right' },
+      },
+    },
+  });
+}
+
+async function insertAt(ctx, actionId, offset, text, auth, session) {
+  return ctx.app.dispatch({
+    actionId, principal: { id: 'u1' }, scope: ctx.scope, history: { session },
+    type: 'FoldRedactDoc.body.operation',
+    payload: {
+      version: 9, id: 'd1',
+      authoring: { version: 1, stream: auth.streamToken, lease: auth.leaseToken, mutationId: actionId },
+      edit: {
+        kind: 'text.insert',
+        at: { positionToken: auth.documentPositionToken, offset, affinity: 'right' },
+        text,
       },
     },
   });
@@ -126,22 +115,24 @@ function committedOperatedEvents(db) {
 test('a recipient with any confidential span never receives a fold envelope (no raw family leak)', async (t) => {
   const ctx = await setup();
   t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const [confidentialBlock, visibleBlock] = ctx.blockIds;
 
-  // Theme + protect the whole of the CONFIDENTIAL block ("SECRET alpha", 12 chars).
-  const map0 = await authoringMap(ctx, 'u1');
-  const themed = await applyConfidentialSpan(ctx, 'theme', confidentialBlock, { id: 'theme-1', family: 'theme', fields: {} }, 0, 12, map0);
+  // Theme + protect the confidential prefix ("SECRET alpha", 12 chars).
+  const auth0 = await binding(ctx, 'u1');
+  const themed = await applyRange(ctx, 'theme', { id: 'theme-1', family: 'theme', fields: {} }, 0, 12, auth0);
   assert.equal(themed.ok, true, themed.failure?.message);
-  const protectMap = await authoringMap(ctx, 'u1');
-  const protect = await applyConfidentialSpan(ctx, 'protect', confidentialBlock, { id: 'protect-1', family: 'confidential', fields: {}, protectedTargetIds: ['theme-1'] }, 0, 12, protectMap);
+  const auth1 = await binding(ctx, 'u1');
+  const protect = await applyRange(
+    ctx, 'protect',
+    { id: 'protect-1', family: 'confidential', fields: {}, protectedTargetIds: ['theme-1'] },
+    0, 12, auth1,
+  );
   assert.equal(protect.ok, true, protect.failure?.message);
 
-  // Edit the VISIBLE block. The affected block is fully visible, so the
-  // original affected-block-only gate would emit a fold — but a redacted
-  // recipient never receives a family seed (neither in its snapshot nor in a
-  // fold), so it must get a resync, not a fold, or every fold would fail.
-  const visibleMap = await authoringMap(ctx, 'u1');
-  const edited = await dispatchTextInsert(ctx, 'edit-visible', visibleBlock, 'u1', 'tab-u1', 0, 'x', visibleMap);
+  // Edit the VISIBLE tail. The affected range is fully visible, so a naive
+  // affected-only gate would emit a fold — but a redacted recipient never
+  // receives a family seed, so it must get a resync, not a fold.
+  const auth2 = await binding(ctx, 'u1');
+  const edited = await insertAt(ctx, 'edit-visible', 13, 'x', auth2, 'tab-u1');
   assert.equal(edited.ok, true, edited.failure?.message);
 
   const events = committedOperatedEvents(ctx.db);
@@ -170,4 +161,7 @@ test('a recipient with any confidential span never receives a fold envelope (no 
   assert.ok(Array.isArray(owner));
   assert.equal(owner[0].type, 'event');
   assert.equal(owner[0].fold?.kind, 'annotatedText');
+  assert.equal(owner[0].fold?.version, 3);
+  assert.equal(typeof owner[0].fold?.projection?.text, 'string');
+  assert.match(owner[0].fold.projection.text, /x/);
 });

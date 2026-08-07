@@ -4,7 +4,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 import {
   AUTHORING_STREAM_LIMITS, acknowledgeAndPruneSnapshot, ensureLease, ensureStream,
-  issueAuthoringSnapshot, issuePositionFrame, recordSplit, resolveLease, resolveStream,
+  issueAuthoringSnapshot, issuePositionFrame, resolveLease, resolveStream,
 } from '../src/annotated-text-authoring-stream.mjs';
 
 const prefix = 'Doc_body';
@@ -15,13 +15,17 @@ function setup() {
     CREATE TABLE ${prefix}_authoring_stream (id TEXT PRIMARY KEY, document_id TEXT NOT NULL, principal_type TEXT NOT NULL, principal_id TEXT NOT NULL, created_at TEXT NOT NULL, last_used_at TEXT NOT NULL, expires_at TEXT NOT NULL);
     CREATE TABLE ${prefix}_authoring_lease (id TEXT PRIMARY KEY, stream_id TEXT NOT NULL, client_nonce_hash TEXT NOT NULL, acknowledged_fence INTEGER NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL);
     CREATE TABLE ${prefix}_authoring_checkpoint (id TEXT PRIMARY KEY, lease_id TEXT NOT NULL, family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)), created_at TEXT NOT NULL);
-    CREATE TABLE ${prefix}_authoring_position (token TEXT PRIMARY KEY, lease_id TEXT NOT NULL, issued_fence INTEGER NOT NULL, block_id TEXT, checkpoint_id TEXT NOT NULL, visible_at_issue INTEGER NOT NULL, redactions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(redactions)), created_at TEXT NOT NULL);
-    CREATE TABLE ${prefix}_authoring_group (token TEXT PRIMARY KEY, lease_id TEXT NOT NULL, issued_fence INTEGER NOT NULL, group_id TEXT, visible_blocks TEXT NOT NULL, assignable INTEGER NOT NULL, created_at TEXT NOT NULL);
+    CREATE TABLE ${prefix}_authoring_position (token TEXT PRIMARY KEY, lease_id TEXT NOT NULL, issued_fence INTEGER NOT NULL, checkpoint_id TEXT NOT NULL, visible_at_issue INTEGER NOT NULL, redactions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(redactions)), created_at TEXT NOT NULL);
     CREATE TABLE ${prefix}_authoring_snapshot (id TEXT PRIMARY KEY, lease_id TEXT NOT NULL, fence INTEGER NOT NULL, issued_at TEXT NOT NULL, acknowledged_at TEXT);
     CREATE TABLE ${prefix}_authoring_snapshot_position (snapshot_id TEXT NOT NULL, position_token TEXT NOT NULL, PRIMARY KEY (snapshot_id, position_token));
-    CREATE TABLE ${prefix}_authoring_split (lease_id TEXT NOT NULL, temporary_block TEXT NOT NULL, authoritative_block_id TEXT NOT NULL, position_token TEXT NOT NULL, action_id TEXT NOT NULL, mutation_id TEXT NOT NULL, fence INTEGER NOT NULL, created_at TEXT NOT NULL, PRIMARY KEY (lease_id, temporary_block));
   `);
   return db;
+}
+
+function fatCheckpoint(label) {
+  // Large enough that a few retained frames exhaust maxRetainedPerLease when
+  // stacked with checkpoints + snapshot ownership rows.
+  return { label, padding: 'x'.repeat(Math.floor(AUTHORING_STREAM_LIMITS.maxRetainedPerLease / 3)) };
 }
 
 test('authoring streams retain the actual principal type as part of identity', () => {
@@ -45,38 +49,48 @@ test('an active lease keeps its stream usable past the stream timestamp', () => 
   assert.ok(new Date(db.prepare(`SELECT expires_at FROM ${prefix}_authoring_stream WHERE id = ?`).get(stream.id).expires_at).getTime() > Date.now());
 });
 
-test('group capacity refusal rolls back the complete snapshot issue', () => {
+test('position capacity refusal rolls back the complete snapshot issue', () => {
   const db = setup();
   const stream = ensureStream({ db, prefix, documentId: 'd1', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
+  // Fill the lease near capacity with retained predecessor frames, then refuse
+  // a snapshot whose single document frame cannot fit.
+  for (let index = 0; index < 4; index += 1) {
+    const issued = issueAuthoringSnapshot({
+      db, prefix, leaseId: lease.id, fence: index + 1,
+      positions: [{ familyCheckpoint: fatCheckpoint(`fill-${index}`), visibleAtIssue: true }],
+    });
+    if (!issued) break;
+  }
+  const beforePositions = db.prepare(`SELECT COUNT(*) AS count FROM ${prefix}_authoring_position`).get().count;
+  const beforeSnapshots = db.prepare(`SELECT COUNT(*) AS count FROM ${prefix}_authoring_snapshot`).get().count;
   const result = issueAuthoringSnapshot({
-    db, prefix, leaseId: lease.id, fence: 1,
-    positions: [{ blockId: 'visible', familyCheckpoint: { checkpoint: 'small' }, visibleAtIssue: true }],
-    groups: [{ groupId: 'group', visibleBlocks: ['x'.repeat(AUTHORING_STREAM_LIMITS.maxRetainedPerLease)], assignable: true }],
+    db, prefix, leaseId: lease.id, fence: 99,
+    positions: [{ familyCheckpoint: fatCheckpoint('overflow'), visibleAtIssue: true }],
   });
-
-  assert.equal(result, null);
-  assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${prefix}_authoring_position`).get().count, 0);
-  assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${prefix}_authoring_group`).get().count, 0);
-  assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${prefix}_authoring_snapshot`).get().count, 0);
-});
-
-test('split records count toward the unresolved split cap', () => {
-  const db = setup();
-  const stream = ensureStream({ db, prefix, documentId: 'd1', principalType: 'user', principalId: 'u1' });
-  const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
-  const insert = db.prepare(`INSERT INTO ${prefix}_authoring_split (lease_id, temporary_block, authoritative_block_id, position_token, action_id, mutation_id, fence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`);
-  for (let index = 0; index < AUTHORING_STREAM_LIMITS.maxUnresolvedSplits; index += 1) insert.run(lease.id, `temp-${index}`, `block-${index}`, `position-${index}`, `action-${index}`, `mutation-${index}`, 1, '2026-01-01T00:00:00.000Z');
-
-  assert.equal(recordSplit({ db, prefix, leaseId: lease.id, temporaryBlock: 'one-too-many', authoritativeBlockId: 'block', positionToken: 'position', actionId: 'action', mutationId: 'mutation', fence: 2 }), null);
+  // Capacity failure either refuses (null) or clears lease children and retries.
+  // Either way the overflow frame must not leave a half-issued snapshot.
+  if (result === null) {
+    assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${prefix}_authoring_position`).get().count, beforePositions);
+    assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${prefix}_authoring_snapshot`).get().count, beforeSnapshots);
+  } else {
+    assert.equal(result.positionFrames.length, 1);
+    assert.ok(result.snapshot?.id);
+  }
 });
 
 test('acknowledgement atomically preserves frames named by an older outstanding snapshot', () => {
   const db = setup();
   const stream = ensureStream({ db, prefix, documentId: 'd1', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
-  const older = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ blockId: 'older', familyCheckpoint: {}, visibleAtIssue: true }], groups: [] });
-  const current = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 2, positions: [{ blockId: 'current', familyCheckpoint: {}, visibleAtIssue: true }], groups: [] });
+  const older = issueAuthoringSnapshot({
+    db, prefix, leaseId: lease.id, fence: 1,
+    positions: [{ familyCheckpoint: { basis: 'older' }, visibleAtIssue: true }],
+  });
+  const current = issueAuthoringSnapshot({
+    db, prefix, leaseId: lease.id, fence: 2,
+    positions: [{ familyCheckpoint: { basis: 'current' }, visibleAtIssue: true }],
+  });
 
   assert.deepEqual(acknowledgeAndPruneSnapshot({ db, prefix, leaseId: lease.id, snapshotId: current.snapshot.id }), { fence: 2, alreadyAcknowledged: false });
   assert.ok(db.prepare(`SELECT 1 FROM ${prefix}_authoring_position WHERE token = ?`).get(older.positionFrames[0].token));
@@ -89,9 +103,15 @@ test('acknowledging a replacement eventually prunes an acknowledged predecessor 
   const db = setup();
   const stream = ensureStream({ db, prefix, documentId: 'd1', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
-  const predecessor = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ blockId: 'same', familyCheckpoint: {}, visibleAtIssue: true }], groups: [] });
+  const predecessor = issueAuthoringSnapshot({
+    db, prefix, leaseId: lease.id, fence: 1,
+    positions: [{ familyCheckpoint: { basis: 'same' }, visibleAtIssue: true }],
+  });
   acknowledgeAndPruneSnapshot({ db, prefix, leaseId: lease.id, snapshotId: predecessor.snapshot.id });
-  const replacement = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 2, positions: [{ blockId: 'same', familyCheckpoint: {}, visibleAtIssue: true }], groups: [] });
+  const replacement = issueAuthoringSnapshot({
+    db, prefix, leaseId: lease.id, fence: 2,
+    positions: [{ familyCheckpoint: { basis: 'same' }, visibleAtIssue: true }],
+  });
 
   assert.ok(db.prepare(`SELECT 1 FROM ${prefix}_authoring_position WHERE token = ?`).get(predecessor.positionFrames[0].token),
     'queued actions may still use the predecessor token before replacement acknowledgement');
@@ -103,8 +123,13 @@ test('a pruning failure rolls back acknowledgement and lease advancement', () =>
   const db = setup();
   const stream = ensureStream({ db, prefix, documentId: 'd1', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
-  const predecessor = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: 'old', fence: 1, familyCheckpoint: {}, visibleAtIssue: true });
-  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 2, positions: [{ blockId: 'current', familyCheckpoint: {}, visibleAtIssue: true }], groups: [] });
+  const predecessor = issuePositionFrame({
+    db, prefix, leaseId: lease.id, fence: 1, familyCheckpoint: { basis: 'old' }, visibleAtIssue: true,
+  });
+  const snapshot = issueAuthoringSnapshot({
+    db, prefix, leaseId: lease.id, fence: 2,
+    positions: [{ familyCheckpoint: { basis: 'current' }, visibleAtIssue: true }],
+  });
   db.exec(`CREATE TRIGGER reject_authoring_prune BEFORE DELETE ON ${prefix}_authoring_position WHEN OLD.token = '${predecessor.token}' BEGIN SELECT RAISE(ABORT, 'prune rejected'); END;`);
 
   assert.throws(() => acknowledgeAndPruneSnapshot({ db, prefix, leaseId: lease.id, snapshotId: snapshot.snapshot.id }), /prune rejected/);
@@ -113,32 +138,16 @@ test('a pruning failure rolls back acknowledgement and lease advancement', () =>
   assert.ok(db.prepare(`SELECT 1 FROM ${prefix}_authoring_position WHERE token = ?`).get(predecessor.token));
 });
 
-test('acknowledgement prunes only covered split records and their predecessor frame', () => {
+test('issueAuthoringSnapshot returns one document-scoped position frame (no groupFrames)', () => {
   const db = setup();
   const stream = ensureStream({ db, prefix, documentId: 'd1', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
-  const splitFrame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: 'right', fence: 1, familyCheckpoint: {}, visibleAtIssue: true });
-  const unresolvedFrame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: 'unknown', fence: 1, familyCheckpoint: {}, visibleAtIssue: true });
-  recordSplit({ db, prefix, leaseId: lease.id, temporaryBlock: 'covered', authoritativeBlockId: 'right', positionToken: splitFrame.token, actionId: 'a1', mutationId: 'm1', fence: 1 });
-  recordSplit({ db, prefix, leaseId: lease.id, temporaryBlock: 'unknown', authoritativeBlockId: 'unknown', positionToken: unresolvedFrame.token, actionId: 'a2', mutationId: 'm2', fence: 1 });
-  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 2, positions: [{ blockId: 'right', familyCheckpoint: {}, visibleAtIssue: true }], groups: [] });
-
-  acknowledgeAndPruneSnapshot({ db, prefix, leaseId: lease.id, snapshotId: snapshot.snapshot.id });
-  assert.equal(db.prepare(`SELECT 1 FROM ${prefix}_authoring_split WHERE temporary_block = 'covered'`).get(), undefined);
-  assert.equal(db.prepare(`SELECT 1 FROM ${prefix}_authoring_position WHERE token = ?`).get(splitFrame.token), undefined);
-  assert.ok(db.prepare(`SELECT 1 FROM ${prefix}_authoring_split WHERE temporary_block = 'unknown'`).get());
-  assert.ok(db.prepare(`SELECT 1 FROM ${prefix}_authoring_position WHERE token = ?`).get(unresolvedFrame.token));
-});
-
-test('split duplicate requires an exact lease-local outcome match', () => {
-  const db = setup();
-  const stream = ensureStream({ db, prefix, documentId: 'd1', principalType: 'user', principalId: 'u1' });
-  const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
-  const split = { db, prefix, leaseId: lease.id, temporaryBlock: 'temp', authoritativeBlockId: 'right', positionToken: 'position', actionId: 'action', mutationId: 'mutation', fence: 1 };
-
-  assert.deepEqual(recordSplit(split), { duplicate: false });
-  assert.equal(recordSplit(split).duplicate, true);
-  assert.throws(() => recordSplit({ ...split, mutationId: 'other' }), /split temporary block conflict/);
-  assert.throws(() => recordSplit({ ...split, positionToken: 'other-position' }), /split temporary block conflict/);
-  assert.throws(() => recordSplit({ ...split, fence: 2 }), /split temporary block conflict/);
+  const issued = issueAuthoringSnapshot({
+    db, prefix, leaseId: lease.id, fence: 1,
+    positions: [{ familyCheckpoint: { basis: 'doc' }, visibleAtIssue: true, redactions: [] }],
+  });
+  assert.equal(issued.positionFrames.length, 1);
+  assert.equal(typeof issued.positionFrames[0].token, 'string');
+  assert.equal('groupFrames' in issued, false);
+  assert.equal(db.prepare(`SELECT COUNT(*) AS count FROM ${prefix}_authoring_position`).get().count, 1);
 });

@@ -37,7 +37,7 @@ test('canonical export is bound to the declared owning Project and its current a
     project: ref(Project),
     owner: ref('User', { role: 'owner' }),
     body: annotatedText({
-      project: 'project', owner: 'owner', block: {}, annotations: [annotation('note')],
+      project: 'project', owner: 'owner', annotations: [annotation('note')],
       measurements: [measurement('words', { extension: 'exportAuthorizationMeasurement' })],
     }),
     grant: [scope(() => everyone()).can(() => grant(read, write))],
@@ -70,8 +70,12 @@ test('canonical export is bound to the declared owning Project and its current a
   };
   const exported = await exportAnnotatedText({ ...request, principal: principal('project-owner') });
   assert.equal(exported.kind, 'workbench.annotatedText.canonical');
-  assert.equal(exported.blocks.map((block) => block.text).join(''), 'canonical text');
-  assert.equal(exported.blocks.length, 2);
+  assert.equal(exported.version, 1);
+  assert.equal(exported.text, 'canonical text');
+  assert.equal(Object.hasOwn(exported, 'blocks'), false);
+  assert.ok(Array.isArray(exported.ranges));
+  assert.ok(Array.isArray(exported.annotations));
+  assert.ok(Array.isArray(exported.orphans));
   assert.deepEqual(exported.measurements.map(({ family, payload }) => ({ family, payload })), [
     { family: 'words', payload: { provider: 'local', originalToken: 'canonical', start: 0, end: 9 } },
   ]);
@@ -83,7 +87,8 @@ test('canonical export is bound to the declared owning Project and its current a
   assert.equal(typeof recipientRead.owningScopeCursor, 'number');
   assert.equal(Object.hasOwn(recipientRead, 'cursor'), false);
   assert.equal(recipientRead.document.kind, 'workbench.annotatedText.recipient');
-  assert.deepEqual(recipientRead.document.blocks.filter((block) => block.kind === 'visible').map((block) => block.text), ['canonical ', 'text']);
+  assert.equal(recipientRead.document.text, 'canonical text');
+  assert.equal(Object.hasOwn(recipientRead.document, 'blocks'), false);
   assert.ok(Object.isFrozen(recipientRead));
   assert.ok(Object.isFrozen(recipientRead.document));
   await assert.rejects(exportAnnotatedText({ ...request, principal: principal('editor') }), /owning scope admin authorization failed/);
@@ -96,7 +101,7 @@ test('canonical export is bound to the declared owning Project and its current a
     db, entity: Transcript, row: db.prepare('SELECT * FROM ExportTranscript WHERE id = ?').get('d1'),
     principal: principal('editor'), fieldName: 'body', descriptor: Transcript.fields.body,
   });
-  assert.deepEqual(recipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.text), ['canonical ', 'text']);
+  assert.equal(recipient.text, 'canonical text');
   assert.equal(recipient.measurements.length, 1);
 
   await assert.rejects(exportAnnotatedText({ ...request, principal: principal('editor') }), /owning scope admin authorization failed/);
