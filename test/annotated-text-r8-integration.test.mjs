@@ -1,14 +1,15 @@
 import assert from 'node:assert/strict';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import workbench, {
   annotatedText, annotation, boolean, entity, executeDDL, executeFrameworkDDL, grant, measurement, ref, read, scope, write, everyone,
-  registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, protectingAnnotation,
+  registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, protectingAnnotation, admin, deny,
 } from '../src/internal.mjs';
-import { materializeBlock, restoreTextFamilyCheckpoint } from '../src/annotated-text-family.mjs';
+import { exportAnnotatedText } from '../src/index.mjs';
+import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
 import { native } from '../src/event-handle.mjs';
-import { projectAnnotatedTextSnapshot } from '../src/annotated-text-snapshot.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 const extension = {
@@ -23,216 +24,410 @@ const extension = {
 registerAnnotatedTextContract('r8IntegrationSource', Object.freeze({ kind: 'measurement' }));
 registerAnnotatedTextStructuralExtension('r8IntegrationSource', Object.freeze(extension));
 
-function makeApp() {
-  const Document = entity('R8IntegrationDocument', {
-    project: ref('Project'), owner: ref('User'),
+function r8Doc({
+  protectingAccess = async ({ is }) => (await is.owner()) ? grant(read) : grant(),
+  access = () => grant(read, write),
+} = {}) {
+  return entity('R8IntegrationDocument', {
+    project: ref('Project'),
+    owner: ref('User', { role: 'owner' }),
     body: annotatedText({
-      project: 'project', owner: 'owner', block: { reviewed: boolean({ default: true }) },
-       annotations: [annotation('coding'), annotation('tag', { appliesTo: 'block-group', cardinality: 'one', fields: { value: boolean({ default: false }) } }), annotation('other', { appliesTo: 'block-group', cardinality: 'one', fields: { value: boolean({ default: false }) } }), protectingAnnotation('confidential', { protects: 'coding', access: () => grant() })],
+      project: 'project',
+      owner: 'owner',
+      annotations: [
+        annotation('coding'),
+        annotation('tag', { fields: { value: boolean({ default: false }) } }),
+        annotation('other', { fields: { value: boolean({ default: false }) } }),
+        annotation('comment', { empty: 'orphan' }),
+        protectingAnnotation('confidential', { protects: 'coding', access: protectingAccess }),
+      ],
       measurements: [measurement('source', { extension: 'r8IntegrationSource' })],
     }),
-    grant: [scope(() => everyone()).can(() => grant(read, write))],
+    grant: [scope(() => everyone()).can(access)],
   });
-  const Project = entity('Project', { owner: ref('User'), grant: [scope(() => everyone()).can(() => grant(read, write))] });
-  return { Document, Project };
 }
 
-async function setup() {
-  const db = new DatabaseSync(':memory:');
-  const { Document, Project } = makeApp();
-  executeFrameworkDDL(db); db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)'); db.exec("INSERT INTO User VALUES ('u1')");
-  executeDDL(Project, db); db.exec("INSERT INTO Project (id, owner) VALUES ('p1', 'u1')"); executeDDL(Document, db);
+async function appFor(db = new DatabaseSync(':memory:'), principalId = null, options) {
+  const Document = r8Doc(options);
+  const Project = entity('Project', {
+    owner: ref('User', { role: 'owner' }),
+    grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, admin) : deny('not project owner'))],
+  });
+  executeFrameworkDDL(db);
+  db.exec('CREATE TABLE User (id TEXT PRIMARY KEY)');
+  db.exec("INSERT INTO User (id) VALUES ('u1')");
+  executeDDL(Project, db);
+  db.exec("INSERT INTO Project (id, owner) VALUES ('p1', 'u1')");
+  executeDDL(Document, db);
   const app = workbench({ db, entities: [Project, Document] });
-  app.listen(0, { principalOf: () => ({ id: 'u1' }) }); await app.ready;
-  const created = await app.dispatch({ actionId: 'create', type: 'R8IntegrationDocument.create', principal: { id: 'u1' }, payload: {
-    id: 'd1', project: 'p1', owner: 'u1', body: { version: 1, blocks: [{ text: 'hello world', fields: { reviewed:  false }, measurements: [{ family: 'source', payload: { text: 'hello world' } }] }] },
-  }});
+  if (principalId !== null) app.listen(0, { principalOf: () => typeof principalId === 'function' ? principalId() : ({ id: principalId }) });
+  else app.start();
+  await app.ready;
+  return { app, db, Document, Project };
+}
+
+async function setupDoc(docText, principalId = null, options) {
+  const { app, db, Document, Project } = await appFor(new DatabaseSync(':memory:'), principalId, options);
+  const created = await app.dispatch({
+    actionId: 'create', type: 'R8IntegrationDocument.create',
+    payload: {
+      id: 'd1', project: 'p1', owner: 'u1',
+      ...(docText ? { body: { version: 1, blocks: [{ text: docText }] } } : {}),
+    },
+    principal: { id: 'u1' },
+  });
   assert.equal(created.ok, true, created.failure?.message);
-  const blockId = db.prepare('SELECT id FROM R8IntegrationDocument_body_block').get().id;
-  return { app, db, Document: app.entities.get('R8IntegrationDocument'), blockId };
+
+  const row = db.prepare("SELECT * FROM R8IntegrationDocument WHERE id = 'd1'").get();
+  const principal = { id: typeof principalId === 'function' ? (principalId()?.id ?? 'u1') : (principalId ?? 'u1') };
+  const binding = await withAuthoringBinding({
+    db, entity: Document, Document, row, principal, fieldName: 'body', descriptor: Document.fields.body,
+  });
+
+  async function refreshBinding(forPrincipal = principal) {
+    const current = db.prepare("SELECT * FROM R8IntegrationDocument WHERE id = 'd1'").get();
+    return withAuthoringBinding({
+      db, entity: Document, Document, row: current, principal: forPrincipal,
+      fieldName: 'body', descriptor: Document.fields.body,
+    });
+  }
+
+  function authoringOf(b, mutationId = `m-${randomUUID()}`) {
+    return { version: 1, stream: b.streamToken, lease: b.leaseToken, mutationId };
+  }
+
+  return {
+    app, db, Document, Project, binding, refreshBinding, authoringOf,
+    documentPositionToken: binding.documentPositionToken,
+  };
 }
 
-async function recipientSnapshot({ db, Document }, principal = { id: 'u1' }) {
-  const row = db.prepare('SELECT * FROM R8IntegrationDocument WHERE id = ?').get('d1');
-  return withAuthoringBinding({ db, entity: Document, Document, row, principal, fieldName: 'body', descriptor: Document.fields.body });
+function familyText(db) {
+  const state = db.prepare("SELECT family_checkpoint FROM R8IntegrationDocument_body_state WHERE document_id = 'd1'").get();
+  return materializeText(restoreTextFamily(JSON.parse(state.family_checkpoint)));
 }
-
-async function dispatch({ app, db, Document }, actionId, command, { binding, principal = { id: 'u1' } } = {}) {
-  const current = binding ?? await recipientSnapshot({ db, Document }, principal);
-  const edit = typeof command === 'function' ? command(current.snapshot) : command;
-  const token = ({ blockId, offset, affinity }) => ({ positionToken: current.positionTokens.get(blockId), offset, affinity });
-  const groups = (selection) => selection.kind === 'one'
-    ? { kind: 'one', groupToken: current.groupTokens.get(selection.blockGroupId) }
-    : { kind: selection.kind, groupTokens: selection.blockGroupIds.map((id) => current.groupTokens.get(id)) };
-  const translated = { ...edit, ...(edit.at ? { at: token(edit.at) } : {}), ...(edit.from ? { from: token(edit.from) } : {}), ...(edit.to ? { to: token(edit.to) } : {}), ...(edit.selection ? { selection: groups(edit.selection) } : {}), authoring: { version: 1, stream: current.streamToken, lease: current.leaseToken, mutationId: actionId } };
-  if (translated.kind === 'block.split' || translated.kind === 'block.continue' || translated.kind === 'block.split-and-assign') translated.temporaryBlock = `temporary-${actionId}`;
-  const result = await app.dispatch({ actionId, principal, scope: 'Project:p1', type: `${Document.name}.body.operation`, payload: { version: 9, id: 'd1', authoring: translated.authoring, edit: Object.fromEntries(Object.entries(translated).filter(([key]) => !['authoring', 'id', 'mutationId'].includes(key))) } });
-  if (!result.ok && result.events?.length) console.log('R8EVENT', actionId, Object.keys(result.events[0].data), result.events[0].data);
-  return result;
-}
-
-function rows(db, sql) { return db.prepare(sql).all(); }
 
 function durableAnnotatedTextState(db) {
   const prefix = 'R8IntegrationDocument_body';
   const quote = (identifier) => `"${identifier.replaceAll('"', '""')}"`;
-  const tables = rows(db, `SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '${prefix}_*' ORDER BY name`)
-    .map(({ name }) => name).filter((name) => !name.includes('_authoring_'));
+  const tables = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '${prefix}_*' ORDER BY name`)
+    .all()
+    .map(({ name }) => name)
+    .filter((name) => !name.includes('_authoring_'));
   return tables.map((name) => {
-    const columns = rows(db, `PRAGMA table_info(${quote(name)})`).map((column) => column.name);
+    const columns = db.prepare(`PRAGMA table_info(${quote(name)})`).all().map((column) => column.name);
     const order = columns.map(quote).join(', ');
-    return [name, rows(db, `SELECT * FROM ${quote(name)} ORDER BY ${order}`)];
+    return [name, db.prepare(`SELECT * FROM ${quote(name)} ORDER BY ${order}`).all()];
   });
 }
 
-test('v9 block.continue partitions block facts while retaining its durable group', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const { db, blockId } = ctx;
-  const result = await dispatch(ctx, 'continue', { kind: 'block.continue', at: { blockId, offset: 5, affinity: 'right' } });
+test('create imports continuous family text without block tables', async () => {
+  const { app, db } = await setupDoc('hello world');
+  assert.equal(familyText(db), 'hello world');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R8IntegrationDocument_body_state WHERE document_id = 'd1'").get().count, 1);
+  const blockTables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB 'R8IntegrationDocument_body_block*'").all();
+  assert.equal(blockTables.length, 0);
+  await app.close?.();
+});
+
+test('text.insert mutates the continuous family at an absolute offset', async () => {
+  const { app, db, binding, authoringOf, documentPositionToken } = await setupDoc('hello world');
+  const result = await app.dispatch({
+    actionId: 'insert', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-insert'),
+      edit: { kind: 'text.insert', at: { positionToken: documentPositionToken, offset: 5, affinity: 'right' }, text: '!' },
+    },
+  });
   assert.equal(result.ok, true, result.failure?.message);
-  const blocks = rows(db, 'SELECT id, group_id FROM R8IntegrationDocument_body_block_group JOIN R8IntegrationDocument_body_block ON id = block_id ORDER BY position');
-  assert.equal(blocks.length, 2); assert.equal(blocks[0].group_id, blocks[1].group_id);
-  assert.deepEqual(rows(db, 'SELECT reviewed FROM R8IntegrationDocument_body_block ORDER BY position').map((r) => r.reviewed), [0, 0]);
-  assert.deepEqual(rows(db, 'SELECT measurement.block_id, measurement.payload FROM R8IntegrationDocument_body_measurement AS measurement JOIN R8IntegrationDocument_body_block AS block ON block.id = measurement.block_id ORDER BY block.position').map((r) => [r.block_id, JSON.parse(r.payload).text]), [[blocks[0].id, 'hello'], [blocks[1].id, ' world']]);
-  assert.equal(rows(db, 'SELECT group_id FROM R8IntegrationDocument_body_block_group').length, 2);
+  assert.equal(familyText(db), 'hello! world');
+  await app.close?.();
 });
 
-test('v9 block.split-and-assign commits split and one right-group annotation in one action', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const result = await dispatch(ctx, 'split-assign', { kind: 'block.split-and-assign', at: { blockId: ctx.blockId, offset: 5, affinity: 'right' }, annotation: { id: 'tag-right', family: 'tag', fields: { value: true } } });
+test('annotation.apply creates one document-scoped membership range', async () => {
+  const { app, db, binding, authoringOf, documentPositionToken } = await setupDoc('hello world');
+  const result = await app.dispatch({
+    actionId: 'apply-coding', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-apply-coding'),
+      edit: {
+        kind: 'annotation.apply',
+        annotation: { id: 'coding-1', family: 'coding', fields: {} },
+        from: { positionToken: documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: documentPositionToken, offset: 5, affinity: 'right' },
+      },
+    },
+  });
   assert.equal(result.ok, true, result.failure?.message);
-  const groups = rows(ctx.db, 'SELECT b.id, bg.group_id FROM R8IntegrationDocument_body_block b JOIN R8IntegrationDocument_body_block_group bg ON bg.block_id=b.id ORDER BY b.position');
-  assert.notEqual(groups[0].group_id, groups[1].group_id); assert.equal(groups[1].group_id, groups[1].id);
-  assert.deepEqual(rows(ctx.db, 'SELECT annotation_id, group_id FROM R8IntegrationDocument_body_group_membership').map((row) => ({ ...row })), [{ annotation_id: 'tag-right', group_id: groups[1].group_id }]);
+  const ann = db.prepare("SELECT id, family FROM R8IntegrationDocument_body_annotation WHERE id = 'coding-1'").get();
+  assert.equal(ann.family, 'coding');
+  const memberships = db.prepare("SELECT * FROM R8IntegrationDocument_body_membership WHERE annotation_id = 'coding-1'").all();
+  assert.equal(memberships.length, 1);
+  assert.equal('block_id' in memberships[0], false);
+  await app.close?.();
 });
 
-test('v9 listed assignment canonicalizes order, replaces only selected groups, and clear is idempotent', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const split = await dispatch(ctx, 'split-assign', { kind: 'block.split-and-assign', at: { blockId: ctx.blockId, offset: 5, affinity: 'right' }, annotation: { id: 'old-a', family: 'tag', fields: { value: false } } });
-  assert.equal(split.ok, true, split.failure?.message);
-  const groups = rows(ctx.db, 'SELECT b.id, bg.group_id FROM R8IntegrationDocument_body_block b JOIN R8IntegrationDocument_body_block_group bg ON bg.block_id=b.id ORDER BY b.position');
-  const oldB = await dispatch(ctx, 'old-b', (snapshot) => ({ kind: 'block-group.assignment.set', selection: { kind: 'one', blockGroupId: snapshot.blockGroups[0].id }, annotation: { id: 'old-b', family: 'tag', fields: { value: false } } }));
-  assert.equal(oldB.ok, true, oldB.failure?.message);
-  const set = await dispatch(ctx, 'set-listed', (snapshot) => ({ kind: 'block-group.assignment.set', selection: { kind: 'listed', blockGroupIds: [snapshot.blockGroups[1].id, snapshot.blockGroups[0].id] }, annotation: { id: 'new', family: 'tag', fields: { value: true } } }));
-  assert.equal(set.ok, true, set.failure?.message);
-   const listedMemberships = rows(ctx.db, `SELECT membership.annotation_id, membership.group_id, membership.ordinal, MIN(block.position) AS group_position
-     FROM R8IntegrationDocument_body_group_membership AS membership
-     JOIN R8IntegrationDocument_body_block_group AS block_group ON block_group.group_id = membership.group_id
-     JOIN R8IntegrationDocument_body_block AS block ON block.id = block_group.block_id
-     GROUP BY membership.annotation_id, membership.group_id, membership.ordinal
-     ORDER BY group_position`).map(({ annotation_id, group_id, ordinal }) => ({ annotation_id, group_id, ordinal }));
-   assert.deepEqual(listedMemberships, [{ annotation_id: 'new', group_id: groups[0].group_id, ordinal: 0 }, { annotation_id: 'new', group_id: groups[1].group_id, ordinal: 1 }]);
-   const cleared = await dispatch(ctx, 'clear-missing', (snapshot) => ({ kind: 'block-group.assignment.clear', selection: { kind: 'one', blockGroupId: snapshot.blockGroups[0].id }, family: 'tag' }));
-  assert.equal(cleared.ok, true, cleared.failure?.message);
-   assert.deepEqual(rows(ctx.db, 'SELECT annotation_id, group_id FROM R8IntegrationDocument_body_group_membership').map((row) => ({ ...row })), [{ annotation_id: 'new', group_id: groups[1].group_id }]);
+test('protecting annotation.apply records protected targets; remove deletes both cleanly', async () => {
+  const { app, db, binding, authoringOf, documentPositionToken, refreshBinding } = await setupDoc('hello world');
+  assert.equal((await app.dispatch({
+    actionId: 'apply-coding', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-coding'),
+      edit: {
+        kind: 'annotation.apply',
+        annotation: { id: 'coding-1', family: 'coding', fields: {} },
+        from: { positionToken: documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: documentPositionToken, offset: 11, affinity: 'right' },
+      },
+    },
+  })).ok, true);
+  const next = await refreshBinding();
+  assert.equal((await app.dispatch({
+    actionId: 'apply-protect', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(next, 'm-protect'),
+      edit: {
+        kind: 'annotation.apply',
+        annotation: { id: 'protect-1', family: 'confidential', fields: {}, protectedTargetIds: ['coding-1'] },
+        from: { positionToken: next.documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: next.documentPositionToken, offset: 11, affinity: 'right' },
+      },
+    },
+  })).ok, true);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM R8IntegrationDocument_body_annotation_protected_target').get().count, 1);
+
+  const afterProtect = await refreshBinding();
+  const removed = await app.dispatch({
+    actionId: 'remove-protect', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(afterProtect, 'm-remove-protect'),
+      edit: { kind: 'annotation.remove', annotationId: 'protect-1' },
+    },
+  });
+  assert.equal(removed.ok, true, removed.failure?.message);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R8IntegrationDocument_body_annotation WHERE id = 'protect-1'").get().count, 0);
+  assert.equal(db.prepare('SELECT COUNT(*) AS count FROM R8IntegrationDocument_body_annotation_protected_target').get().count, 0);
+  await app.close?.();
 });
 
-test('v9 assignment removal is scoped to the operated family', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const other = await dispatch(ctx, 'other', (snapshot) => ({ kind: 'block-group.assignment.set', selection: { kind: 'one', blockGroupId: snapshot.blockGroups[0].id }, annotation: { id: 'other-1', family: 'other', fields: { value: true } } }));
-  assert.equal(other.ok, true, other.failure?.message);
-  const tag = await dispatch(ctx, 'tag', (snapshot) => ({ kind: 'block-group.assignment.set', selection: { kind: 'one', blockGroupId: snapshot.blockGroups[0].id }, annotation: { id: 'tag-1', family: 'tag', fields: { value: true } } }));
-  assert.equal(tag.ok, true, tag.failure?.message);
-  const cleared = await dispatch(ctx, 'clear-tag', (snapshot) => ({ kind: 'block-group.assignment.clear', selection: { kind: 'one', blockGroupId: snapshot.blockGroups[0].id }, family: 'tag' }));
-  assert.equal(cleared.ok, true, cleared.failure?.message);
-  assert.deepEqual(rows(ctx.db, 'SELECT annotation_id, group_id FROM R8IntegrationDocument_body_group_membership ORDER BY annotation_id').map((row) => ({ ...row })), [{ annotation_id: 'other-1', group_id: rows(ctx.db, 'SELECT group_id FROM R8IntegrationDocument_body_block_group LIMIT 1').at(0).group_id }]);
-  assert.equal(rows(ctx.db, "SELECT id FROM R8IntegrationDocument_body_annotation WHERE family = 'tag'").length, 0);
-  assert.deepEqual(cleared.events[0].data.facts.removedAnnotationIds, ['tag-1']);
+test('annotation.remove is an explicit delete; tampered replay is rejected without writes', async () => {
+  const { app, db, Document, binding, authoringOf, documentPositionToken, refreshBinding } = await setupDoc('tag me');
+  assert.equal((await app.dispatch({
+    actionId: 'apply-tag', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-tag'),
+      edit: {
+        kind: 'annotation.apply',
+        annotation: { id: 'tag-1', family: 'tag', fields: { value: true } },
+        from: { positionToken: documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: documentPositionToken, offset: 3, affinity: 'right' },
+      },
+    },
+  })).ok, true);
+  const next = await refreshBinding();
+  const preimage = db.serialize();
+  const removed = await app.dispatch({
+    actionId: 'remove-tag', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(next, 'm-remove-tag'),
+      edit: { kind: 'annotation.remove', annotationId: 'tag-1' },
+    },
+  });
+  assert.equal(removed.ok, true, removed.failure?.message);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R8IntegrationDocument_body_annotation WHERE id = 'tag-1'").get().count, 0);
+
+  const tampered = structuredClone(removed.events[0].data);
+  tampered.facts.removedAnnotationIds = ['forged-id'];
+  db.deserialize(preimage);
+  assert.throws(
+    () => Document.projection.apply({ handle: native('R8IntegrationDocument', 'body', 'operated'), data: tampered }, db),
+  );
+  assert.deepEqual(db.serialize(), preimage);
+  await app.close?.();
 });
 
-test('v9 rejects invalid consecutive selections, stale/partial bases, boundaries, and invalid families without partial writes', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-   const split = await dispatch(ctx, 'split', { kind: 'block.split-and-assign', at: { blockId: ctx.blockId, offset: 5, affinity: 'right' }, annotation: { id: 'first', family: 'tag', fields: { value: true } } }); assert.equal(split.ok, true, split.failure?.message);
-   const splitAgain = await dispatch(ctx, 'split-again', { kind: 'block.split-and-assign', at: { blockId: rows(ctx.db, 'SELECT id FROM R8IntegrationDocument_body_block ORDER BY position')[1].id, offset: 1, affinity: 'right' }, annotation: { id: 'middle', family: 'tag', fields: { value: true } } });
-   assert.equal(splitAgain.ok, true, splitAgain.failure?.message);
-   const groups = rows(ctx.db, 'SELECT b.id, bg.group_id FROM R8IntegrationDocument_body_block b JOIN R8IntegrationDocument_body_block_group bg ON bg.block_id=b.id ORDER BY b.position');
-   const before = durableAnnotatedTextState(ctx.db);
-   for (const [actionId, pick] of [['reordered', (ids) => [ids[1], ids[0]]], ['nonadjacent', (ids) => [ids[0], ids[2]]]]) {
-     const result = await dispatch(ctx, actionId, (snapshot) => ({ kind: 'block-group.assignment.set', selection: { kind: 'consecutive', blockGroupIds: pick(snapshot.blockGroups.map((group) => group.id)) }, annotation: { id: actionId, family: 'tag', fields: { value: true } } })); assert.equal(result.ok, false, result.failure?.message);
-   }
-   const boundary = await dispatch(ctx, 'boundary', { kind: 'block.continue', at: { blockId: groups[0].id, offset: 0, affinity: 'right' } }); assert.equal(boundary.ok, false, boundary.failure?.message);
-   const invalidFamily = await dispatch(ctx, 'invalid-family', (snapshot) => ({ kind: 'block-group.assignment.clear', selection: { kind: 'one', blockGroupId: snapshot.blockGroups[0].id }, family: 'not-declared' })); assert.equal(invalidFamily.ok, false, invalidFamily.failure?.message);
-   assert.deepEqual(durableAnnotatedTextState(ctx.db), before);
+test('orphan-policy annotations survive text delete that empties their range', async () => {
+  const { app, db, binding, authoringOf, documentPositionToken, refreshBinding } = await setupDoc('hello world');
+  assert.equal((await app.dispatch({
+    actionId: 'orphan-comment', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-orphan-comment'),
+      edit: {
+        kind: 'annotation.apply',
+        annotation: { id: 'keep-comment', family: 'comment', fields: {} },
+        from: { positionToken: documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: documentPositionToken, offset: 5, affinity: 'right' },
+      },
+    },
+  })).ok, true);
+  const next = await refreshBinding();
+  const deleted = await app.dispatch({
+    actionId: 'delete-span', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(next, 'm-delete-span'),
+      edit: {
+        kind: 'text.delete',
+        from: { positionToken: next.documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: next.documentPositionToken, offset: 5, affinity: 'right' },
+      },
+    },
+  });
+  assert.equal(deleted.ok, true, deleted.failure?.message);
+  assert.equal(familyText(db), ' world');
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R8IntegrationDocument_body_annotation WHERE id = 'keep-comment'").get().count, 1);
+  assert.equal(db.prepare("SELECT saved_quote FROM R8IntegrationDocument_body_annotation_orphan_state WHERE annotation_id = 'keep-comment'").get().saved_quote, 'hello');
+  await app.close?.();
 });
 
-test('v9 block continuation classifies an unprojectable token position as invalid input', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const before = durableAnnotatedTextState(ctx.db);
-  const result = await dispatch(ctx, 'invalid-position', { kind: 'block.continue', at: { blockId: ctx.blockId, offset: 12, affinity: 'right' } });
-  assert.equal(result.ok, false);
-  assert.equal(result.failure.category, 'invalid-input');
-  assert.match(result.failure.message, /offset is outside text bounds/);
-  assert.equal(rows(ctx.db, "SELECT COUNT(*) AS count FROM _Log WHERE actionId = 'invalid-position'")[0].count, 0);
-  assert.deepEqual(durableAnnotatedTextState(ctx.db), before);
+test('export produces blockless canonical; retire fences reuse', async () => {
+  const { app, db, Project } = await setupDoc('retired secret');
+  const Doc = r8Doc();
+  const exportRequest = {
+    app, entity: Doc, field: Doc.body, documentId: 'd1',
+    expectedOwningScope: { entity: Project, id: 'p1' },
+  };
+  const exported = await exportAnnotatedText({ ...exportRequest, principal: { id: 'u1' } });
+  assert.equal(exported.kind, 'workbench.annotatedText.canonical');
+  assert.equal(exported.text, 'retired secret');
+  assert.equal(Object.hasOwn(exported, 'blocks'), false);
+  assert.deepEqual(exported.ranges, []);
+  assert.deepEqual(exported.annotations, []);
+
+  const retired = await app.dispatch({
+    actionId: 'retire-d1', type: 'R8IntegrationDocument.annotatedText.retire', scope: 'Project:p1', principal: { id: 'u1' }, payload: { id: 'd1' },
+  });
+  assert.equal(retired.ok, true, retired.failure?.message);
+  assert.equal(db.prepare("SELECT COUNT(*) AS count FROM R8IntegrationDocument_body_retired WHERE document_id = 'd1'").get().count, 1);
+  await assert.rejects(exportAnnotatedText({ ...exportRequest, principal: { id: 'u1' } }));
+  const reused = await app.dispatch({
+    actionId: 'reuse-d1', type: 'R8IntegrationDocument.create', scope: 'Project:p1', principal: { id: 'u1' }, payload: { id: 'd1', project: 'p1', owner: 'u1' },
+  });
+  assert.equal(reused.ok, false);
 });
 
-test('v9 projection rejects tampered split facts before any durable write', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const result = await dispatch(ctx, 'tamper-source', { kind: 'block.continue', at: { blockId: ctx.blockId, offset: 5, affinity: 'right' } }); assert.equal(result.ok, true);
-  const snapshot = ctx.db.serialize(); ctx.db.deserialize(snapshot);
-  const event = structuredClone(result.events[0].data); event.operation.groupId = 'unknown-group';
-  assert.throws(() => ctx.Document.projection.apply({ handle: native('R8IntegrationDocument', 'body', 'operated'), data: event }, ctx.db), /source group fact mismatch/);
-  assert.deepEqual(ctx.db.serialize(), snapshot);
+test('HTTP snapshot redacts for non-owner; replay requires a fresh snapshot', async (t) => {
+  let principal = { id: 'u1' };
+  const { app, db, binding, authoringOf, documentPositionToken, refreshBinding } = await setupDoc('secret text', () => principal, {
+    protectingAccess: async ({ is }) => (await is.owner()) ? grant(read) : grant(),
+  });
+  t.after(async () => { await app.shutdown(); db.close(); });
+
+  assert.equal((await app.dispatch({
+    actionId: 'coding', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-coding'),
+      edit: {
+        kind: 'annotation.apply',
+        annotation: { id: 'coding-1', family: 'coding', fields: {} },
+        from: { positionToken: documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: documentPositionToken, offset: 11, affinity: 'right' },
+      },
+    },
+  })).ok, true);
+  const next = await refreshBinding();
+  assert.equal((await app.dispatch({
+    actionId: 'protect', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(next, 'm-protect'),
+      edit: {
+        kind: 'annotation.apply',
+        annotation: { id: 'protect-1', family: 'confidential', fields: {}, protectedTargetIds: ['coding-1'] },
+        from: { positionToken: next.documentPositionToken, offset: 0, affinity: 'left' },
+        to: { positionToken: next.documentPositionToken, offset: 11, affinity: 'right' },
+      },
+    },
+  })).ok, true);
+
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  const owner = await (await fetch(`${origin}/snapshot/R8IntegrationDocument/d1`, { signal: AbortSignal.timeout(5_000) })).json();
+  assert.equal(owner.snapshot.body.text, 'secret text');
+  assert.equal(Object.hasOwn(owner.snapshot.body, 'blocks'), false);
+  assert.equal('basis' in owner.snapshot.body, false);
+
+  principal = { id: 'u2' };
+  const denied = await (await fetch(`${origin}/snapshot/R8IntegrationDocument/d1`, { signal: AbortSignal.timeout(5_000) })).json();
+  assert.equal(denied.snapshot.body.kind, 'workbench.annotatedText.recipient');
+  assert.equal(JSON.stringify(denied.snapshot.body).includes('secret text'), false);
+
+  principal = { id: 'u1' };
+  const replay = await fetch(`${origin}/events-since/R8IntegrationDocument/d1?cursor=0`, { signal: AbortSignal.timeout(5_000) });
+  assert.equal(replay.status, 200);
+  assert.deepEqual(await replay.json(), { resync: 'stale', reason: 'annotated-text-snapshot-required' });
 });
 
-test('v9 token is bound to the recipient and rejects a newly restricted physical group', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const captured = await recipientSnapshot(ctx);
-  const groupId = captured.snapshot.blockGroups[0].id;
-  const blockId = ctx.blockId;
-  const point = JSON.stringify({ point: ['point', ['root'], 'left'], tokenFrontier: [] });
-  ctx.db.prepare("INSERT INTO R8IntegrationDocument_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('coding-1', 'd1', 'p1', 'u1', 'coding')").run();
-  ctx.db.prepare("INSERT INTO R8IntegrationDocument_body_annotation (id, document_id, project_id, owner_id, family) VALUES ('protect-1', 'd1', 'p1', 'u1', 'confidential')").run();
-  ctx.db.prepare("INSERT INTO R8IntegrationDocument_body_annotation_confidential (annotation_id) VALUES ('protect-1')").run();
-  ctx.db.prepare("INSERT INTO R8IntegrationDocument_body_annotation_protected_target (annotation_id, target_annotation_id) VALUES ('protect-1', 'coding-1')").run();
-  ctx.db.prepare('INSERT INTO R8IntegrationDocument_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES (?, ?, 0, ?, ?)').run('coding-1', blockId, point, point);
-  ctx.db.prepare('INSERT INTO R8IntegrationDocument_body_membership (annotation_id, block_id, ordinal, start_point, end_point) VALUES (?, ?, 0, ?, ?)').run('protect-1', blockId, point, point);
-  const before = durableAnnotatedTextState(ctx.db);
-  const rejected = await dispatch(ctx, 'hidden-group', { kind: 'block-group.assignment.set', selection: { kind: 'one', blockGroupId: groupId }, annotation: { id: 'never', family: 'tag', fields: { value: true } } }, { binding: captured, principal: { id: 'u1' } });
-  assert.equal(rejected.ok, false);
-  assert.deepEqual(durableAnnotatedTextState(ctx.db), before);
+test('v9 receipt dedupe and foreign position tokens reject without mutation', async () => {
+  const { app, db, binding, authoringOf, documentPositionToken } = await setupDoc('hello');
+  const first = await app.dispatch({
+    actionId: 'dedupe-insert', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-dedupe'),
+      edit: { kind: 'text.insert', at: { positionToken: documentPositionToken, offset: 5, affinity: 'right' }, text: '!' },
+    },
+  });
+  assert.equal(first.ok, true, first.failure?.message);
+  const again = await app.dispatch({
+    actionId: 'dedupe-insert', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-dedupe'),
+      edit: { kind: 'text.insert', at: { positionToken: documentPositionToken, offset: 5, affinity: 'right' }, text: '!' },
+    },
+  });
+  assert.equal(again.ok, true);
+  assert.equal(again.deduped === true || again.events?.length === 0 || familyText(db) === 'hello!', true);
+
+  const before = durableAnnotatedTextState(db);
+  const foreign = await app.dispatch({
+    actionId: 'foreign-token', type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: {
+      version: 9, id: 'd1',
+      authoring: authoringOf(binding, 'm-foreign'),
+      edit: { kind: 'text.insert', at: { positionToken: randomBytes(32).toString('base64url'), offset: 0, affinity: 'right' }, text: 'x' },
+    },
+  });
+  assert.equal(foreign.ok, false);
+  assert.deepEqual(durableAnnotatedTextState(db), before);
+  await app.close?.();
 });
 
-test('v9 authoring stream/lease persists across structural mutations and old binding positions remain valid for surviving blocks', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const captured = await recipientSnapshot(ctx);
-  const split = await dispatch(ctx, 'fresh-split', { kind: 'block.continue', at: { blockId: ctx.blockId, offset: 5, affinity: 'right' } });
-  assert.equal(split.ok, true, split.failure?.message);
-  const before = durableAnnotatedTextState(ctx.db);
-  // The old binding's stream/lease is still valid; the original block survives as the left half
-  const stillValid = await dispatch(ctx, 'stale-binding', { kind: 'text.insert', at: { blockId: ctx.blockId, offset: 1, affinity: 'right' }, text: 'X' }, { binding: captured, principal: { id: 'u1' } });
-  assert.equal(stillValid.ok, true, stillValid.failure?.message);
-  // The old binding has no position token for the new right block
-  const blocks = rows(ctx.db, 'SELECT id FROM R8IntegrationDocument_body_block ORDER BY position');
-  assert.equal(captured.positionTokens.has(blocks[1].id), false);
-});
-
-test('v9 assignment projection rejects tampered set and clear facts without writes', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const set = await dispatch(ctx, 'tamper-set', (snapshot) => ({ kind: 'block-group.assignment.set', selection: { kind: 'one', blockGroupId: snapshot.blockGroups[0].id }, annotation: { id: 'set-ann', family: 'tag', fields: { value: true } } }));
-  assert.equal(set.ok, true);
-  const clear = await dispatch(ctx, 'tamper-clear', (snapshot) => ({ kind: 'block-group.assignment.clear', selection: { kind: 'one', blockGroupId: snapshot.blockGroups[0].id }, family: 'tag' }));
-  assert.equal(clear.ok, true);
-  for (const tamper of [
-    (event) => { event.facts.preimage[0].annotationId = 'forged'; },
-    (event) => { event.operation.groupIds[0] = 'forged'; },
+test('block-era structure edits and invalid families are rejected without partial writes', async () => {
+  const { app, db, binding, authoringOf, documentPositionToken } = await setupDoc('hello world');
+  const before = durableAnnotatedTextState(db);
+  for (const [actionId, edit] of [
+    ['split', { kind: 'block.split', at: { positionToken: documentPositionToken, offset: 5, affinity: 'right' }, temporaryBlock: 'a'.repeat(43) }],
+    ['merge', { kind: 'block.merge', leftPositionToken: documentPositionToken, rightPositionToken: documentPositionToken }],
+    ['continue', { kind: 'block.continue', at: { positionToken: documentPositionToken, offset: 5, affinity: 'right' }, temporaryBlock: 'b'.repeat(43) }],
+    ['unknown-family', {
+      kind: 'annotation.apply',
+      annotation: { id: 'x', family: 'not-declared', fields: {} },
+      from: { positionToken: documentPositionToken, offset: 0, affinity: 'left' },
+      to: { positionToken: documentPositionToken, offset: 5, affinity: 'right' },
+    }],
+    ['bad-offset', {
+      kind: 'annotation.apply',
+      annotation: { id: 'y', family: 'coding', fields: {} },
+      from: { positionToken: documentPositionToken, offset: 0, affinity: 'left' },
+      to: { positionToken: documentPositionToken, offset: 99, affinity: 'right' },
+    }],
   ]) {
-    const before = durableAnnotatedTextState(ctx.db); const event = structuredClone(clear.events[0].data); tamper(event);
-    assert.throws(() => ctx.Document.projection.apply({ handle: native('R8IntegrationDocument', 'body', 'operated'), data: event }, ctx.db));
-    assert.deepEqual(durableAnnotatedTextState(ctx.db), before);
+    const result = await app.dispatch({
+      actionId, type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+      payload: { version: 9, id: 'd1', authoring: authoringOf(binding, `m-${actionId}`), edit },
+    });
+    assert.equal(result.ok, false, actionId);
   }
-});
-
-test('v9 split-and-assign projection rejects tampered annotation and group membership facts', async (t) => {
-  const ctx = await setup(); t.after(async () => { await ctx.app.shutdown(); ctx.db.close(); });
-  const result = await dispatch(ctx, 'tamper-split-assign', { kind: 'block.split-and-assign', at: { blockId: ctx.blockId, offset: 5, affinity: 'right' }, annotation: { id: 'split-ann', family: 'tag', fields: { value: true } } });
-  assert.equal(result.ok, true);
-  for (const tamper of [
-    (event) => { event.facts.annotation.id = 'forged'; },
-    (event) => { event.facts.groupMembership.groupId = 'forged'; },
-  ]) {
-    const before = durableAnnotatedTextState(ctx.db); const event = structuredClone(result.events[0].data); tamper(event);
-    assert.throws(() => ctx.Document.projection.apply({ handle: native('R8IntegrationDocument', 'body', 'operated'), data: event }, ctx.db));
-    assert.deepEqual(durableAnnotatedTextState(ctx.db), before);
-  }
+  assert.deepEqual(durableAnnotatedTextState(db), before);
+  await app.close?.();
 });
