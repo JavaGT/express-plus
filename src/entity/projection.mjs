@@ -147,19 +147,7 @@ function projectBlocklessTextApply({ name, handle, db, data }) {
   if (JSON.stringify(continuousTextFamilyCheckpoint(next)) !== JSON.stringify(f.family) ||
       JSON.stringify(data.after.frontier) !== JSON.stringify(next.checkpoint.frontier)) throw new Error(`${name}.${handle.field}.operated v13 family does not match the operation`);
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`).run(data.after.structuralRevision, JSON.stringify(f.family), data.id);
-  for (const emptied of f.emptiedAnnotations) {
-    if (!emptied || typeof emptied !== 'object' || typeof emptied.annotationId !== 'string' || !emptied.disposition ||
-        !emptied.disposition || typeof emptied.disposition !== 'object' || (emptied.disposition.kind !== 'orphaned' && emptied.disposition.kind !== 'deleted')) throw new Error(`${name}.${handle.field}.operated v13 emptied annotation is invalid`);
-    const annotation = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(emptied.annotationId, data.id);
-    if (!annotation) throw new Error(`${name}.${handle.field}.operated v13 emptied annotation does not exist`);
-    if (emptied.disposition.kind === 'orphaned') {
-      db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(emptied.annotationId);
-      db.prepare(`INSERT INTO ${prefix}_annotation_orphan_state (annotation_id, saved_quote, last_range) VALUES (?, ?, ?)`)
-        .run(emptied.annotationId, typeof emptied.disposition.savedQuote === 'string' ? emptied.disposition.savedQuote : '', JSON.stringify(emptied.disposition.lastRange ?? null));
-    } else {
-      deleteAnnotatedTextAnnotation(db, prefix, emptied.annotationId);
-    }
-  }
+  applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data });
 }
 
 function projectBlocklessTextReplace({ name, handle, db, data }) {
@@ -185,6 +173,23 @@ function projectBlocklessTextReplace({ name, handle, db, data }) {
   if (JSON.stringify(continuousTextFamilyCheckpoint(next)) !== JSON.stringify(f.family) ||
       JSON.stringify(data.after.frontier) !== JSON.stringify(next.checkpoint.frontier)) throw new Error(`${name}.${handle.field}.operated v13 family does not match the replace`);
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ?, family_checkpoint = ? WHERE document_id = ?`).run(data.after.structuralRevision, JSON.stringify(f.family), data.id);
+  applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data });
+}
+
+function applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data }) {
+  for (const emptied of data.facts.emptiedAnnotations) {
+    if (!emptied || typeof emptied !== 'object' || typeof emptied.annotationId !== 'string' || !emptied.disposition ||
+        typeof emptied.disposition !== 'object' || (emptied.disposition.kind !== 'orphaned' && emptied.disposition.kind !== 'deleted')) throw new Error(`${name}.${handle.field}.operated v13 emptied annotation is invalid`);
+    const annotation = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(emptied.annotationId, data.id);
+    if (!annotation) throw new Error(`${name}.${handle.field}.operated v13 emptied annotation does not exist`);
+    if (emptied.disposition.kind === 'orphaned') {
+      db.prepare(`DELETE FROM ${prefix}_membership WHERE annotation_id = ?`).run(emptied.annotationId);
+      db.prepare(`INSERT INTO ${prefix}_annotation_orphan_state (annotation_id, saved_quote, last_range) VALUES (?, ?, ?)`)
+        .run(emptied.annotationId, typeof emptied.disposition.savedQuote === 'string' ? emptied.disposition.savedQuote : '', JSON.stringify(emptied.disposition.lastRange ?? null));
+    } else {
+      deleteAnnotatedTextAnnotation(db, prefix, emptied.annotationId);
+    }
+  }
 }
 
 function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, data }) {
@@ -227,6 +232,13 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
     .run(annOp.id, data.id, row[descriptor.project], row[descriptor.owner], annOp.family);
   const fieldNames = Object.keys(declared.fields);
+  // Fail closed: the annotation's field payload must EXACTLY match the declared
+  // schema — unknown keys (including on a zero-field family) are rejected, so
+  // the durable row can never silently drop or ignore attacker-supplied fields.
+  const suppliedFieldNames = Object.keys(annOp.fields).sort();
+  if (suppliedFieldNames.length !== fieldNames.length || [...fieldNames].sort().some((fieldName, index) => suppliedFieldNames[index] !== fieldName)) {
+    throw new Error(`${name}.${handle.field}.operated v13 annotation fields disagree with declaration`);
+  }
   const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${annOp.family} WHERE annotation_id = ?`).get(annOp.id);
   if (fieldNames.length) {
     const values = fieldNames.map((fieldName) => {

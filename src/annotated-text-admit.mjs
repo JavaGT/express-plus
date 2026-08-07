@@ -71,6 +71,16 @@ async function assertV9AuthoringPrelude({ name, fieldName, prefix, descriptor, r
     : null;
   if (token && !position) throw new ValidationError(`${name}.${fieldName}.operation position token unavailable`, { code: 'position-token-unavailable' });
   if (position && !position.visible_at_issue) throw new ValidationError(`${name}.${fieldName}.operation position no longer visible`, { code: 'position-no-longer-visible' });
+  if (position) {
+    // Fail closed on a stale authoring basis: the client's absolute offset is
+    // meaningful only against the family its position frame was issued for. If
+    // the current family frontier differs, the offset can land somewhere else;
+    // require the client to re-bootstrap instead of trusting the offset.
+    const positionFamily = restoreTextFamily(JSON.parse(position.family_checkpoint));
+    if (JSON.stringify(positionFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) {
+      throw new ValidationError(`${name}.${fieldName}.operation authoring basis is stale; re-bootstrap the snapshot`, { code: 'position-stale' });
+    }
+  }
   const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${command.id}\u0000${principal?.id ?? ''}\u0000${command.authoring.mutationId}`).digest('hex').slice(0, 32);
   const lamport = Math.max(0, ...Object.values(family.checkpoint.elements).map((element) => element.lamport)) + 1;
   return Object.freeze({
@@ -88,10 +98,9 @@ function assertOffsetInDocument(family, offset, label) {
 
 /** text.insert | text.delete | text.replace */
 async function admitTextEdit(ctx) {
-  const { name, fieldName, command, db, prefix, documentScope, lease, family, state, position, actor, lamport, edit } = ctx;
-  const positionFamily = restoreTextFamily(JSON.parse(position.family_checkpoint));
-  // The client's offset is absolute against the position basis; it must also be
-  // within the CURRENT document.
+  const { name, fieldName, command, db, prefix, documentScope, lease, family, state, actor, lamport, edit } = ctx;
+  // The position's family-basis equality with the current family is enforced in
+  // the prelude; the client's offset is absolute against that same basis.
   const at = edit.at ?? edit.from;
   const offset = at.offset;
   assertOffsetInDocument(family, offset, 'position');
@@ -100,6 +109,11 @@ async function admitTextEdit(ctx) {
     if (!edit.to?.positionToken) throw new ValidationError(`${name}.${fieldName}.operation replacement end position token unavailable`, { code: 'position-token-unavailable' });
     const toPosition = resolvePosition({ db, prefix, positionToken: edit.to.positionToken, leaseId: lease.id });
     if (!toPosition) throw new ValidationError(`${name}.${fieldName}.operation replacement end position token unavailable`, { code: 'position-token-unavailable' });
+    if (!toPosition.visible_at_issue) throw new ValidationError(`${name}.${fieldName}.operation replacement end position no longer visible`, { code: 'position-no-longer-visible' });
+    const toPositionFamily = restoreTextFamily(JSON.parse(toPosition.family_checkpoint));
+    if (JSON.stringify(toPositionFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) {
+      throw new ValidationError(`${name}.${fieldName}.operation replacement end authoring basis is stale; re-bootstrap the snapshot`, { code: 'position-stale' });
+    }
     toOffset = edit.to.offset;
     assertOffsetInDocument(family, toOffset, 'replacement end');
   }
@@ -115,7 +129,6 @@ async function admitTextEdit(ctx) {
       annotations, ranges, edit: plannerEdit,
     });
   } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`, error.code ? { code: error.code } : undefined); }
-  void positionFamily;
   const handle = eventHandles.native(name, fieldName, 'operated');
   return [{ handle, type: handle.type, scope: documentScope, data: plan }];
 }
@@ -129,6 +142,13 @@ async function admitTextRangeApply(ctx) {
   const fromPos = resolvePosition({ db, prefix, positionToken: fromToken, leaseId: lease.id });
   const toPos = resolvePosition({ db, prefix, positionToken: toToken, leaseId: lease.id });
   if (!fromPos || !toPos) throw new ValidationError(`${name}.${fieldName}.operation annotation selection tokens unavailable`, { code: 'position-token-unavailable' });
+  if (!fromPos.visible_at_issue || !toPos.visible_at_issue) throw new ValidationError(`${name}.${fieldName}.operation annotation selection position no longer visible`, { code: 'position-no-longer-visible' });
+  const fromPosFamily = restoreTextFamily(JSON.parse(fromPos.family_checkpoint));
+  const toPosFamily = restoreTextFamily(JSON.parse(toPos.family_checkpoint));
+  if (JSON.stringify(fromPosFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier) ||
+      JSON.stringify(toPosFamily.checkpoint.frontier) !== JSON.stringify(family.checkpoint.frontier)) {
+    throw new ValidationError(`${name}.${fieldName}.operation annotation selection authoring basis is stale; re-bootstrap the snapshot`, { code: 'position-stale' });
+  }
   const familyMeta = compiledMeta.annotationHandles[edit.annotation?.family];
   if (!familyMeta) throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family`, { code: 'position-invalid' });
   const ranges = loadRanges({ db, prefix, documentId: command.id });

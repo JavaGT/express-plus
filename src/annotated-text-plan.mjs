@@ -106,12 +106,16 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
       let insertOperation = ['workbench.text', 1, [`${actor.slice(0, 30)}e0`, 1], lamport + 1, intermediate.checkpoint.frontier, ['insert', anchor, edit.text]];
       insertOperation = canonicalTextOp(insertOperation);
       const nextFamily = applyTextOperation(intermediate, insertOperation);
+      // A replacement can empty an annotation range exactly like a delete does;
+      // the emptied-annotation dispositions must be planned and applied.
+      const emptied = emptiedRanges({ beforeFamily: family, afterFamily: nextFamily, ranges, annotations, structureVersion });
       return unifiedPlan({
         id: documentId,
         before: before(family, structureVersion),
         operation: { kind: 'text.replace', operations: [deleteOperation, insertOperation] },
-        after: Object.freeze({ structuralRevision: structureVersion, frontier: nextFamily.checkpoint.frontier }),
+        after: Object.freeze({ structuralRevision: structureVersion + (emptied.length ? 1 : 0), frontier: nextFamily.checkpoint.frontier }),
         family: textFamilyCheckpoint(nextFamily),
+        emptiedAnnotations: Object.freeze(emptied),
       });
     }
     const operation = textOperationForOffsetEdit(family, { kind: 'text.delete', from: edit.from, to: edit.to }, actor, lamport);
