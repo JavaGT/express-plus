@@ -206,30 +206,42 @@ export function issueSnapshot({ db, prefix, leaseId, fence }) {
 // family checkpoint, otherwise the dedup key could split into the pre/post-split
 // bases an action was never meant to straddle.
 export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions, groups }) {
-  db.exec('SAVEPOINT authoring_snapshot_issue');
-  try {
-    if (positions.length > 0) {
-      const serialized = positions.map((position) => JSON.stringify(position.familyCheckpoint));
-      if (serialized.some((value) => value !== serialized[0])) {
-        throw new Error('inconsistent position family checkpoints');
+  const attempt = () => {
+    db.exec('SAVEPOINT authoring_snapshot_issue');
+    try {
+      if (positions.length > 0) {
+        const serialized = positions.map((position) => JSON.stringify(position.familyCheckpoint));
+        if (serialized.some((value) => value !== serialized[0])) {
+          throw new Error('inconsistent position family checkpoints');
+        }
       }
+      const positionFrames = positions.map((position) => issuePositionFrame({ db, prefix, leaseId, fence, ...position }));
+      if (positionFrames.some((frame) => !frame)) throw new Error('capacity');
+      const groupFrames = groups.map((group) => issueGroupFrame({ db, prefix, leaseId, fence, ...group }));
+      if (groupFrames.some((frame) => !frame)) throw new Error('capacity');
+      const snapshot = issueSnapshot({ db, prefix, leaseId, fence });
+      if (!snapshot) throw new Error('capacity');
+      const ownPosition = db.prepare(`INSERT INTO ${prefix}_authoring_snapshot_position (snapshot_id, position_token) VALUES (?, ?)`);
+      for (const frame of positionFrames) ownPosition.run(snapshot.id, frame.token);
+      db.exec('RELEASE authoring_snapshot_issue');
+      return { positionFrames, groupFrames, snapshot };
+    } catch (error) {
+      db.exec('ROLLBACK TO authoring_snapshot_issue');
+      db.exec('RELEASE authoring_snapshot_issue');
+      if (error.message === 'capacity') return null;
+      throw error;
     }
-    const positionFrames = positions.map((position) => issuePositionFrame({ db, prefix, leaseId, fence, ...position }));
-    if (positionFrames.some((frame) => !frame)) throw new Error('capacity');
-    const groupFrames = groups.map((group) => issueGroupFrame({ db, prefix, leaseId, fence, ...group }));
-    if (groupFrames.some((frame) => !frame)) throw new Error('capacity');
-    const snapshot = issueSnapshot({ db, prefix, leaseId, fence });
-    if (!snapshot) throw new Error('capacity');
-    const ownPosition = db.prepare(`INSERT INTO ${prefix}_authoring_snapshot_position (snapshot_id, position_token) VALUES (?, ?)`);
-    for (const frame of positionFrames) ownPosition.run(snapshot.id, frame.token);
-    db.exec('RELEASE authoring_snapshot_issue');
-    return { positionFrames, groupFrames, snapshot };
-  } catch (error) {
-    db.exec('ROLLBACK TO authoring_snapshot_issue');
-    db.exec('RELEASE authoring_snapshot_issue');
-    if (error.message === 'capacity') return null;
-    throw error;
-  }
+  };
+  const first = attempt();
+  if (first) return first;
+  // The lease's retained frames exhausted capacity. The unacknowledged frames
+  // belong to an earlier page session that will never acknowledge them, and the
+  // snapshot being issued now supersedes them. Prune the lease's frames and
+  // retry once so a reload cannot brick the document with "authoring stream
+  // capacity exceeded". If the incoming frames alone still exceed capacity, the
+  // retry returns null and the caller refuses (unchanged contract).
+  clearLeaseChildren(db, prefix, leaseId);
+  return attempt();
 }
 
 export function acknowledgeAndPruneSnapshot({ db, prefix, snapshotId, leaseId }) {
