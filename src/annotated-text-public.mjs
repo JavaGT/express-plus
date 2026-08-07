@@ -5,6 +5,7 @@ export {
   annotation,
   protectingAnnotation,
   measurement,
+  wordEvidenceFamily,
   annotationAction,
 } from './field.mjs';
 export {
@@ -15,7 +16,12 @@ export {
   annotatedTextAction,
   annotatedTextCreateAction,
   annotatedTextRetireAction,
-  assertWordTimingPayload,
 } from './annotated-text-action.mjs';
 export { exportAnnotatedText, readAnnotatedTextForRecipient } from './annotated-text-snapshot.mjs';
 export { importTextFamilyFromBlocks, resolvePositionToEndpoint, projectEndpointToBlockOffset, materializeBlock, textFamilyCheckpoint, restoreTextFamilyCheckpoint } from './annotated-text-family.mjs';
+export {
+  assertWordEvidencePayload,
+  readWordEvidence,
+  wordEvidenceFieldHandle,
+  wordEvidenceTableName,
+} from './word-evidence.mjs';

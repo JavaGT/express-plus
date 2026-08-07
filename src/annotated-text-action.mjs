@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { assertWellFormedText } from './annotated-text.mjs';
 import { resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';
 import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
+import { assertWordEvidencePayload } from './word-evidence.mjs';
 import { annotatedTextAction as buildAnnotatedTextAction } from './annotated-text-action-builder.mjs';
 
 function validateEntityAndField(entity, field) {
@@ -47,48 +48,6 @@ export function annotatedTextRetireAction(entity, documentId) {
   return deepFreeze({ type: `${entity.name}.annotatedText.retire`, payload: { id: documentId } });
 }
 
-/**
- * A word-timing evidence payload carried event-only on an annotated-text
- * create source block. Never folded into the CRDT checkpoint: a committed-log
- * projection materializes it into relational rows anchored to immutable RGA
- * endpoints (Sol D2).
- */
-export function assertWordTimingPayload(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
-  if (value.version !== 1) return false;
-  const arrays = {
-    ids: 'string',
-    starts: 'number',
-    ends: 'number',
-    mediaStartsMs: 'number',
-    mediaEndsMs: 'number',
-  };
-  for (const [key, type] of Object.entries(arrays)) {
-    if (!Array.isArray(value[key]) || value[key].some((entry) => typeof entry !== type)) return false;
-  }
-  const length = value.ids.length;
-  if (length === 0) return false;
-  for (const key of ['starts', 'ends', 'mediaStartsMs', 'mediaEndsMs']) {
-    if (value[key].length !== length) return false;
-  }
-  for (const [key, type] of Object.entries({
-    confidence: ['number', 'null'],
-    originalTokens: 'string',
-    providers: 'string',
-    alignment: 'string',
-    fragmentStarts: 'number',
-    fragmentEnds: 'number',
-  })) {
-    if (value[key] === undefined) continue;
-    if (!Array.isArray(value[key]) || value[key].length !== length) return false;
-    const allowed = Array.isArray(type) ? type : [type];
-    if (value[key].some((entry) => !allowed.includes(typeof entry))) return false;
-  }
-  if (value.start !== undefined && (typeof value.start !== 'number' || !Number.isSafeInteger(value.start))) return false;
-  if (value.end !== undefined && (typeof value.end !== 'number' || !Number.isSafeInteger(value.end))) return false;
-  return true;
-}
-
 export function annotatedTextCreateAction(entity, field, input) {
   if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
     throw new Error('annotatedTextCreateAction: entity must be a non-null object');
@@ -127,7 +86,7 @@ export function annotatedTextCreateAction(entity, field, input) {
     }
     const blocks = source.blocks.map((block, index) => {
       if (!block || typeof block !== 'object' || Array.isArray(block) ||
-          Object.keys(block).some((key) => !['text', 'fields', 'measurements', 'words'].includes(key)) || typeof block.text !== 'string') {
+          Object.keys(block).some((key) => !['text', 'fields', 'measurements', 'wordEvidence'].includes(key)) || typeof block.text !== 'string') {
         throw new Error(`annotatedTextCreateAction: source block ${index} is invalid`);
       }
       try { assertWellFormedText(block.text); } catch (error) { throw new Error(`annotatedTextCreateAction: source block ${index} text ${error.message}`); }
@@ -138,8 +97,16 @@ export function annotatedTextCreateAction(entity, field, input) {
       if (block.measurements !== undefined && !Array.isArray(block.measurements)) {
         throw new Error(`annotatedTextCreateAction: source block ${index} measurements must be an array`);
       }
-      if (block.words !== undefined && !assertWordTimingPayload(block.words)) {
-        throw new Error(`annotatedTextCreateAction: source block ${index} words must be a well-formed word timing payload`);
+      let wordEvidence;
+      if (block.wordEvidence !== undefined) {
+        try {
+          wordEvidence = assertWordEvidencePayload(block.wordEvidence, {
+            families: descriptor.wordEvidence,
+            blockText: block.text,
+          });
+        } catch (error) {
+          throw new Error(`annotatedTextCreateAction: source block ${index} wordEvidence ${error.message}`);
+        }
       }
       const families = new Set();
       const measurements = (block.measurements ?? []).map((measurement, measurementIndex) => {
@@ -165,7 +132,7 @@ export function annotatedTextCreateAction(entity, field, input) {
         text: block.text,
         ...(block.fields === undefined ? {} : { fields: structuredClone(block.fields) }),
         ...(block.measurements === undefined ? {} : { measurements }),
-        ...(block.words === undefined ? {} : { words: frozenJsonSnapshot(block.words) }),
+        ...(wordEvidence === undefined ? {} : { wordEvidence }),
       };
     });
     payload[fieldName] = { version: 1, blocks };

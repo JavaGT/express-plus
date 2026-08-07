@@ -282,6 +282,31 @@ export function measurement(name, { extension = null, formatVersion = 1, queries
   });
 }
 
+/**
+ * Declare a word-evidence family on an annotatedText field. Word evidence is
+ * event-only import data (never CRDT state) materialized into the generated
+ * relational word-evidence table by a committed-log consumer. Each family
+ * declares a `parse(value)` that validates one per-word payload value and
+ * returns its canonical JSON-safe form.
+ */
+export function wordEvidenceFamily(name, { formatVersion = 1, parse } = {}) {
+  if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
+    throw new Error(`word evidence family name '${name}' is not a valid identifier`);
+  }
+  if (typeof formatVersion !== 'number' || !Number.isSafeInteger(formatVersion) || formatVersion <= 0) {
+    throw new Error(`word evidence family '${name}' formatVersion must be a positive integer`);
+  }
+  if (typeof parse !== 'function') {
+    throw new Error(`word evidence family '${name}' requires a parse function`);
+  }
+  return Object.freeze({
+    kind: 'wordEvidenceFamily',
+    familyName: name,
+    formatVersion,
+    parse,
+  });
+}
+
 export function annotationAction(name) {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`annotationAction name '${name}' is not a valid identifier`);
@@ -426,6 +451,34 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     }
   }
 
+  // Validate wordEvidence families array
+  const wordEvidenceNames = new Set();
+  if (descriptor.wordEvidence !== undefined) {
+    if (!Array.isArray(descriptor.wordEvidence)) {
+      fail(entity, field, 'wordEvidence', 'must be an array of word evidence family descriptors');
+    }
+    for (const family of descriptor.wordEvidence) {
+      if (!family || typeof family !== 'object' || !Object.isFrozen(family)) {
+        fail(entity, field, 'wordEvidence', 'each family must be a frozen descriptor');
+      }
+      if (family.kind !== 'wordEvidenceFamily') {
+        fail(entity, field, 'wordEvidence', `expected wordEvidenceFamily descriptor, got '${String(family.kind)}'`);
+      }
+      const familyName = family.familyName;
+      if (wordEvidenceNames.has(familyName)) {
+        fail(entity, field, `wordEvidence.${familyName}`, 'duplicate family name');
+      }
+      assertName(entity, field, `wordEvidence.${familyName}`, familyName);
+      if (typeof family.formatVersion !== 'number' || !Number.isSafeInteger(family.formatVersion) || family.formatVersion <= 0) {
+        fail(entity, field, `wordEvidence.${familyName}.formatVersion`, 'must be a positive integer');
+      }
+      if (typeof family.parse !== 'function') {
+        fail(entity, field, `wordEvidence.${familyName}.parse`, 'must be a function');
+      }
+      wordEvidenceNames.add(familyName);
+    }
+  }
+
   // Validate capabilities
   if (descriptor.capabilities !== undefined) {
     if (!descriptor.capabilities || typeof descriptor.capabilities !== 'object' || Array.isArray(descriptor.capabilities)) {
@@ -446,7 +499,7 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   // `access` is set by makeDescriptor's initial properties, and `can` is a
   // method added by makeDescriptor. Both are field descriptor properties, not
   // declaration keys, and are allowed to pass through.
-  const ALLOWED_KEYS = new Set(['project', 'owner', 'block', 'annotations', 'measurements', 'capabilities', 'carets', 'kind', 'type', 'access', 'can']);
+  const ALLOWED_KEYS = new Set(['project', 'owner', 'block', 'annotations', 'measurements', 'capabilities', 'carets', 'wordEvidence', 'kind', 'type', 'access', 'can']);
   for (const key of Object.keys(descriptor)) {
     if (!ALLOWED_KEYS.has(key)) {
       fail(entity, field, key, `unknown key '${key}'`);
@@ -469,6 +522,18 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     for (const key of Object.keys(meas)) {
       if (!ALLOWED_MEAS_KEYS.has(key)) {
         fail(entity, field, `measurements.${meas.measurementName}.${key}`, `unknown key '${key}'`);
+      }
+    }
+  }
+
+  // Validate no unknown keys on word evidence family descriptors
+  const ALLOWED_WORD_EVIDENCE_KEYS = new Set(['kind', 'familyName', 'formatVersion', 'parse']);
+  if (descriptor.wordEvidence !== undefined) {
+    for (const family of descriptor.wordEvidence) {
+      for (const key of Object.keys(family)) {
+        if (!ALLOWED_WORD_EVIDENCE_KEYS.has(key)) {
+          fail(entity, field, `wordEvidence.${family.familyName}.${key}`, `unknown key '${key}'`);
+        }
       }
     }
   }
@@ -536,6 +601,13 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   // Compile metadata and store in WeakMap
   const families = [...annotationNames].sort();
   const measurementFamilyList = [...measurementNames].sort();
+  const wordEvidenceFamilyList = descriptor.wordEvidence === undefined ? [] : [...wordEvidenceNames].sort();
+  const wordEvidenceConfigs = {};
+  if (descriptor.wordEvidence !== undefined) {
+    for (const family of descriptor.wordEvidence) {
+      wordEvidenceConfigs[family.familyName] = family;
+    }
+  }
 
   // Build action identifiers per annotation
   const annotationActionIds = {};
@@ -559,6 +631,8 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     annotationFields,
     measurementConfigs,
     measurementFamilyList,
+    wordEvidenceConfigs: Object.freeze({ ...wordEvidenceConfigs }),
+    wordEvidenceFamilyList: Object.freeze(wordEvidenceFamilyList),
     capabilities: descriptor.capabilities ? Object.freeze({ ...descriptor.capabilities }) : null,
     protectingFamilies: Object.freeze({ ...protectingFamilies }),
     restrictedPlaceholder: protectingPlaceholders[0] ?? null,
@@ -599,7 +673,7 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   };
   compiledMeta.set(descriptor, Object.freeze(compiled));
 
-  return { blockFields, families, measurements: measurementFamilyList };
+  return { blockFields, families, measurements: measurementFamilyList, wordEvidence: wordEvidenceFamilyList };
 }
 
 function columnType(descriptor) {
@@ -613,7 +687,7 @@ function extensionColumns(fields, names) {
 }
 
 export function annotatedTextDDL(entity, field, descriptor, fields) {
-  const { blockFields, families, measurements } = validateAnnotatedTextDeclaration(entity, field, descriptor, fields);
+  const { blockFields, families, measurements, wordEvidence } = validateAnnotatedTextDeclaration(entity, field, descriptor, fields);
   const prefix = `${entity}_${field}`;
   const projectTarget = targetName(fields[descriptor.project]);
   const ownerTarget = targetName(fields[descriptor.owner]);
@@ -661,6 +735,14 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_measurement_once ON ${measurement} (block_id, family);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_measurement_block ON ${measurement} (block_id, family, id);`,
   );
+  if (wordEvidence.length > 0) {
+    const wordEvidenceTable = `${prefix}_word_evidence`;
+    const familyCheck = wordEvidence.map((name) => `'${name}'`).join(', ');
+    statements.push(
+      `CREATE TABLE IF NOT EXISTS ${wordEvidenceTable} (\n  scope TEXT NOT NULL,\n  document_id TEXT NOT NULL,\n  word_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${familyCheck})),\n  source_block_id TEXT NOT NULL,\n  source_ordinal INTEGER NOT NULL CHECK (source_ordinal >= 0),\n  start_anchor TEXT NOT NULL CHECK (json_valid(start_anchor)),\n  end_anchor TEXT NOT NULL CHECK (json_valid(end_anchor)),\n  source_start_utf16 INTEGER NOT NULL,\n  source_end_utf16 INTEGER NOT NULL,\n  original_token TEXT NOT NULL,\n  payload TEXT NOT NULL CHECK (json_valid(payload)),\n  origin_seq INTEGER NOT NULL,\n  format_version INTEGER NOT NULL,\n  PRIMARY KEY (scope, document_id, word_id, family),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
+      `CREATE INDEX IF NOT EXISTS idx_${prefix}_word_evidence_doc ON ${wordEvidenceTable} (scope, document_id, family, source_ordinal);`,
+    );
+  }
   return statements;
 }
 

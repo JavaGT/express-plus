@@ -20,7 +20,7 @@ import { assertR2BlockSplitPayload, frozenJsonSnapshot } from '../annotated-text
 import { assertR3BlockMergePayload, canonicalJsonEqual } from '../annotated-text-r3.mjs';
 import { assertR4AnnotationApplyPayload } from '../annotated-text-r4.mjs';
 import { assertR5AnnotationDetachPayload } from '../annotated-text-r5.mjs';
-import { assertWordTimingPayload } from '../annotated-text-action.mjs';
+import { assertWordEvidencePayload } from '../word-evidence.mjs';
 import { erasureDirectivePreparation } from '../erasure-directive.mjs';
 import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.mjs';
 import { mayRow } from '../row-grant.mjs';
@@ -177,7 +177,7 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
     if (!block || typeof block !== 'object' || Array.isArray(block)) {
       throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] must be a non-array object`);
     }
-    const allowedBlock = new Set(['text', 'fields', 'measurements', 'words']);
+    const allowedBlock = new Set(['text', 'fields', 'measurements', 'wordEvidence']);
     for (const key of Object.keys(block)) {
       if (!allowedBlock.has(key)) throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] has unknown key '${key}'`);
     }
@@ -244,10 +244,21 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
         measurements.push(Object.freeze({ id: randomUUID(), family: measurement.family, formatVersion: config.formatVersion, payload }));
       }
     }
-    const words = block.words === undefined ? undefined : assertWordTimingPayload(block.words)
-      ? frozenJsonSnapshot(block.words)
-      : (() => { throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].words is malformed`); })();
-    canonicalBlocks.push(Object.freeze({ id: randomUUID(), text: block.text, fields: Object.freeze(fields), measurements: Object.freeze(measurements), ...(words === undefined ? {} : { words }) }));
+    let wordEvidence;
+    if (block.wordEvidence !== undefined) {
+      try {
+        wordEvidence = assertWordEvidencePayload(block.wordEvidence, { families: descriptor.wordEvidence, blockText: block.text });
+      } catch (error) {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].wordEvidence ${error.message}`);
+      }
+    }
+    canonicalBlocks.push(Object.freeze({
+      id: randomUUID(),
+      text: block.text,
+      fields: Object.freeze(fields),
+      measurements: Object.freeze(measurements),
+      ...(wordEvidence === undefined ? {} : { wordEvidence }),
+    }));
   }
   return Object.freeze({ version: 1, actor: randomUUID().replaceAll('-', ''), blocks: Object.freeze(canonicalBlocks) });
 }

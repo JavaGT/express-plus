@@ -17,6 +17,7 @@ import { createProjectedAsyncConsumer } from './projected-async.mjs';
 import { buildDurableEffectsRegistry, createDurableEffectsConsumer } from './durable-effects.mjs';
 import { createBlobLifecycle } from './blob-lifecycle.mjs';
 import { createOperationalConsumers } from './operational-consumer.mjs';
+import { createWordEvidenceConsumers } from './word-evidence.mjs';
 import { createPendingBlobLifecycle } from './pending-blob.mjs';
 import { readSeq } from './committed-log.mjs';
 import { CRUD_CURSOR_POLICY, assertV9AnnotatedTextOffsetEditPayload, ANNOTATED_TEXT_COMPENSATION } from './entity/crud.mjs';
@@ -447,7 +448,8 @@ export function buildKernel(app) {
   // pick it up here alongside the other reconcile sweeps kernel already owns.
   // No-op default when the email seam was never installed.
   app.reconcileEmailDelivery = app._reconcileEmailDelivery ?? (async () => ({ delivered: 0 }));
-  const operational = createOperationalConsumers(app.operationalConsumers, {
+  const wordEvidenceConsumers = createWordEvidenceConsumers({ db: app.db, entities });
+  const operational = createOperationalConsumers([...app.operationalConsumers, ...wordEvidenceConsumers], {
     writeQueue: app.writeQueue,
     onShutdown: app.onShutdown,
   });

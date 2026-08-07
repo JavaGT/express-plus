@@ -5,7 +5,7 @@ import { captureDeletedRowAnchor } from '../deleted-row-anchor.mjs';
 import { CASCADE_DESCENDANT } from './removal-cascade.mjs';
 import { applyTextOp, assertUtf16Offset, assertWellFormedText, canonicalTextOp, createTextState, restoreTextCheckpoint, textCheckpoint } from '../annotated-text.mjs';
 import { applyTextOperationToBlock, applyTextOperationToNewBlock, importTextFamilyFromBlocks, restoreTextFamilyCheckpoint, textFamilyCheckpoint, splitBlock, mergeBlocks, removeEmptyBlock, materializeBlock, resolvePositionToEndpoint, rgaTraversal } from '../annotated-text-family.mjs';
-import { assertWordTimingPayload } from '../annotated-text-action.mjs';
+import { assertWordEvidencePayload } from '../word-evidence.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership, removeAnnotation } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
 import { deriveBlockPosition, frozenJsonSnapshot } from '../annotated-text-r2.mjs';
@@ -53,10 +53,16 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
           (importedBlock.fields !== null && (!importedBlock.fields || typeof importedBlock.fields !== 'object' || Array.isArray(importedBlock.fields)))) {
         throw new Error(`${name}.${fieldName} created event has invalid imported block ${blockIndex}`);
       }
-      for (const key of Object.keys(importedBlock)) if (!['id', 'text', 'fields', 'measurements', 'words'].includes(key)) throw new Error(`${name}.${fieldName} created event has unknown imported block key '${key}'`);
+      for (const key of Object.keys(importedBlock)) if (!['id', 'text', 'fields', 'measurements', 'wordEvidence'].includes(key)) throw new Error(`${name}.${fieldName} created event has unknown imported block key '${key}'`);
       assertWellFormedText(importedBlock.text);
       if (importedBlock.text.length === 0 && imported.blocks.some((candidate) => candidate.fields !== null)) throw new Error(`${name}.${fieldName} created event has an empty imported block`);
-      if (importedBlock.words !== undefined && !assertWordTimingPayload(importedBlock.words)) throw new Error(`${name}.${fieldName} created event block ${blockIndex} has invalid word timing payload`);
+      if (importedBlock.wordEvidence !== undefined) {
+        try {
+          assertWordEvidencePayload(importedBlock.wordEvidence, { families: fields[fieldName].wordEvidence, blockText: importedBlock.text });
+        } catch (error) {
+          throw new Error(`${name}.${fieldName} created event block ${blockIndex} has invalid word evidence payload: ${error.message}`);
+        }
+      }
     }
     const family = importTextFamilyFromBlocks(row.id, imported.actor, imported.blocks);
     const checkpoint = JSON.stringify(textFamilyCheckpoint(family));

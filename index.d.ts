@@ -215,6 +215,16 @@ export interface AnnotatedTextMeasurementDescriptor {
   readonly formatVersion: number;
   readonly queries: readonly string[];
 }
+export interface AnnotatedTextWordEvidenceFamily<Name extends string = string, Payload = unknown> {
+  readonly kind: 'wordEvidenceFamily';
+  readonly familyName: Name;
+  readonly formatVersion: number;
+  readonly parse: (value: unknown) => Payload;
+}
+export interface AnnotatedTextWordEvidenceFamilyHandle {
+  readonly familyName: string;
+  readonly formatVersion: number;
+}
 export interface AnnotatedTextActionDescriptor {
   readonly kind: 'annotationAction';
   readonly actionName: string;
@@ -239,6 +249,10 @@ export function measurement(name: string, options?: {
   formatVersion?: number;
   queries?: readonly string[];
 }): AnnotatedTextMeasurementDescriptor;
+export function wordEvidenceFamily<Name extends string, Payload = unknown>(name: Name, options: {
+  formatVersion?: number;
+  parse: (value: unknown) => Payload;
+}): AnnotatedTextWordEvidenceFamily<Name, Payload>;
 export function annotationAction(name: string): AnnotatedTextActionDescriptor;
 
 export interface AnnotatedTextOptions {
@@ -247,6 +261,7 @@ export interface AnnotatedTextOptions {
   block?: Record<string, FieldDescriptor>;
   annotations?: readonly (AnnotatedTextAnnotationDescriptor | AnnotatedTextProtectingAnnotationDescriptor)[];
   measurements?: readonly AnnotatedTextMeasurementDescriptor[];
+  wordEvidence?: readonly AnnotatedTextWordEvidenceFamily<string, unknown>[];
   capabilities?: Readonly<Record<string, unknown>>;
 }
 
@@ -385,10 +400,19 @@ export interface AnnotatedTextCreateSourceMeasurement {
   readonly family: string;
   readonly payload: unknown;
 }
+export interface AnnotatedTextWordEvidenceInput {
+  readonly version: 1;
+  readonly ids: readonly string[];
+  readonly startsUtf16: readonly number[];
+  readonly endsUtf16: readonly number[];
+  readonly originalTokens?: readonly string[];
+  readonly families: Readonly<Record<string, { readonly formatVersion: number; readonly values: readonly unknown[] }>>;
+}
 export interface AnnotatedTextCreateSourceBlock {
   readonly text: string;
   readonly fields?: Readonly<Record<string, unknown>>;
   readonly measurements?: readonly AnnotatedTextCreateSourceMeasurement[];
+  readonly wordEvidence?: AnnotatedTextWordEvidenceInput;
 }
 export interface AnnotatedTextCreateInput {
   readonly id: string;
@@ -508,6 +532,43 @@ export function exportAnnotatedText(input: {
   readonly expectedOwningScope: AnnotatedTextExpectedOwningScope;
   readonly principal: Principal;
 }): Promise<AnnotatedTextCanonicalDocument>;
+
+export interface AnnotatedTextWordEvidenceReadResult {
+  readonly structureVersion: number;
+  readonly words: ReadonlyArray<{
+    readonly wordId: string;
+    readonly blockId: string | null;
+    readonly start: number;
+    readonly end: number;
+    readonly text: string;
+    readonly edited: boolean;
+    readonly evidence: Readonly<Record<string, unknown>>;
+  }>;
+}
+export function readWordEvidence(input: {
+  readonly database: unknown;
+  readonly entityName: string;
+  readonly fieldName: string;
+  readonly tableName?: string;
+  readonly scope: string;
+  readonly documentId: string;
+  readonly families?: readonly string[];
+}): AnnotatedTextWordEvidenceReadResult | null;
+export function wordEvidenceFieldHandle(
+  entityName: string,
+  fieldName: string,
+  descriptor: { readonly wordEvidence?: readonly AnnotatedTextWordEvidenceFamily<string, unknown>[] },
+): {
+  readonly entityName: string;
+  readonly fieldName: string;
+  readonly tableName: string;
+  readonly families: readonly AnnotatedTextWordEvidenceFamilyHandle[];
+};
+export function wordEvidenceTableName(entityName: string, fieldName: string): string;
+export function assertWordEvidencePayload(
+  value: unknown,
+  context: { readonly families?: readonly AnnotatedTextWordEvidenceFamily<string, unknown>[]; readonly blockText: string },
+): Readonly<Record<string, unknown>>;
 export function boolean(options?: FieldOptions<boolean>): FieldDescriptor<boolean>;
 export function date(options?: FieldOptions<Date | number | string>): FieldDescriptor<Date>;
 export function number(options?: FieldOptions<number>): FieldDescriptor<number>;

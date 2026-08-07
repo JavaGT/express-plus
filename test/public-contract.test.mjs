@@ -52,9 +52,10 @@ export const PUBLIC_API = Object.freeze({
     exact: true,
     named: Object.freeze([
        'annotatedText', 'annotation', 'protectingAnnotation', 'measurement',
-       'annotationAction', 'registerAnnotatedTextContract',
+       'wordEvidenceFamily', 'annotationAction', 'registerAnnotatedTextContract',
         'registerAnnotatedTextStructuralExtension', 'annotatedTextAction', 'annotatedTextCreateAction', 'annotatedTextRetireAction', 'exportAnnotatedText', 'readAnnotatedTextForRecipient',
-        'assertWordTimingPayload', 'importTextFamilyFromBlocks', 'resolvePositionToEndpoint', 'projectEndpointToBlockOffset', 'materializeBlock', 'textFamilyCheckpoint', 'restoreTextFamilyCheckpoint',
+        'assertWordEvidencePayload', 'readWordEvidence', 'wordEvidenceFieldHandle', 'wordEvidenceTableName',
+        'importTextFamilyFromBlocks', 'resolvePositionToEndpoint', 'projectEndpointToBlockOffset', 'materializeBlock', 'textFamilyCheckpoint', 'restoreTextFamilyCheckpoint',
     ]),
   }),
 });

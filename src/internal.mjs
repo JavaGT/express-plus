@@ -1,6 +1,6 @@
 export { check, resolveDecision, UnawaitedCheckError } from './check.mjs';
 export { assertGuarded } from './guard/static.mjs';
-export { text, annotatedText, annotation, protectingAnnotation, measurement, annotationAction, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';
+export { text, annotatedText, annotation, protectingAnnotation, measurement, wordEvidenceFamily, annotationAction, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';
 export { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
 export { protectingAnnotationCapabilities } from './row-grant.mjs';
 export { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
