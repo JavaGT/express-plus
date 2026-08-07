@@ -3516,13 +3516,19 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     },
     replace(input) {
       if (!input || typeof input !== 'object') return { ok: false, failure: new TypeError('annotated text replace requires from, to, and text') };
-      const command = {
-        kind: input?.text ? 'text.replace' : 'text.delete',
-        mutationId: input?.mutationId,
-        from: input?.from,
-        to: input?.to,
-        ...(input?.text ? { text: input.text } : {}),
-      };
+      // An insert (empty selection) must NOT be sent as text.replace: the
+      // server rejects a replace with an empty delete range. Route it to
+      // text.insert so editor keystrokes and IME inserts submit correctly.
+      const isInsert = input?.from?.offset === input?.to?.offset && input?.text;
+      const command = isInsert
+        ? { kind: 'text.insert', mutationId: input?.mutationId, at: input.from, text: input.text }
+        : {
+            kind: input?.text ? 'text.replace' : 'text.delete',
+            mutationId: input?.mutationId,
+            from: input?.from,
+            to: input?.to,
+            ...(input?.text ? { text: input.text } : {}),
+          };
       return queueAuthoringMutation(command, (current) => dispatchNow(current));
     },
     applyAnnotation({ mutationId, annotation, from, to }) {
