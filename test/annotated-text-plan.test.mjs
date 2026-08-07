@@ -1,152 +1,296 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { applyTextOp, createTextState, textCheckpoint } from '../src/annotated-text.mjs';
-import { createTextFamily, materializeBlock, resolvePositionToEndpoint, splitBlock } from '../src/annotated-text-family.mjs';
-import { addMembership } from '../src/annotated-text-membership.mjs';
-import { planTextOffsetEdit, planAnnotationApplyOffsets, planAnnotationRemove, planTextRangeApply } from '../src/annotated-text-plan.mjs';
+import {
+  importTextToFamily,
+  materializeText,
+  resolveOffsetToEndpoint,
+} from '../src/annotated-text-continuous.mjs';
+import {
+  planTextOffsetEdit,
+  planAnnotationApplyOffsets,
+  planAnnotationRemove,
+  planTextRangeApply,
+} from '../src/annotated-text-plan.mjs';
 
-const ACTOR = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
-function familyFromText(text, blockId = 'block1') {
-  const op = ['workbench.text', 1, [ACTOR, 1], 1, [], ['insert', ['root'], text]];
-  return createTextFamily('doc1', textCheckpoint(applyTextOp(createTextState(), op)), blockId);
+const ACTOR = 'a'.repeat(32);
+const EDIT_ACTOR = 'b'.repeat(32);
+
+function familyFromText(text) {
+  return importTextToFamily('doc1', ACTOR, text);
 }
-function pos(family, blockId, offset, affinity = 'right') { return { blockId, offset, affinity, positionFamily: family }; }
-const input = (family, edit, extra = {}) => planTextOffsetEdit({ documentId: 'doc1', structureVersion: 1, family, actor: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', lamport: 2, visibleBlockIds: family.blocks.map((b) => b.id), membershipBlockIds: [], sourceBlocks: {}, mintBlockId: () => 'new', edit, ...extra });
 
-test('plans insert, delete, and replace as unified span-native operations', () => {
+function at(offset, affinity = 'right') {
+  return { offset, affinity };
+}
+
+function input(family, edit, extra = {}) {
+  return planTextOffsetEdit({
+    documentId: 'doc1',
+    structureVersion: 1,
+    family,
+    actor: EDIT_ACTOR,
+    lamport: 2,
+    edit,
+    ...extra,
+  });
+}
+
+function rangeFor(family, annotationId, startOffset, endOffset) {
+  const frontier = family.checkpoint.frontier;
+  return {
+    annotationId,
+    start: resolveOffsetToEndpoint(family, startOffset, frontier, 'left'),
+    end: resolveOffsetToEndpoint(family, endOffset, frontier, 'right'),
+  };
+}
+
+test('plans insert, delete, and replace as unified document-wide operations', () => {
   const family = familyFromText('abc');
-  const inserted = input(family, { kind: 'text.insert', text: 'x', at: pos(family, 'block1', 1) });
-  assert.equal(inserted.version, 13); assert.equal(inserted.operation.kind, 'text.apply'); assert.equal(materializeBlock(inserted.facts.family, 'block1'), 'axbc');
-  const deleted = input(family, { kind: 'text.delete', from: pos(family, 'block1', 1), to: pos(family, 'block1', 2) });
+
+  const inserted = input(family, { kind: 'text.insert', text: 'x', at: at(1) });
+  assert.equal(inserted.version, 13);
+  assert.equal(inserted.operation.kind, 'text.apply');
+  assert.equal(inserted.id, 'doc1');
+  assert.deepEqual(inserted.before, { structuralRevision: 1, frontier: family.checkpoint.frontier });
+  assert.equal(inserted.after.structuralRevision, 1, 'insert does not bump structuralRevision');
+  assert.equal(materializeText(inserted.facts.family), 'axbc');
+  assert.equal(inserted.operation.operation[0], 'workbench.text');
+  assert.equal(inserted.operation.operation[5][0], 'insert');
+  assert.equal(inserted.operation.operation[5][2], 'x');
+  assert.deepEqual(inserted.facts.emptiedAnnotations, []);
+
+  const deleted = input(family, { kind: 'text.delete', from: at(1), to: at(2) });
   assert.equal(deleted.version, 13);
-  const replaced = input(family, { kind: 'text.replace', text: 'xy', from: pos(family, 'block1', 1), to: pos(family, 'block1', 2) });
-  assert.equal(replaced.version, 13); assert.equal(replaced.operation.operations.length, 2);
+  assert.equal(deleted.operation.kind, 'text.apply');
+  assert.equal(materializeText(deleted.facts.family), 'ac');
+  assert.equal(deleted.operation.operation[5][0], 'delete');
+  assert.equal(deleted.after.structuralRevision, 1, 'delete without emptied ranges keeps revision');
+
+  const replaced = input(family, { kind: 'text.replace', text: 'xy', from: at(1), to: at(2) });
+  assert.equal(replaced.version, 13);
+  assert.equal(replaced.operation.kind, 'text.replace');
+  assert.equal(replaced.operation.operations.length, 2);
+  assert.equal(replaced.operation.operations[0][5][0], 'delete');
+  assert.equal(replaced.operation.operations[1][5][0], 'insert');
+  assert.equal(replaced.operation.operations[1][5][2], 'xy');
+  assert.equal(materializeText(replaced.facts.family), 'axyc');
+  assert.equal(replaced.after.structuralRevision, 1);
+  assert.ok(Array.isArray(replaced.after.frontier));
 });
 
-test('routes a membership boundary to the adjacent visible unannotated block', () => {
-  const split = splitBlock(familyFromText('abcd'), 'block1', 'block2', 2).family;
-  const plan = input(split, { kind: 'text.insert', text: '!', at: pos(split, 'block1', 2) }, { membershipBlockIds: ['block1'] });
-  assert.equal(plan.version, 13); assert.equal(plan.operation.blockId, 'block2');
-});
-
-test('uses insert-block at a boundary when no adjacent destination exists', () => {
-  const family = familyFromText('abc');
-  const plan = input(family, { kind: 'text.insert', text: '!', at: pos(family, 'block1', 3) }, { membershipBlockIds: ['block1'], sourceBlocks: { block1: { epoch: 1, fields: {} } } });
-  assert.equal(plan.version, 13); assert.equal(plan.operation.kind, 'text.insert-block');
-});
-
-test('prunes empty unannotated blocks emptied by a delete', () => {
-  const split = splitBlock(familyFromText('abcd'), 'block1', 'block2', 2).family;
-  const plan = input(split, { kind: 'text.delete', from: pos(split, 'block2', 0), to: pos(split, 'block2', 2) }, { membershipBlockIds: ['block1'] });
-  assert.equal(plan.version, 13);
-  assert.deepEqual(plan.facts.prunedBlockIds, ['block2']);
-  assert.deepEqual(plan.facts.emptiedAnnotations, []);
-  assert.equal(plan.facts.family.blocks.length, 1);
-  assert.equal(materializeBlock(plan.facts.family, 'block1'), 'ab');
-});
-
-test('prunes empty annotated blocks and applies empty-policy on delete', () => {
-  const split = splitBlock(familyFromText('abcd'), 'block1', 'block2', 2).family;
+test('delete empties an orphan-policy annotation and bumps structuralRevision', () => {
+  const family = familyFromText('abcd');
   const annotation = { id: 'ann1', family: 'comment', empty: 'orphan', protectedTargetIds: [] };
-  const membership = addMembership(split, [annotation], [], 'ann1', 'block2',
-    resolvePositionToEndpoint(split, 'block2', 0, split.checkpoint.frontier, 'left'),
-    resolvePositionToEndpoint(split, 'block2', 2, split.checkpoint.frontier, 'right'));
-  const plan = input(split, { kind: 'text.delete', from: pos(split, 'block2', 0), to: pos(split, 'block2', 2) }, {
-    membershipBlockIds: ['block2'],
+  const ranges = [rangeFor(family, 'ann1', 2, 4)];
+  const plan = input(family, { kind: 'text.delete', from: at(2), to: at(4) }, {
     annotations: [annotation],
-    memberships: membership.memberships,
+    ranges,
   });
   assert.equal(plan.version, 13);
-  assert.deepEqual(plan.facts.prunedBlockIds, ['block2']);
+  assert.equal(materializeText(plan.facts.family), 'ab');
+  assert.equal(plan.after.structuralRevision, 2, 'emptied range bumps structuralRevision');
   assert.equal(plan.facts.emptiedAnnotations.length, 1);
   assert.equal(plan.facts.emptiedAnnotations[0].annotationId, 'ann1');
+  assert.equal(plan.facts.emptiedAnnotations[0].empty, 'orphan');
   assert.equal(plan.facts.emptiedAnnotations[0].disposition.kind, 'orphaned');
+  assert.equal(plan.facts.emptiedAnnotations[0].disposition.family, 'comment');
   assert.equal(plan.facts.emptiedAnnotations[0].disposition.savedQuote, 'cd');
-  assert.equal(plan.facts.family.blocks.length, 1);
+  assert.equal(plan.facts.emptiedAnnotations[0].disposition.lastRange, null);
 });
 
-test('plans annotation offsets and rejects inverted ranges', () => {
-  const family = familyFromText('abc');
-  const result = planAnnotationApplyOffsets({ family, structureVersion: 1, from: pos(family, 'block1', 0), to: pos(family, 'block1', 1), visibleBlockIds: ['block1'] });
-  assert.equal(result.crossBlock, false); assert.equal(result.selection.endUtf16Offset, 1);
-  assert.throws(() => planAnnotationApplyOffsets({ family, structureVersion: 1, from: pos(family, 'block1', 2), to: pos(family, 'block1', 1), visibleBlockIds: ['block1'] }), /position-invalid|forward/);
+test('replace empties a delete-policy annotation like a delete does', () => {
+  const family = familyFromText('abcd');
+  const annotation = { id: 'ann1', family: 'comment', empty: 'delete', protectedTargetIds: [] };
+  // Range endpoints use left affinity so a replace that covers the annotated
+  // span can leave start>=end after the delete+insert pair (insert sits after
+  // a right-affinity end and would keep the range non-empty).
+  const frontier = family.checkpoint.frontier;
+  const ranges = [{
+    annotationId: 'ann1',
+    start: resolveOffsetToEndpoint(family, 1, frontier, 'left'),
+    end: resolveOffsetToEndpoint(family, 2, frontier, 'left'),
+  }];
+  const plan = input(family, {
+    kind: 'text.replace',
+    text: 'Z',
+    from: at(0, 'left'),
+    to: at(2, 'left'),
+  }, {
+    annotations: [annotation],
+    ranges,
+  });
+  assert.equal(plan.operation.kind, 'text.replace');
+  assert.equal(plan.operation.operations.length, 2);
+  assert.equal(materializeText(plan.facts.family), 'Zcd');
+  assert.equal(plan.after.structuralRevision, 2);
+  assert.equal(plan.facts.emptiedAnnotations.length, 1);
+  assert.equal(plan.facts.emptiedAnnotations[0].annotationId, 'ann1');
+  assert.equal(plan.facts.emptiedAnnotations[0].disposition.kind, 'deleted');
+  assert.equal(plan.facts.emptiedAnnotations[0].disposition.savedQuote, null);
 });
 
-test('redaction-aware offsets attach at visible edges and reject a spanning selection', () => {
-  const family = familyFromText('preSECRETsuffix');
-  const redactions = [{ visibleStart: 3, start: 3, end: 9 }];
-  const left = input(family, { kind: 'text.insert', text: '!', at: { ...pos(family, 'block1', 3, 'left'), redactions } });
-  assert.equal(materializeBlock(left.facts.family, 'block1'), 'pre!SECRETsuffix');
-  const right = input(family, { kind: 'text.insert', text: '!', at: { ...pos(family, 'block1', 3, 'right'), redactions } });
-  assert.equal(materializeBlock(right.facts.family, 'block1'), 'preSECRET!suffix');
-  assert.throws(() => input(family, {
-    kind: 'text.delete',
-    from: { ...pos(family, 'block1', 3, 'left'), redactions },
-    to: { ...pos(family, 'block1', 3, 'right'), redactions },
-  }), /confidential redaction/);
+test('delete that does not empty a covering range leaves emptiedAnnotations empty', () => {
+  const family = familyFromText('abcd');
+  const annotation = { id: 'ann1', family: 'comment', empty: 'orphan', protectedTargetIds: [] };
+  const ranges = [rangeFor(family, 'ann1', 0, 4)];
+  const plan = input(family, { kind: 'text.delete', from: at(1), to: at(2) }, {
+    annotations: [annotation],
+    ranges,
+  });
+  assert.equal(materializeText(plan.facts.family), 'acd');
+  assert.deepEqual(plan.facts.emptiedAnnotations, []);
+  assert.equal(plan.after.structuralRevision, 1);
 });
 
-test('removes a delete-empty annotation and freezes the v10 result', () => {
+test('planAnnotationApplyOffsets is rejected as block-era', () => {
+  assert.throws(
+    () => planAnnotationApplyOffsets(),
+    (error) => error.code === 'position-invalid' && /block-era|planTextRangeApply/.test(error.message),
+  );
+});
+
+test('removes an annotation and freezes the v13 result', () => {
   const family = familyFromText('abc');
   const annotation = { id: 'ann1', family: 'comment', empty: 'delete', protectedTargetIds: [] };
-  const start = pos(family, 'block1', 0); const end = pos(family, 'block1', 3);
-  const membership = addMembership(family, [annotation], [], 'ann1', 'block1',
-    resolvePositionToEndpoint(family, 'block1', start.offset, family.checkpoint.frontier, start.affinity),
-    resolvePositionToEndpoint(family, 'block1', end.offset, family.checkpoint.frontier, end.affinity));
-  const plan = planAnnotationRemove({ documentId: 'doc1', structureVersion: 1, family, annotationId: 'ann1', annotations: [annotation], memberships: membership.memberships, visibleBlockIds: ['block1'] });
-  assert.equal(plan.version, 13); assert.equal(plan.facts.result.disposition.kind, 'deleted'); assert(Object.isFrozen(plan));
+  const ranges = [rangeFor(family, 'ann1', 0, 3)];
+  const plan = planAnnotationRemove({
+    documentId: 'doc1',
+    structureVersion: 1,
+    family,
+    annotationId: 'ann1',
+    annotations: [annotation],
+    ranges,
+  });
+  assert.equal(plan.version, 13);
+  assert.equal(plan.operation.kind, 'annotation.remove');
+  assert.equal(plan.operation.annotationId, 'ann1');
+  assert.equal(plan.facts.result.disposition.kind, 'deleted');
+  assert.deepEqual(plan.facts.removedAnnotationIds, ['ann1']);
+  assert.deepEqual(plan.facts.ranges, []);
+  assert.equal(plan.after.structuralRevision, 1);
+  assert.equal(plan.facts.family.id, 'doc1');
+  assert.ok(Object.isFrozen(plan));
 });
 
-test('plans a same-block text-range apply as one partial membership with no family change', () => {
+test('plans a text-range apply as one document range with no family change', () => {
   const family = familyFromText('A diarized transcript');
   const annotation = { id: 'code1', family: 'code', fields: {} };
   const plan = planTextRangeApply({
-    documentId: 'doc1', structureVersion: 1, family,
+    documentId: 'doc1',
+    structureVersion: 1,
+    family,
     annotation,
-    from: pos(family, 'block1', 2), to: pos(family, 'block1', 12),
-    visibleBlockIds: ['block1'],
+    from: at(2),
+    to: at(12),
   });
   assert.equal(plan.version, 13);
   assert.equal(plan.operation.kind, 'annotation.apply-range');
-  assert.equal(plan.facts.family.blocks.length, 1, 'no block split');
-  assert.equal(plan.facts.splitOps.length, 0);
+  assert.deepEqual(plan.operation.selection, { startOffset: 2, endOffset: 12 });
+  assert.equal(plan.operation.annotation.id, 'code1');
   assert.equal(plan.after.structuralRevision, 1, 'revision unchanged');
-  assert.deepEqual(plan.facts.selectedBlockIds, ['block1']);
-  assert.equal(plan.facts.memberships.length, 1);
-  assert.equal(plan.facts.memberships[0].blockId, 'block1');
-  assert.equal(plan.facts.memberships[0].annotationId, 'code1');
-  assert.ok(plan.facts.memberships[0].start.point, 'carries structural start endpoint');
-  assert.ok(plan.facts.memberships[0].end.point, 'carries structural end endpoint');
+  assert.deepEqual(plan.after.frontier, family.checkpoint.frontier);
+  assert.equal(plan.facts.family.id, 'doc1');
+  assert.equal(materializeText(plan.facts.family), 'A diarized transcript');
+  assert.equal(plan.facts.ranges.length, 1);
+  assert.equal(plan.facts.ranges[0].annotationId, 'code1');
+  assert.ok(plan.facts.ranges[0].start.point, 'carries structural start endpoint');
+  assert.ok(plan.facts.ranges[0].end.point, 'carries structural end endpoint');
+  assert.equal(plan.facts.selectedRange.annotationId, 'code1');
+  assert.ok(plan.facts.selectedRange.start.point);
+  assert.ok(plan.facts.selectedRange.end.point);
+  assert.deepEqual(plan.facts.measurements, []);
 });
 
-test('plans a cross-block text-range apply as one membership per intersected block', () => {
-  let split = splitBlock(familyFromText('First block words'), 'block1', 'block2', 5).family;
-  const annotation = { id: 'code1', family: 'code', fields: {} };
-  const plan = planTextRangeApply({
-    documentId: 'doc1', structureVersion: 1, family: split,
-    annotation,
-    from: pos(split, 'block1', 2), to: pos(split, 'block2', 3),
-    visibleBlockIds: split.blocks.map((b) => b.id),
-  });
-  assert.equal(plan.version, 13);
-  assert.equal(plan.operation.kind, 'annotation.apply-range');
-  assert.equal(plan.facts.family.blocks.length, 2, 'no splits');
-  assert.deepEqual(plan.facts.selectedBlockIds, ['block1', 'block2']);
-  assert.equal(plan.facts.memberships.length, 2);
-  assert.deepEqual(plan.facts.memberships.map((m) => m.blockId), ['block1', 'block2']);
-});
-
-test('text-range apply rejects non-visible or empty selections', () => {
+test('text-range apply replaces an existing range for the same annotation', () => {
   const family = familyFromText('hello world');
   const annotation = { id: 'code1', family: 'code', fields: {} };
-  assert.throws(() => planTextRangeApply({
-    documentId: 'doc1', structureVersion: 1, family, annotation,
-    from: pos(family, 'block1', 2), to: pos(family, 'block1', 2),
-    visibleBlockIds: ['block1'],
-  }), /forward, non-empty range/);
-  assert.throws(() => planTextRangeApply({
-    documentId: 'doc1', structureVersion: 1, family, annotation,
-    from: pos(family, 'block1', 0), to: pos(family, 'block1', 5),
-    visibleBlockIds: ['other'],
-  }), /restricted or hidden block/);
+  const existing = [rangeFor(family, 'code1', 0, 5), rangeFor(family, 'other', 6, 11)];
+  const plan = planTextRangeApply({
+    documentId: 'doc1',
+    structureVersion: 1,
+    family,
+    annotation,
+    from: at(6),
+    to: at(11),
+    ranges: existing,
+  });
+  assert.equal(plan.facts.ranges.length, 2);
+  const byId = Object.fromEntries(plan.facts.ranges.map((entry) => [entry.annotationId, entry]));
+  assert.ok(byId.code1);
+  assert.ok(byId.other);
+  assert.equal(plan.operation.selection.startOffset, 6);
+  assert.equal(plan.operation.selection.endOffset, 11);
+});
+
+test('rejects out-of-bounds offsets and empty delete ranges', () => {
+  const family = familyFromText('abc');
+  assert.throws(
+    () => input(family, { kind: 'text.insert', text: 'x', at: at(9) }),
+    (error) => error.code === 'position-invalid',
+  );
+  assert.throws(
+    () => input(family, { kind: 'text.delete', from: at(1), to: at(1) }),
+    (error) => error.code === 'position-invalid' && /non-empty/.test(error.message),
+  );
+  assert.throws(
+    () => input(family, { kind: 'text.delete', from: at(2), to: at(1) }),
+    (error) => error.code === 'position-invalid',
+  );
+  assert.throws(
+    () => input(family, { kind: 'text.replace', text: 'z', from: at(0), to: at(99) }),
+    (error) => error.code === 'position-invalid',
+  );
+});
+
+test('annotation remove requires the annotation to exist', () => {
+  const family = familyFromText('abc');
+  assert.throws(
+    () => planAnnotationRemove({
+      documentId: 'doc1',
+      structureVersion: 1,
+      family,
+      annotationId: 'missing',
+      annotations: [],
+      ranges: [],
+    }),
+    /annotation not found/,
+  );
+});
+
+test('text-range apply rejects empty or inverted selections', () => {
+  const family = familyFromText('hello world');
+  const annotation = { id: 'code1', family: 'code', fields: {} };
+  assert.throws(
+    () => planTextRangeApply({
+      documentId: 'doc1',
+      structureVersion: 1,
+      family,
+      annotation,
+      from: at(2),
+      to: at(2),
+    }),
+    (error) => error.code === 'position-invalid' && /forward, non-empty range/.test(error.message),
+  );
+  assert.throws(
+    () => planTextRangeApply({
+      documentId: 'doc1',
+      structureVersion: 1,
+      family,
+      annotation,
+      from: at(5),
+      to: at(2),
+    }),
+    (error) => error.code === 'position-invalid',
+  );
+  assert.throws(
+    () => planTextRangeApply({
+      documentId: 'doc1',
+      structureVersion: 1,
+      family,
+      annotation,
+      from: at(0),
+      to: at(99),
+    }),
+    (error) => error.code === 'position-invalid',
+  );
 });
