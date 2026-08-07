@@ -163,14 +163,14 @@ export const WORKBENCH_MIGRATIONS = Object.freeze([
         if (PREFIX_IDENTIFIER.test(prefix) === false) {
           throw new Error(`invalid authoring stream table prefix: ${prefix}`);
         }
-        const required = ['stream', 'snapshot_position', 'split', 'snapshot', 'group', 'position', 'checkpoint'];
+        const required = ['stream', 'snapshot_position', 'snapshot', 'position', 'checkpoint'];
         const missing = required.filter((table) => !tableExists(db, `${prefix}_authoring_${table}`));
         if (missing.length > 0) {
           throw new Error(`incomplete authoring stream table family: ${prefix} missing ${missing.join(', ')}`);
         }
         // Invalidate the whole ephemeral family once, child-first. Removing
         // streams cascades leases after every lease-owned row is already gone.
-        for (const table of ['snapshot_position', 'split', 'snapshot', 'group', 'position', 'checkpoint']) {
+        for (const table of ['snapshot_position', 'snapshot', 'position', 'checkpoint']) {
           db.exec(`DELETE FROM ${prefix}_authoring_${table}`);
         }
         db.exec(`DELETE FROM ${prefix}_authoring_stream`);

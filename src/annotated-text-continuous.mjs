@@ -18,6 +18,7 @@ import {
   assertUtf16Offset,
   canonicalTextOp,
   compareOpId,
+  createTextState,
   frontierDominates,
   materializeText as materializeCheckpointText,
   restoreTextCheckpoint,
@@ -60,6 +61,22 @@ export function createTextFamily(id, checkpoint) {
   if (typeof id !== 'string' || id.length === 0) fail('document id must be a non-empty string');
   const restored = restoreTextCheckpoint(checkpoint);
   return deepFreeze({ id, checkpoint: restored });
+}
+
+/**
+ * Seed a continuous family from plain text (one root element; blocks are gone).
+ * A single multi-scalar element is the canonical import shape — mid-element
+ * offset edits resolve correctly (verified) — so import is O(1), not O(chars).
+ */
+export function importTextToFamily(documentId, actor, text) {
+  if (typeof documentId !== 'string' || documentId.length === 0) fail('document id must be a non-empty string');
+  if (typeof actor !== 'string' || !/^[0-9a-f]{32}$/.test(actor)) fail('import actor must be a 32-hex id');
+  if (typeof text !== 'string') fail('import text must be a string');
+  let state = createTextState();
+  if (text.length > 0) {
+    state = applyTextOp(state, ['workbench.text', 1, [actor, 1], 1, [], ['insert', ['root'], text]]);
+  }
+  return createTextFamily(documentId, textCheckpoint(state));
 }
 
 export function textFamilyCheckpoint(family) {
