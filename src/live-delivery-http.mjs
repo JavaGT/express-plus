@@ -208,14 +208,25 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
     } catch (error) {
       log?.error?.('live', 'HTTP live delivery request failed', {
         path: url.pathname,
+        mode: url.searchParams.get('mode') ?? null,
+        scope: url.searchParams.get('scope') ?? null,
+        entity: url.searchParams.get('entity') ?? null,
+        field: url.searchParams.get('field') ?? null,
+        documentId: url.searchParams.get('documentId') ?? null,
         error: error instanceof Error ? error.message : String(error),
       });
       releaseStream?.();
+      // Surface the underlying framework error (message only, no stack) so a
+      // client's bootstrap failure is diagnosable instead of an opaque 400.
+      const denied = error?.code === 'live-delivery-revoked';
+      const detail = !denied && error instanceof Error && typeof error.message === 'string'
+        ? `live delivery unavailable: ${error.message}`
+        : 'live delivery unavailable';
       if (url.pathname === `${path}/events`) {
-        if (!res.headersSent) reject(res, error?.code === 'live-delivery-revoked' ? 403 : 400, 'live delivery unavailable');
+        if (!res.headersSent) reject(res, denied ? 403 : 400, detail);
         else if (!res.writableEnded) res.end();
       } else if (!res.headersSent) {
-        reject(res, error?.code === 'live-delivery-revoked' ? 403 : 400, 'live delivery unavailable');
+        reject(res, denied ? 403 : 400, detail);
       }
       return true;
     }

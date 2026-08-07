@@ -375,8 +375,17 @@
 
     $('add-comment').onclick = () => void addCommentMarker();
     function updateCommentButton() {
-      const selection = editorBinding?.getSelection();
-      const enabled = selection !== null
+      let selection;
+      try {
+        selection = editorBinding?.getSelection();
+      } catch (error) {
+        reportError(error);
+        selection = null;
+      }
+      // getSelection() may be null (no editor) or undefined (no selection yet);
+      // only a well-formed range enables the marker buttons.
+      const enabled = selection != null
+        && selection.from != null && selection.to != null
         && (selection.from.blockId !== selection.to.blockId || selection.from.offset !== selection.to.offset);
       $('add-comment').disabled = session?.status !== 'live' || !enabled;
       $('mark-confidential').disabled = session?.status !== 'live' || !enabled;
