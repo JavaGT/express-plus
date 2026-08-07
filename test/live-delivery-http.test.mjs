@@ -76,9 +76,19 @@ test('HTTP delivery logs bootstrap exceptions before returning a sanitized failu
     assert.deepEqual(logs, [{
       channel: 'live',
       message: 'HTTP live delivery request failed',
-      context: { path: '/live-delivery/bootstrap', error: 'offset is outside text bounds' },
+      context: {
+        path: '/live-delivery/bootstrap',
+        mode: 'snapshot',
+        scope: 'Project:p1',
+        entity: null,
+        field: null,
+        documentId: null,
+        error: 'offset is outside text bounds',
+      },
     }]);
-    assert.deepEqual(await response.json(), { error: 'live delivery unavailable' });
+    // The sanitized failure now carries the underlying framework error so a
+    // client's bootstrap failure is diagnosable (message only, no stack).
+    assert.deepEqual(await response.json(), { error: 'live delivery unavailable: offset is outside text bounds' });
   } finally { server.close(); }
 });
 

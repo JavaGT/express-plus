@@ -29,9 +29,9 @@
 // them and should not re-deliver on reconnect.
 
 import { readSeq, readSince } from './committed-log.mjs';
-import { EventKind, parseEventType } from './event-handle.mjs';
+import { EventKind, parseEventType } from './event-handle.ts';
 import { mayRow } from './row-grant.mjs';
-import { tryParseScopeKey } from './scope-handle.mjs';
+import { tryParseScopeKey } from './scope-handle.ts';
 
 let nextSubId = 1;
 
@@ -407,11 +407,11 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
 
   function close() {
     closed = true;
-    for (const sub of subs.values()) {
-      sub.active = false;
-      if (sub.signal && typeof sub.signal.removeEventListener === 'function') {
-        try { sub.signal.removeEventListener('abort', sub._abortHandler); } catch { /* ignore */ }
-      }
+    // Revoke every active subscription so transport skins (SSE ends its
+    // response only via revoke) release their connections. Marking inactive
+    // without revoking left sockets open and pinned server.close() forever.
+    for (const subId of [...subs.keys()]) {
+      revokeSub(subId);
     }
     subs.clear();
     byScope.clear();

@@ -119,6 +119,11 @@ export function prepareGracefulShutdown(app) {
         }
 
         await app.writeQueue?.close?.();
+        // After hooks release application-owned producers (including live
+        // delivery), destroy any sockets that remain. closeIdleConnections at
+        // the top only drops idle keep-alives — an active SSE stream is not
+        // idle and would pin server.close() forever without this backstop.
+        try { app.httpServer?.closeAllConnections?.(); } catch { /* best-effort */ }
         await serverClosed;
         liveApps.delete(app);
       })();

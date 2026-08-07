@@ -745,7 +745,7 @@ test('composite snapshot resync gate: member events resync only when they touch 
   t.after(async () => { await app.shutdown(); db.close(); });
 
   const { buildSnapshotResyncRelevance, snapshotEventTouchesComposite } = await import('../src/live-delivery-public.mjs');
-  const { tryParseScopeKey } = await import('../src/scope-handle.mjs');
+  const { tryParseScopeKey } = await import('../src/scope-handle.ts');
   const compiled = await (async () => {
     const { compileSnapshots } = await import('../src/snapshot-projection.mjs');
     const resolveEntity = (name) => name === 'Project' ? app.entities.get('Project') : name === 'Codebook' ? app.entities.get('Codebook') : undefined;
@@ -875,5 +875,45 @@ test('composite shell subscriber does not resync for annotated-text body edits o
   session.close();
   await shellReader.cancel();
   streamController.abort();
+});
+
+test('shutdown completes without client abort or closeAllConnections while an SSE stream is open', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  const app = workbench({ db, entities: [project()], actions: [projectAction()] });
+  app.attachLiveDelivery({ principalOf: () => user });
+  app.listen(0);
+  await app.ready;
+
+  let reader = null;
+  let streamController = null;
+  let closedDb = false;
+  t.after(async () => {
+    if (reader) await reader.cancel().catch(() => {});
+    if (streamController) streamController.abort();
+    if (!closedDb) { try { db.close(); } catch { /* already closed */ } closedDb = true; }
+  });
+
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+  await app.dispatch({
+    actionId: 'shutdown-seed', type: 'project.write', scope: 'Project:p1',
+    payload: { id: 'p1', name: 'seed', authorized: true }, principal: user,
+  });
+  streamController = new AbortController();
+  const stream = await fetch(`${origin}/live-delivery/events?scope=Project%3Ap1&after=0`, { signal: streamController.signal });
+  assert.equal(stream.status, 200);
+  reader = stream.body.getReader();
+  await reader.read(); // package-owned connection comment
+
+  // Deliberately no client abort and no test-side closeAllConnections: shutdown
+  // alone must release the open SSE stream (core.revoke + closeAllConnections).
+  const beforeShutdown = Date.now();
+  await Promise.race([
+    app.shutdown(),
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error('app.shutdown() did not complete within 2s while an SSE stream was open')),
+      2000,
+    )),
+  ]);
+  assert.ok(Date.now() - beforeShutdown < 2000);
 });
 
