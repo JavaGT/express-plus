@@ -117,6 +117,17 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
         const folded = await tryBuildAnnotatedTextFoldEnvelopes({ ...base, event: context.event }, { db, document });
         if (folded) return folded;
       }
+      // A composite shell subscriber resyncs only when the committed event can
+      // change the composite output. Without this gate the shared envelope
+      // builder returns a resync for EVERY event on the composite's scope, so
+      // an annotated-text body edit (committed to the owning Project scope)
+      // re-bootstraps the whole shell per keystroke.
+      if (base.composite && !document) {
+        const declaration = composites.get(handle.entity);
+        if (declaration?.output && !eventTouchesComposite(declaration, context.event)) {
+          return [];
+        }
+      }
       return envelopes.buildEnvelope(base);
     },
     scopeVisible: ({ entity, principal, scope: handle }) => {

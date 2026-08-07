@@ -756,3 +756,105 @@ test('composite snapshot resync gate: member events resync only when they touch 
   void tryParseScopeKey;
 });
 
+test('composite shell subscriber does not resync for annotated-text body edits on its own scope', async (t) => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec("CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO User VALUES ('u1')");
+  const Project = entity('Project', {
+    name: text(), owner: ref('User', { role: 'owner' }),
+    grant: [scope(() => everyone()).can(async ({ is }) => (await is.owner()) ? grant(read, write, subscribe, admin) : deny('not project owner'))],
+  });
+  executeDDL(Project, db);
+  db.exec("INSERT INTO Project (id, name, owner) VALUES ('p1', 'proj', 'u1')");
+  const ShellDoc = entity('ShellDoc', {
+    project: ref(Project, { physical: true }), owner: ref('User', { role: 'owner' }),
+    body: annotatedText({ project: 'project', owner: 'owner', annotations: [annotation('note')] }),
+    grant: [scope(() => everyone()).can(() => grant(read, write, subscribe))],
+  });
+  executeDDL(ShellDoc, db);
+  const Codebook = entity('Codebook', {
+    projectId: ref(Project, { immutable: true, physical: true }), name: text(),
+    grant: inherit(Project, { via: 'projectId' }),
+    applicationHttpActions: ['create'],
+  });
+  executeDDL(Codebook, db);
+  const app = workbench({ db, entities: [Project, ShellDoc, Codebook], history: (await import('../src/index.mjs')).durableHistory({ authorize: () => true }) });
+  app.attachLiveDelivery({
+    principalOf: () => user,
+    snapshots: [snapshot(Project, {
+      output: object({
+        name: select(Project.field.name),
+        codebooks: keyed(Codebook, { via: Codebook.field.projectId, select: select(Codebook.field.name) }),
+      }),
+    })],
+  });
+  app.listen(0, { principalOf: () => user });
+  await app.ready;
+  t.after(async () => { app.httpServer.closeAllConnections?.(); await app.shutdown(); db.close(); });
+  const origin = `http://127.0.0.1:${app.httpServer.address().port}`;
+
+  const create = annotatedTextCreateAction(ShellDoc, ShellDoc.body, { id: 'd1', projectId: 'p1', ownerId: 'u1' });
+  const createRes = await fetch(`${origin}/workbench/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ actionId: 'create-shell', type: create.type, payload: create.payload, scope: 'Project:p1', clientId: 'tab-a' }),
+  });
+  assert.equal(createRes.status, 200);
+  const initialBlockId = db.prepare('SELECT id FROM ShellDoc_body_block WHERE document_id = ?').get('d1').id;
+
+  const anchor = Number(db.prepare("SELECT MAX(seq) AS s FROM _Log WHERE scope = 'Project:p1'").get().s ?? 0);
+  const aggregate = Number(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get().revision);
+  const cursor = encodeURIComponent(JSON.stringify({ anchor, aggregate }));
+
+  // Bare composite shell subscription (no document identity) on the Project scope.
+  const streamController = new AbortController();
+  const shellUrl = `${origin}/live-delivery/events?scope=Project%3Ap1&after=${cursor}`;
+  const shellResponse = await fetch(shellUrl, { signal: streamController.signal });
+  assert.equal(shellResponse.status, 200);
+  const shellReader = shellResponse.body.getReader();
+  await shellReader.read();
+
+  // A text insert commits an annotated-text operated event to the Project scope.
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: `${origin}/live-delivery`, context: { entity: ShellDoc, field: ShellDoc.body, documentId: 'd1' },
+    historySession: 'tab-b', createActionId: () => 'shell-typed',
+    eventSourceFactory: () => ({ close() {}, onmessage: null, onerror: null }),
+  });
+  await session.ready.catch((error) => { error.message = `shell-ready: ${error.message}`; throw error; });
+  const inserted = await session.insert({ mutationId: 'shell-insert', at: { blockId: initialBlockId, offset: 0, affinity: 'right' }, text: 'hi' });
+  assert.equal(inserted.ok, true);
+  await inserted.settlement.wait();
+  const insertSeq = Number(db.prepare("SELECT MAX(seq) AS s FROM _Log WHERE scope = 'Project:p1'").get().s ?? 0);
+
+  // Then a genuinely composite-touching event: a member create on the same
+  // scope (Codebook presence changes the composite output).
+  const createBookRes = await fetch(`${origin}/workbench/actions`, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ actionId: 'shell-book', type: 'Codebook.create', scope: 'Project:p1', clientId: 'tab-c', payload: { id: 'book-1', projectId: 'p1', name: 'Interviews' } }),
+  });
+  assert.equal(createBookRes.status, 200);
+  const updateSeq = Number(db.prepare("SELECT MAX(seq) AS s FROM _Log WHERE scope = 'Project:p1'").get().s ?? 0);
+
+  // Read frames until the member create's resync arrives; the annotated-text
+  // insert (same scope, seq insertSeq) must never produce a frame.
+  const envelopes = [];
+  let sawUpdate = false;
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const batch = await Promise.race([
+      nextSseJson(shellReader),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('composite shell resync timed out')), 300)),
+    ]);
+    for (const frame of batch) {
+      envelopes.push(frame);
+      if (frame.type === 'resync' && frame.seq === updateSeq) sawUpdate = true;
+    }
+    if (sawUpdate) break;
+  }
+  assert.ok(sawUpdate, `expected a resync for the member create, got batches: ${JSON.stringify(envelopes)}`);
+  for (const frame of envelopes) {
+    assert.notEqual(frame.seq, insertSeq, `annotated-text body edit must not resync the composite shell`);
+  }
+  session.close();
+  await shellReader.cancel();
+  streamController.abort();
+});
+
