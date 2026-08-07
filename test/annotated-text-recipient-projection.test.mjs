@@ -21,67 +21,57 @@ function descriptor() {
   return body;
 }
 
-function groupedDescriptor() {
-  const body = annotatedText({
-    project: 'project', owner: 'owner',
-    annotations: [annotation('coding'), annotation('card', { appliesTo: 'block-group', cardinality: 'one' })],
-    measurements: [measurement('words', { extension: `${suffix}Measurement` })],
-  });
-  entity('GroupedRecipientProjectionDoc', { project: ref('Project'), owner: ref('User'), body });
-  return body;
-}
-
-function groupedCanonical() {
-  return {
-    kind: 'workbench.annotatedText.canonical', version: 1,
-    blocks: [
-      { id: 'a', groupId: 'g1', text: 'a', fields: {}, annotationIds: ['code'] },
-      { id: 'b', groupId: 'g1', text: 'b', fields: {}, annotationIds: [] },
-      { id: 'c', groupId: 'g2', text: 'c', fields: {}, annotationIds: [] },
-    ],
-    annotations: [
-      { id: 'code', family: 'coding', fields: {} },
-      { id: 'card', family: 'card', fields: {} },
-    ],
-    memberships: [{ annotationId: 'code', blockId: 'a', ordinal: 0 }],
-    groupMemberships: [{ annotationId: 'card', groupId: 'g1', ordinal: 0 }],
-    measurements: [], capabilities: {}, orphans: [],
-  };
-}
-
+/** Blockless canonical: one continuous text + document-scoped ranges (issue #33). */
 function canonical(hidden = 'secret') {
+  const text = `${hidden}visible`;
+  const hiddenEnd = hidden.length;
   return {
     kind: 'workbench.annotatedText.canonical', version: 1,
-    blocks: [
-      { id: 'a', groupId: 'a', text: hidden, fields: {}, annotationIds: ['code', 'protect'] },
-      { id: 'b', groupId: 'b', text: 'visible', fields: {}, annotationIds: ['code'] },
-    ],
+    text,
     annotations: [
       { id: 'code', family: 'coding', fields: {} },
       { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
     ],
-    memberships: [
-      { annotationId: 'code', blockId: 'a', ordinal: 0 }, { annotationId: 'code', blockId: 'b', ordinal: 1 },
-      { annotationId: 'protect', blockId: 'a', ordinal: 0 },
+    ranges: [
+      { annotationId: 'code', start: 0, end: text.length },
+      { annotationId: 'protect', start: 0, end: hiddenEnd },
     ],
     measurements: [
-      { id: 'm-a', blockId: 'a', family: 'words', formatVersion: 1, payload: { token: hidden } },
-      { id: 'm-b', blockId: 'b', family: 'words', formatVersion: 1, payload: { token: 'visible' } },
+      { id: 'm-hidden', family: 'words', formatVersion: 1, payload: { token: 'meta-hidden' } },
+      { id: 'm-visible', family: 'words', formatVersion: 1, payload: { token: 'visible' } },
     ],
-    capabilities: {}, groupMemberships: [], orphans: [],
+    capabilityHints: [],
+    orphans: [],
   };
 }
 
-test('denied protector restricts only overlapping blocks without hidden details', () => {
+/** Single-range document with optional inline protectors over absolute offsets. */
+function inlineCanonical({ protectors, hidden = 'SECRET', text = `before ${hidden} after` }) {
+  const annotations = [{ id: 'code', family: 'coding', fields: {} }];
+  const ranges = [{ annotationId: 'code', start: 0, end: text.length }];
+  for (const { id, start, end } of protectors) {
+    annotations.push({ id, family: 'confidential', fields: {}, protectedTargetIds: ['code'] });
+    ranges.push({ annotationId: id, start, end });
+  }
+  return {
+    kind: 'workbench.annotatedText.canonical', version: 1,
+    text, annotations, ranges, measurements: [], capabilityHints: [], orphans: [],
+  };
+}
+
+test('denied protector redacts its range without hidden details', () => {
   const projected = projectAnnotatedTextForRecipient(canonical(), descriptor(), {
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: ['body.read', 'body.edit'],
   });
-  assert.deepEqual(projected.blocks, [
-    { kind: 'restricted', id: 'a', placeholder: '[Private]' },
-    { kind: 'visible', id: 'b', text: 'visible', fields: {}, annotationIds: ['code'] },
-  ]);
+  assert.equal(projected.kind, 'workbench.annotatedText.recipient');
+  assert.equal(projected.text, 'visible');
+  assert.deepEqual(projected.redactions, [{ start: 0, end: 0, placeholder: '[Private]' }]);
+  assert.deepEqual(projected.ranges, [{ annotationId: 'code', start: 0, end: 7 }]);
   assert.deepEqual(projected.annotations, [{ id: 'code', family: 'coding', fields: {} }]);
-  assert.deepEqual(projected.measurements, [{ id: 'm-b', blockId: 'b', family: 'words', formatVersion: 1, payload: { token: 'visible' } }]);
+  assert.deepEqual(projected.measurements, [
+    { id: 'm-hidden', family: 'words', formatVersion: 1, payload: { token: 'meta-hidden' } },
+    { id: 'm-visible', family: 'words', formatVersion: 1, payload: { token: 'visible' } },
+  ]);
   assert.deepEqual(projected.capabilityHints, ['body.edit']);
   assert.equal(JSON.stringify(projected).includes('secret'), false);
   assert.equal(JSON.stringify(projected).includes('protect'), false);
@@ -92,7 +82,9 @@ test('restricted output is independent of hidden body length and content', () =>
   const decisions = { version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [] };
   const first = projectAnnotatedTextForRecipient(canonical('x'), descriptor(), decisions);
   const second = projectAnnotatedTextForRecipient(canonical('much longer private body'), descriptor(), decisions);
-  assert.deepEqual(first.blocks[0], second.blocks[0]);
+  assert.equal(first.text, 'visible');
+  assert.equal(second.text, 'visible');
+  assert.deepEqual(first.redactions, second.redactions);
   assert.deepEqual(first.measurements, second.measurements);
 });
 
@@ -108,36 +100,22 @@ test('all protector allows retain body but protecting annotations stay private',
   const projected = projectAnnotatedTextForRecipient(canonical(), descriptor(), {
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: ['body.read'],
   });
-  assert.equal(projected.blocks[0].kind, 'visible');
-  assert.equal(projected.blocks[0].text, 'secret');
+  assert.equal(projected.text, 'secretvisible');
+  assert.equal(Object.hasOwn(projected, 'redactions'), false);
   assert.equal(JSON.stringify(projected).includes('protectedTargetIds'), false);
   assert.equal(JSON.stringify(projected).includes('protect'), false);
+  assert.deepEqual(projected.annotations, [{ id: 'code', family: 'coding', fields: {} }]);
 });
 
-function inlineCanonical({ protectors, hidden = 'SECRET', text = `before ${hidden} after` }) {
-  const annotations = [{ id: 'code', family: 'coding', fields: {} }];
-  const memberships = [{ annotationId: 'code', blockId: 'a', ordinal: 0, start: 0, end: text.length }];
-  for (const { id, start, end } of protectors) {
-    annotations.push({ id, family: 'confidential', fields: {}, protectedTargetIds: ['code'] });
-    memberships.push({ annotationId: id, blockId: 'a', ordinal: 0, start, end });
-  }
-  return {
-    kind: 'workbench.annotatedText.canonical', version: 1,
-    blocks: [{ id: 'a', groupId: 'a', text, fields: {}, annotationIds: ['code', ...protectors.map(({ id }) => id)] }],
-    annotations, memberships, measurements: [], capabilities: {}, groupMemberships: [], orphans: [],
-  };
-}
-
-test('denied same-block range omits raw text and carries a zero-width redaction marker', () => {
+test('denied range omits raw text and carries a zero-width redaction marker', () => {
   const hidden = 'SECRET';
   const c = inlineCanonical({ hidden, protectors: [{ id: 'protect', start: 7, end: 13 }] });
   const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [],
   });
-  assert.deepEqual(projected.blocks, [{
-    kind: 'visible', id: 'a', text: 'before  after', fields: {}, annotationIds: ['code'],
-    redactions: [{ start: 7, end: 7, placeholder: '[Private]' }],
-  }]);
+  assert.equal(projected.text, 'before  after');
+  assert.deepEqual(projected.redactions, [{ start: 7, end: 7, placeholder: '[Private]' }]);
+  assert.deepEqual(projected.ranges, [{ annotationId: 'code', start: 0, end: 13 }]);
   assert.equal(JSON.stringify(projected).includes(hidden), false);
   assert.equal(JSON.stringify(projected).includes('protect'), false);
 });
@@ -147,34 +125,34 @@ test('a protector whose range does not intersect its target is not active', () =
   // Target `code` covers [0,2); the protector covers [5,8) — disjoint ranges.
   const c = {
     kind: 'workbench.annotatedText.canonical', version: 1,
-    blocks: [{ id: 'a', groupId: 'a', text, fields: {}, annotationIds: ['code', 'protect'] }],
+    text,
     annotations: [
       { id: 'code', family: 'coding', fields: {} },
       { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
     ],
-    memberships: [
-      { annotationId: 'code', blockId: 'a', ordinal: 0, start: 0, end: 2 },
-      { annotationId: 'protect', blockId: 'a', ordinal: 0, start: 5, end: 8 },
+    ranges: [
+      { annotationId: 'code', start: 0, end: 2 },
+      { annotationId: 'protect', start: 5, end: 8 },
     ],
-    measurements: [], capabilities: {}, groupMemberships: [], orphans: [],
+    measurements: [], capabilityHints: [], orphans: [],
   };
   // No protector decision is expected because the protector is not active.
   const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
     version: 1, protectors: [], capabilityHints: [],
   });
-  assert.equal(projected.blocks[0].kind, 'visible');
-  assert.equal(projected.blocks[0].text, text);
-  assert.equal(Object.hasOwn(projected.blocks[0], 'redactions'), false);
+  assert.equal(projected.text, text);
+  assert.equal(Object.hasOwn(projected, 'redactions'), false);
+  assert.deepEqual(projected.ranges, [{ annotationId: 'code', start: 0, end: 2 }]);
 });
 
-test('measurements are dropped on an inline-redacted block so payload text cannot leak', () => {
+test('document-scoped measurements are retained on partial redaction', () => {
   const hidden = 'SECRET';
   const c = inlineCanonical({ hidden, protectors: [{ id: 'protect', start: 7, end: 13 }] });
-  c.measurements = [{ id: 'm-a', blockId: 'a', family: 'words', formatVersion: 1, payload: { token: hidden } }];
+  c.measurements = [{ id: 'm-a', family: 'words', formatVersion: 1, payload: { token: 'count' } }];
   const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [],
   });
-  assert.deepEqual(projected.measurements, []);
+  assert.deepEqual(projected.measurements, [{ id: 'm-a', family: 'words', formatVersion: 1, payload: { token: 'count' } }]);
   assert.equal(JSON.stringify(projected).includes(hidden), false);
 });
 
@@ -193,8 +171,8 @@ test('overlapping denied ranges merge to one marker and nesting uses every denie
       { protectorId: 'overlap-denied', outcome: 'deny' },
     ], capabilityHints: [],
   });
-  assert.equal(projected.blocks[0].text, '019');
-  assert.deepEqual(projected.blocks[0].redactions, [{ start: 2, end: 2, placeholder: '[Private]' }]);
+  assert.equal(projected.text, '019');
+  assert.deepEqual(projected.redactions, [{ start: 2, end: 2, placeholder: '[Private]' }]);
   assert.equal(JSON.stringify(projected).includes('2345678'), false);
 });
 
@@ -205,111 +183,120 @@ test('allowed outer does not reveal denied inner and authorized recipients recei
   const denied = projectAnnotatedTextForRecipient(c, descriptor(), {
     version: 1, protectors: [{ protectorId: 'outer-allowed', outcome: 'allow' }, { protectorId: 'inner-denied', outcome: 'deny' }], capabilityHints: [],
   });
-  assert.equal(denied.blocks[0].text, 'before  after');
+  assert.equal(denied.text, 'before  after');
+  assert.deepEqual(denied.redactions, [{ start: 7, end: 7, placeholder: '[Private]' }]);
   const allowed = projectAnnotatedTextForRecipient(c, descriptor(), {
     version: 1, protectors: [{ protectorId: 'outer-allowed', outcome: 'allow' }, { protectorId: 'inner-denied', outcome: 'allow' }], capabilityHints: [],
   });
-  assert.equal(allowed.blocks[0].text, 'before SECRET after');
-  assert.equal(Object.hasOwn(allowed.blocks[0], 'redactions'), false);
+  assert.equal(allowed.text, 'before SECRET after');
+  assert.equal(Object.hasOwn(allowed, 'redactions'), false);
 });
 
-test('malformed canonical memberships and measurements fail closed', () => {
+test('malformed canonical ranges and measurements fail closed', () => {
   const decisions = { version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [] };
-  const duplicateMembership = canonical();
-  duplicateMembership.memberships.push({ annotationId: 'code', blockId: 'a', ordinal: 1 });
-  assert.throws(() => projectAnnotatedTextForRecipient(duplicateMembership, descriptor(), decisions), /unique/);
+  const duplicateRange = canonical();
+  duplicateRange.ranges.push({ annotationId: 'code', start: 0, end: 1 });
+  assert.throws(() => projectAnnotatedTextForRecipient(duplicateRange, descriptor(), decisions), /exactly one range/);
   const extraMeasurement = canonical();
   extraMeasurement.measurements[0].private = 'leak';
   assert.throws(() => projectAnnotatedTextForRecipient(extraMeasurement, descriptor(), decisions), /invalid shape/);
 });
 
-test('membershipless canonical annotations fail closed', () => {
+test('canonical annotations without a range fail closed', () => {
   const ordinary = canonical();
   ordinary.annotations.push({ id: 'orphan', family: 'coding', fields: {} });
   assert.throws(() => projectAnnotatedTextForRecipient(ordinary, descriptor(), {
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
-  }), /no membership/);
+  }), /no range/);
 
   const protector = canonical();
   protector.annotations.push({ id: 'orphan-protector', family: 'confidential', fields: {}, protectedTargetIds: ['code'] });
   assert.throws(() => projectAnnotatedTextForRecipient(protector, descriptor(), {
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
-  }), /no membership/);
+  }), /no range/);
 });
 
-test('recipient projection keeps block and group annotations in separate shapes', () => {
-  const projected = projectAnnotatedTextForRecipient(groupedCanonical(), groupedDescriptor(), { version: 1, protectors: [], capabilityHints: [] });
-  assert.deepEqual(projected.blocks[0].annotationIds, ['code']);
-  assert.deepEqual(projected.blockGroups, [{ id: 'group-0', blockIds: ['a', 'b'], annotationIds: ['card'] }, { id: 'group-1', blockIds: ['c'], annotationIds: [] }]);
-  assert.deepEqual(projected.memberships, [{ annotationId: 'code', blockId: 'a', ordinal: 0 }]);
+test('whole-document denied protector restricts the recipient fail-closed', () => {
+  const text = 'entirely secret body';
+  const c = {
+    kind: 'workbench.annotatedText.canonical', version: 1,
+    text,
+    annotations: [
+      { id: 'code', family: 'coding', fields: {} },
+      { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
+    ],
+    ranges: [
+      { annotationId: 'code', start: 0, end: text.length },
+      { annotationId: 'protect', start: 0, end: text.length },
+    ],
+    measurements: [{ id: 'm1', family: 'words', formatVersion: 1, payload: { token: 'leak' } }],
+    capabilityHints: [],
+    orphans: [{ id: 'orphan-r', family: 'coding', fields: {}, savedQuote: 'hidden quote', savedRange: [0, 6] }],
+  };
+  const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
+    version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: ['body.read'],
+  });
+  assert.deepEqual(projected, {
+    kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [],
+  });
+  const serialized = JSON.stringify(projected);
+  assert.equal(serialized.includes('entirely'), false);
+  assert.equal(serialized.includes('orphan-r'), false);
+  assert.equal(serialized.includes('hidden quote'), false);
+  assert.equal(serialized.includes('leak'), false);
 });
 
-test('restricted content breaks groups without exposing canonical topology', () => {
-  const canonical = groupedCanonical();
-  canonical.blocks[1].annotationIds = ['code', 'protect'];
-  canonical.annotations.push({ id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] });
-  canonical.memberships.push({ annotationId: 'code', blockId: 'b', ordinal: 1 }, { annotationId: 'protect', blockId: 'b', ordinal: 0 });
-  const body = annotatedText({ project: 'project', owner: 'owner', annotations: [annotation('coding'), annotation('card', { appliesTo: 'block-group' }), protectingAnnotation('confidential', { protects: 'coding', placeholder: '[Private]', access: () => grant(read) })], measurements: [measurement('words', { extension: `${suffix}Measurement` })] });
-  entity('RestrictedGroupedProjectionDoc', { project: ref('Project'), owner: ref('User'), body });
-  const projected = projectAnnotatedTextForRecipient(canonical, body, { version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [] });
-  assert.deepEqual(projected.blockGroups, [{ id: 'group-0', blockIds: ['a'], annotationIds: [] }, { id: 'group-1', blockIds: ['c'], annotationIds: [] }]);
-  assert.equal(JSON.stringify(projected).includes('g1'), false);
+test('annotation fully inside a redaction drops out of the recipient', () => {
+  const text = 'before SECRET after';
+  const c = {
+    kind: 'workbench.annotatedText.canonical', version: 1,
+    text,
+    annotations: [
+      { id: 'code', family: 'coding', fields: {} },
+      { id: 'inner', family: 'coding', fields: { note: 'inside' } },
+      { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
+    ],
+    ranges: [
+      { annotationId: 'code', start: 0, end: text.length },
+      { annotationId: 'inner', start: 7, end: 13 },
+      { annotationId: 'protect', start: 7, end: 13 },
+    ],
+    measurements: [], capabilityHints: [], orphans: [],
+  };
+  const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
+    version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [],
+  });
+  assert.equal(projected.text, 'before  after');
+  assert.deepEqual(projected.annotations.map((a) => a.id), ['code']);
+  assert.equal(JSON.stringify(projected).includes('inside'), false);
+  assert.equal(JSON.stringify(projected).includes('SECRET'), false);
 });
 
-test('group cardinality permits one annotation spanning groups but rejects distinct annotations per group', () => {
-  const decisions = { version: 1, protectors: [], capabilityHints: [] };
-  const unknownGroup = groupedCanonical();
-  unknownGroup.groupMemberships[0].groupId = 'missing';
-  assert.throws(() => projectAnnotatedTextForRecipient(unknownGroup, groupedDescriptor(), decisions), /group membership is invalid/);
-  const wrongFamily = groupedCanonical();
-  wrongFamily.groupMemberships[0].annotationId = 'code';
-  assert.throws(() => projectAnnotatedTextForRecipient(wrongFamily, groupedDescriptor(), decisions), /group membership is invalid/);
-  const spanning = groupedCanonical();
-  spanning.groupMemberships.push({ annotationId: 'card', groupId: 'g2', ordinal: 1 });
-  assert.deepEqual(projectAnnotatedTextForRecipient(spanning, groupedDescriptor(), decisions).blockGroups.map((group) => group.annotationIds), [['card'], ['card']]);
-  const duplicateOne = groupedCanonical();
-  duplicateOne.annotations.push({ id: 'card-2', family: 'card', fields: {} });
-  duplicateOne.groupMemberships.push({ annotationId: 'card-2', groupId: 'g1', ordinal: 1 });
-  assert.throws(() => projectAnnotatedTextForRecipient(duplicateOne, groupedDescriptor(), decisions), /cardinality-one/);
-});
-
-test('canonical group identity is required and cannot be normalized', () => {
-  const decisions = { version: 1, protectors: [], capabilityHints: [] };
-  const missingMemberships = groupedCanonical();
-  delete missingMemberships.groupMemberships;
-  assert.throws(() => projectAnnotatedTextForRecipient(missingMemberships, groupedDescriptor(), decisions), /invalid shape/);
-  const missingGroupId = groupedCanonical();
-  delete missingGroupId.blocks[0].groupId;
-  assert.throws(() => projectAnnotatedTextForRecipient(missingGroupId, groupedDescriptor(), decisions), /block has invalid shape/);
-  const emptyGroupId = groupedCanonical();
-  emptyGroupId.blocks[0].groupId = '';
-  assert.throws(() => projectAnnotatedTextForRecipient(emptyGroupId, groupedDescriptor(), decisions), /block is invalid/);
-});
-
-test('orphan projection passes safe fields and excludes raw memberships', () => {
-  const c = canonical();
-  c.annotations = [];
-  c.memberships = [];
-  c.blocks = c.blocks.map((b) => ({ ...b, annotationIds: [] }));
-  c.orphans = [{ id: 'orphan-1', family: 'coding', fields: { color: 'blue' }, owner: 'user-7', savedQuote: 'secret', membershipBlockIds: ['a', 'b'] }];
+test('orphan projection passes safe fields and excludes savedRange', () => {
+  const c = {
+    kind: 'workbench.annotatedText.canonical', version: 1,
+    text: 'visible only',
+    annotations: [],
+    ranges: [],
+    measurements: [],
+    capabilityHints: [],
+    orphans: [{ id: 'orphan-1', family: 'coding', fields: { color: 'blue' }, owner: 'user-7', savedQuote: 'secret', savedRange: [0, 6] }],
+  };
   const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
     version: 1, protectors: [], capabilityHints: [],
   });
-  assert.equal(projected.orphans.length, 1);
-  assert.equal(projected.orphans[0].id, 'orphan-1');
-  assert.equal(projected.orphans[0].family, 'coding');
-  assert.deepEqual(projected.orphans[0].fields, { color: 'blue' });
-  assert.equal(projected.orphans[0].savedQuote, 'secret');
-  assert.equal(projected.orphans[0].owner, 'user-7');
-  assert.equal(projected.orphans[0].protectedTargetIds, undefined);
+  assert.deepEqual(projected.orphans, [{
+    id: 'orphan-1', family: 'coding', fields: { color: 'blue' }, savedQuote: 'secret', owner: 'user-7',
+  }]);
   const serialized = JSON.stringify(projected);
+  assert.equal(serialized.includes('savedRange'), false);
   assert.equal(serialized.includes('last_memberships'), false);
   assert.equal(serialized.includes('endpoint'), false);
   assert.equal(serialized.includes('frontier'), false);
   assert.equal(serialized.includes('structuralRevision'), false);
 });
 
-test('recipient projection carries annotation owner and rejects malformed owner', () => {
+test('recipient projection carries annotation owner', () => {
   const c = canonical();
   c.annotations = [
     { id: 'code', family: 'coding', fields: {}, owner: 'user-42' },
@@ -320,22 +307,12 @@ test('recipient projection carries annotation owner and rejects malformed owner'
   });
   const code = projected.annotations.find((a) => a.id === 'code');
   assert.equal(code?.owner, 'user-42');
-
-  const bad = canonical();
-  bad.annotations = [
-    { id: 'code', family: 'coding', fields: {}, owner: '' },
-    { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
-  ];
-  assert.throws(
-    () => projectAnnotatedTextForRecipient(bad, descriptor(), { version: 1, protectors: [], capabilityHints: [] }),
-    /annotation owner is invalid/
-  );
 });
 
 test('orphan with conflicting annotation id fails closed', () => {
   assert.throws(() => {
     const c = canonical();
-    c.orphans = [{ id: 'code', family: 'coding', fields: {}, savedQuote: 'quote', membershipBlockIds: ['a'] }];
+    c.orphans = [{ id: 'code', family: 'coding', fields: {}, savedQuote: 'quote', savedRange: [0, 5] }];
     projectAnnotatedTextForRecipient(c, descriptor(), {
       version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
     });
@@ -345,7 +322,7 @@ test('orphan with conflicting annotation id fails closed', () => {
 test('orphan with unknown family fails closed', () => {
   assert.throws(() => {
     const c = canonical();
-    c.orphans = [{ id: 'orphan-x', family: 'unknown', fields: {}, savedQuote: 'quote', membershipBlockIds: ['a'] }];
+    c.orphans = [{ id: 'orphan-x', family: 'unknown', fields: {}, savedQuote: 'quote', savedRange: [0, 5] }];
     projectAnnotatedTextForRecipient(c, descriptor(), {
       version: 1, protectors: [{ protectorId: 'protect', outcome: 'allow' }], capabilityHints: [],
     });
@@ -362,62 +339,35 @@ test('orphan with malformed shape fails closed', () => {
   }, /orphan has invalid shape/);
 });
 
-test('orphan excluded when all blocks are restricted', () => {
-  const c = {
-    kind: 'workbench.annotatedText.canonical', version: 1,
-    blocks: [{ id: 'x', groupId: 'x', text: 'secret', fields: {}, annotationIds: ['code', 'protect'] }],
-    annotations: [
-      { id: 'code', family: 'coding', fields: {} },
-      { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
-    ],
-    memberships: [
-      { annotationId: 'code', blockId: 'x', ordinal: 0 },
-      { annotationId: 'protect', blockId: 'x', ordinal: 0 },
-    ],
-    groupMemberships: [], measurements: [], capabilities: {},
-    orphans: [{ id: 'orphan-r', family: 'coding', fields: {}, savedQuote: 'hidden quote', membershipBlockIds: ['x'] }],
-  };
+test('orphans are withheld when any range is redacted', () => {
+  const c = canonical();
+  c.orphans = [{ id: 'orphan-hidden', family: 'coding', fields: {}, savedQuote: 'quote', savedRange: [0, 5] }];
   const projected = projectAnnotatedTextForRecipient(c, descriptor(), {
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [],
   });
-  assert.equal(projected.orphans.length, 0);
-  assert.equal(JSON.stringify(projected).includes('orphan-r'), false);
-  assert.equal(JSON.stringify(projected).includes('hidden quote'), false);
-});
-
-test('orphan fails closed when any source block is missing or restricted', () => {
-  const c = canonical();
-  c.annotations = [];
-  c.memberships = [];
-  c.blocks = c.blocks.map((block) => ({ ...block, annotationIds: [] }));
-  // Pruned/missing membership anchors are non-disclosable history; they must
-  // not take down the whole recipient document (bootstrap would fail closed).
-  c.orphans = [{ id: 'orphan-missing', family: 'coding', fields: {}, savedQuote: 'quote', membershipBlockIds: ['missing'] }];
-  assert.deepEqual(projectAnnotatedTextForRecipient(c, descriptor(), { version: 1, protectors: [], capabilityHints: [] }).orphans, []);
-
-  c.orphans = [{ id: 'orphan-hidden', family: 'coding', fields: {}, savedQuote: 'quote', membershipBlockIds: ['a'] }];
-  c.annotations = [
-    { id: 'code', family: 'coding', fields: {} },
-    { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['code'] },
-  ];
-  c.memberships = [
-    { annotationId: 'code', blockId: 'a', ordinal: 0 },
-    { annotationId: 'protect', blockId: 'a', ordinal: 0 },
-  ];
-  c.blocks[0].annotationIds = ['code', 'protect'];
-  const projected = projectAnnotatedTextForRecipient(c, descriptor(), { version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [] });
   assert.deepEqual(projected.orphans, []);
+  assert.equal(Object.hasOwn(projected, 'redactions'), true);
+  assert.equal(JSON.stringify(projected).includes('orphan-hidden'), false);
+  assert.equal(JSON.stringify(projected).includes('quote'), false);
 });
 
-test('protecting and block-group orphans are never recipient-visible', () => {
-  const c = canonical();
-  c.annotations = [];
-  c.memberships = [];
-  c.blocks = c.blocks.map((block) => ({ ...block, annotationIds: [] }));
-  c.orphans = [{ id: 'protect-orphan', family: 'confidential', fields: {}, savedQuote: 'secret', membershipBlockIds: ['a'] }];
+test('protecting orphans are never recipient-visible', () => {
+  const c = {
+    kind: 'workbench.annotatedText.canonical', version: 1,
+    text: 'visible only',
+    annotations: [],
+    ranges: [],
+    measurements: [],
+    capabilityHints: [],
+    orphans: [{ id: 'protect-orphan', family: 'confidential', fields: {}, savedQuote: 'secret', savedRange: [0, 6] }],
+  };
   assert.deepEqual(projectAnnotatedTextForRecipient(c, descriptor(), { version: 1, protectors: [], capabilityHints: [] }).orphans, []);
+});
 
-  const grouped = groupedCanonical();
-  grouped.orphans = [{ id: 'card-orphan', family: 'card', fields: {}, savedQuote: 'quote', membershipBlockIds: ['a'] }];
-  assert.throws(() => projectAnnotatedTextForRecipient(grouped, groupedDescriptor(), { version: 1, protectors: [], capabilityHints: [] }), /orphan is invalid/);
+test('stale protector target id fails closed', () => {
+  const c = canonical();
+  c.annotations[1] = { id: 'protect', family: 'confidential', fields: {}, protectedTargetIds: ['missing'] };
+  assert.throws(() => projectAnnotatedTextForRecipient(c, descriptor(), {
+    version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [],
+  }), /unknown protected target/);
 });
