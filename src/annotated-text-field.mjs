@@ -5,7 +5,6 @@ const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 import { assertGuarded } from './guard/static.mjs';
 const CAPABILITY_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$/;
 const SCALAR_TYPES = new Set(['text', 'boolean', 'date', 'number', 'json', 'vector', 'ref']);
-const RESERVED_BLOCK_COLUMNS = new Set(['id', 'document_id', 'project_id', 'owner_id', 'position', 'epoch', 'structure_version']);
 const RESERVED_ANNOTATION_COLUMNS = new Set(['annotation_id', 'id', 'document_id', 'project_id', 'owner_id', 'family']);
 const ORPHAN_TABLE_SUFFIX = '_annotation_orphan_state';
 const RESERVED_ANNOTATION_FAMILIES = new Set(['orphan_state']);
@@ -190,18 +189,18 @@ function assertScalarFields(entity, field, path, entries, reserved) {
 
 // -- Declarative annotation / measurement descriptor constructors --
 
-export function annotation(name, { appliesTo = 'block', cardinality = 'many', fields = {}, actions = [], empty = 'delete' } = {}) {
+export function annotation(name, { appliesTo = 'text-range', cardinality = 'many', fields = {}, actions = [], empty = 'delete' } = {}) {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`annotation name '${name}' is not a valid identifier`);
   }
-  if (appliesTo !== 'block' && appliesTo !== 'block-group' && appliesTo !== 'text-range') {
-    throw new Error(`annotation '${name}' appliesTo must be 'block', 'block-group', or 'text-range'`);
+  if (appliesTo !== 'text-range') {
+    throw new Error(`annotation '${name}' appliesTo must be 'text-range' (issue #33: blocks are removed)`);
   }
   if (cardinality !== 'many' && cardinality !== 'one') {
     throw new Error(`annotation '${name}' cardinality must be 'many' or 'one'`);
   }
-  if (cardinality === 'one' && appliesTo !== 'block-group' && appliesTo !== 'text-range') {
-    throw new Error(`annotation '${name}' cardinality 'one' requires appliesTo 'block-group' or 'text-range'`);
+  if (cardinality === 'one' && appliesTo !== 'text-range') {
+    throw new Error(`annotation '${name}' cardinality 'one' requires appliesTo 'text-range'`);
   }
   if (empty !== 'delete' && empty !== 'orphan') {
     throw new Error(`annotation '${name}' empty policy must be 'delete' or 'orphan'`);
@@ -330,7 +329,7 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     }
   }
 
-  const blockFields = assertScalarFields(entity, field, 'block', descriptor.block ?? {}, RESERVED_BLOCK_COLUMNS);
+  const blockFields = Object.freeze([]);
 
   let caret = null;
   if (descriptor.carets !== undefined) {
@@ -373,16 +372,16 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
     if (ann.empty !== 'delete' && ann.empty !== 'orphan') {
       fail(entity, field, `annotations.${name}.empty`, "must be 'delete' or 'orphan'");
     }
-    const appliesTo = ann.appliesTo === undefined ? 'block' : ann.appliesTo;
-    if (appliesTo !== 'block' && appliesTo !== 'block-group' && appliesTo !== 'text-range') {
-      fail(entity, field, `annotations.${name}.appliesTo`, "must be 'block', 'block-group', or 'text-range'");
+    const appliesTo = ann.appliesTo === undefined ? 'text-range' : ann.appliesTo;
+    if (appliesTo !== 'text-range') {
+      fail(entity, field, `annotations.${name}.appliesTo`, "must be 'text-range' (issue #33: blocks are removed)");
     }
     const cardinality = ann.cardinality === undefined ? 'many' : ann.cardinality;
     if (cardinality !== 'many' && cardinality !== 'one') {
       fail(entity, field, `annotations.${name}.cardinality`, "must be 'many' or 'one'");
     }
-    if (cardinality === 'one' && appliesTo !== 'block-group' && appliesTo !== 'text-range') {
-      fail(entity, field, `annotations.${name}.cardinality`, "'one' requires appliesTo 'block-group' or 'text-range'");
+    if (cardinality === 'one' && appliesTo !== 'text-range') {
+      fail(entity, field, `annotations.${name}.cardinality`, "'one' requires appliesTo 'text-range'");
     }
     if (annotationNames.has(name)) {
       fail(entity, field, `annotations.${name}`, 'duplicate annotation name');
@@ -499,7 +498,7 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
   // `access` is set by makeDescriptor's initial properties, and `can` is a
   // method added by makeDescriptor. Both are field descriptor properties, not
   // declaration keys, and are allowed to pass through.
-  const ALLOWED_KEYS = new Set(['project', 'owner', 'block', 'annotations', 'measurements', 'capabilities', 'carets', 'wordEvidence', 'kind', 'type', 'access', 'can']);
+  const ALLOWED_KEYS = new Set(['project', 'owner', 'annotations', 'measurements', 'capabilities', 'carets', 'wordEvidence', 'kind', 'type', 'access', 'can']);
   for (const key of Object.keys(descriptor)) {
     if (!ALLOWED_KEYS.has(key)) {
       fail(entity, field, key, `unknown key '${key}'`);
@@ -645,7 +644,7 @@ export function validateAnnotatedTextDeclaration(entity, field, descriptor, fiel
         return [n, Object.freeze({
           family: n,
           annotationName: n,
-          appliesTo: annConfig?.appliesTo === undefined ? 'block' : annConfig.appliesTo,
+          appliesTo: 'text-range',
           cardinality: annConfig?.cardinality === undefined ? 'many' : annConfig.cardinality,
           actions: annotationActionIds[n] || Object.freeze([]),
           empty: (annConfig && annConfig.empty) || 'delete',
@@ -687,31 +686,25 @@ function extensionColumns(fields, names) {
 }
 
 export function annotatedTextDDL(entity, field, descriptor, fields) {
-  const { blockFields, families, measurements, wordEvidence } = validateAnnotatedTextDeclaration(entity, field, descriptor, fields);
+  const { families, measurements, wordEvidence } = validateAnnotatedTextDeclaration(entity, field, descriptor, fields);
   const prefix = `${entity}_${field}`;
   const projectTarget = targetName(fields[descriptor.project]);
   const ownerTarget = targetName(fields[descriptor.owner]);
-  const block = `${prefix}_block`;
   const annotation = `${prefix}_annotation`;
   const orphan = `${prefix}${ORPHAN_TABLE_SUFFIX}`;
   const protectedTarget = `${prefix}_annotation_protected_target`;
   const membership = `${prefix}_membership`;
-  const groupMembership = `${prefix}_group_membership`;
   const measurement = `${prefix}_measurement`;
   const state = `${prefix}_state`;
   const retired = `${prefix}_retired`;
   const statements = [
     `CREATE TABLE IF NOT EXISTS ${retired} (\n  document_id TEXT PRIMARY KEY,\n  generation TEXT NOT NULL,\n  retired_at TEXT NOT NULL\n);`,
     `CREATE TABLE IF NOT EXISTS ${state} (\n  document_id TEXT PRIMARY KEY,\n  structure_version INTEGER NOT NULL CHECK (structure_version >= 0),\n  family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
-    `CREATE TABLE IF NOT EXISTS ${block} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  owner_id TEXT NOT NULL,\n  position TEXT NOT NULL,\n  epoch INTEGER NOT NULL DEFAULT 1 CHECK (epoch > 0),\n  structure_version INTEGER NOT NULL DEFAULT 1 CHECK (structure_version > 0)${blockFields.length ? `,\n  ${extensionColumns(descriptor.block, blockFields).join(',\n  ')}` : ''},\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE,\n  FOREIGN KEY (project_id) REFERENCES ${projectTarget}(id) ON DELETE CASCADE,\n  FOREIGN KEY (owner_id) REFERENCES ${ownerTarget}(id) ON DELETE CASCADE\n);`,
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_block_order ON ${block} (document_id, position);`,
-    `CREATE INDEX IF NOT EXISTS idx_${prefix}_block_project ON ${block} (project_id, document_id, position, id);`,
     `CREATE TABLE IF NOT EXISTS ${annotation} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  project_id TEXT NOT NULL,\n  owner_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${families.map((name) => `'${name}'`).join(', ')})),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE,\n  FOREIGN KEY (project_id) REFERENCES ${projectTarget}(id) ON DELETE CASCADE,\n  FOREIGN KEY (owner_id) REFERENCES ${ownerTarget}(id) ON DELETE CASCADE\n);`,
     `CREATE TABLE IF NOT EXISTS ${protectedTarget} (\n  annotation_id TEXT NOT NULL,\n  target_annotation_id TEXT NOT NULL,\n  PRIMARY KEY (annotation_id, target_annotation_id),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE,\n  FOREIGN KEY (target_annotation_id) REFERENCES ${annotation}(id) ON DELETE RESTRICT\n);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_annotation_protected_target_target ON ${protectedTarget} (target_annotation_id, annotation_id);`,
-    `CREATE TABLE IF NOT EXISTS ${orphan} (\n  annotation_id TEXT PRIMARY KEY,\n  saved_quote TEXT NOT NULL,\n  last_memberships TEXT NOT NULL CHECK (json_valid(last_memberships)),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE\n);`,
+    `CREATE TABLE IF NOT EXISTS ${orphan} (\n  annotation_id TEXT PRIMARY KEY,\n  saved_quote TEXT NOT NULL,\n  last_range TEXT NOT NULL CHECK (json_valid(last_range)),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE\n);`,
   ];
-  statements.push(`CREATE TABLE IF NOT EXISTS ${prefix}_block_group (block_id TEXT PRIMARY KEY, group_id TEXT NOT NULL, FOREIGN KEY (block_id) REFERENCES ${block}(id) ON DELETE CASCADE);`);
   for (const family of families) {
     const annConfig = descriptor.annotations.find(a => a.annotationName === family);
     const annFields = annConfig ? annConfig.fields : {};
@@ -719,28 +712,16 @@ export function annotatedTextDDL(entity, field, descriptor, fields) {
     statements.push(`CREATE TABLE IF NOT EXISTS ${prefix}_annotation_${family} (\n  annotation_id TEXT PRIMARY KEY${names.length ? `,\n  ${extensionColumns(annFields, names).join(',\n  ')}` : ''},\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE\n);`);
   }
   statements.push(
-    `CREATE TABLE IF NOT EXISTS ${membership} (\n  annotation_id TEXT NOT NULL,\n  block_id TEXT NOT NULL,\n  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),\n  start_point TEXT NOT NULL CHECK (json_valid(start_point)),\n  end_point TEXT NOT NULL CHECK (json_valid(end_point)),\n  PRIMARY KEY (annotation_id, ordinal),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE,\n  FOREIGN KEY (block_id) REFERENCES ${block}(id) ON DELETE CASCADE\n);`,
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_membership_block_once ON ${membership} (annotation_id, block_id);`,
-    `CREATE INDEX IF NOT EXISTS idx_${prefix}_membership_by_block ON ${membership} (block_id, annotation_id);`,
-    `CREATE TABLE IF NOT EXISTS ${groupMembership} (
-  annotation_id TEXT NOT NULL,
-  group_id TEXT NOT NULL,
-  ordinal INTEGER NOT NULL CHECK (ordinal >= 0),
-  PRIMARY KEY (annotation_id, ordinal),
-  UNIQUE (annotation_id, group_id),
-  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE
-);`,
-    `CREATE INDEX IF NOT EXISTS idx_${prefix}_group_membership_by_group ON ${groupMembership} (group_id, annotation_id);`,
-    `CREATE TABLE IF NOT EXISTS ${measurement} (\n  id TEXT PRIMARY KEY,\n  block_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${measurements.map((name) => `'${name}'`).join(', ')})),\n  format_version INTEGER NOT NULL CHECK (format_version > 0),\n  payload TEXT NOT NULL CHECK (json_valid(payload)),\n  FOREIGN KEY (block_id) REFERENCES ${block}(id) ON DELETE CASCADE\n);`,
-    `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_measurement_once ON ${measurement} (block_id, family);`,
-    `CREATE INDEX IF NOT EXISTS idx_${prefix}_measurement_block ON ${measurement} (block_id, family, id);`,
+    `CREATE TABLE IF NOT EXISTS ${membership} (\n  annotation_id TEXT PRIMARY KEY,\n  start_point TEXT NOT NULL CHECK (json_valid(start_point)),\n  end_point TEXT NOT NULL CHECK (json_valid(end_point)),\n  FOREIGN KEY (annotation_id) REFERENCES ${annotation}(id) ON DELETE CASCADE\n);`,
+    `CREATE TABLE IF NOT EXISTS ${measurement} (\n  id TEXT PRIMARY KEY,\n  document_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${measurements.map((name) => `'${name}'`).join(', ')})),\n  format_version INTEGER NOT NULL CHECK (format_version > 0),\n  payload TEXT NOT NULL CHECK (json_valid(payload)),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_measurement_once ON ${measurement} (document_id, family);`,
   );
   if (wordEvidence.length > 0) {
     const wordEvidenceTable = `${prefix}_word_evidence`;
     const familyCheck = wordEvidence.map((name) => `'${name}'`).join(', ');
     statements.push(
-      `CREATE TABLE IF NOT EXISTS ${wordEvidenceTable} (\n  scope TEXT NOT NULL,\n  document_id TEXT NOT NULL,\n  word_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${familyCheck})),\n  source_block_id TEXT NOT NULL,\n  source_ordinal INTEGER NOT NULL CHECK (source_ordinal >= 0),\n  start_anchor TEXT NOT NULL CHECK (json_valid(start_anchor)),\n  end_anchor TEXT NOT NULL CHECK (json_valid(end_anchor)),\n  source_start_utf16 INTEGER NOT NULL,\n  source_end_utf16 INTEGER NOT NULL,\n  original_token TEXT NOT NULL,\n  payload TEXT NOT NULL CHECK (json_valid(payload)),\n  origin_seq INTEGER NOT NULL,\n  format_version INTEGER NOT NULL,\n  PRIMARY KEY (scope, document_id, word_id, family),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
-      `CREATE INDEX IF NOT EXISTS idx_${prefix}_word_evidence_doc ON ${wordEvidenceTable} (scope, document_id, family, source_ordinal);`,
+      `CREATE TABLE IF NOT EXISTS ${wordEvidenceTable} (\n  scope TEXT NOT NULL,\n  document_id TEXT NOT NULL,\n  word_id TEXT NOT NULL,\n  family TEXT NOT NULL CHECK (family IN (${familyCheck})),\n  start_anchor TEXT NOT NULL CHECK (json_valid(start_anchor)),\n  end_anchor TEXT NOT NULL CHECK (json_valid(end_anchor)),\n  source_start_utf16 INTEGER NOT NULL,\n  source_end_utf16 INTEGER NOT NULL,\n  original_token TEXT NOT NULL,\n  payload TEXT NOT NULL CHECK (json_valid(payload)),\n  origin_seq INTEGER NOT NULL,\n  format_version INTEGER NOT NULL,\n  PRIMARY KEY (scope, document_id, word_id, family),\n  FOREIGN KEY (document_id) REFERENCES ${entity}(id) ON DELETE CASCADE\n);`,
+      `CREATE INDEX IF NOT EXISTS idx_${prefix}_word_evidence_doc ON ${wordEvidenceTable} (scope, document_id, family, source_start_utf16);`,
     );
   }
   return statements;
@@ -754,14 +735,11 @@ export function annotatedTextAuthoringStreamDDL(entity, field) {
     `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_lease (\n  id TEXT PRIMARY KEY,\n  stream_id TEXT NOT NULL,\n  client_nonce_hash TEXT NOT NULL,\n  acknowledged_fence INTEGER NOT NULL DEFAULT 0,\n  created_at TEXT NOT NULL,\n  expires_at TEXT NOT NULL,\n  FOREIGN KEY (stream_id) REFERENCES ${prefix}_authoring_stream(id) ON DELETE CASCADE\n);`,
     `CREATE UNIQUE INDEX IF NOT EXISTS idx_${prefix}_authoring_lease_stream_nonce ON ${prefix}_authoring_lease (stream_id, client_nonce_hash);`,
      `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_checkpoint (\n  id TEXT PRIMARY KEY,\n  lease_id TEXT NOT NULL,\n  family_checkpoint TEXT NOT NULL CHECK (json_valid(family_checkpoint)),\n  created_at TEXT NOT NULL,\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE\n);`,
-     `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_position (\n  token TEXT PRIMARY KEY,\n  lease_id TEXT NOT NULL,\n  issued_fence INTEGER NOT NULL,\n  block_id TEXT,\n  checkpoint_id TEXT NOT NULL,\n  visible_at_issue INTEGER NOT NULL DEFAULT 1,\n  redactions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(redactions)),\n  created_at TEXT NOT NULL,\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE,\n  FOREIGN KEY (checkpoint_id) REFERENCES ${prefix}_authoring_checkpoint(id) ON DELETE RESTRICT\n);`,
+     `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_position (\n  token TEXT PRIMARY KEY,\n  lease_id TEXT NOT NULL,\n  issued_fence INTEGER NOT NULL,\n  checkpoint_id TEXT NOT NULL,\n  visible_at_issue INTEGER NOT NULL DEFAULT 1,\n  redactions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(redactions)),\n  created_at TEXT NOT NULL,\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE,\n  FOREIGN KEY (checkpoint_id) REFERENCES ${prefix}_authoring_checkpoint(id) ON DELETE RESTRICT\n);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_authoring_position_lease ON ${prefix}_authoring_position (lease_id, issued_fence);`,
-    `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_group (\n  token TEXT PRIMARY KEY,\n  lease_id TEXT NOT NULL,\n  issued_fence INTEGER NOT NULL,\n  group_id TEXT,\n  visible_blocks TEXT NOT NULL CHECK (json_valid(visible_blocks)),\n  assignable INTEGER NOT NULL,\n  created_at TEXT NOT NULL,\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE\n);`,
-    `CREATE INDEX IF NOT EXISTS idx_${prefix}_authoring_group_lease ON ${prefix}_authoring_group (lease_id, issued_fence);`,
     `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_snapshot (\n  id TEXT PRIMARY KEY,\n  lease_id TEXT NOT NULL,\n  fence INTEGER NOT NULL,\n  issued_at TEXT NOT NULL,\n  acknowledged_at TEXT,\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE\n);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_authoring_snapshot_lease ON ${prefix}_authoring_snapshot (lease_id, fence);`,
     `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_snapshot_position (\n  snapshot_id TEXT NOT NULL,\n  position_token TEXT NOT NULL,\n  PRIMARY KEY (snapshot_id, position_token),\n  FOREIGN KEY (snapshot_id) REFERENCES ${prefix}_authoring_snapshot(id) ON DELETE CASCADE,\n  FOREIGN KEY (position_token) REFERENCES ${prefix}_authoring_position(token) ON DELETE CASCADE\n);`,
     `CREATE INDEX IF NOT EXISTS idx_${prefix}_authoring_snapshot_position_token ON ${prefix}_authoring_snapshot_position (position_token, snapshot_id);`,
-    `CREATE TABLE IF NOT EXISTS ${prefix}_authoring_split (\n  lease_id TEXT NOT NULL,\n  temporary_block TEXT NOT NULL,\n  authoritative_block_id TEXT NOT NULL,\n  position_token TEXT NOT NULL,\n  action_id TEXT NOT NULL,\n  mutation_id TEXT NOT NULL,\n  fence INTEGER NOT NULL,\n  created_at TEXT NOT NULL,\n  PRIMARY KEY (lease_id, temporary_block),\n  UNIQUE (lease_id, action_id, temporary_block),\n  FOREIGN KEY (lease_id) REFERENCES ${prefix}_authoring_lease(id) ON DELETE CASCADE\n);`,
   ];
 }
