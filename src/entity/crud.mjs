@@ -28,7 +28,7 @@ import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority
 import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope } from '../annotated-text-authoring-stream.mjs';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.mjs';
 import { packOperatedFacts } from '../annotated-text-operated-facts.mjs';
-import { restoreTextFamily, textFamilyCheckpoint as continuousTextFamilyCheckpoint } from '../annotated-text-continuous.mjs';
+import { applyTextOperation, restoreTextFamily, textFamilyCheckpoint as continuousTextFamilyCheckpoint } from '../annotated-text-continuous.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 export const ANNOTATED_TEXT_COMPENSATION = Symbol('workbench.annotated-text-compensation');
@@ -1567,7 +1567,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (!sourceFact || sourceFact.version !== 2 || sourceFact.documentId !== payload.id) throw new ValidationError('invalid annotated text compensation fact');
         const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(payload.id);
         if (!state) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
-        const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+        const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
         if (payload.history.direction === 'redo' && sourceFact.linkage?.outcome === 'noop') {
           return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
         }
@@ -1575,12 +1575,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (!contribution || contribution.kind !== 'text.insert') throw new ValidationError('invalid annotated text compensation contribution');
         const originalOp = contribution.opId;
         const expectedKeys = Array.from({ length: contribution.scalarCount }, (_, ordinal) => `${originalOp[0]}:${originalOp[1]}:${ordinal}`);
-        const block = family.blocks.find((candidate) => candidate.id === contribution.blockId);
         const live = expectedKeys.filter((elementKey) => family.checkpoint.elements[elementKey]?.deletedBy.length === 0);
-        const owned = new Set(block?.elementKeys ?? []);
-        if (payload.history.direction === 'undo' && live.length > 0 && (live.length !== expectedKeys.length || expectedKeys.some((key) => !owned.has(key)))) {
-          throw new ValidationError('annotated text compensation conflicts with concurrent ownership');
-        }
         let operation = null;
         if (payload.history.direction === 'undo' && live.length === expectedKeys.length) {
           const actor = createHash('sha256').update(`${name}\u0000${fieldName}\u0000${payload.id}\u0000${actionId}`).digest('hex').slice(0, 32);
@@ -1592,13 +1587,13 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           operation = canonicalTextOp(['workbench.text', 1, [actor, 1], lamport, family.checkpoint.frontier, ['insert', contribution.anchor, contribution.text]]);
         }
         if (!operation) return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
-        const nextFamily = applyTextOperationToBlock(family, contribution.blockId, operation);
+        const nextFamily = applyTextOperation(family, operation);
         const handle = eventHandles.native(name, fieldName, 'operated');
-        const compensation = { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'applied' }, contribution: { kind: 'text.insert', blockId: contribution.blockId, opId: operation[2], anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount } };
-        if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', blockId: contribution.blockId, opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount };
+        const compensation = { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'applied' }, contribution: { kind: 'text.insert', opId: operation[2], anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount } };
+        if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount };
         const before = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
         const after = Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier });
-        const operationData = { id: payload.id, before, after, operation: Object.freeze({ kind: 'text.apply', blockId: contribution.blockId, operation }), family: textFamilyCheckpoint(nextFamily) };
+        const operationData = { id: payload.id, before, after, operation: Object.freeze({ kind: 'text.apply', operation }), family: continuousTextFamilyCheckpoint(nextFamily) };
         const envelope = { id: payload.id, before, after, operation: operationData.operation, version: 13, facts: packOperatedFacts(operationData) };
         return { events: [Object.freeze({ handle, type: handle.type, scope, data: Object.freeze(envelope) })], privateFact: compensation, historyOutcome: 'applied' };
       }
