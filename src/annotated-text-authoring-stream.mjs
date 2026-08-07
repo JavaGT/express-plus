@@ -5,7 +5,6 @@ const LEASE_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_LEASES_PER_STREAM = 16;
 const MAX_RETAINED_PER_LEASE = 16 * 1024 * 1024;
 const MAX_RETAINED_PER_STREAM = 64 * 1024 * 1024;
-const MAX_UNRESOLVED_SPLITS = 256;
 
 function base64url(bytes) {
   return bytes.toString('base64url');
@@ -13,10 +12,6 @@ function base64url(bytes) {
 
 function randomToken() {
   return base64url(randomBytes(TOKEN_BYTES));
-}
-
-function fail(message) {
-  throw new Error(`annotated-text authoring stream: ${message}`);
 }
 
 function now() {
@@ -36,10 +31,6 @@ export function allocateLeaseToken() {
 }
 
 export function allocatePositionToken() {
-  return randomToken();
-}
-
-export function allocateGroupToken() {
   return randomToken();
 }
 
@@ -110,14 +101,11 @@ export const AUTHORING_STREAM_LIMITS = Object.freeze({
   maxLeasesPerStream: MAX_LEASES_PER_STREAM,
   maxRetainedPerLease: MAX_RETAINED_PER_LEASE,
   maxRetainedPerStream: MAX_RETAINED_PER_STREAM,
-  maxUnresolvedSplits: MAX_UNRESOLVED_SPLITS,
 });
 
 function clearLeaseChildren(db, prefix, leaseId) {
   db.prepare(`DELETE FROM ${prefix}_authoring_position WHERE lease_id = ?`).run(leaseId);
-  db.prepare(`DELETE FROM ${prefix}_authoring_group WHERE lease_id = ?`).run(leaseId);
   db.prepare(`DELETE FROM ${prefix}_authoring_snapshot WHERE lease_id = ?`).run(leaseId);
-  db.prepare(`DELETE FROM ${prefix}_authoring_split WHERE lease_id = ?`).run(leaseId);
   db.prepare(`DELETE FROM ${prefix}_authoring_checkpoint WHERE lease_id = ?`).run(leaseId);
 }
 
@@ -157,19 +145,6 @@ export function resolvePosition({ db, prefix, positionToken, leaseId }) {
   return position;
 }
 
-export function resolveGroup({ db, prefix, groupToken, leaseId }) {
-  return db.prepare(`SELECT * FROM ${prefix}_authoring_group WHERE token = ? AND lease_id = ?`).get(groupToken, leaseId) || null;
-}
-
-export function issueGroupFrame({ db, prefix, leaseId, groupId, visibleBlocks, assignable, fence }) {
-  const token = randomToken();
-  const visibleBlocksJson = JSON.stringify(visibleBlocks);
-  const createdAt = now();
-  if (!hasCapacity({ db, prefix, leaseId, bytes: rowBytes([token, leaseId, fence, groupId, visibleBlocksJson, assignable ? 1 : 0, createdAt]) })) return null;
-  db.prepare(`INSERT INTO ${prefix}_authoring_group (token, lease_id, issued_fence, group_id, visible_blocks, assignable, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(token, leaseId, fence, groupId, visibleBlocksJson, assignable ? 1 : 0, createdAt);
-  return { token };
-}
-
 function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }) {
   const serialized = JSON.stringify(familyCheckpoint);
   const existing = db.prepare(`SELECT id FROM ${prefix}_authoring_checkpoint WHERE lease_id = ? AND family_checkpoint = ? LIMIT 1`).get(leaseId, serialized);
@@ -179,17 +154,20 @@ function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }) {
   return id;
 }
 
-export function issuePositionFrame({ db, prefix, leaseId, blockId, fence, familyCheckpoint, visibleAtIssue, redactions = [] }) {
+// A position frame is DOCUMENT-scoped (issue #33): one frame names the whole
+// document's family checkpoint basis, not a block. The client's edit carries an
+// absolute UTF-16 offset against that basis.
+export function issuePositionFrame({ db, prefix, leaseId, fence, familyCheckpoint, visibleAtIssue, redactions = [] }) {
   const token = randomToken();
   const resolvedCheckpointId = ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint });
   const createdAt = now();
   const redactionsJson = JSON.stringify(redactions);
-  if (!hasCapacity({ db, prefix, leaseId, bytes: rowBytes([token, leaseId, fence, blockId, resolvedCheckpointId, visibleAtIssue ? 1 : 0, redactionsJson, createdAt]) })) {
+  if (!hasCapacity({ db, prefix, leaseId, bytes: rowBytes([token, leaseId, fence, resolvedCheckpointId, visibleAtIssue ? 1 : 0, redactionsJson, createdAt]) })) {
     db.prepare(`DELETE FROM ${prefix}_authoring_checkpoint AS checkpoint WHERE checkpoint.id = ? AND NOT EXISTS (SELECT 1 FROM ${prefix}_authoring_position WHERE checkpoint_id = checkpoint.id)`).run(resolvedCheckpointId);
     return null;
   }
-  db.prepare(`INSERT INTO ${prefix}_authoring_position (token, lease_id, issued_fence, block_id, checkpoint_id, visible_at_issue, redactions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(token, leaseId, fence, blockId, resolvedCheckpointId, visibleAtIssue ? 1 : 0, redactionsJson, createdAt);
-  return { token, blockId };
+  db.prepare(`INSERT INTO ${prefix}_authoring_position (token, lease_id, issued_fence, checkpoint_id, visible_at_issue, redactions, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(token, leaseId, fence, resolvedCheckpointId, visibleAtIssue ? 1 : 0, redactionsJson, createdAt);
+  return { token };
 }
 
 export function issueSnapshot({ db, prefix, leaseId, fence }) {
@@ -205,7 +183,7 @@ export function issueSnapshot({ db, prefix, leaseId, fence }) {
 // A snapshot is one coherent basis: every position must serialize to the same
 // family checkpoint, otherwise the dedup key could split into the pre/post-split
 // bases an action was never meant to straddle.
-export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions, groups }) {
+export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions }) {
   const attempt = () => {
     db.exec('SAVEPOINT authoring_snapshot_issue');
     try {
@@ -217,14 +195,12 @@ export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions, 
       }
       const positionFrames = positions.map((position) => issuePositionFrame({ db, prefix, leaseId, fence, ...position }));
       if (positionFrames.some((frame) => !frame)) throw new Error('capacity');
-      const groupFrames = groups.map((group) => issueGroupFrame({ db, prefix, leaseId, fence, ...group }));
-      if (groupFrames.some((frame) => !frame)) throw new Error('capacity');
       const snapshot = issueSnapshot({ db, prefix, leaseId, fence });
       if (!snapshot) throw new Error('capacity');
       const ownPosition = db.prepare(`INSERT INTO ${prefix}_authoring_snapshot_position (snapshot_id, position_token) VALUES (?, ?)`);
       for (const frame of positionFrames) ownPosition.run(snapshot.id, frame.token);
       db.exec('RELEASE authoring_snapshot_issue');
-      return { positionFrames, groupFrames, snapshot };
+      return { positionFrames, snapshot };
     } catch (error) {
       db.exec('ROLLBACK TO authoring_snapshot_issue');
       db.exec('RELEASE authoring_snapshot_issue');
@@ -260,19 +236,8 @@ export function acknowledgeAndPruneSnapshot({ db, prefix, snapshotId, leaseId })
   db.prepare(`UPDATE ${prefix}_authoring_snapshot SET acknowledged_at = ? WHERE id = ?`).run(now(), snapshotId);
   db.prepare(`UPDATE ${prefix}_authoring_lease SET acknowledged_fence = MAX(acknowledged_fence, ?) WHERE id = ?`).run(existing.fence, leaseId);
 
-  // A split becomes known only after this snapshot carries its authoritative
-  // block. Its receipt frame can then be retired with other predecessor frames.
-  db.prepare(`DELETE FROM ${prefix}_authoring_split
-    WHERE lease_id = ? AND fence <= ?
-      AND EXISTS (
-        SELECT 1 FROM ${prefix}_authoring_snapshot_position AS owned
-        JOIN ${prefix}_authoring_position AS position ON position.token = owned.position_token
-        WHERE owned.snapshot_id = ? AND position.block_id = ${prefix}_authoring_split.authoritative_block_id
-      )`).run(leaseId, existing.fence, snapshotId);
-
-  // Never invalidate a token that an outstanding snapshot can still name, a
-  // split with an unresolved outcome still needs, or the acknowledged snapshot
-  // itself issued. All predicates are lease-scoped.
+  // Never invalidate a token that an outstanding snapshot can still name, or
+  // the acknowledged snapshot itself issued. All predicates are lease-scoped.
   db.prepare(`DELETE FROM ${prefix}_authoring_position AS position
     WHERE position.lease_id = ? AND position.issued_fence < ?
       AND NOT EXISTS (
@@ -285,10 +250,6 @@ export function acknowledgeAndPruneSnapshot({ db, prefix, snapshotId, leaseId })
         WHERE snapshot.lease_id = position.lease_id
           AND snapshot.acknowledged_at IS NULL
           AND owned.position_token = position.token
-      )
-      AND NOT EXISTS (
-        SELECT 1 FROM ${prefix}_authoring_split AS split
-        WHERE split.lease_id = position.lease_id AND split.position_token = position.token
       )`).run(leaseId, existing.fence, snapshotId);
 
   // The newly acknowledged snapshot is the idempotency marker. Older completed
@@ -315,16 +276,14 @@ function retainedBytes(db, prefix, leaseId = null, streamId = null) {
     const parameter = leaseId ?? streamId;
     return Number(db.prepare(`SELECT COALESCE(SUM(${columns.map((column) => `COALESCE(length(CAST(${alias}.${column} AS BLOB)), 0)`).join(' + ')}), 0) AS bytes FROM ${prefix}_${table} AS ${alias}${filter}`).get(parameter).bytes);
   };
-  return total('authoring_position', 'position', ['token', 'lease_id', 'issued_fence', 'block_id', 'checkpoint_id', 'visible_at_issue', 'redactions', 'created_at'])
+  return total('authoring_position', 'position', ['token', 'lease_id', 'issued_fence', 'checkpoint_id', 'visible_at_issue', 'redactions', 'created_at'])
     + Number(db.prepare(`SELECT COALESCE(SUM(
           length(CAST(checkpoint.id AS BLOB))
         + length(CAST(checkpoint.lease_id AS BLOB))
         + length(CAST(checkpoint.created_at AS BLOB))
         + length(CAST(checkpoint.family_checkpoint AS BLOB))
       ), 0) AS bytes FROM ${prefix}_authoring_checkpoint AS checkpoint JOIN ${prefix}_authoring_lease AS lease ON lease.id = checkpoint.lease_id ${leaseId !== null ? 'WHERE checkpoint.lease_id = ?' : 'WHERE lease.stream_id = ?'}`).get(leaseId ?? streamId).bytes)
-    + total('authoring_group', 'group_frame', ['token', 'lease_id', 'issued_fence', 'group_id', 'visible_blocks', 'assignable', 'created_at'])
     + total('authoring_snapshot', 'snapshot', ['id', 'lease_id', 'fence', 'issued_at', 'acknowledged_at'])
-    + total('authoring_split', 'split', ['lease_id', 'temporary_block', 'authoritative_block_id', 'position_token', 'action_id', 'mutation_id', 'fence', 'created_at'])
     + Number(db.prepare(`SELECT COALESCE(SUM(length(CAST(owned.snapshot_id AS BLOB)) + length(CAST(owned.position_token AS BLOB))), 0) AS bytes
       FROM ${prefix}_authoring_snapshot_position AS owned
       JOIN ${prefix}_authoring_snapshot AS snapshot ON snapshot.id = owned.snapshot_id
@@ -337,40 +296,6 @@ function hasCapacity({ db, prefix, leaseId, bytes = 0 }) {
   const streamId = db.prepare(`SELECT stream_id FROM ${prefix}_authoring_lease WHERE id = ?`).get(leaseId)?.stream_id;
   if (!streamId) return false;
   return retainedBytes(db, prefix, null, streamId) + bytes <= MAX_RETAINED_PER_STREAM;
-}
-
-export function recordSplit({ db, prefix, leaseId, temporaryBlock, authoritativeBlockId, positionToken, actionId, mutationId, fence }) {
-  const existing = db.prepare(`SELECT * FROM ${prefix}_authoring_split WHERE lease_id = ? AND temporary_block = ?`).get(leaseId, temporaryBlock);
-  if (existing) {
-    if (existing.authoritative_block_id !== authoritativeBlockId ||
-        existing.position_token !== positionToken ||
-        existing.action_id !== actionId ||
-        existing.mutation_id !== mutationId ||
-        existing.fence !== fence) {
-      fail('split temporary block conflict');
-    }
-    return { duplicate: true, existing };
-  }
-  const count = db.prepare(`SELECT COUNT(*) AS cnt FROM ${prefix}_authoring_split WHERE lease_id = ?`).get(leaseId).cnt;
-  if (count >= MAX_UNRESOLVED_SPLITS) {
-    return null;
-  }
-  const createdAt = now();
-  if (!hasCapacity({ db, prefix, leaseId, bytes: rowBytes([leaseId, temporaryBlock, authoritativeBlockId, positionToken, actionId, mutationId, fence, createdAt]) })) return null;
-  try {
-    db.prepare(`INSERT INTO ${prefix}_authoring_split (lease_id, temporary_block, authoritative_block_id, position_token, action_id, mutation_id, fence, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(leaseId, temporaryBlock, authoritativeBlockId, positionToken, actionId, mutationId, fence, createdAt);
-  } catch (error) {
-    const raced = db.prepare(`SELECT * FROM ${prefix}_authoring_split WHERE lease_id = ? AND temporary_block = ?`).get(leaseId, temporaryBlock);
-    if (raced && raced.authoritative_block_id === authoritativeBlockId && raced.position_token === positionToken && raced.action_id === actionId && raced.mutation_id === mutationId && raced.fence === fence) {
-      return { duplicate: true, existing: raced };
-    }
-    throw error;
-  }
-  return { duplicate: false };
-}
-
-export function resolveSplit({ db, prefix, leaseId, temporaryBlock }) {
-  return db.prepare(`SELECT * FROM ${prefix}_authoring_split WHERE lease_id = ? AND temporary_block = ?`).get(leaseId, temporaryBlock) || null;
 }
 
 export function clearStream(db, prefix, streamId) {
@@ -395,15 +320,13 @@ export function clearAuthoringState(db, prefix, documentId) {
   for (const stream of streams) clearStream(db, prefix, stream.id);
 }
 
-export function buildAuthoringEnvelope({ db, prefix, streamToken, leaseToken, leaseId, snapshotToken, fence, positionFrames, groupFrames = [], splitResolutions }) {
+export function buildAuthoringEnvelope({ streamToken, leaseToken, snapshotToken, fence, positionFrames }) {
   return {
     version: 1,
     stream: streamToken,
     lease: leaseToken,
     snapshot: snapshotToken,
     acknowledgementFence: fence,
-    positionFrames: positionFrames.map((f) => ({ blockId: f.blockId, positionToken: f.token })),
-    groupFrames: groupFrames.map((f) => ({ groupToken: f.token })),
-    splitResolutions: splitResolutions || [],
+    positionFrames: positionFrames.map((f) => ({ positionToken: f.token })),
   };
 }
