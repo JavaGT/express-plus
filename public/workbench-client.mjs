@@ -3337,11 +3337,16 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     if (materializeFamilyText(family) !== fold.projection.text) {
       throw new Error('annotated text fold projection disagrees with family');
     }
-    // Cheap whole-document cross-check without serializing the family: the
-    // post-apply RGA element count must match the server's.
-    if (Number.isSafeInteger(fold.familyElementCount)
-      && Object.keys(family.checkpoint.elements).length !== fold.familyElementCount) {
+    // A causally-reducible fold must leave NO pending operations behind: a
+    // syntactically valid op whose dependency is absent would materialize the
+    // same text now and then silently drain into the document on a later fold,
+    // desynchronizing the session. The element count is required and exact.
+    if (!Number.isSafeInteger(fold.familyElementCount)
+      || Object.keys(family.checkpoint.elements).length !== fold.familyElementCount) {
       throw new Error('annotated text fold family element count disagrees');
+    }
+    if (Object.keys(family.checkpoint.pending).length !== 0 || family.checkpoint.rebootstrapRequired) {
+      throw new Error('annotated text fold left pending operations behind; snapshot recovery required');
     }
     familyCheckpoint = textFamilyCheckpoint(family);
     installAuthoringFromFold(fold.authoring, fence);
@@ -3419,25 +3424,14 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     }
   });
   function capturedBlocks(command) {
-    const document = session.snapshot;
     // Blockless: the whole document is ONE text. Capture the CURRENT
     // (optimistic) text so the submit check can detect a foreign change that
     // appeared after capture.
     void command;
-    return new Map([['document', document?.text ?? '']]);
+    return new Map([['document', session.snapshot?.text ?? '']]);
   }
   function sameCapturedBlocks(blocks) {
     return blocks.get('document') === session.snapshot?.text;
-  }
-  function rebaseQueuedInsertion(command, blocks) {
-    // A single foreign edit elsewhere shifts the absolute offset by the net
-    // text-length delta. Conservative: only applies to text.insert.
-    if (command.kind !== 'text.insert' || !command.at || !blocks.has('document')) return null;
-    const before = blocks.get('document');
-    const after = session.snapshot?.text ?? before;
-    const delta = after.length - before.length;
-    const offset = Math.max(0, Math.min(after.length, command.at.offset + delta));
-    return { ...command, at: { ...command.at, offset } };
   }
   function localAuthoringConflict() {
     return { ok: false, failure: new Error('annotated text changed before queued operation could be submitted') };
@@ -3468,9 +3462,13 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
         }
         if (sessionClosed) throw new ClientClosedError('Annotated text document is unavailable');
         if (['revoked', 'unavailable'].includes(session.status)) return localAuthoringConflict();
-        const rebased = sameCapturedBlocks(blocks) ? command : rebaseQueuedInsertion(command, blocks);
-        if (!rebased) return localAuthoringConflict();
-        const result = await send(rebased);
+        // Fail closed on any foreign change after capture: the queued offset is
+        // absolute against the captured view, and a naive length-delta rebase
+        // moves it to the wrong place when the foreign edit sits after the
+        // target. The position basis would be stale server-side anyway; surface
+        // the conflict instead of guessing.
+        if (!sameCapturedBlocks(blocks)) return localAuthoringConflict();
+        const result = await send(command);
         if (result?.ok && result.settlement?.wait) await result.settlement.wait();
         return result;
       } finally {

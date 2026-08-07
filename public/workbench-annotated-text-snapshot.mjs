@@ -1,5 +1,12 @@
 import { createAnnotatedTextSnapshotSessionBinding, getAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
 
+function deepFreeze(value) {
+  if (value === null || typeof value !== 'object') return value;
+  if (Array.isArray(value)) { for (const child of value) deepFreeze(child); return Object.freeze(value); }
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
+}
+
 export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {}) {
   const binding = getAnnotatedTextSnapshotSessionBinding({ binding: options?.binding }) ?? createAnnotatedTextSnapshotSessionBinding();
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) ||
@@ -10,7 +17,7 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
   }
   if (snapshot.orphans !== undefined && !Array.isArray(snapshot.orphans)) throw new Error('annotatedText snapshot: orphans must be an array');
   if (snapshot.redactions !== undefined && !Array.isArray(snapshot.redactions)) throw new Error('annotatedText snapshot: redactions must be an array');
-  const document = Object.freeze({
+  const document = deepFreeze({
     kind: 'workbench.annotatedText.recipient', version: 1,
     text: snapshot.text,
     ranges: snapshot.ranges.map((r) => ({ annotationId: r.annotationId, start: r.start, end: r.end })),
