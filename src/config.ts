@@ -9,14 +9,14 @@
 // are opaque on the wire in every mode; environment belongs in server logs and
 // other deployment behavior, not in the public failure grammar.
 
-                                  
-                        
-                       
-                                   
-                                     
- 
+export interface WorkbenchConfig {
+  readonly port: number;
+  readonly env: string;
+  readonly viewsDir: string | null;
+  readonly sessionDurationMs: number;
+}
 
-function readPort(raw                             )         {
+function readPort(raw: string | number | undefined): number {
   const n = Number.parseInt(String(raw ?? ''), 10);
   return Number.isInteger(n) && n >= 0 ? n : 3000;
 }
@@ -27,12 +27,12 @@ function readPort(raw                             )         {
 // the process-wide singleton below (env-sourced defaults). The frozen shape is
 // the same four keys every consumer reads, so `app.config` and the singleton
 // are interchangeable to readers — only the values differ per app.
-export function resolveConfig(options    
-                         
-               
-                           
-                                    
- )                  {
+export function resolveConfig(options?: {
+  port?: number | string;
+  env?: string;
+  viewsDir?: string | null;
+  session?: { durationMs?: number };
+}): WorkbenchConfig {
   return Object.freeze({
     port: readPort(options?.port ?? process.env.PORT),
     env: options?.env ?? process.env.NODE_ENV ?? 'production',
@@ -45,4 +45,4 @@ export function resolveConfig(options
 // no app in reach (module-level helpers in session/middleware/field-delta) and
 // the fallback `listen()`/`makeRequestHandler` read when an app omits an option.
 // Identical to `resolveConfig()` with no args — one mechanism, not two.
-export const config                  = resolveConfig();
+export const config: WorkbenchConfig = resolveConfig();

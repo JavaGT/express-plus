@@ -5,7 +5,7 @@
 // dependencies, matching Scope's approach (in-memory, brute-force). Returns a
 // similarity score in [-1, 1]; 1 = identical, 0 = orthogonal, -1 = opposite.
 // A zero-magnitude vector returns 0 to avoid division by zero.
-export function cosineSimilarity(a         , b         )         {
+export function cosineSimilarity(a: unknown, b: unknown): number {
   if (!a || !b || !Array.isArray(a) || !Array.isArray(b)) return 0;
   const len = Math.min(a.length, b.length);
   if (len === 0) return 0;
@@ -26,16 +26,16 @@ export function cosineSimilarity(a         , b         )         {
 // cosine similarity for the named field, and returns the top-K rows (hydrated).
 // Brute-force (fine for single-user-project scale); no SQL-level similarity op.
 export function nearest(
-  db                                                                ,
-  entityName        ,
-  fieldName        ,
-  queryVec         ,
-  k        ,
-  hydrateFn                                            ,
-)            {
+  db: { prepare(sql: string): { all(): Record<string, unknown>[] } },
+  entityName: string,
+  fieldName: string,
+  queryVec: unknown,
+  k: number,
+  hydrateFn?: (row: Record<string, unknown>) => unknown,
+): unknown[] {
   const rows = db.prepare(`SELECT * FROM ${entityName} AS t0`).all();
   const scored = rows.map((row) => {
-    let vec          = row[fieldName];
+    let vec: unknown = row[fieldName];
     if (typeof vec === 'string') {
       try { vec = JSON.parse(vec); } catch { vec = null; }
     }
@@ -47,19 +47,19 @@ export function nearest(
   return topK.map(({ row }) => (hydrateFn ? hydrateFn(row) : row));
 }
 
-                              
-                
-                 
-            
- 
+export interface NearestSpec {
+  field: string;
+  query: unknown;
+  k: number;
+}
 
 // applyNearest(rows, nearest, hydrate) — post-processes already-fetched rows
 // by computing cosine similarity against the query vector and returning top-K.
 // Used internally by the query builder for scope predicates containing .nearest().
-export function applyNearest(rows                           , nearest             , _hydrate          )                            {
+export function applyNearest(rows: Record<string, unknown>[], nearest: NearestSpec, _hydrate?: unknown): Record<string, unknown>[] {
   const { field, query, k } = nearest;
   const scored = rows.map((row) => {
-    let vec          = row[field];
+    let vec: unknown = row[field];
     if (typeof vec === 'string') {
       try { vec = JSON.parse(vec); } catch { vec = null; }
     }

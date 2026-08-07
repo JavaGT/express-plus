@@ -1,24 +1,24 @@
 const DECLARATION_RE = /^[a-z][a-z0-9-]{0,63}$/;
-const PRINCIPAL_TYPES = ['user', 'link', 'system', 'apiKey']         ;
+const PRINCIPAL_TYPES = ['user', 'link', 'system', 'apiKey'] as const;
 
-                                                      
+type PrincipalType = (typeof PRINCIPAL_TYPES)[number];
 
-                                         
-                      
-                                          
- 
+export interface PrincipalSnapshotInput {
+  declaration: string;
+  principal: { type: string; id: string };
+}
 
-                                               
-                      
-                      
-             
- 
+export interface ParsedPrincipalSnapshotScope {
+  declaration: string;
+  type: PrincipalType;
+  id: string;
+}
 
-export function principalSnapshotScope({ declaration, principal: { type, id } }                        )         {
+export function principalSnapshotScope({ declaration, principal: { type, id } }: PrincipalSnapshotInput): string {
   if (typeof declaration !== 'string' || !DECLARATION_RE.test(declaration)) {
     throw new Error(`Invalid principal snapshot declaration name '${declaration}'`);
   }
-  if (!(PRINCIPAL_TYPES                     ).includes(type)) {
+  if (!(PRINCIPAL_TYPES as readonly string[]).includes(type)) {
     throw new Error(`Invalid principal type '${type}' for principal snapshot`);
   }
   if (typeof id !== 'string' || id.length === 0) {
@@ -28,7 +28,7 @@ export function principalSnapshotScope({ declaration, principal: { type, id } } 
   return `PrincipalSnapshot:${declaration}/${type}/${encodedId}`;
 }
 
-export function parsePrincipalSnapshotScope(key        )                               {
+export function parsePrincipalSnapshotScope(key: string): ParsedPrincipalSnapshotScope {
   if (typeof key !== 'string') {
     throw new Error('Principal snapshot scope key must be a string');
   }
@@ -49,10 +49,10 @@ export function parsePrincipalSnapshotScope(key        )                        
   if (!DECLARATION_RE.test(declaration)) {
     throw new Error(`Invalid declaration name in principal snapshot scope '${key}'`);
   }
-  if (!(PRINCIPAL_TYPES                     ).includes(type)) {
+  if (!(PRINCIPAL_TYPES as readonly string[]).includes(type)) {
     throw new Error(`Invalid principal type in principal snapshot scope '${key}'`);
   }
-  let decodedId        ;
+  let decodedId: string;
   try {
     decodedId = decodeURIComponent(encodedId);
   } catch {
@@ -65,5 +65,5 @@ export function parsePrincipalSnapshotScope(key        )                        
   if (canonicalEncoded !== encodedId) {
     throw new Error(`Non-canonical encoding in principal snapshot scope '${key}'`);
   }
-  return { declaration, type: type                 , id: decodedId };
+  return { declaration, type: type as PrincipalType, id: decodedId };
 }

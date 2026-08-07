@@ -7,48 +7,48 @@
 // ephemeral field is a per-connection write handle (drawing-canvas stroke at
 // 60Hz) whose events coalesce to ~15fps per subscriber.
 
-                     
-                                          
- 
+interface Coalescer {
+  (acc: unknown, event: unknown): unknown;
+}
 
 const coalescers = Object.freeze({
   // latest-wins: position data is loss-tolerant — the latest snapshot wins.
   // Matches the ephemeral projection (INSERT OR REPLACE latest-snapshot).
-  'latest-wins': Object.freeze((_acc         , event         ) => event)             ,
+  'latest-wins': Object.freeze((_acc: unknown, event: unknown) => event) as Coalescer,
 });
 
-                     
-              
- 
+interface SpanEvent {
+  seq: number;
+}
 
-function reduceSpan(events             )                                             {
+function reduceSpan(events: SpanEvent[]): { seq: number; seqSpan: [number, number] } {
   return {
     seq: events[events.length - 1].seq,
     seqSpan: [events[0].seq, events[events.length - 1].seq],
   };
 }
 
-                              
-                 
-                    
- 
+export interface PaceProfile {
+  window: number;
+  by: string | null;
+}
 
 const profiles = Object.freeze({
-  'pass-through': Object.freeze({ window: 0, by: null })               ,
-  '15fps': Object.freeze({ window: 66, by: 'latest-wins' })               ,
+  'pass-through': Object.freeze({ window: 0, by: null }) as PaceProfile,
+  '15fps': Object.freeze({ window: 66, by: 'latest-wins' }) as PaceProfile,
 });
 
 const bounds = Object.freeze({
-  allowedBy: Object.freeze(['latest-wins'])                     ,
+  allowedBy: Object.freeze(['latest-wins']) as readonly string[],
   maxWindow: 1000,
 });
 
-                               
-                                                  
-                                                                                           
-                                                  
-                                                              
- 
+export interface PaceStrategy {
+  coalescers: Readonly<Record<string, Coalescer>>;
+  reduceSpan: ((events: SpanEvent[]) => { seq: number; seqSpan: [number, number] }) | null;
+  profiles: Readonly<Record<string, PaceProfile>>;
+  bounds: { allowedBy: readonly string[]; maxWindow: number };
+}
 
 // The pace strategy registry, keyed by field-kind. Only `ephemeral` for now.
 // Other field-kinds (value, text, etc.) have no entry — see resolvePace for
@@ -59,34 +59,34 @@ export const PACE_STRATEGIES = Object.freeze({
     reduceSpan,
     profiles,
     bounds,
-  })                ,
+  }) as PaceStrategy,
 });
 
 // Resolve the pace strategy for a field kind. If the kind has no explicit
 // entry, returns a synthetic pass-through descriptor — pass-through only, no
 // coalescing is lawful. This is NOT an error: an absent entry means "only
 // verbatim delivery."
-export function resolvePace(kind        )               {
-  const entry = PACE_STRATEGIES[kind                                ];
+export function resolvePace(kind: string): PaceStrategy {
+  const entry = PACE_STRATEGIES[kind as keyof typeof PACE_STRATEGIES];
   if (entry) return entry;
   return Object.freeze({
     coalescers: {},
     reduceSpan: null,
     profiles: { 'pass-through': Object.freeze({ window: 0, by: null }) },
     bounds: Object.freeze({ allowedBy: [], maxWindow: 0 }),
-  })                ;
+  }) as PaceStrategy;
 }
 
-                                     
-                   
-                                            
- 
+export interface PaceSelectionInput {
+  profile?: string;
+  coalesce?: { window: number; by: string };
+}
 
 // Validate a subscriber's pace selection at subscribe time (fail-closed).
 // `pace` may be null/undefined (→ pass-through, valid for any kind), or
 // { profile: '<name>' }, or { coalesce: { window: <ms>, by: '<name>' } }.
 // Returns the resolved effective { window, by } on success.
-export function validatePaceSelection(kind        , pace                                       )              {
+export function validatePaceSelection(kind: string, pace: PaceSelectionInput | null | undefined): PaceProfile {
   // Reject closures — SPEC §8: pace must be data, not code.
   if (typeof pace === 'function') {
     throw Object.assign(new Error('pace must be data, not a closure'), { status: 400 });

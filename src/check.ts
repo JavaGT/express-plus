@@ -21,14 +21,14 @@
 //       entity-load and reject any `is.*` call not lexically inside an `await`.
 //       Catches the mid-expression foot-gun before any request runs.
 
-                                             
-                        
- 
+export interface UnawaitedCheckErrorOptions {
+  check?: string | null;
+}
 
 export class UnawaitedCheckError extends Error {
-  check               ;
+  check: string | null;
 
-  constructor(message        , { check = null }                             = {}) {
+  constructor(message: string, { check = null }: UnawaitedCheckErrorOptions = {}) {
     super(message);
     this.name = 'UnawaitedCheckError';
     this.check = check;
@@ -38,49 +38,49 @@ export class UnawaitedCheckError extends Error {
 // check(fn, { name }) -> a callable check. Calling it runs `fn` (sync or async)
 // and returns a normal promise resolving to a boolean fact. A check is awaited
 // at the use site: `(await is.owner()) ? grant(...) : deny(...)`.
-const CHECK_RESULT                = Symbol('workbench.checkResult');
+const CHECK_RESULT: unique symbol = Symbol('workbench.checkResult');
 
-                                               
+type CheckFn = (...args: unknown[]) => unknown;
 
-                                                                                
+type CheckResultPromise = Promise<boolean> & { [CHECK_RESULT]?: string | true };
 
-                                                                        
-                           
-  
+export type CheckFnFunc = ((...args: unknown[]) => Promise<boolean>) & {
+  checkName: string | null;
+};
 
-                                                                                                 
+type CallableCheck = ((...args: unknown[]) => CheckResultPromise) & { checkName: string | null };
 
-export function check(fn         , { name }                    = {})              {
-  const callable = (...args           )                     => {
+export function check(fn: CheckFn, { name }: { name?: string } = {}): CheckFnFunc {
+  const callable = (...args: unknown[]): CheckResultPromise => {
     // The result is a real promise (so `await` works and `||`/`&&` over two
     // results still yields a promise), tagged so the runtime backstop can tell
     // "a check escaped as the decision" from "an async body returned a boolean".
-    const promise                     = Promise.resolve(fn(...args)).then(Boolean)                      ;
+    const promise: CheckResultPromise = Promise.resolve(fn(...args)).then(Boolean) as CheckResultPromise;
     promise[CHECK_RESULT] = name ?? true;
     return promise;
   };
-  (callable                 ).checkName = name ?? null;
-  return callable                          ;
+  (callable as CallableCheck).checkName = name ?? null;
+  return callable as unknown as CheckFnFunc;
 }
 
 // True when a value is a check's own result that escaped without `await` (the
 // body returned `is.owner()` or `is.a() || is.b()` directly as the decision).
-const isEscapedCheck = (v         )                          =>
+const isEscapedCheck = (v: unknown): v is CheckResultPromise =>
   v !== null && typeof v === 'object' && CHECK_RESULT in v;
 
 // A value is "thenable" if it has a callable `.then` (a promise or a check
 // result that escaped without `await`).
-const isThenable = (v         )          => typeof (v                             )?.then === 'function';
+const isThenable = (v: unknown): boolean => typeof (v as { then?: unknown } | null)?.then === 'function';
 
 // Layer (1): RUNTIME BACKSTOP. The grant engine wraps every `.can`/`scope` body
 // with this. It awaits the body once, then inspects the resolved decision: if
 // the decision is itself a thenable, the body returned an un-awaited check
 // (`return is.owner()` / `return is.a() || is.b()`) — fail closed.
 export async function resolveDecision(
-  fn         ,
-  args            = [],
-  { where = 'a grant' }                     = {},
-)                   {
+  fn: CheckFn,
+  args: unknown[] = [],
+  { where = 'a grant' }: { where?: string } = {},
+): Promise<boolean> {
   // Inspect the body's RAW return value synchronously, before `await` collapses
   // the thenable chain. A correct body either returns a boolean directly or is
   // `async` and returns a Promise<boolean>. The foot-gun signature is a body

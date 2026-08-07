@@ -8,16 +8,16 @@
 // see the row as gone the instant it is deleted; only the explicit historical
 // read path (authorizeRow's `allowDeletedAnchor` option) consults it.
 
-                            
-                                              
-                                                                            
-  
+type DeletedRowStatement = {
+  run(params?: Record<string, unknown>): void;
+  get<T = { row: string }>(params?: Record<string, unknown>): T | undefined;
+};
 
-                     
-                                            
-  
+type DeletedRowDb = {
+  prepare(sql: string): DeletedRowStatement;
+};
 
-export function deletedRowAnchorTableDDL()         {
+export function deletedRowAnchorTableDDL(): string {
   return `CREATE TABLE IF NOT EXISTS _DeletedRowAnchor (
   entity TEXT NOT NULL,
   id TEXT NOT NULL,
@@ -32,12 +32,12 @@ export function deletedRowAnchorTableDDL()         {
 // anchor tracks the most recent deletion, matching the most recent grant a
 // principal actually held.
 export function captureDeletedRowAnchor(
-  db              ,
-  entityName        ,
-  id        ,
-  row         ,
-  deletedAt        ,
-)       {
+  db: DeletedRowDb,
+  entityName: string,
+  id: string,
+  row: unknown,
+  deletedAt: string,
+): void {
   db.prepare(
     'INSERT INTO _DeletedRowAnchor (entity, id, row, deletedAt) VALUES (:entity, :id, :row, :deletedAt) ' +
       'ON CONFLICT(entity, id) DO UPDATE SET row = excluded.row, deletedAt = excluded.deletedAt',
@@ -47,9 +47,9 @@ export function captureDeletedRowAnchor(
 // readDeletedRowAnchor — the row's last known state, in the same raw
 // (pre-deserializeRow) shape `readScopedRow`'s SQL read would have produced,
 // or undefined if this id was never captured (including: never deleted).
-export function readDeletedRowAnchor(db              , entityName        , id        )          {
+export function readDeletedRowAnchor(db: DeletedRowDb, entityName: string, id: string): unknown {
   const stored = db
     .prepare('SELECT row FROM _DeletedRowAnchor WHERE entity = :entity AND id = :id')
-    .get                 ({ entity: entityName, id });
+    .get<{ row: string }>({ entity: entityName, id });
   return stored ? JSON.parse(stored.row) : undefined;
 }

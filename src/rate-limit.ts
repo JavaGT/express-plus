@@ -1,33 +1,33 @@
 // rate-limit.mjs — per-key fixed-window rate limiter.
 // Buckets keyed by floor(now / windowMs); stale buckets dropped on access.
 
-                                                    
-                                                                             
+type RateBucket = { window: number; count: number };
+type BucketCheck = { allowed: boolean; retryAfterMs: number; limit: number };
 
-                                              
+export type RateLimitScope = 'ip' | 'session';
 
-                               
-                   
-                       
-                
-                        
-  
+export type RateLimitResult = {
+  allowed: boolean;
+  retryAfterMs: number;
+  limit: number;
+  scope: RateLimitScope;
+};
 
-                                
-                                        
-                                                     
-                     
-  
+export type RateLimitOptions = {
+  ip: { windowMs: number; max: number };
+  session?: { windowMs: number; max: number } | null;
+  now?: () => number;
+};
 
 export function createRateLimiter(
-  { ip: { windowMs: ipWindowMs, max: ipMax }, session = null, now = Date.now }                   = {}                    ,
-)                                                                        {
-  const ipBuckets = new Map                    ();
-  const sessionBuckets = new Map                    ();
+  { ip: { windowMs: ipWindowMs, max: ipMax }, session = null, now = Date.now }: RateLimitOptions = {} as RateLimitOptions,
+): { check(input: { ip: string; sessionId?: string }): RateLimitResult } {
+  const ipBuckets = new Map<string, RateBucket>();
+  const sessionBuckets = new Map<string, RateBucket>();
   const sessionWindowMs = session?.windowMs;
   const sessionMax = session?.max;
 
-  function pruneBuckets(buckets                         , currentWindow        ) {
+  function pruneBuckets(buckets: Map<string, RateBucket>, currentWindow: number) {
     for (const [key, bucket] of buckets) {
       if (bucket.window < currentWindow) {
         buckets.delete(key);
@@ -35,7 +35,7 @@ export function createRateLimiter(
     }
   }
 
-  function checkBucket(buckets                         , key        , windowMs        , max        )              {
+  function checkBucket(buckets: Map<string, RateBucket>, key: string, windowMs: number, max: number): BucketCheck {
     const currentWindow = Math.floor(now() / windowMs);
     pruneBuckets(buckets, currentWindow);
 
@@ -52,7 +52,7 @@ export function createRateLimiter(
     return { allowed, retryAfterMs, limit: max };
   }
 
-  function check({ ip, sessionId }                                    )                  {
+  function check({ ip, sessionId }: { ip: string; sessionId?: string }): RateLimitResult {
     const ipResult = checkBucket(ipBuckets, ip, ipWindowMs, ipMax);
 
     if (!ipResult.allowed) {
@@ -60,7 +60,7 @@ export function createRateLimiter(
     }
 
     if (session && sessionId) {
-      const sessionResult = checkBucket(sessionBuckets, sessionId, sessionWindowMs , sessionMax );
+      const sessionResult = checkBucket(sessionBuckets, sessionId, sessionWindowMs!, sessionMax!);
       if (!sessionResult.allowed) {
         return { ...sessionResult, scope: 'session' };
       }

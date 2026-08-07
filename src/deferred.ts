@@ -6,13 +6,13 @@
 // `with: { archivedAt: now }`) — the declaration carries the TOKEN, the engine
 // carries the resolution.
 
-                           
-                            
-                                     
-                     
-  
+export type DeferredNow = {
+  readonly kind: 'deferred';
+  readonly resolve: 'commit-instant';
+  toString(): string;
+};
 
-export const now              = Object.freeze({
+export const now: DeferredNow = Object.freeze({
   kind: 'deferred',
   resolve: 'commit-instant',
   toString() {

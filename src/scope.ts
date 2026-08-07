@@ -16,33 +16,33 @@
 // A grant clause: the read predicate (for SQL lowering) plus the runtime
 // capability function. Frozen — a declared grant is immutable.
 
-                                  
-                              
-                                                    
-  
+export type RuntimeGrantClause = {
+  readonly predicate: unknown;
+  readonly can: (fn: unknown) => RuntimeGrantClause;
+};
 
 const RUNTIME_GRANT_CLAUSE = Symbol('runtimeGrantClause');
 
-function markRuntimeGrantClause(clause                                      )                     {
+function markRuntimeGrantClause(clause: { predicate: unknown; can: unknown }): RuntimeGrantClause {
   Object.defineProperty(clause, RUNTIME_GRANT_CLAUSE, { value: true });
-  return clause                      ;
+  return clause as RuntimeGrantClause;
 }
 
-function makeClause(predicate         , can         )                     {
+function makeClause(predicate: unknown, can: unknown): RuntimeGrantClause {
   return Object.freeze(markRuntimeGrantClause({ predicate, can }));
 }
 
-export function isRuntimeGrantClause(clause         )                               {
-  return Boolean((clause                                                           )?.[RUNTIME_GRANT_CLAUSE]);
+export function isRuntimeGrantClause(clause: unknown): clause is RuntimeGrantClause {
+  return Boolean((clause as { [RUNTIME_GRANT_CLAUSE]?: unknown } | null | undefined)?.[RUNTIME_GRANT_CLAUSE]);
 }
 
-export function scope(predicate         )   
-                              
-                                       
-  {
+export function scope(predicate: unknown): {
+  readonly predicate: unknown;
+  can(fn: unknown): RuntimeGrantClause;
+} {
   return Object.freeze({
     predicate,
     // .can attaches the runtime capability half and closes the clause.
-    can: (fn         ) => makeClause(predicate, fn),
+    can: (fn: unknown) => makeClause(predicate, fn),
   });
 }
