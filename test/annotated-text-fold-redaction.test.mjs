@@ -12,10 +12,11 @@ import { ensureStream, ensureLease, hashClientNonce } from '../src/annotated-tex
 import { durableHistory } from '../src/internal.mjs';
 import { tryBuildAnnotatedTextFoldEnvelopes } from '../src/annotated-text-fold-envelope.mjs';
 
-// The fold envelope carries the full canonical text family as the client's
-// reducer checkpoint (fold.family). A recipient whose view is redacted ANYWHERE
-// in the document must never receive a fold envelope, or the raw confidential
-// text leaks through fold.family even when the AFFECTED block is visible.
+// The fold envelope no longer ships the canonical family (the snapshot's
+// authoring envelope carries it, unredacted recipients only). A recipient whose
+// view is redacted ANYWHERE must never receive a fold envelope: it also never
+// receives a family seed, so folding it would fail every subsequent transition
+// and loop through recovery.
 
 const protectingAccess = async ({ is }) => (await is.owner()) ? grant(read) : grant();
 
@@ -136,9 +137,9 @@ test('a recipient with any confidential span never receives a fold envelope (no 
   assert.equal(protect.ok, true, protect.failure?.message);
 
   // Edit the VISIBLE block. The affected block is fully visible, so the
-  // original affected-block-only gate would emit a fold — but fold.family
-  // carries the whole canonical family including the confidential block's
-  // raw text. u2 must get a resync, not a fold.
+  // original affected-block-only gate would emit a fold — but a redacted
+  // recipient never receives a family seed (neither in its snapshot nor in a
+  // fold), so it must get a resync, not a fold, or every fold would fail.
   const visibleMap = await authoringMap(ctx, 'u1');
   const edited = await dispatchTextInsert(ctx, 'edit-visible', visibleBlock, 'u1', 'tab-u1', 0, 'x', visibleMap);
   assert.equal(edited.ok, true, edited.failure?.message);

@@ -130,11 +130,14 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
   if (!block || block.kind !== 'visible' || block.redactions?.length) {
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
   }
-  // The fold payload carries the full canonical text family (every block's raw
-  // text) as the client reducer checkpoint, so a fold is safe only when the
-  // recipient sees the ENTIRE document unredacted — not just the affected
-  // block. Any restricted block or inline redaction anywhere in the recipient
-  // view leaks through fold.family; decline folding for such a recipient.
+  // The client folds each text transition against the family checkpoint it
+  // seeded from its snapshot's authoring envelope (unredacted recipients only).
+  // The fold itself ships only the operation, projection, and authoring tokens,
+  // never the full family — a 96-block transcript family is megabytes, which
+  // would blow the SSE frame limit and silently demote every fold to a resync.
+  // A recipient whose view is redacted ANYWHERE receives no family (neither in
+  // the snapshot nor in a fold), so it stays on snapshot recovery and never
+  // needs a seed; the checks below keep that contract fail-closed.
   if (recipient.blocks.some((candidate) => candidate.kind !== 'visible' || (candidate.redactions?.length ?? 0) > 0)) {
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
   }
@@ -179,6 +182,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
     recipient,
     family,
     prefix,
+    changedBlockIds: [foldable.blockId],
   });
 
   const loggedEvent = {
@@ -191,7 +195,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
 
   const fold = Object.freeze({
     kind: 'annotatedText',
-    version: 1,
+    version: 2,
     field: document.fieldName,
     baseCursor,
     fence,
@@ -203,6 +207,9 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
       changedBlocks: Object.freeze([Object.freeze({ id: foldable.blockId, text: block.text })]),
       removedBlockIds: Object.freeze([]),
     }),
+    // Compact cross-check the client can verify against its own post-apply
+    // family without serializing the whole checkpoint.
+    familyElementCount: Object.keys(family.checkpoint.elements).length,
     authoring: Object.freeze({
       acknowledgementFence: fence,
       positionBlocks: authoring?.positionBlocks ?? Object.freeze([]),
@@ -214,7 +221,6 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
         }
         : {}),
     }),
-    family: facts.family,
   });
 
   return [Object.freeze({
@@ -228,7 +234,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
   })];
 }
 
-function mintFoldAuthoring({ db, document, principal, fence, recipient, family, prefix }) {
+function mintFoldAuthoring({ db, document, principal, fence, recipient, family, prefix, changedBlockIds }) {
   if (typeof document.clientNonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(document.clientNonce)) {
     return null;
   }
@@ -247,30 +253,27 @@ function mintFoldAuthoring({ db, document, principal, fence, recipient, family, 
   });
   if (!lease) return null;
 
-  const groupIdByBlock = new Map(
-    db.prepare(`SELECT block_id, group_id FROM ${prefix}_block_group WHERE block_id IN (SELECT id FROM ${prefix}_block WHERE document_id = ?)`).all(document.documentId)
-      .map((row) => [row.block_id, row.group_id]),
-  );
-  const visibleBlocks = recipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id);
+  // A fold refreshes authoring only for the block(s) it changed. Every other
+  // block's text is identical between the previous basis and the current
+  // family, so the client's existing tokens for them stay valid — re-issuing
+  // the whole visible set per keystroke serializes the full family checkpoint
+  // into N position frames and burns a hasCapacity pass per frame (hundreds of
+  // ms on a large document). The snapshot mint still issues every visible block
+  // once, so the client has a full token map to start from.
+  const visibleIds = new Set(recipient.blocks.filter((block) => block.kind === 'visible').map((block) => block.id));
+  const affected = changedBlockIds.filter((blockId) => visibleIds.has(blockId));
   const issued = issueAuthoringSnapshot({
     db,
     prefix,
     leaseId: lease.id,
     fence,
-    positions: visibleBlocks.map((blockId) => ({
+    positions: affected.map((blockId) => ({
       blockId,
       familyCheckpoint: textFamilyCheckpoint(family),
       visibleAtIssue: true,
       redactions: authoringRedactionsForRecipient(recipient, blockId),
     })),
-    groups: recipient.blockGroups.map((group) => {
-      const groupId = groupIdByBlock.get(group.blockIds[0]);
-      return {
-        groupId: groupId ?? group.blockIds[0],
-        visibleBlocks: group.blockIds,
-        assignable: group.blockIds.every((blockId) => visibleBlocks.includes(blockId)),
-      };
-    }),
+    groups: [],
   });
   if (!issued) return null;
   const envelope = buildAuthoringEnvelope({

@@ -31,11 +31,12 @@ function token(label) {
   return `${label}${'x'.repeat(43)}`.slice(0, 43);
 }
 
-function authoringEnvelope(cursor) {
+function authoringEnvelope(cursor, family = null) {
   return {
     version: 1, stream: token('stream'), lease: token('lease'), snapshot: token(`snapshot${cursor}`), acknowledgementFence: cursor,
     positionFrames: [{ blockId: 'block-1', positionToken: token(`position${cursor}`) }],
     groupFrames: [{ groupToken: token(`group${cursor}`) }], splitResolutions: [],
+    ...(family ? { family } : {}),
   };
 }
 
@@ -630,7 +631,8 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
         ...snapshot(cursor).body,
         blocks: [{ kind: 'visible', id: 'block-1', text: cursor === 1 ? 'Hello' : nextText, fields: {}, annotationIds: [] }],
       };
-      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor) }) };
+      const seed = cursor === 1 ? textFamilyCheckpoint(baseFamily) : textFamilyCheckpoint(nextFamily);
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor, seed) }) };
     },
     eventSourceFactory: () => {
       const source = { close() {}, onmessage: null, onerror: null };
@@ -649,15 +651,15 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId },
     fold: {
-      kind: 'annotatedText', version: 1, field: 'body', baseCursor: 1, fence: 2,
+      kind: 'annotatedText', version: 2, field: 'body', baseCursor: 1, fence: 2,
       text: { reducer: 'workbench.text', operations: [nextOp] },
       projection: { changedBlocks: [{ id: 'block-1', text: nextText }], removedBlockIds: [] },
+      familyElementCount: Object.keys(textFamilyCheckpoint(nextFamily).checkpoint.elements).length,
       authoring: {
         acknowledgementFence: 2,
         stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
         positionBlocks: [{ blockId: 'block-1', positionToken: token('position2') }],
       },
-      family: textFamilyCheckpoint(nextFamily),
     },
   }]) });
   await new Promise((resolve) => setTimeout(resolve, 10));

@@ -405,8 +405,11 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options) {
   }
 
   const authoring = snapshot.authoring;
+  const authoringKeys = ['version', 'stream', 'lease', 'snapshot', 'acknowledgementFence', 'positionFrames', 'groupFrames', 'splitResolutions'];
   if (authoring !== undefined && (!authoring || typeof authoring !== 'object' || Array.isArray(authoring)
-    || !exactKeys(authoring, ['version', 'stream', 'lease', 'snapshot', 'acknowledgementFence', 'positionFrames', 'groupFrames', 'splitResolutions'])
+    || authoringKeys.some((key) => !Object.hasOwn(authoring, key))
+    || Object.keys(authoring).some((key) => key !== 'family' && !authoringKeys.includes(key))
+    || (authoring.family !== undefined && (!authoring.family || typeof authoring.family !== 'object' || Array.isArray(authoring.family)))
     || authoring.version !== 1 || !opaqueToken(authoring.stream) || !opaqueToken(authoring.lease)
     || !opaqueToken(authoring.snapshot) || new Set([authoring.stream, authoring.lease, authoring.snapshot]).size !== 3
     || !Number.isSafeInteger(authoring.acknowledgementFence) || authoring.acknowledgementFence < 0

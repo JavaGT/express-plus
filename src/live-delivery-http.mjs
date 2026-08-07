@@ -37,9 +37,15 @@ function afterFrom(url) {
   }
 }
 
-function writeJson(res, value) {
+// Bootstraps and catch-ups are one-time page-load responses: a document's
+// recipient view plus (for unredacted recipients) its family checkpoint seed.
+// Those legitimately reach several MB on large documents. Per-keystroke SSE
+// frames stay at JSON_LIMIT so folds cannot silently demote to resync.
+const BOOTSTRAP_LIMIT = 16 * 1024 * 1024;
+
+function writeJson(res, value, maxBytes = JSON_LIMIT) {
   const body = JSON.stringify(value);
-  if (Buffer.byteLength(body) > JSON_LIMIT) throw new Error('live delivery response exceeds limit');
+  if (Buffer.byteLength(body) > maxBytes) throw new Error('live delivery response exceeds limit');
   res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(body);
 }
@@ -127,7 +133,7 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
         if (mode === 'snapshot') {
           // The delivery seam creates the snapshot from its recipient-hydrated row.
           const result = await delivery.bootstrap({ principal, scope: effectiveScope, document });
-          writeJson(res, result);
+          writeJson(res, result, BOOTSTRAP_LIMIT);
         } else if (mode === 'catchup') {
           const result = await delivery.catchup({ principal, scope: effectiveScope, after, document });
           // A small event count can still contain a large recipient envelope.
@@ -135,7 +141,7 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
           const encoded = JSON.stringify(result);
           writeJson(res, Buffer.byteLength(encoded) > JSON_LIMIT
             ? await delivery.bootstrap({ principal, scope: effectiveScope, document })
-            : result);
+            : result, BOOTSTRAP_LIMIT);
         } else {
           reject(res, 400, 'invalid live delivery mode');
         }

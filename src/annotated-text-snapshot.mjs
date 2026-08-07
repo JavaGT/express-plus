@@ -243,7 +243,15 @@ async function projectAnnotatedText({ db, entity, row, principal, fieldName, des
     .map((s) => ({ temporaryBlock: s.temporary_block, blockId: s.authoritative_block_id }));
 
   const envelope = buildAuthoringEnvelope({ db, prefix, streamToken, leaseToken, leaseId: lease.id, snapshotToken: snapshot.id, fence: cursor, positionFrames, groupFrames, splitResolutions });
-  return Object.freeze({ ...recipient, authoring: envelope });
+  // The recipient seeds its fold reducer from this family checkpoint. The
+  // checkpoint is the full canonical text (including tombstones), so it is only
+  // safe when the recipient sees the ENTIRE document unredacted. Restricted or
+  // inline-redacted recipients get no family: they stay on snapshot recovery
+  // and the fold path declines them, so they never need a seed.
+  const fullyVisible = recipient.blocks.every((candidate) => candidate.kind === 'visible' && (candidate.redactions?.length ?? 0) === 0)
+    && recipient.blocks.every((candidate) => (authoringRedactionsForRecipient(recipient, candidate.id) ?? []).length === 0);
+  if (fullyVisible) envelope.family = textFamilyCheckpoint(family);
+  return Object.freeze({ ...recipient, authoring: Object.freeze(envelope) });
 }
 
 /** Owning-scope-admin-authorized package canonical export. Never projects through a recipient view. */
