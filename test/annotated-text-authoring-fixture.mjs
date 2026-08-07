@@ -17,9 +17,9 @@ export function allocateClientNonce() {
 
 /**
  * Set up an authoring stream + lease for a principal on a document, then
- * capture a fresh snapshot that includes the authoring envelope (position
- * frames, group frames, splits). Returns the stream/lease tokens and the
- * per-block position-token map.
+ * capture a fresh snapshot that includes the blockless authoring envelope
+ * (ONE document-scoped position frame). Returns the stream/lease tokens and
+ * the document position token.
  */
 export async function withAuthoringBinding({ db, entity, Document, row, principal, fieldName, descriptor }) {
   const prefix = `${entity.name}_${fieldName}`;
@@ -28,16 +28,9 @@ export async function withAuthoringBinding({ db, entity, Document, row, principa
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: hashClientNonce(clientNonce) });
   const authoring = { streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, clientNonceHash: hashClientNonce(clientNonce) };
   const snapshot = await projectAnnotatedTextSnapshot({ db, entity: Document, row, principal, fieldName, descriptor, authoring });
-  const positionTokens = new Map();
-  for (const frame of snapshot.authoring.positionFrames) {
-    positionTokens.set(frame.blockId, frame.positionToken);
-  }
-  const groupTokens = new Map();
-  for (let i = 0; i < snapshot.authoring.groupFrames.length; i += 1) {
-    const group = snapshot.blockGroups[i];
-    groupTokens.set(group.id, snapshot.authoring.groupFrames[i].groupToken);
-  }
-  return { streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, clientNonceHash: hashClientNonce(clientNonce), snapshot, positionTokens, groupTokens };
+  const documentPositionToken = snapshot.authoring.positionFrames[0]?.positionToken;
+  if (typeof documentPositionToken !== 'string') throw new Error('blockless authoring envelope is missing the document position frame');
+  return { streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, clientNonceHash: hashClientNonce(clientNonce), snapshot, documentPositionToken };
 }
 
 export function authoringBinding(streamToken, leaseToken, mutationId) {

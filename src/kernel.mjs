@@ -21,7 +21,6 @@ import { createWordEvidenceConsumers } from './word-evidence.mjs';
 import { createPendingBlobLifecycle } from './pending-blob.mjs';
 import { readSeq } from './committed-log.mjs';
 import { CRUD_CURSOR_POLICY, assertV9AnnotatedTextOffsetEditPayload, ANNOTATED_TEXT_COMPENSATION } from './entity/crud.mjs';
-import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 import { EventKind } from './event-handle.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
 import { bindAuthorizedRows, isAuthorizedRows } from './action-authorization.mjs';
@@ -492,7 +491,8 @@ export function buildKernel(app) {
   };
     const isContribution = (fact, documentId) => fact?.version === 2 && fact.kind === 'annotated-text.contribution'
       && fact.documentId === documentId && fact.contribution?.kind === 'text.insert'
-      && typeof fact.contribution.blockId === 'string' && Array.isArray(fact.contribution.opId)
+      && (!Object.hasOwn(fact.contribution, 'blockId') || (typeof fact.contribution.blockId === 'string' && fact.contribution.blockId.length > 0))
+      && Array.isArray(fact.contribution.opId)
       && typeof fact.contribution.text === 'string' && Number.isSafeInteger(fact.contribution.scalarCount);
     const isAnnotatedHistoryFact = ({ type, payload, fact }) => {
       const detail = annotatedActionDetails.get(type);

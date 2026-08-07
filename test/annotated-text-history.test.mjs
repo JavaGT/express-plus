@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 import workbench, { annotatedText, durableHistory, entity, executeDDL, executeFrameworkDDL, grant, ref, read, scope, write, everyone } from '../src/internal.mjs';
-import { materializeBlock, restoreTextFamilyCheckpoint } from '../src/annotated-text-family.mjs';
+import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
 function declaration(fieldAccess = () => grant(read, write)) {
@@ -16,13 +16,13 @@ async function setup(fieldAccess) {
   executeFrameworkDDL(db); db.exec("CREATE TABLE User (id TEXT PRIMARY KEY); INSERT INTO User VALUES ('alice'), ('bob')"); executeDDL(Project, db); db.exec("INSERT INTO Project VALUES ('p1', 'alice')"); executeDDL(Document, db);
   const app = workbench({ db, entities: [Project, Document], history: durableHistory({ authorize: () => true, actions: {} }) }); await app.start();
   await app.dispatch({ actionId: 'create', type: 'HistoryDocument.create', principal: { type: 'user', id: 'alice' }, payload: { id: 'd1', project: 'p1', owner: 'alice', body: { version: 1, blocks: [{ text: 'hello' }] } } });
-  return { app, db, Document: app.entities.get('HistoryDocument'), blockId: db.prepare('SELECT id FROM HistoryDocument_body_block').get().id };
+  return { app, db, Document: app.entities.get('HistoryDocument') };
 }
 
 async function insert(ctx, actionId, principal, session, offset, text) {
   const row = ctx.db.prepare('SELECT * FROM HistoryDocument WHERE id = ?').get('d1');
   const binding = await withAuthoringBinding({ db: ctx.db, entity: ctx.Document, Document: ctx.Document, row, principal, fieldName: 'body', descriptor: ctx.Document.fields.body });
-  return ctx.app.dispatch({ actionId, principal, scope: 'Project:p1', history: { session }, type: 'HistoryDocument.body.operation', payload: { version: 9, id: 'd1', authoring: { version: 1, stream: binding.streamToken, lease: binding.leaseToken, mutationId: actionId }, edit: { kind: 'text.insert', at: { positionToken: binding.positionTokens.get(ctx.blockId), offset, affinity: 'right' }, text } } });
+  return ctx.app.dispatch({ actionId, principal, scope: 'Project:p1', history: { session }, type: 'HistoryDocument.body.operation', payload: { version: 9, id: 'd1', authoring: { version: 1, stream: binding.streamToken, lease: binding.leaseToken, mutationId: actionId }, edit: { kind: 'text.insert', at: { positionToken: binding.documentPositionToken, offset, affinity: 'right' }, text } } });
 }
 
 async function move(ctx, operation, actionId, principal = { type: 'user', id: 'alice' }, session = 'tab-a') {
@@ -32,8 +32,7 @@ async function move(ctx, operation, actionId, principal = { type: 'user', id: 'a
 
 function text(ctx) {
   const state = ctx.db.prepare('SELECT family_checkpoint FROM HistoryDocument_body_state WHERE document_id = ?').get('d1');
-  const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
-  return family.blocks.map((block) => materializeBlock(family, block.id)).join('');
+  return materializeText(restoreTextFamily(JSON.parse(state.family_checkpoint)));
 }
 
 test('undo and redo compensate only Alice insertion after Bob edits', async (t) => {
@@ -61,7 +60,7 @@ test('history is isolated and an unsupported annotated action is a barrier', asy
   // A delete is not modeled in Landing 1. It clears Alice's cursor rather than exposing an older insert across it.
   const row = c.db.prepare('SELECT * FROM HistoryDocument WHERE id = ?').get('d1'); const principal = { type: 'user', id: 'alice' };
   const binding = await withAuthoringBinding({ db: c.db, entity: c.Document, Document: c.Document, row, principal, fieldName: 'body', descriptor: c.Document.fields.body });
-  const token = binding.positionTokens.get(c.blockId);
+  const token = binding.documentPositionToken;
   const deleted = await c.app.dispatch({ actionId: 'delete', principal, scope: 'Project:p1', history: { session: 'tab-a' }, type: 'HistoryDocument.body.operation', payload: { version: 9, id: 'd1', authoring: { version: 1, stream: binding.streamToken, lease: binding.leaseToken, mutationId: 'delete' }, edit: { kind: 'text.delete', from: { positionToken: token, offset: 0, affinity: 'right' }, to: { positionToken: token, offset: 1, affinity: 'right' } } } });
   assert.equal(deleted.ok, true, deleted.failure?.message);
   assert.equal((await c.app.history.cursor({ scope: 'Project:p1', principal, session: 'tab-a' })).undo, 0);
@@ -85,7 +84,7 @@ test('undo and redo retain a durable no-op when another action deleted the contr
   assert.equal((await insert(c, 'alice-insert', alice, 'tab-a', 5, '!')).ok, true);
   const row = c.db.prepare('SELECT * FROM HistoryDocument WHERE id = ?').get('d1');
   const binding = await withAuthoringBinding({ db: c.db, entity: c.Document, Document: c.Document, row, principal: { type: 'user', id: 'bob' }, fieldName: 'body', descriptor: c.Document.fields.body });
-  const token = binding.positionTokens.get(c.blockId);
+  const token = binding.documentPositionToken;
   const deleted = await c.app.dispatch({ actionId: 'bob-delete', principal: { type: 'user', id: 'bob' }, scope: 'Project:p1', type: 'HistoryDocument.body.operation', payload: { version: 9, id: 'd1', authoring: { version: 1, stream: binding.streamToken, lease: binding.leaseToken, mutationId: 'bob-delete' }, edit: { kind: 'text.delete', from: { positionToken: token, offset: 5, affinity: 'right' }, to: { positionToken: token, offset: 6, affinity: 'right' } } } });
   assert.equal(deleted.ok, true, deleted.failure?.message);
   const undone = await move(c, 'undo', 'alice-noop-undo');
