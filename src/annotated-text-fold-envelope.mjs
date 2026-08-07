@@ -130,8 +130,18 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
   if (!block || block.kind !== 'visible' || block.redactions?.length) {
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
   }
-  if ((authoringRedactionsForRecipient(recipient, foldable.blockId) ?? []).length) {
+  // The fold payload carries the full canonical text family (every block's raw
+  // text) as the client reducer checkpoint, so a fold is safe only when the
+  // recipient sees the ENTIRE document unredacted — not just the affected
+  // block. Any restricted block or inline redaction anywhere in the recipient
+  // view leaks through fold.family; decline folding for such a recipient.
+  if (recipient.blocks.some((candidate) => candidate.kind !== 'visible' || (candidate.redactions?.length ?? 0) > 0)) {
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
+  }
+  for (const candidate of recipient.blocks) {
+    if ((authoringRedactionsForRecipient(recipient, candidate.id) ?? []).length) {
+      return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
+    }
   }
 
   const prefix = `${document.entity.name}_${document.fieldName}`;
