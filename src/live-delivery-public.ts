@@ -293,7 +293,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       }
       if (isPrincipalSnapshotScope(subscription.scope)) {
         return principalDelivery
-          ? principalDelivery.subscribe(subscription as never)
+          ? principalDelivery.subscribe({ ...subscription, signal, revoke } as never)
           : Promise.reject(Object.assign(new Error('principal snapshot delivery is not attached'), { code: 'live-delivery-revoked' }));
       }
       const handle = tryParseScopeKey(subscription.scope);

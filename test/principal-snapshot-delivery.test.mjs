@@ -10,6 +10,7 @@ import { createPrincipalSnapshotDelivery } from '../src/principal-snapshot-deliv
 import { createPrincipalSnapshotTransaction } from '../src/principal-snapshot-transaction.mjs';
 import { createWriteQueue } from '../src/write-queue.mjs';
 import { validatePrincipalSnapshotDeclarations } from '../src/principal-snapshot-delivery.mjs';
+import { createOwnedLiveDelivery } from '../src/live-delivery-public.mjs';
 
 function setup() {
   const db = new DatabaseSync(':memory:');
@@ -107,4 +108,187 @@ test('principal delivery validation rejects a foreign source schema and undeclar
     output: principalSnapshot.object({ rows: principalSnapshot.many(foreignSource, { via: foreignSource.field.id, key: foreignSource.field.id, select: principalSnapshot.select(foreignSource.field.id) }) }),
   });
   assert.throws(() => validatePrincipalSnapshotDeclarations([foreignDeclaration], schema), /application schema/);
+});
+
+test('principal delivery close revokes active subscriptions exactly once and blocks later use', async () => {
+  const { delivery, declaration } = setup();
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  const revokes = [];
+  const delivered = [];
+  const controller = new AbortController();
+  const first = await delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: controller.signal,
+    deliver: async (batch) => delivered.push(...batch),
+    revoke: () => revokes.push('first'),
+  });
+  const second = await delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal,
+    deliver: async (batch) => delivered.push(...batch),
+    revoke: () => revokes.push('second'),
+  });
+  await first.activate();
+  await second.activate();
+  assert.deepEqual(revokes, [], 'nothing revoked while open');
+  delivery.close();
+  assert.deepEqual([...revokes].sort(), ['first', 'second'], 'close revokes every active subscription once');
+  controller.abort();
+  delivery.close();
+  assert.deepEqual([...revokes].sort(), ['first', 'second'], 'abort and repeated close never double-release');
+  assert.equal(await first.activate(), undefined, 'closed activation settles without a cursor');
+  await assert.rejects(
+    () => delivery.subscribe({ principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal, deliver: async () => {} }),
+    /is closed/,
+  );
+  await assert.rejects(() => delivery.bootstrap({ principal: { type: 'user', id: 'u1' }, scope }), /is closed/);
+  await assert.rejects(() => delivery.catchup({ principal: { type: 'user', id: 'u1' }, scope, after: 0 }), /is closed/);
+  delivery.wake(declaration, { type: 'user', id: 'u1' });
+  assert.deepEqual(delivered, [], 'a wake after close reaches no subscription');
+});
+
+test('principal delivery close during an awaited drain cannot deliver after shutdown', async () => {
+  const { delivery, declaration, db } = setup();
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  let releaseDelivery;
+  let markDeliveryEntered;
+  const deliveryGate = new Promise((resolve) => { releaseDelivery = resolve; });
+  const deliveryEntered = new Promise((resolve) => { markDeliveryEntered = resolve; });
+  const delivered = [];
+  let revokes = 0;
+  const activation = await delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal,
+    deliver: async (batch) => {
+      delivered.push(...batch);
+      markDeliveryEntered();
+      await deliveryGate;
+    },
+    revoke: () => { revokes += 1; },
+  });
+  assert.equal(await activation.activate(), 0, 'quiesced open subscription reports its cursor');
+  db.prepare(
+    `INSERT INTO _PrincipalSnapshotRevision (declaration, principalType, principalId, revision) VALUES (?, ?, ?, 1)
+     ON CONFLICT(declaration, principalType, principalId) DO UPDATE SET revision = revision + 1`,
+  ).run(declaration.name, 'user', 'u1');
+  const draining = activation.activate();
+  await deliveryEntered;
+  assert.deepEqual(delivered.map((e) => e.seq), [1], 'the in-flight batch has started');
+  delivery.close();
+  assert.equal(revokes, 1, 'close revokes the subscription while its drain awaits delivery');
+  releaseDelivery();
+  assert.equal(await draining, undefined, 'shutdown drain settles without a cursor');
+  assert.equal(await activation.activate(), undefined, 'a later activate on the closed subscription settles');
+  assert.deepEqual(delivered.map((e) => e.seq), [1], 'no second batch is delivered after close');
+});
+
+test('principal delivery close before activation leaves no active subscription', async () => {
+  const { delivery, declaration } = setup();
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  let revokes = 0;
+  const delivered = [];
+  const activation = await delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal,
+    deliver: async (batch) => delivered.push(...batch),
+    revoke: () => { revokes += 1; },
+  });
+  delivery.close();
+  assert.equal(revokes, 1, 'close between subscribe and activate revokes once');
+  assert.equal(await activation.activate(), undefined, 'activation of a closed subscription settles without a cursor');
+  assert.deepEqual(delivered, [], 'nothing delivers after close');
+  delivery.close();
+  assert.equal(revokes, 1, 'repeated close after removal does not double-release');
+});
+
+test('principal delivery abort is idempotent and releases exactly once', async () => {
+  const { delivery, declaration } = setup();
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  const controller = new AbortController();
+  let revokes = 0;
+  const activation = await delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: controller.signal,
+    deliver: async () => {},
+    revoke: () => { revokes += 1; },
+  });
+  controller.abort();
+  assert.equal(revokes, 1, 'abort revokes the subscription once');
+  controller.abort();
+  assert.equal(revokes, 1, 'a second abort does not double-release');
+  delivery.close();
+  assert.equal(revokes, 1, 'close after abort does not double-release');
+  assert.equal(await activation.activate(), undefined, 'aborted activation settles without a cursor');
+});
+
+test('owned live delivery forwards signal and revoke to principal snapshot subscriptions', async () => {
+  const { db, schema, declaration } = setup();
+  const owned = createOwnedLiveDelivery({
+    db,
+    entities: new Map(),
+    mayVerb: async () => true,
+    principalSnapshots: [declaration],
+    schema,
+  });
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  const controller = new AbortController();
+  let revokes = 0;
+  const activation = await owned.delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: controller.signal,
+    deliver: async () => {},
+    revoke: () => { revokes += 1; },
+  });
+  assert.equal(await activation.activate(), 0, 'open subscription quiesces at its cursor');
+  controller.abort();
+  assert.equal(revokes, 1, 'the owned public seam forwards the transport abort to the principal delivery');
+  assert.equal(await activation.activate(), undefined, 'aborted subscription settles without a cursor');
+  owned.close();
+  assert.equal(revokes, 1, 'close after abort does not double-release');
+});
+
+test('principal delivery wake during an active drain delivers the woken revision', async () => {
+  const { delivery, declaration, db, app } = setup();
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  db.prepare(
+    `INSERT INTO _PrincipalSnapshotRevision (declaration, principalType, principalId, revision) VALUES (?, ?, ?, 1)
+     ON CONFLICT(declaration, principalType, principalId) DO UPDATE SET revision = revision + 1`,
+  ).run(declaration.name, 'user', 'u1');
+  let entered;
+  let release;
+  const deliveryEntered = new Promise((resolve) => { entered = resolve; });
+  const deliveryGate = new Promise((resolve) => { release = resolve; });
+  const delivered = [];
+  let first = true;
+  const activation = await delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal,
+    deliver: async (batch) => {
+      if (first) {
+        first = false;
+        entered();
+        await deliveryGate;
+      }
+      delivered.push(...batch);
+    },
+  });
+  const draining = activation.activate();
+  await deliveryEntered;
+  await app.principalSnapshots.transaction((tx) => tx.invalidate(declaration, { type: 'user', id: 'u1' }));
+  release();
+  assert.equal(await draining, 2, 'the drain picks up the woken second revision and reports the final cursor');
+  assert.deepEqual(delivered.map((envelope) => envelope.seq), [1, 2]);
+  delivery.close();
+});
+
+test('principal delivery terminal drain error removal revokes exactly once', async () => {
+  const { delivery, declaration, db } = setup();
+  const scope = principalSnapshotScope({ declaration: declaration.name, principal: { type: 'user', id: 'u1' } });
+  let revokes = 0;
+  const activation = await delivery.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope, after: 0, signal: new AbortController().signal,
+    deliver: async () => { throw new Error('drain boom'); },
+    revoke: () => { revokes += 1; },
+  });
+  db.prepare(
+    `INSERT INTO _PrincipalSnapshotRevision (declaration, principalType, principalId, revision) VALUES (?, ?, ?, 1)
+     ON CONFLICT(declaration, principalType, principalId) DO UPDATE SET revision = revision + 1`,
+  ).run(declaration.name, 'user', 'u1');
+  await assert.rejects(() => activation.activate(), /drain boom/);
+  assert.equal(revokes, 1, 'a terminal drain error revokes exactly once');
+  delivery.close();
+  assert.equal(revokes, 1, 'close after the removed subscription does not double-release');
 });

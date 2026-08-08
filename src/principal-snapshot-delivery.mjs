@@ -198,15 +198,26 @@ export function createPrincipalSnapshotDelivery({ db, declarations }
     return Object.freeze({ kind: 'retry' });
   }
 
+  // Singular lifecycle: every removal path (abort signal, drain failure, close)
+  // flows through here. It marks the subscription inactive, detaches its abort
+  // listener, removes it from the registries, then invokes the transport revoke
+  // exactly once so the SSE stream ends and its capacity is released. The
+  // subs.get guard makes later removals, aborts, and close() calls no-ops, so
+  // nothing double-releases.
   function remove(id        ) {
     const sub = subs.get(id);
     if (!sub) return;
     sub.active = false;
+    if (sub.signal && sub.abort) sub.signal.removeEventListener('abort', sub.abort);
     subs.delete(id);
     const scopeSubs = byScope.get(sub.scope);
     scopeSubs?.delete(id);
     if (scopeSubs?.size === 0) byScope.delete(sub.scope);
-    if (sub.signal && sub.abort) sub.signal.removeEventListener('abort', sub.abort);
+    try {
+      sub.revoke?.();
+    } catch {
+      // Transport lifecycle callbacks are isolated.
+    }
   }
 
   async function drain(id        ) {

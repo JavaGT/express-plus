@@ -14,7 +14,7 @@ import { anonymous } from './principal.mjs';
                                                 
                                              
                                                                                                             
-                                                                
+                                                                                
 
 function requestIdOf(msg                         )                              {
   const value = msg?.requestId;
@@ -66,6 +66,8 @@ export class LiveConnection {
   #log                     ;
   #carets                        ;
   #coreAcs                              ;
+  #coreActivations                             ;
+  #coreGen                     ;
 
   constructor(socket        , id        , { fanout, core = null, resolveEntity, mayVerb, db, currentSeq, onClose, log = null, carets = null }                       ) {
     this.#socket = socket;
@@ -83,6 +85,8 @@ export class LiveConnection {
     this.#log = log;
     this.#carets = carets;
     this.#coreAcs = new Map();
+    this.#coreActivations = new Map();
+    this.#coreGen = new Map();
 
     socket.on('data', (chunk) => {
       this.#parser.feed(chunk);
@@ -185,16 +189,44 @@ export class LiveConnection {
     }
   }
 
+  // Advance the per-scope ownership generation and return the new value. Every
+  // subscribe request claims the newest generation for its scope before its
+  // first await, and an explicit unsubscribe advances it again to invalidate any
+  // in-flight request. A request that finds the scope at a higher generation
+  // after an await is stale and must only detach its own activation/controller.
+  #bumpScopeGen(scope        )         {
+    const gen = (this.#coreGen.get(scope) ?? 0) + 1;
+    this.#coreGen.set(scope, gen);
+    return gen;
+  }
+
   #handleUnsubscribe(msg         )       {
     const normalized = parseSubscribeMsg(msg);
     if (normalized) {
+      // A per-scope unsubscribe is genuinely non-terminal: detach the core
+      // subscription through its explicit handle without any transport revoke,
+      // so the connection and its other scopes stay alive. The AbortSignal is
+      // reserved for terminal removal (transport abort, error, auth denial,
+      // close/shutdown) and is never used here. The generation bump invalidates
+      // any still-pending subscribe: it becomes stale and detaches only its own
+      // controller when admission completes, never this scope's newer state.
+      this.#bumpScopeGen(normalized.scope);
       this.#carets?.removeConnection(this, normalized.scope).catch(() => {});
       this.#fanout.removeSubscription(normalized.scope, this);
-      const ac = this.#coreAcs.get(normalized.scope);
-      if (ac) {
-        ac.abort();
-        this.#coreAcs.delete(normalized.scope);
-      }
+      const activation = this.#coreActivations.get(normalized.scope);
+      activation?.unsubscribe?.();
+      this.#coreActivations.delete(normalized.scope);
+      // The controller in the scope map belongs to the winner (or to a request
+      // still pending inside core.subscribe). Detaching the winner's activation
+      // first removed the core's abort listener, so aborting its controller is
+      // an idempotent no-op that cannot trigger a transport revoke — the
+      // ordering is what keeps a per-scope unsubscribe genuinely non-terminal.
+      // A still-pending request has no subscription installed yet, so aborting
+      // its controller simply cancels its in-flight core admission; its own
+      // stale branch then completes silently. Every detached controller is
+      // aborted exactly once here or by its owning request's stale branch.
+      this.#coreAcs.get(normalized.scope)?.abort();
+      this.#coreAcs.delete(normalized.scope);
       const response                          = { type: 'unsubscribed', scope: normalized.scope };
       if (normalized.interest.entity) response.entity = normalized.interest.entity;
       if (normalized.interest.id !== undefined) response.id = normalized.interest.id;
@@ -204,6 +236,17 @@ export class LiveConnection {
 
   async #authorizeAndSubscribe(msg         )                {
     const requestId = requestIdOf(msg                           );
+    // Per-scope ownership fence. The generation is claimed before the first
+    // await so arrival order decides the winner: a later subscribe for the same
+    // scope — and any explicit unsubscribe — supersedes requests still in
+    // flight. Every post-await mutation below re-checks ownsScope() and, when
+    // stale, detaches only this request's own activation/controller — never the
+    // newer owner's state, ack, or fan-out registration.
+    const normalized = parseSubscribeMsg(msg);
+    const pendingScope = normalized?.scope;
+    const scopeGen = pendingScope === undefined ? 0 : this.#bumpScopeGen(pendingScope);
+    const ownsScope = () => pendingScope === undefined || this.#coreGen.get(pendingScope) === scopeGen;
+
     const result = await authorizeSubscription(msg, this, {
       resolveEntity: this.#resolveEntity,
       mayVerb: this.#mayVerb,
@@ -211,25 +254,50 @@ export class LiveConnection {
       fanout: this.#fanout,
     });
     if (!result.admitted) {
-      this.error(result.failure, requestId);
+      // A superseded request reports nothing: its outcome is noise to a client
+      // that already moved on to the newer owner.
+      if (ownsScope()) this.error(result.failure, requestId);
       return;
     }
+    // A newer subscribe or an explicit unsubscribe superseded us during
+    // admission. We never installed anything, so detach nothing and send no ack.
+    if (!ownsScope()) return;
 
     const scope = result.scope;
     let activateCore                                             = null;
-    let coreAc                         = null;
+    let coreSubscription                        = null;
+    // This request's OWN controller. The scope map (#coreAcs) holds only the
+    // current owner's controller, so a newer same-scope request overwrites the
+    // map — this local reference is the only handle a stale request has to
+    // cancel exactly its own work. Every branch below that detaches its own
+    // subscription also aborts this controller, ordered AFTER the detach so the
+    // abort is an idempotent no-op that cannot reach the transport revoke.
+    let requestController                         = null;
 
     // Subscribe to the core for committed-event delivery BEFORE sending the
     // subscribed ack. If core subscription fails, we remove the fanout
     // registration and send only an error — no ack reaches the client.
     if (this.#core) {
-      const previousAc = this.#coreAcs.get(scope);
-      if (previousAc) previousAc.abort();
+      // A resubscribe replaces the previous subscription for this scope. That
+      // is non-terminal for the connection: detach the old subscription through
+      // its explicit handle instead of aborting, so no revoke error reaches the
+      // client. A still-pending older subscribe has no handle yet; the
+      // ownership fence below detaches it without revoke when it completes.
+      const previousActivation = this.#coreActivations.get(scope);
+      if (previousActivation) {
+        previousActivation.unsubscribe?.();
+        this.#coreActivations.delete(scope);
+        this.#fanout.removeSubscription(scope, this);
+        // The replaced controller belongs to the previous owner and its abort
+        // listener was removed by the detach above, so aborting it is an
+        // idempotent no-op that cannot trigger a transport revoke.
+        this.#coreAcs.get(scope)?.abort();
+      }
       const ac = new AbortController();
-      coreAc = ac;
+      requestController = ac;
       this.#coreAcs.set(scope, ac);
       try {
-        const coreSubscription = await this.#core.subscribe({
+        coreSubscription = (await this.#core.subscribe({
           principal: this.#principal ?? anonymous,
           scope,
           after: this.#currentSeq(scope),
@@ -244,27 +312,52 @@ export class LiveConnection {
           },
           revoke: () => {
             // A reauthorization failure after acknowledgement is terminal for
-            // this recipient. Do not leave the transport appearing live.
-            if (this.#coreAcs.get(scope) !== ac) return;
+            // this recipient — but only while this request still owns the
+            // scope. A newer owner or an explicit unsubscribe has (or will
+            // have) its own terminal handling; reporting here would clobber the
+            // winner. The revoke also advances the generation, so this
+            // request's own post-await continuation reports nothing further:
+            // terminal reporting has already happened, exactly once.
+            if (!ownsScope()) return;
             this.#coreAcs.delete(scope);
+            this.#coreActivations.delete(scope);
             this.#fanout.removeSubscription(scope, this);
             ac.abort();
+            this.#bumpScopeGen(scope);
             this.error(failure('denied', 'Subscription revoked.'), requestId);
           },
-        });
+        })) ?? null;
         activateCore = coreSubscription?.activate ?? null;
         if (ac.signal.aborted) return;
+        // Register our own activation only while this request still owns the
+        // scope; a stale request must never overwrite the winner's entry.
+        if (coreSubscription && ownsScope()) this.#coreActivations.set(scope, coreSubscription);
       } catch (err) {
-        // A newer subscribe or unsubscribe owns this scope now. Its controller
-        // and fan-out registration must not be clobbered by this stale attempt.
-        if (this.#coreAcs.get(scope) !== ac) return;
+        // The core already removed its own subscription (or never installed
+        // one), so the detach no-ops and the abort below is an idempotent
+        // no-op that cannot reach the transport revoke. It fires exactly once
+        // for this request's controller whether this request is stale or the
+        // owner, and never touches a newer winner's controller.
+        coreSubscription?.unsubscribe?.();
+        ac.abort();
+        if (!ownsScope()) return;
         this.#coreAcs.delete(scope);
+        this.#coreActivations.delete(scope);
         this.#fanout.removeSubscription(scope, this);
         this.#log?.error?.('live', 'core subscription failed', { scope, err: String(err) });
         this.error(failure('denied', 'Subscription failed.'), requestId);
         return;
       }
-      if (this.#coreAcs.get(scope) !== ac) return;
+      // A newer subscribe or an explicit unsubscribe owns this scope now —
+      // detach only our own subscription without revoke, then abort our own
+      // controller (an idempotent no-op after the detach). The winner (or
+      // connection close) handles terminal teardown. Never leave an active
+      // paused subscription.
+      if (!ownsScope()) {
+        coreSubscription?.unsubscribe?.();
+        ac.abort();
+        return;
+      }
     }
 
     const response                          = {
@@ -281,13 +374,34 @@ export class LiveConnection {
       try {
         await activateCore();
       } catch (err) {
-        if (this.#coreAcs.get(scope) === coreAc) {
-          this.#coreAcs.delete(scope);
-        }
+        // A core activation rejection only ever surfaces through the core's
+        // terminal removal path, whose revoke callback (when this request still
+        // owned the scope) already reported and advanced the generation. If we
+        // no longer own the generation — a newer owner superseded us, or the
+        // revoke already handled terminal reporting — reporting again here
+        // would emit a second terminal frame. Detach and abort only this
+        // request's own subscription/controller first (both no-ops when the
+        // terminal path already ran), so a rejection without a core revoke
+        // still aborts this request's own controller exactly once.
+        coreSubscription?.unsubscribe?.();
+        requestController?.abort();
+        if (!ownsScope()) return;
+        this.#coreAcs.delete(scope);
+        this.#coreActivations.delete(scope);
+        this.#fanout.removeSubscription(scope, this);
         this.#log?.error?.('live', 'core activation failed', { scope, err: String(err) });
         this.error(failure('denied', 'Subscription failed.'), requestId);
         return;
       }
+    }
+    if (!ownsScope()) {
+      // Superseded while our activation ran: the winner already detached our
+      // activation (or this no-ops), and the detach came first, so aborting our
+      // own controller is an idempotent no-op that cannot reach a revoke. No
+      // stale cancellation handle outlives the request.
+      coreSubscription?.unsubscribe?.();
+      requestController?.abort();
+      return;
     }
     if (this.#coreAcs.get(scope) === undefined) return;
     this.#fanout.addSubscription(scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
@@ -304,7 +418,14 @@ export class LiveConnection {
     for (const ac of this.#coreAcs.values()) {
       ac.abort();
     }
+    // Connection teardown is terminal for every in-flight request: advance each
+    // scope's generation so a pending subscribe continuation never reports or
+    // mutates state on a closed connection.
+    for (const scope of [...this.#coreGen.keys()]) {
+      this.#bumpScopeGen(scope);
+    }
     this.#coreAcs.clear();
+    this.#coreActivations.clear();
     this.#fanout.removeAll(this);
     this.#carets?.removeConnection(this).catch(() => {});
     this.#onClose?.();

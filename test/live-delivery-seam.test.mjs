@@ -153,6 +153,25 @@ function appendEvent(db, scope, seq, type, data = {}) {
   ).run(scope, seq);
 }
 
+// A mayVerb that passes everything except the Nth call, which blocks until
+// release() — a deterministic seam to hold one subscribe at a chosen await.
+function gateMayVerbCall(gateCall) {
+  let calls = 0;
+  let entered;
+  let release;
+  const enteredPromise = new Promise((resolve) => { entered = resolve; });
+  const releasePromise = new Promise((resolve) => { release = resolve; });
+  const mayVerb = async () => {
+    calls += 1;
+    if (calls === gateCall) {
+      entered();
+      await releasePromise;
+    }
+    return true;
+  };
+  return { mayVerb, enteredPromise, release };
+}
+
 // --- tests ---
 
 test('createLiveDelivery is the singular factory (createLiveServer is the same function)', () => {
@@ -436,6 +455,171 @@ test('(R1) one connection with two entity scopes, unsubscribe one, subsequent co
   }
 });
 
+test('(R1b) terminal reauthorization denial revokes with an error frame; connection and other scope stay alive', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n1', 'ok', 'u1', 'public');
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n2', 'ok', 'u1', 'public');
+
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'ok' });
+  appendEvent(db, 'Note:n2', 1, 'Note.created', { title: 'ok' });
+
+  const httpServer = http.createServer();
+  const live = createLiveDelivery(httpServer, {
+    mayVerb: async () => true,
+    principalOf: (req) => {
+      const u = req.headers?.['x-test-user'] ?? 'test';
+      return { type: 'user', id: u };
+    },
+    db,
+    resolveEntity: (name) => name === 'Note' ? makeNoteEntity() : null,
+    log: null,
+  });
+
+  httpServer.listen(0);
+  const port = httpServer.address().port;
+
+  try {
+    const ws = await openRawWS(port);
+
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+    const ack1 = await ws.nextMessage();
+    assert.equal(ack1.type, 'subscribed');
+    assert.equal(ack1.scope, 'Note:n1');
+
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n2' }));
+    const ack2 = await ws.nextMessage();
+    assert.equal(ack2.type, 'subscribed');
+    assert.equal(ack2.scope, 'Note:n2');
+
+    const consumer = live.createConsumer({
+      entities: new Map([['Note', makeNoteEntity()]]),
+    });
+
+    // Delete n1's authorization row and commit an ordinary update. The core
+    // reauthorises on the next wake; with no row the update cannot be
+    // re-authorized (it is not a terminal removal), so the one terminal removal
+    // path revokes the subscription — the connection receives an error frame
+    // but stays alive.
+    db.prepare(`DELETE FROM Note WHERE id = ?`).run('n1');
+    appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'ghost' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 2, data: { title: 'ghost' } }], { db });
+    await sleep(100);
+
+    const revoked = await ws.nextMessage(500);
+    assert.ok(revoked, 'terminal revocation reaches the connection');
+    assert.equal(revoked.type, 'error');
+    assert.ok(revoked.failure, 'the revocation error carries a failure');
+
+    // The other scope still delivers on the same connection.
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('still', 'n2');
+    appendEvent(db, 'Note:n2', 2, 'Note.updated', { title: 'still' });
+    await consumer([{ scope: 'Note:n2', type: 'Note.updated', seq: 2, data: { title: 'still' } }], { db });
+    await sleep(100);
+
+    const ev = await ws.nextEvent(500);
+    assert.ok(ev, 'other scope still delivered after terminal revoke of the first');
+    assert.equal(ev.entity, 'Note');
+    assert.equal(ev.id, 'n2');
+    assert.equal(ev.seq, 2);
+
+    // No further frames.
+    assert.equal(await ws.nextMessage(100), null, 'no further messages after the revocation and the other scope event');
+  } finally {
+    live.close();
+    httpServer.close();
+    await sleep(50);
+  }
+});
+
+test('(R1c) unsubscribe all scopes leaves the connection alive; shutdown drops it exactly once', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n1', 'a', 'u1', 'public');
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n2', 'b', 'u1', 'public');
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n3', 'c', 'u1', 'public');
+
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'a' });
+  appendEvent(db, 'Note:n2', 1, 'Note.created', { title: 'b' });
+  appendEvent(db, 'Note:n3', 1, 'Note.created', { title: 'c' });
+
+  const httpServer = http.createServer();
+  const live = createLiveDelivery(httpServer, {
+    mayVerb: async () => true,
+    principalOf: (req) => {
+      const u = req.headers?.['x-test-user'] ?? 'test';
+      return { type: 'user', id: u };
+    },
+    db,
+    resolveEntity: (name) => name === 'Note' ? makeNoteEntity() : null,
+    log: null,
+  });
+
+  httpServer.listen(0);
+  const port = httpServer.address().port;
+
+  try {
+    const ws = await openRawWS(port);
+
+    for (const id of ['n1', 'n2']) {
+      ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id }));
+      const ack = await ws.nextMessage();
+      assert.equal(ack.type, 'subscribed');
+      assert.equal(ack.scope, `Note:${id}`);
+    }
+
+    for (const id of ['n1', 'n2']) {
+      ws.send(JSON.stringify({ type: 'unsubscribe', entity: 'Note', id }));
+      const unsub = await ws.nextMessage();
+      assert.equal(unsub.type, 'unsubscribed');
+      assert.equal(unsub.scope, `Note:${id}`);
+    }
+
+    assert.equal(live.count(), 1, 'the connection survives unsubscribing every scope');
+
+    const consumer = live.createConsumer({
+      entities: new Map([['Note', makeNoteEntity()]]),
+    });
+
+    // No registry residue: commits to the unsubscribed scopes deliver nothing.
+    appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'ghost' });
+    appendEvent(db, 'Note:n2', 2, 'Note.updated', { title: 'ghost' });
+    await consumer([
+      { scope: 'Note:n1', type: 'Note.updated', seq: 2, data: { title: 'ghost' } },
+      { scope: 'Note:n2', type: 'Note.updated', seq: 2, data: { title: 'ghost' } },
+    ], { db });
+    await sleep(100);
+    assert.equal(await ws.nextEvent(150), null, 'no delivery to unsubscribed scopes');
+
+    // The connection can still subscribe a fresh scope and receive events.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n3' }));
+    const ack3 = await ws.nextMessage();
+    assert.equal(ack3.type, 'subscribed');
+    assert.equal(ack3.scope, 'Note:n3');
+
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('c-live', 'n3');
+    appendEvent(db, 'Note:n3', 2, 'Note.updated', { title: 'c-live' });
+    await consumer([{ scope: 'Note:n3', type: 'Note.updated', seq: 2, data: { title: 'c-live' } }], { db });
+    await sleep(100);
+    const ev = await ws.nextEvent(500);
+    assert.ok(ev, 'a fresh subscription after unsubscribing everything still delivers');
+    assert.equal(ev.entity, 'Note');
+    assert.equal(ev.id, 'n3');
+    assert.equal(ev.seq, 2);
+
+    // Shutdown drops the connection; a second close is a no-op.
+    live.close();
+    assert.equal(live.count(), 0, 'close removes the connection');
+    assert.doesNotThrow(() => live.close());
+  } finally {
+    live.close();
+    httpServer.close();
+    await sleep(50);
+  }
+});
+
 test('(R4) public live delivery cannot emit an annotated-text ephemeral payload', async () => {
   const db = new DatabaseSync(':memory:');
   executeFrameworkDDL(db);
@@ -528,6 +712,379 @@ test('(R6) activation failure occurs only after the subscribed acknowledgement',
     assert.ok(error, 'activation failure is reported after acknowledgement');
     assert.equal(error.type, 'error');
     assert.ok(error.failure);
+  } finally {
+    live.close();
+    httpServer.close();
+    await sleep(50);
+  }
+});
+
+// --- (P1/P2) per-scope ownership fence: concurrent same-scope subscribes ---
+
+test('(P1a) concurrent same-scope subscribes: newest wins, stale request acks nothing and leaks nothing', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n1', 'hello', 'u1', 'public');
+
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+
+  const gate = gateMayVerbCall(1);
+  const httpServer = http.createServer();
+  const live = createLiveDelivery(httpServer, {
+    mayVerb: gate.mayVerb,
+    principalOf: (req) => {
+      const u = req.headers?.['x-test-user'] ?? 'test';
+      return { type: 'user', id: u };
+    },
+    db,
+    resolveEntity: (name) => name === 'Note' ? makeNoteEntityWithGrant() : null,
+    log: null,
+  });
+  const consumer = live.createConsumer({ entities: new Map([['Note', makeNoteEntity()]]) });
+
+  httpServer.listen(0);
+  const port = httpServer.address().port;
+
+  try {
+    const ws = await openRawWS(port);
+
+    // Older subscribe #1 stalls in admission (gated mayVerb).
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1', requestId: 'first' }));
+    await gate.enteredPromise;
+
+    // Newer subscribe #2 for the same scope completes fully while #1 waits.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1', requestId: 'second' }));
+    const ack = await ws.nextMessage(500);
+    assert.ok(ack, 'newest subscribe acknowledges');
+    assert.equal(ack.type, 'subscribed');
+    assert.equal(ack.requestId, 'second', 'only the newest subscribe wins the ack');
+    assert.equal(ack.scope, 'Note:n1');
+
+    // Release the stale #1: it must complete silently — no ack, no error.
+    gate.release();
+    await sleep(150);
+    assert.equal(await ws.nextMessage(150), null, 'stale request sends no ack and no error');
+
+    // The winner's subscription is live: one delivery, never revoked.
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('world', 'n1');
+    appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'world' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 2, data: { title: 'world' } }], { db });
+    const ev = await ws.nextEvent(500);
+    assert.ok(ev, 'winner delivers the committed event');
+    assert.equal(ev.seq, 2);
+    assert.equal(await ws.nextEvent(150), null, 'exactly one delivery — the stale request leaked no subscription');
+
+    // No residue: unsubscribe cleanly, then commits deliver nothing.
+    ws.send(JSON.stringify({ type: 'unsubscribe', entity: 'Note', id: 'n1' }));
+    const unsub = await ws.nextMessage();
+    assert.equal(unsub.type, 'unsubscribed');
+    appendEvent(db, 'Note:n1', 3, 'Note.updated', { title: 'ghost' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 3, data: { title: 'ghost' } }], { db });
+    assert.equal(await ws.nextEvent(150), null, 'no delivery after unsubscribe — no leaked core subscription');
+
+    // The connection's scope state is clean: a fresh subscribe still works.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1', requestId: 'third' }));
+    const ack2 = await ws.nextMessage();
+    assert.equal(ack2.type, 'subscribed');
+    assert.equal(ack2.requestId, 'third');
+    assert.equal(await ws.nextMessage(150), null, 'no stray frames after the fresh subscribe');
+  } finally {
+    live.close();
+    httpServer.close();
+    await sleep(50);
+  }
+});
+
+test('(P1b) unsubscribe during an in-flight subscribe invalidates it; nothing leaks', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n1', 'hello', 'u1', 'public');
+
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+
+  const gate = gateMayVerbCall(1);
+  const httpServer = http.createServer();
+  const live = createLiveDelivery(httpServer, {
+    mayVerb: gate.mayVerb,
+    principalOf: (req) => {
+      const u = req.headers?.['x-test-user'] ?? 'test';
+      return { type: 'user', id: u };
+    },
+    db,
+    resolveEntity: (name) => name === 'Note' ? makeNoteEntityWithGrant() : null,
+    log: null,
+  });
+  const consumer = live.createConsumer({ entities: new Map([['Note', makeNoteEntity()]]) });
+
+  httpServer.listen(0);
+  const port = httpServer.address().port;
+
+  try {
+    const ws = await openRawWS(port);
+
+    // Subscribe #1 stalls in admission.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+    await gate.enteredPromise;
+
+    // An explicit unsubscribe supersedes the in-flight subscribe.
+    ws.send(JSON.stringify({ type: 'unsubscribe', entity: 'Note', id: 'n1' }));
+    const unsub = await ws.nextMessage();
+    assert.equal(unsub.type, 'unsubscribed');
+    assert.equal(unsub.scope, 'Note:n1');
+
+    // Release #1: it must complete silently — no ack, no error.
+    gate.release();
+    await sleep(150);
+    assert.equal(await ws.nextMessage(150), null, 'the invalidated subscribe sends no ack and no error');
+
+    // No leaked subscription: commits deliver nothing.
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('ghost', 'n1');
+    appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'ghost' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 2, data: { title: 'ghost' } }], { db });
+    assert.equal(await ws.nextEvent(150), null, 'no delivery to an unsubscribed-then-dropped scope');
+
+    // The connection stays healthy: a fresh subscribe still delivers.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+    const ack = await ws.nextMessage();
+    assert.equal(ack.type, 'subscribed');
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('alive', 'n1');
+    appendEvent(db, 'Note:n1', 3, 'Note.updated', { title: 'alive' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 3, data: { title: 'alive' } }], { db });
+    const ev = await ws.nextEvent(500);
+    assert.ok(ev, 'a fresh subscribe after the invalidated one still delivers');
+    assert.equal(ev.seq, 3);
+  } finally {
+    live.close();
+    httpServer.close();
+    await sleep(50);
+  }
+});
+
+test('(P1c) a subscribe superseded and unsubscribed while pending inside core.subscribe is cancelled, silent, and leak-free', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n1', 'hello', 'u1', 'public');
+
+  // Gate the SECOND mayVerb call: the connection admission (call 1) passes, so
+  // the request stalls INSIDE core.subscribe at its inline reauthorization
+  // (call 2) — after its own AbortController is already registered in the scope
+  // map. This races after admission, not merely at the admission mayVerb.
+  const gate = gateMayVerbCall(2);
+  const httpServer = http.createServer();
+  const live = createLiveDelivery(httpServer, {
+    mayVerb: gate.mayVerb,
+    principalOf: (req) => {
+      const u = req.headers?.['x-test-user'] ?? 'test';
+      return { type: 'user', id: u };
+    },
+    db,
+    resolveEntity: (name) => name === 'Note' ? makeNoteEntityWithGrant() : null,
+    log: null,
+  });
+  const consumer = live.createConsumer({ entities: new Map([['Note', makeNoteEntity()]]) });
+
+  httpServer.listen(0);
+  const port = httpServer.address().port;
+
+  try {
+    const ws = await openRawWS(port);
+
+    // Subscribe #1 passes admission and stalls inside core.subscribe.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1', requestId: 'first' }));
+    await gate.enteredPromise;
+
+    // Subscribe #2 for the same scope supersedes #1 (overwriting the scope
+    // map) and completes fully while #1 is still pending.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1', requestId: 'second' }));
+    const ack = await ws.nextMessage(500);
+    assert.ok(ack, 'the superseding subscribe acknowledges');
+    assert.equal(ack.type, 'subscribed');
+    assert.equal(ack.requestId, 'second', 'only the superseding request wins the ack');
+    assert.equal(ack.scope, 'Note:n1');
+
+    // The winner is live while #1 is still pending inside core.subscribe: a
+    // committed event delivers exactly once — the stale request leaks nothing
+    // and cannot affect the winner.
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('world', 'n1');
+    appendEvent(db, 'Note:n1', 1, 'Note.updated', { title: 'world' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 1, data: { title: 'world' } }], { db });
+    const ev = await ws.nextEvent(500);
+    assert.ok(ev, 'the winner delivers while the stale request is still pending inside core.subscribe');
+    assert.equal(ev.seq, 1);
+    assert.equal(await ws.nextEvent(150), null, 'exactly one delivery — the pending stale request leaked nothing');
+
+    // An explicit unsubscribe invalidates the still-pending #1 and drops the
+    // winner's subscription non-terminally.
+    ws.send(JSON.stringify({ type: 'unsubscribe', entity: 'Note', id: 'n1' }));
+    const unsub = await ws.nextMessage();
+    assert.equal(unsub.type, 'unsubscribed');
+    assert.equal(unsub.scope, 'Note:n1');
+
+    // Release the stale #1: its core.subscribe resumes, installs nothing that
+    // survives, and its own stale branch detaches and aborts exactly its own
+    // controller — silently, with no ack and no error.
+    gate.release();
+    await sleep(200);
+    assert.equal(await ws.nextMessage(200), null, 'the stale request sends no ack and no error');
+
+    // No residue: a commit after the dust settles delivers nothing.
+    appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'ghost' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 2, data: { title: 'ghost' } }], { db });
+    assert.equal(await ws.nextEvent(200), null, 'no delivery after the stale request settled — no leaked core subscription');
+
+    // The connection's scope state is clean: a fresh subscribe still works and
+    // no stray cancellation handle blocks it.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1', requestId: 'third' }));
+    const ack2 = await ws.nextMessage();
+    assert.equal(ack2.type, 'subscribed');
+    assert.equal(ack2.requestId, 'third');
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('alive', 'n1');
+    appendEvent(db, 'Note:n1', 3, 'Note.updated', { title: 'alive' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 3, data: { title: 'alive' } }], { db });
+    const ev2 = await ws.nextEvent(500);
+    assert.ok(ev2, 'a fresh subscribe after the superseded stale request still delivers');
+    assert.equal(ev2.seq, 3);
+    assert.equal(await ws.nextMessage(150), null, 'no stray frames after the fresh subscribe');
+  } finally {
+    live.close();
+    httpServer.close();
+    await sleep(50);
+  }
+});
+
+test('(P1d) a subscribe superseded while its activation is in flight settles silently without touching the winner', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n1', 'hello', 'u1', 'public');
+
+  // Gate the THIRD mayVerb call: admission (1) and the core.subscribe inline
+  // check (2) pass, the subscribed ack is sent, then the activation's catch-up
+  // reauthorization (3) stalls — a supersede must settle the activation without
+  // emitting a second terminal frame and without reaching the winner's state.
+  const gate = gateMayVerbCall(3);
+  const httpServer = http.createServer();
+  const live = createLiveDelivery(httpServer, {
+    mayVerb: gate.mayVerb,
+    principalOf: (req) => {
+      const u = req.headers?.['x-test-user'] ?? 'test';
+      return { type: 'user', id: u };
+    },
+    db,
+    resolveEntity: (name) => name === 'Note' ? makeNoteEntityWithGrant() : null,
+    log: null,
+  });
+  const consumer = live.createConsumer({ entities: new Map([['Note', makeNoteEntity()]]) });
+
+  httpServer.listen(0);
+  const port = httpServer.address().port;
+
+  try {
+    const ws = await openRawWS(port);
+
+    // Subscribe #1 acknowledges, then its activation stalls in catch-up.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1', requestId: 'first' }));
+    await gate.enteredPromise;
+    const ack1 = await ws.nextMessage(500);
+    assert.equal(ack1?.type, 'subscribed');
+    assert.equal(ack1.requestId, 'first');
+
+    // Subscribe #2 supersedes #1, detaching its in-flight activation, and wins.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1', requestId: 'second' }));
+    const ack2 = await ws.nextMessage(500);
+    assert.equal(ack2?.type, 'subscribed');
+    assert.equal(ack2.requestId, 'second', 'the superseding subscribe wins the ack');
+
+    // The winner is live: a committed event delivers exactly once.
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('world', 'n1');
+    appendEvent(db, 'Note:n1', 1, 'Note.updated', { title: 'world' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 1, data: { title: 'world' } }], { db });
+    const ev = await ws.nextEvent(500);
+    assert.ok(ev, 'the winner delivers after superseding the in-flight activation');
+    assert.equal(ev.seq, 1);
+    assert.equal(await ws.nextEvent(150), null, 'exactly one delivery — the superseded activation leaked nothing');
+
+    // Release the superseded activation: it abandons its catch-up, detaches and
+    // aborts only its own controller, and reports nothing — no second terminal
+    // frame, no event from the dead catch-up.
+    gate.release();
+    await sleep(200);
+    assert.equal(await ws.nextMessage(200), null, 'the superseded activation settles silently');
+
+    // No residue: a fresh subscribe still works.
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1', requestId: 'third' }));
+    const ack3 = await ws.nextMessage();
+    assert.equal(ack3.type, 'subscribed');
+    assert.equal(ack3.requestId, 'third');
+    db.prepare(`UPDATE Note SET title = ? WHERE id = ?`).run('alive', 'n1');
+    appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'alive' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.updated', seq: 2, data: { title: 'alive' } }], { db });
+    const ev2 = await ws.nextEvent(500);
+    assert.ok(ev2, 'a fresh subscribe after the superseded activation still delivers');
+    assert.equal(ev2.seq, 2);
+    assert.equal(await ws.nextMessage(150), null, 'no stray frames after the fresh subscribe');
+  } finally {
+    live.close();
+    httpServer.close();
+    await sleep(50);
+  }
+});
+
+test('(P2) core activation terminal failure emits exactly one terminal frame', async () => {
+  const db = new DatabaseSync(':memory:');
+  executeFrameworkDDL(db);
+  db.exec(`CREATE TABLE Note (id TEXT PRIMARY KEY, title TEXT, owner TEXT, workspace TEXT)`);
+  db.prepare(`INSERT INTO Note (id, title, owner, workspace) VALUES (?, ?, ?, ?)`).run('n1', 'hello', 'u1', 'public');
+
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+
+  // Hold the initial activation at its catch-up reauthorization (call 3: after
+  // admission call 1 and the core.subscribe inline check call 2). While it
+  // waits, commit an event whose type the envelope grammar cannot parse, so the
+  // resumed catch-up throws after the core has already terminally revoked.
+  const gate = gateMayVerbCall(3);
+  const httpServer = http.createServer();
+  const live = createLiveDelivery(httpServer, {
+    mayVerb: gate.mayVerb,
+    principalOf: (req) => {
+      const u = req.headers?.['x-test-user'] ?? 'test';
+      return { type: 'user', id: u };
+    },
+    db,
+    resolveEntity: (name) => name === 'Note' ? makeNoteEntityWithGrant() : null,
+    log: null,
+  });
+  const consumer = live.createConsumer({ entities: new Map([['Note', makeNoteEntity()]]) });
+
+  httpServer.listen(0);
+  const port = httpServer.address().port;
+
+  try {
+    const ws = await openRawWS(port);
+
+    ws.send(JSON.stringify({ type: 'subscribe', entity: 'Note', id: 'n1' }));
+    await gate.enteredPromise;
+
+    // The invalid committed event wakes the pending catch-up while it is gated.
+    appendEvent(db, 'Note:n1', 2, 'Note.bogus', { title: 'boom' });
+    await consumer([{ scope: 'Note:n1', type: 'Note.bogus', seq: 2, data: { title: 'boom' } }], { db });
+    gate.release();
+
+    const ack = await ws.nextMessage(500);
+    assert.ok(ack, 'subscribed acknowledgement received');
+    assert.equal(ack.type, 'subscribed');
+
+    // The activation failure surfaces as exactly ONE terminal error frame (the
+    // revoke's) — never a second 'Subscription failed.' on top of it.
+    const terminal = await ws.nextMessage(500);
+    assert.ok(terminal, 'the terminal failure reaches the connection');
+    assert.equal(terminal.type, 'error');
+    assert.equal(terminal.failure?.category, 'denied');
+    assert.equal(terminal.failure?.message, 'Subscription revoked.');
+    assert.equal(await ws.nextMessage(250), null, 'exactly one terminal frame — no duplicate error');
   } finally {
     live.close();
     httpServer.close();

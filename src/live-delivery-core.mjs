@@ -99,6 +99,12 @@ function deniedError(scope        )                            {
 
                                  
                                           
+                                                                          
+                                                                            
+                                                                            
+                                                                         
+                                                                     
+                       
  
 
                                  
@@ -160,6 +166,9 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     if (closed) throw new Error('live-delivery-core is closed');
     if (typeof snapshot !== 'function') throw new Error('live delivery bootstrap requires a snapshot function');
     if (!(await authorizeSnapshot(principal, scope))) return { kind: 'revoked' };
+    // Close can land on the awaited authorization await. Recheck so a closed
+    // core never returns recipient state.
+    if (closed) throw new Error('live-delivery-core is closed');
     // A materializer may await recipient authorization. If a commit interleaves,
     // reject rather than return a snapshot/cursor pair from different states.
     const before = readSeq(db, scope);
@@ -172,6 +181,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     // snapshot/cursor pair so a revocation during the first check never returns
     // recipient state; a later committed change is caught up from this cursor.
     if (!(await authorizeSnapshot(principal, scope))) return { kind: 'revoked' };
+    if (closed) throw new Error('live-delivery-core is closed');
     return { kind: 'snapshot', snapshot: value, cursor };
   }
 
@@ -227,26 +237,35 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  function removeSub(subId        )       {
+  // Shared internal detach: marks the subscription inactive, detaches its abort
+  // listener, and removes it from the registries. Both lifecycle paths share it
+  // — an explicit per-scope unsubscribe detaches without any transport revoke,
+  // while the terminal path (removeSub) follows detach with revoke exactly once.
+  function detachSub(subId        )                      {
     const sub = subs.get(subId);
-    if (!sub) return;
+    if (!sub) return undefined;
     sub.active = false;
-    subs.delete(subId);
     if (sub.signal && typeof sub.signal.removeEventListener === 'function') {
       try { sub.signal.removeEventListener('abort', sub._abortHandler              ); } catch { /* ignore */ }
     }
+    subs.delete(subId);
     const set = byScope.get(sub.scope);
     if (set) {
       set.delete(subId);
       if (set.size === 0) byScope.delete(sub.scope);
     }
+    return sub;
   }
 
-  function revokeSub(subId        )       {
-    const sub = subs.get(subId);
+  // Singular terminal lifecycle: every terminal removal path (read/projection/
+  // delivery error, terminal removal, abort, close) flows through here. It
+  // detaches then invokes the transport revoke exactly once so SSE ends and its
+  // capacity releases. The subs.get guard makes later removals, aborts, and
+  // close() calls no-ops, so nothing double-releases.
+  function removeSub(subId        )       {
+    const sub = detachSub(subId);
     if (!sub) return;
     try { sub.revoke?.(); } catch { /* transport lifecycle callbacks are isolated */ }
-    removeSub(subId);
   }
 
   async function catchUp(subId        )                {
@@ -281,8 +300,8 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         const deliverableEvents = auth
           ? events
           : terminalRemoval ? events : [];
-        if (!auth && !terminalRemoval) { revokeSub(subId); log?.error?.('live', 'reauth denied', { scope: sub.scope }); return; }
-        if (auth && !(await checkMayRow(sub.entityRec, auth.row, sub.principal))) { revokeSub(subId); log?.error?.('live', 'mayRow denied', { scope: sub.scope }); return; }
+        if (!auth && !terminalRemoval) { removeSub(subId); log?.error?.('live', 'reauth denied', { scope: sub.scope }); return; }
+        if (auth && !(await checkMayRow(sub.entityRec, auth.row, sub.principal))) { removeSub(subId); log?.error?.('live', 'mayRow denied', { scope: sub.scope }); return; }
         if (!sub.active) return;
         const resyncEnvelope = sub.resyncEnvelope;
         if (events.length === 0 && !resyncEnvelope) {
@@ -406,6 +425,9 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
       log?.error?.('live', 'subscribe denied', { scope });
       throw deniedError(scope);
     }
+    // Close can land on the awaited admission await. Recheck before insertion
+    // so a closed core never installs a stranded subscription.
+    if (closed) throw new Error('live-delivery-core is closed');
     const subId = generateSubId();
     const sub          = { entityRec, principal, deliver, revoke, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true, document };
     subs.set(subId, sub);
@@ -438,7 +460,11 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
       }
       return current.activation;
     }
-    if (paused) return { activate };
+    if (paused) return { activate, unsubscribe: () => detachSub(subId) };
+    if (closed) {
+      removeSub(subId);
+      throw new Error('live-delivery-core is closed');
+    }
     await activate();
   }
 
@@ -487,7 +513,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     // response only via revoke) release their connections. Marking inactive
     // without revoking left sockets open and pinned server.close() forever.
     for (const subId of [...subs.keys()]) {
-      revokeSub(subId);
+      removeSub(subId);
     }
     subs.clear();
     byScope.clear();
@@ -498,6 +524,9 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
       throw new Error(`after must be a nonnegative safe integer, got ${after}`);
     }
     const authorized = await authorizeSnapshot(principal, scope);
+    // Close can land on the awaited admission await. Recheck so a closed core
+    // never installs the paused catch-up subscription.
+    if (closed) throw new Error('live-delivery-core is closed');
     if (!authorized) {
       const handle = tryParseScopeKey(scope);
       const entityRec = handle ? resolveEntity(handle.entity) : null;
@@ -529,7 +558,12 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
     try {
       const cursor = await activation .activate();
-      return revoked ? { kind: 'revoked' } : { kind: 'catchup', envelopes, cursor };
+      // A terminal removal delivers its removal envelope first and only then
+      // revokes through the one removal path (the row is gone, so the stream
+      // legitimately ends). That post-delivery revoke must not turn a delivered
+      // catch-up into a revocation — only a revoke that delivered nothing is a
+      // genuine revocation (admission/reauth denial before any envelope).
+      return revoked && envelopes.length === 0 ? { kind: 'revoked' } : { kind: 'catchup', envelopes, cursor };
     } finally {
       controller.abort();
     }

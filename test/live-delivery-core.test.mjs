@@ -330,7 +330,7 @@ test('terminal removal delivers after its authorization row is deleted', async (
   await sleep(30);
 
   assert.deepEqual(delivered.map((event) => event.type), ['Note.removed']);
-  assert.equal(revoked, false);
+  assert.equal(revoked, true, 'the terminal removal ends the stream through the one removal path');
   core.close();
 });
 
@@ -1460,4 +1460,343 @@ test('(R6) paused subscription records wakes and only delivers after activation'
   assert.equal(delivered.length, 1);
   assert.equal(delivered[0].seq, 1);
   core.close();
+});
+
+// ---- (g) singular terminal lifecycle: closed rechecks, revoke, reentrancy ----
+
+test('(15) close during awaited subscribe authorization never installs a subscription', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'first' });
+
+  let enteredAuth;
+  let releaseAuth;
+  const authEntered = new Promise((resolve) => { enteredAuth = resolve; });
+  const authGate = new Promise((resolve) => { releaseAuth = resolve; });
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: async () => { enteredAuth(); await authGate; return true; },
+    projectRecipient: simpleProjector,
+  });
+
+  const delivered = [];
+  let revokes = 0;
+  const subscribing = core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null,
+    deliver: async (batch) => { delivered.push(...batch); },
+    revoke: () => { revokes += 1; },
+  });
+  await authEntered;
+  core.close();
+  releaseAuth();
+  await assert.rejects(subscribing, /is closed/);
+  assert.equal(delivered.length, 0, 'no delivery from a subscribe that closed mid-admission');
+  assert.equal(revokes, 0, 'no subscription was installed, so nothing to revoke');
+  core.close();
+});
+
+test('(16) close during awaited bootstrap authorization rejects instead of returning a snapshot', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'first' });
+
+  let enteredAuth;
+  let releaseAuth;
+  const authEntered = new Promise((resolve) => { enteredAuth = resolve; });
+  const authGate = new Promise((resolve) => { releaseAuth = resolve; });
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: async () => { enteredAuth(); await authGate; return true; },
+    projectRecipient: simpleProjector,
+  });
+
+  const bootstrapping = core.bootstrap({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1',
+    snapshot: async ({ scope: snapshotScope }) => core.snapshot({ principal: { type: 'user', id: 'u1' }, scope: snapshotScope }),
+  });
+  await authEntered;
+  core.close();
+  releaseAuth();
+  await assert.rejects(bootstrapping, /is closed/);
+  core.close();
+});
+
+test('(17) catchup rechecks closed after its awaited authorization', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'first' });
+
+  let enteredAuth;
+  let releaseAuth;
+  const authEntered = new Promise((resolve) => { enteredAuth = resolve; });
+  const authGate = new Promise((resolve) => { releaseAuth = resolve; });
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: async () => { enteredAuth(); await authGate; return true; },
+    projectRecipient: simpleProjector,
+  });
+
+  const catching = core.catchup({ principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0 });
+  await authEntered;
+  core.close();
+  releaseAuth();
+  await assert.rejects(catching, /is closed/);
+  core.close();
+});
+
+test('(18) terminal delivery error removal revokes the transport exactly once', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'first' });
+
+  let revokes = 0;
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+
+  await assert.rejects(
+    () => core.subscribe({
+      principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null,
+      deliver: async () => { throw new Error('delivery boom'); },
+      revoke: () => { revokes += 1; },
+    }),
+    /delivery callback threw/,
+  );
+  assert.equal(revokes, 1, 'a terminal delivery error revokes exactly once');
+  core.close();
+});
+
+test('(19) revoke is reentrant-safe: close and abort from inside the callback never double-release', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'first' });
+
+  const controller = new AbortController();
+  let revokes = 0;
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+
+  const subscription = await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: controller.signal, paused: true,
+    deliver: async () => {},
+    revoke: () => {
+      revokes += 1;
+      core.close();
+      controller.abort();
+      core.close();
+      controller.abort();
+    },
+  });
+  assert.equal(await subscription.activate(), 1);
+  core.close();
+  assert.equal(revokes, 1, 'a reentrant close/abort from inside revoke never double-releases');
+  core.close();
+  controller.abort();
+  assert.equal(revokes, 1, 'repeated close and abort after removal stay no-ops');
+});
+
+test('(20) a throwing revoke callback is isolated and releases exactly once', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'first' });
+
+  let revokes = 0;
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+
+  const subscription = await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null, paused: true,
+    deliver: async () => {},
+    revoke: () => { revokes += 1; throw new Error('transport revoke boom'); },
+  });
+  assert.equal(await subscription.activate(), 1);
+  assert.doesNotThrow(() => core.close());
+  assert.equal(revokes, 1, 'close reaches the revoke once and isolates its throw');
+  assert.doesNotThrow(() => core.close());
+  assert.equal(revokes, 1, 'a second close is a no-op');
+});
+
+test('(21) wake during an active delivery drains the second batch before quiescence', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'first' });
+
+  let enteredDelivery;
+  let releaseDelivery;
+  const deliveryEntered = new Promise((resolve) => { enteredDelivery = resolve; });
+  const deliveryGate = new Promise((resolve) => { releaseDelivery = resolve; });
+  let first = true;
+  const delivered = [];
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+
+  const subscribing = core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, signal: null,
+    deliver: async (batch) => {
+      if (first) {
+        first = false;
+        enteredDelivery();
+        await deliveryGate;
+      }
+      delivered.push(...batch);
+    },
+  });
+  await deliveryEntered;
+  appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'second' });
+  core.wake('Note:n1');
+  releaseDelivery();
+  await subscribing;
+  assert.deepEqual(delivered.map((event) => event.seq), [1, 2], 'wake during the gated delivery drains the second batch');
+  core.close();
+});
+
+// ---- (h) explicit per-scope unsubscribe vs terminal removal ----
+
+test('(22) explicit unsubscribe detaches without revoke; other scopes stay alive', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  insertRow(db, 'n2', 'world');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+  appendEvent(db, 'Note:n2', 1, 'Note.created', { title: 'world' });
+
+  const deliveredA = [];
+  const deliveredB = [];
+  let revokesA = 0;
+  let revokesB = 0;
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+
+  const subA = await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, paused: true, signal: null,
+    deliver: async (batch) => deliveredA.push(...batch),
+    revoke: () => { revokesA += 1; },
+  });
+  const subB = await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n2', after: 0, paused: true, signal: null,
+    deliver: async (batch) => deliveredB.push(...batch),
+    revoke: () => { revokesB += 1; },
+  });
+  await subA.activate();
+  await subB.activate();
+  assert.equal(deliveredA.length, 1);
+  assert.equal(deliveredB.length, 1);
+
+  // Per-scope unsubscribe is genuinely non-terminal: no transport revoke.
+  subA.unsubscribe();
+
+  appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'ignored' });
+  core.wake('Note:n1');
+  await sleep(30);
+  assert.equal(deliveredA.length, 1, 'no delivery to an unsubscribed scope');
+  assert.equal(revokesA, 0, 'explicit unsubscribe does not revoke the transport');
+
+  appendEvent(db, 'Note:n2', 2, 'Note.updated', { title: 'delivered' });
+  core.wake('Note:n2');
+  await sleep(30);
+  assert.equal(deliveredB.length, 2, 'the other scope still delivers');
+
+  core.close();
+  assert.equal(revokesA, 0, 'close does not revive a detached subscription');
+  assert.equal(revokesB, 1, 'close terminally revokes the remaining subscription exactly once');
+  core.close();
+  assert.equal(revokesB, 1, 'repeated close stays a no-op');
+});
+
+test('(23) explicit unsubscribe leaves no registry residue — wake, abort, and close stay no-ops', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+
+  const delivered = [];
+  let revokes = 0;
+  const controller = new AbortController();
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+
+  const sub = await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, paused: true, signal: controller.signal,
+    deliver: async (batch) => delivered.push(...batch),
+    revoke: () => { revokes += 1; },
+  });
+  assert.equal(await sub.activate(), 1);
+
+  sub.unsubscribe();
+  assert.equal(revokes, 0, 'unsubscribe is non-terminal');
+
+  // A second unsubscribe, the abort signal, wake, and close all observe the
+  // subscription already detached — nothing double-releases.
+  sub.unsubscribe();
+  controller.abort();
+  appendEvent(db, 'Note:n1', 2, 'Note.updated', { title: 'after' });
+  core.wake('Note:n1');
+  await sleep(30);
+  core.close();
+  controller.abort();
+  core.close();
+
+  assert.equal(delivered.length, 1, 'nothing delivered after unsubscribe');
+  assert.equal(revokes, 0, 'abort and close after an explicit unsubscribe never revoke');
+});
+
+test('(24) terminal abort still revokes exactly once alongside an explicitly unsubscribed scope', async () => {
+  const db = makeDb();
+  insertRow(db, 'n1', 'hello');
+  insertRow(db, 'n2', 'world');
+  appendEvent(db, 'Note:n1', 1, 'Note.created', { title: 'hello' });
+  appendEvent(db, 'Note:n2', 1, 'Note.created', { title: 'world' });
+
+  let revokes = 0;
+  const controller = new AbortController();
+  const core = createLiveDeliveryCore({
+    db,
+    entities: new Map([['Note', makeEntityRecord('Note')]]),
+    mayVerb: alwaysAllow,
+    projectRecipient: simpleProjector,
+  });
+
+  const subA = await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n1', after: 0, paused: true, signal: null,
+    deliver: async () => {},
+    revoke: () => { revokes += 1; },
+  });
+  const subB = await core.subscribe({
+    principal: { type: 'user', id: 'u1' }, scope: 'Note:n2', after: 0, paused: true, signal: controller.signal,
+    deliver: async () => {},
+    revoke: () => { revokes += 1; },
+  });
+  await subA.activate();
+  await subB.activate();
+
+  subA.unsubscribe();
+  controller.abort();
+  assert.equal(revokes, 1, 'transport abort still terminally revokes the abortable scope exactly once');
+
+  core.close();
+  assert.equal(revokes, 1, 'no double-release from close after abort');
 });

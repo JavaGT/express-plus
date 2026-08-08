@@ -121,6 +121,39 @@ test('HTTP delivery reports an initial subscription revocation as forbidden', as
   } finally { server.close(); }
 });
 
+test('HTTP SSE terminal revoke ends the response and releases capacity for a second stream', async () => {
+  let subscriptions = 0;
+  const delivery = {
+    bootstrap: async () => ({ kind: 'revoked' }),
+    catchup: async () => ({ kind: 'revoked' }),
+    subscribe(input) {
+      subscriptions += 1;
+      return {
+        activate: async () => {
+          // Terminal error removal: write the frame, then revoke so SSE ends.
+          if (input.deliver) await input.deliver([{ type: 'event', seq: 1, event: { type: 'Project.updated', data: { name: 'one' } } }]);
+          input.revoke();
+          return undefined;
+        },
+      };
+    },
+  };
+  const handler = createLiveDeliveryHttpHandler({ delivery, principalOf: () => ({ type: 'user', id: 'u1' }), maxSubscriptions: 1 });
+  const { server, baseUrl } = await serve(handler);
+  try {
+    const first = await fetch(`${baseUrl}/events?scope=Project%3Ap1&after=0`);
+    assert.equal(first.status, 200);
+    const body = await first.text();
+    assert.ok(body.includes('Project.updated'), 'the terminal frame was written before the revoke ended the stream');
+
+    // Capacity released: the single reserved slot is reusable by a second stream.
+    const second = await fetch(`${baseUrl}/events?scope=Project%3Ap1&after=0`);
+    assert.equal(second.status, 200, 'capacity freed by the first revoke is reused, not a 503');
+    await second.text();
+    assert.equal(subscriptions, 2, 'both streams reached the delivery seam');
+  } finally { server.close(); }
+});
+
 test('HTTP session delegates duplicate, gap and opaque resync recovery to the package session', async () => {
   const requests = [];
   const sources = [];
