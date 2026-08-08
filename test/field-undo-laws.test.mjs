@@ -22,7 +22,7 @@ test('canUndoField returns false for non-invertible kinds', () => {
 test('undoableFieldKinds lists only invertible kinds', () => {
   const kinds = undoableFieldKinds();
   assert.ok(kinds.includes('value'));
-  assert.ok(kinds.includes('crdt'));
+  assert.ok(!kinds.includes('crdt'), 'crdt is not invertible, so generic undo is unavailable');
   assert.ok(kinds.includes('store'));
   assert.ok(kinds.includes('ordered'));
   assert.ok(kinds.includes('struct'));

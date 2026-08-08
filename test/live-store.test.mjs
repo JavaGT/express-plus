@@ -102,6 +102,22 @@ describe('LiveStore', () => {
     assert.deepEqual(JSON.parse(calls[0].options.body), { operation });
   });
 
+  it('apply labels a local serialization failure failed-rolled-back, never outcome-unknown', async () => {
+    const channel = makeFakeChannel();
+    let fetchCalled = false;
+    const fetch = async () => {
+      fetchCalled = true;
+      return { ok: true, status: 200, headers: { get: () => null }, json: async () => ({}) };
+    };
+    const store = createLiveStore({ baseUrl: 'http://test', name: 'Doc', path: '/docs', channel, fetchImpl: fetch });
+    const result = await store.apply('1', 'body', { payload: 1n });
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 'failed-rolled-back');
+    assert.equal(result.failure.category, 'invalid-input');
+    assert.equal(fetchCalled, false, 'fetch must not fire when the body cannot be encoded');
+    store.close();
+  });
+
   // --- 1. subscribe(id) returns LiveList, caches by id ---
   it('subscribe returns LiveList, caches by id (same id returns same instance)', async () => {
     const channel = makeFakeChannel();

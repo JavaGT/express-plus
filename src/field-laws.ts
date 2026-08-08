@@ -1,4 +1,4 @@
-import { lawsOf } from './field-strategy.ts';
+import { lawsOf, STRATEGIES } from './field-strategy.ts';
 
 export function canUndoField(kind: string): boolean {
   const laws = lawsOf(kind) as { invertible?: boolean };
@@ -6,5 +6,5 @@ export function canUndoField(kind: string): boolean {
 }
 
 export function undoableFieldKinds(): string[] {
-  return ['value', 'crdt', 'store', 'ordered', 'struct', 'state'];
+  return Object.keys(STRATEGIES).filter((kind) => lawsOf(kind).invertible === true);
 }

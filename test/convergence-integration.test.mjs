@@ -288,7 +288,7 @@ test('W5: canUndoField surfaces the undo vocabulary', () => {
 
   const kinds = undoableFieldKinds();
   assert.ok(kinds.includes('value'));
-  assert.ok(kinds.includes('crdt'));
+  assert.ok(!kinds.includes('crdt'));
   assert.ok(!kinds.includes('hash'));
   assert.ok(!kinds.includes('computed'));
 });

@@ -568,7 +568,8 @@ export interface ScopeOperation<Payload = unknown> {
 
 export type ScopeDispatchResult =
   | { ok: true; status: 'committed'; opId: string; value?: unknown }
-  | { ok: false; status: 'failed-rolled-back'; opId: string; failure: unknown };
+  | { ok: false; status: 'failed-rolled-back'; opId: string; failure: unknown }
+  | { ok: false; status: 'outcome-unknown'; opId: string; failure: unknown };
 
 export interface ScopeLiveStoreConfig<Snapshot> {
   baseUrl: string;

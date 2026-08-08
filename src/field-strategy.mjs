@@ -159,7 +159,7 @@ function structDiff(previous         , next         , descriptor                
 // table, the field constructors in field.mjs, and the resolveStrategy error
 // message. The deletion test (AGENTS.md) confirms that kind absorbs strategy
 // (concentrates), rather than relocating it onto each descriptor.
-const STRATEGIES                                          = Object.freeze({
+export const STRATEGIES                                          = Object.freeze({
   // `value` — a single stored value with whole-value diff. apply replaces;
   // diff is a whole-value set, null when unchanged.
   value: Object.freeze({

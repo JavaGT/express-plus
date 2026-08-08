@@ -113,10 +113,42 @@ describe('ScopeLiveStore', () => {
     const result = await store.dispatch('Value.add', { value: 'no' });
 
     assert.equal(result.status, 'failed-rolled-back');
+    assert.equal(result.failure.category, 'internal');
     assert.deepEqual(store.snapshot, { values: [] });
     assert.equal(store.pendingCount(), 0);
     assert.equal(store.failedCount(), 1);
     assert.equal(store.operations()[0].error.message, 'denied');
+    store.close();
+  });
+
+  it('labels a sendAction transport throw outcome-unknown and retains the failed operation', async () => {
+    const { store } = setup({ sendAction: async () => { throw new Error('network down'); } });
+    await store.ready;
+    const result = await store.dispatch('Value.add', { value: 'no' });
+
+    assert.equal(result.status, 'outcome-unknown');
+    assert.equal(result.failure.category, 'internal');
+    assert.equal(result.failure.message, 'network down');
+    assert.equal(store.failedCount(), 1, 'the failed placeholder is retained as a visible operation');
+    const operation = store.operations()[0];
+    assert.equal(operation.status, 'failed');
+    assert.equal(operation.error.category, 'internal');
+    assert.equal(operation.error.message, 'network down');
+    store.close();
+  });
+
+  it('reconciles a retained outcome-unknown operation when its committed echo arrives', async () => {
+    const { store, channel } = setup({ sendAction: async () => { throw new Error('network down'); } });
+    await store.ready;
+    const result = await store.dispatch('Value.add', { value: 'no' });
+
+    assert.equal(result.status, 'outcome-unknown');
+    assert.equal(store.failedCount(), 1);
+
+    channel.emit(2, 'Value.added', { value: 'no' }, result.opId);
+    assert.deepEqual(store.snapshot, { values: ['no'] });
+    assert.equal(store.failedCount(), 0, 'the committed echo reconciles the retained operation');
+    assert.equal(store.pendingCount(), 0);
     store.close();
   });
 

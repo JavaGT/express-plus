@@ -1491,6 +1491,17 @@ function clientFailure(category, message, details) {
   return { category, message, ...(details === undefined ? {} : { details }) };
 }
 
+function normalizeFailure(value) {
+  if (isWorkbenchFailure(value)) return value;
+  const raw = value?.message ?? value?.error ?? value;
+  const message = typeof raw === 'string'
+    ? raw
+    : raw && typeof raw === 'object' && typeof raw.message === 'string'
+      ? raw.message
+      : String(raw);
+  return clientFailure('internal', message);
+}
+
 export async function decodeResult(res) {
   if (res.status === 204) {
     return { ok: true, httpStatus: 204, value: undefined };
@@ -1869,11 +1880,13 @@ export function createLiveStore({ baseUrl, name, path, channel, fetchImpl, repli
         return { ok: false, status: 'failed-rolled-back', opId, failure: clientFailure('invalid-input', 'text operation requires { id, operation }') };
       }
       let requestAttempted = false;
+      let body;
       try {
+        body = JSON.stringify({ operation: payload.operation });
         requestAttempted = true;
         const res = await resolvedFetch(`${baseUrl}${path}/${payload.id}/${fieldName}/apply`, {
           method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ operation: payload.operation }),
+          body,
         });
         const decoded = await decodeResult(res);
         if (!decoded.ok) return decoded.failure
@@ -3731,7 +3744,11 @@ export function createScopeLiveStore({
     const ownOperation = event.actionId ? operations.get(event.actionId) : null;
     if (ownOperation) {
       ownOperation.echoCursor = cursor;
-      if (ownOperation.delivered && (ownOperation.confirmedCursor == null || cursor >= ownOperation.confirmedCursor)) {
+      // A committed echo for this actionId proves the action committed, so it
+      // reconciles the operation even when it was retained as an
+      // outcome-unknown placeholder (delivered is false) after a transport throw.
+      const reconcile = ownOperation.delivered || ownOperation.status === 'failed';
+      if (reconcile && (ownOperation.confirmedCursor == null || cursor >= ownOperation.confirmedCursor)) {
         operations.delete(event.actionId);
       }
     }
@@ -3828,7 +3845,7 @@ export function createScopeLiveStore({
       const receipt = await sendAction(action);
       if (receipt?.ok === false) {
         operation.status = 'failed';
-        operation.error = receipt.failure ?? receipt.error ?? receipt;
+        operation.error = normalizeFailure(receipt.failure ?? receipt.error ?? receipt);
         publish();
         return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: operation.error };
       }
@@ -3843,9 +3860,9 @@ export function createScopeLiveStore({
       return { ok: true, status: 'committed', opId: actionId, value: receipt?.value };
     } catch (error) {
       operation.status = 'failed';
-      operation.error = error;
+      operation.error = clientFailure('internal', String(error?.message ?? error));
       publish();
-      return { ok: false, status: 'failed-rolled-back', opId: actionId, failure: error };
+      return { ok: false, status: 'outcome-unknown', opId: actionId, failure: operation.error };
     }
   }
 

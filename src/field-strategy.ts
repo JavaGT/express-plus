@@ -159,7 +159,7 @@ export interface FieldStrategy {
 // table, the field constructors in field.mjs, and the resolveStrategy error
 // message. The deletion test (AGENTS.md) confirms that kind absorbs strategy
 // (concentrates), rather than relocating it onto each descriptor.
-const STRATEGIES: Readonly<Record<string, FieldStrategy>> = Object.freeze({
+export const STRATEGIES: Readonly<Record<string, FieldStrategy>> = Object.freeze({
   // `value` — a single stored value with whole-value diff. apply replaces;
   // diff is a whole-value set, null when unchanged.
   value: Object.freeze({
