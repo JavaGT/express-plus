@@ -185,7 +185,7 @@ export function appliedWorkbenchVersion(db          )         {
   return row?.v ?? 0;
 }
 
-export async function runWorkbenchMigrations(db          , { now = () => new Date().toISOString() }                         = {}) {
+export function runWorkbenchMigrations(db          , { now = () => new Date().toISOString() }                         = {}) {
   // Read-only pre-flight: avoid opening the exclusive transaction when the
   // ledger already records every migration. This never creates the table, so
   // a fresh DB (no ledger, no migration work) takes the same early return.
@@ -198,7 +198,8 @@ export async function runWorkbenchMigrations(db          , { now = () => new Dat
   // read, every migration's rebuild, and the version-record insert commit or
   // roll back together (Sol ruling 5175490719). exclusiveTxn owns the
   // BEGIN EXCLUSIVE / COMMIT / ROLLBACK bracket; the lane's work is the body.
-  await exclusiveTxn(db, () => {
+  // Synchronous: the migration lane's body has no awaits.
+  exclusiveTxn(db, () => {
     ensureWorkbenchMigrationTable(db);
     const current = (db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM _WorkbenchMigration').get()                 ).v;
     for (const migration of WORKBENCH_MIGRATIONS) {

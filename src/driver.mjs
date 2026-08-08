@@ -7,7 +7,8 @@
 //     prepare(sql) -> { run(...args), get(...args), all(...args) },
 //     exec(sql),
 //     txn(fn)            -> async; BEGIN IMMEDIATE / await fn() / COMMIT, ROLLBACK on throw,
-//     exclusiveTxn(fn)   -> async; BEGIN EXCLUSIVE / await fn() / COMMIT, ROLLBACK on throw
+//     exclusiveTxn(fn)   -> sync; BEGIN EXCLUSIVE / fn() / COMMIT inside the try so a
+//                          failing COMMIT still ROLLBACKs
 //                         (the exclusive-upgrade lane — e.g. package schema migrations),
 //     readSnapshotTxn(fn)-> async; BEGIN (deferred) / await fn() / COMMIT in a finally,
 //                         never ROLLBACK — a read-only consistent snapshot that does NOT
@@ -53,7 +54,7 @@
                                     
                              
                                                                    
-                                                                            
+                                                
                                                                                
                      
                       
@@ -70,11 +71,16 @@
 
 // ---- SQLite default implementations (the fallback + the wrapped-handle body) ----
 
+// COMMIT inside the try: a failing COMMIT still attempts ROLLBACK so a
+// transaction that could not be committed does not stay open with uncertain
+// state. The commit-loop writer relies on single-writer semantics — leaving an
+// uncommitted txn behind would be a durability hazard.
 async function sqliteTxn(db          , fn               )                   {
   db.exec('BEGIN IMMEDIATE');
-  let result         ;
   try {
-    result = await fn();
+    const result = await fn();
+    db.exec('COMMIT');
+    return result;
   } catch (err) {
     try {
       db.exec('ROLLBACK');
@@ -83,18 +89,19 @@ async function sqliteTxn(db          , fn               )                   {
     }
     throw err;
   }
-  db.exec('COMMIT');
-  return result;
 }
 
-// Exclusive-upgrade lane: BEGIN EXCLUSIVE / await fn / COMMIT, ROLLBACK on throw
-// — the same shape as sqliteTxn but with the exclusive variant. Used by the
-// package schema migrations where deferred would break the one-lane ruling.
-async function sqliteExclusiveTxn(db          , fn               )                   {
+// Exclusive-upgrade lane: BEGIN EXCLUSIVE / fn() / COMMIT inside the try so a
+// failing COMMIT still attempts ROLLBACK — the same shape as sqliteTxn but with
+// the exclusive variant. Used by the package schema migrations where deferred
+// would break the one-lane ruling. Synchronous: the migration lane's body has
+// no awaits.
+function sqliteExclusiveTxn(db          , fn               )          {
   db.exec('BEGIN EXCLUSIVE');
-  let result         ;
   try {
-    result = await fn();
+    const result = fn();
+    db.exec('COMMIT');
+    return result;
   } catch (err) {
     try {
       db.exec('ROLLBACK');
@@ -103,8 +110,6 @@ async function sqliteExclusiveTxn(db          , fn               )              
     }
     throw err;
   }
-  db.exec('COMMIT');
-  return result;
 }
 
 // Read-only consistent snapshot: BEGIN (deferred, no write lock) / await fn /
@@ -164,7 +169,7 @@ export async function txn(db          , fn               )                   {
   return sqliteTxn(db, fn);
 }
 
-export async function exclusiveTxn(db          , fn               )                   {
+export function exclusiveTxn(db          , fn               )          {
   if (typeof db.exclusiveTxn === 'function') return db.exclusiveTxn(fn);
   return sqliteExclusiveTxn(db, fn);
 }

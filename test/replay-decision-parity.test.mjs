@@ -80,7 +80,6 @@ test('workbench-client embeds a replay-decision that behaves identically to src'
     [0, true, { kind: 'next', cursor: 1 }],
     ['4', 5, { kind: 'next', cursor: 5 }],
     [NaN, 1, { kind: 'next', cursor: 1 }],
-    [Infinity, 5, { kind: 'duplicate' }],
     [2, [2.5, 4.5], { kind: 'next', cursor: 4.5 }],
   ];
   for (const [cursor, seqOrSpan, expected] of corpus) {
@@ -112,6 +111,12 @@ test('workbench-client embeds a replay-decision that behaves identically to src'
     assert.equal(embeddedError.message, srcError.message);
     assert.equal(embeddedError.name, srcError.name);
   }
+
+  // Parity-only for the Infinity cursor: both implementations must agree, but
+  // the Infinity-cursor verdict (every finite event is a duplicate) is a
+  // poisoned-cursor hazard — NOT blessed as intended behavior here. See the
+  // coercion note in src/replay-decision.ts.
+  assert.deepEqual(embedded.decideReplay(Infinity, 5), decideReplay(Infinity, 5), 'embedded and src agree on an Infinity cursor');
 });
 
 test('createClient is span-aware via decideReplay (shared core)', async () => {

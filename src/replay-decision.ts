@@ -38,11 +38,15 @@ export function normalizeSeqSpan(
  * @param cursor - last applied sequence (0 before any event)
  * @param seqOrSpan - event seq or [lo, hi] span
  *
- * Defensive cursor coercion: a non-finite/NaN `cursor` is treated as 0
- * (`Number(cursor) || 0`), so a poisoned local cursor falls back to
- * "expected seq 1" and every finite event is a `duplicate` rather than
- * crashing — fail-closed. This coercion is load-bearing (the browser embed
- * shares it; the parity test blesses it).
+ * Defensive cursor coercion: a falsy cursor (`undefined`, `null`, `NaN`, `0`)
+ * is treated as 0 via `Number(cursor) || 0`, so a missing or poisoned local
+ * cursor falls back to "expected seq 1" — every finite event is a `duplicate`
+ * rather than crashing. This coercion is load-bearing (the browser embed shares
+ * it; the parity test blesses it). NOTE: `Infinity` is truthy and is NOT
+ * coerced — an `Infinity` cursor makes every finite event a `duplicate`
+ * indefinitely. That is a poisoned-cursor hazard, not a supported recovery
+ * path; callers must never persist an `Infinity` cursor. The parity test does
+ * not bless `Infinity` as expected behavior (it would freeze replay recovery).
  */
 export function decideReplay(
   cursor: number,

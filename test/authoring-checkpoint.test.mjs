@@ -407,7 +407,7 @@ test('A8-rollback: induced migration failure rolls back and leaves legacy schema
   // a trigger that aborts the rebuild). Simplest: a BEFORE DELETE trigger on
   // legacy position that aborts — failure inside the exclusive txn rolls back.
   db.exec(`CREATE TRIGGER fail_migration BEFORE DELETE ON ${prefix}_authoring_position BEGIN SELECT RAISE(ABORT, 'injected failure'); END;`);
-  await assert.rejects(runWorkbenchMigrations(db), /injected failure/);
+  assert.throws(() => runWorkbenchMigrations(db), /injected failure/);
 
   // Rollback: legacy shape preserved, version not recorded, no partial state.
   assert.equal(appliedWorkbenchVersion(db), 0, 'no version on rollback');
@@ -459,7 +459,7 @@ test('A8-incomplete: partial authoring family fails closed and rolls back', asyn
   // Omit the authoring_group table → incomplete legacy family.
   db.exec('DROP TABLE Doc_body_authoring_group');
 
-  await assert.rejects(runWorkbenchMigrations(db), /incomplete authoring stream table family/);
+  assert.throws(() => runWorkbenchMigrations(db), /incomplete authoring stream table family/);
   assert.equal(appliedWorkbenchVersion(db), 0, 'no version recorded on fail-closed refusal');
   // The legacy position table is untouched (nothing cleared).
   const positionColumns = new Set(db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => r.name));
