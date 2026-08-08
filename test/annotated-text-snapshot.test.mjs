@@ -61,6 +61,7 @@ test('materializes a blockless recipient into public immutable shapes', () => {
     annotations: [{ id: 'a1', family: 'coding', fields: {} }],
     orphans: [],
     measurements: [{ id: 'm1', family: 'words', formatVersion: 1, payload: {} }],
+    capabilities: [],
   });
   assert.ok(Object.isFrozen(document));
   assert.ok(Object.isFrozen(document.ranges[0]));
@@ -68,10 +69,32 @@ test('materializes a blockless recipient into public immutable shapes', () => {
   assert.ok(Object.isFrozen(document.annotations[0].fields));
   assert.ok(Object.isFrozen(document.orphans));
   assert.ok(Object.isFrozen(document.measurements[0]));
+  assert.ok(Object.isFrozen(document.capabilities));
   // No block-era or binding-era keys leak into the public document.
   for (const absent of ['basis', 'authoring', 'blocks', 'blockGroups', 'memberships', 'capabilityHints']) {
     assert.equal(absent in document, false, `${absent} must not leak`);
   }
+});
+
+test('projects capabilityHints into the public capabilities array (restricted recipients are review-only)', () => {
+  const document = materializeAnnotatedTextSnapshot(recipient({ capabilityHints: ['edit', 'body.read'] }));
+  assert.deepEqual(document.capabilities, ['edit', 'body.read']);
+  assert.ok(Object.isFrozen(document.capabilities));
+  assert.equal('capabilityHints' in document, false);
+
+  const plain = materializeAnnotatedTextSnapshot(recipient());
+  assert.deepEqual(plain.capabilities, []);
+
+  const restricted = materializeAnnotatedTextSnapshot(recipient({
+    restricted: true,
+    text: '',
+    ranges: [],
+    annotations: [],
+    orphans: [],
+    measurements: [],
+  }));
+  assert.equal(restricted.restricted, true);
+  assert.equal(restricted.capabilities, null);
 });
 
 test('materializes document-level redactions without expanding text', () => {

@@ -43,6 +43,11 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
     annotations: snapshot.annotations.map((a) => ({ id: a.id, family: a.family, fields: { ...a.fields }, ...(a.owner ? { owner: a.owner } : {}) })),
     orphans: (snapshot.orphans ?? []).map((o) => ({ id: o.id, family: o.family, fields: { ...o.fields }, savedQuote: o.savedQuote, ...(o.owner ? { owner: o.owner } : {}) })),
     measurements: (snapshot.measurements ?? []).map((m) => ({ ...m })),
+    // Authoring capability signal: the wire envelope carries `capabilityHints`
+    // (granted capability names); project them into the public `capabilities`
+    // array the host uses to expose authoring affordances. A restricted
+    // recipient is review-only and exposes `capabilities: null`.
+    capabilities: snapshot.restricted ? null : (snapshot.capabilityHints ? [...snapshot.capabilityHints] : []),
     ...(snapshot.restricted ? { restricted: true } : {}),
     ...(snapshot.redactions?.length ? { redactions: snapshot.redactions.map((r) => ({ start: r.start, end: r.end, placeholder: r.placeholder })) } : {}),
   });
