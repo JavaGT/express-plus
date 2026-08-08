@@ -7,8 +7,8 @@ import {
   resolveOffsetToEndpoint,
   restoreTextFamily,
 } from './annotated-text-continuous.mjs';
-
-
+                                                                           
+                                                                     
 import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
 
 // Word evidence is the general, framework-native form of the old timing-only
@@ -26,20 +26,20 @@ import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
 
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 
+                                                
+                              
+                                 
+                                              
+ 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
+                                                
+                      
+                                  
+                                          
+                                        
+                                             
+                                                                                                               
+ 
 
 export function assertWordEvidenceFamilyName(name        )       {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
@@ -190,12 +190,12 @@ function upsertStatement(db          , tableName        )              {
  * idempotency: one `${scope}:${committedEventId}` key, one DB transaction
  * covering every block, word and family in the event.
  */
-export function createWordEvidenceConsumer({ db, entityName, fieldName, tableName, families }
-
-
-
-
-
+export function createWordEvidenceConsumer({ db, entityName, fieldName, tableName, families }   
+               
+                     
+                    
+                    
+                                                     
  ) {
   const declared = new Map(families.map((family) => [family.familyName, family]));
   const consumerName = `${entityName}.${fieldName}.word-evidence`;
@@ -270,15 +270,15 @@ export function createWordEvidenceConsumer({ db, entityName, fieldName, tableNam
   });
 }
 
-
-
-
-
+                                  
+               
+                                                                                                       
+ 
 
 /** Build the engaged word-evidence consumers for every declared field. */
-export function createWordEvidenceConsumers({ db, entities }
-
-
+export function createWordEvidenceConsumers({ db, entities }   
+               
+                                                        
  )            {
   const consumers            = [];
   for (const entity of entities.values()) {
@@ -299,11 +299,11 @@ export function createWordEvidenceConsumers({ db, entities }
 }
 
 /** A frozen handle to a field's declared word-evidence families. */
-export function wordEvidenceFieldHandle(entityName        , fieldName        , descriptor                                                             )
-
-
-
-
+export function wordEvidenceFieldHandle(entityName        , fieldName        , descriptor                                                             )   
+                     
+                    
+                    
+                                                                               
   {
   const families = Object.freeze(
     (descriptor.wordEvidence ?? []).map((family) => Object.freeze({ familyName: family.familyName, formatVersion: family.formatVersion })),
@@ -316,16 +316,16 @@ export function wordEvidenceFieldHandle(entityName        , fieldName        , d
   });
 }
 
-
-
-
-
-
-
-
-
-
-
+                         
+           
+                         
+                       
+                             
+                           
+                          
+    
+                                    
+ 
 
 /**
  * Resolve a document's immutable word-evidence anchors against the current
@@ -334,14 +334,14 @@ export function wordEvidenceFieldHandle(entityName        , fieldName        , d
  * anchor no longer projects to its original token is marked `edited`. The
  * caller compares the returned `structureVersion` with its live document.
  */
-export function readWordEvidence({ database, entityName, fieldName, tableName, scope, documentId, families }
-
-
-
-
-
-
-
+export function readWordEvidence({ database, entityName, fieldName, tableName, scope, documentId, families }   
+                     
+                     
+                    
+                    
+                
+                     
+                               
  )                                                                  {
   const state = database.prepare(`SELECT structure_version, family_checkpoint FROM ${entityName}_${fieldName}_state WHERE document_id = ?`).get(documentId);
   if (!state) return null;
@@ -354,16 +354,16 @@ export function readWordEvidence({ database, entityName, fieldName, tableName, s
   return pivotEvidenceRows(family, state.structure_version, rows);
 }
 
-function pivotEvidenceRows(family                      , structureVersion         , rows                                    )
-
-
-
-
-
-
-
-
-
+function pivotEvidenceRows(family                      , structureVersion         , rows                                    )   
+                            
+                            
+                   
+                  
+                
+                 
+                    
+                                                
+       
   {
   const byWord = new Map                       ();
   for (const row of rows) {
@@ -388,13 +388,13 @@ function pivotEvidenceRows(family                      , structureVersion       
       byWord.set(wordId, { shared, evidence: { [String(row.family)]: JSON.parse(row.payload          ) } });
     }
   }
-  const words
-
-
-
-
-
-
+  const words         
+                   
+                  
+                
+                 
+                    
+                                                
      = [];
   for (const [wordId, entry] of byWord) {
     const { startAnchor, endAnchor, sourceStartUtf16, sourceEndUtf16, originalToken } = entry.shared;
