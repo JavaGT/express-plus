@@ -37,6 +37,12 @@ export function normalizeSeqSpan(
  *
  * @param cursor - last applied sequence (0 before any event)
  * @param seqOrSpan - event seq or [lo, hi] span
+ *
+ * Defensive cursor coercion: a non-finite/NaN `cursor` is treated as 0
+ * (`Number(cursor) || 0`), so a poisoned local cursor falls back to
+ * "expected seq 1" and every finite event is a `duplicate` rather than
+ * crashing — fail-closed. This coercion is load-bearing (the browser embed
+ * shares it; the parity test blesses it).
  */
 export function decideReplay(
   cursor        ,

@@ -8,31 +8,110 @@ import { decideReplay, normalizeSeqSpan } from '../src/replay-decision.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
-test('workbench-client embeds the same replay-decision body as src', () => {
-  // Typed source is authoritative; emitted .mjs is the Node runtime sibling.
+const BEGIN_MARKER = '// --- BEGIN GENERATED from src/replay-decision.ts';
+const END_MARKER = '// --- END GENERATED from src/replay-decision.ts';
+
+// Slice the embedded zero-import body out of the client and evaluate it in a
+// controlled scope so we can drive the client's own functions, not a copy.
+function extractEmbeddedReplayDecision() {
+  const client = readFileSync(join(root, 'public/workbench-client.mjs'), 'utf8');
+  const begin = client.indexOf(BEGIN_MARKER);
+  const end = client.indexOf(END_MARKER);
+  assert.ok(begin !== -1, 'client missing BEGIN GENERATED marker');
+  assert.ok(end !== -1 && end > begin, 'client missing END GENERATED marker');
+  const blockStart = client.indexOf('\n', begin) + 1;
+  const blockEnd = client.lastIndexOf('\n', end);
+  const blockText = client.slice(blockStart, blockEnd);
+  const factory = new Function(`${blockText}\nreturn { normalizeSeqSpan, decideReplay };`);
+  return factory();
+}
+
+function captureError(fn) {
+  try {
+    fn();
+  } catch (error) {
+    return error;
+  }
+  return null;
+}
+
+test('workbench-client embeds a replay-decision that behaves identically to src', () => {
   const src = readFileSync(join(root, 'src/replay-decision.ts'), 'utf8');
   const client = readFileSync(join(root, 'public/workbench-client.mjs'), 'utf8');
 
-  // Extract the pure function bodies from the source module (strip exports).
-  const body = src
-    .replace(/^\/\/.*$/gm, '')
-    .replace(/export /g, '')
-    .trim();
-  // The client must contain the GENERATED block markers and the core predicates.
+  // Lightweight marker check: the zero-import embed is flagged and both function
+  // names survive, so accidental deletion/rename is caught without pinning the
+  // verbatim formatting (the load-bearing check is behavioral, below).
   assert.match(client, /BEGIN GENERATED from src\/replay-decision\.ts/);
   assert.match(client, /END GENERATED from src\/replay-decision\.ts/);
   assert.match(client, /function decideReplay\(cursor, seqOrSpan\)/);
   assert.match(client, /function normalizeSeqSpan\(seqOrSpan\)/);
-  // Load-bearing predicates must match the source module verbatim.
-  for (const fragment of [
-    'if (hi < expected) return { kind: \'duplicate\' };',
-    'if (lo > expected) return { kind: \'gap\' };',
-    'return { kind: \'next\', cursor: hi };',
-  ]) {
-    assert.ok(src.includes(fragment), `src missing ${fragment}`);
-    assert.ok(client.includes(fragment), `client missing ${fragment}`);
+  assert.ok(src.includes('export function decideReplay'));
+  assert.ok(src.includes('export function normalizeSeqSpan'));
+
+  const embedded = extractEmbeddedReplayDecision();
+
+  // Behavioral corpus: [cursor, seqOrSpan, expectedVerdict]. Covers next on a
+  // single seq, duplicate (hi < expected), gap (lo > expected), span inputs,
+  // spans crossing / ending exactly at the boundary, reversed and oversized
+  // arrays, scalar coercions, and hostile cursor values.
+  const corpus = [
+    [0, 1, { kind: 'next', cursor: 1 }],
+    [0, 0, { kind: 'duplicate' }],
+    [5, 4, { kind: 'duplicate' }],
+    [1, 3, { kind: 'gap' }],
+    [3, 4, { kind: 'next', cursor: 4 }],
+    [-3, -2, { kind: 'next', cursor: -2 }],
+    [-3, -4, { kind: 'duplicate' }],
+    [2.5, 3.5, { kind: 'next', cursor: 3.5 }],
+    [1, [2, 4], { kind: 'next', cursor: 4 }],
+    [1, [1, 4], { kind: 'next', cursor: 4 }],
+    [1, [3, 5], { kind: 'gap' }],
+    [4, [1, 4], { kind: 'duplicate' }],
+    [1, [4, 2], { kind: 'gap' }],
+    [0, [1, 1], { kind: 'next', cursor: 1 }],
+    [2, [3, 3], { kind: 'next', cursor: 3 }],
+    [1, [2, 4, 99], { kind: 'next', cursor: 4 }],
+    [1, [2], { kind: 'next', cursor: 2 }],
+    [0, [], { kind: 'duplicate' }],
+    [3, '5', { kind: 'gap' }],
+    [0, '', { kind: 'duplicate' }],
+    [0, null, { kind: 'duplicate' }],
+    [0, true, { kind: 'next', cursor: 1 }],
+    ['4', 5, { kind: 'next', cursor: 5 }],
+    [NaN, 1, { kind: 'next', cursor: 1 }],
+    [Infinity, 5, { kind: 'duplicate' }],
+    [2, [2.5, 4.5], { kind: 'next', cursor: 4.5 }],
+  ];
+  for (const [cursor, seqOrSpan, expected] of corpus) {
+    assert.deepEqual(
+      embedded.decideReplay(cursor, seqOrSpan),
+      decideReplay(cursor, seqOrSpan),
+      `embedded vs src verdict for cursor=${cursor} seqOrSpan=${JSON.stringify(seqOrSpan)}`,
+    );
+    assert.deepEqual(
+      embedded.decideReplay(cursor, seqOrSpan),
+      expected,
+      `unexpected verdict for cursor=${cursor} seqOrSpan=${JSON.stringify(seqOrSpan)}`,
+    );
+    assert.deepEqual(
+      embedded.normalizeSeqSpan(seqOrSpan),
+      normalizeSeqSpan(seqOrSpan),
+      `embedded vs src span for ${JSON.stringify(seqOrSpan)}`,
+    );
   }
-  assert.ok(body.includes('normalizeSeqSpan'));
+
+  // Invalid inputs: normalizeSeqSpan rejects non-finite seqs on both sides,
+  // throwing the same error message; decideReplay propagates that throw.
+  const invalidInputs = [NaN, Infinity, -Infinity, 'abc', undefined, {}, [NaN, 1], [1, Infinity], ['x', 2]];
+  for (const bad of invalidInputs) {
+    const embeddedError = captureError(() => embedded.decideReplay(0, bad));
+    const srcError = captureError(() => decideReplay(0, bad));
+    assert.ok(embeddedError, `embedded should throw for ${JSON.stringify(bad)}`);
+    assert.ok(srcError, `src should throw for ${JSON.stringify(bad)}`);
+    assert.equal(embeddedError.message, srcError.message);
+    assert.equal(embeddedError.name, srcError.name);
+  }
 });
 
 test('createClient is span-aware via decideReplay (shared core)', async () => {
