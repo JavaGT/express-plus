@@ -19,33 +19,33 @@
 // it after its own COMMIT (accepted: it is no longer atomic with the bump, so
 // the migration must be authored to tolerate that).
 
-import { begin, commit, rollback,               } from './driver.mjs';
+import { begin, commit, rollback, type DbHandle } from './driver.ts';
 
-                         
-                  
-                             
-  
+export type Migration = {
+  version: number;
+  up: (db: DbHandle) => void;
+};
 
 export const MIGRATION_DDL = `CREATE TABLE IF NOT EXISTS _Migration (
   version INTEGER PRIMARY KEY,
   appliedAt TEXT NOT NULL
 )`;
 
-export function ensureMigrationTable(db          ) {
+export function ensureMigrationTable(db: DbHandle) {
   db.exec(MIGRATION_DDL);
 }
 
-export function appliedVersion(db          )         {
+export function appliedVersion(db: DbHandle): number {
   ensureMigrationTable(db);
   const row = db
     .prepare('SELECT MAX(version) AS v FROM _Migration')
-    .get()                              ;
+    .get() as { v?: number } | undefined;
   return row?.v ?? 0;
 }
 
 export function runMigrations(
-  db          ,
-  migrations              = [],
+  db: DbHandle,
+  migrations: Migration[] = [],
   { now = () => new Date().toISOString() } = {},
 ) {
   ensureMigrationTable(db);

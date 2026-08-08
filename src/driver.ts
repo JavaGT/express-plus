@@ -34,34 +34,34 @@
 
 // Loose, Workbench-like db surface. A conforming driver may provide its own
 // txn/upsert; a raw handle falls back to the SQLite defaults wrapped here.
-                           
-                                               
-                                                               
-                                                     
-  
+export type DbStatement = {
+  run(...args: unknown[]): { changes: number };
+  get(...args: unknown[]): Record<string, unknown> | undefined;
+  all(...args: unknown[]): Record<string, unknown>[];
+};
 
-                        
-                                    
-                             
-                                                                   
-                     
-                      
-                        
-                                         
-  
+export type DbHandle = {
+  prepare(sql: string): DbStatement;
+  exec(sql: string): unknown;
+  txn?: (fn: () => Promise<unknown> | unknown) => Promise<unknown>;
+  begin?: () => void;
+  commit?: () => void;
+  rollback?: () => void;
+  upsert?: (opts: UpsertOptions) => void;
+};
 
-                             
-                
-                       
-                     
-                                  
-  
+export type UpsertOptions = {
+  table: string;
+  keyColumns: string[];
+  columns?: string[];
+  values: Record<string, unknown>;
+};
 
 // ---- SQLite default implementations (the fallback + the wrapped-handle body) ----
 
-async function sqliteTxn(db          , fn               )                   {
+async function sqliteTxn(db: DbHandle, fn: () => unknown): Promise<unknown> {
   db.exec('BEGIN IMMEDIATE');
-  let result         ;
+  let result: unknown;
   try {
     result = await fn();
   } catch (err) {
@@ -76,13 +76,13 @@ async function sqliteTxn(db          , fn               )                   {
   return result;
 }
 
-function sqliteBegin(db          ) {
+function sqliteBegin(db: DbHandle) {
   db.exec('BEGIN IMMEDIATE');
 }
-function sqliteCommit(db          ) {
+function sqliteCommit(db: DbHandle) {
   db.exec('COMMIT');
 }
-function sqliteRollback(db          ) {
+function sqliteRollback(db: DbHandle) {
   db.exec('ROLLBACK');
 }
 
@@ -93,8 +93,8 @@ function sqliteRollback(db          ) {
 // DO UPDATE (in-place update, no delete) is semantically equivalent and is the
 // single upsert path now.
 function sqliteUpsert(
-  db          ,
-  { table, keyColumns, columns = [], values }               ,
+  db: DbHandle,
+  { table, keyColumns, columns = [], values }: UpsertOptions,
 ) {
   const allCols = [...keyColumns, ...columns];
   const placeholders = allCols.map((c) => ':' + c).join(', ');
@@ -114,12 +114,12 @@ function sqliteUpsert(
 // a wrapped app.db (helpers attached by wrapDriver) calls the attached method;
 // a conforming custom driver calls its own implementation. All three uniform.
 
-export async function txn(db          , fn               )                   {
+export async function txn(db: DbHandle, fn: () => unknown): Promise<unknown> {
   if (typeof db.txn === 'function') return db.txn(fn);
   return sqliteTxn(db, fn);
 }
 
-export function begin(db          ) {
+export function begin(db: DbHandle) {
   if (typeof db.begin === 'function') {
     db.begin();
     return;
@@ -127,7 +127,7 @@ export function begin(db          ) {
   sqliteBegin(db);
 }
 
-export function commit(db          ) {
+export function commit(db: DbHandle) {
   if (typeof db.commit === 'function') {
     db.commit();
     return;
@@ -135,7 +135,7 @@ export function commit(db          ) {
   sqliteCommit(db);
 }
 
-export function rollback(db          ) {
+export function rollback(db: DbHandle) {
   if (typeof db.rollback === 'function') {
     db.rollback();
     return;
@@ -143,7 +143,7 @@ export function rollback(db          ) {
   sqliteRollback(db);
 }
 
-export function upsert(db          , opts               ) {
+export function upsert(db: DbHandle, opts: UpsertOptions) {
   if (typeof db.upsert === 'function') {
     db.upsert(opts);
     return;
@@ -160,7 +160,7 @@ export function upsert(db          , opts               ) {
 // bootstrap, so NO PRAGMAs run for it — it may not even be SQLite. PRAGMAs run
 // only on the default path (raw DatabaseSync or a bare object) and are guarded
 // so a mock/stub db without a working .exec is a no-op.
-export function wrapDriver(dbOrDriver                             )                              {
+export function wrapDriver(dbOrDriver: DbHandle | null | undefined): DbHandle | null | undefined {
   if (dbOrDriver == null) return dbOrDriver;
   const isConformingDriver =
     typeof dbOrDriver.txn === 'function' && typeof dbOrDriver.upsert === 'function';
@@ -168,10 +168,10 @@ export function wrapDriver(dbOrDriver                             )             
   // Attach the SQLite defaults. `this` inside the arrow closures is lexical, so
   // we bind to the handle explicitly by closure (not `this`).
   dbOrDriver.txn = (fn) => sqliteTxn(dbOrDriver, fn);
-  dbOrDriver.begin = () => sqliteBegin(dbOrDriver );
-  dbOrDriver.commit = () => sqliteCommit(dbOrDriver );
-  dbOrDriver.rollback = () => sqliteRollback(dbOrDriver );
-  dbOrDriver.upsert = (opts) => sqliteUpsert(dbOrDriver , opts);
+  dbOrDriver.begin = () => sqliteBegin(dbOrDriver!);
+  dbOrDriver.commit = () => sqliteCommit(dbOrDriver!);
+  dbOrDriver.rollback = () => sqliteRollback(dbOrDriver!);
+  dbOrDriver.upsert = (opts) => sqliteUpsert(dbOrDriver!, opts);
   if (typeof dbOrDriver.exec === 'function') {
     try {
       dbOrDriver.exec('PRAGMA journal_mode = WAL');

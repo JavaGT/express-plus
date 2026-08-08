@@ -5,27 +5,27 @@
 //
 // One response abstraction — no two paths building the same wrapper twice.
 
-                                                
+import type { ServerResponse } from 'node:http';
 
-import { sendJson } from './http-response.mjs';
-import { canWriteResponse } from './http-response.mjs';
+import { sendJson } from './http-response.ts';
+import { canWriteResponse } from './http-response.ts';
 
-                                        
-                     
- 
+export interface ResponseFacadeOptions {
+  onEnd?: () => void;
+}
 
-                                 
-                                       
-                                       
-                                        
-                                           
-                                
-                                                                       
-                                                                  
-                                                                       
-                      
-                                  
- 
+export interface ResponseFacade {
+  status(code: number): ResponseFacade;
+  json(value: unknown): ResponseFacade;
+  send(value?: unknown): ResponseFacade;
+  sendStatus(code: number): ResponseFacade;
+  readonly headersSent: boolean;
+  writeHead(...args: Parameters<ServerResponse['writeHead']>): unknown;
+  end(...args: Parameters<ServerResponse['end']>): ResponseFacade;
+  setHeader(...args: Parameters<ServerResponse['setHeader']>): unknown;
+  raw: ServerResponse;
+  readonly _pendingStatus: number;
+}
 
 /**
  * Creates an Express-style response facade wrapping a Node.js ServerResponse.
@@ -35,28 +35,28 @@ import { canWriteResponse } from './http-response.mjs';
  * end). serve.mjs uses this to flip its `handled` flag in the `app.use`
  * intercept.
  */
-export function createResponseFacade(nodeRes                , { onEnd }                        = {})                 {
+export function createResponseFacade(nodeRes: ServerResponse, { onEnd }: ResponseFacadeOptions = {}): ResponseFacade {
   let pendingStatus = 200;
   let facadeEnded = false;
 
-  function markEnded()       {
+  function markEnded(): void {
     if (facadeEnded) return;
     facadeEnded = true;
     if (onEnd) onEnd();
   }
 
   const res = {
-    status(code        ) {
+    status(code: number) {
       pendingStatus = code;
-      return res                  ;
+      return res as ResponseFacade;
     },
-    json(value         ) {
+    json(value: unknown) {
       const wrote = sendJson(nodeRes, pendingStatus, value, {}, { operation: 'res.json' });
       if (wrote) markEnded();
-      return res                  ;
+      return res as ResponseFacade;
     },
-    send(value          ) {
-      if (!canWriteResponse(nodeRes, 'res.send')) return res                  ;
+    send(value?: unknown) {
+      if (!canWriteResponse(nodeRes, 'res.send')) return res as ResponseFacade;
       const payload = typeof value === 'string' ? value : String(value);
       nodeRes.writeHead(pendingStatus, {
         'content-type': 'text/plain; charset=utf-8',
@@ -64,28 +64,28 @@ export function createResponseFacade(nodeRes                , { onEnd }         
       });
       nodeRes.end(payload);
       markEnded();
-      return res                  ;
+      return res as ResponseFacade;
     },
-    sendStatus(code        ) {
-      if (!canWriteResponse(nodeRes, 'res.sendStatus')) return res                  ;
+    sendStatus(code: number) {
+      if (!canWriteResponse(nodeRes, 'res.sendStatus')) return res as ResponseFacade;
       nodeRes.writeHead(code);
       nodeRes.end();
       markEnded();
-      return res                  ;
+      return res as ResponseFacade;
     },
     get headersSent() {
       return nodeRes.headersSent;
     },
-    writeHead(...args                                         ) {
-      return (nodeRes.writeHead                                )(...args);
+    writeHead(...args: Parameters<ServerResponse['writeHead']>) {
+      return (nodeRes.writeHead as (...a: unknown[]) => unknown)(...args);
     },
-    end(...args                                   ) {
-      (nodeRes.end                                )(...args);
+    end(...args: Parameters<ServerResponse['end']>) {
+      (nodeRes.end as (...a: unknown[]) => unknown)(...args);
       markEnded();
-      return res                  ;
+      return res as ResponseFacade;
     },
-    setHeader(...args                                         ) {
-      return (nodeRes.setHeader                                )(...args);
+    setHeader(...args: Parameters<ServerResponse['setHeader']>) {
+      return (nodeRes.setHeader as (...a: unknown[]) => unknown)(...args);
     },
     raw: nodeRes,
   };
@@ -95,5 +95,5 @@ export function createResponseFacade(nodeRes                , { onEnd }         
     get() { return pendingStatus; },
     enumerable: false,
   });
-  return res                  ;
+  return res as ResponseFacade;
 }

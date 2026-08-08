@@ -2,34 +2,34 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-                                 
-                    
-                     
-                     
-  
+export type WriteQueueOptions = {
+  maxDepth?: number;
+  maxWaitMs?: number;
+  now?: () => number;
+};
 
-                          
-                                  
-                            
-                         
-                            
-                           
-                          
-  
+export type WriteQueue = {
+  run<T>(fn: () => T): Promise<T>;
+  close(): Promise<unknown>;
+  readonly depth: number;
+  readonly running: boolean;
+  readonly closed: boolean;
+  readonly owned: boolean;
+};
 
 export function createWriteQueue({
   maxDepth = 64,
   maxWaitMs = 5000,
   now = Date.now,
-}                    = {})             {
+}: WriteQueueOptions = {}): WriteQueue {
   void now; // accepted option; timeout still uses wall-clock setTimeout (pre-existing)
-  const ownership = new AsyncLocalStorage                     ();
+  const ownership = new AsyncLocalStorage<{ active: boolean }>();
   let waiters = 0;
   let running = false;
   let closed = false;
-  let lock                   = Promise.resolve();
+  let lock: Promise<unknown> = Promise.resolve();
 
-  function invoke(fn               ) {
+  function invoke(fn: () => unknown) {
     const owner = { active: true };
     return Promise.resolve()
       .then(() => ownership.run(owner, fn))
@@ -38,9 +38,9 @@ export function createWriteQueue({
       });
   }
 
-  function run   (fn         )             {
+  function run<T>(fn: () => T): Promise<T> {
     if (closed) {
-      const err = new Error('write queue is closed')                              ;
+      const err = new Error('write queue is closed') as Error & { status: number };
       err.status = 503;
       return Promise.reject(err);
     }
@@ -48,15 +48,15 @@ export function createWriteQueue({
       return Promise.resolve().then(fn);
     }
     if (waiters + 1 >= maxDepth) {
-      const err = new Error('write queue: depth limit exceeded')                              ;
+      const err = new Error('write queue: depth limit exceeded') as Error & { status: number };
       err.status = 503;
       return Promise.reject(err);
     }
 
     if (!running && waiters === 0) {
       running = true;
-      let releaseNext            ;
-      const completion = new Promise      ((r) => {
+      let releaseNext: () => void;
+      const completion = new Promise<void>((r) => {
         releaseNext = r;
       });
 
@@ -66,19 +66,19 @@ export function createWriteQueue({
         releaseNext();
       });
       lock = completion;
-      return wrapped              ;
+      return wrapped as Promise<T>;
     }
 
     waiters++;
 
     let cancelled = false;
     let acquired = false;
-    let releaseNext            ;
-    const completion = new Promise      ((r) => {
+    let releaseNext: () => void;
+    const completion = new Promise<void>((r) => {
       releaseNext = r;
     });
 
-    const waitForLock = new Promise      ((resolve) => {
+    const waitForLock = new Promise<void>((resolve) => {
       lock = lock.then(() => {
         if (cancelled) {
           waiters--;
@@ -93,8 +93,8 @@ export function createWriteQueue({
       });
     });
 
-    let timeoutId                ;
-    const timeout = new Promise      ((_, reject) => {
+    let timeoutId: NodeJS.Timeout;
+    const timeout = new Promise<void>((_, reject) => {
       timeoutId = setTimeout(() => {
         if (!acquired) {
           // Set cancelled and reject fast (client gets 503 immediately). Do NOT
@@ -104,7 +104,7 @@ export function createWriteQueue({
           // (fail-closed: maxDepth guard trips earlier under starvation, never
           // later), avoiding the double-decrement drift that weakened it.
           cancelled = true;
-          const err = new Error('write queue: wait timeout')                              ;
+          const err = new Error('write queue: wait timeout') as Error & { status: number };
           err.status = 503;
           reject(err);
         }
@@ -117,12 +117,12 @@ export function createWriteQueue({
       })
       .then(
         () => {
-          return (invoke(fn)              ).finally(() => {
+          return (invoke(fn) as Promise<T>).finally(() => {
             running = false;
             releaseNext();
           });
         },
-        (err         ) => {
+        (err: unknown) => {
           throw err;
         },
       );
@@ -131,7 +131,7 @@ export function createWriteQueue({
   // Stop admitting new writes and resolve once every already-admitted write has
   // released the mutex. Shutdown uses this to avoid closing durable resources
   // under an in-flight transaction.
-  function close()                   {
+  function close(): Promise<unknown> {
     closed = true;
     return Promise.resolve(lock);
   }
@@ -139,16 +139,16 @@ export function createWriteQueue({
   return {
     run,
     close,
-    get depth()         {
+    get depth(): number {
       return waiters;
     },
-    get running()          {
+    get running(): boolean {
       return running;
     },
-    get closed()          {
+    get closed(): boolean {
       return closed;
     },
-    get owned()          {
+    get owned(): boolean {
       return ownership.getStore()?.active === true;
     },
   };

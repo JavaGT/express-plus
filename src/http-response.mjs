@@ -5,8 +5,9 @@ const DOUBLE_RESPONSE_WARNING_CODE = 'WB_DOUBLE_RESPONSE';
                           
                       
                                                  
-                                                                       
-                               
+                                                                          
+                                                         
+                                   
  
 
 export function responseHasStarted(res                  )          {

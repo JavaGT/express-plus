@@ -4,24 +4,24 @@
 
 import { getLog } from './log.mjs';
 
-                                     
-                 
- 
+export interface ClockWatcherHandle {
+  remove(): void;
+}
 
-                              
-                                                                                                       
- 
+export interface SharedClock {
+  add(options: { name: string; intervalMs: number; fn: (now: number) => unknown }): ClockWatcherHandle;
+}
 
-                                     
-                             
-                     
-                               
-               
- 
+export interface ClockRunnerOptions {
+  clock?: SharedClock | null;
+  intervalMs: number;
+  fn: (now: number) => unknown;
+  name: string;
+}
 
-                               
-               
- 
+export interface RunnerHandle {
+  stop(): void;
+}
 
 /**
  * Creates a clock-driven or setInterval-based periodic runner.
@@ -34,7 +34,7 @@ import { getLog } from './log.mjs';
  * way (the setInterval path uses an async wrapper; the clock path delegates to
  * the clock's own error swallowing).
  */
-export function createClockRunner({ clock, intervalMs, fn, name }                    )               {
+export function createClockRunner({ clock, intervalMs, fn, name }: ClockRunnerOptions): RunnerHandle {
   if (clock) {
     const watcher = clock.add({ name, intervalMs, fn });
     return { stop() { watcher?.remove(); } };

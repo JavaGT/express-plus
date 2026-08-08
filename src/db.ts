@@ -10,7 +10,7 @@
 // getActiveDb fails closed: running an entity query before an app is built (no
 // db bound) throws rather than silently operating on nothing.
 
-let activeDb         ;
+let activeDb: unknown;
 
 // Rebinding the ambient db is a real hazard: a second workbench({db}) in the
 // same process rebinds the active db for ALL entities, so the prior app's
@@ -29,7 +29,7 @@ let activeDb         ;
 // loud line carries that. Repeating it per construction is noise that trains
 // readers to ignore it.
 let warnedRebind = false;
-export function setActiveDb(db         , { replace = false } = {}) {
+export function setActiveDb(db: unknown, { replace = false } = {}) {
   if (!replace && !warnedRebind && activeDb && activeDb !== db) {
     warnedRebind = true;
     process.emitWarning(
@@ -64,12 +64,12 @@ export function getActiveDb() {
 // independently of any app, so it cannot be passed in; it registers ITSELF by
 // name at construction. One name → one entity (module-cached), the singular
 // source for FK population.
-const activeEntities = new Map                 ();
+const activeEntities = new Map<string, unknown>();
 
-export function setActiveEntity(name        , entityRecord         ) {
+export function setActiveEntity(name: string, entityRecord: unknown) {
   activeEntities.set(name, entityRecord);
 }
 
-export function getActiveEntity(name        )          {
+export function getActiveEntity(name: string): unknown {
   return activeEntities.get(name);
 }

@@ -1,21 +1,21 @@
 // Lightweight package-table census for security-sensitive code that cannot
 // import the auth compile graph without introducing an initialization cycle.
 import { generateFrameworkDDL } from './ddl.mjs';
-import { MIGRATION_DDL } from './migrations.mjs';
+import { MIGRATION_DDL } from './migrations.ts';
 
 const AUTH_TABLE_NAMES = ['User', 'Session', 'Inbox', 'Credential', 'Invitation', 'ApiKey', 'TwoFactor'];
 const CREATE_TABLE_NAME = /CREATE\s+(?:VIRTUAL\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?("(?:""|[^"])+"|`(?:``|[^`])+`|\[(?:]]|[^\]])+]|[A-Za-z_][A-Za-z0-9_]*)/iy;
 
-function unquoteIdentifier(name        )         {
+function unquoteIdentifier(name: string): string {
   if (name.startsWith('"')) return name.slice(1, -1).replaceAll('""', '"');
   if (name.startsWith('`')) return name.slice(1, -1).replaceAll('``', '`');
   if (name.startsWith('[')) return name.slice(1, -1).replaceAll(']]', ']');
   return name;
 }
 
-export function stripSqlComments(sql        )         {
+export function stripSqlComments(sql: string): string {
   let result = '';
-  let quote                = null;
+  let quote: string | null = null;
   for (let index = 0; index < sql.length; index += 1) {
     const character = sql[index];
     if (quote === '[') {
@@ -50,14 +50,14 @@ export function stripSqlComments(sql        )         {
   return result;
 }
 
-                           
-                 
-              
- 
+export interface DdlEntry {
+  source: string;
+  sql: string;
+}
 
-export function collectTableNamesFromDdl(entries            )           {
-  const seen = new Map                ();
-  const names           = [];
+export function collectTableNamesFromDdl(entries: DdlEntry[]): string[] {
+  const seen = new Map<string, string>();
+  const names: string[] = [];
   for (const { source, sql } of entries) {
     const uncommented = stripSqlComments(sql);
     for (let index = 0; index < uncommented.length;) {
@@ -95,9 +95,9 @@ export function collectTableNamesFromDdl(entries            )           {
 export const frameworkTableNamesWithoutAuthCompile = Object.freeze([
   ...new Set([
     ...collectTableNamesFromDdl([
-      ...generateFrameworkDDL().map((sql        ) => ({ source: 'framework DDL', sql })),
+      ...generateFrameworkDDL().map((sql: string) => ({ source: 'framework DDL', sql })),
       { source: 'migration DDL', sql: MIGRATION_DDL },
     ]),
     ...AUTH_TABLE_NAMES,
   ]),
-])                     ;
+]) as readonly string[];

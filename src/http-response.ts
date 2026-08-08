@@ -5,8 +5,9 @@ export interface HttpResponseLike {
   writableEnded?: boolean;
   destroyed?: boolean;
   req?: { method?: string; url?: string } | null;
-  writeHead(status: number, headers: Record<string, unknown>): unknown;
-  end(body?: unknown): unknown;
+  // Loose enough for node:http ServerResponse overloads and test doubles.
+  writeHead(status: number, ...rest: unknown[]): unknown;
+  end(...args: unknown[]): unknown;
 }
 
 export function responseHasStarted(res: HttpResponseLike): boolean {

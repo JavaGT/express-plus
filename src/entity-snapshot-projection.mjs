@@ -2,11 +2,30 @@
 // projection before a transport can serialize it.
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
 
-export function hasAnnotatedTextFields(entity) {
+                                        
+                
+                         
+ 
+
+                                       
+                
+                                                
+                                                                        
+ 
+
+export function hasAnnotatedTextFields(entity                      )          {
   return Object.values(entity.fields).some((descriptor) => descriptor.kind === 'annotatedText');
 }
 
-export async function projectEntitySnapshot({ db, entity, row, principal, authoring = null }) {
+                                         
+              
+                               
+                               
+                     
+                      
+ 
+
+export async function projectEntitySnapshot({ db, entity, row, principal, authoring = null }                        )                                   {
   const snapshot = entity.deserializeRow({ ...row });
   for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
     if (descriptor.kind === 'annotatedText') {

@@ -2,34 +2,34 @@
 // An empty body parses to {}. Entity CRUD still requires JSON; imperative routes
 // can also accept browser forms.
 const BODY_LIMIT = 1_000_000; // ~1mb, SPEC §3 body-parse cap.
-const claimedBodies = new WeakSet             ();
+const claimedBodies = new WeakSet<BodyRequest>();
 
 export class BodyError extends Error {
-  status        ;
-  constructor(message        , status        ) {
+  status: number;
+  constructor(message: string, status: number) {
     super(message);
     this.status = status;
   }
 }
 
-                       
-                                              
-                                                                   
-                                                                    
-                   
-                    
-                    
-                      
- 
+interface BodyRequest {
+  headers: Record<string, string | undefined>;
+  on(event: string, listener: (...args: never[]) => void): unknown;
+  off(event: string, listener: (...args: never[]) => void): unknown;
+  pause(): unknown;
+  resume(): unknown;
+  aborted?: boolean;
+  destroyed?: boolean;
+}
 
-function readCappedBody(req             , limit = BODY_LIMIT, tooLargeMessage = 'request body exceeds the 1mb limit')                  {
+function readCappedBody(req: BodyRequest, limit = BODY_LIMIT, tooLargeMessage = 'request body exceeds the 1mb limit'): Promise<Buffer> {
   if (claimedBodies.has(req)) {
     return Promise.reject(new BodyError('request body has already been read', 400));
   }
   claimedBodies.add(req);
 
   return new Promise((resolve, reject) => {
-    const chunks           = [];
+    const chunks: Buffer[] = [];
     let size = 0;
     let settled = false;
 
@@ -40,19 +40,19 @@ function readCappedBody(req             , limit = BODY_LIMIT, tooLargeMessage = 
       req.off('aborted', onAborted);
       req.off('close', onClose);
     };
-    const succeed = (body        ) => {
+    const succeed = (body: Buffer) => {
       if (settled) return;
       settled = true;
       cleanup();
       resolve(body);
     };
-    const fail = (error       ) => {
+    const fail = (error: Error) => {
       if (settled) return;
       settled = true;
       cleanup();
       reject(error);
     };
-    const onData = (chunk        ) => {
+    const onData = (chunk: Buffer) => {
       size += chunk.length;
       if (size > limit) {
         // Stop consuming and reject so the handler can write a 413. Do NOT
@@ -67,7 +67,7 @@ function readCappedBody(req             , limit = BODY_LIMIT, tooLargeMessage = 
       chunks.push(chunk);
     };
     const onEnd = () => succeed(Buffer.concat(chunks, size));
-    const onError = (error       ) => fail(error);
+    const onError = (error: Error) => fail(error);
     const onAborted = () => fail(new BodyError('request body was aborted', 400));
     const onClose = () => fail(new BodyError('request body closed before completion', 400));
 
@@ -90,11 +90,11 @@ function readCappedBody(req             , limit = BODY_LIMIT, tooLargeMessage = 
   });
 }
 
-function contentType(req             )         {
+function contentType(req: BodyRequest): string {
   return (req.headers['content-type'] ?? '').split(';')[0].trim().toLowerCase();
 }
 
-function contentTypeParam(req             , name        )                {
+function contentTypeParam(req: BodyRequest, name: string): string | null {
   const parts = String(req.headers['content-type'] ?? '').split(';').slice(1);
   for (const part of parts) {
     const [key, ...valueParts] = part.split('=');
@@ -106,10 +106,10 @@ function contentTypeParam(req             , name        )                {
   return null;
 }
 
-function assignFormValue(body                         , name        , value         )       {
+function assignFormValue(body: Record<string, unknown>, name: string, value: unknown): void {
   if (Object.prototype.hasOwnProperty.call(body, name)) {
     Object.defineProperty(body, name, {
-      value: Array.isArray(body[name]) ? [...(body[name]             ), value] : [body[name], value],
+      value: Array.isArray(body[name]) ? [...(body[name] as unknown[]), value] : [body[name], value],
       enumerable: true,
       configurable: true,
       writable: true,
@@ -124,15 +124,15 @@ function assignFormValue(body                         , name        , value     
   }
 }
 
-function parseUrlencodedBody(buffer        )                          {
-  const body                          = {};
+function parseUrlencodedBody(buffer: Buffer): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
   const params = new URLSearchParams(buffer.toString('utf8'));
   for (const [name, value] of params) assignFormValue(body, name, value);
   return body;
 }
 
-function parseMultipartHeaders(rawHeaders        )                         {
-  const headers                         = {};
+function parseMultipartHeaders(rawHeaders: string): Record<string, string> {
+  const headers: Record<string, string> = {};
   for (const line of rawHeaders.split('\r\n')) {
     const colon = line.indexOf(':');
     if (colon === -1) continue;
@@ -141,8 +141,8 @@ function parseMultipartHeaders(rawHeaders        )                         {
   return headers;
 }
 
-function parseContentDisposition(value        )                         {
-  const params                         = {};
+function parseContentDisposition(value: string): Record<string, string> {
+  const params: Record<string, string> = {};
   for (const part of value.split(';').slice(1)) {
     const [key, ...valueParts] = part.split('=');
     const name = key?.trim().toLowerCase();
@@ -154,17 +154,17 @@ function parseContentDisposition(value        )                         {
   return params;
 }
 
-                         
-               
-                   
-               
-               
-                  
- 
+interface MultipartFile {
+  name: string;
+  filename: string;
+  type: string;
+  size: number;
+  content: Buffer;
+}
 
-function parseMultipartBody(buffer        , boundary               )                          {
+function parseMultipartBody(buffer: Buffer, boundary: string | null): Record<string, unknown> {
   if (!boundary) throw new BodyError('multipart body is missing a boundary', 400);
-  const body                          = {};
+  const body: Record<string, unknown> = {};
   const delimiter = `--${boundary}`;
   const raw = buffer.toString('latin1');
   for (const section of raw.split(delimiter).slice(1)) {
@@ -184,7 +184,7 @@ function parseMultipartBody(buffer        , boundary               )            
         type: headers['content-type'] ?? 'application/octet-stream',
         size: content.length,
         content,
-      }                        );
+      } satisfies MultipartFile);
     } else {
       assignFormValue(body, disposition.name, content.toString('utf8'));
     }
@@ -192,11 +192,11 @@ function parseMultipartBody(buffer        , boundary               )            
   return body;
 }
 
-                                         
-                     
- 
+export interface ReadRequestBodyOptions {
+  jsonOnly?: boolean;
+}
 
-export async function readRequestBody(req             , { jsonOnly = false }                         = {})                   {
+export async function readRequestBody(req: BodyRequest, { jsonOnly = false }: ReadRequestBodyOptions = {}): Promise<unknown> {
   const buffer = await readCappedBody(req);
   if (buffer.length === 0) return {};
   const type = contentType(req);
@@ -219,6 +219,6 @@ export async function readRequestBody(req             , { jsonOnly = false }    
 // cap-and-refuse contract as readRequestBody (a baked-in default) — an oversized
 // upload rejects with a 413 and drains to a clean response, never an abrupt
 // socket close that would race the response.
-export function readRawBody(req             , limit        )                  {
+export function readRawBody(req: BodyRequest, limit: number): Promise<Buffer> {
   return readCappedBody(req, limit, 'upload exceeds the size limit');
 }
