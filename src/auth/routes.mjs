@@ -744,6 +744,9 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     if (totpLock) {
       const backup = consumeBackupCode(twoFactor.id, String(token));
       if (!backup.usedBackup) {
+        // A failed attempt under lockout still consumes one challenge attempt,
+        // so the max-attempt cap holds even when the TOTP lockout is active.
+        loginChallengeStore.registerFailure(challengeId);
         return next({ status: 429, message: 'TOTP temporarily locked', retryAfterMs: totpLock.retryAfterMs });
       }
       return mintSession();

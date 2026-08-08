@@ -604,6 +604,34 @@ test('authenticate rejects a wrong token while TOTP is locked (429)', async (t) 
   assert.equal(authRes.headers.get('set-cookie'), null);
 });
 
+test('invalid attempts while TOTP is locked still exhaust the login challenge', async (t) => {
+  const { origin, cookie } = await login(t);
+
+  await enrollAndEnable(origin, cookie);
+  for (let i = 0; i < 5; i++) {
+    await fetch(`${origin}/auth/totp/verify`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ token: '999999' }),
+    });
+  }
+
+  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+  const { challenge } = await loginForTotp(origin);
+
+  // All five attempts count against the challenge even though TOTP is locked.
+  for (let i = 0; i < 5; i++) {
+    const res = await authenticate(origin, challenge, '123456');
+    assert.equal(res.status, 429, `attempt ${i + 1} should still be lockout-limited`);
+    assert.equal(res.headers.get('set-cookie'), null);
+  }
+
+  // The sixth attempt must be rejected as an exhausted challenge — no session.
+  const exhausted = await authenticate(origin, challenge, '123456');
+  assert.equal(exhausted.status, 400, 'challenge is exhausted after the attempt cap');
+  assert.equal(exhausted.headers.get('set-cookie'), null);
+});
+
 test('authenticate requires both a challenge and a token', async (t) => {
   const { origin } = await boot(t);
 
