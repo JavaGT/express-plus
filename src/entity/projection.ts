@@ -7,6 +7,7 @@ import { applyTextOp, assertWellFormedText, canonicalTextOp, createTextState, re
 import {
   applyTextOperation as applyContinuousTextOperation,
   importTextToFamily,
+  resolveOffsetToEndpoint,
   restoreTextFamily,
   textFamilyCheckpoint as continuousTextFamilyCheckpoint,
 } from '../annotated-text-continuous.ts';
@@ -99,6 +100,7 @@ interface ImportedAnnotatedText {
   version?: unknown;
   actor?: unknown;
   blocks?: Array<Record<string, unknown>>;
+  ranges?: Array<Record<string, unknown>>;
   initialBlockId?: unknown;
 }
 
@@ -173,6 +175,86 @@ function initializeAnnotatedText({ name, fields, event, db, row }: { name: strin
       try { if (extension.validate({ version: 1, formatVersion: config.formatVersion, blockText: fullText, payload }) !== undefined) throw new Error('returned a value'); } catch { throw new Error(`${name}.${fieldName} created event measurement validation failed`); }
       db.prepare(`INSERT INTO ${prefix}_measurement (id, document_id, family, format_version, payload) VALUES (?, ?, ?, ?, ?)`).run(measurement.id, row.id, measurementFamily, config.formatVersion, JSON.stringify(payload));
     }
+    if (imported.ranges !== undefined) {
+      seedImportedAnnotationRanges({ name, fieldName, prefix, descriptor, db, row, family, fullText, ranges: imported.ranges });
+    }
+  }
+}
+
+// Seed create-source annotation ranges (issue #216) in the SAME create
+// transaction as the text family: one `_annotation` row, its `_annotation_{family}`
+// field row, and one `_membership` row. Endpoints use the membership-valid
+// affinity — END = right, START = right (the document-root start resolves to
+// left automatically) — matching the runtime range-apply semantics.
+function seedImportedAnnotationRanges({ name, fieldName, prefix, descriptor, db, row, family, fullText, ranges }: {
+  name: string;
+  fieldName: string;
+  prefix: string;
+  descriptor: FieldDescriptor;
+  db: Db;
+  row: Row;
+  family: ReturnType<typeof importTextToFamily>;
+  fullText: string;
+  ranges: Array<Record<string, unknown>>;
+}) {
+  const frontier = family.checkpoint.frontier;
+  for (const [index, range] of ranges.entries()) {
+    if (!range || typeof range !== 'object' || Array.isArray(range)) {
+      throw new Error(`${name}.${fieldName} created event imported range ${index} is invalid`);
+    }
+    const allowedRange = new Set(['annotationId', 'family', 'start', 'end', 'fields']);
+    for (const key of Object.keys(range)) {
+      if (!allowedRange.has(key)) throw new Error(`${name}.${fieldName} created event imported range ${index} has unknown key '${key}'`);
+    }
+    const { annotationId, family: rangeFamily, start, end } = range;
+    if (typeof annotationId !== 'string' || annotationId.length === 0) {
+      throw new Error(`${name}.${fieldName} created event imported range ${index} annotationId must be a non-empty string`);
+    }
+    if (typeof rangeFamily !== 'string' || rangeFamily.length === 0) {
+      throw new Error(`${name}.${fieldName} created event imported range ${index} family must be a non-empty string`);
+    }
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || (start as number) < 0 || (end as number) <= (start as number) || (end as number) > fullText.length) {
+      throw new Error(`${name}.${fieldName} created event imported range ${index} offsets are invalid`);
+    }
+    const declared = descriptor.annotations?.find((entry) => entry.annotationName === rangeFamily);
+    if (!declared) throw new Error(`${name}.${fieldName} created event imported range ${index} family '${rangeFamily}' is not declared`);
+    const fieldEntries = Object.entries(declared.fields);
+    const supplied = (range.fields ?? {}) as Record<string, unknown>;
+    if (!supplied || typeof supplied !== 'object' || Array.isArray(supplied)) {
+      throw new Error(`${name}.${fieldName} created event imported range ${index} fields must be a non-array object`);
+    }
+    const suppliedNames = Object.keys(supplied).sort();
+    const declaredNames = fieldEntries.map(([fieldName]) => fieldName).sort();
+    if (JSON.stringify(suppliedNames) !== JSON.stringify(declaredNames)) {
+      throw new Error(`${name}.${fieldName} created event imported range ${index} fields disagree with declaration`);
+    }
+    const storedFields = fieldEntries.map(([declaredName, field]) => {
+      const value = supplied[declaredName];
+      if (value === null && field.nullable === true) return null;
+      const strategy = resolveStrategy(field.kind);
+      const validation = strategy.validate(value, field);
+      if (validation !== true || (typeof field.validate === 'function' && field.validate(value) !== true)) {
+        throw new Error(`${name}.${fieldName} created event imported range ${index} field '${declaredName}' failed validation`);
+      }
+      return serializeField(field, value);
+    });
+    let startEndpoint;
+    let endEndpoint;
+    try {
+      startEndpoint = resolveOffsetToEndpoint(family, start as number, frontier, 'right');
+      endEndpoint = resolveOffsetToEndpoint(family, end as number, frontier, 'right');
+    } catch (error) {
+      throw new Error(`${name}.${fieldName} created event imported range ${index} offsets cannot be resolved: ${(error as Error).message}`);
+    }
+    db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
+      .run(annotationId, row.id, row[descriptor.project!], row[descriptor.owner!], rangeFamily);
+    if (fieldEntries.length) {
+      const names = fieldEntries.map(([declaredName]) => declaredName);
+      db.prepare(`INSERT INTO ${prefix}_annotation_${rangeFamily} (annotation_id, ${names.join(', ')}) VALUES (?, ${names.map(() => '?').join(', ')})`)
+        .run(annotationId, ...storedFields);
+    }
+    db.prepare(`INSERT INTO ${prefix}_membership (annotation_id, start_point, end_point) VALUES (?, ?, ?)`)
+      .run(annotationId, JSON.stringify(startEndpoint), JSON.stringify(endEndpoint));
   }
 }
 

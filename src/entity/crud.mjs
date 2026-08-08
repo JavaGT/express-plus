@@ -12,7 +12,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { validateMaterializedField, validateMutation, ValidationError, deserializeField, serializeField, flattenStruct, resolveStrategy } from '../field-strategy.mjs';
 import { scopeOf } from '../scope-handle.mjs';
 import * as eventHandles from '../event-handle.mjs';
-import { assertFrontier, assertWellFormedText, canonicalTextOp, frontierDominates, scalarCount } from '../annotated-text.mjs';
+import { assertFrontier, assertUtf16Offset, assertWellFormedText, canonicalTextOp, frontierDominates, scalarCount } from '../annotated-text.mjs';
 import { applyTextOperationToBlock, restoreTextFamilyCheckpoint, splitBlock, mergeBlocks, materializeBlock, textFamilyCheckpoint, resolvePositionToEndpoint } from '../annotated-text-family.mjs';
 import { splitBlockMemberships, mergeBlocksMemberships, addMembership, removeMembership } from '../annotated-text-membership.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope, resolveDeclarationMeasurementExtension } from '../annotated-text-field.mjs';
@@ -159,7 +159,7 @@ function assertAnnotatedTextImportPayload(name        , fieldName        , descr
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new ValidationError(`${name}.${fieldName} annotated-text import must be a non-array object`);
   }
-  const allowed = new Set(['version', 'blocks']);
+  const allowed = new Set(['version', 'blocks', 'ranges']);
   for (const key of Object.keys(value)) {
     if (!allowed.has(key)) throw new ValidationError(`${name}.${fieldName} annotated-text import has unknown key '${key}'`);
   }
@@ -267,7 +267,82 @@ function assertAnnotatedTextImportPayload(name        , fieldName        , descr
       ...(wordEvidence === undefined ? {} : { wordEvidence }),
     }));
   }
-  return Object.freeze({ version: 1, actor: randomUUID().replaceAll('-', ''), blocks: Object.freeze(canonicalBlocks) });
+  // Document-absolute annotation ranges over the concatenated block texts
+  // (issue #216): one annotation row, its family field row, and one membership
+  // per range, seeded by the create projection in the same transaction.
+  const fullText = blocks.map((block     ) => block.text).join('');
+  const canonicalRanges = [];
+  const annotationIds = new Set();
+  if (value.ranges !== undefined) {
+    if (!Array.isArray(value.ranges)) throw new ValidationError(`${name}.${fieldName} annotated-text import ranges must be an array`);
+    for (let i = 0; i < value.ranges.length; i++) {
+      const range = value.ranges[i];
+      if (!range || typeof range !== 'object' || Array.isArray(range)) {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}] must be a non-array object`);
+      }
+      const allowedRange = new Set(['annotationId', 'family', 'start', 'end', 'fields']);
+      for (const key of Object.keys(range)) {
+        if (!allowedRange.has(key)) throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}] has unknown key '${key}'`);
+      }
+      const { annotationId, family, start, end } = range;
+      if (typeof annotationId !== 'string' || annotationId.length === 0) {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}].annotationId must be a non-empty string`);
+      }
+      if (annotationIds.has(annotationId)) throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}] has duplicate annotationId '${annotationId}'`);
+      annotationIds.add(annotationId);
+      const declaredAnnotation = descriptor.annotations?.find((entry     ) => entry.annotationName === family);
+      if (typeof family !== 'string' || !declaredAnnotation) {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}].family '${String(family)}' is not declared`);
+      }
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end <= start || end > fullText.length) {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}] offsets must be safe integers with 0 <= start < end <= ${fullText.length}`);
+      }
+      try { assertUtf16Offset(fullText, start); assertUtf16Offset(fullText, end); } catch (error     ) {
+        throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}] offsets ${error.message}`);
+      }
+      const declaredFields                      = declaredAnnotation.fields ?? {};
+      if (range.fields !== undefined) {
+        if (!range.fields || typeof range.fields !== 'object' || Array.isArray(range.fields)) {
+          throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}].fields must be a non-array object or omitted`);
+        }
+        for (const fieldName of Object.keys(range.fields)) {
+          if (!Object.hasOwn(declaredFields, fieldName)) {
+            throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}].fields has unknown field '${fieldName}'`);
+          }
+        }
+      }
+      const rangeFields                      = {};
+      for (const [fieldName, fieldDescriptor] of Object.entries(declaredFields)) {
+        let fieldValue;
+        if (Object.hasOwn(range.fields ?? {}, fieldName)) {
+          fieldValue = range.fields[fieldName];
+        } else if (fieldDescriptor.default !== undefined) {
+          fieldValue = materializeDefault(fieldDescriptor.default);
+        } else if (fieldDescriptor.nullable || fieldDescriptor.optional) {
+          fieldValue = null;
+        } else {
+          throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}].fields is missing required field '${fieldName}'`);
+        }
+        if (fieldValue === null && fieldDescriptor.nullable === true) {
+          rangeFields[fieldName] = null;
+          continue;
+        }
+        const strategy = resolveStrategy(fieldDescriptor.kind);
+        const validation = strategy.validate(fieldValue, fieldDescriptor);
+        if (validation !== true) {
+          throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}].fields.${fieldName}: ${validation}`);
+        }
+        if (typeof fieldDescriptor.validate === 'function' && fieldDescriptor.validate(fieldValue) !== true) {
+          throw new ValidationError(`${name}.${fieldName} annotated-text import ranges[${i}].fields.${fieldName} failed declared validation`);
+        }
+        rangeFields[fieldName] = fieldValue;
+      }
+      canonicalRanges.push(Object.freeze({ annotationId, family, start, end, fields: Object.freeze(rangeFields) }));
+    }
+  }
+  const imported = { version: 1, actor: randomUUID().replaceAll('-', ''), blocks: Object.freeze(canonicalBlocks) };
+  if (value.ranges !== undefined) (imported                           ).ranges = Object.freeze(canonicalRanges);
+  return Object.freeze(imported);
 }
 
 export function materializeCreateDefaults(record     , payload     ) {
