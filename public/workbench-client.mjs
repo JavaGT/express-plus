@@ -3547,7 +3547,11 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     clearBlockGroupAssignment() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
     splitAndAssign() { throw new Error('annotated-text: block-era command is not supported (issue #33)'); },
     reconnect: () => session.reconnect(),
-    subscribe: (listener) => session.subscribe(listener),
+    // Subscribe delivers the same document view the session.document getter
+    // exposes. The underlying delivery publishes the raw blockless recipient
+    // snapshot; block-era callers (the editor binding) render `blocks` and must
+    // see the single-block view, never the raw envelope.
+    subscribe: (listener) => session.subscribe((snapshot) => listener(snapshot === null ? null : annotatedDocumentView(snapshot))),
     close: () => {
       sessionClosed = true;
       wakeAuthoringMutation?.();

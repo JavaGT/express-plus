@@ -359,7 +359,7 @@ function censusTargets(db: DbHandle, { owningScope, subject, census }: ErasurePr
 /** Prepare an exact package-owned manifest from the current transaction snapshot. */
 export function prepareErasureDirective(db: DbHandle, input: unknown, { excludeActionId = null }: { excludeActionId?: string | null } = {}): Readonly<ErasureDirective> {
   const declared: ErasurePreparation = isErasureDirectivePreparation(input)
-    ? input
+    ? { owningScope: input.owningScope, subject: input.subject, census: input.census }
     : (input as ErasurePreparation);
   erasureDirectivePreparation(declared);
   const { receipts, rows, targetIds } = censusTargets(db, declared, excludeActionId);
