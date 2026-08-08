@@ -365,8 +365,8 @@ import {
 ingest decision (duplicate / next / gap). Optimistic UI is a placeholder until
 the committed event folds.
 
-Related: `public/workbench-ui*.mjs` + Svelte primitives (UI kit) bind to the
-store; props catalogue is out of scope here — see components under `public/`.
+Related: the UI kit previously shipped here was deleted (issues #43/#44); the
+client store remains the headless surface.
 
 ---
 

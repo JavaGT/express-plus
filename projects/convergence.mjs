@@ -1,17 +1,18 @@
-// convergence.mjs — integration proof: one app exercising all four layers.
+// convergence.mjs — integration proof: one app exercising the convergence
+// layers.
 //
 //   W1 passkey auth — .auth() from workbench (login, session cookie, passkeys)
 //   W3 job queue — enqueue/claim/complete infrastructure on app.jobs
-//   W4 UI kit — bindAction/bindField/bindList/bindConnection adapters
 //   W5 client engine — createLiveStore boot → CRUD dispatch → overlay surface
+//   (W4 UI kit deleted per issues #43/#44 — see DECISIONLOG)
 //
 // This file is a declaration-only exemplar. It defines
 // entities and assertions but does NOT start a server — `test/convergence-
 // integration.test.mjs` boots the app for end-to-end acceptance.
 //
 // The acceptance run exercises: HTTP auth round-trips, entity CRUD, job
-// enqueue/claim/complete, client store CRUD surface, bindAction/bindField
-// handles, and canUndoField vocabulary — all four wave layers in one run.
+// enqueue/claim/complete, client store CRUD surface, and canUndoField
+// vocabulary — the remaining convergence layers in one run.
 
 import { entity, text, date, owner, grant, deny, read, write, subscribe, scope } from 'workbench';
 

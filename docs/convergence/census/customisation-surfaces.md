@@ -47,12 +47,10 @@ proven in the test suite.
 
 ## UI kit layer
 
-| Seam | Location | Default | Tested |
-|------|----------|---------|--------|
-| `bindAction(store, { id, action, payload, onStatusChange })` | `public/workbench-ui-bindings.mjs:27` | all options user-supplied | `test/workbench-ui.test.mjs:165` ✓ |
-| `bindField(store, { id, field, onValueChange })` | `public/workbench-ui-bindings.mjs:119` | all options user-supplied | `test/workbench-ui.test.mjs:345` ✓ |
-| `bindList(store, { id, field, onItemsChange })` | `public/workbench-ui-bindings.mjs:212` | all options user-supplied | `test/workbench-ui.test.mjs:441` ✓ |
-| `bindConnection(channel)` | `public/workbench-ui-bindings.mjs:308` | disconnected when no hook | `test/workbench-ui.test.mjs:1194` ✓ |
+> **Deleted 2026-08-09** (issues #43/#44): the Svelte UI kit
+> (`public/workbench-ui*.mjs`, `public/*.svelte`, and its test harness
+> `test/workbench-ui.test.mjs`) had zero production consumers and was removed.
+> The bindings/status seam described below no longer exists.
 
 ## Ops / listen layer
 

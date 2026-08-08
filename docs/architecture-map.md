@@ -57,7 +57,6 @@ Post-commit → re-auth → wire → client Replay decision → fold.
 | Module | Role |
 | --- | --- |
 | `live-delivery.mjs` | **Singular public seam** `createLiveDelivery` → `{ emit, count, close, createConsumer }` |
-| `live.mjs` | Re-export of createLiveDelivery (compat import path) |
 | `live-connection.mjs` / `live-admission.mjs` / `live-fanout.mjs` | Private impl of the seam (conn / subscribe auth / fan-out) |
 | `websocket.mjs` | Framing |
 | `field-delta.mjs` / `field-pace.mjs` | Delta + pace |
@@ -94,7 +93,6 @@ authorization (`authz.mjs`, `scope-sql`, `row-grant`) stays outside this folder.
 | `job-queue.mjs` | Worker claim/lease board |
 | `post-commit-effects.mjs` (runner) | Fenced app-owned claim/complete/fail for declared external work; never executes I/O |
 | `blob-store.mjs` | Blob bytes |
-| `public/workbench-ui*.mjs` + Svelte primitives | UI kit over the client store |
 | `public/workbench-local-*.mjs` | Local log / cross-tab (**demand-gated** — S6) |
 
 ## Annotated text (field kind across loops)

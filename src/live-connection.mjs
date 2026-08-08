@@ -3,7 +3,7 @@
 //
 // Subscribe-time admission is delegated to live-admission.mjs; subscription
 // registration delegates to the injected fanout handle. The transport wiring
-// (WebSocket upgrade, CSWSH check, principalOf) stays in live.mjs.
+// (WebSocket upgrade, CSWSH check, principalOf) stays in live-delivery.mjs.
 
                                           
 

@@ -27,7 +27,7 @@ export const applySecurityHeaders = (res: HttpResponseLike & { setHeader(name: s
   Object.entries(SECURITY_HEADERS).forEach(([name, value]) => res.setHeader(name, value));
 
 // Same-origin verification — the ONE implementation used by both transports:
-// the REST CSRF guard (serve.mjs) and the WebSocket upgrade handshake (live.mjs).
+// the REST CSRF guard (serve.mjs) and the WebSocket upgrade handshake (live-delivery.mjs).
 // A single mechanism so the two can never drift (AGENTS.md → no second auth path).
 //
 // `sameOriginAsHost` returns the verdict of ONE header against the request Host:

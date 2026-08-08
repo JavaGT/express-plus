@@ -1,15 +1,15 @@
-// convergence-integration.test.mjs — acceptance run exercising all four
-// convergence layers (W1 passkeys, W3 job queue, W4 UI bindings, W5 client
-// engine) in a single node --test run against a real workbench server.
+// convergence-integration.test.mjs — acceptance run exercising the convergence
+// layers (W1 passkeys, W3 job queue, W5 client engine) in a single node --test
+// run against a real workbench server. The W4 UI kit was deleted (issues
+// #43/#44); this file no longer covers it.
 //
 // Layer coverage:
 //   W1: passkey auth — login → cookie session → authorised CRUD → logout
 //   W3: job queue — HTTP enqueue → register worker → claim → submit result
-//   W4: UI bindings — bindAction/bindField/bindConnection surface
 //   W5: client engine — createLiveStore boot → dispatch → canUndoField surface
 //
 // The W1+W3 tests boot shared servers so the "single acceptance run"
-// constraint holds. W4/W5 tests run unit-style against the client library.
+// constraint holds. W5 tests run unit-style against the client library.
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -291,67 +291,4 @@ test('W5: canUndoField surfaces the undo vocabulary', () => {
   assert.ok(kinds.includes('crdt'));
   assert.ok(!kinds.includes('hash'));
   assert.ok(!kinds.includes('computed'));
-});
-
-// ---------------------------------------------------------------------------
-// W4 — UI bindings (surface exists, returns handles)
-// ---------------------------------------------------------------------------
-
-test('W4: bindAction returns a handle with status, dispatch, subscribe', async () => {
-  const { bindAction } = await import('../public/workbench-ui-bindings.mjs');
-
-  const store = {
-    overlayFor(id) { return id === 'n1' ? { id: 'n1', title: 'Test' } : null; },
-    overlayStatusFor(id) { return null; },
-    pendingCreates() { return []; },
-    onRender() { return () => {}; },
-    dispatch: async () => ({ ok: true, data: { id: 'n1' } }),
-  };
-
-  const bound = bindAction(store, { id: 'n1', action: 'note.archive', payload: () => ({ id: 'n1' }) });
-
-  assert.equal(typeof bound.dispatch, 'function');
-  assert.equal(bound.status, 'idle');
-  assert.equal(bound.row?.title, 'Test');
-
-  let received = null;
-  const unsub = bound.subscribe((s) => { received = s; });
-  assert.equal(received.status, 'idle');
-  assert.equal(received.row.title, 'Test');
-  unsub();
-  bound.destroy();
-});
-
-test('W4: bindField returns a handle with value, update, subscribe', async () => {
-  const { bindField } = await import('../public/workbench-ui-bindings.mjs');
-
-  const store = {
-    overlayFor(id) { return id === 'n1' ? { id: 'n1', title: 'My Title' } : null; },
-    overlayStatusFor(id) { return null; },
-    pendingCreates() { return []; },
-    onRender() { return () => {}; },
-    update: async () => ({ ok: true }),
-  };
-
-  const bound = bindField(store, { id: 'n1', field: 'title' });
-
-  assert.equal(bound.value, 'My Title');
-  assert.equal(typeof bound.update, 'function');
-  assert.equal(bound.status, 'idle');
-
-  let received = null;
-  const unsub = bound.subscribe((s) => { received = s; });
-  assert.equal(received.value, 'My Title');
-  unsub();
-  bound.destroy();
-});
-
-test('W4: bindConnection default status is disconnected (no onConnectionChange provided)', async () => {
-  const { bindConnection } = await import('../public/workbench-ui-bindings.mjs');
-
-  const channel = {}; // No onConnectionChange — stays disconnected
-
-  const bound = bindConnection(channel);
-  assert.equal(bound.status, 'disconnected');
-  bound.destroy();
 });

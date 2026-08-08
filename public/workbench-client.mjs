@@ -4,7 +4,7 @@
 // entity/id subscriptions. Auto-reconnects with exponential backoff. Zero
 // external dependencies — uses Node's global WebSocket (Node 22+).
 //
-// Protocol (matches src/live.mjs verbatim):
+// Protocol (matches src/live-delivery.mjs verbatim):
 //   client → server: {type:'subscribe', requestId, entity, id, fields?, pace?} / {type:'subscribe', requestId, scope, interest?} / {type:'unsubscribe', entity, id} / {type:'unsubscribe', scope}
 //   server → client: {type:'subscribed', requestId, scope, entity, id, currentSeq}
 //                    {type:'unsubscribed', scope, entity, id}
