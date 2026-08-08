@@ -14,15 +14,15 @@
 // Lazy import of effect compiler (avoids circular dependency at module load time).
 import { readSeq } from './committed-log.mjs';
 import { appendEvents, receiptFor, eventsFromReceipt, insertReceipt } from './committed-log.mjs';
-import { lifecycleVerb, parseEventType } from './event-handle.mjs';
-import { txn } from './driver.mjs';
+import { lifecycleVerb, parseEventType } from './event-handle.ts';
+import { txn } from './driver.ts';
 import { isPlainObject, ValidationError } from './field-strategy.mjs';
 import { createRequire } from 'node:module';
 import { createDurableHistoryRuntime } from './durable-history.mjs';
-import { decideReplay } from './replay-decision.mjs';
-import { getLog } from './log.mjs';
-import { failure, failureFromError, failureOutcome } from './outcome.mjs';
-import { principalKeyOf } from './principal.mjs';
+import { decideReplay } from './replay-decision.ts';
+import { getLog } from './log.ts';
+import { failure, failureFromError, failureOutcome } from './outcome.ts';
+import { principalKeyOf } from './principal.ts';
 import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparation, prepareErasureDirective } from './erasure-directive.mjs';
 import { declarePostCommitEffectsInTxn } from './post-commit-effects.mjs';
 

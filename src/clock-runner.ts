@@ -2,7 +2,7 @@
 // simulate.mjs share timer-driver boilerplate. This extracts the common
 // branching (clock.add vs setInterval) + unref + stop pattern.
 
-import { getLog } from './log.mjs';
+import { getLog } from './log.ts';
 
 export interface ClockWatcherHandle {
   remove(): void;

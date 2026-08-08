@@ -21,22 +21,22 @@
 
 import { createServer as createHttpServer } from 'node:http';
 
-import { anonymous } from './principal.mjs';
+import { anonymous } from './principal.ts';
 import { mayVerb, mayRow } from './row-grant.mjs';
-import { config } from './config.mjs';
+import { config } from './config.ts';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
 import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/session.mjs';
 import { createLiveDelivery } from './live-delivery.mjs';
-import { getLog, withLog } from './log.mjs';
-import { createRateLimiter } from './rate-limit.mjs';
-import { BodyError, readRequestBody } from './http-body.mjs';
+import { getLog, withLog } from './log.ts';
+import { createRateLimiter } from './rate-limit.ts';
+import { BodyError, readRequestBody } from './http-body.ts';
 import { runChain } from './http-handler-chain.mjs';
-import { matchRoute } from './http-route-match.mjs';
-import { committedEventHeaders, responseHasStarted, warnLateResponse, sendJson } from './http-response.mjs';
-import { createResponseFacade } from './http-response-factory.mjs';
+import { matchRoute } from './http-route-match.ts';
+import { committedEventHeaders, responseHasStarted, warnLateResponse, sendJson } from './http-response.ts';
+import { createResponseFacade } from './http-response-factory.ts';
 import { dispatchCrud } from './http-crud-dispatch.mjs';
-import { failure } from './outcome.mjs';
-import { sendFailure } from './http-failure.mjs';
+import { failure } from './outcome.ts';
+import { sendFailure } from './http-failure.ts';
 import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute, handleClientSdkRoute } from './http-framework-routes.mjs';
 import { handleApplicationActionHttp } from './application-action-http.mjs';
 

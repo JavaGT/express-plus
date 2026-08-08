@@ -4,11 +4,11 @@
 // schedule.mjs. Runtime functions extracted to keep the declaration surface clean.
 
 import { randomUUID } from 'node:crypto';
-import { principalFrom } from './principal.mjs';
-import { getLog } from './log.mjs';
-import { createClockRunner } from './clock-runner.mjs';
-import { materializeStoredRow } from './entity/materialize-row.mjs';
-import { triggerList, schedulerSource, tickSource } from './schedule.mjs';
+import { principalFrom } from './principal.ts';
+import { getLog } from './log.ts';
+import { createClockRunner } from './clock-runner.ts';
+import { materializeStoredRow } from './entity/materialize-row.ts';
+import { triggerList, schedulerSource, tickSource } from './schedule.ts';
 
 const DEADLINE_SCAN_INTERVAL_MS = 1000;
 
