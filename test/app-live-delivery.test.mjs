@@ -567,10 +567,12 @@ test('annotated text text-insert is delivered as a fold envelope over the live S
   assert.equal(envelope.type, 'event');
   assert.ok(envelope.fold, 'annotated text text-insert must deliver a fold envelope, not a snapshot recovery');
   assert.equal(envelope.fold.kind, 'annotatedText');
-  // The complete blockless v3 fold shape: a malformed fold — or one with the
+  // The complete blockless v4 fold shape: a malformed fold — or one with the
   // wrong projected text — must not pass as "usable fold delivery".
-  assert.equal(envelope.fold.version, 3);
+  assert.equal(envelope.fold.version, 4);
   assert.equal(envelope.fold.field, 'body');
+  assert.ok(Array.isArray(envelope.fold.dispositions), 'a fold always ships its emptied-annotation dispositions');
+  assert.equal(envelope.fold.dispositions.length, 0, 'a pure text insert empties no annotation');
   assert.ok(Number.isSafeInteger(envelope.fold.baseCursor) && envelope.fold.baseCursor >= 0);
   assert.equal(envelope.fold.text?.reducer, 'workbench.text');
   assert.ok(Array.isArray(envelope.fold.text?.operations) && envelope.fold.text.operations.length > 0);

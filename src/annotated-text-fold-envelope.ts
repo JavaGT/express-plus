@@ -2,7 +2,7 @@
 // blockless model).
 //
 // The server emits BLOCKLESS state: one continuous RGA family per document.
-// This projector emits a single v3 fold envelope for a contiguous whole-document
+// This projector emits a single v4 fold envelope for a contiguous whole-document
 // text.apply / text.replace transition when the recipient's view of the ENTIRE
 // document is fully visible and unredacted. The fully-visible client folds the
 // text operations onto its own family copy (seeded from its snapshot's authoring
@@ -11,6 +11,13 @@
 // fold — they stay on snapshot recovery because they can neither seed nor
 // verify a fold. Annotation edits change no text and fall through to the
 // ordinary envelope grammar; block-era operation shapes fall through with them.
+//
+// v4 additionally ships the authoritative `dispositions` for annotations whose
+// range an edit emptied (deleted vs orphaned, with the orphan's saved quote) so
+// the client's one reconciliation path reproduces the server's policy instead
+// of inferring it. v3 clients (and pre-disposition servers) fail closed to
+// snapshot recovery on a version mismatch: a v3 client that silently pruned an
+// emptied orphan would diverge from the server.
 
 import { parseEventType, EventKind } from './event-handle.ts';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.ts';
@@ -24,6 +31,7 @@ import {
   buildAuthoringEnvelope,
 } from './annotated-text-authoring-stream.ts';
 import { authoringRedactionsForRecipient } from './annotated-text-recipient-projection.ts';
+import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.ts';
 import type { Principal } from './principal.ts';
 import type { FieldDescriptor } from './field-strategy.ts';
 import type { LiveEntityRecord } from './live-fanout.ts';
@@ -85,6 +93,26 @@ interface FoldAuthoring {
   snapshot: string;
   acknowledgementFence: number;
   positionFrames: Array<{ positionToken: string }>;
+}
+
+// The plan's authoritative emptied-annotation disposition (mirrors
+// annotated-text-plan.ts EmptiedAnnotation): an annotation whose range an edit
+// collapsed to zero width is either `deleted` (dropped) or `orphaned` (kept
+// with its saved quote), per its declaration's `empty` policy. The fold carries
+// only the disclosure the recipient is entitled to.
+interface EmptiedDisposition {
+  annotationId: string;
+  empty: 'delete' | 'orphan';
+  disposition:
+    | { kind: 'orphaned'; family: string; savedQuote: string; lastRange: number[] | null }
+    | { kind: 'deleted'; family: string; savedQuote: string | null; lastRange: number[] | null };
+}
+
+interface FoldDisposition {
+  annotationId: string;
+  kind: 'deleted' | 'orphaned';
+  family: string;
+  savedQuote?: string;
 }
 
 // The v13 operated-event facts bag is one exact key set (mirrors
@@ -233,6 +261,56 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx: FoldCtx, { db, doc
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
   }
 
+  // Carry the authoritative emptied-annotation disposition through the fold so
+  // the recipient's one reconciliation path reproduces the server's delete-vs-
+  // orphan decision instead of inferring it. This gate has already proved the
+  // recipient sees the ENTIRE document unredacted, so an orphaned annotation's
+  // historical saved quote discloses nothing the recipient could not already
+  // read.
+  //
+  // An edit that empties a protecting-family annotation can CHANGE a
+  // recipient's visibility: a denied protector's redaction (or whole-document
+  // restriction) disappears with it, so a recipient who was redacted before the
+  // edit becomes fold-eligible after it. That recipient never received a family
+  // seed (redacted recipients never do), so it could not apply this fold anyway
+  // — and the fold would carry dispositions for annotations the recipient was
+  // never entitled to see. Such an edit falls back to snapshot recovery for
+  // every recipient (rare, and a fresh authorized snapshot is always safe).
+  const emptiedAnnotations = (facts.emptiedAnnotations ?? []) as Array<EmptiedDisposition>;
+  if (!Array.isArray(emptiedAnnotations)) {
+    return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
+  }
+  const compiled = getAnnotatedTextCompiledMetadata(document.descriptor);
+  let disclosures: FoldDisposition[];
+  try {
+    if (emptiedAnnotations.some((emptied) =>
+      compiled && Object.hasOwn(compiled.protectingFamilies, emptied?.disposition?.family))) {
+      return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
+    }
+    disclosures = [];
+    for (const emptied of emptiedAnnotations) {
+      if (!emptied || typeof emptied !== 'object' || Array.isArray(emptied)
+        || typeof emptied.annotationId !== 'string'
+        || !emptied.disposition || typeof emptied.disposition !== 'object' || Array.isArray(emptied.disposition)
+        || (emptied.disposition.kind !== 'deleted' && emptied.disposition.kind !== 'orphaned')
+        || typeof emptied.disposition.family !== 'string'
+        || (emptied.disposition.kind === 'orphaned' && typeof emptied.disposition.savedQuote !== 'string')) {
+        return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
+      }
+      // Defense in depth: protecting-family dispositions never leave the server
+      // even if a future gate change re-enables folding an emptied protector.
+      if (compiled && Object.hasOwn(compiled.protectingFamilies, emptied.disposition.family)) continue;
+      disclosures.push(Object.freeze({
+        annotationId: emptied.annotationId,
+        kind: emptied.disposition.kind,
+        family: emptied.disposition.family,
+        ...(emptied.disposition.kind === 'orphaned' ? { savedQuote: emptied.disposition.savedQuote } : {}),
+      }));
+    }
+  } catch {
+    return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
+  }
+
   const prefix = `${document.entity.name}_${document.fieldName}`;
   let committed;
   try {
@@ -295,7 +373,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx: FoldCtx, { db, doc
 
   const fold = Object.freeze({
     kind: 'annotatedText',
-    version: 3,
+    version: 4,
     field: document.fieldName,
     baseCursor,
     fence,
@@ -306,6 +384,11 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx: FoldCtx, { db, doc
     projection: Object.freeze({
       text: recipient.text,
     }),
+    // The authoritative emptied-annotation disposition (deleted vs orphaned)
+    // this transition committed, restricted to annotations the recipient's
+    // snapshot actually discloses. The client fold consumes these; a range the
+    // projection emptied without a disposition fails closed to recovery.
+    dispositions: Object.freeze(disclosures),
     // Compact cross-check the client can verify against its own post-apply
     // family without serializing the whole checkpoint.
     familyElementCount: Object.keys(committed.checkpoint.elements).length,

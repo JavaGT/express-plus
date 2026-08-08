@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { annotatedText, annotation, entity, measurement, ref, registerAnnotatedTextContract } from '../src/index.mjs';
 import { registerAnnotatedTextStructuralExtension } from '../src/internal.mjs';
-import { createAnnotatedTextHttpSession } from '../public/workbench-client.mjs';
+import { createAnnotatedTextHttpSession, materializeAnnotatedTextSnapshot } from '../public/workbench-client.mjs';
 
 registerAnnotatedTextContract('liveSessionMeasurement', Object.freeze({ kind: 'measurement' }));
 registerAnnotatedTextStructuralExtension('liveSessionMeasurement', Object.freeze({
@@ -639,9 +639,10 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId },
     fold: {
-      kind: 'annotatedText', version: 3, field: 'body', baseCursor: 1, fence: 2,
+      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 1, fence: 2,
       text: { reducer: 'workbench.text', operations: [nextOp] },
       projection: { text: nextText },
+      dispositions: [],
       familyElementCount: Object.keys(textFamilyCheckpoint(nextFamily).checkpoint.elements).length,
       authoring: {
         acknowledgementFence: 2,
@@ -661,6 +662,321 @@ test('own-echo fold installs text without a second bootstrap snapshot', async ()
   assert.equal(foldTimings.length, 1, 'onFoldApplied must fire once for the folded edit');
   assert.equal(foldTimings[0].kind, 'annotatedText');
   assert.ok(Number.isFinite(foldTimings[0].elapsedMs) && foldTimings[0].elapsedMs >= 0);
+  session.close();
+});
+
+test('a v4 client receiving a v3 fold recovers by snapshot instead of applying or pruning', async () => {
+  const snapshotRequests = [];
+  const sources = [];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const cursor = ++number;
+      snapshotRequests.push({ cursor });
+      const body = number === 1 ? snapshot() : snapshot('recovered');
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body: body.body }, cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  assert.equal(snapshotRequests.length, 1);
+  // A genuine v3 fold (the pre-disposition shape: no `dispositions` key at
+  // all) delivered against the current cursor. The v4 client's version guard
+  // must fail closed to a covering snapshot — never apply or silently prune.
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'v3-fold' },
+    fold: {
+      kind: 'annotatedText', version: 3, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [['workbench.text', 1, ['a'.repeat(32), 1], 1, [], ['insert', ['root'], 'x']]] },
+      projection: { text: 'x' },
+      familyElementCount: 1,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(snapshotRequests.length >= 2, 'a v3 fold must recover via snapshot');
+  assert.equal(session.document.text, 'recovered', 'the fold was not applied; the covering snapshot refreshed state');
+  assert.equal(session.status, 'live');
+  session.close();
+});
+
+test('a v4 fold missing or malformed dispositions recovers by snapshot instead of applying or pruning', async () => {
+  const snapshotRequests = [];
+  const sources = [];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const cursor = ++number;
+      snapshotRequests.push({ cursor });
+      const body = number === 1 ? snapshot() : snapshot('recovered');
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body: body.body }, cursor, authoring: authoringEnvelope(cursor) }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  assert.equal(snapshotRequests.length, 1);
+
+  // A v4 fold that omits `dispositions` entirely.
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'missing-dispositions' },
+    fold: {
+      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [['workbench.text', 1, ['a'.repeat(32), 1], 1, [], ['insert', ['root'], 'x']]] },
+      projection: { text: 'x' },
+      familyElementCount: 1,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(snapshotRequests.length >= 2, 'a fold without dispositions must recover via snapshot');
+  assert.equal(session.document.text, 'recovered', 'the missing-dispositions fold was not applied');
+  assert.equal(session.status, 'live');
+
+  // A v4 fold whose dispositions is malformed (not an array). Cursor is now 2.
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 3, seqSpan: [3, 3],
+    event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 3, actionId: 'malformed-dispositions' },
+    fold: {
+      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 2, fence: 3,
+      text: { reducer: 'workbench.text', operations: [['workbench.text', 1, ['a'.repeat(32), 1], 1, [], ['insert', ['root'], 'y']]] },
+      projection: { text: 'y' },
+      dispositions: { annotationId: 'c1' },
+      familyElementCount: 1,
+      authoring: {
+        acknowledgementFence: 3,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot3'),
+        positionFrames: [{ positionToken: token('position3') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(snapshotRequests.length >= 3, 'a fold with malformed dispositions must recover via snapshot');
+  assert.equal(session.document.text, 'recovered', 'the malformed-dispositions fold was not applied');
+  assert.equal(session.status, 'live');
+  session.close();
+});
+
+test('a collapsed range without a matching disposition recovers by snapshot instead of silently pruning', async () => {
+  const { createTextState, applyTextOp, textCheckpoint } = await import('../src/annotated-text.mjs');
+  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText, textOperationForOffsetEdit } = await import('../src/annotated-text-continuous.mjs');
+  const A = 'a'.repeat(32);
+  const B = 'b'.repeat(32);
+  const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello world']];
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
+  const deleteOp = textOperationForOffsetEdit(baseFamily, { kind: 'text.delete', from: { offset: 6 }, to: { offset: 11 } }, B, 2);
+  const nextFamily = applyTextOperation(baseFamily, deleteOp);
+  const nextText = materializeText(nextFamily);
+  assert.equal(nextText, 'hello ');
+
+  const snapshotRequests = [];
+  const sources = [];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') {
+        if (url.includes('/authoring/ack')) return { ok: true, status: 200, json: async () => ({ ok: true, acknowledgedThrough: number }) };
+        return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      }
+      const cursor = ++number;
+      snapshotRequests.push({ cursor });
+      const body = number === 1
+        ? {
+          ...snapshot().body,
+          text: 'hello world',
+          ranges: [{ annotationId: 'c1', start: 6, end: 11 }],
+          annotations: [{ id: 'c1', family: 'note', fields: {}, owner: 'u1' }],
+          orphans: [],
+        }
+        : {
+          ...snapshot().body,
+          text: nextText,
+          ranges: [],
+          annotations: [],
+          orphans: [{ id: 'c1', family: 'note', fields: {}, owner: 'u1', savedQuote: 'world' }],
+        };
+      return { ok: true, status: 200, json: async () => ({
+        kind: 'snapshot', snapshot: { body }, cursor,
+        authoring: authoringEnvelope(cursor, textFamilyCheckpoint(number === 1 ? baseFamily : nextFamily)),
+      }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  assert.equal(session.document.text, 'hello world');
+  assert.equal(session.document.ranges.length, 1);
+
+  // The edit collapses c1 to zero width, but the fold ships NO disposition for
+  // it. The one reconciliation path must fail closed to a covering snapshot:
+  // the collapsed range is never silently pruned and never crashes the session.
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'no-disposition' },
+    fold: {
+      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [deleteOp] },
+      projection: { text: nextText },
+      dispositions: [],
+      familyElementCount: Object.keys(textFamilyCheckpoint(nextFamily).checkpoint.elements).length,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(snapshotRequests.length >= 2, 'a collapsed range without a disposition must recover via snapshot');
+  const fresh = materializeAnnotatedTextSnapshot({
+    kind: 'workbench.annotatedText.recipient', version: 1,
+    text: nextText,
+    ranges: [],
+    annotations: [],
+    orphans: [{ id: 'c1', family: 'note', fields: {}, owner: 'u1', savedQuote: 'world' }],
+    measurements: [],
+  }, Document.body);
+  assert.equal(session.document.text, fresh.text);
+  assert.deepEqual(session.document.ranges, fresh.ranges);
+  assert.deepEqual(session.document.annotations, fresh.annotations);
+  assert.deepEqual(session.document.orphans, fresh.orphans);
+  assert.deepEqual(session.document.measurements, fresh.measurements);
+  assert.equal(session.status, 'live');
+  session.close();
+});
+
+test('a v4 fold disposition reproduces the fresh authorized snapshot for emptied annotations', async () => {
+  const { createTextState, applyTextOp, textCheckpoint } = await import('../src/annotated-text.mjs');
+  const { createTextFamily, applyTextOperation, textFamilyCheckpoint, materializeText, textOperationForOffsetEdit } = await import('../src/annotated-text-continuous.mjs');
+  const A = 'a'.repeat(32);
+  const B = 'b'.repeat(32);
+  const insertOp = ['workbench.text', 1, [A, 1], 1, [], ['insert', ['root'], 'hello world']];
+  const baseFamily = createTextFamily('d1', textCheckpoint(applyTextOp(createTextState(), insertOp)));
+  // Delete 'world' (6..11). Both annotations cover exactly that range, so the
+  // server's edit empties them: one orphan policy, one delete policy. The fold
+  // ships both dispositions; the client never infers the policy.
+  // textOperationForOffsetEdit mints a UNIQUE actor per offset edit ([actor, 1])
+  // against the current frontier, so the delete actor must be distinct from the
+  // insert's A.
+  const deleteOp = textOperationForOffsetEdit(baseFamily, { kind: 'text.delete', from: { offset: 6 }, to: { offset: 11 } }, B, 2);
+  const nextFamily = applyTextOperation(baseFamily, deleteOp);
+  const nextText = materializeText(nextFamily);
+
+  const snapshotRequests = [];
+  const sources = [];
+  let number = 0;
+  const session = createAnnotatedTextHttpSession({
+    baseUrl: 'https://example.test/live-delivery',
+    context: { entity: Document, field: Document.body, documentId: 'd1' },
+    historySession: 'tab-a', createActionId: () => 'action-1',
+    fetchImpl: async (url, options) => {
+      if (options?.method === 'POST') return { ok: true, status: 200, json: async () => ({ ok: true }) };
+      const cursor = ++number;
+      snapshotRequests.push(cursor);
+      const body = {
+        ...snapshot().body,
+        text: 'hello world',
+        ranges: [
+          { annotationId: 'c1', start: 6, end: 11 },
+          { annotationId: 'm1', start: 6, end: 11 },
+        ],
+        annotations: [
+          { id: 'c1', family: 'note', fields: {}, owner: 'u1' },
+          { id: 'm1', family: 'note', fields: {}, owner: 'u1' },
+        ],
+        orphans: [],
+      };
+      return { ok: true, status: 200, json: async () => ({ kind: 'snapshot', snapshot: { body }, cursor, authoring: authoringEnvelope(cursor, textFamilyCheckpoint(baseFamily)) }) };
+    },
+    eventSourceFactory: () => {
+      const source = { close() {}, onmessage: null, onerror: null };
+      sources.push(source);
+      return source;
+    },
+  });
+  await session.ready;
+  assert.equal(session.document.text, 'hello world');
+  assert.equal(session.document.ranges.length, 2);
+
+  // A FOREIGN live edit (no pending own operation): the fold is the one
+  // reconciliation path, identical to the own-echo path (ingest folds
+  // baseSnapshot before own/foreign reconciliation is decided).
+  sources[0].onmessage({ data: JSON.stringify([{
+    type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
+    event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'foreign' },
+    fold: {
+      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 1, fence: 2,
+      text: { reducer: 'workbench.text', operations: [deleteOp] },
+      projection: { text: nextText },
+      dispositions: [
+        { annotationId: 'm1', kind: 'deleted', family: 'note' },
+        { annotationId: 'c1', kind: 'orphaned', family: 'note', savedQuote: 'world' },
+      ],
+      familyElementCount: Object.keys(textFamilyCheckpoint(nextFamily).checkpoint.elements).length,
+      authoring: {
+        acknowledgementFence: 2,
+        stream: token('stream'), lease: token('lease'), snapshot: token('snapshot2'),
+        positionFrames: [{ positionToken: token('position2') }],
+      },
+    },
+  }]) });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  // The folded document is exactly a fresh authorized snapshot of the same
+  // committed state (the server's recipient projection for the post-edit row).
+  const fresh = materializeAnnotatedTextSnapshot({
+    kind: 'workbench.annotatedText.recipient', version: 1,
+    text: nextText,
+    ranges: [],
+    annotations: [],
+    orphans: [{ id: 'c1', family: 'note', fields: {}, owner: 'u1', savedQuote: 'world' }],
+    measurements: [],
+  }, Document.body);
+  assert.equal(session.document.text, fresh.text);
+  assert.deepEqual(session.document.ranges, fresh.ranges);
+  assert.deepEqual(session.document.annotations, fresh.annotations);
+  assert.deepEqual(session.document.orphans, fresh.orphans);
+  assert.deepEqual(session.document.measurements, fresh.measurements);
+  assert.deepEqual(session.document.orphans, [{
+    id: 'c1', family: 'note', fields: {}, owner: 'u1', savedQuote: 'world',
+  }]);
   session.close();
 });
 
@@ -693,9 +1009,10 @@ test('baseCursor mismatch forces snapshot recovery rather than applying fold', a
     type: 'event', entity: 'Project', id: 'p1', seq: 2, seqSpan: [2, 2],
     event: { type: 'LiveDocument.body.operated', scope: 'Project:p1', seq: 2, actionId: 'foreign' },
     fold: {
-      kind: 'annotatedText', version: 3, field: 'body', baseCursor: 0, fence: 2,
+      kind: 'annotatedText', version: 4, field: 'body', baseCursor: 0, fence: 2,
       text: { reducer: 'workbench.text', operations: [['workbench.text', 1, ['a'.repeat(32), 1], 1, [], ['insert', ['root'], 'x']]] },
       projection: { text: 'x' },
+      dispositions: [],
       familyElementCount: 1,
       authoring: {
         acknowledgementFence: 2,

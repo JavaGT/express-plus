@@ -22,7 +22,7 @@ historical lattice row is replayed.
 | Lifecycle beside ops | `annotatedTextCreateAction` / entity create; `annotatedText.retire` |
 | Client/session | Build v9 actions via package/client helpers; hold authoring tokens |
 | Durable log / projection | `Entity.<field>.operated` payloads **version 13 only** — admitted and reduced; every other version fails closed |
-| Live delivery | Fully-visible recipients may receive a **recipient-safe v13 fold envelope** (`annotatedText` fold v3) for whole-document text transitions; redacted/restricted recipients and non-foldable operated events fall back to **snapshot resync** (`annotated-text-snapshot-required`) |
+| Live delivery | Fully-visible recipients may receive a **recipient-safe v13 fold envelope** (`annotatedText` fold v4, carrying authoritative emptied-annotation `dispositions`) for whole-document text transitions; redacted/restricted recipients and non-foldable operated events fall back to **snapshot resync** (`annotated-text-snapshot-required`). v3 clients and pre-disposition servers fail closed to snapshot recovery |
 
 ## Why pre-13 rows are not replayed
 
@@ -56,6 +56,15 @@ view:
 
 This is one fold mechanism with one eligibility gate — not a second
 reconciliation path, and never the retired v1–v11 lattice.
+
+**Fold-wire deployment boundary.** The fold envelope itself is versioned
+(`annotatedText` fold v4). A v4 client receiving a v3 fold, a fold with missing
+or malformed `dispositions`, or a fold whose emptied range has no matching
+disposition fails closed to covering snapshot recovery — it never applies the
+fold, never prunes an emptied annotation, and never crashes the session. The
+prior v3 client carried the mirror-image version guard, but no retained v3
+client artifact is executable, so mixed-deployment behavior is proven at the
+current-client boundary only.
 
 ## Fail-closed version guard
 

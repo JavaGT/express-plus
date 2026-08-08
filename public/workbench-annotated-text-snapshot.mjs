@@ -51,7 +51,11 @@ export function materializeAnnotatedTextSnapshot(snapshot, handle, options = {})
   return document;
 }
 
-// Optimistic absolute-offset text splice (issue #33 blockless).
+// Optimistic absolute-offset text splice (issue #33 blockless). The result is
+// DISPOSITION-NEUTRAL: a range the edit collapses to zero width stays collapsed
+// and its annotation stays attached, so the visible placeholder never infers
+// the server's delete-vs-orphan policy. The authoritative v4 fold disposition
+// resolves each emptied annotation exactly once; the client never prunes here.
 export function projectPendingAnnotatedTextDocument(document, action, _ignored) {
   const edit = action?.payload?.version === 9 ? action.payload.edit : null;
   if (!edit || (edit.kind !== 'text.insert' && edit.kind !== 'text.delete' && edit.kind !== 'text.replace')) return document;
@@ -63,12 +67,11 @@ export function projectPendingAnnotatedTextDocument(document, action, _ignored) 
     ? `${text.slice(0, start)}${edit.text}${text.slice(start)}`
     : `${text.slice(0, start)}${edit.kind === 'text.replace' ? edit.text : ''}${text.slice(end)}`;
   const projected = projectRangesOverEdit(document.ranges, start, end, edit.kind === 'text.insert' || edit.kind === 'text.replace' ? edit.text : '');
-  const next = Object.freeze({
+  return Object.freeze({
     ...document,
     text: spliced,
     ...(Array.isArray(document.ranges) ? { ranges: projected } : {}),
   });
-  return pruneEmptiedRanges(next);
 }
 
 /**
@@ -106,20 +109,6 @@ export function projectRangesOverEdit(ranges, from, to, text) {
       end = range.end <= from ? range.end : range.end > to ? range.end + delta : from + text.length;
     }
     return Object.freeze({ ...range, start, end });
-  });
-}
-
-/** Drop ranges a text edit collapsed to zero width and their annotations. */
-export function pruneEmptiedRanges(document) {
-  if (!Array.isArray(document.ranges) || document.ranges.length === 0) return document;
-  const live = document.ranges.some((range) => range.start >= range.end);
-  if (!live) return document;
-  const retained = document.ranges.filter((range) => range.start < range.end);
-  const retainedIds = new Set(retained.map((range) => range.annotationId));
-  return Object.freeze({
-    ...document,
-    ranges: retained,
-    annotations: (document.annotations ?? []).filter((annotation) => retainedIds.has(annotation.id)),
   });
 }
 

@@ -15,7 +15,7 @@
 import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } from './workbench-annotated-text.mjs';
 import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
-import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, projectRangesOverText, pruneEmptiedRanges } from './workbench-annotated-text-snapshot.mjs';
+import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, projectRangesOverText } from './workbench-annotated-text-snapshot.mjs';
 import { applyTextOperation, materializeText as materializeFamilyText, restoreTextFamily, textFamilyCheckpoint } from './workbench-annotated-text-continuous.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
@@ -51,6 +51,12 @@ function decideReplay(cursor, seqOrSpan) {
 // stay at the call sites, which differ in reset/clear semantics.
 function backoffDelay(attempt, base, max) {
   return Math.min(base * 2 ** attempt, max);
+}
+
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+  for (const child of Object.values(value)) deepFreeze(child);
+  return Object.freeze(value);
 }
 
 // ---------------------------------------------------------------------------
@@ -3372,10 +3378,79 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     });
   }
 
+  /**
+   * Consume the server-authoritative emptied-annotation disposition a v4 fold
+   * ships. The fold is the ONE reconciliation path: the client never infers
+   * delete-vs-orphan itself. A `deleted` disposition drops the annotation; an
+   * `orphaned` disposition keeps its durable identity with the server's saved
+   * quote (fields and owner come from the annotation the recipient already
+   * disclosed). A disposition naming an annotation the recipient never had, a
+   * family mismatch, or a collapsed range without a matching disposition fail
+   * closed so the session recovers with an authorized snapshot instead of
+   * diverging.
+   */
+  function applyAnnotatedTextFoldDispositions(currentDocument, ranges, dispositions) {
+    if (!Array.isArray(dispositions)) throw new Error('annotated text fold dispositions are invalid');
+    const annotationById = new Map(currentDocument.annotations.map((annotation) => [annotation.id, annotation]));
+    const dispositionById = new Map();
+    for (const disposition of dispositions) {
+      if (!disposition || typeof disposition !== 'object' || Array.isArray(disposition)
+        || typeof disposition.annotationId !== 'string'
+        || (disposition.kind !== 'deleted' && disposition.kind !== 'orphaned')
+        || typeof disposition.family !== 'string'
+        || (disposition.kind === 'orphaned' && typeof disposition.savedQuote !== 'string')) {
+        throw new Error('annotated text fold disposition is invalid');
+      }
+      const annotation = annotationById.get(disposition.annotationId);
+      if (!annotation) throw new Error('annotated text fold disposition names an unknown annotation');
+      if (annotation.family !== disposition.family) throw new Error('annotated text fold disposition family disagrees');
+      if (dispositionById.has(disposition.annotationId)) throw new Error('annotated text fold disposition is duplicated');
+      dispositionById.set(disposition.annotationId, disposition);
+    }
+    const retainedRanges = [];
+    const orphans = [...(currentDocument.orphans ?? [])];
+    for (const range of ranges) {
+      const disposition = dispositionById.get(range.annotationId);
+      if (disposition) {
+        // The server is authoritative: the annotation is gone from the active
+        // ranges regardless of the local projection's width approximation.
+        if (disposition.kind === 'orphaned') {
+          const annotation = annotationById.get(range.annotationId);
+          orphans.push(deepFreeze({
+            id: annotation.id,
+            family: annotation.family,
+            fields: { ...annotation.fields },
+            savedQuote: disposition.savedQuote,
+            ...(annotation.owner ? { owner: annotation.owner } : {}),
+          }));
+        }
+        continue;
+      }
+      // A range the server emptied always carries a disposition. A collapsed
+      // range without one is a projection divergence; recover with a snapshot.
+      if (range.start >= range.end) throw new Error('annotated text fold collapsed a range without a disposition');
+      retainedRanges.push(range);
+    }
+    const retainedAnnotations = currentDocument.annotations.filter((annotation) => !dispositionById.has(annotation.id));
+    // The server's snapshot canonicalizes orphans by `ORDER BY a.id` (see
+    // annotated-text-snapshot.mjs). A fold must reproduce that EXACT order so
+    // a folded document is byte-for-byte the fresh authorized snapshot: new
+    // orphans are appended in range order above, so sort the combined list
+    // canonically before installing it. Fields are preserved by the stable id
+    // sort.
+    const canonicalOrphans = [...orphans].sort((left, right) => left.id < right.id ? -1 : left.id > right.id ? 1 : 0);
+    return Object.freeze({
+      ...currentDocument,
+      ranges: Object.freeze(retainedRanges),
+      annotations: Object.freeze(retainedAnnotations),
+      orphans: Object.freeze(canonicalOrphans),
+    });
+  }
+
   function foldAnnotatedTextDocument(currentDocument, envelope) {
     const startedAt = onFoldApplied ? performance.now() : 0;
     const fold = envelope?.fold;
-    if (!fold || fold.kind !== 'annotatedText' || fold.version !== 3 || fold.field !== field.fieldName) {
+    if (!fold || fold.kind !== 'annotatedText' || fold.version !== 4 || fold.field !== field.fieldName) {
       throw new Error('annotated text fold envelope is missing or unsupported');
     }
     const fence = envelope.seq ?? envelope.seqSpan?.[1];
@@ -3388,6 +3463,9 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     if (!fold.projection || typeof fold.projection.text !== 'string') {
       throw new Error('annotated text fold projection is invalid');
     }
+    if (!Array.isArray(fold.dispositions)) {
+      throw new Error('annotated text fold dispositions are invalid');
+    }
     // The family seed comes from the snapshot's authoring envelope (fully
     // unredacted recipients). A fold against no seeded checkpoint cannot verify
     // the transition; fail closed so the session recovers with a fresh snapshot.
@@ -3398,8 +3476,9 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     // A fold ships text operations only; the annotation ranges must track the
     // same transition. Project the authoritative snapshot ranges through the
     // fold's COMBINED text change (a replace is one delete+insert pair whose
-    // combined effect empties a covered range without re-opening it), then
-    // drop annotations the edit collapsed to zero width.
+    // combined effect empties a covered range without re-opening it), then let
+    // the fold's server-carried dispositions decide each emptied annotation's
+    // delete-vs-orphan fate (the client never infers the policy itself).
     const beforeText = materializeFamilyText(family);
     for (const operation of fold.text.operations) {
       family = applyTextOperation(family, operation);
@@ -3425,8 +3504,8 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     familyCheckpoint = textFamilyCheckpoint(family);
     installAuthoringFromFold(fold.authoring, fence);
     if (onFoldApplied) onFoldApplied(fold, performance.now() - startedAt);
-    const foldedDocument = Object.freeze({ ...currentDocument, text: fold.projection.text, ranges: foldedRanges });
-    return pruneEmptiedRanges(foldedDocument);
+    const foldedDocument = applyAnnotatedTextFoldDispositions(currentDocument, foldedRanges, fold.dispositions);
+    return Object.freeze({ ...foldedDocument, text: fold.projection.text });
   }
 
   const session = createLiveDeliveryHttpSession({
