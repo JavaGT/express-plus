@@ -30,6 +30,7 @@ import { createInvitationApi } from './invitation.mjs';
 import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.mjs';
 import { config,                      } from '../config.mjs';
 import { verifyTotp, verifyBackupCode } from './totp.mjs';
+import { loginChallengeStore } from './login-challenge.mjs';
 import { checkLockout, loginLockoutDecision, totpLockoutDecision } from './lockout.mjs';
 import { serializeField } from '../field-strategy.mjs';
 import {
@@ -108,6 +109,33 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     return { isValid: isTotpValid || isBackupValid, usedBackup: isBackupValid, backupCodes };
   }
 
+  // Consume a backup code DURABLY, with transactional protection: re-read the
+  // persisted backupCodes JSON inside a BEGIN IMMEDIATE transaction (write lock)
+  // so two concurrent submissions of the same code cannot both mint a session.
+  // The list is stored as SHA-256 hashes; the in-memory decoded list is compared
+  // against the persisted list within the transaction and only written back on a
+  // match. Returns { usedBackup } — a consumed code is persisted before the
+  // session is minted (the caller), never after.
+  function consumeBackupCode(twoFactorId        , token        )                          {
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      const row = db.prepare('SELECT secret, backupCodes FROM TwoFactor WHERE id = ?').get(twoFactorId)                                                              ;
+      const { usedBackup, backupCodes } = verifyTotpOrBackupCode(
+        { secret: row?.secret ?? '', backupCodes: row?.backupCodes ?? '[]' },
+        token,
+      );
+      if (usedBackup) {
+        db.prepare('UPDATE TwoFactor SET backupCodes = ?, totpFailedAttempts = 0, totpLockedUntil = NULL WHERE id = ?')
+          .run(JSON.stringify(backupCodes), twoFactorId);
+      }
+      db.exec('COMMIT');
+      return { usedBackup };
+    } catch (err) {
+      db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
   function findIdentity(credential         , next          )                                 {
     for (const name of identityFields) {
       const field = User[name];
@@ -175,11 +203,16 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
         .run(user.id);
     }
     // Two-factor check: if the user has an enabled TOTP enrollment, do NOT mint a
-    // session yet — return the userId so the client can prompt for the TOTP token
-    // and call /auth/totp/authenticate to complete authentication.
+    // session yet. Issue a pending-login challenge bound server-side to this user
+    // and return it (alongside the userId for display/debug) so the client can
+    // prompt for the TOTP token and call /auth/totp/authenticate to complete
+    // authentication. The authenticate route derives the user from the challenge
+    // — it never trusts a client-supplied userId — so a challenge is the proof
+    // the caller passed this user's password.
     const twoFactor = TwoFactor.findOne(TwoFactor.userId.is(user.id));
     if (twoFactor && twoFactor.enabled === 1) {
-      return res.json({ requiresTotp: true, userId: user.id });
+      const challenge = loginChallengeStore.set(user.id);
+      return res.json({ requiresTotp: true, challenge, userId: user.id });
     }
     createSessionResponse(user, res);
   });
@@ -531,6 +564,16 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
 
   // ---- TOTP (two-factor authentication) routes ------------------------------
 
+  // GET /auth/totp — return the current user's TOTP enrollment status.
+  // requireUser: an anonymous caller is rejected (401). The response is EXACTLY
+  // { enrolled, enabled } — no secret, no backup-code hashes or count, no
+  // verifiedAt, no lockout counters, no row id.
+  s.get('/totp', requireUser(), (req             , res              ) => {
+    const twoFactor = TwoFactor.findOne(TwoFactor.userId.is(req.principal.id));
+    if (!twoFactor) return res.json({ enrolled: false, enabled: false });
+    return res.json({ enrolled: true, enabled: twoFactor.enabled === 1 });
+  });
+
   // POST /auth/totp/enroll — enroll in TOTP two-factor authentication.
   // requireUser: only an authenticated user can enroll. Generates a secret
   // (base32-encoded), backup codes, and a TwoFactor row. Returns the secret
@@ -661,46 +704,74 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   });
 
   // POST /auth/totp/authenticate — complete login with TOTP 2FA.
-  // allowAnonymous: the caller has already provided a password via /auth/login,
-  // which returned { requiresTotp: true, userId }. This route verifies the TOTP
-  // token (or backup code), mints a Session, and sets the sid cookie — the same
-  // authentication pathway as password login.
+  // allowAnonymous: the caller already provided a password via /auth/login, which
+  // returned { requiresTotp: true, challenge }. The user is derived FROM the
+  // challenge (bound server-side to the user who passed the password); a
+  // client-supplied userId is never trusted here. The route accepts either a
+  // valid TOTP token or an unused backup code, consumes the challenge, mints a
+  // Session, and sets the sid cookie — the same authentication pathway as
+  // password login. TOTP and backup success share ONE response so the response
+  // never reveals which factor was used.
   s.post('/totp/authenticate', allowAnonymous(), (req             , res              , next          ) => {
-    const { userId, token } = req.body ?? {};
-    if (!userId || !token) {
-      return next({ status: 400, message: 'userId and token are required' });
+    const { challenge, token } = req.body ?? {};
+    if (!challenge || !token) {
+      return next({ status: 400, message: 'challenge and token are required' });
     }
+    const challengeId = String(challenge);
+    const entry = loginChallengeStore.get(challengeId);
+    if (!entry) {
+      return next({ status: 400, message: 'unknown or expired challenge' });
+    }
+    const userId = entry.userId;
     const twoFactor = TwoFactor.findOne(TwoFactor.userId.is(userId));
     if (!twoFactor || twoFactor.enabled !== 1) {
       return next({ status: 400, message: 'TOTP not enabled for this user' });
     }
-    // TOTP lockout check — before token verification.
+
+    // Success: consume the challenge (single-use), reset the TOTP lockout
+    // counters (reset below the CAS for backup success), and mint the session.
+    // consume is checked so a stale race cannot mint a second session.
+    const mintSession = () => {
+      if (!loginChallengeStore.consume(challengeId, userId)) {
+        return next({ status: 400, message: 'unknown or expired challenge' });
+      }
+      createSessionResponse(User.getOrFail(userId), res);
+    };
+
+    // Valid TOTP obeys the existing TOTP lockout. A valid backup code may
+    // succeed while the lockout is active (it is the recovery escape hatch).
     const totpLock = checkLockout(twoFactor.totpLockedUntil);
     if (totpLock) {
-      return next({ status: 429, message: 'TOTP temporarily locked', retryAfterMs: totpLock.retryAfterMs });
-    }
-    // Only TOTP tokens are accepted here — backup codes are recovery secrets,
-    // not authentication tokens. See auth/totp/disable for backup code usage.
-    if (!verifyTotp(twoFactor.secret, token          )) {
-      // Failed TOTP attempt: increment counter and optionally lock.
-      const attempts = (twoFactor.totpFailedAttempts ?? 0) + 1;
-      const decision = totpLockoutDecision({ attempts });
-      if (decision) {
-        db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE id = ?')
-          .run(attempts, decision.lockedUntil, twoFactor.id);
-      } else {
-        db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ? WHERE id = ?')
-          .run(attempts, twoFactor.id);
+      const backup = consumeBackupCode(twoFactor.id, String(token));
+      if (!backup.usedBackup) {
+        return next({ status: 429, message: 'TOTP temporarily locked', retryAfterMs: totpLock.retryAfterMs });
       }
-      return next({ status: 400, message: 'invalid TOTP token' });
+      return mintSession();
     }
-    // Successful TOTP verification: reset counter.
-    db.prepare('UPDATE TwoFactor SET totpFailedAttempts = 0, totpLockedUntil = NULL WHERE id = ?')
-      .run(twoFactor.id);
-    const user = User.getOrFail(userId);
-    const session = Session.create({ userId: user.id });
-    res.setHeader('set-cookie', sessionCookie(session.token, { secure }));
-    res.status(201).json({ user: { id: user.id, username: user.username } });
+
+    if (verifyTotp(twoFactor.secret, String(token))) {
+      db.prepare('UPDATE TwoFactor SET totpFailedAttempts = 0, totpLockedUntil = NULL WHERE id = ?')
+        .run(twoFactor.id);
+      return mintSession();
+    }
+
+    const backup = consumeBackupCode(twoFactor.id, String(token));
+    if (backup.usedBackup) {
+      return mintSession();
+    }
+
+    // Invalid second factor: consume one challenge attempt, never a backup code.
+    const attempts = (twoFactor.totpFailedAttempts ?? 0) + 1;
+    const decision = totpLockoutDecision({ attempts });
+    if (decision) {
+      db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE id = ?')
+        .run(attempts, decision.lockedUntil, twoFactor.id);
+    } else {
+      db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ? WHERE id = ?')
+        .run(attempts, twoFactor.id);
+    }
+    loginChallengeStore.registerFailure(challengeId);
+    return next({ status: 400, message: 'invalid token or backup code' });
   });
 
   return s;

@@ -117,14 +117,14 @@ export function generateSecret(username = 'user'): { secret: string; uri: string
 // ---- backup codes -------------------------------------------------------------
 
 // generateBackupCodes(n = 8) → { plainCodes, hashedCodes }
-// Generates n random backup codes. Each code is 4 random bytes → 8 hex chars.
-// The plain codes are returned ONCE (for display to the user); the hashed
-// codes (SHA-256) are stored for one-way verification.
+// Generates n random backup codes. Each code is 16 random bytes → 32 hex chars
+// (128 bits of entropy). The plain codes are returned ONCE (for display to the
+// user); the hashed codes (SHA-256) are stored for one-way verification.
 export function generateBackupCodes(n = 8): { plainCodes: string[]; hashedCodes: string[] } {
   const plainCodes: string[] = [];
   const hashedCodes: string[] = [];
   for (let i = 0; i < n; i++) {
-    const code = crypto.randomBytes(4).toString('hex');
+    const code = crypto.randomBytes(16).toString('hex');
     plainCodes.push(code);
     hashedCodes.push(sha256hex(code));
   }
