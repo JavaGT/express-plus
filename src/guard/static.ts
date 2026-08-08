@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Layer (2) of the async `is.*` guard: LOAD-TIME STATIC ANALYSIS (ADR #16).
 //
 // The primary guard. At entity-load, the framework scans every `.can`/`scope`
@@ -19,7 +18,7 @@ import { UnawaitedCheckError } from '../check.ts';
 // Remove line/block comments and string/template literals so their contents are
 // never mistaken for code. Replaces each with equivalent-length whitespace so
 // reported offsets stay roughly aligned.
-function stripCommentsAndStrings(src) {
+function stripCommentsAndStrings(src: string): string {
   let out = '';
   let i = 0;
   const n = src.length;
@@ -56,10 +55,10 @@ function stripCommentsAndStrings(src) {
 
 // Find every `is.<name>(` call and report any not immediately preceded by
 // `await` (ignoring whitespace). Returns an array of unguarded check names.
-function findUnawaitedChecks(code) {
-  const unguarded = [];
+function findUnawaitedChecks(code: string): string[] {
+  const unguarded: string[] = [];
   const callRe = /\bis\.([A-Za-z_$][\w$]*)\s*\(/g;
-  let m;
+  let m: RegExpExecArray | null;
   while ((m = callRe.exec(code)) !== null) {
     const before = code.slice(0, m.index).replace(/\s+$/, '');
     if (!/\bawait$/.test(before)) {
@@ -72,7 +71,10 @@ function findUnawaitedChecks(code) {
 // assertGuarded(fn, { where }) — throws UnawaitedCheckError if the function
 // body calls any `is.*` check without `await`. Call this at entity-load for
 // every `.can`/`scope` body.
-export function assertGuarded(fn, { where = 'a grant body' } = {}) {
+export function assertGuarded(
+  fn: (...args: unknown[]) => unknown,
+  { where = 'a grant body' }: { where?: string } = {},
+): void {
   const code = stripCommentsAndStrings(Function.prototype.toString.call(fn));
   const unguarded = findUnawaitedChecks(code);
   if (unguarded.length > 0) {

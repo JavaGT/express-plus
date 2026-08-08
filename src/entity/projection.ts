@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { getLog } from '../log.ts';
 import { serializeField, flattenStruct, resolveStrategy } from '../field-strategy.ts';
 import * as eventHandle from '../event-handle.ts';
@@ -15,12 +14,107 @@ import { assertWordEvidencePayload } from '../word-evidence.ts';
 import { resolveDeclarationMeasurementExtension } from '../annotated-text-field.ts';
 import { frozenJsonSnapshot } from '../annotated-text-r2.ts';
 import { markAnnotatedEntityProjection } from '../annotated-text-history.ts';
+import type { DbHandle } from '../driver.ts';
+import type { SideTableStrategyEntry, ProjectionEvent } from '../side-table-strategy.ts';
 
-function initializeAnnotatedText({ name, fields, event, db, row }) {
+type Row = Record<string, unknown>;
+type Db = DbHandle;
+
+interface FieldDescriptor {
+  kind: string;
+  type?: string;
+  project?: string;
+  owner?: string;
+  wordEvidence?: unknown;
+  measurements?: Array<{ measurementName?: string; formatVersion?: number }>;
+  annotations?: Array<{ annotationName?: string; fields: Record<string, FieldDescriptor> }>;
+  block?: Record<string, FieldDescriptor>;
+  validate?: (value: unknown) => string | true;
+  [key: string]: unknown;
+}
+
+type Fields = Record<string, FieldDescriptor>;
+
+type NativeEventHandle = Extract<eventHandle.EventIdentityHandle, { kind: typeof eventHandle.EventKind.native }>;
+
+interface DataLike {
+  id?: string;
+  version?: number;
+  __workbench?: { annotatedText?: Record<string, unknown> };
+  [key: string]: unknown;
+}
+
+interface EventLike {
+  handle?: eventHandle.EventIdentityHandle;
+  data?: DataLike | null;
+  committedAt?: unknown;
+  type?: string;
+  [key: string]: unknown;
+  [key: symbol]: unknown;
+}
+
+interface TextRevision {
+  structuralRevision?: number;
+  frontier?: unknown[];
+}
+
+interface EmptiedAnnotationFact {
+  annotationId?: string;
+  disposition?: { kind?: string; savedQuote?: unknown; lastRange?: unknown };
+}
+
+interface OperatedFacts {
+  ranges: Array<Record<string, unknown>>;
+  measurements: Array<Record<string, unknown>>;
+  emptiedAnnotations: Array<EmptiedAnnotationFact>;
+  removedAnnotationIds: unknown[];
+  family: unknown;
+  annotation: Record<string, unknown> | null;
+  lifecycle: unknown;
+  result: unknown;
+  actorId: unknown;
+  selectedRange: Record<string, unknown> | null;
+}
+
+interface OperatedEnvelope {
+  id: string;
+  version: number;
+  before: TextRevision;
+  after: TextRevision;
+  operation?: {
+    kind?: string;
+    operation?: unknown[];
+    operations?: Array<Record<string, unknown>>;
+    annotation?: { id?: string; family?: string; fields?: Record<string, unknown>; protectedTargetIds?: unknown };
+    selection?: unknown;
+    annotationId?: string;
+  };
+  facts: OperatedFacts;
+  [key: string]: unknown;
+}
+
+type ComputedEntry = [string, { compute?: (row: Record<string, unknown>) => unknown }];
+
+interface ImportedAnnotatedText {
+  version?: unknown;
+  actor?: unknown;
+  blocks?: Array<Record<string, unknown>>;
+  initialBlockId?: unknown;
+}
+
+function isTextRevision(value: unknown): value is TextRevision {
+  const record = value as Record<string, unknown>;
+  return !!value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(record).sort().join() === 'frontier,structuralRevision' &&
+    Number.isSafeInteger(record.structuralRevision as number) && (record.structuralRevision as number) >= 1 &&
+    Array.isArray(record.frontier);
+}
+
+function initializeAnnotatedText({ name, fields, event, db, row }: { name: string; fields: Fields; event: EventLike; db: Db; row: Row }) {
   const metadata = event.data?.__workbench?.annotatedText;
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind !== 'annotatedText') continue;
-    const imported = metadata?.[fieldName];
+    const imported = metadata?.[fieldName] as ImportedAnnotatedText | undefined;
     const initialBlockId = imported?.initialBlockId;
     if (!imported || imported.version !== 1 || typeof imported.actor !== 'string' || !/^[0-9a-f]{32}$/.test(imported.actor) ||
         !Array.isArray(imported.blocks) || imported.blocks.length === 0 || typeof initialBlockId !== 'string' || initialBlockId.length === 0 ||
@@ -40,14 +134,14 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
       if (importedBlock.text.length === 0 && imported.blocks.some((candidate) => candidate.fields !== null)) throw new Error(`${name}.${fieldName} created event has an empty imported block`);
       if (importedBlock.wordEvidence !== undefined) {
         try {
-          assertWordEvidencePayload(importedBlock.wordEvidence, { families: fields[fieldName].wordEvidence, blockText: importedBlock.text });
+          assertWordEvidencePayload(importedBlock.wordEvidence, { families: fields[fieldName].wordEvidence as never[], blockText: importedBlock.text });
         } catch (error) {
-          throw new Error(`${name}.${fieldName} created event block ${blockIndex} has invalid word evidence payload: ${error.message}`);
+          throw new Error(`${name}.${fieldName} created event block ${blockIndex} has invalid word evidence payload: ${(error as Error).message}`);
         }
       }
     }
     const fullText = imported.blocks.map((importedBlock) => importedBlock.text).join('');
-    const family = importTextToFamily(row.id, imported.actor, fullText);
+    const family = importTextToFamily(row.id as string, imported.actor, fullText);
     const checkpoint = JSON.stringify(continuousTextFamilyCheckpoint(family));
     const state = db.prepare(`SELECT * FROM ${prefix}_state WHERE document_id = ?`).get(row.id);
     if (state) {
@@ -71,7 +165,7 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
       }
     }
     for (const [measurementFamily, measurement] of measurementByFamily) {
-      const config = descriptor.measurements.find((entry) => entry.measurementName === measurementFamily);
+      const config = descriptor.measurements!.find((entry) => entry.measurementName === measurementFamily);
       const extension = config && resolveDeclarationMeasurementExtension(config);
       if (!config || measurement.formatVersion !== config.formatVersion || !extension) throw new Error(`${name}.${fieldName} created event measurement declaration mismatch`);
       let payload;
@@ -82,7 +176,7 @@ function initializeAnnotatedText({ name, fields, event, db, row }) {
   }
 }
 
-function applyAnnotatedTextOperation({ name, fields, handle, event, db }) {
+function applyAnnotatedTextOperation({ name, fields, handle, event, db }: { name: string; fields: Fields; handle: eventHandle.EventIdentityHandle; event: EventLike; db: Db }) {
   if (handle.kind !== eventHandle.EventKind.native || handle.nativeName !== 'operated') return false;
   const descriptor = fields[handle.field];
   if (descriptor?.kind !== 'annotatedText') return false;
@@ -90,21 +184,19 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db }) {
   if (!data || typeof data !== 'object' || typeof data.id !== 'string' || data.id.length === 0) {
     throw new Error(`${name}.${handle.field}.operated event has no data`);
   }
-  if (data.version === 13) return applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data });
+  if (data.version === 13) return applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data: data as unknown as OperatedEnvelope });
   throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
 }
 
 // The active durable codec is one exact envelope.  The operation-specific
 // reducers below consume only the facts in this envelope; versions before 13
 // are deliberately not accepted by the projection.
-function applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data }) {
+function applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data }: { name: string; handle: NativeEventHandle; db: Db; descriptor: FieldDescriptor; data: OperatedEnvelope }) {
   const prefix = `${name}.${handle.field}.operated v13`;
   const factKeys = ['actorId', 'annotation', 'emptiedAnnotations', 'family', 'lifecycle', 'measurements', 'ranges', 'removedAnnotationIds', 'result', 'selectedRange'];
-  const revision = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
-    Object.keys(value).sort().join() === 'frontier,structuralRevision' && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
   if (!data || typeof data !== 'object' || Array.isArray(data) ||
       Object.keys(data).sort().join() !== 'after,before,facts,id,operation,version' || data.version !== 13 ||
-      typeof data.id !== 'string' || !data.id || !revision(data.before) || !revision(data.after) ||
+      typeof data.id !== 'string' || !data.id || !isTextRevision(data.before) || !isTextRevision(data.after) ||
       !data.operation || typeof data.operation !== 'object' || Array.isArray(data.operation) ||
       !data.facts || typeof data.facts !== 'object' || Array.isArray(data.facts) ||
       Object.keys(data.facts).sort().join() !== factKeys.join()) {
@@ -127,17 +219,15 @@ function applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, d
   }
 }
 
-function projectBlocklessTextApply({ name, handle, db, data }) {
+function projectBlocklessTextApply({ name, handle, db, data }: { name: string; handle: NativeEventHandle; db: Db; data: OperatedEnvelope }) {
   const prefix = `${name}_${handle.field}`;
-  const revision = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
-    Object.keys(value).sort().join() === 'frontier,structuralRevision' && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
   const operation = data.operation;
   const f = data.facts;
   if (!operation || operation.kind !== 'text.apply' || !Array.isArray(operation.operation) ||
-      !f.family || !revision(data.before) || !revision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 text.apply event has invalid data`);
+      !f.family || !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 text.apply event has invalid data`);
   const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
   if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
-  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint));
+  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint as string));
   if (currentRow.structure_version !== data.before.structuralRevision ||
       JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 event conflicts with projection state`);
   let canonical;
@@ -151,17 +241,15 @@ function projectBlocklessTextApply({ name, handle, db, data }) {
   applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data });
 }
 
-function projectBlocklessTextReplace({ name, handle, db, data }) {
+function projectBlocklessTextReplace({ name, handle, db, data }: { name: string; handle: NativeEventHandle; db: Db; data: OperatedEnvelope }) {
   const prefix = `${name}_${handle.field}`;
-  const revision = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
-    Object.keys(value).sort().join() === 'frontier,structuralRevision' && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
   const operation = data.operation;
   const f = data.facts;
   if (!operation || operation.kind !== 'text.replace' || !Array.isArray(operation.operations) || operation.operations.length !== 2 ||
-      !f.family || !revision(data.before) || !revision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 text.replace event has invalid data`);
+      !f.family || !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 text.replace event has invalid data`);
   const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
   if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
-  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint));
+  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint as string));
   if (currentRow.structure_version !== data.before.structuralRevision ||
       JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 event conflicts with projection state`);
   let next = current;
@@ -177,7 +265,7 @@ function projectBlocklessTextReplace({ name, handle, db, data }) {
   applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data });
 }
 
-function applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data }) {
+function applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data }: { name: string; handle: NativeEventHandle; db: Db; prefix: string; data: OperatedEnvelope }) {
   for (const emptied of data.facts.emptiedAnnotations) {
     if (!emptied || typeof emptied !== 'object' || typeof emptied.annotationId !== 'string' || !emptied.disposition ||
         typeof emptied.disposition !== 'object' || (emptied.disposition.kind !== 'orphaned' && emptied.disposition.kind !== 'deleted')) throw new Error(`${name}.${handle.field}.operated v13 emptied annotation is invalid`);
@@ -193,14 +281,12 @@ function applyEmptiedAnnotationDispositions({ name, handle, db, prefix, data }) 
   }
 }
 
-function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, data }) {
+function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, data }: { name: string; handle: NativeEventHandle; db: Db; descriptor: FieldDescriptor; data: OperatedEnvelope }) {
   const prefix = `${name}_${handle.field}`;
-  const revision = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
-    Object.keys(value).sort().join() === 'frontier,structuralRevision' && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
   const operation = data.operation;
   const f = data.facts;
   if (!operation || operation.kind !== 'annotation.apply-range' || !operation.annotation || !operation.selection ||
-      !f.annotation || !f.selectedRange || !revision(data.before) || !revision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 annotation.apply-range event has invalid data`);
+      !f.annotation || !f.selectedRange || !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 annotation.apply-range event has invalid data`);
   const annOp = operation.annotation;
   const annFact = f.annotation;
   if (JSON.stringify(Object.keys(annOp).sort()) !== JSON.stringify(Object.keys(annFact).sort()) ||
@@ -214,7 +300,7 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   if (f.selectedRange.annotationId !== annOp.id) throw new Error(`${name}.${handle.field}.operated v13 selected range does not match the annotation`);
   const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
   if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
-  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint));
+  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint as string));
   if (currentRow.structure_version !== data.before.structuralRevision ||
       JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 event conflicts with projection state`);
   if (JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.after.frontier) ||
@@ -222,16 +308,16 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   if (JSON.stringify(continuousTextFamilyCheckpoint(current)) !== JSON.stringify(f.family)) throw new Error(`${name}.${handle.field}.operated v13 annotation family does not match the document`);
   const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(data.id);
   if (!row) throw new Error(`${name}.${handle.field}.operated v13 document row is missing`);
-  const declared = descriptor.annotations.find((entry) => entry.annotationName === annOp.family);
+  const declared = descriptor.annotations!.find((entry) => entry.annotationName === annOp.family);
   if (!declared) throw new Error(`${name}.${handle.field}.operated v13 annotation family is not declared`);
-  const targetIds = annOp.protectedTargetIds ?? [];
+  const targetIds = (annOp.protectedTargetIds ?? []) as string[];
   if (Array.isArray(targetIds) && targetIds.some((id, index, ids) => typeof id !== 'string' || (index > 0 && ids[index - 1] >= id))) throw new Error(`${name}.${handle.field}.operated v13 protected targets are invalid`);
   for (const targetId of targetIds) {
     const target = db.prepare(`SELECT id FROM ${prefix}_annotation WHERE id = ? AND document_id = ?`).get(targetId, data.id);
     if (!target) throw new Error(`${name}.${handle.field}.operated v13 protected target does not exist`);
   }
   db.prepare(`INSERT INTO ${prefix}_annotation (id, document_id, project_id, owner_id, family) VALUES (?, ?, ?, ?, ?)`)
-    .run(annOp.id, data.id, row[descriptor.project], row[descriptor.owner], annOp.family);
+    .run(annOp.id, data.id, row[descriptor.project as string], row[descriptor.owner as string], annOp.family);
   const fieldNames = Object.keys(declared.fields);
   // Fail closed: the annotation's field payload must EXACTLY match the declared
   // schema — unknown keys (including on a zero-field family) are rejected, so
@@ -243,12 +329,12 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   const stored = db.prepare(`SELECT * FROM ${prefix}_annotation_${annOp.family} WHERE annotation_id = ?`).get(annOp.id);
   if (fieldNames.length) {
     const values = fieldNames.map((fieldName) => {
-      if (!Object.hasOwn(annOp.fields, fieldName)) throw new Error(`${name}.${handle.field}.operated v13 annotation is missing field '${fieldName}'`);
+      if (!Object.hasOwn(annOp.fields!, fieldName)) throw new Error(`${name}.${handle.field}.operated v13 annotation is missing field '${fieldName}'`);
       const field = declared.fields[fieldName];
       const strategy = resolveStrategy(field.kind);
-      const validation = strategy.validate(annOp.fields[fieldName], field);
-      if (validation !== true || (typeof field.validate === 'function' && field.validate(annOp.fields[fieldName]) !== true)) throw new Error(`${name}.${handle.field}.operated v13 annotation field '${fieldName}' failed validation`);
-      return serializeField(field, annOp.fields[fieldName]);
+      const validation = strategy.validate(annOp.fields![fieldName], field);
+      if (validation !== true || (typeof field.validate === 'function' && field.validate(annOp.fields![fieldName]) !== true)) throw new Error(`${name}.${handle.field}.operated v13 annotation field '${fieldName}' failed validation`);
+      return serializeField(field, annOp.fields![fieldName]);
     });
     if (stored) {
       db.prepare(`UPDATE ${prefix}_annotation_${annOp.family} SET ${fieldNames.map((fieldName) => `${fieldName} = ?`).join(', ')} WHERE annotation_id = ?`).run(...values, annOp.id);
@@ -263,18 +349,16 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ? WHERE document_id = ?`).run(data.after.structuralRevision, data.id);
 }
 
-function projectBlocklessAnnotationRemove({ name, handle, db, data }) {
+function projectBlocklessAnnotationRemove({ name, handle, db, data }: { name: string; handle: NativeEventHandle; db: Db; data: OperatedEnvelope }) {
   const prefix = `${name}_${handle.field}`;
-  const revision = (value) => value && typeof value === 'object' && !Array.isArray(value) &&
-    Object.keys(value).sort().join() === 'frontier,structuralRevision' && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1 && Array.isArray(value.frontier);
   const operation = data.operation;
   const f = data.facts;
   if (!operation || operation.kind !== 'annotation.remove' || typeof operation.annotationId !== 'string' ||
       !Array.isArray(f.removedAnnotationIds) || f.removedAnnotationIds.length !== 1 || f.removedAnnotationIds[0] !== operation.annotationId ||
-      !revision(data.before) || !revision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 annotation.remove event has invalid data`);
+      !isTextRevision(data.before) || !isTextRevision(data.after)) throw new Error(`${name}.${handle.field}.operated v13 annotation.remove event has invalid data`);
   const currentRow = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(data.id);
   if (!currentRow) throw new Error(`${name}.${handle.field}.operated v13 document does not exist`);
-  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint));
+  const current = restoreTextFamily(JSON.parse(currentRow.family_checkpoint as string));
   if (currentRow.structure_version !== data.before.structuralRevision ||
       JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.before.frontier)) throw new Error(`${name}.${handle.field}.operated v13 event conflicts with projection state`);
   if (JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.after.frontier) ||
@@ -286,12 +370,12 @@ function projectBlocklessAnnotationRemove({ name, handle, db, data }) {
   db.prepare(`UPDATE ${prefix}_state SET structure_version = ? WHERE document_id = ?`).run(data.after.structuralRevision, data.id);
 }
 
-function deleteAnnotatedTextAnnotation(db, prefix, annotationId) {
+function deleteAnnotatedTextAnnotation(db: Db, prefix: string, annotationId: string) {
   db.prepare(`DELETE FROM ${prefix}_annotation_protected_target WHERE annotation_id = ? OR target_annotation_id = ?`).run(annotationId, annotationId);
   db.prepare(`DELETE FROM ${prefix}_annotation WHERE id = ?`).run(annotationId);
 }
 
-function buildProjectedComputeRow(storedRow, fields) {
+function buildProjectedComputeRow(storedRow: Row, fields: Fields): Row {
   const row = { ...storedRow };
   for (const [fName, desc] of Object.entries(fields)) {
     if (Object.prototype.hasOwnProperty.call(row, fName)) {
@@ -303,7 +387,15 @@ function buildProjectedComputeRow(storedRow, fields) {
   return row;
 }
 
-export function createEntityProjection({ name, fields, verbs, storedComputedFields, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }) {
+export function createEntityProjection({ name, fields, verbs, storedComputedFields, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }: {
+  name: string;
+  fields: Fields;
+  verbs: Record<string, { type: string }>;
+  storedComputedFields: Array<ComputedEntry>;
+  sideTableStrategyEntries: Array<SideTableStrategyEntry>;
+  conditionalHistory?: boolean;
+  conditionalCreateHistory?: boolean;
+}) {
   const projection = {
     eventTypes: [
       verbs.created.type,
@@ -318,12 +410,12 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
       ...sideTableStrategyEntries.flatMap(({ strategy, fields: strategyFields }) =>
         strategy.eventTypes(name, strategyFields)),
     ],
-    apply: (event, db) => {
+    apply: (event: EventLike, db: Db) => {
       const table = name;
       const handle = event.handle;
       if (handle?.brand !== 'event-handle' || handle.entity !== name) return;
       for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
-        if (strategy.projectionApply({ entityName: name, fieldEntries: strategyFields, handle, event, db })) return;
+        if (strategy.projectionApply({ entityName: name, fieldEntries: strategyFields, handle, event: event as unknown as ProjectionEvent, db })) return;
       }
       if (handle.kind === eventHandle.EventKind.native && handle.nativeName === 'retired') {
         const descriptor = fields[handle.field];
@@ -343,8 +435,8 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         if (!id) return;
         const current = db.prepare(`SELECT ${handle.field} FROM ${table} WHERE id = ?`).get(id);
         if (!current) return;
-        const state = restoreTextCheckpoint(JSON.parse(current[handle.field]));
-        const next = applyTextOp(state, event.data.operation);
+        const state = restoreTextCheckpoint(JSON.parse(current[handle.field] as string));
+        const next = applyTextOp(state, event.data?.operation);
         db.prepare(`UPDATE ${table} SET ${handle.field} = ? WHERE id = ?`)
           .run(JSON.stringify(textCheckpoint(next)), id);
         getLog().debug('dispatch', `${name}.${handle.field}.applied`, { id });
@@ -356,7 +448,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
             throw new Error(`${name}.${fieldName} document id is permanently retired`);
           }
         }
-        const row = {};
+        const row: Record<string, unknown> = {};
         for (const [key, value] of Object.entries(event.data ?? {})) {
           if (key === '__workbench') continue;
           const descriptor = fields[key];
@@ -379,8 +471,8 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         for (const [fieldName, { compute }] of storedComputedFields) {
           try {
             const computeRow = buildProjectedComputeRow(row, fields);
-            const result = compute(computeRow);
-            row[fieldName] = resolveStrategy('computed').serialize(result);
+            const result = compute!(computeRow);
+            row[fieldName] = resolveStrategy('computed').serialize!(result);
           } catch {
             throw new Error(`${name}.${fieldName} computed.stored compute failed`);
           }
@@ -395,10 +487,10 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         }
       } else if (handle.kind === eventHandle.EventKind.updated) {
         if (conditionalHistory) return;
-        const { id, ...data } = event.data ?? {};
+        const { id, ...data } = (event.data ?? {}) as DataLike;
         if (!id) return;
         const updates = [];
-        const params = { id };
+        const params: Record<string, unknown> = { id };
         for (const [key, value] of Object.entries(data)) {
           const descriptor = fields[key];
           if (descriptor && descriptor.kind === 'store') continue;
@@ -425,8 +517,8 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
             for (const [fieldName, { compute }] of storedComputedFields) {
               try {
                 const computeRow = buildProjectedComputeRow(merged, fields);
-                const result = compute(computeRow);
-                const stored = resolveStrategy('computed').serialize(result);
+                const result = compute!(computeRow);
+                const stored = resolveStrategy('computed').serialize!(result);
                 updates.push(`${fieldName} = :${fieldName}`);
                 params[fieldName] = stored;
               } catch {
@@ -448,7 +540,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         // same projection-consumer call (same transaction as the DELETE) —
         // atomic, so a committed removal can never leave the anchor missing.
         const existingRow = id ? db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) : undefined;
-        if (existingRow) captureDeletedRowAnchor(db, name, id, existingRow, event.committedAt);
+        if (existingRow) captureDeletedRowAnchor(db as Parameters<typeof captureDeletedRowAnchor>[0], name, id as string, existingRow, event.committedAt as string);
         // A protecting annotation's target edge is ON DELETE RESTRICT. The row
         // delete cascades into the annotation rows, so tear down the document's
         // protected-target edges first or removing a document that carries a
@@ -473,22 +565,22 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
   return Object.freeze(projection);
 }
 
-export function createConditionalHistoryProjection({ name, verbs }) {
+export function createConditionalHistoryProjection({ name, verbs }: { name: string; verbs: Record<string, { type: string }> }) {
   return Object.freeze({
     actionType: `${name}.update`,
     eventTypes: [verbs.updated.type],
     privateFact: true,
     replay: false,
-    apply: (event, db, { privateFact }) => {
+    apply: (event: EventLike, db: Db, { privateFact }: { privateFact?: { before?: Row; after?: Row } }) => {
       const before = privateFact?.before;
       const after = privateFact?.after;
       if (!before || !after || before.id !== after.id || event.data?.id !== before.id) throw new Error(`${name}.update private fact is invalid`);
-      const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
+      const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name as string);
       if (columns.some((column) => !Object.hasOwn(before, column) || !Object.hasOwn(after, column))) throw new Error(`${name}.update private fact is incomplete`);
       const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(before.id);
       if (!current) throw Object.assign(new Error(`${name} ${before.id} not found`), { status: 404 });
       if (!columns.every((column) => Object.is(current[column], before[column]))) throw Object.assign(new Error(`${name} update conflicts`), { status: 409 });
-      const params = {};
+      const params: Record<string, unknown> = {};
       const assignments = columns.filter((column) => column !== 'id').map((column) => {
         params[`after_${column}`] = after[column];
         return `${column} = :after_${column}`;
@@ -508,10 +600,10 @@ export function createConditionalHistoryProjection({ name, verbs }) {
   });
 }
 
-export function createConditionalCreateHistoryProjection({ name, verbs }) {
-  const apply = (event, db, { privateFact }) => {
+export function createConditionalCreateHistoryProjection({ name, verbs }: { name: string; verbs: Record<string, { type: string }> }) {
+  const apply = (event: EventLike, db: Db, { privateFact }: { privateFact?: { before?: Row | null; after?: Row | null } }) => {
     const { before, after } = privateFact ?? {};
-    const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
+    const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name as string);
     if (event.type === verbs.created.type) {
       if (before !== null || !after || after.id !== event.data?.id) throw new Error(`${name}.create private fact is invalid`);
       const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(after.id);
@@ -524,7 +616,7 @@ export function createConditionalCreateHistoryProjection({ name, verbs }) {
       const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(before.id);
       if (!current) throw Object.assign(new Error(`${name} ${before.id} not found`), { status: 404 });
       if (!columns.every((column) => Object.is(current[column], before[column]))) throw Object.assign(new Error(`${name} remove conflicts`), { status: 409 });
-      captureDeletedRowAnchor(db, name, before.id, current, event.committedAt);
+      captureDeletedRowAnchor(db as Parameters<typeof captureDeletedRowAnchor>[0], name, before.id as string, current, event.committedAt as string);
       const predicates = columns.map((column) => `${column} IS :${column}`);
       const result = db.prepare(`DELETE FROM ${name} WHERE ${predicates.join(' AND ')}`).run(before);
       if (Number(result.changes) !== 1) throw Object.assign(new Error(`${name} remove conflicts`), { status: 409 });

@@ -1,25 +1,30 @@
-// @ts-nocheck
 // Node HTTP/SSE skin for public LiveDelivery. Applications mount this handler
 // directly; it never receives raw log rows or application projection callbacks.
 
+                                                                 
+
+                                                
+                                             
+                                                                                                        
+
 const JSON_LIMIT = 1024 * 1024;
 
-function requestUrl(req) {
+function requestUrl(req                 )      {
   return new URL(req.url ?? '/', 'http://workbench.local');
 }
 
-function reject(res, status, message) {
+function reject(res                , status        , message        )       {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   res.end(JSON.stringify({ error: message }));
 }
 
-function scopeFrom(url) {
+function scopeFrom(url     )                {
   const scope = url.searchParams.get('scope');
   if (typeof scope !== 'string' || scope.length === 0 || scope.length > 512) return null;
   return scope;
 }
 
-function afterFrom(url) {
+function afterFrom(url     )                      {
   const raw = url.searchParams.get('after');
   if (raw === null) return 0;
   if (/^(0|[1-9][0-9]*)$/.test(raw)) {
@@ -27,12 +32,12 @@ function afterFrom(url) {
     return Number.isSafeInteger(after) ? after : null;
   }
   try {
-    const cursor = JSON.parse(raw);
+    const cursor = JSON.parse(raw)                                             ;
     if (!cursor || typeof cursor !== 'object' || Array.isArray(cursor)
-      || !Number.isSafeInteger(cursor.anchor) || cursor.anchor < 0
-      || !Number.isSafeInteger(cursor.aggregate) || cursor.aggregate < 0
+      || !Number.isSafeInteger(cursor.anchor) || (cursor.anchor          ) < 0
+      || !Number.isSafeInteger(cursor.aggregate) || (cursor.aggregate          ) < 0
       || Object.keys(cursor).length !== 2) return null;
-    return Object.freeze({ anchor: cursor.anchor, aggregate: cursor.aggregate });
+    return Object.freeze({ anchor: cursor.anchor          , aggregate: cursor.aggregate           });
   } catch {
     return null;
   }
@@ -44,7 +49,7 @@ function afterFrom(url) {
 // frames stay at JSON_LIMIT so folds cannot silently demote to resync.
 const BOOTSTRAP_LIMIT = 16 * 1024 * 1024;
 
-function writeJson(res, value, maxBytes = JSON_LIMIT) {
+function writeJson(res                , value         , maxBytes = JSON_LIMIT)       {
   const body = JSON.stringify(value);
   if (Buffer.byteLength(body) > maxBytes) throw new Error('live delivery response exceeds limit');
   res.writeHead(200, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
@@ -59,7 +64,13 @@ function writeJson(res, value, maxBytes = JSON_LIMIT) {
  * {path}/events?scope=<scope>&after=<cursor>` is an SSE stream whose data
  * frames are arrays of recipient envelopes. Return false for unrelated routes.
  */
-export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/live-delivery', maxSubscriptions = 100, log = null } = {}) {
+export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/live-delivery', maxSubscriptions = 100, log = null }   
+                              
+                                                                                                         
+                
+                            
+                            
+ ) {
   if (!delivery || typeof delivery.bootstrap !== 'function' || typeof delivery.catchup !== 'function' || typeof delivery.subscribe !== 'function') {
     throw new TypeError('delivery must be a LiveDelivery');
   }
@@ -69,35 +80,40 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
 
   let subscriptions = 0;
 
-  return async function handleLiveDelivery(req, res) {
+  return async function handleLiveDelivery(req                 , res                )                   {
     const url = requestUrl(req);
 
     // Authoring ack endpoint
     if (url.pathname === `${path}/authoring/ack`) {
       if (req.method !== 'POST') { reject(res, 405, 'method not allowed'); return true; }
-      let body;
+      let body         ;
       try {
-        const { readRequestBody, BodyError } = await import('./http-body.mjs');
-        body = await readRequestBody(req, { jsonOnly: true });
+        const { readRequestBody } = await import('./http-body.mjs');
+        body = await readRequestBody(req                                                    , { jsonOnly: true });
       } catch {
         reject(res, 400, 'invalid body');
         return true;
       }
-      if (!body || typeof body !== 'object' || Array.isArray(body) || body.version !== 1 ||
-          typeof body.entity !== 'string' || typeof body.field !== 'string' || typeof body.documentId !== 'string' ||
-          typeof body.stream !== 'string' || typeof body.lease !== 'string' || typeof body.snapshot !== 'string') {
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
         reject(res, 400, 'invalid ack request');
         return true;
       }
-      let principal;
+      const ack = body                           ;
+      if (ack.version !== 1 ||
+          typeof ack.entity !== 'string' || typeof ack.field !== 'string' || typeof ack.documentId !== 'string' ||
+          typeof ack.stream !== 'string' || typeof ack.lease !== 'string' || typeof ack.snapshot !== 'string') {
+        reject(res, 400, 'invalid ack request');
+        return true;
+      }
+      let principal           ;
       // Demo-only principal hint (viewAs) is carried in the ack body alongside the
       // document identity; the real sessionPrincipalOf ignores it.
-      try { principal = await principalOf(req, { viewAs: body.viewAs ?? null }); } catch { reject(res, 403, 'access denied'); return true; }
+      try { principal = await principalOf(req, { viewAs: ack.viewAs ?? null }); } catch { reject(res, 403, 'access denied'); return true; }
       if (!principal || typeof principal !== 'object') { reject(res, 403, 'access denied'); return true; }
-      const documentIdentity = { entity: body.entity, field: body.field, documentId: body.documentId };
+      const documentIdentity = { entity: ack.entity          , field: ack.field          , documentId: ack.documentId           };
       const document = delivery.resolveAnnotatedTextDocument ? delivery.resolveAnnotatedTextDocument(documentIdentity) : null;
       if (!document) { reject(res, 404, 'document not found'); return true; }
-      const result = await delivery.acknowledgeAuthoringSnapshot({ document, principal, stream: body.stream, lease: body.lease, snapshot: body.snapshot });
+      const result = await delivery.acknowledgeAuthoringSnapshot({ document, principal, stream: ack.stream          , lease: ack.lease          , snapshot: ack.snapshot           });
        if (!result) { reject(res, 409, 'acknowledgement rejected'); return true; }
       const { sendJson } = await import('./http-response.mjs');
       sendJson(res, 200, { ok: true, acknowledgedThrough: result.acknowledgedThrough });
@@ -114,8 +130,8 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
     const documentIdentity = url.searchParams.has('documentId') ? {
       entity: url.searchParams.get('entity'), field: url.searchParams.get('field'), documentId: url.searchParams.get('documentId'),
     } : null;
-    const resolvedDocument = documentIdentity ? delivery.resolveAnnotatedTextDocument?.(documentIdentity) : null;
-    const document = resolvedDocument && url.searchParams.has('authoringClient')
+    const resolvedDocument = documentIdentity ? delivery.resolveAnnotatedTextDocument?.(documentIdentity                                                         ) : null;
+    const document                               = resolvedDocument && url.searchParams.has('authoringClient')
       ? { ...resolvedDocument, clientNonce: url.searchParams.get('authoringClient') }
       : resolvedDocument;
     const effectiveScope = document?.scope ?? scope;
@@ -123,11 +139,11 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
       reject(res, 400, 'invalid live delivery request');
       return true;
     }
-    let principal;
+    let principal           ;
     try { principal = await principalOf(req); } catch { reject(res, 403, 'access denied'); return true; }
     if (!principal || typeof principal !== 'object') { reject(res, 403, 'access denied'); return true; }
 
-    let releaseStream = null;
+    let releaseStream                      = null;
     try {
       if (url.pathname === `${path}/bootstrap`) {
         const mode = url.searchParams.get('mode');
@@ -176,10 +192,10 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
           if (controller.signal.aborted) throw new Error('live delivery stream closed');
           const payload = JSON.stringify(envelopes);
           const frame = Buffer.byteLength(payload) > JSON_LIMIT
-            ? JSON.stringify([{ type: 'resync', seq: envelopes.at(-1)?.seq ?? after, reason: 'recipient-snapshot-required' }])
+            ? JSON.stringify([{ type: 'resync', seq: (envelopes.at(-1)                                )?.seq ?? after, reason: 'recipient-snapshot-required' }])
             : payload;
           if (!res.write(`data: ${frame}\n\n`)) {
-            await new Promise((resolve, reject) => {
+            await new Promise      ((resolve, reject) => {
               const onDrain = () => { res.off('close', onClose); resolve(); };
               const onClose = () => { res.off('drain', onDrain); reject(new Error('live delivery stream closed')); };
               res.once('drain', onDrain);
@@ -219,7 +235,7 @@ export function createLiveDeliveryHttpHandler({ delivery, principalOf, path = '/
       releaseStream?.();
       // Surface the underlying framework error (message only, no stack) so a
       // client's bootstrap failure is diagnosable instead of an opaque 400.
-      const denied = error?.code === 'live-delivery-revoked';
+      const denied = (error                                         )?.code === 'live-delivery-revoked';
       const detail = !denied && error instanceof Error && typeof error.message === 'string'
         ? `live delivery unavailable: ${error.message}`
         : 'live delivery unavailable';

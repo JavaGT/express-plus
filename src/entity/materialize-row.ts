@@ -1,5 +1,4 @@
-// @ts-nocheck
-import { deserializeField, structCellColumn, verifyHash } from '../field-strategy.ts';
+import { deserializeField, structCellColumn, verifyHash, type FieldDescriptor } from '../field-strategy.ts';
 import { materializeText, restoreTextCheckpoint } from '../annotated-text.ts';
 
 // Convert one SQLite result into the field values an application declared.
@@ -24,7 +23,7 @@ export function materializeStoredRow(
     if (descriptor.kind === 'struct') {
       const value: Record<string, unknown> = {};
       let present = false;
-      for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells)) {
+      for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells ?? {})) {
         const column = structCellColumn(fieldName, cellName);
         if (!Object.prototype.hasOwnProperty.call(row, column)) continue;
         const stored = row[column];
@@ -54,20 +53,8 @@ export function materializeStoredRow(
 
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind !== 'computed' || descriptor.mode !== 'pull') continue;
-    try { row[fieldName] = descriptor.compute(row); } catch {}
+    try { row[fieldName] = (descriptor.compute as (row: Record<string, unknown>) => unknown)(row); } catch {}
   }
 
   return freeze ? Object.freeze(row) as Record<string, unknown> : row;
-}
-
-interface CellDescriptor {
-  [key: string]: unknown;
-}
-
-interface FieldDescriptor {
-  kind?: string;
-  type?: string;
-  mode?: string;
-  cells?: Record<string, CellDescriptor>;
-  compute?: (row: Record<string, unknown>) => unknown;
 }

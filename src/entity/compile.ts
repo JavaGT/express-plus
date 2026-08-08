@@ -1,4 +1,3 @@
-// @ts-nocheck
 // entity(name, { <fields>, grant, checks?, routes?, ... }) — the entity compiler.
 //
 // The declaration is fields-less: every top-level key that is not a reserved
@@ -27,8 +26,7 @@ import { fieldHandle, bindReadScope } from '../scope-sql.ts';
 import { compileEntityAuthz } from '../authz.ts';
 import { getLog } from '../log.ts';
 import {
-  serializeField, validateMutation, ValidationError, flattenStruct,
-  structCellColumn,
+  serializeField, validateMutation, flattenStruct,
 } from '../field-strategy.ts';
 import { materializeStoredRow } from './materialize-row.ts';
 import { action, event } from '../pipeline.ts';
@@ -59,11 +57,11 @@ const RESERVED_DECLARATION_SLOTS = new Set([
 ]);
 const APPLICATION_HTTP_CRUD_VERBS = Object.freeze(['create', 'update', 'remove']);
 
-function looksLikeFieldDescriptor(value) {
+function looksLikeFieldDescriptor(value: any) {
   return value !== null && typeof value === 'object' && typeof value.kind === 'string';
 }
 
-export function entity(name, declaration = {}) {
+export function entity(name: any, declaration: any = {}) {
   if (Object.hasOwn(declaration, 'fields')) {
     throw new Error(
       `entity('${name}') uses the retired fields wrapper. Declare fields directly on ` +
@@ -87,7 +85,7 @@ export function entity(name, declaration = {}) {
   }
   const conditionalHistory = historyDecl?.update === 'conditional';
   const conditionalCreateHistory = historyDecl?.create === 'conditional';
-  let applicationHttpActions = Object.freeze([]);
+  let applicationHttpActions: readonly string[] = Object.freeze([]);
   if (declaredApplicationHttpActions !== undefined) {
     if (!Array.isArray(declaredApplicationHttpActions) || declaredApplicationHttpActions.length === 0) {
       throw new Error(`entity('${name}') applicationHttpActions must be a non-empty array of 'create' | 'update' | 'remove'`);
@@ -123,7 +121,7 @@ export function entity(name, declaration = {}) {
   // descriptor. A reserved-slot name used as a field is a load-time error (the
   // developer intended a field, the compiler owns the slot — fail closed rather
   // than silently drop the field).
-  const fields = {};
+  const fields: Record<string, any> = {};
   for (const [key, value] of Object.entries(declaration)) {
     if (RESERVED_DECLARATION_SLOTS.has(key)) continue;
     fields[key] = value;
@@ -134,7 +132,7 @@ export function entity(name, declaration = {}) {
   // precedence (the membership entry is a convenience shortcut, not a second path).
   let effectiveGrant = grant;
   let declaredChecks = { ...declaredChecksIn };
-  let compiledMembershipChecks = null;
+  let compiledMembershipChecks: any = null;
   if (membershipDecl && (grant === undefined || grant === null)) {
     const membershipResult = compileMembershipAuthz(name, fields, membershipDecl);
     effectiveGrant = membershipResult.grant;
@@ -208,7 +206,7 @@ export function entity(name, declaration = {}) {
     }
   }
 
-  const indexes = [];
+  const indexes: any[] = [];
   if (indexesDecl !== undefined) {
     if (!Array.isArray(indexesDecl)) throw new Error(`entity('${name}') indexes must be an array`);
     const seenIndexes = new Set();
@@ -217,7 +215,7 @@ export function entity(name, declaration = {}) {
         || Object.keys(index).some((key) => key !== 'fields' && key !== 'unique')) {
         throw new Error(`entity('${name}') indexes entries must be { fields: [..], unique: true }`);
       }
-      if (index.fields.length < 2 || index.fields.some((fieldName) => typeof fieldName !== 'string')) {
+      if (index.fields.length < 2 || index.fields.some((fieldName: any) => typeof fieldName !== 'string')) {
         throw new Error(`entity('${name}') index fields must contain at least two field names`);
       }
       const fieldsKey = [...index.fields].sort().join('\u0000');
@@ -279,7 +277,8 @@ export function entity(name, declaration = {}) {
       if (key === 'created') return created(name);
       if (key === 'updated') return updated(name);
       if (key === 'removed') return removed(name);
-      if (Object.prototype.hasOwnProperty.call(fields, key)) return fieldHandle(key, fields[key], name);
+      const fieldKey = typeof key === 'string' ? key : String(key);
+      if (Object.prototype.hasOwnProperty.call(fields, fieldKey)) return fieldHandle(fieldKey, fields[fieldKey], name);
       return undefined;
     },
   });
@@ -298,7 +297,7 @@ export function entity(name, declaration = {}) {
   ];
   const validatedEffects = entries.length > 0 ? Object.freeze([...entries]) : null;
   for (const [triggerHandle, effect] of entries) {
-    if (effect && typeof effect === 'object' && typeof effect.durable === 'string') continue;
+    if (effect && typeof effect === 'object' && typeof (effect as any).durable === 'string') continue;
     validateEffectDeclaration(effect, { triggerHandle, sourceEntityName: name });
   }
 
@@ -309,7 +308,7 @@ export function entity(name, declaration = {}) {
     declaredSchedule.update = [...triggerList(declaredSchedule.update), trigger];
   }
 
-  let validatedSchedule = null;
+  let validatedSchedule: Record<string, any> | null = null;
   const scheduleKeys = Object.keys(declaredSchedule);
   if (scheduleKeys.length > 0) {
     validatedSchedule = {};
@@ -324,13 +323,13 @@ export function entity(name, declaration = {}) {
       if (triggers.length === 0) {
         throw new Error(`schedule.${verbName}: expected at least one schedule trigger`);
       }
-      const validated = triggers.map((trigger) => validateScheduleTrigger({
+      const validated: any[] = triggers.map((trigger) => validateScheduleTrigger({
         name,
         verbName,
         trigger,
         fields,
         registry,
-      }));
+      } as any) as any);
       const triggerIds = new Set();
       for (const trigger of validated) {
         if (
@@ -376,7 +375,7 @@ export function entity(name, declaration = {}) {
   // grant stays a separate layer and is untouched here.
   const gate = resolveRouteGate(declaredGate);
 
-  const record = {
+  const record: any = {
     name,
     fields: Object.freeze({ ...fields }),
     // Only put grant on the record when it's defined, so the set trap can
@@ -389,8 +388,9 @@ export function entity(name, declaration = {}) {
     // tests expect `checks` to expose callable functions. Uses `this.registry`
     // so it dynamically picks up overrides set by membership().
     get checks() {
-      const checksObj = {};
-      for (const [name, entry] of Object.entries(this.registry ?? {})) {
+      const checksObj: Record<string, any> = {};
+      const registry: Record<string, any> = (this as any).registry ?? {};
+      for (const [name, entry] of Object.entries(registry)) {
         if (entry.run) checksObj[name] = entry.run;
       }
       return Object.freeze(checksObj);
@@ -398,12 +398,12 @@ export function entity(name, declaration = {}) {
     routes,
     gate,
     applicationHttpActions,
-    inherit: clauses?.inherit
-      ? Object.freeze({ parent: clauses.inherit.name, via: clauses.via })
+    inherit: (clauses as any)?.inherit
+      ? Object.freeze({ parent: (clauses as any).inherit.name, via: (clauses as any).via })
       : null,
     readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
     scopeAst,
-    scopeFilter(principal) {
+    scopeFilter(principal: any) {
       if (this.grant == null) return { sql: '1=0', params: {} };
       if (!readScope) return { sql: '1=1', params: {} };
       const bound = bindReadScope(readScope, principal);
@@ -425,11 +425,11 @@ export function entity(name, declaration = {}) {
     throw new Error(`entity('${name}') conditional create history supports only replayable stored value fields`);
   }
 
-  function createEntityHydrator({ record, entityName, fields, sideTableStrategyEntries, runtime }) {
+  function createEntityHydrator({ record, entityName, fields, sideTableStrategyEntries, runtime }: any) {
     // Keep the long-standing public contract: callers may ignore this return
     // value and still observe the row deserialized in place. Lifecycle code
     // uses materializeStoredRow directly when it needs a detached snapshot.
-    const deserializeStoredCells = (row) => {
+    const deserializeStoredCells = (row: any) => {
       if (!row) return row;
       const materialized = materializeStoredRow(row, fields);
       for (const key of Object.keys(row)) {
@@ -439,7 +439,7 @@ export function entity(name, declaration = {}) {
       return row;
     };
 
-    const hydrate = (row, principal = null, dispatch = null) => {
+    const hydrate = (row: any, principal: any = null, dispatch: any = null) => {
       if (!row) return row;
       row = deserializeStoredCells(row);
       for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
@@ -474,14 +474,14 @@ export function entity(name, declaration = {}) {
   // system, deletion test: the policy override adds intent, not a second insert).
   record.verbs = Object.freeze({
     create: action(`${name}.create`),
-    created: event(eventHandle.created(name), (state, { data }) => ({ ...state, ...data })),
+    created: event(eventHandle.created(name), (state: any, { data }: any) => ({ ...state, ...data })),
     update: action(`${name}.update`),
-    updated: event(eventHandle.updated(name), (state, { data }) => ({ ...state, ...data })),
+    updated: event(eventHandle.updated(name), (state: any, { data }: any) => ({ ...state, ...data })),
     remove: action(`${name}.remove`),
-    removed: event(eventHandle.removed(name), (state) => ({ ...state, _removed: true })),
+    removed: event(eventHandle.removed(name), (state: any) => ({ ...state, _removed: true })),
   });
 
-  record.removedEvent = (id, db) => ({
+  record.removedEvent = (id: any, db: any) => ({
     handle: record.verbs.removed.handle,
     type: record.verbs.removed.type,
     scope: Object.values(fields).some((descriptor) => descriptor.kind === 'annotatedText')
@@ -508,15 +508,15 @@ export function entity(name, declaration = {}) {
   record.generateDDL = () => generateDDL(record);
 
   const LIFECYCLE_HANDLES = Object.freeze({
-    created: (name) => created(name),
-    updated: (name) => updated(name),
-    removed: (name) => removed(name),
+    created: (name: any) => created(name),
+    updated: (name: any) => updated(name),
+    removed: (name: any) => removed(name),
   });
 
   // Don't freeze the entire record — only `fields` is frozen (above). Auth-related
   // properties (grant, registry, readScope, scopeAst) are mutable so membership()
   // and similar post-compilation augmentations can set them in place.
-  function handleProxy(target, resolveEntity, { mutableAuth = false } = {}) {
+  function handleProxy(target: any, resolveEntity: any, { mutableAuth = false }: any = {}) {
     const fieldNamespace = new Proxy(Object.create(null), {
       get(_namespace, key) {
         if (key === 'id') return { fieldName: 'id' };
@@ -537,7 +537,8 @@ export function entity(name, declaration = {}) {
           return Reflect.get(target, key, receiver);
         }
         if (key === 'id') return { fieldName: 'id' };
-        if (LIFECYCLE_HANDLES[key]) return LIFECYCLE_HANDLES[key](name);
+        const lifecycleHandle = (LIFECYCLE_HANDLES as Record<string, any>)[key];
+        if (lifecycleHandle) return lifecycleHandle(name);
         if (Object.hasOwn(fields, key)) {
           return fieldHandle(key, fields[key], name, resolveEntity);
         }
@@ -558,7 +559,7 @@ export function entity(name, declaration = {}) {
   // declaration can be mounted by several applications without ambient state.
   Object.defineProperty(record, 'bind', {
     enumerable: false,
-    value(runtime) {
+    value(runtime: any) {
       if (!runtime || typeof runtime.entityOf !== 'function') {
         throw new Error(`cannot bind entity '${name}' without an application runtime`);
       }
@@ -572,7 +573,7 @@ export function entity(name, declaration = {}) {
       // operations remain present but fail loudly when invoked, preserving one
       // facade shape across construction and startup.
       const queryDb = Object.freeze({
-        prepare(...args) {
+        prepare(...args: any[]) {
           return requireDb().prepare(...args);
         },
       });
@@ -593,14 +594,14 @@ export function entity(name, declaration = {}) {
 
       installEntityQueries(boundRecord, {
         name,
-        hydrate,
+        hydrate: hydrate as any,
         deserializeStoredCells,
         db: queryDb,
       });
 
-      const insert = (cells) => {
+      const insert = (cells: any) => {
         const id = cells.id ?? randomUUID();
-        const stored = { id };
+        const stored: Record<string, any> = { id };
         for (const [key, value] of Object.entries(cells)) {
           if (key === 'id') continue;
           const descriptor = fields[key];
@@ -620,7 +621,7 @@ export function entity(name, declaration = {}) {
         return hydrate(db.prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`).get({ id }));
       };
 
-      boundRecord.create = (payload) => {
+      boundRecord.create = (payload: any) => {
         if (typeof createPolicy === 'function') {
           return createPolicy(payload, { insert, mintToken });
         }
@@ -628,17 +629,17 @@ export function entity(name, declaration = {}) {
         return insert(materializeCreateDefaults(bound, validated));
       };
       boundRecord.insert = insert;
-      boundRecord.delete = (id) => {
+      boundRecord.delete = (id: any) => {
         requireDb().prepare(`DELETE FROM ${name} WHERE id = :id`).run({ id });
       };
       boundRecord.crudHandlers = createCrudHandlers({ record: bound, sideTableStrategyEntries, conditionalHistory, conditionalCreateHistory });
       if (conditionalHistory) boundRecord.historyActionRule = Object.freeze({
-        inverse: ({ action, fact }) => ({ type: `${name}.update`, payload: { id: action.payload.id }, input: { expected: fact.after, replacement: fact.before } }),
-        redo: ({ action, fact }) => ({ type: `${name}.update`, payload: { id: action.payload.id }, input: { expected: fact.before, replacement: fact.after } }),
+        inverse: ({ action, fact }: any) => ({ type: `${name}.update`, payload: { id: action.payload.id }, input: { expected: fact.after, replacement: fact.before } }),
+        redo: ({ action, fact }: any) => ({ type: `${name}.update`, payload: { id: action.payload.id }, input: { expected: fact.before, replacement: fact.after } }),
       });
       if (conditionalCreateHistory) boundRecord.createHistoryActionRule = Object.freeze({
-        inverse: ({ action, fact }) => ({ type: `${name}.remove`, payload: { id: action.payload.id }, input: { expected: fact.after, replacement: null } }),
-        redo: ({ action, fact }) => ({ type: `${name}.create`, payload: { id: action.payload.id }, input: { expected: null, replacement: fact.after } }),
+        inverse: ({ action, fact }: any) => ({ type: `${name}.remove`, payload: { id: action.payload.id }, input: { expected: fact.after, replacement: null } }),
+        redo: ({ action, fact }: any) => ({ type: `${name}.create`, payload: { id: action.payload.id }, input: { expected: null, replacement: fact.after } }),
       });
       return bound;
     },
@@ -646,7 +647,7 @@ export function entity(name, declaration = {}) {
 
   const proxy = handleProxy(
     record,
-    (target) => typeof target === 'object' ? target : null,
+    (target: any) => typeof target === 'object' ? target : null,
     { mutableAuth: true },
   );
   return proxy;

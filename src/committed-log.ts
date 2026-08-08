@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The committed _Log — the single durable event store.
 //
 // This module owns the _Log table (DDL, append, read, dedupe) so pipeline.mjs
@@ -9,7 +8,9 @@
 // The _Log row shape: scope, seq, eventType, eventData (JSON), actionId,
 // committedAt (ISO string). Per-scope seq is monotonic; PRIMARY KEY (scope, seq).
 
-import { readSeq as cursorReadSeq } from './cursor.ts';
+import { readSeq as cursorReadSeq, type CursorDatabase } from './cursor.ts';
+import type { EventIdentityHandle } from './event-handle.ts';
+import type { DbHandle } from './driver.ts';
 
 // ---- DDL ----
 
@@ -96,20 +97,20 @@ export function frameworkLogDDL() {
 
 // readSeq — the per-scope committed sequence counter. Delegates to the canonical
 // cursor.mjs read so there is one SQL path to _Cursor.
-export function readSeq(db, scope) {
+export function readSeq(db: CursorDatabase | null | undefined, scope: string): number {
   return cursorReadSeq(db, scope);
 }
 
 // eventsFor — read every event for an actionId (dedupe). Returns raw DB rows
 // with eventData parsed, ordered by scope + seq.
-export function eventsFor(db, actionId) {
+export function eventsFor(db: DbHandle, actionId: string): LogEvent[] {
   const rows = db.prepare(
     'SELECT * FROM _Log WHERE actionId = :actionId ORDER BY scope, seq',
   ).all({ actionId });
   return rows.map((r) => ({
     ...r,
-    data: JSON.parse(r.eventData),
-  }));
+    data: JSON.parse(r.eventData as string),
+  }) as LogEvent);
 }
 
 // receiptFor — read the owning-stream action receipt for (scope, actionId), or
@@ -117,12 +118,16 @@ export function eventsFor(db, actionId) {
 // dedupe check for durable dispatch/dispatchBatch (Wave 4.9): unlike eventsFor,
 // this is scoped by the action's own owning scope, so the same actionId reused
 // under a different owning scope is a distinct, independent action.
-export function receiptFor(db, scope, actionId) {
+export function receiptFor(db: DbHandle, scope: string, actionId: string): ParsedReceipt | undefined {
   const row = db.prepare(
     'SELECT * FROM _ActionReceipt WHERE scope = :scope AND actionId = :actionId',
   ).get({ scope, actionId });
   if (!row) return undefined;
-  return { ...row, eventRefs: JSON.parse(row.eventRefs), resultData: row.resultData ? JSON.parse(row.resultData) : null };
+  return {
+    ...row,
+    eventRefs: JSON.parse(row.eventRefs as string),
+    resultData: row.resultData ? JSON.parse(row.resultData as string) : null,
+  } as ParsedReceipt;
 }
 
 // eventsFromReceipt — resolve a receipt's stored `eventRefs` back into full
@@ -131,12 +136,12 @@ export function receiptFor(db, scope, actionId) {
 // having outrun the receipt) is skipped rather than thrown — the receipt still
 // proves the action committed; a pruned event is gone from every path, not
 // just replay.
-export function eventsFromReceipt(db, receipt, parseEventType) {
+export function eventsFromReceipt(db: DbHandle, receipt: ParsedReceipt, parseEventType: EventTypeParser): LogEvent[] {
   const stmt = db.prepare('SELECT * FROM _Log WHERE scope = :scope AND seq = :seq');
-  const events = [];
+  const events: LogEvent[] = [];
   for (const ref of receipt.eventRefs) {
     const row = stmt.get({ scope: ref.scope, seq: ref.seq });
-    if (row) events.push(rowToEvent(row, parseEventType));
+    if (row) events.push(rowToEvent(row as unknown as LogRowLike, parseEventType));
   }
   return events;
 }
@@ -145,10 +150,10 @@ export function eventsFromReceipt(db, receipt, parseEventType) {
 // open transaction, immediately after the same action's events (if any) are
 // appended to _Log. Atomic with the append: both land in the same commit, or
 // neither does.
-export function insertReceipt(db, scope, actionId, committedAt, events, metadata = {}) {
+export function insertReceipt(db: DbHandle, scope: string, actionId: string, committedAt: string, events: LogEvent[], metadata: ReceiptMetadata = {}): number {
   const historyOrder = db.prepare(
     'SELECT COALESCE(MAX(historyOrder), 0) + 1 AS next FROM _ActionReceipt WHERE scope = :scope',
-  ).get({ scope }).next;
+  ).get({ scope })!.next as number;
   db.prepare(
     `INSERT INTO _ActionReceipt
        (scope, actionId, committedAt, eventRefs, historyOrder, actionType, actionData, principalKey, sessionId, operation, resultData, historyRootActionId, historyTargetActionId, historyOutcome)
@@ -178,44 +183,44 @@ export function insertReceipt(db, scope, actionId, committedAt, events, metadata
 
 // readSince — read events for a scope with seq > cursor, ordered by seq.
 // Returns raw rows with eventData parsed. Used by the resync route.
-export function readSince(db, scope, cursor) {
+export function readSince(db: DbHandle, scope: string, cursor: number): LogEvent[] {
   const rows = db.prepare(
     'SELECT * FROM _Log WHERE scope = :scope AND seq > :cursor ORDER BY seq',
   ).all({ scope, cursor });
   return rows.map((r) => ({
     ...r,
-    data: JSON.parse(r.eventData),
-  }));
+    data: JSON.parse(r.eventData as string),
+  }) as LogEvent);
 }
 
 // minSeqForScope — the oldest retained event seq for a scope. Used by the
 // resync route to detect a gap that can never be filled (cursor-behind-retention).
 // Returns null when the scope has no events.
-export function minSeqForScope(db, scope) {
+export function minSeqForScope(db: DbHandle, scope: string): number | null {
   const row = db.prepare(
     'SELECT MIN(seq) AS min FROM _Log WHERE scope = :scope',
   ).get({ scope });
-  return row?.min ?? null;
+  return (row?.min as number | null) ?? null;
 }
 
 // rowToEvent — rebuild an event object from a durable _Log row. Shared by
 // the dedupe path: a re-sent actionId returns its previously-committed events
 // without re-running the handler. The row→event shape has ONE definition.
-export function rowToEvent(row, parseEventType) {
-  let handle;
+export function rowToEvent(row: LogRowLike, parseEventType: EventTypeParser): LogEvent {
+  let handle: EventIdentityHandle | undefined;
   try {
-    handle = parseEventType(row.eventType);
+    handle = parseEventType(row.eventType as string);
   } catch {
     handle = undefined;
   }
   const event = {
-    type: row.eventType,
-    scope: row.scope,
-    seq: row.seq,
-    actionId: row.actionId,
-    committedAt: row.committedAt,
-    data: row.eventData ? (typeof row.eventData === 'string' ? JSON.parse(row.eventData) : row.eventData) : null,
-  };
+    type: row.eventType as string,
+    scope: row.scope as string,
+    seq: row.seq as number,
+    actionId: row.actionId as string,
+    committedAt: row.committedAt as string,
+    data: row.eventData ? (typeof row.eventData === 'string' ? JSON.parse(row.eventData) : (row.eventData as Record<string, unknown>)) : null,
+  } as unknown as LogEvent;
   if (handle) {
     const out = { ...event };
     Object.defineProperty(out, 'handle', { value: handle, enumerable: false });
@@ -230,7 +235,7 @@ export function rowToEvent(row, parseEventType) {
 // transaction. Each event must already carry its resolved data, scope, seq,
 // actionId, and committedAt. The caller handles NOW-token resolution and
 // per-scope sequence assignment before calling this.
-export function appendEvents(db, events) {
+export function appendEvents(db: DbHandle, events: AppendedEvent[]) {
   const stmt = db.prepare(
     'INSERT INTO _Log (scope, seq, eventType, eventData, actionId, committedAt) VALUES (:scope, :seq, :eventType, :eventData, :actionId, :committedAt)',
   );
@@ -248,20 +253,20 @@ export function appendEvents(db, events) {
 
 // retentionPrune — delete log entries older than a cutoff date. Used by the
 // log retention reaper (serve.mjs). Runs under the writeQueue mutex.
-export function retentionPrune(db, cutoffIso) {
+export function retentionPrune(db: DbHandle, cutoffIso: string) {
   db.exec('BEGIN IMMEDIATE');
   try {
     const expired = new Set(db.prepare(
       'SELECT scope, actionId FROM _ActionReceipt WHERE committedAt < :cutoff',
-    ).all({ cutoff: cutoffIso }).map((row) => `${row.scope}\u0000${row.actionId}`));
+    ).all({ cutoff: cutoffIso }).map((row) => `${row.scope as string}\u0000${row.actionId as string}`));
     const cursors = db.prepare('SELECT * FROM _HistoryCursor').all();
     const update = db.prepare('UPDATE _HistoryCursor SET past = ?, future = ? WHERE principalKey = ? AND sessionId = ? AND scope = ?');
     for (const cursor of cursors) {
-      const filter = (json) => JSON.parse(json).filter((frame) => {
-        const actionId = typeof frame === 'string' ? frame : frame?.rootActionId;
-        return typeof actionId === 'string' && !expired.has(`${cursor.scope}\u0000${actionId}`);
+      const filter = (json: string) => JSON.parse(json).filter((frame: unknown) => {
+        const actionId = typeof frame === 'string' ? frame : (frame as { rootActionId?: unknown } | null | undefined)?.rootActionId;
+        return typeof actionId === 'string' && !expired.has(`${cursor.scope as string}\u0000${actionId}`);
       });
-      update.run(JSON.stringify(filter(cursor.past)), JSON.stringify(filter(cursor.future)), cursor.principalKey, cursor.sessionId, cursor.scope);
+      update.run(JSON.stringify(filter(cursor.past as string)), JSON.stringify(filter(cursor.future as string)), cursor.principalKey, cursor.sessionId, cursor.scope);
     }
     db.prepare('UPDATE _ActionReceipt SET actionData = NULL WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
     db.prepare('DELETE FROM _PrivateActionFact WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
@@ -271,4 +276,73 @@ export function retentionPrune(db, cutoffIso) {
     db.exec('ROLLBACK');
     throw error;
   }
+}
+
+// ---- shared shapes ----
+
+export type EventTypeParser = (eventType: string) => EventIdentityHandle;
+
+export interface LogRow {
+  scope: string;
+  seq: number;
+  eventType: string;
+  eventData: string;
+  actionId: string;
+  committedAt: string;
+}
+
+export interface LogEvent extends LogRow {
+  data: Record<string, unknown> | null;
+}
+
+export interface LogRowLike {
+  scope: unknown;
+  seq: unknown;
+  eventType: unknown;
+  eventData: unknown;
+  actionId: unknown;
+  committedAt: unknown;
+}
+
+export interface AppendedEvent {
+  scope: string;
+  seq: number;
+  type: string;
+  data?: unknown;
+  actionId: string;
+  committedAt: string;
+}
+
+export interface EventRef {
+  scope: string;
+  seq: number;
+}
+
+export interface ParsedReceipt {
+  scope: string;
+  actionId: string;
+  committedAt: string;
+  eventRefs: EventRef[];
+  resultData: unknown;
+  historyOrder: number | null;
+  actionType: string | null;
+  actionData: string | null;
+  principalKey: string | null;
+  sessionId: string | null;
+  operation: string;
+  historyRootActionId: string | null;
+  historyTargetActionId: string | null;
+  historyOutcome: string | null;
+}
+
+export interface ReceiptMetadata {
+  actionType?: string | null;
+  actionData?: unknown;
+  principalKey?: string | null;
+  sessionId?: string | null;
+  operation?: string;
+  resultData?: unknown;
+  historyRootActionId?: string | null;
+  historyTargetActionId?: string | null;
+  historyOutcome?: string | null;
 }

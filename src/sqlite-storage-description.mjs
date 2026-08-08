@@ -1,29 +1,120 @@
-// @ts-nocheck
 import { DatabaseSync } from 'node:sqlite';
 
 import { generateDDL } from './ddl.mjs';
 import { collectTableNamesFromDdl } from './schema-table-census.mjs';
 
-function quoteIdent(name) {
+function quoteIdent(name         )         {
   if (typeof name !== 'string' || name.length === 0 || name.includes('\0')) {
     throw new Error('SQLite identifier must be a non-empty string without NUL bytes');
   }
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-function deepFreeze(value) {
+function deepFreeze   (value   )    {
   if (value === null || typeof value !== 'object' || Object.isFrozen(value)) return value;
   for (const child of Object.values(value)) deepFreeze(child);
   return Object.freeze(value);
 }
 
-function describeIndexes(db, tableName) {
-  const rows = db.prepare(`PRAGMA index_list(${quoteIdent(tableName)})`).all();
+                        
+               
+                 
+                 
+                  
+ 
+
+                         
+                
+              
+                      
+               
+               
+              
+ 
+
+                         
+             
+              
+                
+               
+             
+                    
+                    
+                
+ 
+
+                         
+              
+               
+                      
+                  
+                                                  
+             
+                 
+ 
+
+                                  
+                   
+                   
+                      
+                      
+                    
+            
+ 
+
+                                         
+               
+                  
+                 
+                   
+                     
+                                
+                           
+ 
+
+                                              
+                
+                                     
+                                               
+                   
+                   
+                
+ 
+
+                                          
+               
+               
+                   
+                                                    
+                             
+                 
+ 
+
+                                         
+               
+              
+                   
+                        
+                  
+                                     
+                       
+                                             
+                                    
+ 
+
+                                           
+                       
+                                   
+ 
+
+function describeIndexes(db              , tableName        )                           {
+  const rows = db.prepare(`PRAGMA index_list(${quoteIdent(tableName)})`).all()                             ;
   return rows
     .map((row) => {
       const terms = db
         .prepare(`PRAGMA index_xinfo(${quoteIdent(row.name)})`)
-        .all()
+        .all()                              ;
+      const termEntries = terms
         .filter((term) => term.key === 1)
         .sort((a, b) => a.seqno - b.seqno)
         .map((term) => ({
@@ -32,27 +123,27 @@ function describeIndexes(db, tableName) {
           name: term.name,
           descending: term.desc === 1,
           collation: term.coll,
-          key: true,
+          key: true         ,
         }));
       const schema = db
         .prepare("SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?")
-        .get(row.name);
+        .get(row.name)                                      ;
       return {
         name: row.name,
         unique: row.unique === 1,
         origin: row.origin,
         partial: row.partial === 1,
         sql: schema?.sql ?? null,
-        columns: terms.map((term) => term.name),
-        terms,
+        columns: termEntries.map((term) => term.name),
+        terms: termEntries,
       };
     })
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-function describeForeignKeys(db, tableName) {
-  const groups = new Map();
-  for (const row of db.prepare(`PRAGMA foreign_key_list(${quoteIdent(tableName)})`).all()) {
+function describeForeignKeys(db              , tableName        )                                {
+  const groups = new Map                                     ();
+  for (const row of db.prepare(`PRAGMA foreign_key_list(${quoteIdent(tableName)})`).all()                              ) {
     let group = groups.get(row.id);
     if (group === undefined) {
       group = {
@@ -75,15 +166,16 @@ function describeForeignKeys(db, tableName) {
   });
 }
 
-function describeTable(db, tableName) {
+function describeTable(db              , tableName        )                         {
   const schema = db
     .prepare("SELECT sql FROM sqlite_schema WHERE type = 'table' AND name = ?")
-    .get(tableName);
+    .get(tableName)                                      ;
   if (schema === undefined) throw new Error(`SQLite table '${tableName}' does not exist`);
   const sql = schema.sql ?? '';
   const columns = db
     .prepare(`PRAGMA table_xinfo(${quoteIdent(tableName)})`)
-    .all()
+    .all()                              ;
+  const columnDescriptions = columns
     .sort((a, b) => a.cid - b.cid)
     .map((column) => ({
       name: column.name,
@@ -99,8 +191,8 @@ function describeTable(db, tableName) {
     virtual: /^CREATE\s+VIRTUAL\s+TABLE/i.test(sql),
     withoutRowid: /\bWITHOUT\s+ROWID\b/i.test(sql),
     strict: /(?:,|\))\s*STRICT\s*$/i.test(sql),
-    columns,
-    primaryKey: columns
+    columns: columnDescriptions,
+    primaryKey: columnDescriptions
       .filter((column) => column.primaryKeyPosition > 0)
       .sort((a, b) => a.primaryKeyPosition - b.primaryKeyPosition)
       .map((column) => column.name),
@@ -109,7 +201,7 @@ function describeTable(db, tableName) {
   };
 }
 
-export function describeSqliteStorage(db, tableNames) {
+export function describeSqliteStorage(db              , tableNames                   )                           {
   if (!Array.isArray(tableNames)) throw new Error('tableNames must be an array');
   if (!tableNames.every((name) => typeof name === 'string' && name.length > 0)) {
     throw new Error('tableNames must contain only non-empty strings');
@@ -124,10 +216,10 @@ export function describeSqliteStorage(db, tableNames) {
   });
 }
 
-export function describeEntityStorage(entity) {
+export function describeEntityStorage(entity                                    )                           {
   const ddl = generateDDL(entity);
   const tableNames = collectTableNamesFromDdl(
-    ddl.map((sql) => ({ source: `entity ${entity.name}`, sql })),
+    ddl.map((sql        ) => ({ source: `entity ${entity.name}`, sql })),
   );
   const db = new DatabaseSync(':memory:');
   try {

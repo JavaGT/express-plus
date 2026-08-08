@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Public recipient projection for the blockless annotated-text model (issue #33).
 //
 // The canonical document is ONE continuous text plus document-scoped
@@ -11,15 +10,15 @@ import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
 
 // Snapshot minting needs the canonical intervals to bind an authoring token,
 // but those intervals must never serialize with the recipient.
-const recipientRedactionIntervals = new WeakMap();
+const recipientRedactionIntervals = new WeakMap          ();
 
-export function authoringRedactionsForRecipient(recipient) {
+export function authoringRedactionsForRecipient(recipient     ) {
   return recipientRedactionIntervals.get(recipient) ?? [];
 }
 
-function fail(message) { throw new Error(`annotated-text recipient projection: ${message}`); }
+function fail(message        )        { throw new Error(`annotated-text recipient projection: ${message}`); }
 
-function freeze(value) {
+function freeze(value     ) {
   if (value && typeof value === 'object') {
     for (const child of Object.values(value)) freeze(child);
     Object.freeze(value);
@@ -27,12 +26,59 @@ function freeze(value) {
   return value;
 }
 
-function exact(value, keys, label) {
+function exact(value     , keys          , label        ) {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) fail(`${label} has invalid shape`);
 }
 
-export function projectAnnotatedTextForRecipient(canonical, descriptor, decisions) {
+                               
+             
+                 
+                              
+                 
+                                
+ 
+
+                          
+                       
+                
+              
+ 
+
+                                
+             
+                 
+                        
+               
+ 
+
+                           
+             
+                 
+                              
+                     
+                               
+                 
+ 
+
+                                  
+               
+                  
+               
+                                     
+                           
+                                       
+                            
+                              
+ 
+
+                              
+                  
+                                                              
+                            
+ 
+
+export function projectAnnotatedTextForRecipient(canonical                        , descriptor     , decisions                    ) {
   const meta = getAnnotatedTextCompiledMetadata(descriptor);
   if (!meta) fail('descriptor must be compiled');
   const canonicalKeys = ['kind', 'version', 'text', 'annotations', 'ranges', 'measurements', 'capabilityHints'];
@@ -45,7 +91,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
       (canonical.orphans !== undefined && !Array.isArray(canonical.orphans)) || !Array.isArray(decisions.protectors) || !Array.isArray(decisions.capabilityHints)) fail('invalid version or collection');
 
   const textLength = canonical.text.length;
-  const annotations = new Map();
+  const annotations = new Map                             ();
   for (const annotation of canonical.annotations) {
     const keys = annotation?.protectedTargetIds === undefined
       ? (annotation?.owner === undefined ? ['id', 'family', 'fields'] : ['id', 'family', 'fields', 'owner'])
@@ -57,7 +103,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   }
 
   // Document-scoped ranges: one contiguous range per annotation, absolute offsets.
-  const rangeByAnnotation = new Map();
+  const rangeByAnnotation = new Map                        ();
   for (const range of canonical.ranges) {
     exact(range, ['annotationId', 'start', 'end'], 'range');
     const annotation = annotations.get(range.annotationId);
@@ -70,8 +116,8 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     if (!rangeByAnnotation.has(annotation.id)) fail('canonical annotation has no range');
   }
 
-  const orphanIds = new Set();
-  const disclosableOrphans = [];
+  const orphanIds = new Set        ();
+  const disclosableOrphans                    = [];
   for (const orphan of canonical.orphans ?? []) {
     exact(orphan, orphan?.owner === undefined ? ['id', 'family', 'fields', 'savedQuote', 'savedRange'] : ['id', 'family', 'fields', 'owner', 'savedQuote', 'savedRange'], 'orphan');
     if (typeof orphan.id !== 'string' || orphanIds.has(orphan.id) || !Object.hasOwn(meta.annotationHandles, orphan.family) ||
@@ -82,7 +128,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     disclosableOrphans.push(orphan);
   }
 
-  const measurementIds = new Set();
+  const measurementIds = new Set        ();
   for (const measurement of canonical.measurements) {
     exact(measurement, ['id', 'family', 'formatVersion', 'payload'], 'measurement');
     if (typeof measurement.id !== 'string' || measurementIds.has(measurement.id) ||
@@ -100,13 +146,13 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
       if (!rangeByAnnotation.has(targetId)) fail(`protector '${annotation.id}' names an unknown protected target '${targetId}'`);
     }
   }
-  const active = new Set();
+  const active = new Set        ();
   for (const annotation of annotations.values()) {
     if (!Object.hasOwn(meta.protectingFamilies, annotation.family) || !annotation.protectedTargetIds?.length) continue;
-    const own = rangeByAnnotation.get(annotation.id);
+    const own = rangeByAnnotation.get(annotation.id) ;
     const wholeDocument = own.start === 0 && own.end === textLength;
     for (const targetId of annotation.protectedTargetIds) {
-      const target = rangeByAnnotation.get(targetId);
+      const target = rangeByAnnotation.get(targetId) ;
       if (wholeDocument || (own.start < target.end && target.start < own.end)) {
         active.add(annotation.id);
         break;
@@ -114,14 +160,14 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     }
   }
 
-  const outcomes = new Map();
+  const outcomes = new Map                ();
   for (const decision of decisions.protectors) {
     exact(decision, ['protectorId', 'outcome'], 'protector decision');
     if (!active.has(decision.protectorId) || outcomes.has(decision.protectorId) || !['allow', 'deny'].includes(decision.outcome)) fail('protector decisions must exactly match active protectors');
     outcomes.set(decision.protectorId, decision.outcome);
   }
   if (outcomes.size !== active.size) fail('protector decisions must exactly match active protectors');
-  const capabilityHints = new Set();
+  const capabilityHints = new Set        ();
   for (const hint of decisions.capabilityHints) {
     if (typeof hint !== 'string' || !Object.hasOwn(meta.capabilityHandles ?? {}, hint) || capabilityHints.has(hint)) fail('capability hints must be unique declared capabilities');
     capabilityHints.add(hint);
@@ -129,16 +175,16 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
 
   // A denied protector redacts its own range. If the range is the whole
   // document, restrict the document (fail closed) and return NO text.
-  const deniedIntervals = [];
+  const deniedIntervals                                                          = [];
   let restricted = false;
   for (const id of active) {
     if (outcomes.get(id) !== 'deny') continue;
-    const range = rangeByAnnotation.get(id);
+    const range = rangeByAnnotation.get(id) ;
     if (range.start === 0 && range.end === textLength) {
       restricted = true;
       break;
     }
-    deniedIntervals.push({ start: range.start, end: range.end, placeholder: meta.protectingFamilies[annotations.get(id).family].placeholder });
+    deniedIntervals.push({ start: range.start, end: range.end, placeholder: meta.protectingFamilies[annotations.get(id) .family].placeholder });
   }
   if (restricted) {
     const result = { kind: 'workbench.annotatedText.recipient', version: 1, restricted: true, text: '', ranges: [], annotations: [] };
@@ -146,7 +192,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     return freeze(result);
   }
   deniedIntervals.sort((left, right) => left.start - right.start || right.end - left.end);
-  const merged = [];
+  const merged                                                          = [];
   for (const interval of deniedIntervals) {
     const prior = merged.at(-1);
     if (prior && interval.start <= prior.end) {
@@ -160,7 +206,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   // placeholder) and map canonical offsets to visible offsets.
   let text = '';
   let offset = 0;
-  const authoring = [];
+  const authoring                                                              = [];
   const redactions = merged.map((interval) => {
     text += canonical.text.slice(offset, interval.start);
     const visibleStart = text.length;
@@ -170,7 +216,7 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
   });
   text += canonical.text.slice(offset);
 
-  const visibleOffsetFor = (canonicalOffset) => {
+  const visibleOffsetFor = (canonicalOffset        ) => {
     let hidden = 0;
     for (const interval of authoring) {
       if (canonicalOffset < interval.start) break;
@@ -182,10 +228,10 @@ export function projectAnnotatedTextForRecipient(canonical, descriptor, decision
     return canonicalOffset - hidden;
   };
 
-  const recipientRanges = [];
-  const retainedAnnotationIds = new Set();
+  const recipientRanges                                                              = [];
+  const retainedAnnotationIds = new Set        ();
   for (const [annotationId, range] of rangeByAnnotation) {
-    const family = annotations.get(annotationId).family;
+    const family = annotations.get(annotationId) .family;
     if (Object.hasOwn(meta.protectingFamilies, family)) continue;
     const start = visibleOffsetFor(range.start);
     const end = visibleOffsetFor(range.end);

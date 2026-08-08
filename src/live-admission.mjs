@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Subscribe-time admission: validate the subscribe message, bind read scope,
 // run mayVerb('subscribe') authorization, and return an admission decision.
 //
@@ -7,27 +6,37 @@
 //
 // Exported for use by live-connection.mjs only.
 
+                                                
 import { anonymous } from './principal.mjs';
 import { mayRow } from './row-grant.mjs';
 import { validatePaceSelection } from './field-pace.mjs';
+                                                                       
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { failure } from './outcome.mjs';
+                                                     
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.mjs';
+                                                                                                            
 
 const MAX_SUBS_PER_CONN = 256;
 const MAX_ID_LEN = 256;
 
-function hasAnnotatedText(entity) {
+function hasAnnotatedText(entity                  )          {
   return Object.values(entity.fields ?? {}).some((field) => field?.kind === 'annotatedText');
 }
 
-export function parseSubscribeMsg(msg) {
-  if (typeof msg !== 'object' || msg === null) return null;
+                                      
+                
+                                    
+ 
 
-  if (typeof msg.scope === 'string' && msg.scope.length > 0) {
-    const scope = msg.scope;
-    const hasExplicitInterest = msg.interest && typeof msg.interest === 'object' && !Array.isArray(msg.interest);
-    const interest = hasExplicitInterest ? { ...msg.interest } : {};
+export function parseSubscribeMsg(msg         )                             {
+  if (typeof msg !== 'object' || msg === null) return null;
+  const message = msg                           ;
+
+  if (typeof message.scope === 'string' && (message.scope          ).length > 0) {
+    const scope = message.scope          ;
+    const hasExplicitInterest = message.interest && typeof message.interest === 'object' && !Array.isArray(message.interest);
+    const interest                          = hasExplicitInterest ? { ...(message.interest                           ) } : {};
 
     if (!hasExplicitInterest) {
       const handle = tryParseScopeKey(scope);
@@ -50,12 +59,12 @@ export function parseSubscribeMsg(msg) {
     return { scope, interest };
   }
 
-  if (typeof msg.entity === 'string' && msg.id !== undefined) {
-    const handle = scopeOf(msg.entity, msg.id);
-    const interest = { entity: handle.entity, id: handle.id };
-    if (msg.fields !== undefined && msg.fields !== null) interest.fields = msg.fields;
-    if (msg.pace !== undefined && msg.pace !== null) interest.pace = msg.pace;
-    if (msg.carets !== undefined && msg.carets !== null) interest.carets = msg.carets;
+  if (typeof message.entity === 'string' && message.id !== undefined) {
+    const handle = scopeOf(message.entity, message.id);
+    const interest                          = { entity: handle.entity, id: handle.id };
+    if (message.fields !== undefined && message.fields !== null) interest.fields = message.fields;
+    if (message.pace !== undefined && message.pace !== null) interest.pace = message.pace;
+    if (message.carets !== undefined && message.carets !== null) interest.carets = message.carets;
     return { scope: handle.key, interest };
   }
 
@@ -64,8 +73,8 @@ export function parseSubscribeMsg(msg) {
 
 // Validate interest fields and pace against the resolved entity schema.
 // Returns { fields, pace } or throws on invalid input.
-function buildInterest(interest, entity) {
-  let fields = null;
+function buildInterest(interest                         , entity                  )                                                                                             {
+  let fields                              = null;
   if (interest.fields !== undefined && interest.fields !== null) {
     if (typeof interest.fields !== 'object' || interest.fields === null || Array.isArray(interest.fields)) {
       throw new Error('Invalid fields interest.');
@@ -87,20 +96,21 @@ function buildInterest(interest, entity) {
         throw new Error('Coordinate narrowing is not supported.');
       }
     }
-    fields = interest.fields;
+    fields = interest.fields                        ;
   }
 
-  let pace = null;
+  let pace                     = null;
   if (interest.pace !== undefined && interest.pace !== null) {
-    pace = validatePaceSelection('ephemeral', interest.pace);
+    pace = validatePaceSelection('ephemeral', interest.pace                                         );
   }
 
-  let carets = null;
+  let carets                  = null;
   if (interest.carets !== undefined && interest.carets !== null) {
-    if (!Array.isArray(interest.carets) || interest.carets.length > 16 || new Set(interest.carets).size !== interest.carets.length) {
+    const candidate = interest.carets            ;
+    if (!Array.isArray(candidate) || candidate.length > 16 || new Set(candidate).size !== candidate.length) {
       throw new Error('Invalid annotated-text caret interest.');
     }
-    for (const field of interest.carets) {
+    for (const field of candidate) {
       if (typeof field !== 'string' || entity.fields?.[field]?.kind !== 'annotatedText') {
         throw new Error('Invalid annotated-text caret interest.');
       }
@@ -109,18 +119,41 @@ function buildInterest(interest, entity) {
         throw new Error('Invalid annotated-text caret interest.');
       }
     }
-    carets = interest.carets;
+    carets = candidate;
   }
 
   return { fields, pace, carets };
 }
 
-export async function authorizeSubscription(msg, conn, {
-  resolveEntity,
-  mayVerb,
-  db,
-  fanout,
-}) {
+                                   
+                                                  
+     
+                     
+                    
+                         
+                  
+                    
+                                          
+                               
+                              
+                                        
+      
+
+export async function authorizeSubscription(
+  msg         ,
+  conn          ,
+  {
+    resolveEntity,
+    mayVerb,
+    db,
+    fanout,
+  }   
+                                                                                              
+                                        
+                                        
+                             
+   ,
+)                                 {
   const normalized = parseSubscribeMsg(msg);
   if (!normalized) {
     return { admitted: false, failure: failure('invalid-input', 'Subscribe requires entity and id, or a scope.') };
@@ -149,7 +182,7 @@ export async function authorizeSubscription(msg, conn, {
     return { admitted: false, failure: failure('denied', 'Forbidden.') };
   }
 
-  const principal = conn.principal ?? anonymous;
+  const principal            = conn.principal ?? anonymous;
   const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
   const row = db
     .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
@@ -159,18 +192,20 @@ export async function authorizeSubscription(msg, conn, {
   }
   {
     const hydrated = entity.hydrate ? entity.hydrate(row, principal) : row;
-    if (!(await mayRow(entity, 'subscribe', hydrated, principal, mayVerb))) {
+    if (!(await mayRow(entity         , 'subscribe', hydrated, principal, mayVerb         ))) {
       return { admitted: false, failure: failure('denied', 'Forbidden.') };
     }
   }
 
   // Entity-specific validation happens only after row authorization. Otherwise
   // different validation errors reveal which entity names and fields exist.
-  let fields, pace, carets;
+  let fields                             ;
+  let pace                    ;
+  let carets                 ;
   try {
     ({ fields, pace, carets } = buildInterest(interest, entity));
   } catch (err) {
-    return { admitted: false, failure: failure('invalid-input', err.message || 'Invalid fields or pace selection.') };
+    return { admitted: false, failure: failure('invalid-input', (err                        ).message || 'Invalid fields or pace selection.') };
   }
 
   return { admitted: true, scope, entityName, id, idStr, fields, pace, carets, interest };

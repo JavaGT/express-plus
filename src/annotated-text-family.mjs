@@ -1,27 +1,64 @@
-// @ts-nocheck
 import {
   assertFrontier, assertStructuralPoint, assertUtf16Offset,
   compareOpId, createTextState, frontierDominates, restoreTextCheckpoint,
   textCheckpoint, canonicalTextOp, applyTextOp,
 } from './annotated-text.mjs';
+             
+                                                                          
+                             
 
 const ROOT_ID = 'root';
 
-function fail(message) {
+                                     
+                         
+                          
+ 
+
+                            
+             
+                                 
+ 
+
+                             
+             
+                        
+                               
+ 
+
+                                            
+                            
+                          
+                  
+ 
+
+                 
+                                                                                                              
+                                                                                                                
+
+                  
+                                                                                             
+                                                                                     
+
+                     
+             
+                                 
+ 
+
+function fail(message        )        {
   throw new Error(`invalid annotated-text family: ${message}`);
 }
 
-function assertFamilyId(value) {
+function assertFamilyId(value         )         {
   if (typeof value !== 'string' || value.length === 0) fail('family id must be a non-empty string');
   return value;
 }
 
-function assertBlockId(value) {
+function assertBlockId(value         )         {
   if (typeof value !== 'string' || value.length === 0) fail('block id must be a non-empty string');
   return value;
 }
 
-function assertElementKeysArray(value) {
+function assertElementKeysArray(value         )           {
   if (!Array.isArray(value)) fail('element keys must be an array');
   for (const key of value) {
     if (typeof key !== 'string' || !/^[0-9a-f]{32}:\d+:\d+$/.test(key)) fail(`invalid element key: ${key}`);
@@ -29,20 +66,20 @@ function assertElementKeysArray(value) {
   return value;
 }
 
-function deepFreeze(value) {
+function deepFreeze   (value   )    {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
     for (const item of value) deepFreeze(item);
-    return Object.freeze(value);
+    return Object.freeze(value)     ;
   }
   const proto = Object.getPrototypeOf(value);
   if (proto !== null && proto !== Object.prototype) return value;
-  for (const v of Object.values(value)) deepFreeze(v);
-  return Object.freeze(value);
+  for (const v of Object.values(value                           )) deepFreeze(v);
+  return Object.freeze(value)     ;
 }
 
-function buildChildren(checkpoint) {
-  const children = new Map([[ROOT_ID, []]]);
+function buildChildren(checkpoint           )                                            {
+  const children = new Map                                      ([[ROOT_ID, []]]);
   for (const [key, element] of Object.entries(checkpoint.elements)) {
     const list = children.get(element.parent) ?? [];
     list.push([key, element]);
@@ -54,12 +91,12 @@ function buildChildren(checkpoint) {
   return children;
 }
 
-export function rgaTraversal(checkpoint) {
+export function rgaTraversal(checkpoint           )                               {
   const children = buildChildren(checkpoint);
-  const order = [];
-  const stack = [...(children.get(ROOT_ID) ?? [])].reverse();
+  const order                               = [];
+  const stack                               = [...(children.get(ROOT_ID) ?? [])].reverse();
   while (stack.length > 0) {
-    const entry = stack.pop();
+    const entry = stack.pop()                         ;
     order.push(entry);
     const descendants = children.get(entry[0]);
     if (descendants) stack.push(...descendants.slice().reverse());
@@ -67,9 +104,9 @@ export function rgaTraversal(checkpoint) {
   return order;
 }
 
-function assertBlockOwnerships(checkpoint, blocks) {
-  const allOwnedKeys = [];
-  const blockIds = new Set();
+function assertBlockOwnerships(checkpoint           , blocks                      ) {
+  const allOwnedKeys           = [];
+  const blockIds = new Set        ();
 
   for (const block of blocks) {
     if (!block || typeof block !== 'object') fail('each block must be an object');
@@ -96,7 +133,7 @@ function assertBlockOwnerships(checkpoint, blocks) {
     if (blocks.length !== 1) fail('empty checkpoint must have exactly one block');
   }
 
-  const seen = new Set();
+  const seen = new Set        ();
   for (const key of allOwnedKeys) {
     if (seen.has(key)) fail(`duplicate element key across blocks: ${key}`);
     seen.add(key);
@@ -119,7 +156,7 @@ function assertBlockOwnerships(checkpoint, blocks) {
   }
 }
 
-export function createTextFamily(id, checkpoint, blockId) {
+export function createTextFamily(id        , checkpoint         , blockId        )             {
   assertFamilyId(id);
   assertBlockId(blockId);
   const restored = restoreTextCheckpoint(checkpoint);
@@ -139,7 +176,7 @@ export function createTextFamily(id, checkpoint, blockId) {
  * committed-log word-timing consumer to resolve word spans to immutable RGA
  * anchors without consulting later document state (Sol D2).
  */
-export function importTextFamilyFromBlocks(documentId, actor, blocks) {
+export function importTextFamilyFromBlocks(documentId        , actor        , blocks                                     )             {
   if (typeof documentId !== 'string' || documentId.length === 0) fail('document id must be a non-empty string');
   if (typeof actor !== 'string' || !/^[0-9a-f]{32}$/.test(actor)) fail('import actor must be a 32-hex id');
   if (!Array.isArray(blocks) || blocks.length === 0) fail('import blocks must be non-empty');
@@ -149,7 +186,7 @@ export function importTextFamilyFromBlocks(documentId, actor, blocks) {
     }
   }
   const fullText = blocks.map((block) => block.text).join('');
-  let textState = createTextState();
+  let textState            = createTextState();
   if (fullText.length > 0) {
     textState = applyTextOp(textState, ['workbench.text', 1, [actor, 1], 1, [], ['insert', ['root'], fullText]]);
   }
@@ -164,28 +201,29 @@ export function importTextFamilyFromBlocks(documentId, actor, blocks) {
   return family;
 }
 
-export function restoreTextFamilyCheckpoint(familyCheckpoint) {
-  if (!familyCheckpoint || typeof familyCheckpoint !== 'object' || Array.isArray(familyCheckpoint)) {
+export function restoreTextFamilyCheckpoint(familyCheckpoint         )             {
+  const raw = familyCheckpoint                       ;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     fail('family checkpoint must be a non-array object');
   }
   const allowedKeys = new Set(['id', 'checkpoint', 'blocks']);
-  for (const key of Object.keys(familyCheckpoint)) {
+  for (const key of Object.keys(raw)) {
     if (!allowedKeys.has(key)) fail(`unknown family checkpoint key: ${key}`);
   }
-  assertFamilyId(familyCheckpoint.id);
-  const restored = restoreTextCheckpoint(familyCheckpoint.checkpoint);
+  assertFamilyId(raw.id);
+  const restored = restoreTextCheckpoint(raw.checkpoint);
   const canonical = textCheckpoint(restored);
-  if (!Array.isArray(familyCheckpoint.blocks) || familyCheckpoint.blocks.length === 0) {
+  if (!Array.isArray(raw.blocks) || raw.blocks.length === 0) {
     fail('family checkpoint must have at least one block');
   }
-  assertBlockOwnerships(canonical, familyCheckpoint.blocks);
-  const blocks = familyCheckpoint.blocks.map((block) =>
+  assertBlockOwnerships(canonical, raw.blocks);
+  const blocks = raw.blocks.map((block     ) =>
     Object.freeze({ id: block.id, elementKeys: Object.freeze([...block.elementKeys].sort()) }),
   );
-  return deepFreeze({ id: familyCheckpoint.id, checkpoint: canonical, blocks });
+  return deepFreeze({ id: raw.id, checkpoint: canonical, blocks });
 }
 
-export function materializeBlock(family, blockId) {
+export function materializeBlock(family            , blockId        )         {
   const block = family.blocks.find((b) => b.id === blockId);
   if (!block) fail(`block not found: ${blockId}`);
   const ownedSet = new Set(block.elementKeys);
@@ -197,7 +235,7 @@ export function materializeBlock(family, blockId) {
   return text;
 }
 
-export function splitBlock(family, blockId, newBlockId, utf16Offset) {
+export function splitBlock(family            , blockId        , newBlockId        , utf16Offset        )              {
   const blockIndex = family.blocks.findIndex((b) => b.id === blockId);
   if (blockIndex === -1) fail(`block not found: ${blockId}`);
   if (family.blocks.some((b) => b.id === newBlockId)) fail(`duplicate block id: ${newBlockId}`);
@@ -242,7 +280,7 @@ export function splitBlock(family, blockId, newBlockId, utf16Offset) {
   };
 }
 
-export function mergeBlocks(family, leftBlockId, rightBlockId) {
+export function mergeBlocks(family            , leftBlockId        , rightBlockId        )             {
   const leftIndex = family.blocks.findIndex((b) => b.id === leftBlockId);
   if (leftIndex === -1) fail(`block not found: ${leftBlockId}`);
   const rightIndex = family.blocks.findIndex((b) => b.id === rightBlockId);
@@ -259,7 +297,7 @@ export function mergeBlocks(family, leftBlockId, rightBlockId) {
 
 // An empty block still owns tombstoned elements.  Move that ownership to an
 // adjacent surviving block before removing its durable identity.
-export function removeEmptyBlock(family, blockId) {
+export function removeEmptyBlock(family            , blockId        )             {
   const blockIndex = family.blocks.findIndex((block) => block.id === blockId);
   if (blockIndex === -1) fail(`block not found: ${blockId}`);
   if (family.blocks.length === 1) fail('cannot remove the final block');
@@ -275,23 +313,23 @@ export function removeEmptyBlock(family, blockId) {
   return deepFreeze({ id: family.id, checkpoint: family.checkpoint, blocks });
 }
 
-export function textFamilyCheckpoint(family) {
+export function textFamilyCheckpoint(family            )             {
   return deepFreeze({ id: family.id, checkpoint: family.checkpoint, blocks: family.blocks });
 }
 
-function opKey(op) {
+function opKey(op               )         {
   return `${op[0]}:${op[1]}`;
 }
 
-function elementKey(op, ordinal) {
+function elementKey(op      , ordinal        )         {
   return `${opKey(op)}:${ordinal}`;
 }
 
-function anchorKeyStr(anchor) {
+function anchorKeyStr(anchor        )         {
   return anchor[0] === 'root' ? ROOT_ID : `${anchor[1][0][0]}:${anchor[1][0][1]}:${anchor[1][1]}`;
 }
 
-function isAncestor(checkpoint, ancestorKey, descendantKey) {
+function isAncestor(checkpoint           , ancestorKey        , descendantKey        )          {
   if (ancestorKey === ROOT_ID) return true;
   if (ancestorKey === descendantKey) return false;
   let current = descendantKey;
@@ -302,7 +340,7 @@ function isAncestor(checkpoint, ancestorKey, descendantKey) {
   return false;
 }
 
-function findLastOwnedKey(family, ownedSet) {
+function findLastOwnedKey(family            , ownedSet             )                {
   const order = rgaTraversal(family.checkpoint);
   for (let i = order.length - 1; i >= 0; i--) {
     const [key] = order[i];
@@ -311,14 +349,7 @@ function findLastOwnedKey(family, ownedSet) {
   return null;
 }
 
-function isCanonicalBlockEnd(family, ownedSet, endpoint) {
-  if (endpoint.point[2] !== 'right') return false;
-  const lastKey = findLastOwnedKey(family, ownedSet);
-  if (lastKey === null) return false;
-  return anchorKeyStr(endpoint.point[1]) === lastKey;
-}
-
-function endpointVirtualPosition(family, endpoint) {
+function endpointVirtualPosition(family            , endpoint                    )         {
   const checkpoint = family.checkpoint;
   const order = rgaTraversal(checkpoint);
   const anchor = endpoint.point[1];
@@ -355,20 +386,21 @@ function endpointVirtualPosition(family, endpoint) {
   return order.length;
 }
 
-export function assertStructuralEndpoint(endpoint) {
+export function assertStructuralEndpoint(endpoint         )                     {
   if (!endpoint || typeof endpoint !== 'object' || Array.isArray(endpoint)) {
     fail('endpoint must be a non-array object');
   }
+  const raw = endpoint                       ;
   const allowedKeys = ['point', 'basisFrontier'];
-  for (const key of Object.keys(endpoint)) {
+  for (const key of Object.keys(raw)) {
     if (!allowedKeys.includes(key)) fail(`unknown endpoint key: ${key}`);
   }
-  assertStructuralPoint(endpoint.point);
-  assertFrontier(endpoint.basisFrontier);
-  return deepFreeze({ point: endpoint.point, basisFrontier: endpoint.basisFrontier });
+  assertStructuralPoint(raw.point);
+  assertFrontier(raw.basisFrontier);
+  return deepFreeze({ point: raw.point, basisFrontier: raw.basisFrontier });
 }
 
-export function compareStructuralEndpoints(family, left, right) {
+export function compareStructuralEndpoints(family            , left                    , right                    )         {
   if (JSON.stringify(left.basisFrontier) !== JSON.stringify(right.basisFrontier)) {
     fail('endpoint basis mismatch: compareStructuralEndpoints requires identical basisFrontier');
   }
@@ -395,7 +427,7 @@ export function compareStructuralEndpoints(family, left, right) {
   return leftKey < rightKey ? -1 : 1;
 }
 
-export function projectEndpointToBlockOffset(family, blockId, endpoint) {
+export function projectEndpointToBlockOffset(family            , blockId        , endpoint                    )         {
   const block = family.blocks.find((b) => b.id === blockId);
   if (!block) fail(`block not found: ${blockId}`);
   if (JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(endpoint.basisFrontier)) {
@@ -429,7 +461,7 @@ export function projectEndpointToBlockOffset(family, blockId, endpoint) {
   return offset;
 }
 
-export function resolvePositionToEndpoint(family, blockId, utf16Offset, basisFrontier, affinity) {
+export function resolvePositionToEndpoint(family            , blockId        , utf16Offset        , basisFrontier          , affinity                  )                     {
   assertBlockId(blockId);
   const blockIndex = family.blocks.findIndex((b) => b.id === blockId);
   if (blockIndex === -1) fail(`block not found: ${blockId}`);
@@ -481,7 +513,7 @@ export function resolvePositionToEndpoint(family, blockId, utf16Offset, basisFro
 
   const totalVisible = blockText.length;
   if (utf16Offset === totalVisible) {
-    let lastOwnedKey = null;
+    let lastOwnedKey                = null;
     for (let i = order.length - 1; i >= 0; i--) {
       const [key] = order[i];
       if (ownedSet.has(key)) { lastOwnedKey = key; break; }
@@ -516,7 +548,7 @@ export function resolvePositionToEndpoint(family, blockId, utf16Offset, basisFro
   fail('failed to resolve position to endpoint');
 }
 
-export function assertMembershipRange(family, blockId, startEndpoint, endEndpoint) {
+export function assertMembershipRange(family            , blockId        , startEndpoint                    , endEndpoint                    )                            {
   assertBlockId(blockId);
   const block = family.blocks.find((b) => b.id === blockId);
   if (!block) fail(`block not found: ${blockId}`);
@@ -549,8 +581,8 @@ export function assertMembershipRange(family, blockId, startEndpoint, endEndpoin
   } else {
     if (blockIndex === 0) fail('non-root start anchor must be in named block for first block');
 
-    let priorBlock = null;
-    let priorOwned = null;
+    let priorBlock                   = null;
+    let priorOwned                     = null;
     for (let i = blockIndex - 1; i >= 0; i--) {
       const candidate = family.blocks[i];
       const candidateOwned = new Set(candidate.elementKeys);
@@ -561,9 +593,9 @@ export function assertMembershipRange(family, blockId, startEndpoint, endEndpoin
       }
     }
     if (!priorBlock) fail('no non-empty predecessor block found for start anchor');
-    if (!priorOwned.has(startKey)) fail('start anchor must be in a prior non-empty block');
+    if (!priorOwned .has(startKey)) fail('start anchor must be in a prior non-empty block');
     if (startEndpoint.point[2] !== 'right') fail('start from prior block must have right affinity');
-    const lastPriorKey = findLastOwnedKey(family, priorOwned);
+    const lastPriorKey = findLastOwnedKey(family, priorOwned );
     if (startKey !== lastPriorKey) fail('start from prior block must be its final owned element');
   }
 
@@ -590,7 +622,7 @@ export function assertMembershipRange(family, blockId, startEndpoint, endEndpoin
   return deepFreeze({ start: startEndpoint, end: endEndpoint, blockId });
 }
 
-export function applyTextOperationToBlock(family, blockId, operation) {
+export function applyTextOperationToBlock(family            , blockId        , operation         )             {
   if (Object.keys(family.checkpoint.pending).length > 0) {
     fail('cannot apply operation to family with pending entries');
   }
@@ -635,7 +667,7 @@ export function applyTextOperationToBlock(family, blockId, operation) {
   const newCheckpoint = textCheckpoint(newState);
   const oldKeys = new Set(Object.keys(elements));
   const newKeys = Object.keys(newCheckpoint.elements).filter((k) => !oldKeys.has(k));
-  let newBlocks;
+  let newBlocks                      ;
   if (body[0] === 'delete' || newKeys.length === 0) {
     newBlocks = family.blocks;
   } else {
@@ -658,7 +690,7 @@ export function applyTextOperationToBlock(family, blockId, operation) {
 // Apply an insertion whose destination block is created by the same structural
 // operation.  Keeping this here (rather than manufacturing an empty block) is
 // important: family checkpoints with live elements cannot contain empty blocks.
-export function applyTextOperationToNewBlock(family, sourceBlockId, newBlockId, operation, side) {
+export function applyTextOperationToNewBlock(family            , sourceBlockId        , newBlockId        , operation         , side                    )             {
   if (side !== 'before' && side !== 'after') fail('new block side must be before or after');
   if (family.blocks.some((block) => block.id === newBlockId)) fail(`duplicate block id: ${newBlockId}`);
   if (Object.keys(family.checkpoint.pending).length > 0) fail('cannot apply operation to family with pending entries');
@@ -683,9 +715,9 @@ export function applyTextOperationToNewBlock(family, sourceBlockId, newBlockId, 
   return restoreTextFamilyCheckpoint({ id: family.id, checkpoint: nextCheckpoint, blocks });
 }
 
-export function textOperationForOffsetEdit(family, edit, actor, lamport) {
+export function textOperationForOffsetEdit(family            , edit            , actor        , lamport        )         {
   const basis = family.checkpoint.frontier;
-  const op = [actor, 1];
+  const op       = [actor, 1];
   if (edit.kind === 'text.insert') {
     const block = family.blocks.find((candidate) => candidate.id === edit.at.blockId);
     if (!block) fail(`block not found: ${edit.at.blockId}`);
@@ -706,7 +738,7 @@ export function textOperationForOffsetEdit(family, edit, actor, lamport) {
   // ordinals merged. Document order is NOT op-id order: each offset-edit uses a
   // unique actor (`[actor, 1]`), so multi-character deletes (select-all, etc.)
   // fail assertDeleteSpans unless spans are reordered like public deleteText().
-  const byOp = new Map();
+  const byOp = new Map                  ();
   let offset = 0;
   for (const [, element] of rgaTraversal(family.checkpoint)) {
     if (!owned.has(elementKey(element.op, element.ordinal)) || element.deletedBy.length) continue;
@@ -720,7 +752,7 @@ export function textOperationForOffsetEdit(family, edit, actor, lamport) {
     offset = next;
   }
   if (offset !== text.length || byOp.size === 0) fail('delete range cannot be resolved');
-  const spans = [];
+  const spans                                = [];
   const sortedKeys = [...byOp.keys()].sort((a, b) => {
     const [aActor, aCounter] = a.split(':');
     const [bActor, bCounter] = b.split(':');
@@ -729,7 +761,7 @@ export function textOperationForOffsetEdit(family, edit, actor, lamport) {
   for (const key of sortedKeys) {
     const [spActor, spCounterS] = key.split(':');
     const spCounter = Number(spCounterS);
-    const ordinals = byOp.get(key).sort((a, b) => a - b);
+    const ordinals = byOp.get(key) .sort((a, b) => a - b);
     let spanStart = ordinals[0];
     let spanCount = 1;
     for (let i = 1; i < ordinals.length; i++) {

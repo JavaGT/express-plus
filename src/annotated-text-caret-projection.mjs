@@ -1,16 +1,66 @@
-// @ts-nocheck
 import { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
 
-function fail(message) { throw new Error(`annotated-text caret projection: ${message}`); }
+                      
+                                                                                
+                                                                                   
 
-function exact(value, keys, label) {
+                               
+             
+                 
+                              
+                 
+                                
+ 
+
+                          
+                       
+                
+              
+ 
+
+                                
+             
+                 
+                        
+               
+ 
+
+                           
+             
+                 
+                              
+                     
+                               
+                 
+ 
+
+                                  
+               
+                  
+               
+                                     
+                           
+                                       
+                            
+                              
+ 
+
+                              
+                  
+                                                              
+                            
+ 
+
+function fail(message        )        { throw new Error(`annotated-text caret projection: ${message}`); }
+
+function exact(value         , keys                   , label        )       {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) {
     fail(`${label} has invalid shape`);
   }
 }
 
-function splitsSurrogate(text, offset) {
+function splitsSurrogate(text        , offset        )          {
   if (offset <= 0 || offset >= text.length) return false;
   const before = text.charCodeAt(offset - 1);
   const after = text.charCodeAt(offset);
@@ -23,7 +73,7 @@ function splitsSurrogate(text, offset) {
 // cannot drift. When any redaction is present, the visible text cannot safely
 // locate the caret, so only a deterministic edge (start/end) with the opaque
 // presence token is disclosed — never the offset or any protected text.
-export function projectAnnotatedTextCaretForRecipient(canonical, descriptor, decisions, caret, presence) {
+export function projectAnnotatedTextCaretForRecipient(canonical                        , descriptor     , decisions                    , caret                    , presence        )                  {
   exact(caret, ['offset'], 'caret');
   if (!Number.isSafeInteger(caret.offset) || caret.offset < 0) {
     fail('caret location is invalid');

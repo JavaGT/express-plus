@@ -1,25 +1,56 @@
-// @ts-nocheck
 import { lowerToSql } from '../scope-sql.mjs';
-import { cosineSimilarity, applyNearest } from '../vector.mjs';
+import { cosineSimilarity, applyNearest,                  } from '../vector.mjs';
 
-export function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null, db }) {
-  const where = lowerToSql(predicate);
-  const state = { orderBy: null, limit: null, selectCols: null };
+                                   
+                                                                            
+                                       
+
+                  
+                                               
+                                           
+                                 
+  
+
+           
+                                  
+  
+
+                      
+              
+                                  
+                              
+  
+
+                                         
+
+export function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null, db }   
+               
+                     
+                     
+                               
+         
+ ) {
+  const where = lowerToSql(predicate                                    )                 ;
+  const state                                                                                = {
+    orderBy: null,
+    limit: null,
+    selectCols: null,
+  };
   const builder = {
-    sort(field, dir = 'asc') {
+    sort(field             , dir = 'asc') {
       const direction = String(dir).toUpperCase() === 'DESC' ? 'DESC' : 'ASC';
       state.orderBy = `${field.fieldName} ${direction}`;
       return builder;
     },
-    limit(n) {
+    limit(n        ) {
       state.limit = Number(n);
       return builder;
     },
-    select(...handles) {
+    select(...handles               ) {
       state.selectCols = handles.map((h) => h.fieldName);
       return builder;
     },
-    then(resolve, reject) {
+    then(resolve                          , reject                           ) {
       try {
         const cols = state.selectCols ? state.selectCols.join(', ') : '*';
         let sql = `SELECT ${cols} FROM ${name} AS t0 WHERE ${where.sql}`;
@@ -43,19 +74,29 @@ export function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null
   return builder;
 }
 
-export function installEntityQueries(record, { name, hydrate, deserializeStoredCells, db }) {
-  record.findOne = (predicate) => {
-    const { sql, params } = lowerToSql(predicate);
+export function installEntityQueries(
+  record                            ,
+  { name, hydrate, deserializeStoredCells, db }   
+                 
+                       
+                                          
+           
+   ,
+) {
+  record.findOne = (predicate         ) => {
+    const { sql, params } = lowerToSql(predicate                                    )                 ;
     const row = db
       .prepare(`SELECT * FROM ${name} AS t0 WHERE ${sql} LIMIT 1`)
       .get(params);
     return row ? hydrate(row) : null;
   };
 
-  record.findAll = (predicate) => {
+  record.findAll = (predicate          ) => {
     if (predicate === undefined) {
-      const rows = db.prepare(`SELECT * FROM ${name} AS t0`).all().map(hydrate);
-      rows.select = (...handles) => {
+      const rows = db.prepare(`SELECT * FROM ${name} AS t0`).all().map(hydrate)             
+                                                     
+       ;
+      rows.select = (...handles               ) => {
         const cols = handles.map((h) => h.fieldName);
         return db.prepare(`SELECT ${cols.join(', ')} FROM ${name} AS t0`).all().map(hydrate);
       };
@@ -64,25 +105,26 @@ export function installEntityQueries(record, { name, hydrate, deserializeStoredC
     return makeQueryBuilder({ name, predicate, hydrate, defaultLimit: 1000, db });
   };
 
-  record.findById = (id, principal = null) => {
+  record.findById = (id        , principal          = null) => {
     const row = db.prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`).get({ id });
     return row ? hydrate(row, principal) : null;
   };
 
-  record.hydrate = (row, principal = null, dispatch = null) => hydrate(row, principal, dispatch);
-  record.deserializeRow = (row) => deserializeStoredCells(row);
+  record.hydrate = (row     , principal          = null, dispatch          = null) =>
+    hydrate(row, principal, dispatch);
+  record.deserializeRow = (row     ) => deserializeStoredCells(row);
 
-  record.getOrFail = (id) => {
-    const row = record.findById(id);
+  record.getOrFail = (id        ) => {
+    const row = (record.findById                              )(id);
     if (!row) {
       const err = new Error(`${name} ${id} not found`);
-      err.status = 404;
+      (err                                 ).status = 404;
       throw err;
     }
     return row;
   };
 
-  record.nearest = (fieldName, queryVec, k) => {
+  record.nearest = (fieldName        , queryVec         , k        ) => {
     if (typeof fieldName !== 'string') {
       throw new Error(`nearest() requires a field name (string), got ${typeof fieldName}`);
     }
@@ -94,7 +136,7 @@ export function installEntityQueries(record, { name, hydrate, deserializeStoredC
     }
     const rows = db.prepare(`SELECT * FROM ${name} AS t0`).all().map(deserializeStoredCells);
     const scored = rows.map((row) => {
-      let vec = row[fieldName];
+      let vec          = row[fieldName];
       if (typeof vec === 'string') {
         try { vec = JSON.parse(vec); } catch { vec = null; }
       }

@@ -1,4 +1,3 @@
-// @ts-nocheck
 // middleware.mjs — the baked-in default behaviors the framework applies to every
 // response (SPEC §3). The app mounts none of this by hand; if it had to, that
 // would be a leak (AGENTS.md → Defaults). Each default here is fail-closed and
@@ -7,7 +6,7 @@
 import { config } from './config.mjs';
 import { getLog } from './log.mjs';
 import { failureForHttpError, failureResponse } from './http-failure.mjs';
-import { canWriteResponse } from './http-response.mjs';
+import { canWriteResponse,                       } from './http-response.mjs';
 import { isWorkbenchFailure } from './outcome.mjs';
 
 // Security headers set on EVERY response — including 401/404/500. These are the
@@ -15,7 +14,7 @@ import { isWorkbenchFailure } from './outcome.mjs';
 // (clickjacking), and never leak the URL in a referrer. Policies that need
 // per-app input (CSP, HSTS) are deliberately NOT baked in — they are app
 // declarations, not framework defaults, and a wrong default there breaks apps.
-const SECURITY_HEADERS = Object.freeze({
+const SECURITY_HEADERS                                   = Object.freeze({
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
   'referrer-policy': 'no-referrer',
@@ -24,7 +23,8 @@ const SECURITY_HEADERS = Object.freeze({
 
 // Apply the security headers to a response before its head is written. Idempotent
 // and unconditional — every exit path runs through here.
-export const applySecurityHeaders = (res) => Object.entries(SECURITY_HEADERS).forEach(([name, value]) => res.setHeader(name, value));
+export const applySecurityHeaders = (res                                                                        ) =>
+  Object.entries(SECURITY_HEADERS).forEach(([name, value]) => res.setHeader(name, value));
 
 // Same-origin verification — the ONE implementation used by both transports:
 // the REST CSRF guard (serve.mjs) and the WebSocket upgrade handshake (live.mjs).
@@ -34,7 +34,7 @@ export const applySecurityHeaders = (res) => Object.entries(SECURITY_HEADERS).fo
 //   null  — header absent (caller decides the fallback)
 //   true  — present and same-origin
 //   false — present and foreign OR unparseable (fail closed)
-export function sameOriginAsHost(headerValue, host) {
+export function sameOriginAsHost(headerValue                    , host                    )                 {
   if (!headerValue) return null; // absent — caller falls back / allows
   try {
     return new URL(headerValue).host === host;
@@ -48,7 +48,7 @@ export function sameOriginAsHost(headerValue, host) {
 // neither present → a non-browser client (no CSRF/CSWSH vector) is allowed.
 // Browsers ALWAYS attach Origin to a cross-origin WebSocket handshake, so an
 // absent Origin cannot be a cross-site attack — the allow is safe.
-export function isSameOriginRequest(req) {
+export function isSameOriginRequest(req                                                                   )          {
   const host = req.headers.host;
   const origin = sameOriginAsHost(req.headers.origin, host);
   if (origin !== null) return origin;   // Origin present → its verdict stands
@@ -70,16 +70,17 @@ export function isSameOriginRequest(req) {
 //
 // `env` is server-owned (a listen option, defaulting to config.env) — never
 // client-controlled.
-export function renderError(res, err, { env = config.env } = {}) {
+export function renderError(res                  , err         , { env = config.env } = {})       {
   if (!canWriteResponse(res, 'renderError', err)) return;
   const normalized = failureForHttpError(err);
-  const canonicalInput = isWorkbenchFailure(err) || isWorkbenchFailure(err?.failure);
+  const errRecord = err                                           ;
+  const canonicalInput = isWorkbenchFailure(err) || isWorkbenchFailure(errRecord.failure);
   const deliberate = canonicalInput || normalized.category !== 'internal';
   if (!deliberate) {
     getLog().error('http', 'request failed', { err, env });
   }
   const { status, body } = failureResponse(normalized, {
-    status: typeof err?.status === 'number' ? err.status : undefined,
+    status: typeof errRecord.status === 'number' ? errRecord.status : undefined,
   });
   const payload = JSON.stringify(body);
   res.writeHead(status, {

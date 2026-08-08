@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The framework-owned auth battery — the routes `projects/session.mjs` hand-rolls,
 // PLUS the Set-Cookie handling that sample omits (the 0→1 auth bug: a client
 // following the exemplar is anonymous on every subsequent request because
@@ -29,7 +28,7 @@ import { router } from '../app.ts';
 import { allowAnonymous, requireUser } from '../route-gate.ts';
 import { createInvitationApi } from './invitation.ts';
 import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.ts';
-import { config } from '../config.ts';
+import { config, type WorkbenchConfig } from '../config.ts';
 import { verifyTotp, verifyBackupCode } from './totp.ts';
 import { checkLockout, loginLockoutDecision, totpLockoutDecision } from './lockout.ts';
 import { serializeField } from '../field-strategy.ts';
@@ -41,6 +40,38 @@ import {
   rpConfig,
   parseClientDataJSON,
 } from './passkey.ts';
+
+import type { ResponseFacade } from '../http-response-factory.ts';
+import type { Principal } from '../principal.ts';
+
+// ---- Structural types --------------------------------------------------------
+// The router's handler chain dispatches `(req, res, next)` where req carries the
+// parsed body/params/query and the server-side principal (http-handler-chain.mjs),
+// res is the response facade, and next forwards an error to the error renderer.
+// The entity facades (User, Session, ...) are compiled bindings from the untyped
+// entity layer, so they stay `any`; the request surface is pinned here.
+
+export interface AuthRoutesOptions {
+  secure?: boolean;
+  identifyBy?: string[];
+  entities?: Record<string, any> | null;
+  db?: AuthDb | null;
+}
+
+interface AuthDb {
+  prepare(sql: string): { run(...params: unknown[]): unknown };
+}
+
+interface AuthRequest {
+  body: Record<string, unknown> | null | undefined;
+  params: Record<string, string>;
+  query: Record<string, string>;
+  principal: Principal;
+  headers: { cookie?: string; authorization?: string };
+}
+
+type AuthResponse = ResponseFacade;
+type AuthNext = (err?: unknown) => void;
 
 // Build the `/auth` router. `secure` follows the app env (true only in
 // production) so the same fail-closed cookie attributes apply on login and
@@ -54,7 +85,7 @@ import {
 // always travels in the body's `username` slot (kept for backward
 // compatibility); only the lookup columns change. Every named field MUST exist
 // on the User entity — a typo fails closed at first login with a thrown lookup.
-export function authRoutes({ secure = config.env === 'production', identifyBy = ['username'], entities, db } = {}) {
+export function authRoutes({ secure = config.env === 'production', identifyBy = ['username'], entities, db }: AuthRoutesOptions = {}) {
   if (!entities || !db) {
     throw new Error('authRoutes requires entities and db options');
   }
@@ -65,32 +96,32 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
 
   // Invitation response builder — shared by create and list routes.
   const INVITATION_FIELDS = ['token', 'targetEntity', 'targetId', 'role', 'targetUser', 'maxUses', 'useCount', 'expiresAt', 'createdBy', 'createdAt'];
-  function invitationResponse(inv) {
+  function invitationResponse(inv: { [key: string]: unknown }) {
     return Object.fromEntries(INVITATION_FIELDS.map(f => [f, inv[f]]));
   }
 
   // TOTP backup-code verification helper — shared by disable and authenticate routes.
-  function verifyTotpOrBackupCode(twoFactor, token) {
+  function verifyTotpOrBackupCode(twoFactor: { secret: string; backupCodes?: string | null }, token: string): { isValid: boolean; usedBackup: boolean; backupCodes: string[] } {
     const backupCodes = JSON.parse(twoFactor.backupCodes || '[]');
     const isTotpValid = verifyTotp(twoFactor.secret, token);
     const isBackupValid = verifyBackupCode(backupCodes, token);
     return { isValid: isTotpValid || isBackupValid, usedBackup: isBackupValid, backupCodes };
   }
 
-  function findIdentity(credential, next) {
+  function findIdentity(credential: unknown, next: AuthNext): { user: any; failed: boolean } {
     for (const name of identityFields) {
       const field = User[name];
       if (!field) {
         next({ status: 500, message: `identifyBy references unknown User field '${name}'` });
-        return { failed: true };
+        return { failed: true, user: null };
       }
       const user = User.findOne(field.is(credential));
-      if (user) return { user };
+      if (user) return { user, failed: false };
     }
-    return { user: null };
+    return { user: null, failed: false };
   }
 
-  function createSessionResponse(user, res) {
+  function createSessionResponse(user: { id: string; username: string }, res: AuthResponse) {
     const session = Session.create({ userId: user.id });
     res.setHeader('set-cookie', sessionCookie(session.token, { secure }));
     res.status(201).json({ user: { id: user.id, username: user.username } });
@@ -98,7 +129,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
 
   // Registration and login are distinct principal-minting intents. Registration
   // creates exactly one identity; login never creates an unknown identity.
-  s.post('/register', allowAnonymous(), async (req, res, next) => {
+  s.post('/register', allowAnonymous(), async (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { username, password } = req.body ?? {};
     if (!username || !password) {
       return next({ status: 400, message: 'username and password are required' });
@@ -110,7 +141,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     createSessionResponse(user, res);
   });
 
-  s.post('/login', allowAnonymous(), async (req, res, next) => {
+  s.post('/login', allowAnonymous(), async (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { username, password } = req.body ?? {};
     if (!username || !password) {
       return next({ status: 400, message: 'username and password are required' });
@@ -157,7 +188,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // valid session is denied at the gate before reaching here. Read the opaque
   // sid token from the cookie, delete that Session row, and clear the cookie
   // with the SAME attributes plus Max-Age=0 so the browser drops it. 204.
-  s.post('/logout', async (req, res) => {
+  s.post('/logout', async (req: AuthRequest, res: AuthResponse) => {
     const token = sessionTokenOf(req);
     if (token) {
       const row = Session.findOne(Session.token.is(token));
@@ -173,7 +204,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // active session. requireUser() rejects anonymous callers. The response
   // includes all User fields: id, username, email, displayName, name, image,
   // phone, bio. Null fields are omitted from the response.
-  s.get('/me', requireUser(), (req, res) => {
+  s.get('/me', requireUser(), (req: AuthRequest, res: AuthResponse) => {
     const user = User.getOrFail(req.principal.id);
     res.json({
       user: {
@@ -193,7 +224,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // requireUser(): only a valid session may change its own password. Verifies
   // the current password against the stored hash before setting the new one.
   // 204 on success; 400 if the body is incomplete, 401 if wrong current pw.
-  s.post('/change-password', requireUser(), (req, res, next) => {
+  s.post('/change-password', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { currentPassword, newPassword } = req.body ?? {};
     if (!currentPassword || !newPassword) {
       return next({ status: 400, message: 'currentPassword and newPassword are required' });
@@ -213,12 +244,12 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
 
   // ---- Passkey (WebAuthn) routes -------------------------------------------
 
-  const rp = rpConfig(config);
+  const rp = rpConfig(config as WorkbenchConfig & { rp?: { name?: string; id?: string; origin?: string } });
 
   // GET /auth/passkey/challenge — issue a new challenge for a WebAuthn ceremony.
   // allowAnonymous: anyone may request a challenge (the ceremony itself proves
   // identity). Returns { challenge, rp: { name, id } }.
-  s.get('/passkey/challenge', allowAnonymous(), (req, res) => {
+  s.get('/passkey/challenge', allowAnonymous(), (_req: AuthRequest, res: AuthResponse) => {
     const challenge = generateChallenge();
     challengeStore.set(challenge);
     res.json({ challenge, rp: { name: rp.name, id: rp.id } });
@@ -228,8 +259,8 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // requireUser: the caller must have an existing session (password login first,
   // then enroll passkey). The credential's userId is the requesting principal's
   // id — a passkey is always bound to the authenticated user who registered it.
-  s.post('/passkey/register', requireUser(), (req, res, next) => {
-    const { credential } = req.body ?? {};
+  s.post('/passkey/register', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
+    const credential = (req.body ?? {}).credential as Parameters<typeof verifyRegistration>[1] | null | undefined;
     if (!credential || !credential.response?.clientDataJSON || !credential.response?.attestationObject) {
       return next({ status: 400, message: 'credential with clientDataJSON and attestationObject is required' });
     }
@@ -239,18 +270,20 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     try {
       clientData = parseClientDataJSON(credential.response.clientDataJSON);
     } catch (err) {
-      return next({ status: 400, message: `invalid clientDataJSON: ${err.message}` });
+      const e = err as { message?: string };
+      return next({ status: 400, message: `invalid clientDataJSON: ${e.message}` });
     }
-    const entry = challengeStore.consume(clientData.challenge);
+    const entry = challengeStore.consume(String(clientData.challenge));
     if (!entry) {
       return next({ status: 400, message: 'unknown or expired challenge' });
     }
 
     let result;
     try {
-      result = verifyRegistration(clientData.challenge, credential, rp);
+      result = verifyRegistration(String(clientData.challenge), credential, rp);
     } catch (err) {
-      return next({ status: 400, message: `registration failed: ${err.message}` });
+      const e = err as { message?: string };
+      return next({ status: 400, message: `registration failed: ${e.message}` });
     }
 
     const userId = req.principal.id;
@@ -271,8 +304,8 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // allowAnonymous: the caller proves identity by demonstrating possession of the
   // private key. On successful verification, the framework mints a Session and
   // sets the `sid` cookie — the same authentication pathway as password login.
-  s.post('/passkey/authenticate', allowAnonymous(), (req, res, next) => {
-    const { credential } = req.body ?? {};
+  s.post('/passkey/authenticate', allowAnonymous(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
+    const credential = (req.body ?? {}).credential as Parameters<typeof verifyAuthentication>[1] | null | undefined;
     if (!credential || !credential.response?.clientDataJSON || !credential.response?.authenticatorData || !credential.response?.signature) {
       return next({ status: 400, message: 'credential with clientDataJSON, authenticatorData, and signature is required' });
     }
@@ -282,9 +315,10 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     try {
       clientData = parseClientDataJSON(credential.response.clientDataJSON);
     } catch (err) {
-      return next({ status: 400, message: `invalid clientDataJSON: ${err.message}` });
+      const e = err as { message?: string };
+      return next({ status: 400, message: `invalid clientDataJSON: ${e.message}` });
     }
-    const entry = challengeStore.consume(clientData.challenge);
+    const entry = challengeStore.consume(String(clientData.challenge));
     if (!entry) {
       return next({ status: 400, message: 'unknown or expired challenge' });
     }
@@ -301,9 +335,10 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
 
     let result;
     try {
-      result = verifyAuthentication(clientData.challenge, credential, storedCredential, rp);
+      result = verifyAuthentication(String(clientData.challenge), credential, storedCredential, rp);
     } catch (err) {
-      return next({ status: 401, message: `authentication failed: ${err.message}` });
+      const e = err as { message?: string };
+      return next({ status: 401, message: `authentication failed: ${e.message}` });
     }
 
     // Update the counter (replay protection). The unstored query API is the
@@ -319,7 +354,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
 
   // DELETE /auth/passkey/:credentialId — remove a passkey credential.
   // requireUser: only an authenticated user can remove their own credential.
-  s.delete('/passkey/:credentialId', requireUser(), (req, res, next) => {
+  s.delete('/passkey/:credentialId', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { credentialId } = req.params;
     const stored = Credential.findOne(Credential.credentialId.is(credentialId));
     if (!stored) {
@@ -335,11 +370,11 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
 
   // GET /auth/passkey — list the current user's passkey credentials.
   // requireUser: an anonymous caller cannot list credentials.
-  s.get('/passkey', requireUser(), (req, res, next) => {
+  s.get('/passkey', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const userId = req.principal.id;
     Credential.findAll(Credential.userId.is(userId))
       .sort(Credential.createdAt, 'desc')
-      .then((rows) => {
+      .then((rows: any[]) => {
         res.json(rows.map((c) => ({
           credentialId: c.credentialId,
           name: c.name,
@@ -347,7 +382,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
           backedUp: c.backedUp,
           transports: c.transports ? c.transports.split(',').filter(Boolean) : [],
         })));
-      }, (err) => next({ status: 500, message: err.message }));
+      }, (err: unknown) => next({ status: 500, message: (err as { message?: string }).message }));
   });
 
   // ---- Invitation routes ---------------------------------------------------
@@ -356,7 +391,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // requireUser: only an authenticated user may invite. The creator is the
   // requesting principal. Body: { targetEntity, targetId, role, targetUser?,
   // maxUses?, expiresAt? }. Returns the invitation with its token.
-  s.post('/invitation/create', requireUser(), async (req, res, next) => {
+  s.post('/invitation/create', requireUser(), async (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { targetEntity, targetId, role, targetUser, maxUses, expiresAt } = req.body ?? {};
     if (!targetEntity || !targetId || !role) {
       return next({ status: 400, message: 'targetEntity, targetId, and role are required' });
@@ -373,44 +408,48 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
       });
       res.status(201).json(invitationResponse(invitation));
     } catch (err) {
-      return next({ status: err.status ?? 500, message: err.message });
+      const e = err as { status?: unknown; message?: string };
+      return next({ status: e.status ?? 500, message: e.message });
     }
   });
 
   // POST /auth/invitation/:token/accept — accept an invitation by token.
   // requireUser: an anonymous caller cannot accept. Validates the token,
   // grants membership on the target entity. Returns { targetEntity, targetId, role }.
-  s.post('/invitation/:token/accept', requireUser(), async (req, res, next) => {
+  s.post('/invitation/:token/accept', requireUser(), async (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { token } = req.params;
     try {
       const result = await acceptInvitation(token, req.principal);
       res.json(result);
     } catch (err) {
-      return next({ status: err.status ?? 500, message: err.message });
+      const e = err as { status?: unknown; message?: string };
+      return next({ status: e.status ?? 500, message: e.message });
     }
   });
 
   // POST /auth/invitation/:token/reject — reject a direct invitation.
   // requireUser: an anonymous caller cannot reject. Removes the direct
   // invitation row if the rejecting user matches the target.
-  s.post('/invitation/:token/reject', requireUser(), async (req, res, next) => {
+  s.post('/invitation/:token/reject', requireUser(), async (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { token } = req.params;
     try {
       await rejectInvitation(token, req.principal);
       res.sendStatus(204);
     } catch (err) {
-      return next({ status: err.status ?? 500, message: err.message });
+      const e = err as { status?: unknown; message?: string };
+      return next({ status: e.status ?? 500, message: e.message });
     }
   });
 
   // GET /auth/invitation — list pending invitations for the current user.
   // Open link tokens are bearer secrets and are never disclosed by this list.
-  s.get('/invitation', requireUser(), (req, res, next) => {
+  s.get('/invitation', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     try {
       const invitations = listInvitationsForUser(req.principal);
       res.json(invitations.map((inv) => invitationResponse(inv)));
     } catch (err) {
-      return next({ status: err.status ?? 500, message: err.message });
+      const e = err as { status?: unknown; message?: string };
+      return next({ status: e.status ?? 500, message: e.message });
     }
   });
 
@@ -419,7 +458,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // POST /auth/api-key/create — mint a new API key. The plain token is returned
   // ONCE in the response body and never stored. Only the SHA-256 hash is stored.
   // requireUser: only an authenticated user may create keys.
-  s.post('/api-key/create', requireUser(), (req, res, next) => {
+  s.post('/api-key/create', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { name, entityName, role, expiresAt } = req.body ?? {};
     if (!name) {
       return next({ status: 400, message: 'name is required' });
@@ -439,19 +478,20 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
         token: result.plainToken,
       });
     } catch (err) {
-      return next({ status: err.status ?? 500, message: err.message });
+      const e = err as { status?: unknown; message?: string };
+      return next({ status: e.status ?? 500, message: e.message });
     }
   });
 
   // GET /auth/api-key — list the current user's API keys (prefix + name only,
   // no hashes, no plain tokens).
   // requireUser: an anonymous caller cannot list keys.
-  s.get('/api-key', requireUser(), (req, res, next) => {
+  s.get('/api-key', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     try {
       const userId = req.principal.id;
-      const keys = ApiKey.findAll(ApiKey.createdBy.is(userId))
+      ApiKey.findAll(ApiKey.createdBy.is(userId))
         .sort(ApiKey.createdAt, 'desc')
-        .then((rows) => {
+        .then((rows: any[]) => {
           res.json(rows.map((k) => ({
             id: k.id,
             prefix: k.prefix,
@@ -461,16 +501,17 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
             expiresAt: k.expiresAt,
             createdAt: k.createdAt,
           })));
-        }, (err) => next({ status: 500, message: err.message }));
+        }, (err: unknown) => next({ status: 500, message: (err as { message?: string }).message }));
     } catch (err) {
-      return next({ status: err.status ?? 500, message: err.message });
+      const e = err as { status?: unknown; message?: string };
+      return next({ status: e.status ?? 500, message: e.message });
     }
   });
 
   // DELETE /auth/api-key/:id — revoke (delete) an API key. Only the key's
   // creator may revoke it.
   // requireUser: an anonymous caller cannot revoke keys.
-  s.delete('/api-key/:id', requireUser(), (req, res, next) => {
+  s.delete('/api-key/:id', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { id } = req.params;
     try {
       const key = ApiKey.getOrFail(id);
@@ -480,10 +521,11 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
       ApiKey.delete(id);
       res.sendStatus(204);
     } catch (err) {
-      if (err.message?.includes('not found')) {
+      const e = err as { status?: unknown; message?: string };
+      if (e.message?.includes('not found')) {
         return next({ status: 404, message: 'key not found' });
       }
-      return next({ status: err.status ?? 500, message: err.message });
+      return next({ status: e.status ?? 500, message: e.message });
     }
   });
 
@@ -493,7 +535,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // requireUser: only an authenticated user can enroll. Generates a secret
   // (base32-encoded), backup codes, and a TwoFactor row. Returns the secret
   // URI (for QR code) and backup codes ONCE — they are never stored in plaintext.
-  s.post('/totp/enroll', requireUser(), (req, res, next) => {
+  s.post('/totp/enroll', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const userId = req.principal.id;
     // One enrollment per user — reject if already enrolled.
     const existing = TwoFactor.findOne(TwoFactor.userId.is(userId));
@@ -509,7 +551,8 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
         backupCodes: result.backupCodes,
       });
     } catch (err) {
-      return next({ status: err.status ?? 500, message: err.message });
+      const e = err as { status?: unknown; message?: string };
+      return next({ status: e.status ?? 500, message: e.message });
     }
   });
 
@@ -517,7 +560,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // requireUser: only an authenticated user can verify. On the first successful
   // verify after enrollment, sets enabled=1 and verifiedAt=now. Returns
   // { verified: true } or 400.
-  s.post('/totp/verify', requireUser(), (req, res, next) => {
+  s.post('/totp/verify', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { token } = req.body ?? {};
     if (!token) {
       return next({ status: 400, message: 'token is required' });
@@ -532,7 +575,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     if (totpLock) {
       return next({ status: 429, message: 'TOTP temporarily locked', retryAfterMs: totpLock.retryAfterMs });
     }
-    if (!verifyTotp(twoFactor.secret, token)) {
+    if (!verifyTotp(twoFactor.secret, token as string)) {
       // Failed TOTP attempt: increment counter and optionally lock.
       const attempts = (twoFactor.totpFailedAttempts ?? 0) + 1;
       const decision = totpLockoutDecision({ attempts });
@@ -559,7 +602,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // POST /auth/totp/disable — remove the TOTP enrollment.
   // requireUser: only an authenticated user can disable. Requires a valid TOTP
   // token, a backup code, or the user's password to confirm the action.
-  s.post('/totp/disable', requireUser(), (req, res, next) => {
+  s.post('/totp/disable', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { token, password } = req.body ?? {};
     if (!token && !password) {
       return next({ status: 400, message: 'token or password is required' });
@@ -583,7 +626,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     // Check lockout for TOTP tokens, but backup codes always bypass lockout
     // (they are the recovery escape hatch when the authenticator is lost).
     const totpLock = checkLockout(twoFactor.totpLockedUntil);
-    const { isValid, usedBackup, backupCodes } = verifyTotpOrBackupCode(twoFactor, token);
+    const { isValid, usedBackup, backupCodes } = verifyTotpOrBackupCode(twoFactor, token as string);
     if (!isValid) {
       // If lockout is active and the token wasn't a valid backup code, enforce
       // the TOTP lockout. If lockout is inactive, count failed TOTP attempts.
@@ -622,7 +665,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // which returned { requiresTotp: true, userId }. This route verifies the TOTP
   // token (or backup code), mints a Session, and sets the sid cookie — the same
   // authentication pathway as password login.
-  s.post('/totp/authenticate', allowAnonymous(), (req, res, next) => {
+  s.post('/totp/authenticate', allowAnonymous(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { userId, token } = req.body ?? {};
     if (!userId || !token) {
       return next({ status: 400, message: 'userId and token are required' });
@@ -638,7 +681,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     }
     // Only TOTP tokens are accepted here — backup codes are recovery secrets,
     // not authentication tokens. See auth/totp/disable for backup code usage.
-    if (!verifyTotp(twoFactor.secret, token)) {
+    if (!verifyTotp(twoFactor.secret, token as string)) {
       // Failed TOTP attempt: increment counter and optionally lock.
       const attempts = (twoFactor.totpFailedAttempts ?? 0) + 1;
       const decision = totpLockoutDecision({ attempts });

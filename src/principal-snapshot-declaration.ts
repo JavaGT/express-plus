@@ -1,4 +1,3 @@
-// @ts-nocheck
 const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const _sourceBrand = new WeakSet<object>();
@@ -21,14 +20,14 @@ function assertBrand(label: string, value: unknown, brand: WeakSet<object>, noun
   }
 }
 
-interface ProjectionSource {
+export interface ProjectionSource {
   kind: 'projectionSource';
   schema: unknown;
   table: string;
   field: Record<string, SourceFieldHandle>;
 }
 
-interface SourceFieldHandle {
+export interface SourceFieldHandle {
   kind: 'sourceField';
   source: ProjectionSource;
   column: string;
@@ -37,7 +36,7 @@ interface SourceFieldHandle {
   direction?: 'asc' | 'desc';
 }
 
-interface ManyCollection {
+export interface ManyCollection {
   kind: 'many';
   source?: ProjectionSource;
   via?: SourceFieldHandle;
@@ -46,12 +45,12 @@ interface ManyCollection {
   orderBy?: SourceFieldHandle[];
 }
 
-interface OutputObject {
+export interface OutputObject {
   kind: 'object';
   shape: Record<string, ManyCollection>;
 }
 
-interface PrincipalSnapshotDeclaration {
+export interface PrincipalSnapshotDeclaration {
   kind: 'principalSnapshot';
   name: string;
   principalType: unknown;
@@ -121,7 +120,7 @@ export function principalSnapshot(name: string, { principalType, output }: Princ
   if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(name)) {
     throw new Error(`principalSnapshot name must match /^[a-z][a-z0-9-]{0,63}$/, got '${name}'`);
   }
-  if (!['user', 'link', 'system', 'apiKey'].includes(principalType)) {
+  if (!['user', 'link', 'system', 'apiKey'].includes(principalType as string)) {
     throw new Error(`principalSnapshot principalType must be one of user, link, system, apiKey, got '${principalType}'`);
   }
   assertBrand('principalSnapshot', output, _objectBrand, 'output object');
@@ -141,7 +140,7 @@ export function principalSnapshot(name: string, { principalType, output }: Princ
     fields: Object.freeze(fields),
   });
   _declarationBrand.add(result);
-  return result;
+  return result as PrincipalSnapshotDeclaration;
 }
 
 export interface principalSnapshot {
@@ -201,7 +200,7 @@ principalSnapshot.many = function many(source: ProjectionSource, { via, key, sel
     orderBy: orderBy === undefined ? undefined : Object.freeze([...orderBy]),
   });
   _manyBrand.add(result);
-  return result;
+  return result as ManyCollection;
 };
 
 principalSnapshot.select = function select(...handles: SourceFieldHandle[]): SourceFieldHandle[] {
@@ -213,7 +212,7 @@ principalSnapshot.select = function select(...handles: SourceFieldHandle[]): Sou
   validateSourceFields('principalSnapshot.select', source, handles);
   const result = Object.freeze([...handles]);
   _selectBrand.add(result);
-  return result;
+  return result as SourceFieldHandle[];
 };
 
 principalSnapshot.orderBy = function orderBy(handle: SourceFieldHandle, direction: 'asc' | 'desc' = 'asc'): SourceFieldHandle {

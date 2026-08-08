@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Effect runtime — in-transaction effect execution (ADR #6, #22, P6b/P6c).
 //
 // Effects are declared on entities and compiled by effect-compiler.mjs. This
@@ -17,10 +16,11 @@
 // LOAD-TIME error (static cycle detection + admission handshake). At RUNTIME, a
 // target grant DENY rolls back the ORIGIN (in-txn atomic).
 
-import { principal } from './principal.ts';
+import { principal, type Principal } from './principal.ts';
 import { randomUUID } from 'node:crypto';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from './scope-sql.ts';
 import { scopeOf, tryParseScopeKey } from './scope-handle.ts';
+import type { DbHandle } from './driver.ts';
 
 // ---- Field-plugin operators for `with` templates (P6b Part 1) ----
 
@@ -29,11 +29,15 @@ import { scopeOf, tryParseScopeKey } from './scope-handle.ts';
 // These operators reference ONLY the target's own field value, which the effect
 // principal already has authority to mutate. NOT arbitrary cross-entity reads.
 
-export function inc(n) {
+export interface IncOperator { readonly kind: 'inc'; readonly value: number; }
+export interface DecOperator { readonly kind: 'dec'; readonly value: number; }
+export type FieldOperator = IncOperator | DecOperator;
+
+export function inc(n: number): IncOperator {
   return Object.freeze({ kind: 'inc', value: n });
 }
 
-export function dec(n) {
+export function dec(n: number): DecOperator {
   return Object.freeze({ kind: 'dec', value: n });
 }
 
@@ -41,14 +45,81 @@ export function dec(n) {
 // When an effect declares `mutate: self`, the effect mutates the origin entity
 // itself (emits `:updated`), rather than creating a fresh row in a target entity.
 
-export const self = Object.freeze({ kind: 'self' });
+export interface SelfSentinel { readonly kind: 'self'; readonly name?: undefined; }
+export const self: SelfSentinel = Object.freeze({ kind: 'self' });
+
+// The typed entity handle an effect mutates (e.g. `Inbox`). Optional `kind`
+// exists only so the `self`/`many` sentinels form one discriminated union.
+export interface EffectTarget {
+  readonly name?: string;
+  readonly kind?: undefined;
+  readonly admitsEffects?: (ctx: {
+    effect: string;
+    principal: Principal;
+    delta: unknown;
+    origin: { id?: string };
+  }) => boolean;
+}
 
 // many — fan-out effect constructor (P6c-C step 2).
 // When an effect declares `mutate: many(Target, { over })`, the effect creates
 // one target row per member in the `over` collection (e.g. one Inbox per collaborator).
 // Each member gets a fresh UUID targetId (create-only, no upsert).
-export function many(target, { over }) {
+export interface ManySentinel {
+  readonly kind: 'many';
+  readonly target: EffectTarget;
+  readonly overField: unknown;
+  readonly name?: undefined;
+}
+export function many(target: EffectTarget, { over }: { over: unknown }): ManySentinel {
   return Object.freeze({ kind: 'many', target, overField: over });
+}
+
+export type EffectMutate = EffectTarget | SelfSentinel | ManySentinel;
+
+export interface EffectWithContext {
+  delta: Record<string, unknown>;
+  origin: { id?: string };
+  member?: unknown;
+}
+
+export interface EffectWhenContext {
+  delta: Record<string, unknown>;
+  origin: { id?: string };
+}
+
+export interface EffectStateTransition {
+  readonly fieldName: string;
+  readonly from?: unknown;
+  readonly to?: unknown;
+}
+
+export interface EffectDeclaration {
+  readonly mutate?: EffectMutate;
+  readonly with?: ((ctx: EffectWithContext) => Record<string, unknown>) | Record<string, unknown>;
+  readonly when?: (ctx: EffectWhenContext) => boolean;
+  readonly _stateTransition?: EffectStateTransition;
+}
+
+export interface EffectTriggerEvent {
+  readonly type: string;
+  readonly scope: string;
+  readonly data?: Record<string, unknown>;
+  readonly _stateTransitions?: readonly EffectStateTransition[];
+}
+
+export interface TargetEvent {
+  type: string;
+  scope: string;
+  data: Record<string, unknown>;
+  _effectSource: string;
+  _effectPrincipal: Principal;
+  _parentActionId: string;
+}
+
+interface ManyMemberRow {
+  id: string;
+  member: Record<string, unknown>;
 }
 
 // ---- Runtime effect execution ----
@@ -56,7 +127,12 @@ export function many(target, { over }) {
 // Resolve the membership rows for a `many` fan-out effect.
 // Returns an array of {id, member} where `id` is a fresh UUID (create-only)
 // and `member` carries the member data {id, ...otherCells}.
-function resolveManyMembers(effect, { originId, sourceEntityName, db, overFieldName }) {
+function resolveManyMembers({ originId, sourceEntityName, db, overFieldName }: {
+  originId: string | undefined;
+  sourceEntityName: string;
+  db: DbHandle | null | undefined;
+  overFieldName?: string;
+}): ManyMemberRow[] {
   if (!overFieldName || !db) return [];
 
   const table = membershipTable(sourceEntityName, overFieldName);
@@ -67,7 +143,7 @@ function resolveManyMembers(effect, { originId, sourceEntityName, db, overFieldN
 
   // Strip the internal membership columns (member_id, owner FK) from memberData
   return rows.map((r) => {
-    const memberData = { id: r.member_id };
+    const memberData: Record<string, unknown> = { id: r.member_id };
     for (const [key, val] of Object.entries(r)) {
       if (key !== MEMBER_COLUMN && key !== ownerCol) {
         memberData[key] = val;
@@ -90,14 +166,23 @@ function resolveManyMembers(effect, { originId, sourceEntityName, db, overFieldN
 // P6c-C: inc/dec operators perform read-modify-write using the in-txn db handle.
 // P6c-C: self target mutates the origin row (emits :updated) rather than creating fresh.
 // P6c-C step 2: `many(Target, {over})` fan-out creates one target row per collection member.
-export function executeEffect(effect, { triggerEvent, now, actionId, sourceEntityName, db, overFieldName }) {
-  const kind = effect.mutate?.kind; // 'self' | 'many' | undefined (plain create)
+export interface ExecuteEffectContext {
+  triggerEvent: EffectTriggerEvent;
+  actionId: string;
+  sourceEntityName: string;
+  db: DbHandle | null | undefined;
+  overFieldName?: string;
+}
+
+export function executeEffect(effect: EffectDeclaration, { triggerEvent, actionId, sourceEntityName, db, overFieldName }: ExecuteEffectContext): TargetEvent[] {
+  const mutate = effect.mutate;
+  const kind = mutate?.kind; // 'self' | 'many' | undefined (plain create)
 
   // Resolve the REAL target entity:
   // - self: no real target (origin entity itself)
   // - many: target is effect.mutate.target
   // - plain: target is effect.mutate
-  const realTarget = kind === 'many' ? effect.mutate.target : (kind === 'self' ? null : effect.mutate);
+  const realTarget: EffectTarget | null | undefined = mutate && mutate.kind === 'many' ? mutate.target : (mutate && mutate.kind === 'self' ? null : mutate);
 
   // Extract delta and origin from the trigger event
   const delta = triggerEvent.data || {};
@@ -105,7 +190,7 @@ export function executeEffect(effect, { triggerEvent, now, actionId, sourceEntit
   const origin = { id: originId };
 
   // Target name: self uses source entity, others use real target's name
-  const targetName = kind === 'self' ? sourceEntityName : realTarget.name;
+  const targetName: string = kind === 'self' ? sourceEntityName : (realTarget as EffectTarget).name as string;
 
   // The effect principal — a bounded system principal tagged with its source
   // entity. NOT the triggering user, NOT a SYSTEM god-principal (ADR #6).
@@ -135,17 +220,17 @@ export function executeEffect(effect, { triggerEvent, now, actionId, sourceEntit
   // - self: [{id: originId, member: undefined}] (one row, origin exists)
   // - plain create: [{id: randomUUID(), member: undefined}] (one row, does not exist yet)
   // - many: N rows from membership table, each with fresh UUID
-  let targetRows;
+  let targetRows: Array<{ id: string; member?: unknown }>;
   if (kind === 'many') {
-    targetRows = resolveManyMembers(effect, { originId, sourceEntityName, db, overFieldName });
+    targetRows = resolveManyMembers({ originId, sourceEntityName, db, overFieldName });
   } else if (kind === 'self') {
-    targetRows = [{ id: originId, member: undefined }];
+    targetRows = [{ id: originId as string, member: undefined }];
   } else {
     targetRows = [{ id: randomUUID(), member: undefined }];
   }
 
   // For each resolved target row, resolve `with` + existence probe + emit event
-  const events = [];
+  const events: TargetEvent[] = [];
   for (const row of targetRows) {
     const { id: rowId, member } = row;
 
@@ -158,13 +243,14 @@ export function executeEffect(effect, { triggerEvent, now, actionId, sourceEntit
     const exists = !!existing?.hit;
 
     // Resolve the `with` template
-    let payload;
+    let payload: Record<string, unknown>;
     if (typeof effect.with === 'function') {
       // Function form: pass {delta, origin, member} (member is undefined for self/create)
       payload = effect.with({ delta, origin, member });
     } else if (typeof effect.with === 'object') {
       // Operator-interpretation pass for inc/dec RMW
-      const isOperatorMarker = (v) => v && typeof v === 'object' && (v.kind === 'inc' || v.kind === 'dec');
+      const isOperatorMarker = (v: unknown): v is FieldOperator =>
+        !!v && typeof v === 'object' && ((v as { kind?: unknown }).kind === 'inc' || (v as { kind?: unknown }).kind === 'dec');
       payload = {};
       for (const [fieldName, value] of Object.entries(effect.with)) {
         if (!isOperatorMarker(value)) {
@@ -202,21 +288,32 @@ export function executeEffect(effect, { triggerEvent, now, actionId, sourceEntit
 // Execute effects for a committed event.
 // Returns an array of target events to apply through the caller's durable variant.
 // db: the in-txn database handle for RMW reads (P6c-C).
-export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, db }) {
+export interface RegistryEffectEntry {
+  sourceEntity: string;
+  effect: EffectDeclaration;
+  overFieldName?: string;
+}
+
+export function executeEffectsForEvent(
+  event: EffectTriggerEvent,
+  effectsRegistry: Map<string, RegistryEffectEntry[]>,
+  { actionId, db }: { actionId: string; db?: DbHandle | null },
+): TargetEvent[] {
   // Find effects registered for this event type
   const eventEffects = effectsRegistry.get(event.type);
   if (!eventEffects || eventEffects.length === 0) {
     return [];
   }
 
-  const allTargetEvents = [];
+  const allTargetEvents: TargetEvent[] = [];
 
   for (const { sourceEntity, effect, overFieldName } of eventEffects) {
     if (effect._stateTransition) {
+      const stateTransition = effect._stateTransition;
       const matched = event._stateTransitions?.some((transition) =>
-        transition.fieldName === effect._stateTransition.fieldName
-        && transition.from === effect._stateTransition.from
-        && transition.to === effect._stateTransition.to);
+        transition.fieldName === stateTransition.fieldName
+        && transition.from === stateTransition.from
+        && transition.to === stateTransition.to);
       if (!matched) continue;
     }
     // Check the `when` guard if present
@@ -237,7 +334,6 @@ export function executeEffectsForEvent(event, effectsRegistry, { now, actionId, 
     // `attributes.effect` tag (gap #2) and the source tag for admission (gap #3).
     const targetEvents = executeEffect(effect, {
       triggerEvent: event,
-      now,
       actionId,
       sourceEntityName: sourceEntity,
       db,

@@ -1,5 +1,18 @@
-// @ts-nocheck
-function descriptorTsType(descriptor) {
+                      
+               
+                
+                
+                                            
+                                    
+ 
+
+                           
+               
+                                                
+                                                         
+ 
+
+function descriptorTsType(descriptor                        )                {
   if (!descriptor) return 'unknown';
 
   const { kind, type } = descriptor;
@@ -23,7 +36,7 @@ function descriptorTsType(descriptor) {
   return 'unknown';
 }
 
-function isStoredColumn(descriptor) {
+function isStoredColumn(descriptor                        )          {
   if (!descriptor) return false;
   const { kind } = descriptor;
   if (kind === 'computed' && descriptor.mode === 'pull') return false;
@@ -32,7 +45,7 @@ function isStoredColumn(descriptor) {
   return false;
 }
 
-function rowProperties(fields) {
+function rowProperties(fields                                      )           {
   const lines = ['id: string'];
   for (const [name, desc] of Object.entries(fields)) {
     if (desc.kind === 'struct') {
@@ -47,7 +60,7 @@ function rowProperties(fields) {
   return lines;
 }
 
-function entityHandleType(name, fields, checks) {
+function entityHandleType(_name        , fields                                      )           {
   const lines = [];
 
   for (const [fname, desc] of Object.entries(fields)) {
@@ -95,7 +108,7 @@ function entityHandleType(name, fields, checks) {
   return lines;
 }
 
-export function generateTypes(entities) {
+export function generateTypes(entities                            )         {
   const parts = [];
 
   parts.push(`// Generated type definitions for workbench declarations.`);

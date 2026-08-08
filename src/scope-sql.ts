@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The scope→SQL compiler: the grant's READ half, lowered to a parameterized
 // SQL WHERE fragment (SPEC §6.1, §11, §13; ADR #2).
 //
@@ -15,6 +14,7 @@
 // entity-load from the frozen field descriptors; there is no per-request cost.
 
 import { serializeField, structCellColumn } from './field-strategy.ts';
+import type { FieldDescriptor as StrategyFieldDescriptor } from './field-strategy.ts';
 import * as eventHandle from './event-handle.ts';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.ts';
 
@@ -34,8 +34,8 @@ export const PRINCIPAL_ATTR_PARAM = 'principalAttrToken';
 // Membership side-table naming convention (singular system: one helper each, so
 // the lowering, the write path, and the schema migration all agree).
 export const MEMBER_COLUMN = 'member_id';
-export const membershipTable = (entityName, fieldName) => `${entityName}_${fieldName}`;
-export const membershipOwnerCol = (entityName) => `${entityName}_id`;
+export const membershipTable = (entityName: string, fieldName: string): string => `${entityName}_${fieldName}`;
+export const membershipOwnerCol = (entityName: string): string => `${entityName}_id`;
 
 // A branded token the harvester injects as `principal.id` so a map `.has()` can
 // tell "this is the requesting principal → emit a rebindable principalId param"
@@ -48,13 +48,15 @@ export const PRINCIPAL_ID_TOKEN = Symbol('principalId');
 // PRINCIPAL_ID_TOKEN for the link-identity axis.
 export const PRINCIPAL_ATTR_TOKEN = Symbol('principalAttrToken');
 // Module-private provenance for closed declaration grammar handles.
-const SNAPSHOT_FIELD_HANDLES = new WeakSet();
-export const isSnapshotFieldHandle = (handle) => SNAPSHOT_FIELD_HANDLES.has(handle);
+const SNAPSHOT_FIELD_HANDLES = new WeakSet<object>();
+export const isSnapshotFieldHandle = (handle: unknown): boolean => SNAPSHOT_FIELD_HANDLES.has(handle as object);
 
 // A typed load-time failure, sibling to UnawaitedCheckError. Raised when a scope
 // predicate cannot be lowered to SQL.
 export class NonCompilableError extends Error {
-  constructor(message, { where } = {}) {
+  where: string | null;
+
+  constructor(message: string, { where }: { where?: string } = {}) {
     super(where ? `${message} (in ${where})` : message);
     this.name = 'NonCompilableError';
     this.where = where ?? null;
@@ -66,19 +68,28 @@ export class NonCompilableError extends Error {
 // Eq/In/IsNull are leaf comparisons against a declared field. Not/And compose.
 // Or is RESERVED (Phase 2); Phase 1 lowers anyOf via De Morgan and never emits
 // it. A Join (reserved here, exercised when inherit lands) traverses a typed FK.
-const TRUE = Object.freeze({ node: 'true' });
-const FALSE = Object.freeze({ node: 'false' });
+// The AST node is an open record tagged by `node`; each lowering case reads its
+// own fields (loose by design — the op set is closed and frozen).
+export interface AstNode {
+  readonly node: string;
+  readonly and: (other: AstNode) => AstNode;
+  readonly not: () => AstNode;
+  readonly [key: string]: unknown;
+}
 
-export function isNode(x) {
-  return x !== null && typeof x === 'object' && typeof x.node === 'string';
+const TRUE: AstNode = Object.freeze({ node: 'true' }) as unknown as AstNode;
+const FALSE: AstNode = Object.freeze({ node: 'false' }) as unknown as AstNode;
+
+export function isNode(x: unknown): x is AstNode {
+  return x !== null && typeof x === 'object' && typeof (x as { node?: unknown }).node === 'string';
 }
 
 // Attach the fluent combinators (.and/.not) to every node so `a.and(b)` works.
-export function makeNode(props) {
-  const node = { ...props };
-  node.and = (other) => makeNode({ node: 'and', operands: [Object.freeze(node), other] });
-  node.not = () => makeNode({ node: 'not', operand: Object.freeze(node) });
-  return Object.freeze(node);
+export function makeNode(props: Record<string, unknown>): AstNode {
+  const node: Record<string, unknown> = { ...props };
+  node.and = (other: AstNode): AstNode => makeNode({ node: 'and', operands: [Object.freeze(node), other] });
+  node.not = (): AstNode => makeNode({ node: 'not', operand: Object.freeze(node) });
+  return Object.freeze(node) as unknown as AstNode;
 }
 
 // ---- the inherit directive (imported by the developer) ----------------------
@@ -88,8 +99,8 @@ export function makeNode(props) {
 // the parent must be defined above the child. The directive is a plain frozen
 // record the entity compiler recognizes; it carries the parent's harvested scope
 // AST (so the child can re-lower it under a join alias) and the FK column name.
-export function inherit(parent, { via } = {}) {
-  if (parent === undefined || parent === null || typeof parent !== 'object' || !parent.name) {
+export function inherit(parent: unknown, { via }: { via?: unknown } = {}): { inherit: unknown; via: unknown } {
+  if (parent === undefined || parent === null || typeof parent !== 'object' || !(parent as { name?: unknown }).name) {
     throw new NonCompilableError(
       'inherit(Parent, { via }) requires the compiled parent entity object, ' +
         'not a name. Define the parent above the child and pass it directly.',
@@ -97,18 +108,18 @@ export function inherit(parent, { via } = {}) {
   }
   if (typeof via !== 'string' || via.length === 0) {
     throw new NonCompilableError(
-      `inherit(${parent.name}, { via }) requires a 'via' FK column name (string).`,
+      `inherit(${(parent as { name: unknown }).name}, { via }) requires a 'via' FK column name (string).`,
     );
   }
   return Object.freeze({ inherit: parent, via });
 }
 
 // ---- top-level combinators (imported by the developer) ----------------------
-export const everyone = () => TRUE;
-export const never = () => FALSE;
+export const everyone: () => AstNode = () => TRUE;
+export const never: () => AstNode = () => FALSE;
 // De Morgan: anyOf(a,b,c) == NOT(AND(NOT a, NOT b, NOT c)). Built only from the
 // Phase 1 op set (and+not); reserves the native Or node for Phase 2.
-export const anyOf = (...nodes) =>
+export const anyOf = (...nodes: AstNode[]): AstNode =>
   makeNode({ node: 'and', operands: nodes.map((n) => makeNode({ node: 'not', operand: n })) }).not();
 
 // ---- the per-entity predicate builders --------------------------------------
@@ -119,13 +130,14 @@ export const anyOf = (...nodes) =>
 // A name with a `harvest` face → invoke it (returns an AST node).
 // A name in the registry WITHOUT a harvest face → runtime-only, throw.
 // A name NOT in the registry at all → throw.
-function makeIsProxy(registry, where) {
+function makeIsProxy(registry: Record<string, unknown>, where: string): unknown {
   return new Proxy({}, {
     get(_t, name) {
-      const entry = registry[name];
+      const entry = registry[name as string] as { harvest?: () => AstNode } | undefined;
       if (entry) {
-        if (entry.harvest) {
-          return () => entry.harvest();
+        const harvest = entry.harvest;
+        if (harvest) {
+          return () => harvest();
         }
         return () => {
           throw new NonCompilableError(
@@ -142,6 +154,28 @@ function makeIsProxy(registry, where) {
   });
 }
 
+// The typed handle one compilable field exposes: the value ops (is/in/isNull/
+// gte/lte) plus the special forms the field's kind adds (has for a map,
+// matches for FTS text, nearest for a vector, native event handles for a
+// membership/list/log field). Ops on a non-compilable kind throw.
+export interface FieldHandle {
+  fieldName: string;
+  entityName?: string | undefined;
+  is: (value: unknown) => AstNode;
+  in: (values: Iterable<unknown>) => AstNode;
+  isNull: () => AstNode;
+  gte: (value: unknown) => AstNode;
+  lte: (value: unknown) => AstNode;
+  has?: (value: unknown) => AstNode;
+  matches?: (query: unknown) => AstNode;
+  nearest?: (query: unknown, k: number) => AstNode;
+  [key: string]: unknown;
+}
+
+// A field descriptor as the scope compiler reads it: kind/type/role decide which
+// ops exist, cells names a struct's sub-cells, target names a ref's FK target.
+type FieldDescriptor = StrategyFieldDescriptor;
+
 // A typed handle for one field, exposing the compilable value ops. This is the
 // ONE handle definition: the scope compiler reaches it through makeFieldsProxy
 // (where the field name comes from a `fields.<name>` access), and the runtime
@@ -149,9 +183,14 @@ function makeIsProxy(registry, where) {
 // hand-written handler can write `User.username.is(name)`. The handle also
 // carries its own `fieldName`, so it doubles as a `.select(...)` projection
 // handle. Ops on a non-compilable field kind (crdt/ordered/store) throw.
-export function fieldHandle(name, descriptor, entityName, resolveEntity) {
+export function fieldHandle(
+  name: string,
+  descriptor: FieldDescriptor | undefined,
+  entityName?: string,
+  resolveEntity?: (target: unknown) => unknown,
+): FieldHandle {
   if (descriptor === undefined) {
-    const fail = (where) => {
+    const fail = (where?: string): never => {
       throw new NonCompilableError(`no field '${String(name)}' on this entity`, { where });
     };
     return {
@@ -172,14 +211,14 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   // linkShare.token.is(x) lowers to `t0.linkShare__token = :p` through the
   // existing value path (concentrate, not a second comparison path).
   if (descriptor.kind === 'struct') {
-    const fail = () => {
+    const fail = (): never => {
       throw new NonCompilableError(
         `field '${String(name)}' is a structured (${descriptor.type}) field and cannot be ` +
           `compared as a whole — compare one of its sub-cells (e.g. ${String(name)}.token)`,
       );
     };
-    const handle = { fieldName: name, entityName, is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
-    for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells)) {
+    const handle: FieldHandle = { fieldName: name, entityName, is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
+    for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells ?? {})) {
       handle[cellName] = fieldHandle(structCellColumn(name, cellName), cellDescriptor);
     }
     return handle;
@@ -192,7 +231,7 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   // branded principal-id token, the compiler emits a rebindable principalId param
   // (so bindReadScope fills it per request); otherwise the literal is baked in.
   if (descriptor.kind === 'store' && descriptor.type === 'map') {
-    const fail = () => {
+    const fail = (): never => {
       throw new NonCompilableError(
         `field '${String(name)}' is a ${descriptor.kind} field and cannot be compared in scope`,
       );
@@ -202,14 +241,14 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
     // error rather than silently emitting a wrong table.
     const tableName = entityName ? membershipTable(entityName, name) : null;
     const ownerCol = entityName ? membershipOwnerCol(entityName) : null;
-    const handle = {
+    const handle: FieldHandle = {
       fieldName: name,
       is: fail,
       in: fail,
       isNull: fail,
       gte: fail,
       lte: fail,
-      has: (value) => {
+      has: (value: unknown) => {
         if (tableName === null) {
           throw new NonCompilableError(
             `field '${String(name)}' is a map field but no entity name is available ` +
@@ -253,12 +292,12 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   // handles for its mutations, like the map field. Whole-value comparison is
   // still forbidden (an ordered collection is not a scalar).
   if (descriptor.kind === 'ordered') {
-    const fail = () => {
+    const fail = (): never => {
       throw new NonCompilableError(
         `field '${String(name)}' is an ${descriptor.kind} field and cannot be compared in scope`,
       );
     };
-    const handle = {
+    const handle: FieldHandle = {
       fieldName: name,
       is: fail,
       in: fail,
@@ -278,12 +317,12 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   // A log field (the `store` kind, `type: 'log'`) exposes its typed native
   // `appended` event handle. Whole-value comparison is forbidden.
   if (descriptor.kind === 'store' && descriptor.type === 'log') {
-    const fail = () => {
+    const fail = (): never => {
       throw new NonCompilableError(
         `field '${String(name)}' is a ${descriptor.kind} field and cannot be compared in scope`,
       );
     };
-    const handle = {
+    const handle: FieldHandle = {
       fieldName: name,
       is: fail,
       in: fail,
@@ -302,13 +341,14 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   // forbidden. The handle is compiled from the declaration metadata, never
   // from physical tables or encoding internals.
   if (descriptor.kind === 'annotatedText') {
-    const fail = () => {
+    const fail = (): never => {
       throw new NonCompilableError(
         `field '${String(name)}' is an annotatedText field and cannot be compared in scope`,
       );
     };
-    const meta = getAnnotatedTextCompiledMetadata(descriptor);
-    const handle = {
+    const meta = getAnnotatedTextCompiledMetadata(descriptor) as
+      { annotationHandles?: unknown; measurementHandles?: unknown; capabilityHandles?: unknown } | null | undefined;
+    const handle: FieldHandle = {
       fieldName: name,
       is: fail,
       in: fail,
@@ -323,14 +363,14 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   }
 
   if (descriptor.kind !== 'value') {
-    const fail = () => {
+    const fail = (): never => {
       throw new NonCompilableError(
         `field '${String(name)}' is a ${descriptor.kind} field and cannot be compared in scope`,
       );
     };
     return { fieldName: name, is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
   }
-  const handle = {
+  const handle: FieldHandle = {
     fieldName: name,
     entityName,
     // .is(undefined) is the deliberate FALSE value (never IS NULL); .is(v) mints
@@ -338,7 +378,7 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
     // (stored-cell) form via the field's strategy — a boolean becomes 1/0, a
     // Date epoch millis — so the param is bindable by node:sqlite, which refuses
     // a JS boolean. One serialize, used here and by the write path.
-    is: (value) => {
+    is: (value: unknown) => {
       // The link-identity token: emit a rebindable principalAttrToken param (the
       // struct sub-cell lives on a generated `<field>__<cell>` column, bound per
       // request to principal.attributes.token). A literal value is baked in
@@ -350,13 +390,13 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
         ? FALSE
         : makeNode({ node: 'eq', field: name, value: serializeField(descriptor, value) });
     },
-    in: (values) =>
+    in: (values: Iterable<unknown>) =>
       makeNode({ node: 'in', field: name, values: [...values].map((v) => serializeField(descriptor, v)) }),
     isNull: () => makeNode({ node: 'isNull', field: name }),
-    gte: (value) => value === undefined
+    gte: (value: unknown) => value === undefined
       ? FALSE
       : makeNode({ node: 'gte', field: name, value: serializeField(descriptor, value) }),
-    lte: (value) => value === undefined
+    lte: (value: unknown) => value === undefined
       ? FALSE
       : makeNode({ node: 'lte', field: name, value: serializeField(descriptor, value) }),
   };
@@ -366,7 +406,7 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   // entityName threading — in the fields proxy too).
   if (descriptor.indexed === 'fts') {
     if (entityName) {
-      handle.matches = (query) => {
+      handle.matches = (query: unknown) => {
         if (typeof query !== 'string' || query.length === 0) {
           throw new NonCompilableError(
             `field '${String(name)}'.matches(query) requires a non-empty search string`,
@@ -396,7 +436,7 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   // nearest config and produces no-op SQL; the query layer post-filters rows
   // after computing cosine similarity in pure JS (brute-force, zero deps).
   if (descriptor.type === 'vector') {
-    handle.nearest = (query, k) => {
+    handle.nearest = (query: unknown, k: number) => {
       if (!Array.isArray(query)) {
         throw new NonCompilableError(
           `field '${String(name)}'.nearest(query, k) requires a query vector (number[]).`,
@@ -426,16 +466,17 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   const targetReference = descriptor.target;
   const targetName = typeof targetReference === 'string'
     ? targetReference
-    : targetReference?.name;
+    : (targetReference as { name?: unknown } | undefined)?.name;
   const target = targetReference ? resolveEntity(targetReference) : null;
-  if (!target?.fields) {
+  const targetRecord = target as { name?: unknown; fields?: Record<string, FieldDescriptor> } | null;
+  if (!targetRecord?.fields) {
     return handle;
   }
-  for (const [targetFieldName, targetDescriptor] of Object.entries(target.fields)) {
+  for (const [targetFieldName, targetDescriptor] of Object.entries(targetRecord.fields)) {
     if (targetDescriptor?.kind === 'store' && targetDescriptor.type === 'map') {
       handle[targetFieldName] = relationMapHandle({
         refFieldName: name,
-        targetEntityName: target.name ?? targetName,
+        targetEntityName: String(targetRecord.name ?? targetName),
         targetFieldName,
       });
     }
@@ -443,8 +484,12 @@ export function fieldHandle(name, descriptor, entityName, resolveEntity) {
   return handle;
 }
 
-function relationMapHandle({ refFieldName, targetEntityName, targetFieldName }) {
-  const fail = () => {
+function relationMapHandle({ refFieldName, targetEntityName, targetFieldName }: {
+  refFieldName: string;
+  targetEntityName: string;
+  targetFieldName: string;
+}): FieldHandle {
+  const fail = (): never => {
     throw new NonCompilableError(
       `field '${String(refFieldName)}.${String(targetFieldName)}' is a map field and cannot be compared in scope`,
     );
@@ -458,7 +503,7 @@ function relationMapHandle({ refFieldName, targetEntityName, targetFieldName }) 
     isNull: fail,
     gte: fail,
     lte: fail,
-    has: (value) => {
+    has: (value: unknown) => {
       if (value === PRINCIPAL_ID_TOKEN) {
         return makeNode({
           node: 'existsMembership',
@@ -483,10 +528,10 @@ function relationMapHandle({ refFieldName, targetEntityName, targetFieldName }) 
 // non-compilable field kind (crdt/ordered/store) are load-time errors. The
 // proxy delegates to fieldHandle so there is one handle definition; it adds
 // the scope-context `where` to the undeclared/non-value error messages.
-function makeFieldsProxy(fields, where, entityName) {
+function makeFieldsProxy(fields: Record<string, FieldDescriptor>, where: string, entityName?: string): unknown {
   return new Proxy({}, {
     get(_t, name) {
-      const descriptor = fields[name];
+      const descriptor = fields[name as string];
       if (descriptor === undefined) {
         throw new NonCompilableError(`no field '${String(name)}' on this entity`, { where });
       }
@@ -494,7 +539,7 @@ function makeFieldsProxy(fields, where, entityName) {
       // value handles, the struct's own .is throws). Other non-value kinds keep
       // the scope-context `where` on their non-compilable error.
       if (descriptor.kind !== 'value' && descriptor.kind !== 'struct') {
-        const fail = () => {
+        const fail = (): never => {
           throw new NonCompilableError(
             `field '${String(name)}' is a ${descriptor.kind} field and cannot be compared in scope`,
             { where },
@@ -502,7 +547,7 @@ function makeFieldsProxy(fields, where, entityName) {
         };
         return { is: fail, in: fail, isNull: fail, gte: fail, lte: fail };
       }
-      return fieldHandle(name, descriptor, entityName);
+      return fieldHandle(name as string, descriptor, entityName);
     },
   });
 }
@@ -512,15 +557,23 @@ function makeFieldsProxy(fields, where, entityName) {
 // The `registry` is the unified check registry (built by buildCheckRegistry) — it
 // provides both harvest AND run faces, and the scope compiler consults its harvest
 // faces exclusively.
-export function harvest(predicate, { fields, where, registry, entityName }) {
+export function harvest(
+  predicate: (ctx: { is: unknown; fields: unknown }) => unknown,
+  { fields, where, registry, entityName }: {
+    fields: Record<string, unknown>;
+    where: string;
+    registry: Record<string, unknown>;
+    entityName?: string;
+  },
+): AstNode {
   const is = makeIsProxy(registry, where);
-  const fieldsProxy = makeFieldsProxy(fields, where, entityName);
-  let ast;
+  const fieldsProxy = makeFieldsProxy(fields as Record<string, FieldDescriptor>, where, entityName);
+  let ast: unknown;
   try {
     ast = predicate({ is, fields: fieldsProxy });
   } catch (err) {
     if (err instanceof NonCompilableError) throw err;
-    throw new NonCompilableError(`scope predicate threw: ${err.message}`, { where });
+    throw new NonCompilableError(`scope predicate threw: ${(err as Error).message}`, { where });
   }
   if (!isNode(ast)) {
     throw new NonCompilableError('scope predicate returned a non-AST value', { where });
@@ -532,15 +585,29 @@ export function harvest(predicate, { fields, where, registry, entityName }) {
 // lowerToSql(ast, ctx) -> { sql, params }. ctx carries the base table alias and
 // a monotonic counter (via a mutable `next`) so composed fragments never collide
 // on param names. Param keys are `:p<n>_<logical>`.
-export function lowerToSql(ast, ctx = {}) {
+export interface LowerContext {
+  alias?: string;
+  state?: { n: number };
+  params?: Record<string, unknown>;
+  where?: string;
+}
+
+export interface NearestScope {
+  entity: string;
+  field: string;
+  query: unknown;
+  k: number;
+}
+
+export function lowerToSql(ast: AstNode, ctx: LowerContext = {}): { sql: string; params: Record<string, unknown>; nearest: NearestScope | null } {
   const alias = ctx.alias ?? 't0';
   const state = ctx.state ?? { n: 0 };
-  const params = ctx.params ?? {};
-  const col = (field) => `${alias}.${field}`;
-  const freshParam = (logical) => `p${state.n += 1}_${logical}`;
-  let nearestResult = null;
+  const params: Record<string, unknown> = ctx.params ?? {};
+  const col = (field: unknown) => `${alias}.${field}`;
+  const freshParam = (logical: unknown) => `p${state.n += 1}_${logical}`;
+  let nearestResult: NearestScope | null = null;
 
-  const lower = (node) => {
+  const lower = (node: AstNode): string => {
     switch (node.node) {
       case 'true': return '1 = 1';
       case 'false': return '1 = 0';
@@ -555,7 +622,7 @@ export function lowerToSql(ast, ctx = {}) {
         return `${col(node.field)} = :${key}`;
       }
       case 'in': {
-        const keys = node.values.map((value, i) => {
+        const keys = (node.values as unknown[]).map((value, i) => {
           const key = `p${state.n += 1}_${i}`;
           params[key] = value;
           return `:${key}`;
@@ -573,8 +640,8 @@ export function lowerToSql(ast, ctx = {}) {
         params[key] = node.value;
         return `${col(node.field)} <= :${key}`;
       }
-      case 'not': return `NOT (${lower(node.operand)})`;
-      case 'and': return `(${node.operands.map(lower).join(' AND ')})`;
+      case 'not': return `NOT (${lower(node.operand as AstNode)})`;
+      case 'and': return `(${(node.operands as AstNode[]).map(lower).join(' AND ')})`;
       // A child's inherited scope: the row is admitted iff a parent row exists
       // that the FK points at AND that satisfies the parent's own scope. The
       // parent scope is re-lowered under a fresh subquery alias, sharing this
@@ -582,7 +649,7 @@ export function lowerToSql(ast, ctx = {}) {
       // params object (and so bindReadScope fills it once for the whole tree).
       case 'join': {
         const parentAlias = `j${state.n += 1}`;
-        const inner = lower2(node.parentAst, {
+        const inner = lower2(node.parentAst as AstNode, {
           alias: parentAlias,
           state,
           params,
@@ -634,7 +701,7 @@ export function lowerToSql(ast, ctx = {}) {
             { where: ctx.where },
           );
         }
-        nearestResult = { entity: node.entity, field: node.field, query: node.query, k: node.k };
+        nearestResult = { entity: node.entity as string, field: node.field as string, query: node.query, k: node.k as number };
         return '1=1';
       }
       default:
@@ -649,15 +716,33 @@ export function lowerToSql(ast, ctx = {}) {
 // A thin alias so the `join` case can recurse into lowerToSql for the parent's
 // AST under a different alias while threading the same param state. Named so the
 // recursion reads as "lower this sub-AST" rather than a bare self-reference.
-function lower2(ast, ctx) {
+function lower2(ast: AstNode, ctx: LowerContext): string {
   return lowerToSql(ast, ctx).sql;
+}
+
+// The compiled read-scope template: the parameterized SQL fragment plus the
+// harvested AST (retained so a child entity's inherit directive can re-lower it
+// under a join alias — the AST is the durable artifact, the SQL one rendering).
+export interface ReadScopeTemplate {
+  sql: string;
+  params: Record<string, unknown>;
+  nearest: NearestScope | null;
+  ast: AstNode;
 }
 
 // Compile a scope predicate to its read-scope SQL template at entity-load, also
 // returning the harvested AST so a child entity can re-lower it under a join
 // alias (the inherit path). The AST is the durable artifact; the SQL is one
 // rendering of it.
-export function compileReadScope(predicate, { fields, where, registry, entityName }) {
+export function compileReadScope(
+  predicate: (ctx: { is: unknown; fields: unknown }) => unknown,
+  { fields, where, registry, entityName }: {
+    fields: Record<string, unknown>;
+    where: string;
+    registry: Record<string, unknown>;
+    entityName?: string;
+  },
+): ReadScopeTemplate {
   const ast = harvest(predicate, { fields, where, registry, entityName });
   return { ...lowerToSql(ast, { where }), ast };
 }
@@ -666,8 +751,11 @@ export function compileReadScope(predicate, { fields, where, registry, entityNam
 // template. The child has no scope of its own; its readability is a correlated
 // EXISTS over the parent's compiled scope AST, joined through the `via` FK. The
 // parent must carry its harvested scope AST (entity() stores it as `scopeAst`).
-export function compileInheritScope(directive, { where }) {
-  const parent = directive.inherit;
+export function compileInheritScope(
+  directive: { inherit: unknown; via?: unknown },
+  { where }: { where: string },
+): ReadScopeTemplate {
+  const parent = directive.inherit as { name: string; scopeAst?: AstNode };
   if (!parent.scopeAst) {
     throw new NonCompilableError(
       `inherit(${parent.name}, ...) requires the parent to have a compiled ` +
@@ -681,7 +769,7 @@ export function compileInheritScope(directive, { where }) {
     parentAst: parent.scopeAst,
     via: directive.via,
   });
-  return { ...lowerToSql(joinAst, { where }), ast: joinAst };
+  return { ...lowerToSql(joinAst as unknown as AstNode, { where }), ast: joinAst as unknown as AstNode };
 }
 
 // The request-time bridge: bind a principal into a compiled read-scope template.
@@ -693,17 +781,18 @@ export function compileInheritScope(directive, { where }) {
 // compiled scope serves every request concurrently.
 export { cosineSimilarity, nearest } from './vector.ts';
 
-export function bindReadScope(readScope, principal) {
+export function bindReadScope(readScope: ReadScopeTemplate | undefined, principal: unknown): { sql: string; params: Record<string, unknown> } | undefined {
   if (readScope === undefined) return undefined;
-  const params = {};
+  const params: Record<string, unknown> = {};
+  const record = principal as { id?: unknown; attributes?: Record<string, unknown> } | null | undefined;
   for (const [key, value] of Object.entries(readScope.params)) {
     if (key.endsWith(`_${PRINCIPAL_ID_PARAM}`)) {
-      params[key] = principal.id;            // the user principal's id
+      params[key] = record?.id;           // the user principal's id
     } else if (key.endsWith(`_${PRINCIPAL_ATTR_PARAM}`)) {
       // The link principal's token (absent for a non-link principal → NULL →
       // `col = NULL` is false in SQL → the linkHolder arm never admits a row:
       // fail-closed, no special case for "no token").
-      params[key] = principal.attributes?.token ?? null;
+      params[key] = record?.attributes?.token ?? null;
     } else {
       params[key] = value;
     }

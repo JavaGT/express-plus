@@ -1,4 +1,3 @@
-// @ts-nocheck
 // fs-blobs.mjs — the default byte-store plugin: blob bytes on node:fs.
 //
 // blob-store.mjs fuses three concerns — byte storage, metadata rows (the
@@ -79,25 +78,38 @@ import path from 'node:path';
 
 const ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 
-function safeId(id) {
+                                    
+                    
+ 
+
+                            
+                                                    
+                                      
+                                                                        
+                                                          
+                                                             
+                                                           
+ 
+
+function safeId(id         )       {
   if (typeof id !== 'string' || !ID_PATTERN.test(id)) {
     throw new Error('invalid blob id');
   }
 }
 
-export function fsBlobs({ root }) {
+export function fsBlobs({ root }                  )            {
   mkdirSync(root, { recursive: true });
 
-  function pathFor(id, { pending } = {}) {
+  function pathFor(id        , { pending }                    = {})         {
     return path.join(root, id + (pending ? '.pending' : ''));
   }
 
-  function writePending(id, bytes) {
+  function writePending(id        , bytes            )       {
     safeId(id);
     writeFileSync(pathFor(id, { pending: true }), bytes);
   }
 
-  function finalizePending(id) {
+  function finalizePending(id        )         {
     safeId(id);
     const pendingPath = pathFor(id, { pending: true });
     const finalPath = pathFor(id);
@@ -107,12 +119,12 @@ export function fsBlobs({ root }) {
       // Idempotent: no pending slot (already finalized / never uploaded) is a
       // no-op, not an error. Anything else surfaces — a permission or disk
       // failure must not be swallowed.
-      if (err.code !== 'ENOENT') throw err;
+      if ((err                         ).code !== 'ENOENT') throw err;
     }
     return finalPath;
   }
 
-  function resolveSlot(id) {
+  function resolveSlot(id        )         {
     const finalPath = pathFor(id);
     if (existsSync(finalPath)) return finalPath;
     const pendingPath = pathFor(id, { pending: true });
@@ -120,34 +132,34 @@ export function fsBlobs({ root }) {
     throw new Error('blob not found');
   }
 
-  function readRange(id, [start, end] = []) {
+  function readRange(id        , [start, end]                                 = [])         {
     safeId(id);
     const filePath = resolveSlot(id);
     const fileSize = statSync(filePath).size;
 
-    start = start ?? 0;
+    const startValue = start ?? 0;
     // Reject bogus bounds cleanly rather than handing a negative position to
     // readSync (which reads from the current offset instead of throwing) or a
     // negative / non-finite length to Buffer.alloc. The upper bound still
     // clamps to the file size, so `null`/`undefined` end (and open-ended → EOF
     // via Infinity) mean "to the end".
-    if (!Number.isFinite(start) || start < 0 || !Number.isInteger(start)) {
+    if (!Number.isFinite(startValue) || startValue < 0 || !Number.isInteger(startValue)) {
       throw new Error('invalid blob range: start');
     }
-    end = end == null ? fileSize : Math.min(end, fileSize);
-    if (!Number.isFinite(end) || end < 0 || !Number.isInteger(end)) {
+    const endValue = end == null ? fileSize : Math.min(end, fileSize);
+    if (!Number.isFinite(endValue) || endValue < 0 || !Number.isInteger(endValue)) {
       throw new Error('invalid blob range: end');
     }
-    if (end < start) {
+    if (endValue < startValue) {
       throw new Error('invalid blob range: end < start');
     }
 
-    const length = end - start;
+    const length = endValue - startValue;
     if (length === 0) return Buffer.alloc(0);
     const buffer = Buffer.alloc(length);
     const fd = openSync(filePath, 'r');
     try {
-      readSync(fd, buffer, 0, length, start);
+      readSync(fd, buffer, 0, length, startValue);
     } finally {
       // sync fds are raw OS descriptors Node will NOT GC — close deterministically.
       closeSync(fd);
@@ -155,24 +167,23 @@ export function fsBlobs({ root }) {
     return buffer;
   }
 
-  function remove(id, { pending } = {}) {
+  function remove(id        , { pending }                       = { pending: false })       {
     safeId(id);
     const filePath = pathFor(id, { pending });
     try {
       unlinkSync(filePath);
     } catch (err) {
       // Idempotent: a slot that is already gone is a no-op.
-      if (err.code !== 'ENOENT') throw err;
+      if ((err                         ).code !== 'ENOENT') throw err;
     }
   }
 
-  function exists(id, { pending } = {}) {
+  function exists(id        , { pending }                       = { pending: false })          {
     safeId(id);
     return existsSync(pathFor(id, { pending }));
   }
 
   return {
-    safeId,
     writePending,
     finalizePending,
     readRange,

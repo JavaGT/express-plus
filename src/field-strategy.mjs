@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The field-type persistence strategy table + the validate pipeline stage.
 //
 // SPEC §5.1, §7 (stage 1: validate), §7.2 ("the field-type plugin owns the
@@ -18,11 +17,36 @@
 import { randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 import { tryBetterAuthHash } from './hash-compat.mjs';
 
+// A field descriptor as the strategy table sees it: kind, value type, and the
+// option surface the validate/serialize seams read. Kept loose — the descriptor
+// is built by field.mjs and consumed by many layers.
+                                  
+                        
+                         
+                                                                      
+                                                                    
+                                          
+                                          
+                                          
+                                       
+                                           
+                                                                         
+                                                   
+                                       
+ 
+
+                               
+                        
+                                                             
+ 
+
 // A typed failure for the validate stage. Stage 1 throws this and NOTHING
 // downstream runs (no apply, no persist, no emit) — a bad payload never proceeds
 // (SPEC §7 stage 1, fail closed). The message names the field path + reason.
 export class ValidationError extends Error {
-  constructor(message, failureDetails) {
+  failure         ;
+
+  constructor(message        , failureDetails          ) {
     super(message);
     this.name = 'ValidationError';
     // Optional structured failure details (JSON-safe record) attached to the
@@ -35,17 +59,17 @@ export class ValidationError extends Error {
 // Structural validators per kind. These check the SHAPE the kind can store,
 // before any declared `validate` runs. A declared validate refines; the
 // structural check is the floor.
-function isTextValue(v) {
+function isTextValue(v         )              {
   return typeof v === 'string';
 }
 
-export function isPlainObject(value) {
+export function isPlainObject(value         )                                   {
   if (value === null || typeof value !== 'object') return false;
   const prototype = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }
 
-function isJsonValue(value, seen = new WeakSet()) {
+function isJsonValue(value         , seen = new WeakSet        ())          {
   if (value === null) return true;
   if (typeof value === 'string' || typeof value === 'boolean') return true;
   if (typeof value === 'number') return Number.isFinite(value);
@@ -62,13 +86,21 @@ function isJsonValue(value, seen = new WeakSet()) {
   return false;
 }
 
+                                
+                                             
+                    
+                                               
+ 
+
 // store (map) membership diff over { member: role } materializations. A member
 // add → added; a member gone → removed; a same-member role change → changed
 // (NOT added — only a NEW member fires native added, DECISIONLOG #57).
-function storeMapDiff(previous, next) {
-  const prev = previous && typeof previous === 'object' ? previous : {};
-  const nxt = next && typeof next === 'object' ? next : {};
-  const added = [], removed = [], changed = [];
+function storeMapDiff(previous         , next         )                              {
+  const prev = (previous && typeof previous === 'object' ? previous : {})                           ;
+  const nxt = (next && typeof next === 'object' ? next : {})                           ;
+  const added                                      = [];
+  const removed           = [];
+  const changed                                      = [];
   for (const [member, role] of Object.entries(nxt)) {
     if (!(member in prev)) added.push({ member, role });
     else if (!Object.is(prev[member], role)) changed.push({ member, role });
@@ -82,11 +114,11 @@ function storeMapDiff(previous, next) {
 
 // struct per-sub-cell diff. Only changed declared sub-cells appear in `cells`
 // as { set: value }; an unchanged sub-cell is absent. A cleared cell → { set: null }.
-function structDiff(previous, next, descriptor) {
-  const prev = previous && typeof previous === 'object' ? previous : {};
-  const nxt = next && typeof next === 'object' ? next : {};
-  const declared = descriptor?.cells ?? {};
-  const cells = {};
+function structDiff(previous         , next         , descriptor                  )                                                     {
+  const prev = (previous && typeof previous === 'object' ? previous : {})                           ;
+  const nxt = (next && typeof next === 'object' ? next : {})                           ;
+  const declared = (descriptor?.cells ?? {})                                     ;
+  const cells                                   = {};
   for (const name of Object.keys(nxt)) {
     if (Object.prototype.hasOwnProperty.call(declared, name) && !Object.is(prev[name], nxt[name])) {
       cells[name] = { set: nxt[name] };
@@ -101,6 +133,24 @@ function structDiff(previous, next, descriptor) {
   return { cells };
 }
 
+// The named-whole algebraic laws a field kind's mutations obey. Consulted by
+// undo (invertible), log compaction (coalescible), and derivation consumers.
+                               
+                               
+                                
+                               
+                                     
+ 
+
+                                
+                              
+                                                                                     
+                                                                
+                                                                                                     
+                                                                                 
+                                                                                   
+ 
+
 // The four named-whole strategies. value is fully implemented (whole-value diff);
 // The FIELD-TYPE CONTRACTS table. A field descriptor carries only `kind`; the
 // strategy is resolved at call time from this frozen table. This is a CLOSED set
@@ -109,13 +159,13 @@ function structDiff(previous, next, descriptor) {
 // table, the field constructors in field.mjs, and the resolveStrategy error
 // message. The deletion test (AGENTS.md) confirms that kind absorbs strategy
 // (concentrates), rather than relocating it onto each descriptor.
-const STRATEGIES = Object.freeze({
+const STRATEGIES                                          = Object.freeze({
   // `value` — a single stored value with whole-value diff. apply replaces;
   // diff is a whole-value set, null when unchanged.
   value: Object.freeze({
     laws: Object.freeze({ invertible: true, coalescible: true, idempotent: false, commutativeMerge: false }),
-    validate(value, descriptor) {
-      switch (descriptor.type) {
+    validate(value         , descriptor                  ) {
+      switch (descriptor?.type) {
         case 'text':
           if (!isTextValue(value)) return 'expected a text value';
           return true;
@@ -135,7 +185,7 @@ const STRATEGIES = Object.freeze({
           return true;
         case 'vector': {
           // Accept a JSON string (from stored cell) or a number[] (from client).
-          let vec = value;
+          let vec          = value;
           if (typeof value === 'string') {
             try { vec = JSON.parse(value); } catch { return 'expected a JSON-encoded vector array'; }
           }
@@ -143,8 +193,8 @@ const STRATEGIES = Object.freeze({
           if (!vec.every((v) => typeof v === 'number' && Number.isFinite(v))) {
             return 'expected a vector of finite numbers';
           }
-          if (vec.length !== descriptor.dimensions) {
-            return `expected vector of length ${descriptor.dimensions}, got ${vec.length}`;
+          if (vec.length !== descriptor?.dimensions) {
+            return `expected vector of length ${descriptor?.dimensions}, got ${vec.length}`;
           }
           return true;
         }
@@ -152,10 +202,10 @@ const STRATEGIES = Object.freeze({
           return true;
       }
     },
-    apply(_previous, next) {
+    apply(_previous         , next         ) {
       return next;
     },
-    diff(previous, next) {
+    diff(previous         , next         ) {
       if (Object.is(previous, next)) return null;
       return { set: next };
     },
@@ -165,9 +215,9 @@ const STRATEGIES = Object.freeze({
     // pass through. null/undefined are left untouched (a null cell is null). This
     // is the ONE place "how a value-kind field becomes a stored cell" is decided —
     // used by both the scope-literal baker and the write path (singular system).
-    serialize(value, descriptor) {
+    serialize(value         , descriptor                  ) {
       if (value === null || value === undefined) return value;
-      switch (descriptor.type) {
+      switch (descriptor?.type) {
         case 'boolean':
           return value ? 1 : 0;
         case 'date':
@@ -182,9 +232,9 @@ const STRATEGIES = Object.freeze({
           return value;
       }
     },
-    deserialize(value, descriptor) {
+    deserialize(value         , descriptor                  ) {
       if (value === null || value === undefined) return value;
-      switch (descriptor.type) {
+      switch (descriptor?.type) {
         case 'boolean':
           return value ? true : false;
         case 'json':
@@ -206,23 +256,23 @@ const STRATEGIES = Object.freeze({
   // plaintext. verify is exposed on the hydrated row, not here.
   hash: Object.freeze({
     laws: Object.freeze({ invertible: false, coalescible: false, idempotent: false, commutativeMerge: false }),
-    validate(value) {
+    validate(value         ) {
       if (!isTextValue(value)) return 'expected a password string';
       return true;
     },
-    apply(_previous, next) {
+    apply(_previous         , next         ) {
       return next;
     },
-    diff(previous, next) {
+    diff(previous         , next         ) {
       if (Object.is(previous, next)) return null;
       return { set: next };
     },
     // serialize digests the plaintext: random 16-byte salt + scrypt(64) →
     // `saltHex:digestHex`. null/undefined pass through (a null cell is null).
-    serialize(value) {
+    serialize(value         ) {
       if (value === null || value === undefined) return value;
       const salt = randomBytes(16);
-      const digest = scryptSync(value, salt, 64);
+      const digest = scryptSync(value          , salt, 64);
       return `${salt.toString('hex')}:${digest.toString('hex')}`;
     },
   }),
@@ -233,7 +283,7 @@ const STRATEGIES = Object.freeze({
     // Text operations need authored compensating operations; generic history
     // cannot derive an inverse from a checkpoint or a string preimage.
     laws: Object.freeze({ invertible: false, coalescible: true, idempotent: false, commutativeMerge: true }),
-    validate(value, descriptor) {
+    validate(value         , descriptor                  ) {
       if (descriptor?.type === 'raster') {
         if (value === null || value === undefined) return true;
         if (Buffer.isBuffer(value)) return true;
@@ -247,10 +297,10 @@ const STRATEGIES = Object.freeze({
       }
       return 'text.crdt accepts native operations only';
     },
-    apply(_previous, next) {
+    apply(_previous         , next         ) {
       return next;
     },
-    diff(previous, next, descriptor) {
+    diff(previous         , next         , descriptor                  ) {
       if (descriptor?.type === 'raster' || descriptor?.type === 'polyline') {
         return Object.is(previous, next) ? null : { set: next };
       }
@@ -263,14 +313,14 @@ const STRATEGIES = Object.freeze({
   // only a NEW member fires native added (idempotent re-share, DECISIONLOG #57).
   store: Object.freeze({
     laws: Object.freeze({ invertible: true, coalescible: true, idempotent: true, commutativeMerge: false }),
-    validate(value) {
+    validate(value         ) {
       if (value === null || typeof value !== 'object') return 'expected a store value';
       return true;
     },
-    apply(_previous, next) {
+    apply(_previous         , next         ) {
       return next;
     },
-    diff(previous, next) {
+    diff(previous         , next         ) {
       return storeMapDiff(previous, next);
     },
   }),
@@ -294,11 +344,11 @@ const STRATEGIES = Object.freeze({
   // strategy's (absent) `.diff` (DECISIONLOG #74 — VESTIGIAL: deleted orderedListDiff).
   ordered: Object.freeze({
     laws: Object.freeze({ invertible: true, coalescible: false, idempotent: false, commutativeMerge: false }),
-    validate(value) {
+    validate(value         ) {
       if (!Array.isArray(value)) return 'expected an ordered list';
       return true;
     },
-    apply(_previous, next) {
+    apply(_previous         , next         ) {
       return next;
     },
   }),
@@ -311,18 +361,18 @@ const STRATEGIES = Object.freeze({
     validate() {
       return true; // the compute result is trusted, not client-provided
     },
-    apply(_previous, next) {
+    apply(_previous         , next         ) {
       return next;
     },
-    diff(previous, next) {
+    diff(previous         , next         ) {
       if (Object.is(previous, next)) return null;
       return { set: next };
     },
-    serialize(value) {
+    serialize(value         ) {
       if (value === null || value === undefined) return value;
       return JSON.stringify(value);
     },
-    deserialize(value) {
+    deserialize(value         ) {
       if (value === null || value === undefined) return value;
       if (typeof value !== 'string') return value;
       try { return JSON.parse(value); } catch { return value; }
@@ -335,18 +385,18 @@ const STRATEGIES = Object.freeze({
     validate() {
       return true;
     },
-    apply(_previous, next) {
+    apply(_previous         , next         ) {
       return next;
     },
-    diff(previous, next) {
+    diff(previous         , next         ) {
       if (Object.is(previous, next)) return null;
       return { set: next };
     },
-    serialize(value) {
+    serialize(value         ) {
       if (value === null || value === undefined) return value;
       return JSON.stringify(value);
     },
-    deserialize(value) {
+    deserialize(value         ) {
       if (value === null || value === undefined) return value;
       if (typeof value !== 'string') return value;
       try { return JSON.parse(value); } catch { return value; }
@@ -361,23 +411,25 @@ const STRATEGIES = Object.freeze({
   // flattenStruct; serialize/apply of the WHOLE struct replace it.
   struct: Object.freeze({
     laws: Object.freeze({ invertible: true, coalescible: true, idempotent: false, commutativeMerge: false }),
-    validate(value, descriptor) {
+    validate(value         , descriptor                  ) {
       if (value === null || value === undefined) return true;
       if (typeof value !== 'object') return 'expected a structured value';
+      const valueRecord = value                           ;
+      const cells = descriptor?.cells ?? {};
       // every supplied sub-key must be a declared, stored sub-cell (fail closed)
-      for (const key of Object.keys(value)) {
-        if (!Object.prototype.hasOwnProperty.call(descriptor.cells, key)) {
+      for (const key of Object.keys(valueRecord)) {
+        if (!Object.prototype.hasOwnProperty.call(cells, key)) {
           return `'${key}' is not a stored sub-cell of this structured field`;
         }
-        const structural = STRATEGIES[descriptor.cells[key].kind].validate(value[key], descriptor.cells[key]);
+        const structural = STRATEGIES[cells[key].kind].validate(valueRecord[key], cells[key]);
         if (structural !== true) return `${key}: ${structural}`;
       }
       return true;
     },
-    apply(_previous, next) {
+    apply(_previous         , next         ) {
       return next;
     },
-    diff(previous, next, descriptor) {
+    diff(previous         , next         , descriptor                  ) {
       return structDiff(previous, next, descriptor);
     },
   }),
@@ -390,16 +442,17 @@ const STRATEGIES = Object.freeze({
   // handler — this strategy validates shape only.
   state: Object.freeze({
     laws: Object.freeze({ invertible: true, coalescible: true, idempotent: true, commutativeMerge: false }),
-    validate(value, descriptor) {
-      if (!descriptor.values.includes(value)) {
-        return `expected one of [${descriptor.values.join(', ')}]`;
+    validate(value         , descriptor                  ) {
+      const values = descriptor?.values ?? [];
+      if (!values.includes(value)) {
+        return `expected one of [${values.join(', ')}]`;
       }
       return true;
     },
-    apply(_previous, next) {
+    apply(_previous         , next         ) {
       return next;
     },
-    diff(previous, next) {
+    diff(previous         , next         ) {
       if (previous === next) return null;
       return { from: previous, to: next };
     },
@@ -412,7 +465,7 @@ const STRATEGIES = Object.freeze({
 // declared field/cell name containing it, so the generated name never collides
 // with a hand-declared field. This ONE function is the sole authority on the
 // name — the scope handle, the write path, and hydration all derive through it.
-export function structCellColumn(fieldName, cellName) {
+export function structCellColumn(fieldName        , cellName        ) {
   return `${fieldName}__${cellName}`;
 }
 
@@ -420,12 +473,13 @@ export function structCellColumn(fieldName, cellName) {
 // write path so a single declared struct field becomes several flat columns.
 // Only declared sub-cells are emitted (validateMutation already rejected any
 // undeclared sub-key); each cell is serialized by its own value strategy.
-export function flattenStruct(fieldName, descriptor, value) {
-  const cells = {};
+export function flattenStruct(fieldName        , descriptor                 , value         )                          {
+  const cells                          = {};
   if (value === null || value === undefined) return cells;
-  for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells)) {
-    if (!Object.prototype.hasOwnProperty.call(value, cellName)) continue;
-    cells[structCellColumn(fieldName, cellName)] = serializeField(cellDescriptor, value[cellName]);
+  const valueRecord = value                           ;
+  for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells ?? {})) {
+    if (!Object.prototype.hasOwnProperty.call(valueRecord, cellName)) continue;
+    cells[structCellColumn(fieldName, cellName)] = serializeField(cellDescriptor, valueRecord[cellName]);
   }
   return cells;
 }
@@ -433,7 +487,7 @@ export function flattenStruct(fieldName, descriptor, value) {
 // Resolve a field's strategy by its kind. An unknown kind fails closed — there is
 // no silent default strategy (the kind names the contract; an unknown kind is a
 // declaration error).
-export function resolveStrategy(kind) {
+export function resolveStrategy(kind        )                {
   if (kind === 'ephemeral') {
     throw new Error(
       `ephemeral fields do not persist — no persistence strategy ` +
@@ -454,7 +508,7 @@ export function resolveStrategy(kind) {
 // invertible before dispatching an inverse), log compaction (coalescible gates
 // coalescing), and future derivation consumers. Laws are frozen, per-kind, and
 // never per-instance — the kind owns its algebra, not individual descriptors.
-export function lawsOf(kind) {
+export function lawsOf(kind        )               {
   return resolveStrategy(kind).laws;
 }
 
@@ -465,7 +519,7 @@ export function lawsOf(kind) {
 // passes the value through. This is the seam the scope compiler calls to bake a
 // literal (fields.x.is(v)) into a bindable param, and the write path will call to
 // store a cell — one mapping, two callers (singular system).
-export function serializeField(descriptor, value) {
+export function serializeField(descriptor                 , value         )          {
   const strategy = resolveStrategy(descriptor.kind);
   if (typeof strategy.serialize !== 'function') return value;
   return strategy.serialize(value, descriptor);
@@ -474,7 +528,7 @@ export function serializeField(descriptor, value) {
 // Deserialize a stored cell back into the public row value owned by its field
 // strategy. Most stored cells are already public values; json is the first
 // value-kind type that needs a read-side mapping from TEXT back to object/array.
-export function deserializeField(descriptor, value) {
+export function deserializeField(descriptor                 , value         )          {
   const strategy = resolveStrategy(descriptor.kind);
   if (typeof strategy.deserialize !== 'function') return value;
   return strategy.deserialize(value, descriptor);
@@ -485,7 +539,7 @@ export function deserializeField(descriptor, value) {
 // stored salt and compares in constant time. Fail closed: a missing/malformed
 // stored cell, or a non-string candidate, is `false` (never a thrown 500 on the
 // login path, never a permissive default).
-export function verifyHash(candidate, stored) {
+export function verifyHash(candidate         , stored         )          {
   if (typeof candidate !== 'string' || typeof stored !== 'string') return false;
   const sep = stored.indexOf(':');
   if (sep <= 0) return false;
@@ -516,7 +570,7 @@ export function verifyHash(candidate, stored) {
 //    is the write path's job (Phase 2), where all sources are merged.
 //  - `default` is materialization, not validation — it belongs to the write/apply
 //    path (Phase 2), never to this accept/reject seam.
-function validateFieldValue(entityName, key, descriptor, value) {
+function validateFieldValue(entityName        , key        , descriptor                 , value         )          {
   if (descriptor.type === 'text' && typeof descriptor.canonicalize === 'function' && value !== null && value !== undefined) {
     value = descriptor.canonicalize(value);
   }
@@ -542,15 +596,15 @@ function validateFieldValue(entityName, key, descriptor, value) {
   return value;
 }
 
-export function validateMaterializedField(entityRecord, key, value) {
+export function validateMaterializedField(entityRecord              , key        , value         )          {
   const descriptor = entityRecord.fields[key];
   if (!descriptor) throw new ValidationError(`${entityRecord.name}.${key} is not a declared field.`);
   return validateFieldValue(entityRecord.name, key, descriptor, value);
 }
 
-export function validateMutation(entityRecord, payload) {
+export function validateMutation(entityRecord              , payload                         )                          {
   const { name, fields } = entityRecord;
-  const transformed = { ...payload };
+  const transformed                          = { ...payload };
   for (const [key, value] of Object.entries(payload)) {
     const descriptor = fields[key];
     if (!descriptor) {

@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Pure annotated-text action builder. Zero imports — browser-safe. This is the
 // single source of truth for the operation-path action grammar shared by the
 // server package entry and the browser SDK. The browser is served THIS file at
@@ -7,67 +6,118 @@
 
 const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 
-function opaqueToken(value) {
+                    
+                        
+                 
+                             
+ 
+
+                
+                                       
+                                                              
+
+                      
+             
+                 
+                                  
+ 
+
+                            
+             
+                 
+                
+                     
+ 
+
+                        
+                                                       
+                                                         
+                                                                        
+                                                                 
+                                                                                  
+                                                                                      
+                                                                              
+                                                       
+                                                                    
+                                                                                        
+                                                                                  
+                                                                                                     
+
+                                      
+             
+             
+                              
+                          
+ 
+
+                                      
+                                     
+ 
+
+function opaqueToken(value         )                  {
   return typeof value === 'string' && OPAQUE_TOKEN.test(value);
 }
 
-function deepFreeze(value) {
+function deepFreeze   (value   )    {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
     for (const item of value) deepFreeze(item);
-    return Object.freeze(value);
+    return Object.freeze(value)     ;
   }
   const proto = Object.getPrototypeOf(value);
   if (proto !== null && proto !== Object.prototype) return value;
-  for (const v of Object.values(value)) deepFreeze(v);
-  return Object.freeze(value);
+  for (const v of Object.values(value                           )) deepFreeze(v);
+  return Object.freeze(value)     ;
 }
 
-function exactKeys(value, keys) {
+function exactKeys(value                         , keys                   )          {
   return Reflect.ownKeys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key));
 }
 
-function position(value, label) {
+function position(value         , label        )           {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
-      !exactKeys(value, ['positionToken', 'offset', 'affinity']) || !opaqueToken(value.positionToken) ||
-      !Number.isSafeInteger(value.offset) || value.offset < 0 ||
-      (value.affinity !== 'left' && value.affinity !== 'right')) {
+      !exactKeys(value                           , ['positionToken', 'offset', 'affinity']) || !opaqueToken((value                               ).positionToken) ||
+      !Number.isSafeInteger((value                        ).offset) || (value                      ).offset < 0 ||
+      ((value                          ).affinity !== 'left' && (value                          ).affinity !== 'right')) {
     throw new Error(`annotatedTextAction: ${label} must be { positionToken, offset, affinity }`);
   }
-  return { positionToken: value.positionToken, offset: value.offset, affinity: value.affinity };
+  return { positionToken: (value                             ).positionToken, offset: (value                      ).offset, affinity: (value                                  ).affinity };
 }
 
-function selection(value) {
+function selection(value         )            {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('annotatedTextAction: selection must be an object');
   }
   const keys = Object.keys(value);
-  if (value.kind === 'one' && keys.length === 2 && opaqueToken(value.groupToken)) {
-    return { kind: 'one', groupToken: value.groupToken };
+  const kind = (value                      ).kind;
+  const groupToken = (value                            ).groupToken;
+  if (kind === 'one' && keys.length === 2 && opaqueToken(groupToken)) {
+    return { kind: 'one', groupToken };
   }
-  if ((value.kind === 'consecutive' || value.kind === 'listed') && keys.length === 2 &&
-      Array.isArray(value.groupTokens) && value.groupTokens.length > 0 &&
-      value.groupTokens.every(opaqueToken) &&
-      new Set(value.groupTokens).size === value.groupTokens.length) {
-    return { kind: value.kind, groupTokens: [...value.groupTokens] };
+  const groupTokens = (value                             ).groupTokens;
+  if ((kind === 'consecutive' || kind === 'listed') && keys.length === 2 &&
+      Array.isArray(groupTokens) && groupTokens.length > 0 &&
+      groupTokens.every(opaqueToken) &&
+      new Set(groupTokens).size === groupTokens.length) {
+    return { kind, groupTokens: [...groupTokens] };
   }
   throw new Error('annotatedTextAction: selection must be one, consecutive, or listed with exact keys');
 }
 
-function annotation(value) {
+function annotation(value         )             {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 3 ||
-      typeof value.id !== 'string' || value.id.length === 0 ||
-      typeof value.family !== 'string' || value.family.length === 0 ||
-      !value.fields || typeof value.fields !== 'object' || Array.isArray(value.fields)) {
+      typeof (value                    ).id !== 'string' || (value                  ).id.length === 0 ||
+      typeof (value                        ).family !== 'string' || (value                      ).family.length === 0 ||
+      !(value                        ).fields || typeof (value                        ).fields !== 'object' || Array.isArray((value                        ).fields)) {
     throw new Error('annotatedTextAction: annotation must be { id, family, fields }');
   }
-  return { id: value.id, family: value.family, fields: value.fields };
+  return { id: (value                  ).id, family: (value                      ).family, fields: (value                                       ).fields };
 }
 
 // A kind that needs a private temporary block. Uses the command's valid opaque
 // token when present; otherwise mints one via options.mintTemporaryBlock (the
 // server's Node-only crypto), or fails closed.
-function temporaryBlock(command, options) {
+function temporaryBlock(command                         , options                            )         {
   if (opaqueToken(command.temporaryBlock)) return command.temporaryBlock;
   if (typeof options.mintTemporaryBlock === 'function') {
     const minted = options.mintTemporaryBlock();
@@ -77,7 +127,12 @@ function temporaryBlock(command, options) {
   throw new Error('annotatedTextAction: this kind requires a private temporary block');
 }
 
-export function annotatedTextAction(entity, field, command, options = {}) {
+export function annotatedTextAction(
+  entity                                                    ,
+  field                       ,
+  command                     ,
+  options                             = {},
+)                                                        {
   if (!entity || typeof entity !== 'object' || Array.isArray(entity)) {
     throw new Error('annotatedTextAction: entity must be a non-null object');
   }
@@ -88,7 +143,7 @@ export function annotatedTextAction(entity, field, command, options = {}) {
     throw new Error('annotatedTextAction: field must be an annotatedText field handle');
   }
   const fieldName = field.fieldName;
-  if (entity.fields?.[fieldName]?.kind !== 'annotatedText') {
+  if ((entity.fields?.[fieldName]                                  )?.kind !== 'annotatedText') {
     throw new Error(`annotatedTextAction: '${entity.name}.${fieldName}' is not an annotatedText field`);
   }
 
@@ -106,7 +161,7 @@ export function annotatedTextAction(entity, field, command, options = {}) {
     throw new Error('annotatedTextAction: command requires an authoring stream binding');
   }
 
-  let edit;
+  let edit                   ;
   switch (command.kind) {
     case 'text.insert':
       if (typeof command.text !== 'string' || command.text.length === 0) throw new Error('annotatedTextAction: inserted text must be non-empty');
@@ -165,7 +220,7 @@ export function annotatedTextAction(entity, field, command, options = {}) {
       throw new Error(`annotatedTextAction: unsupported command kind '${String(command.kind)}'`);
   }
 
-  const payload = deepFreeze({
+  const payload = deepFreeze                            ({
     version: 9,
     id: command.id,
     authoring: { ...command.authoring },

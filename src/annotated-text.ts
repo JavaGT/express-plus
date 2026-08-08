@@ -1,27 +1,62 @@
-// @ts-nocheck
 // T1 owns the stable annotated-text operation grammar. T2 owns reduction.
 
 const ACTOR = /^[0-9a-f]{32}$/;
-const SAFE_POSITIVE = (value) => Number.isSafeInteger(value) && value > 0;
+const SAFE_POSITIVE = (value: unknown): boolean => Number.isSafeInteger(value) && (value as number) > 0;
 const HIGH_SURROGATE = /^[\uD800-\uDBFF]$/;
 const LOW_SURROGATE = /^[\uDC00-\uDFFF]$/;
 
-function fail(message) {
+export type OpId = readonly [actor: string, counter: number];
+export type Frontier = readonly OpId[];
+export type Anchor = readonly ['root'] | readonly ['element', readonly [op: OpId, ordinal: number]];
+export type StructuralPoint = readonly ['point', Anchor, 'left' | 'right'];
+export type DeleteSpan = readonly [op: OpId, first: number, count: number];
+export type TextOpBody = readonly ['insert', Anchor, string] | readonly ['delete', readonly DeleteSpan[]];
+export type TextOp = readonly ['workbench.text', 1, OpId, number, Frontier, TextOpBody];
+
+export interface TextElement {
+  op: OpId;
+  ordinal: number;
+  scalar: string;
+  parent: string;
+  lamport: number;
+  deletedBy: string[];
+}
+
+export interface TextRegistryEntry {
+  digest: string;
+  op: TextOp;
+}
+
+export interface TextState {
+  version: 1;
+  frontier: Frontier;
+  elements: Record<string, TextElement>;
+  operations: Record<string, TextRegistryEntry>;
+  pending: Record<string, TextRegistryEntry>;
+  maxPending: number;
+  rebootstrapRequired: boolean;
+}
+
+interface TextStateOptions {
+  maxPending?: number;
+}
+
+function fail(message: string): never {
   throw new Error(`invalid annotated-text value: ${message}`);
 }
 
-function assertClosedArray(value, length, name) {
+function assertClosedArray(value: unknown, length: number, name: string) {
   if (!Array.isArray(value) || value.length !== length) fail(`${name} must be an array of length ${length}`);
   for (const key of Object.keys(value)) {
     if (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= length) fail(`${name} has an extra property`);
   }
 }
 
-function assertActor(actor) {
+function assertActor(actor: unknown) {
   if (typeof actor !== 'string' || !ACTOR.test(actor)) fail('actor must be 32 lowercase hexadecimal characters');
 }
 
-export function assertWellFormedText(text) {
+export function assertWellFormedText(text: string): string {
   if (typeof text !== 'string') fail('text must be a string');
   for (let index = 0; index < text.length; index += 1) {
     const unit = text[index];
@@ -35,12 +70,12 @@ export function assertWellFormedText(text) {
   return text;
 }
 
-export function scalarCount(text) {
+export function scalarCount(text: string): number {
   assertWellFormedText(text);
   return [...text].length;
 }
 
-export function assertUtf16Offset(text, offset) {
+export function assertUtf16Offset(text: string, offset: number): number {
   assertWellFormedText(text);
   if (!Number.isSafeInteger(offset) || offset < 0 || offset > text.length) fail('offset is outside text bounds');
   if (offset > 0 && offset < text.length && HIGH_SURROGATE.test(text[offset - 1]) && LOW_SURROGATE.test(text[offset])) {
@@ -49,55 +84,55 @@ export function assertUtf16Offset(text, offset) {
   return offset;
 }
 
-export function assertUtf16Range(text, start, end) {
+export function assertUtf16Range(text: string, start: number, end: number): [number, number] {
   assertUtf16Offset(text, start);
   assertUtf16Offset(text, end);
   if (start > end) fail('range is reversed');
   return [start, end];
 }
 
-export function assertOpId(value) {
+export function assertOpId(value: unknown): OpId {
   assertClosedArray(value, 2, 'operation ID');
-  const [actor, counter] = value;
+  const [actor, counter] = value as OpId;
   assertActor(actor);
   if (!SAFE_POSITIVE(counter)) fail('operation counter must be a positive safe integer');
   return Object.freeze([actor, counter]);
 }
 
-export function compareOpId(left, right) {
+export function compareOpId(left: OpId, right: OpId): number {
   const [leftActor, leftCounter] = assertOpId(left);
   const [rightActor, rightCounter] = assertOpId(right);
   return leftActor === rightActor ? leftCounter - rightCounter : leftActor < rightActor ? -1 : 1;
 }
 
-export function assertFrontier(value) {
+export function assertFrontier(value: unknown): Frontier {
   if (!Array.isArray(value)) fail('frontier must be an array');
   for (const key of Object.keys(value)) {
     if (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= value.length) fail('frontier has an extra property');
   }
-  let previousActor = null;
+  let previousActor: string | null = null;
   for (const entry of value) {
     const [actor, counter] = assertOpId(entry);
     if (previousActor !== null && previousActor >= actor) fail('frontier actors must be sorted and unique');
     previousActor = actor;
     if (counter < 1) fail('frontier counters cannot be zero');
   }
-  return Object.freeze(value.map((entry) => Object.freeze([...entry])));
+  return Object.freeze(value.map((entry) => Object.freeze([...entry] as unknown as OpId))) as Frontier;
 }
 
-export function frontierCounter(frontier, actor) {
+export function frontierCounter(frontier: Frontier, actor: string): number {
   assertFrontier(frontier);
   assertActor(actor);
   return frontier.find(([candidate]) => candidate === actor)?.[1] ?? 0;
 }
 
-export function frontierDominates(left, right) {
+export function frontierDominates(left: Frontier, right: Frontier): boolean {
   assertFrontier(left);
   assertFrontier(right);
   return right.every(([actor, counter]) => frontierCounter(left, actor) >= counter);
 }
 
-export function assertAnchor(value) {
+export function assertAnchor(value: unknown): Anchor {
   if (!Array.isArray(value)) fail('anchor must be an array');
   if (value.length === 1 && value[0] === 'root') {
     assertClosedArray(value, 1, 'root anchor');
@@ -112,12 +147,12 @@ export function assertAnchor(value) {
   if (!Number.isSafeInteger(ordinal) || ordinal < 0) fail('element ordinal must be a non-negative safe integer');
   // The operation grammar cannot know the referenced run length. T2 admission
   // verifies this names an observed scalar, never the run-end gap.
-  return Object.freeze(['element', Object.freeze([assertOpId(op), ordinal])]);
+  return Object.freeze(['element', Object.freeze([assertOpId(op), ordinal] as readonly [OpId, number])]);
 }
 
-function assertDeleteSpans(value, deps) {
+function assertDeleteSpans(value: unknown, deps: Frontier): readonly DeleteSpan[] {
   if (!Array.isArray(value) || value.length === 0) fail('delete spans must be a non-empty array');
-  let previous = null;
+  let previous: { op: OpId; end: number } | null = null;
   return Object.freeze(value.map((span) => {
     assertClosedArray(span, 3, 'delete span');
     const [op, first, count] = span;
@@ -129,18 +164,18 @@ function assertDeleteSpans(value, deps) {
       if (compare > 0 || (compare === 0 && previous.end >= first)) fail('delete spans must be sorted, disjoint, and minimally merged');
     }
     previous = { op: canonicalOp, end: first + count - 1 };
-    return Object.freeze([canonicalOp, first, count]);
+    return Object.freeze([canonicalOp, first, count]) as DeleteSpan;
   }));
 }
 
-export function compareInsertOrder(left, right) {
+export function compareInsertOrder(left: TextOp, right: TextOp): number {
   const [, , leftOp, leftLamport] = assertTextOp(left);
   const [, , rightOp, rightLamport] = assertTextOp(right);
   if (leftLamport !== rightLamport) return rightLamport - leftLamport;
   return -compareOpId(leftOp, rightOp);
 }
 
-export function assertTextOp(value) {
+export function assertTextOp(value: unknown): TextOp {
   if (!Array.isArray(value) || value.length !== 6 || value[0] !== 'workbench.text' || value[1] !== 1) {
     fail('operation must use the workbench.text v1 array grammar');
   }
@@ -152,7 +187,7 @@ export function assertTextOp(value) {
   if (frontierCounter(deps, op[0]) !== op[1] - 1) fail('operation dependencies must include the previous local counter');
   const body = value[5];
   if (!Array.isArray(body) || body.length < 2) fail('operation body is invalid');
-  let canonicalBody;
+  let canonicalBody: TextOpBody;
   if (body[0] === 'insert' && body.length === 3) {
     assertClosedArray(body, 3, 'insert body');
     const anchor = assertAnchor(body[1]);
@@ -171,13 +206,13 @@ export function assertTextOp(value) {
   return Object.freeze(['workbench.text', 1, op, lamport, deps, canonicalBody]);
 }
 
-export function canonicalTextOp(value) {
+export function canonicalTextOp(value: unknown): TextOp {
   const canonical = assertTextOp(value);
   if (JSON.stringify(value) !== JSON.stringify(canonical)) fail('operation is not in canonical form');
   return canonical;
 }
 
-export function assertStructuralPoint(value) {
+export function assertStructuralPoint(value: unknown): StructuralPoint {
   if (!Array.isArray(value) || value.length !== 3 || value[0] !== 'point') fail('structural point is invalid');
   assertClosedArray(value, 3, 'structural point');
   const anchor = assertAnchor(value[1]);
@@ -188,27 +223,27 @@ export function assertStructuralPoint(value) {
 const ROOT_ID = 'root';
 const DEFAULT_MAX_PENDING = 1_000;
 
-function opKey(op) {
+function opKey(op: OpId | TextOp): string {
   return `${op[0]}:${op[1]}`;
 }
 
-function elementKey(op, ordinal) {
+function elementKey(op: OpId, ordinal: number): string {
   return `${opKey(op)}:${ordinal}`;
 }
 
-function anchorKey(anchor) {
+function anchorKey(anchor: Anchor): string {
   return anchor[0] === 'root' ? ROOT_ID : elementKey(anchor[1][0], anchor[1][1]);
 }
 
-function canonicalDigest(op) {
+function canonicalDigest(op: TextOp): string {
   return JSON.stringify(op);
 }
 
-function canonicalFrontier(frontier) {
-  return frontier.map(([actor, counter]) => [actor, counter]);
+function canonicalFrontier(frontier: Frontier): OpId[] {
+  return frontier.map(([actor, counter]): OpId => [actor, counter]);
 }
 
-function makeState({ maxPending = DEFAULT_MAX_PENDING } = {}) {
+function makeState({ maxPending = DEFAULT_MAX_PENDING }: TextStateOptions = {}): TextState {
   if (!Number.isSafeInteger(maxPending) || maxPending < 1) throw new TypeError('maxPending must be a positive safe integer');
   return {
     version: 1,
@@ -221,12 +256,12 @@ function makeState({ maxPending = DEFAULT_MAX_PENDING } = {}) {
   };
 }
 
-function cloneState(state) {
+function cloneState(state: TextState): TextState {
   return {
     version: 1,
     frontier: canonicalFrontier(state.frontier),
     elements: Object.fromEntries(Object.entries(state.elements).map(([key, element]) => [key, {
-      op: [...element.op], ordinal: element.ordinal, scalar: element.scalar,
+      op: [...element.op] as OpId, ordinal: element.ordinal, scalar: element.scalar,
       parent: element.parent, lamport: element.lamport, deletedBy: [...element.deletedBy],
     }])),
     operations: Object.fromEntries(Object.entries(state.operations).map(([key, value]) => [key, { digest: value.digest, op: value.op }])),
@@ -236,7 +271,7 @@ function cloneState(state) {
   };
 }
 
-function assertState(state) {
+function assertState(state: TextState): TextState {
   if (!state || state.version !== 1 || !Array.isArray(state.frontier) || !state.elements || !state.operations || !state.pending) {
     throw new TypeError('invalid annotated-text reducer state');
   }
@@ -244,15 +279,15 @@ function assertState(state) {
   return state;
 }
 
-export function createTextState(options?) {
+export function createTextState(options?: TextStateOptions): TextState {
   return Object.freeze(makeState(options));
 }
 
-function stateFrontierCounter(state, actor) {
+function stateFrontierCounter(state: TextState, actor: string): number {
   return state.frontier.find(([candidate]) => candidate === actor)?.[1] ?? 0;
 }
 
-function operationReady(state, op) {
+function operationReady(state: TextState, op: TextOp): boolean {
   if (!frontierDominates(state.frontier, op[4])) return false;
   const body = op[5];
   if (body[0] === 'insert') return body[1][0] === 'root' || Object.hasOwn(state.elements, anchorKey(body[1]));
@@ -264,7 +299,7 @@ function operationReady(state, op) {
   });
 }
 
-function advanceFrontier(state, op) {
+function advanceFrontier(state: TextState, op: TextOp) {
   const [actor, counter] = op[2];
   const frontier = state.frontier.filter(([candidate]) => candidate !== actor);
   frontier.push([actor, counter]);
@@ -272,7 +307,7 @@ function advanceFrontier(state, op) {
   state.frontier = frontier;
 }
 
-function applyReadyOperation(state, op, digest) {
+function applyReadyOperation(state: TextState, op: TextOp, digest: string) {
   const body = op[5];
   if (body[0] === 'insert') {
     const parent = anchorKey(body[1]);
@@ -299,7 +334,7 @@ function applyReadyOperation(state, op, digest) {
   advanceFrontier(state, op);
 }
 
-function drainPending(state) {
+function drainPending(state: TextState) {
   let progressed = true;
   while (progressed) {
     progressed = false;
@@ -313,20 +348,21 @@ function drainPending(state) {
   }
 }
 
-function assertCheckpoint(value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).some((key) => !['version', 'frontier', 'elements', 'operations', 'pending', 'maxPending', 'rebootstrapRequired'].includes(key))) {
+function assertCheckpoint(value: unknown): TextState {
+  const raw = value as Record<string, any>;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Object.keys(raw).some((key) => !['version', 'frontier', 'elements', 'operations', 'pending', 'maxPending', 'rebootstrapRequired'].includes(key))) {
     throw new TypeError('invalid annotated-text checkpoint');
   }
-  const state = makeState({ maxPending: value.maxPending });
-  state.frontier = assertFrontier(value.frontier).map((entry) => [...entry]);
-  state.rebootstrapRequired = value.rebootstrapRequired === true;
-  for (const [key, element] of Object.entries(value.elements ?? {})) {
+  const state = makeState({ maxPending: raw.maxPending });
+  state.frontier = assertFrontier(raw.frontier).map((entry) => [...entry]);
+  state.rebootstrapRequired = raw.rebootstrapRequired === true;
+  for (const [key, element] of Object.entries((raw.elements ?? {}) as Record<string, any>)) {
     if (!element || typeof element.scalar !== 'string' || scalarCount(element.scalar) !== 1 || typeof element.parent !== 'string' || !Array.isArray(element.op) || !Number.isSafeInteger(element.ordinal) || element.ordinal < 0 || !SAFE_POSITIVE(element.lamport) || !Array.isArray(element.deletedBy)) throw new TypeError('invalid annotated-text checkpoint element');
     if (key !== elementKey(element.op, element.ordinal)) throw new TypeError('invalid annotated-text checkpoint element identity');
     state.elements[key] = { op: [...assertOpId(element.op)], ordinal: element.ordinal, scalar: element.scalar, parent: element.parent, lamport: element.lamport, deletedBy: [...element.deletedBy].sort() };
   }
-  for (const registryName of ['operations', 'pending']) {
-    for (const [key, entry] of Object.entries(value[registryName] ?? {})) {
+  for (const registryName of ['operations', 'pending'] as const) {
+    for (const [key, entry] of Object.entries((raw[registryName] ?? {}) as Record<string, any>)) {
       const op = canonicalTextOp(entry?.op);
       const digest = canonicalDigest(op);
       if (key !== opKey(op[2]) || entry.digest !== digest) throw new TypeError('invalid annotated-text checkpoint operation registry');
@@ -336,7 +372,7 @@ function assertCheckpoint(value) {
   return state;
 }
 
-export function restoreTextCheckpoint(checkpoint) {
+export function restoreTextCheckpoint(checkpoint: unknown): TextState {
   const supplied = assertCheckpoint(checkpoint);
   const applied = Object.values(supplied.operations).map((entry) => entry.op);
   const pending = Object.values(supplied.pending).map((entry) => entry.op);
@@ -372,19 +408,19 @@ export function restoreTextCheckpoint(checkpoint) {
   return restored;
 }
 
-export function textCheckpoint(state) {
+export function textCheckpoint(state: TextState): TextState {
   assertState(state);
   const sortedElements = Object.fromEntries(Object.entries(state.elements).sort(([left], [right]) => left.localeCompare(right)).map(([key, element]) => [key, {
-    op: [...element.op], ordinal: element.ordinal, scalar: element.scalar, parent: element.parent,
+    op: [...element.op] as OpId, ordinal: element.ordinal, scalar: element.scalar, parent: element.parent,
     lamport: element.lamport, deletedBy: [...element.deletedBy].sort(),
   }]));
-  const registry = (entries) => Object.fromEntries(Object.entries(entries).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, { digest: entry.digest, op: entry.op }]));
+  const registry = (entries: Record<string, TextRegistryEntry>) => Object.fromEntries(Object.entries(entries).sort(([left], [right]) => left.localeCompare(right)).map(([key, entry]) => [key, { digest: entry.digest, op: entry.op }]));
   return Object.freeze({ version: 1, frontier: canonicalFrontier(state.frontier), elements: sortedElements, operations: registry(state.operations), pending: registry(state.pending), maxPending: state.maxPending, rebootstrapRequired: state.rebootstrapRequired });
 }
 
-export function materializeText(state) {
+export function materializeText(state: TextState): string {
   assertState(state);
-  const children = new Map([[ROOT_ID, []]]);
+  const children = new Map<string, Array<[string, TextElement]>>([[ROOT_ID, []]]);
   for (const [key, element] of Object.entries(state.elements)) {
     const list = children.get(element.parent) ?? [];
     list.push([key, element]);
@@ -394,9 +430,9 @@ export function materializeText(state) {
     list.sort(([, left], [, right]) => right.lamport - left.lamport || -compareOpId(left.op, right.op));
   }
   let text = '';
-  const stack = [...(children.get(ROOT_ID) ?? [])].reverse();
+  const stack: Array<[string, TextElement]> = [...(children.get(ROOT_ID) ?? [])].reverse();
   while (stack.length > 0) {
-    const [key, element] = stack.pop();
+    const [key, element] = stack.pop()!;
     if (element.deletedBy.length === 0) text += element.scalar;
     const descendants = children.get(key);
     if (descendants) stack.push(...descendants.slice().reverse());
@@ -407,7 +443,7 @@ export function materializeText(state) {
 // Applies one immutable operation. It is deliberately atomic: an operation is
 // either fully reduced, retained intact in the bounded pending registry, or the
 // replica fails closed and must rebootstrap from a checkpoint.
-export function applyTextOp(current, value) {
+export function applyTextOp(current: TextState, value: unknown): TextState {
   const state = cloneState(assertState(current));
   if (state.rebootstrapRequired) return Object.freeze(state);
   const op = canonicalTextOp(value);

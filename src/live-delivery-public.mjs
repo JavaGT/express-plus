@@ -1,20 +1,24 @@
-// @ts-nocheck
 // Public, transport-neutral committed delivery. The package owns reread,
 // authorization, projection, and cursor semantics; adapters only deliver the
 // recipient-safe batch and acknowledge it by resolving their callback.
 
 import { createLiveDeliveryCore } from './live-delivery-core.mjs';
+                                                                                    
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
 import { tryBuildAnnotatedTextFoldEnvelopes } from './annotated-text-fold-envelope.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
+                                                     
 import { readSeq } from './committed-log.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, acknowledgeAndPruneSnapshot } from './annotated-text-authoring-stream.mjs';
 import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
+                                                
+                                             
+                                                                                                 
 
-function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
+function jsonSnapshot(value         , path = 'snapshot', ancestors = new Set         ())          {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new TypeError(`${path} must contain only finite JSON numbers`);
@@ -32,22 +36,131 @@ function jsonSnapshot(value, path = 'snapshot', ancestors = new Set()) {
   }
   if (ancestors.has(value)) throw new TypeError(`${path} must not contain cycles`);
   ancestors.add(value);
-  const copy = {};
+  const copy                          = {};
   for (const [key, entry] of Object.entries(value)) copy[key] = jsonSnapshot(entry, `${path}.${key}`, ancestors);
   ancestors.delete(value);
   return Object.freeze(copy);
 }
 
+// ---------------------------------------------------------------------------
+// Package-private shared delivery shapes
+// ---------------------------------------------------------------------------
+
+                                                                     
+                 
+                     
+                
+                                 
+               
+                    
+                       
+ 
+
+                                
+                
+                            
+                               
+                             
+                                 
+                         
+ 
+
+                                 
+                                        
+ 
+
+                                    
+                            
+                                          
+                            
+                         
+ 
+
+                                      
+                           
+                         
+                                       
+                                            
+                         
+ 
+
+                                                                                                      
+
+                                          
+                                           
+                              
+ 
+
+                                        
+                
+                           
+                     
+                    
+                                                 
+                              
+                
+ 
+
+                                                                                    
+
+                                   
+                                                                                      
+                       
+                      
+
+                                 
+                                                                   
+                       
+                                                                                      
+                      
+
+                                   
+                                                
+ 
+
+                                       
+                       
+                
+                       
+                      
+                                                               
+                      
+                                          
+                   
+ 
+
+                                    
+                                                                                                                              
+                                                                                                                                 
+                                                                    
+                                                                                                                                     
+                                                                                                                                                       
+                            
+                                                                                                                                                                                                   
+ 
+
+                                           
+                   
+                                                                                             
+                   
+                      
+                               
+                   
+                            
+                            
+                            
+ 
+
 // Package-private assembly for an application-owned activation. The public
 // factory below deliberately returns only the delivery protocol; application
 // lifecycle wiring retains the committed consumer and shutdown capability.
-export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, principalSnapshots, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }) {
+export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, principalSnapshots, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }                          )                                                                                                                         {
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
-  const resolveEntity = typeof entities === 'function' ? entities : (name) => entities.get(name);
-  const composites = compileSnapshots(snapshots, resolveEntity, db);
-  validatePrincipalSnapshotDeclarations(principalSnapshots, schema);
-  const principalDelivery = principalSnapshots?.length
-    ? createPrincipalSnapshotDelivery({ db, declarations: principalSnapshots })
+  const resolveEntity = typeof entities === 'function' ? entities : (name        ) => entities.get(name);
+  const composites = compileSnapshots(snapshots, resolveEntity, db         )                                ;
+  validatePrincipalSnapshotDeclarations(principalSnapshots         , schema         );
+  const principalDelivery = (principalSnapshots                                  )?.length
+    ? createPrincipalSnapshotDelivery({ db: db         , declarations: principalSnapshots          })
     : null;
   const requiredEntities = composites.requiredEntities ?? new Set();
 
@@ -57,23 +170,23 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
   // scope — including annotated-text body edits that touch no selected field —
   // forces a full composite re-bootstrap.
   const resyncRelevance = buildSnapshotResyncRelevance(composites);
-  function eventTouchesComposite(declaration, event) {
+  function eventTouchesComposite(declaration                     , event                    )          {
     return snapshotEventTouchesComposite(resyncRelevance, declaration, event);
   }
 
-  const aggregateRevision = () => Number(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get().revision);
-  async function aggregateSnapshot({ principal, scope, declaration }) {
+  const aggregateRevision = ()         => Number(db.prepare("SELECT revision FROM _CommittedRevision WHERE name = 'actions'").get() .revision);
+  async function aggregateSnapshot({ principal, scope, declaration }                                                                           )                                 {
     const handle = tryParseScopeKey(scope);
     // No transaction crosses authorization awaits. Each attempt detaches a
     // complete candidate graph and its two committed fences before authorizing.
     for (let attempt = 0; attempt < 3; attempt += 1) {
-      let captured;
+      let captured                                                                       ;
       db.exec('BEGIN');
       try {
         captured = Object.freeze({
           anchor: readSeq(db, scope),
           aggregate: aggregateRevision(),
-          candidate: captureSnapshot({ db, principal, anchor: declaration.anchor, id: handle.id, output: declaration.output, tombstones: declaration.tombstones }),
+          candidate: captureSnapshot({ db: db         , principal, anchor: declaration.anchor         , id: handle .id, output: declaration.output         , tombstones: declaration.tombstones          }),
         });
       } catch {
         // A visibility read that cannot establish absence is a denied snapshot,
@@ -82,12 +195,12 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       } finally {
         db.exec('COMMIT');
       }
-      if (!captured.candidate) return { kind: 'revoked' };
-      const authorization = await authorizeSnapshot({ principal, anchor: declaration.anchor, candidate: captured.candidate, mayVerb });
+      if (!captured .candidate) return { kind: 'revoked' };
+      const authorization = await authorizeSnapshot({ principal, anchor: declaration.anchor         , candidate: captured .candidate         , mayVerb: mayVerb          });
       if (!authorization.anchorAllowed) return { kind: 'revoked' };
-      const value = jsonSnapshot(projectSnapshot({ anchor: declaration.anchor, candidate: captured.candidate, output: declaration.output, authorized: authorization.authorized }));
-      if (readSeq(db, scope) === captured.anchor && aggregateRevision() === captured.aggregate) {
-        return Object.freeze({ kind: 'snapshot', snapshot: value, cursor: Object.freeze({ anchor: captured.anchor, aggregate: captured.aggregate }) });
+      const value = jsonSnapshot(projectSnapshot({ anchor: declaration.anchor         , candidate: captured .candidate         , output: declaration.output         , authorized: authorization.authorized }));
+      if (readSeq(db, scope) === captured .anchor && aggregateRevision() === captured .aggregate) {
+        return Object.freeze({ kind: 'snapshot', snapshot: value, cursor: Object.freeze({ anchor: captured .anchor, aggregate: captured .aggregate }) })                                    ;
       }
       await Promise.resolve();
     }
@@ -97,11 +210,11 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
   // Public delivery deliberately has no connection state. It emits only
   // recipient-hydrated lifecycle snapshots or opaque recovery controls.
   const envelopes = createLiveEnvelopeBuilder({ stateful: false, includeActionId });
-  const core = createLiveDeliveryCore({
+  const core                   = createLiveDeliveryCore({
     db,
     entities,
     mayVerb,
-    projectRecipient: async (context) => {
+    projectRecipient: async (context                    ) => {
       // The public projector must never receive raw _Log eventData. The
       // envelope grammar uses only metadata plus the recipient-hydrated row.
       const { data: _data, eventData: _eventData, ...event } = context.event;
@@ -114,8 +227,8 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       // The fold builder needs the full committed event (including data);
       // buildEnvelope must keep the stripped event (raw eventData never leaves).
       const document = base.document;
-      if (document && context.event?.eventType?.startsWith(`${document.entity?.name}.`)) {
-        const folded = await tryBuildAnnotatedTextFoldEnvelopes({ ...base, event: context.event }, { db, document });
+      if (document && (context.event                          ).eventType?.startsWith(`${(document                                 ).entity?.name}.`)) {
+        const folded = await tryBuildAnnotatedTextFoldEnvelopes({ ...base, event: context.event }         , { db: db         , document: document          });
         if (folded) return folded;
       }
       // A composite shell subscriber resyncs only when the committed event can
@@ -124,18 +237,18 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       // an annotated-text body edit (committed to the owning Project scope)
       // re-bootstraps the whole shell per keystroke.
       if (base.composite && !document) {
-        const declaration = composites.get(handle.entity);
-        if (declaration?.output && !eventTouchesComposite(declaration, context.event)) {
+        const declaration = composites.get(handle .entity);
+        if (declaration?.output && !eventTouchesComposite(declaration, context.event                      )) {
           return [];
         }
       }
-      return envelopes.buildEnvelope(base);
+      return envelopes.buildEnvelope(base         );
     },
-    scopeVisible: ({ entity, principal, scope: handle }) => {
+    scopeVisible: ({ entity, principal, scope: handle }                                                                        ) => {
       const declaration = composites.get(entity.name);
       if (!declaration?.tombstones?.some((rule) => rule.target === entity)) return true;
       try {
-        return captureSnapshot({ db, principal, anchor: declaration.anchor, id: handle.id, output: declaration.output, tombstones: declaration.tombstones }) !== null;
+        return captureSnapshot({ db: db         , principal, anchor: declaration.anchor         , id: handle.id, output: declaration.output         , tombstones: declaration.tombstones          }) !== null;
       } catch {
         return false;
       }
@@ -143,16 +256,16 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
     log,
   });
 
-  const delivery = {
-    resolveAnnotatedTextDocument({ entity: entityName, field: fieldName, documentId }) {
+  const delivery                    = {
+    resolveAnnotatedTextDocument({ entity: entityName, field: fieldName, documentId }                                                       )                               {
       const entity = resolveEntity(entityName);
       const descriptor = entity?.fields?.[fieldName];
       if (!entity || descriptor?.kind !== 'annotatedText' || typeof documentId !== 'string' || !documentId) return null;
       const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(documentId);
       if (!row) return null;
-      return Object.freeze({ scope: resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key, entity, row, fieldName, descriptor, documentId });
+      return Object.freeze({ scope: resolveAnnotatedTextOwningScope(descriptor, entity.fields                       , row                       ).key, entity, row, fieldName, descriptor, documentId });
     },
-    async authorizeAnnotatedTextDocument(document, principal) {
+    async authorizeAnnotatedTextDocument(document                       , principal           )                                          {
       const project = tryParseScopeKey(document.scope);
       const projectEntity = project && resolveEntity(project.entity);
       if (projectEntity) {
@@ -168,8 +281,8 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       return row;
     },
     // Public subscribers always acknowledge before any durable batch drains.
-    subscribe(input) {
-      const { paused: _paused, signal, revoke, ...subscription } = input ?? {};
+    subscribe(input                      )                            {
+      const { paused: _paused, signal, revoke, ...subscription } = (input ?? {})                        ;
       if (!signal || typeof signal.addEventListener !== 'function') {
         throw new Error('live delivery subscription requires an AbortSignal');
       }
@@ -178,7 +291,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       }
       if (isPrincipalSnapshotScope(subscription.scope)) {
         return principalDelivery
-          ? principalDelivery.subscribe(subscription)
+          ? principalDelivery.subscribe(subscription         )
           : Promise.reject(Object.assign(new Error('principal snapshot delivery is not attached'), { code: 'live-delivery-revoked' }));
       }
       const handle = tryParseScopeKey(subscription.scope);
@@ -188,7 +301,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
         return Promise.resolve({ activate: async () => undefined });
       }
       const supplied = subscription.after;
-      const after = declaration && supplied && typeof supplied === 'object' ? supplied.anchor : supplied;
+      const after = (declaration && supplied && typeof supplied === 'object' ? supplied.anchor : supplied)                      ;
       let recoveryQueued = false;
       const authorizeDocument = input.document
         ? this.authorizeAnnotatedTextDocument(input.document, subscription.principal).then((row) => {
@@ -203,36 +316,36 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
         })
         : core.subscribe({ ...subscription, after, signal, paused: true, revoke });
       const activation = Promise.resolve(authorizeDocument).then((value) => value).catch((error) => {
-        if (error?.code !== 'live-delivery-revoked') throw error;
+        if ((error                                         )?.code !== 'live-delivery-revoked') throw error;
         revoke?.();
         return { activate: async () => undefined };
       });
-      if (!declaration) return activation;
+      if (!declaration) return activation                                        ;
       return activation.then((value) => ({
-        activate: async () => {
+        activate: async ()                                    => {
           // Admission is async, so latch stale-cursor recovery only after the
           // paused subscription has been installed. Compare now: a commit may
           // have completed while admission awaited its anchor grant.
           if (!supplied || typeof supplied !== 'object' || supplied.aggregate !== aggregateRevision()) {
-            core.resync(subscription.scope, { type: 'resync', entity: handle.entity, id: handle.id, seq: after ?? 0, reason: 'recipient-snapshot-required' });
+            core.resync(subscription.scope, { type: 'resync', entity: handle .entity, id: handle .id, seq: after ?? 0, reason: 'recipient-snapshot-required' });
             recoveryQueued = true;
           }
-          const anchor = await value.activate();
+          const anchor = await value?.activate();
           // Activation can await delivery. A member commit in that interval is
           // not represented by the anchor cursor, so never acknowledge it.
           const aggregate = aggregateRevision();
           if (supplied && typeof supplied === 'object' && supplied.aggregate !== aggregate) {
-            if (!recoveryQueued) core.resync(subscription.scope, { type: 'resync', entity: handle.entity, id: handle.id, seq: after ?? 0, reason: 'recipient-snapshot-required' });
+            if (!recoveryQueued) core.resync(subscription.scope, { type: 'resync', entity: handle .entity, id: handle .id, seq: after ?? 0, reason: 'recipient-snapshot-required' });
             return anchor === undefined ? undefined : Object.freeze({ anchor, aggregate });
           }
           return anchor === undefined ? undefined : Object.freeze({ anchor, aggregate });
         },
       }));
     },
-    async bootstrap({ principal, scope, document = null }) {
+    async bootstrap({ principal, scope, document = null }                                                                                  )                                 {
       if (isPrincipalSnapshotScope(scope)) {
         return principalDelivery
-          ? principalDelivery.bootstrap({ principal, scope })
+          ? principalDelivery.bootstrap({ principal: principal         , scope })
           : Object.freeze({ kind: 'revoked' });
       }
       const handle = tryParseScopeKey(scope);
@@ -245,11 +358,11 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
         if (!row) return { kind: 'revoked' };
         const before = readSeq(db, scope);
         const authoring = document.descriptor?.kind === 'annotatedText' && typeof document.clientNonce === 'string' && /^[A-Za-z0-9_-]{43}$/.test(document.clientNonce)
-          ? (() => { const prefix = `${document.entity.name}_${document.fieldName}`; const stream = ensureStream({ db, prefix, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' }); const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: hashClientNonce(document.clientNonce) }); return lease ? { streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, fence: before } : null; })()
+          ? (() => { const prefix = `${document.entity.name}_${document.fieldName}`; const stream = ensureStream({ db: db         , prefix, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' }); const lease = ensureLease({ db: db         , prefix, streamId: stream.id, clientNonceHash: hashClientNonce(document.clientNonce) }); return lease ? { streamToken: stream.id, leaseToken: lease.id, leaseId: lease.id, fence: before } : null; })()
           : null;
-        const snapshot = await projectEntitySnapshot({ db, entity: document.entity, row, principal, authoring });
+        const snapshot = await projectEntitySnapshot({ db: db         , entity: document.entity         , row, principal, authoring });
         if (readSeq(db, scope) !== before) return { kind: 'retry' };
-        const annotated = snapshot[document.fieldName];
+        const annotated = (snapshot                       )[document.fieldName];
         const envelope = annotated?.authoring;
         if (!envelope || envelope.acknowledgementFence !== before) return { kind: 'retry' };
         const publicSnapshot = Object.freeze({ ...snapshot, [document.fieldName]: Object.freeze(Object.fromEntries(Object.entries(annotated).filter(([key]) => key !== 'authoring'))) });
@@ -262,20 +375,20 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       const result = await core.bootstrap({
         principal,
         scope,
-      snapshot: ({ principal: recipient, scope: snapshotScope }) => {
+        snapshot: ({ principal: recipient, scope: snapshotScope }) => {
           const row = core.snapshot({ principal: recipient, scope: snapshotScope });
           const direct = tryParseScopeKey(snapshotScope);
           const entity = direct && resolveEntity(direct.entity);
-          if (!entity || !hasAnnotatedTextFields(entity)) return row;
-          return projectEntitySnapshot({ db, entity, row, principal: recipient });
+          if (!entity || !hasAnnotatedTextFields(entity         )) return row;
+          return projectEntitySnapshot({ db: db         , entity: entity         , row, principal: recipient });
         },
       });
        return result;
     },
-    async catchup(input) {
+    async catchup(input                                                                                                        )                               {
       if (isPrincipalSnapshotScope(input.scope)) {
         return principalDelivery
-          ? principalDelivery.catchup(input)
+          ? principalDelivery.catchup(input         )                                           
           : Object.freeze({ kind: 'revoked' });
       }
       const handle = tryParseScopeKey(input.scope);
@@ -291,7 +404,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
         const row = await this.authorizeAnnotatedTextDocument(input.document, input.principal);
         if (!row) return { kind: 'revoked' };
         const document = Object.freeze({ ...input.document, row });
-        return core.catchup({ ...input, document });
+        return core.catchup({ ...input, after: input.after                      , document })                                           ;
       }
       const declaration = handle && composites.get(handle.entity);
       if (declaration) {
@@ -305,36 +418,35 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
         if (aggregateRevision() !== cursor.aggregate) {
           return this.bootstrap({ principal: input.principal, scope: input.scope });
         }
-        return result.kind === 'revoked' ? result : { ...result, cursor: Object.freeze({ anchor: result.cursor, aggregate: cursor.aggregate }) };
-      }
-      // Never materialize an unbounded retained history merely to discover it
+        return result.kind === 'revoked' ? result : { ...result, cursor: Object.freeze({ anchor: result.cursor          , aggregate: cursor.aggregate }) };
+      }      // Never materialize an unbounded retained history merely to discover it
       // cannot fit a transport frame. A fresh paired recipient snapshot is the
       // canonical opaque recovery for a long gap.
-      if (core.exceedsCatchupLimit(input.scope, input.after ?? 0, maxCatchupEvents)) {
+      if (core.exceedsCatchupLimit(input.scope, input.after         , maxCatchupEvents)) {
         return this.bootstrap({ principal: input.principal, scope: input.scope });
       }
-      return core.catchup(input);
+      return core.catchup(input                                                                                          )                                           ;
     },
-    wake(scope) {
+    wake(scope        )       {
       if (isPrincipalSnapshotScope(scope)) {
-        principalDelivery?.wake(scope);
+        principalDelivery?.wake(scope         , undefined         );
         return;
       }
       // A wake is only a payloadless hint; it is not a delivery barrier.
       void core.wake(scope);
     },
-    async acknowledgeAuthoringSnapshot({ document, principal, stream, lease, snapshot }) {
+    async acknowledgeAuthoringSnapshot({ document, principal, stream, lease, snapshot }                                                                                                            )                                                  {
       const documentIdentity = { entity: document.entity.name, field: document.fieldName, documentId: document.documentId };
       const resolved = this.resolveAnnotatedTextDocument(documentIdentity);
       if (!resolved) return null;
       const row = await this.authorizeAnnotatedTextDocument(resolved, principal);
       if (!row) return null;
        const prefix = `${document.entity.name}_${document.fieldName}`;
-        const resolvedStream = resolveStream({ db, prefix, streamToken: stream, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' });
+        const resolvedStream = resolveStream({ db: db         , prefix, streamToken: stream, documentId: document.documentId, principalType: principal.type ?? 'principal', principalId: principal.id ?? '' });
       if (!resolvedStream) return null;
-      const resolvedLease = resolveLease({ db, prefix, leaseToken: lease, streamId: resolvedStream.id });
+      const resolvedLease = resolveLease({ db: db         , prefix, leaseToken: lease, streamId: resolvedStream.id });
       if (!resolvedLease) return null;
-        const result = acknowledgeAndPruneSnapshot({ db, prefix, snapshotId: snapshot, leaseId: resolvedLease.id });
+        const result = acknowledgeAndPruneSnapshot({ db: db         , prefix, snapshotId: snapshot, leaseId: resolvedLease.id });
         if (!result) return null;
         return { acknowledgedThrough: result.fence };
     },
@@ -342,15 +454,15 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
 
   return {
     delivery,
-    consumer: async (events) => {
-      const scopes = new Set();
+    consumer: async (events                               )                => {
+      const scopes = new Set        ();
       for (const event of events) {
         if (event?.scope) scopes.add(event.scope);
       }
       for (const scope of scopes) core.wake(scope);
-      const invalidatedAnchors = new Set();
+      const invalidatedAnchors = new Set        ();
       for (const event of events) {
-        const handle = tryParseScopeKey(event?.scope);
+        const handle = tryParseScopeKey(event?.scope          );
         if (!handle) continue;
         for (const [anchorName, declaration] of composites) {
           // Resync only when the event can actually change the composite output
@@ -368,11 +480,11 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       for (const anchorName of invalidatedAnchors) {
         core.resyncEntity(anchorName, (scope) => {
           const anchor = tryParseScopeKey(scope);
-          return { type: 'resync', entity: anchorName, id: anchor.id, seq: 0, reason: 'recipient-snapshot-required' };
+          return { type: 'resync', entity: anchorName, id: anchor .id, seq: 0, reason: 'recipient-snapshot-required' };
         });
       }
     },
-    close() {
+    close()       {
       core.close();
       principalDelivery?.close();
     },
@@ -386,19 +498,19 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
  * no selected field (e.g. annotated-text body edits) do not force a full
  * composite snapshot re-bootstrap.
  */
-export function buildSnapshotResyncRelevance(composites) {
-  const resyncRelevance = new Map();
+export function buildSnapshotResyncRelevance(composites                   )                                                 {
+  const resyncRelevance = new Map                                           ();
   for (const [anchorName, declaration] of composites) {
-    const relevantFields = new Map();
-    const collect = (branch, isRoot) => {
+    const relevantFields = new Map                     ();
+    const collect = (branch                                   , isRoot         )       => {
       for (const entry of branch?.entries ?? []) {
         const entityName = entry.entity?.name;
         if (entityName) {
-          const fields = relevantFields.get(entityName) ?? new Set();
+          const fields = relevantFields.get(entityName) ?? new Set        ();
           for (const field of entry.selected ?? []) fields.add(field);
           relevantFields.set(entityName, fields);
         } else if (isRoot && entry.kind === 'select') {
-          const fields = relevantFields.get(anchorName) ?? new Set();
+          const fields = relevantFields.get(anchorName) ?? new Set        ();
           for (const field of entry.fields ?? []) fields.add(field);
           relevantFields.set(anchorName, fields);
         }
@@ -410,7 +522,7 @@ export function buildSnapshotResyncRelevance(composites) {
     // Tombstone identity events always resync; the anchor's own selected fields
     // are captured in relevantFields (its create/remove also resync via
     // presence, and identity-only updates are covered by the field gate below).
-    const alwaysRelevant = new Set();
+    const alwaysRelevant = new Set        ();
     if (tombstone?.entity?.name) alwaysRelevant.add(tombstone.entity.name);
     if (tombstone?.terminalScope?.name) alwaysRelevant.add(tombstone.terminalScope.name);
     resyncRelevance.set(anchorName, Object.freeze({ relevantFields, alwaysRelevant }));
@@ -424,8 +536,8 @@ export function buildSnapshotResyncRelevance(composites) {
  * member appears in the output; member update/native events resync only when
  * they touch a field the output reads.
  */
-export function snapshotEventTouchesComposite(relevance, declaration, event) {
-  const handle = tryParseScopeKey(event?.scope);
+export function snapshotEventTouchesComposite(relevance                                                , declaration                     , event                    )          {
+  const handle = tryParseScopeKey(event?.scope          );
   const entityName = handle?.entity;
   if (!entityName) return false;
   const anchorRelevance = relevance.get(declaration.anchor.name);
@@ -451,6 +563,6 @@ export function snapshotEventTouchesComposite(relevance, declaration, event) {
  * kernel. Workbench applications should use app.attachLiveDelivery() instead,
  * so the package binds delivery to the application's own authority.
  */
-export function createLiveDelivery(options) {
+export function createLiveDelivery(options                          )                    {
   return createOwnedLiveDelivery(options).delivery;
 }

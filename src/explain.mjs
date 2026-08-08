@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { rowCapabilities, mayVerb, fieldCapabilities } from './row-grant.mjs';
 import { isRuntimeGrantClause } from './scope.mjs';
 
@@ -86,10 +85,13 @@ function checksSource(entityRecord              )                             {
   }
 
   for (const [fieldName, descriptor] of Object.entries(fields)) {
-    if (descriptor?.kind === 'store' && descriptor.type === 'map' && descriptor.roles?.length > 0) {
-      for (const roleName of descriptor.roles) {
-        if (!sources[roleName]) {
-          sources[roleName] = { kind: 'map-role', field: fieldName, scopeAvailable: false };
+    if (descriptor?.kind === 'store' && descriptor.type === 'map') {
+      const roles = descriptor.roles;
+      if (roles && roles.length > 0) {
+        for (const roleName of roles) {
+          if (!sources[roleName]) {
+            sources[roleName] = { kind: 'map-role', field: fieldName, scopeAvailable: false };
+          }
         }
       }
     }
@@ -161,7 +163,7 @@ export async function explain({ entity, row, principal, verb, field }           
   } else if (grantInfo.type === 'own-scope') {
     try {
       const capabilities = await rowCapabilities(entity, row, principal);
-      grantInfo.capabilities = (capabilities.capabilities || []).map((c) => c.capability);
+      grantInfo.capabilities = (capabilities.capabilities || []).map((c                        ) => c.capability);
       grantInfo.verbAdmitted = await mayVerb(entity, verb, row, principal);
       grantInfo.verbRequired = verb;
       admitted = grantInfo.verbAdmitted;
@@ -171,7 +173,7 @@ export async function explain({ entity, row, principal, verb, field }           
   } else if (grantInfo.type === 'inherit') {
     try {
       const capabilities = await rowCapabilities(entity, row, principal);
-      grantInfo.capabilities = (capabilities.capabilities || []).map((c) => c.capability);
+      grantInfo.capabilities = (capabilities.capabilities || []).map((c                        ) => c.capability);
       grantInfo.verbAdmitted = await mayVerb(entity, verb, row, principal);
       grantInfo.verbRequired = verb;
       admitted = grantInfo.verbAdmitted;

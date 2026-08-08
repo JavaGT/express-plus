@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Schedule / state validation helpers extracted from compile.mjs.
 //
 // Pure extraction — zero behavioral change. These functions validate schedule
@@ -9,7 +8,7 @@ import { randomBytes } from 'node:crypto';
 import { compileReadScope } from '../scope-sql.ts';
 import { updated } from '../event-handle.ts';
 import { self } from '../effect-runtime.ts';
-import { schedule as scheduleConstructors, triggerList } from '../schedule.ts';
+import { schedule as scheduleConstructors } from '../schedule.ts';
 
 // mintToken — a cryptographically random opaque session token. Handed to a
 // create policy so a framework entity that mints session-like rows (Session)
@@ -18,11 +17,44 @@ export function mintToken() {
   return randomBytes(24).toString('hex');
 }
 
-export function stateEffectEntries(entityName, fieldName, descriptor) {
+interface EffectDescriptor {
+  mutate?: unknown;
+  durable?: unknown;
+  [key: string]: unknown;
+}
+
+interface StateFieldDescriptor {
+  kind?: string;
+  type?: string;
+  effects?: Record<string, EffectDescriptor | undefined>;
+  transitions?: Record<string, string[] | undefined>;
+  values?: string[];
+  auto?: {
+    when?: string;
+    after?: number | string;
+    to?: string;
+    from?: unknown;
+  };
+  [key: string]: unknown;
+}
+
+type Fields = Record<string, StateFieldDescriptor>;
+
+type Row = Record<string, unknown>;
+
+type Statement = {
+  get(...args: unknown[]): Row | undefined;
+};
+
+type Db = {
+  prepare(sql: string): Statement;
+};
+
+export function stateEffectEntries(entityName: string, fieldName: string, descriptor: StateFieldDescriptor) {
   const declared = descriptor.effects;
   if (declared == null || Object.keys(declared).length === 0) return [];
 
-  const legalTransitions = new Map();
+  const legalTransitions = new Map<string, { from: string; to: string }>();
   for (const [from, targets] of Object.entries(descriptor.transitions ?? {})) {
     for (const to of targets ?? []) {
       const key = `transition:${from}->${to}`;
@@ -51,7 +83,7 @@ export function stateEffectEntries(entityName, fieldName, descriptor) {
         'transition preimages are transaction-local.',
       );
     }
-    const mutate = Object.hasOwn(declaredEffect ?? {}, 'mutate') ? declaredEffect.mutate : self;
+    const mutate = Object.hasOwn(declaredEffect ?? {}, 'mutate') ? (declaredEffect as EffectDescriptor).mutate : self;
     const effect = Object.freeze({
       ...declaredEffect,
       mutate,
@@ -70,7 +102,7 @@ export function stateEffectEntries(entityName, fieldName, descriptor) {
 // bare identifier (letter or `_` first, then letters/digits/`_`).
 const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-export function assertSqlIdentifier(kind, value) {
+export function assertSqlIdentifier(kind: string, value: unknown) {
   if (typeof value !== 'string' || !SQL_IDENTIFIER.test(value)) {
     throw new Error(
       `${kind} name ${JSON.stringify(value)} is not a valid SQL identifier. A ` +
@@ -81,7 +113,7 @@ export function assertSqlIdentifier(kind, value) {
   }
 }
 
-export function autoStateScheduleTrigger(entityName, fieldName, descriptor, fields) {
+export function autoStateScheduleTrigger(entityName: string, fieldName: string, descriptor: StateFieldDescriptor, fields: Fields) {
   const auto = descriptor.auto;
   if (!auto || typeof auto !== 'object' || Array.isArray(auto)) {
     throw new Error(`${entityName}.${fieldName}.auto must be an object`);
@@ -90,16 +122,16 @@ export function autoStateScheduleTrigger(entityName, fieldName, descriptor, fiel
   if (when === undefined || after === undefined || to === undefined || from === undefined) {
     throw new Error(`${entityName}.${fieldName}.auto requires when, after, to, and from`);
   }
-  if (!descriptor.values.includes(when)) {
+  if (!descriptor.values!.includes(when)) {
     throw new Error(`${entityName}.${fieldName}.auto.when must be one of the declared state values`);
   }
-  if (!descriptor.values.includes(to)) {
+  if (!descriptor.values!.includes(to)) {
     throw new Error(`${entityName}.${fieldName}.auto.to must be one of the declared state values`);
   }
-  if (!(descriptor.transitions[when] ?? []).includes(to)) {
+  if (!(descriptor.transitions![when] ?? []).includes(to)) {
     throw new Error(`${entityName}.${fieldName}.auto transition ${when} -> ${to} is not declared`);
   }
-  let anchorName = null;
+  let anchorName: string | null = null;
   for (const [candidateName, candidate] of Object.entries(fields)) {
     if (candidate === from) {
       anchorName = candidateName;
@@ -120,18 +152,38 @@ export function autoStateScheduleTrigger(entityName, fieldName, descriptor, fiel
   });
 }
 
-export function validateScheduleTrigger({ name, verbName, trigger, fields, registry }) {
+interface DeclaredScheduleTrigger {
+  kind?: string;
+  field?: unknown;
+  when?: unknown;
+  while?: unknown;
+  with?: unknown;
+  delay?: number;
+  hertz?: number;
+  intervalMs?: number;
+  autoState?: { fieldName?: string; when?: string };
+  sourceName?: string | null;
+  key?: string;
+}
+
+export function validateScheduleTrigger({ name, verbName, trigger, fields, registry }: {
+  name: string;
+  verbName: string;
+  trigger: DeclaredScheduleTrigger;
+  fields: Fields;
+  registry: unknown;
+}) {
   const isDeadline = trigger?.kind === 'schedule.at' || trigger?.kind === 'schedule.after';
   const isTick = trigger?.kind === 'tick.hz' || trigger?.kind === 'tick.every';
   if (!trigger || typeof trigger !== 'object' || !(isDeadline || isTick)) {
     throw new Error(`schedule.${verbName}: expected schedule.at(...), schedule.after(...), tick.hz(...), or tick.every(...), got ${JSON.stringify(trigger)}`);
   }
 
-  let whileSql;
-  let whileParams;
-  let whileAst;
-  let withValue;
-  let fieldName = null;
+  let whileSql: string | undefined;
+  let whileParams: Record<string, unknown> | undefined;
+  let whileAst: unknown;
+  let withValue: unknown;
+  let fieldName: string | null = null;
 
   if (trigger.when !== undefined && typeof trigger.when !== 'function') {
     throw new Error(`schedule.${verbName}: 'when' must be a function ({row}) => boolean`);
@@ -167,10 +219,10 @@ export function validateScheduleTrigger({ name, verbName, trigger, fields, regis
       );
     }
     if (trigger.kind === 'tick.hz') {
-      if (!Number.isFinite(trigger.hertz) || trigger.hertz <= 0) {
+      if (!Number.isFinite(trigger.hertz) || trigger.hertz! <= 0) {
         throw new Error(`schedule.${verbName}: hertz must be a finite positive number (tick.hz should have validated)`);
       }
-    } else if (!Number.isFinite(trigger.intervalMs) || trigger.intervalMs <= 0) {
+    } else if (!Number.isFinite(trigger.intervalMs) || trigger.intervalMs! <= 0) {
       throw new Error(`schedule.${verbName}: intervalMs must be a finite positive number (tick.every should have validated)`);
     }
     withValue = trigger.with;
@@ -188,10 +240,10 @@ export function validateScheduleTrigger({ name, verbName, trigger, fields, regis
     whileParams = { [paramName]: trigger.autoState.when };
     whileAst = Object.freeze({ node: 'autoState', field: trigger.autoState.fieldName, value: trigger.autoState.when });
   } else if (trigger.while !== undefined) {
-    const compiled = compileReadScope(trigger.while, {
+    const compiled = compileReadScope(trigger.while as (ctx: { is: unknown; fields: unknown }) => unknown, {
       fields,
       where: `schedule.${verbName} while on entity('${name}')`,
-      registry,
+      registry: registry as Record<string, unknown>,
       entityName: name,
     });
     whileSql = compiled.sql;
@@ -211,7 +263,7 @@ export function validateScheduleTrigger({ name, verbName, trigger, fields, regis
   // matches(db, row) — run the while predicate against one row after discovery.
   // The whileSql is still compiled (used in discovery queries), but callers that
   // need to verify a single row use this instead of recomposing the SQL inline.
-  const matches = (db, row) => {
+  const matches = (db: Db, row: Row) => {
     if (!whileSql) return true;
     const params = { ...(whileParams ?? {}), __rowId: row.id };
     const result = db.prepare(
@@ -239,8 +291,8 @@ export function validateScheduleTrigger({ name, verbName, trigger, fields, regis
   }
   return Object.freeze({
     kind: trigger.kind,
-    hertz: trigger.hertz,
-    intervalMs: trigger.intervalMs,
+    hertz: trigger.hertz!,
+    intervalMs: trigger.intervalMs!,
     whileSql,
     whileParams,
     whileAst,

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { createHash, randomBytes } from 'node:crypto';
 
 const TOKEN_BYTES = 32;
@@ -7,48 +6,106 @@ const MAX_LEASES_PER_STREAM = 16;
 const MAX_RETAINED_PER_LEASE = 16 * 1024 * 1024;
 const MAX_RETAINED_PER_STREAM = 64 * 1024 * 1024;
 
-function base64url(bytes) {
+interface Statement {
+  run(...args: unknown[]): { changes: number };
+  get(...args: unknown[]): any;
+  all(...args: unknown[]): any[];
+}
+
+interface Db {
+  prepare(sql: string): Statement;
+  exec(sql: string): unknown;
+}
+
+interface StreamRow {
+  id: string;
+  document_id: string;
+  principal_type: string;
+  principal_id: string;
+  created_at: string;
+  last_used_at: string;
+  expires_at: string;
+}
+
+interface LeaseRow {
+  id: string;
+  stream_id: string;
+  client_nonce_hash: string;
+  acknowledged_fence: number;
+  created_at: string;
+  expires_at: string;
+}
+
+interface PositionRow {
+  token: string;
+  lease_id: string;
+  issued_fence: number;
+  checkpoint_id: string;
+  visible_at_issue: number;
+  redactions: string;
+  created_at: string;
+  family_checkpoint?: string;
+}
+
+interface AuthoringPositionInput {
+  familyCheckpoint: unknown;
+  visibleAtIssue?: boolean;
+  redactions?: unknown[];
+}
+
+interface IssuedSnapshot {
+  id: string;
+  fence: number;
+}
+
+function base64url(bytes: Buffer): string {
   return bytes.toString('base64url');
 }
 
-function randomToken() {
+function randomToken(): string {
   return base64url(randomBytes(TOKEN_BYTES));
 }
 
-function now() {
+function now(): string {
   return new Date().toISOString();
 }
 
-function clientNonceHash(nonce) {
+function clientNonceHash(nonce: string): string {
   return createHash('sha256').update(nonce).digest('hex');
 }
 
-export function allocateStreamToken() {
+export function allocateStreamToken(): string {
   return randomToken();
 }
 
-export function allocateLeaseToken() {
+export function allocateLeaseToken(): string {
   return randomToken();
 }
 
-export function allocatePositionToken() {
+export function allocatePositionToken(): string {
   return randomToken();
 }
 
-export function allocateSnapshotToken() {
+export function allocateSnapshotToken(): string {
   return randomToken();
 }
 
-export function allocateClientNonce() {
+export function allocateClientNonce(): string {
   return randomToken();
 }
 
-export function hashClientNonce(nonce) {
+export function hashClientNonce(nonce: string): string {
   return clientNonceHash(nonce);
 }
 
-export function ensureStream({ db, prefix, documentId, principalType, principalId }) {
-  const existing = db.prepare(`SELECT id, expires_at FROM ${prefix}_authoring_stream WHERE document_id = ? AND principal_type = ? AND principal_id = ?`).get(documentId, principalType, principalId);
+export function ensureStream({ db, prefix, documentId, principalType, principalId }: {
+  db: Db;
+  prefix: string;
+  documentId: string;
+  principalType: string;
+  principalId: string;
+}): { id: string; created: boolean } {
+  const existing = db.prepare(`SELECT id, expires_at FROM ${prefix}_authoring_stream WHERE document_id = ? AND principal_type = ? AND principal_id = ?`).get(documentId, principalType, principalId) as StreamRow | undefined;
   if (existing) {
     const expiresAt = new Date(existing.expires_at).getTime();
     const hasLiveLease = db.prepare(`SELECT 1 FROM ${prefix}_authoring_lease WHERE stream_id = ? AND expires_at > ?`).get(existing.id, now());
@@ -67,8 +124,13 @@ export function ensureStream({ db, prefix, documentId, principalType, principalI
   return { id, created: true };
 }
 
-export function ensureLease({ db, prefix, streamId, clientNonceHash }) {
-  const existing = db.prepare(`SELECT id, acknowledged_fence, expires_at FROM ${prefix}_authoring_lease WHERE stream_id = ? AND client_nonce_hash = ?`).get(streamId, clientNonceHash);
+export function ensureLease({ db, prefix, streamId, clientNonceHash }: {
+  db: Db;
+  prefix: string;
+  streamId: string;
+  clientNonceHash: string;
+}): { id: string; created: boolean; acknowledgedFence: number } | null {
+  const existing = db.prepare(`SELECT id, acknowledged_fence, expires_at FROM ${prefix}_authoring_lease WHERE stream_id = ? AND client_nonce_hash = ?`).get(streamId, clientNonceHash) as LeaseRow | undefined;
   if (existing) {
     const expiresAt = new Date(existing.expires_at).getTime();
     if (expiresAt > Date.now()) {
@@ -80,7 +142,7 @@ export function ensureLease({ db, prefix, streamId, clientNonceHash }) {
     clearLeaseChildren(db, prefix, existing.id);
     db.prepare(`DELETE FROM ${prefix}_authoring_lease WHERE id = ?`).run(existing.id);
   }
-  const count = db.prepare(`SELECT COUNT(*) AS cnt FROM ${prefix}_authoring_lease WHERE stream_id = ?`).get(streamId).cnt;
+  const count = db.prepare(`SELECT COUNT(*) AS cnt FROM ${prefix}_authoring_lease WHERE stream_id = ?`).get(streamId).cnt as number;
   if (count >= MAX_LEASES_PER_STREAM) {
     const expired = db.prepare(`SELECT id FROM ${prefix}_authoring_lease WHERE stream_id = ? AND expires_at < ? ORDER BY expires_at ASC LIMIT 1`).get(streamId, now());
     if (expired) {
@@ -104,14 +166,21 @@ export const AUTHORING_STREAM_LIMITS = Object.freeze({
   maxRetainedPerStream: MAX_RETAINED_PER_STREAM,
 });
 
-function clearLeaseChildren(db, prefix, leaseId) {
+function clearLeaseChildren(db: Db, prefix: string, leaseId: string): void {
   db.prepare(`DELETE FROM ${prefix}_authoring_position WHERE lease_id = ?`).run(leaseId);
   db.prepare(`DELETE FROM ${prefix}_authoring_snapshot WHERE lease_id = ?`).run(leaseId);
   db.prepare(`DELETE FROM ${prefix}_authoring_checkpoint WHERE lease_id = ?`).run(leaseId);
 }
 
-export function resolveStream({ db, prefix, streamToken, documentId, principalType, principalId }) {
-  const stream = db.prepare(`SELECT * FROM ${prefix}_authoring_stream WHERE id = ? AND document_id = ? AND principal_type = ? AND principal_id = ?`).get(streamToken, documentId, principalType, principalId);
+export function resolveStream({ db, prefix, streamToken, documentId, principalType, principalId }: {
+  db: Db;
+  prefix: string;
+  streamToken: string;
+  documentId: string;
+  principalType: string;
+  principalId: string;
+}): StreamRow | null {
+  const stream = db.prepare(`SELECT * FROM ${prefix}_authoring_stream WHERE id = ? AND document_id = ? AND principal_type = ? AND principal_id = ?`).get(streamToken, documentId, principalType, principalId) as StreamRow | undefined;
   if (!stream) return null;
   const hasLiveLease = db.prepare(`SELECT 1 FROM ${prefix}_authoring_lease WHERE stream_id = ? AND expires_at > ?`).get(stream.id, now());
   const expiresAt = new Date(stream.expires_at).getTime();
@@ -123,8 +192,13 @@ export function resolveStream({ db, prefix, streamToken, documentId, principalTy
   return stream;
 }
 
-export function resolveLease({ db, prefix, leaseToken, streamId }) {
-  const lease = db.prepare(`SELECT * FROM ${prefix}_authoring_lease WHERE id = ? AND stream_id = ?`).get(leaseToken, streamId);
+export function resolveLease({ db, prefix, leaseToken, streamId }: {
+  db: Db;
+  prefix: string;
+  leaseToken: string;
+  streamId: string;
+}): LeaseRow | null {
+  const lease = db.prepare(`SELECT * FROM ${prefix}_authoring_lease WHERE id = ? AND stream_id = ?`).get(leaseToken, streamId) as LeaseRow | undefined;
   if (!lease) return null;
   const expiresAt = new Date(lease.expires_at).getTime();
   if (expiresAt <= Date.now()) {
@@ -140,13 +214,23 @@ export function resolveLease({ db, prefix, leaseToken, streamId }) {
   return lease;
 }
 
-export function resolvePosition({ db, prefix, positionToken, leaseId }) {
-  const position = db.prepare(`SELECT position.*, checkpoint.family_checkpoint AS family_checkpoint FROM ${prefix}_authoring_position AS position LEFT JOIN ${prefix}_authoring_checkpoint AS checkpoint ON checkpoint.id = position.checkpoint_id WHERE position.token = ? AND position.lease_id = ?`).get(positionToken, leaseId);
+export function resolvePosition({ db, prefix, positionToken, leaseId }: {
+  db: Db;
+  prefix: string;
+  positionToken: string;
+  leaseId: string;
+}): PositionRow | null {
+  const position = db.prepare(`SELECT position.*, checkpoint.family_checkpoint AS family_checkpoint FROM ${prefix}_authoring_position AS position LEFT JOIN ${prefix}_authoring_checkpoint AS checkpoint ON checkpoint.id = position.checkpoint_id WHERE position.token = ? AND position.lease_id = ?`).get(positionToken, leaseId) as PositionRow | undefined;
   if (!position) return null;
   return position;
 }
 
-function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }) {
+function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }: {
+  db: Db;
+  prefix: string;
+  leaseId: string;
+  familyCheckpoint: unknown;
+}): string {
   const serialized = JSON.stringify(familyCheckpoint);
   const existing = db.prepare(`SELECT id FROM ${prefix}_authoring_checkpoint WHERE lease_id = ? AND family_checkpoint = ? LIMIT 1`).get(leaseId, serialized);
   if (existing) return existing.id;
@@ -158,7 +242,15 @@ function ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint }) {
 // A position frame is DOCUMENT-scoped (issue #33): one frame names the whole
 // document's family checkpoint basis, not a block. The client's edit carries an
 // absolute UTF-16 offset against that basis.
-export function issuePositionFrame({ db, prefix, leaseId, fence, familyCheckpoint, visibleAtIssue, redactions = [] }) {
+export function issuePositionFrame({ db, prefix, leaseId, fence, familyCheckpoint, visibleAtIssue, redactions = [] }: {
+  db: Db;
+  prefix: string;
+  leaseId: string;
+  fence: number;
+  familyCheckpoint: unknown;
+  visibleAtIssue?: boolean;
+  redactions?: unknown[];
+}): { token: string } | null {
   const token = randomToken();
   const resolvedCheckpointId = ensureCheckpointForBasis({ db, prefix, leaseId, familyCheckpoint });
   const createdAt = now();
@@ -171,7 +263,12 @@ export function issuePositionFrame({ db, prefix, leaseId, fence, familyCheckpoin
   return { token };
 }
 
-export function issueSnapshot({ db, prefix, leaseId, fence }) {
+export function issueSnapshot({ db, prefix, leaseId, fence }: {
+  db: Db;
+  prefix: string;
+  leaseId: string;
+  fence: number;
+}): IssuedSnapshot | null {
   const id = randomToken();
   const issuedAt = now();
   if (!hasCapacity({ db, prefix, leaseId, bytes: rowBytes([id, leaseId, fence, issuedAt, null]) })) return null;
@@ -184,8 +281,14 @@ export function issueSnapshot({ db, prefix, leaseId, fence }) {
 // A snapshot is one coherent basis: every position must serialize to the same
 // family checkpoint, otherwise the dedup key could split into the pre/post-split
 // bases an action was never meant to straddle.
-export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions }) {
-  const attempt = () => {
+export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions }: {
+  db: Db;
+  prefix: string;
+  leaseId: string;
+  fence: number;
+  positions: AuthoringPositionInput[];
+}): { positionFrames: Array<{ token: string }>; snapshot: IssuedSnapshot } | null {
+  const attempt = (): { positionFrames: Array<{ token: string }>; snapshot: IssuedSnapshot } | null => {
     db.exec('SAVEPOINT authoring_snapshot_issue');
     try {
       if (positions.length > 0) {
@@ -194,7 +297,7 @@ export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions }
           throw new Error('inconsistent position family checkpoints');
         }
       }
-      const positionFrames = positions.map((position) => issuePositionFrame({ db, prefix, leaseId, fence, ...position }));
+      const positionFrames = positions.map((position) => issuePositionFrame({ db, prefix, leaseId, fence, ...position })) as Array<{ token: string }>;
       if (positionFrames.some((frame) => !frame)) throw new Error('capacity');
       const snapshot = issueSnapshot({ db, prefix, leaseId, fence });
       if (!snapshot) throw new Error('capacity');
@@ -205,7 +308,7 @@ export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions }
     } catch (error) {
       db.exec('ROLLBACK TO authoring_snapshot_issue');
       db.exec('RELEASE authoring_snapshot_issue');
-      if (error.message === 'capacity') return null;
+      if ((error as Error).message === 'capacity') return null;
       throw error;
     }
   };
@@ -221,7 +324,12 @@ export function issueAuthoringSnapshot({ db, prefix, leaseId, fence, positions }
   return attempt();
 }
 
-export function acknowledgeAndPruneSnapshot({ db, prefix, snapshotId, leaseId }) {
+export function acknowledgeAndPruneSnapshot({ db, prefix, snapshotId, leaseId }: {
+  db: Db;
+  prefix: string;
+  snapshotId: string;
+  leaseId: string;
+}): { fence: number; alreadyAcknowledged: boolean } | null {
   db.exec('SAVEPOINT authoring_snapshot_acknowledge');
   try {
   const existing = db.prepare(`SELECT id, lease_id, fence, acknowledged_at FROM ${prefix}_authoring_snapshot WHERE id = ? AND lease_id = ?`).get(snapshotId, leaseId);
@@ -267,12 +375,12 @@ export function acknowledgeAndPruneSnapshot({ db, prefix, snapshotId, leaseId })
   }
 }
 
-function rowBytes(values) {
-  return values.reduce((total, value) => total + (value === null || value === undefined ? 0 : Buffer.byteLength(String(value))), 0);
+function rowBytes(values: Array<string | number | null | undefined>): number {
+  return values.reduce<number>((total, value) => total + (value === null || value === undefined ? 0 : Buffer.byteLength(String(value))), 0);
 }
 
-function retainedBytes(db, prefix, leaseId = null, streamId = null) {
-  const total = (table, alias, columns) => {
+function retainedBytes(db: Db, prefix: string, leaseId: string | null = null, streamId: string | null = null): number {
+  const total = (table: string, alias: string, columns: string[]): number => {
     const filter = leaseId !== null ? ` WHERE ${alias}.lease_id = ?` : ` JOIN ${prefix}_authoring_lease AS lease ON lease.id = ${alias}.lease_id WHERE lease.stream_id = ?`;
     const parameter = leaseId ?? streamId;
     return Number(db.prepare(`SELECT COALESCE(SUM(${columns.map((column) => `COALESCE(length(CAST(${alias}.${column} AS BLOB)), 0)`).join(' + ')}), 0) AS bytes FROM ${prefix}_${table} AS ${alias}${filter}`).get(parameter).bytes);
@@ -291,7 +399,12 @@ function retainedBytes(db, prefix, leaseId = null, streamId = null) {
       ${leaseId !== null ? 'WHERE snapshot.lease_id = ?' : `JOIN ${prefix}_authoring_lease AS lease ON lease.id = snapshot.lease_id WHERE lease.stream_id = ?`}`).get(leaseId ?? streamId).bytes);
 }
 
-function hasCapacity({ db, prefix, leaseId, bytes = 0 }) {
+function hasCapacity({ db, prefix, leaseId, bytes = 0 }: {
+  db: Db;
+  prefix: string;
+  leaseId: string;
+  bytes?: number;
+}): boolean {
   const leaseBytes = retainedBytes(db, prefix, leaseId);
   if (leaseBytes + bytes > MAX_RETAINED_PER_LEASE) return false;
   const streamId = db.prepare(`SELECT stream_id FROM ${prefix}_authoring_lease WHERE id = ?`).get(leaseId)?.stream_id;
@@ -299,14 +412,14 @@ function hasCapacity({ db, prefix, leaseId, bytes = 0 }) {
   return retainedBytes(db, prefix, null, streamId) + bytes <= MAX_RETAINED_PER_STREAM;
 }
 
-export function clearStream(db, prefix, streamId) {
+export function clearStream(db: Db, prefix: string, streamId: string): void {
   const leases = db.prepare(`SELECT id FROM ${prefix}_authoring_lease WHERE stream_id = ?`).all(streamId);
   for (const lease of leases) clearLeaseChildren(db, prefix, lease.id);
   db.prepare(`DELETE FROM ${prefix}_authoring_lease WHERE stream_id = ?`).run(streamId);
   db.prepare(`DELETE FROM ${prefix}_authoring_stream WHERE id = ?`).run(streamId);
 }
 
-export function clearExpiredLeases(db, prefix) {
+export function clearExpiredLeases(db: Db, prefix: string): void {
   const expired = db.prepare(`SELECT id FROM ${prefix}_authoring_lease WHERE expires_at < ?`).all(now());
   for (const lease of expired) {
     clearLeaseChildren(db, prefix, lease.id);
@@ -316,12 +429,25 @@ export function clearExpiredLeases(db, prefix) {
   for (const stream of orphaned) db.prepare(`DELETE FROM ${prefix}_authoring_stream WHERE id = ?`).run(stream.id);
 }
 
-export function clearAuthoringState(db, prefix, documentId) {
+export function clearAuthoringState(db: Db, prefix: string, documentId: string): void {
   const streams = db.prepare(`SELECT id FROM ${prefix}_authoring_stream WHERE document_id = ?`).all(documentId);
   for (const stream of streams) clearStream(db, prefix, stream.id);
 }
 
-export function buildAuthoringEnvelope({ streamToken, leaseToken, snapshotToken, fence, positionFrames }) {
+export function buildAuthoringEnvelope({ streamToken, leaseToken, snapshotToken, fence, positionFrames }: {
+  streamToken: string;
+  leaseToken: string;
+  snapshotToken: string;
+  fence: number;
+  positionFrames: Array<{ token: string }>;
+}): {
+  version: 1;
+  stream: string;
+  lease: string;
+  snapshot: string;
+  acknowledgementFence: number;
+  positionFrames: Array<{ positionToken: string }>;
+} {
   return {
     version: 1,
     stream: streamToken,

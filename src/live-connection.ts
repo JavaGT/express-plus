@@ -1,4 +1,3 @@
-// @ts-nocheck
 // A live WebSocket connection — socket I/O, frame parsing/sending,
 // message routing, and the connection lifecycle.
 //
@@ -6,36 +5,69 @@
 // registration delegates to the injected fanout handle. The transport wiring
 // (WebSocket upgrade, CSWSH check, principalOf) stays in live.mjs.
 
+import type { Duplex } from 'node:stream';
+
 import { FrameSender, FrameParser } from './websocket.ts';
 import { authorizeSubscription, parseSubscribeMsg } from './live-admission.ts';
 import { failure, isWorkbenchFailure, sanitizeUnexpectedFailure } from './outcome.ts';
+import { anonymous } from './principal.ts';
+import type { Principal } from './principal.ts';
+import type { FrameworkLog } from './log.ts';
+import type { LiveConn, LiveDatabase, LiveEntityRecord, LiveFanoutHandle, MayVerb } from './live-fanout.ts';
+import type { LiveDeliveryCore } from './live-delivery-core.ts';
 
-function requestIdOf(msg) {
+function requestIdOf(msg: { requestId?: unknown }): number | string | undefined {
   const value = msg?.requestId;
-  if (Number.isSafeInteger(value) && value >= 0) return value;
+  if (typeof value === 'number' && Number.isSafeInteger(value) && value >= 0) return value;
   if (typeof value === 'string' && value.length > 0 && value.length <= 128) return value;
   return undefined;
 }
 
-export class LiveConnection {
-  #socket;
-  #sender;
-  #parser;
-  #id;
-  #closed = false;
-  #principal;
-  #fanout;
-  #core;
-  #resolveEntity;
-  #mayVerb;
-  #db;
-  #currentSeq;
-  #onClose;
-  #log;
-  #carets;
-  #coreAcs;
+interface ParsedFrame {
+  opcode: number;
+  payload?: Buffer;
+  closeCode?: number;
+  closeReason?: string;
+  error?: string;
+}
 
-  constructor(socket, id, { fanout, core = null, resolveEntity, mayVerb, db, currentSeq, onClose, log = null, carets = null } = {}) {
+interface CaretLiveHandle {
+  update(conn: LiveConn, message: unknown): Promise<unknown>;
+  clear(conn: LiveConn, message: unknown): Promise<unknown>;
+  removeConnection(conn: LiveConn, scope?: string): Promise<unknown>;
+}
+
+export interface LiveConnectionOptions {
+  fanout: LiveFanoutHandle;
+  core?: LiveDeliveryCore | null;
+  resolveEntity: ((name: string) => LiveEntityRecord | undefined | null) | null;
+  mayVerb: MayVerb | null;
+  db: LiveDatabase | null;
+  currentSeq: (scope: string) => number;
+  onClose: () => void;
+  log?: FrameworkLog | null;
+  carets?: CaretLiveHandle | null;
+}
+
+export class LiveConnection {
+  #socket: Duplex;
+  #sender: FrameSender;
+  #parser: FrameParser;
+  #id: string;
+  #closed = false;
+  #principal: Principal | null;
+  #fanout: LiveFanoutHandle;
+  #core: LiveDeliveryCore | null;
+  #resolveEntity: ((name: string) => LiveEntityRecord | undefined | null) | null;
+  #mayVerb: MayVerb | null;
+  #db: LiveDatabase | null;
+  #currentSeq: (scope: string) => number;
+  #onClose: (() => void) | null;
+  #log: FrameworkLog | null;
+  #carets: CaretLiveHandle | null;
+  #coreAcs: Map<string, AbortController>;
+
+  constructor(socket: Duplex, id: string, { fanout, core = null, resolveEntity, mayVerb, db, currentSeq, onClose, log = null, carets = null }: LiveConnectionOptions) {
     this.#socket = socket;
     this.#sender = new FrameSender();
     this.#parser = new FrameParser();
@@ -62,17 +94,17 @@ export class LiveConnection {
     socket.on('close', () => this.#close());
   }
 
-  get id() { return this.#id; }
-  get closed() { return this.#closed; }
-  get principal() { return this.#principal; }
+  get id(): string { return this.#id; }
+  get closed(): boolean { return this.#closed; }
+  get principal(): Principal | null { return this.#principal; }
 
-  close() { this.#close(); }
+  close(): void { this.#close(); }
 
-  setPrincipal(p) {
+  setPrincipal(p: Principal): void {
     this.#principal = p;
   }
 
-  send(data) {
+  send(data: unknown): void {
     if (this.#closed) return;
     try {
       this.#socket.write(this.#sender.text(JSON.stringify(data)));
@@ -81,8 +113,8 @@ export class LiveConnection {
     }
   }
 
-  error(workbenchFailure, requestId) {
-    const response = {
+  error(workbenchFailure: unknown, requestId?: number | string): void {
+    const response: Record<string, unknown> = {
       type: 'error',
       failure: isWorkbenchFailure(workbenchFailure)
         ? workbenchFailure
@@ -92,8 +124,8 @@ export class LiveConnection {
     this.send(response);
   }
 
-  #drain() {
-    const msgs = this.#parser.drainMessages();
+  #drain(): void {
+    const msgs = this.#parser.drainMessages() as ParsedFrame[];
     for (const msg of msgs) {
       if (msg.opcode === 0x8) {
         try { this.#socket.write(this.#sender.close(msg.closeCode ?? 1000, msg.closeReason)); } catch { /* ignore */ }
@@ -102,7 +134,7 @@ export class LiveConnection {
       }
       if (msg.opcode === 0x1) {
         try {
-          const parsed = JSON.parse(msg.payload.toString('utf-8'));
+          const parsed = JSON.parse(msg.payload?.toString('utf-8') ?? '');
           this.#handleMessage(parsed);
         } catch {
           this.error(failure('invalid-input', 'Invalid JSON.'));
@@ -119,7 +151,7 @@ export class LiveConnection {
     }
   }
 
-  #handleMessage(msg) {
+  #handleMessage(msg: Record<string, unknown>): void {
     if (!msg || typeof msg !== 'object' || Array.isArray(msg)) {
       this.error(failure('invalid-input', 'Message must be an object.'));
       return;
@@ -153,7 +185,7 @@ export class LiveConnection {
     }
   }
 
-  #handleUnsubscribe(msg) {
+  #handleUnsubscribe(msg: unknown): void {
     const normalized = parseSubscribeMsg(msg);
     if (normalized) {
       this.#carets?.removeConnection(this, normalized.scope).catch(() => {});
@@ -163,15 +195,15 @@ export class LiveConnection {
         ac.abort();
         this.#coreAcs.delete(normalized.scope);
       }
-      const response = { type: 'unsubscribed', scope: normalized.scope };
+      const response: Record<string, unknown> = { type: 'unsubscribed', scope: normalized.scope };
       if (normalized.interest.entity) response.entity = normalized.interest.entity;
       if (normalized.interest.id !== undefined) response.id = normalized.interest.id;
       this.send(response);
     }
   }
 
-  async #authorizeAndSubscribe(msg) {
-    const requestId = requestIdOf(msg);
+  async #authorizeAndSubscribe(msg: unknown): Promise<void> {
+    const requestId = requestIdOf(msg as { requestId?: unknown });
     const result = await authorizeSubscription(msg, this, {
       resolveEntity: this.#resolveEntity,
       mayVerb: this.#mayVerb,
@@ -184,8 +216,8 @@ export class LiveConnection {
     }
 
     const scope = result.scope;
-    let activateCore = null;
-    let coreAc = null;
+    let activateCore: (() => Promise<number | undefined>) | null = null;
+    let coreAc: AbortController | null = null;
 
     // Subscribe to the core for committed-event delivery BEFORE sending the
     // subscribed ack. If core subscription fails, we remove the fanout
@@ -198,7 +230,7 @@ export class LiveConnection {
       this.#coreAcs.set(scope, ac);
       try {
         const coreSubscription = await this.#core.subscribe({
-          principal: this.#principal,
+          principal: this.#principal ?? anonymous,
           scope,
           after: this.#currentSeq(scope),
           signal: ac.signal,
@@ -235,7 +267,7 @@ export class LiveConnection {
       if (this.#coreAcs.get(scope) !== ac) return;
     }
 
-    const response = {
+    const response: Record<string, unknown> = {
       type: 'subscribed',
       scope,
       currentSeq: this.#currentSeq(scope),
@@ -261,14 +293,14 @@ export class LiveConnection {
     this.#fanout.addSubscription(scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
   }
 
-  #close() {
+  #close(): void {
     if (this.#closed) return;
     this.#closed = true;
     this.#cleanup();
     try { this.#socket.destroy(); } catch { /* ignore */ }
   }
 
-  #cleanup() {
+  #cleanup(): void {
     for (const ac of this.#coreAcs.values()) {
       ac.abort();
     }

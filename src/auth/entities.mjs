@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The framework-provided auth entities: User, Session, Credential, and Inbox.
 //
 // session.mjs (the binding exemplar) imports these FROM the framework rather than
@@ -22,14 +21,22 @@
 import { randomBytes, createHash } from 'node:crypto';
 import { entity } from '../entity/compile.mjs';
 import { text, hash, ref, date, number } from '../field.mjs';
-import { scope } from '../scope.mjs';
+import { scope,                         } from '../scope.mjs';
 import { never } from '../scope-sql.mjs';
 import { grant, deny, read, write, subscribe } from '../grant.mjs';
 import { schedule, schedulerSource } from '../schedule.mjs';
 import { config } from '../config.mjs';
 import { generateSecret, generateBackupCodes } from './totp.mjs';
+                                                 
 
-function sha256hex(s) {
+// The check-execution context the grant `.can` bodies and `checks` functions
+// receive: `is` runs a named check and resolves its boolean result. The scope
+// predicate half (compiled to SQL) is never awaited; the `.can` half is.
+                     
+                                             
+ 
+
+function sha256hex(s        )         {
   return createHash('sha256').update(s).digest('hex');
 }
 
@@ -37,7 +44,7 @@ function sha256hex(s) {
 // by trusted server code (login lookup, principal hydration), never dispatched
 // to a request principal. The most fail-closed valid grant: a never() scope (no
 // row is request-visible) whose .can denies every capability.
-const notRequestReadable = (which) =>
+const notRequestReadable = (which        )                     =>
   scope(() => never()).can(() =>
     deny(`${which} is a framework auth entity, reached only by trusted server ` +
       `code (the unscoped query API), never request-dispatched`));
@@ -69,7 +76,7 @@ export const User = entity('User', {
 
 const SessionCreatedAt = date();
 const sessionExpiryTrigger = schedule.after(SessionCreatedAt, config.sessionDurationMs, { key: 'expiry' });
-const sessionExpirySchedulerSource = schedulerSource('Session', 'remove', sessionExpiryTrigger.key);
+const sessionExpirySchedulerSource = schedulerSource('Session', 'remove', sessionExpiryTrigger.key );
 
 // The two session intents are a CLOSED set, each a named whole mapped to the one
 // canonical stored row { token, principalType, principalId, createdAt }:
@@ -79,7 +86,18 @@ const sessionExpirySchedulerSource = schedulerSource('Session', 'remove', sessio
 // link's share token). Anything else is rejected — fail closed. This create
 // policy mints server-side cells it owns, so it does not run validateMutation;
 // it composes the entity's trusted `insert` core (one write path).
-function mintSession(payload, { insert, mintToken }) {
+                              
+                                                    
+                      
+ 
+
+                          
+                   
+                
+                  
+ 
+
+function mintSession(payload                                   , { insert, mintToken }                    )          {
   const token = mintToken();
   const now = Date.now();
   if (payload && typeof payload.userId !== 'undefined') {
@@ -111,10 +129,10 @@ export const Session = entity('Session', {
     // This is the sole normal-grant allowance for this otherwise private entity.
     // The source is derived from its declared remove schedule, and durable
     // beforeProjection admission still rechecks its row, due time, and payload.
-    expiryReaper: ({ principal }) =>
+    expiryReaper: ({ principal }                                  ) =>
       principal?.type === 'system' && principal.attributes?.source === sessionExpirySchedulerSource,
   },
-  grant: () => [scope(() => never()).can(async ({ is }) =>
+  grant: () => [scope(() => never()).can(async ({ is }           ) =>
     (await is.expiryReaper())
       ? grant(write)
       : deny('Session is a framework auth entity, reached only by trusted server code or its declared expiry scheduler'))],
@@ -155,10 +173,10 @@ export const Inbox = entity('Inbox', {
     // admitsEffects handshake succeeds. Inbox is itself an effect sink, so its
     // row grant must confer the write capability required by the canonical
     // create admission pass; ordinary recipients remain read/subscribe-only.
-    effectMutation: ({ principal }) =>
+    effectMutation: ({ principal }                                  ) =>
       principal?.type === 'system' && typeof principal.attributes?.effect === 'string',
   },
-  grant: () => [scope(({ is }) => is.recipient()).can(async ({ is }) =>
+  grant: () => [scope(({ is }           ) => is.recipient()).can(async ({ is }           ) =>
     (await is.effectMutation()) ? grant(write) : grant(read, subscribe))],
   // Inbox EXISTS to receive projected notifications from other entities' effects
   // (e.g. Doc's collaboratorAdded → Inbox invite row). It admits effect
@@ -213,7 +231,22 @@ export const Inbox = entity('Inbox', {
 //   - createdBy    — the User who created this invitation
 //   - createdAt    — timestamp
 
-function mintInvitation(payload, { insert }) {
+                         
+                                                    
+ 
+
+                             
+                 
+                       
+                   
+               
+                       
+                    
+                      
+                     
+ 
+
+function mintInvitation(payload                   , { insert }               )          {
   const token = payload.token || randomBytes(32).toString('base64url');
   const now = new Date();
   return insert({
@@ -278,7 +311,15 @@ export const Credential = entity('Credential', {
 //   - createdBy  — the User who created this key
 //   - expiresAt  — optional epoch ms expiration
 //   - createdAt  — timestamp of creation
-function mintApiKey(payload, { insert }) {
+                         
+               
+                       
+                 
+                     
+                      
+ 
+
+function mintApiKey(payload               , { insert }               )          {
   const plainToken = randomBytes(32).toString('base64url');
   const tokenHash = sha256hex(plainToken);
   const prefix = plainToken.slice(0, 8);
@@ -292,7 +333,7 @@ function mintApiKey(payload, { insert }) {
     createdBy: payload.createdBy,
     expiresAt: payload.expiresAt ?? null,
     createdAt: now,
-  });
+  })                           ;
   // The plain token is returned ONCE alongside the row and never stored.
   return { ...row, plainToken };
 }
@@ -323,17 +364,21 @@ export const ApiKey = entity('ApiKey', {
 // Like User/Session/Credential/Invitation/ApiKey, TwoFactor is not
 // request-readable: it is reached only by trusted server code (the auth routes),
 // never exposed through the entity CRUD API.
-function enrollTotp(payload, { insert }) {
+                       
+                   
+                  
+ 
+
+function enrollTotp(payload             , { insert }               )          {
   const { secret, uri } = generateSecret(payload.username);
   const { plainCodes, hashedCodes } = generateBackupCodes(8);
-  const now = new Date();
   const row = insert({
     userId: payload.userId,
     secret,
     backupCodes: JSON.stringify(hashedCodes),
     enabled: 0,
     verifiedAt: null,
-  });
+  })                           ;
   return { ...row, secret, uri, backupCodes: plainCodes };
 }
 

@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Schedule module — time-driven sources (ADR #10, ADR-0002) and constructor
 // declarations. Runtime functions (discovery, admission, clock dispatch, receipt
 // management) live in schedule-runtime.mjs and are re-exported here.
@@ -34,9 +33,9 @@ function validateWith(withValue         , context        )              {
   if (withValue === null) return null;
   if (typeof withValue === 'function') {
     if (isDeclaredAsync(withValue)) throw new Error(`${context}: with must be synchronous`);
-    return withValue;
+    return withValue                                   ;
   }
-  if (typeof withValue === 'object' && !Array.isArray(withValue)) return withValue;
+  if (typeof withValue === 'object' && !Array.isArray(withValue)) return withValue                           ;
   throw new Error(`${context}: 'with' must be an object or a function ({row}) => obj`);
 }
 
@@ -46,7 +45,7 @@ function validateOptionalFunction(value         , context        , option       
     throw new Error(`${context}: ${option} must be a function ${signature}`);
   }
   if (isDeclaredAsync(value)) throw new Error(`${context}: ${option} must be synchronous`);
-  return value;
+  return value                                   ;
 }
 
 function validateTriggerKey(value         , context        )                     {
@@ -66,8 +65,7 @@ function validateTriggerKey(value         , context        )                    
                  
  
 
-                                
-                      
+                                  
                           
                  
                         
@@ -75,7 +73,11 @@ function validateTriggerKey(value         , context        )                    
                     
  
 
-                                                                
+                                                               
+                      
+ 
+
+                                                                  
                          
                 
  
@@ -165,7 +167,7 @@ export function simulate({ hz, step, when }                  = {})              
   if (typeof step !== 'function') {
     throw new Error('simulate: step must be a function ({state, dt, row}) => ({state, events})');
   }
-  return Object.freeze({ kind: 'simulate', hz, step, when: when ?? undefined });
+  return Object.freeze({ kind: 'simulate', hz, step: step                                   , when: (when ?? undefined)                                                  });
 }
 
                            

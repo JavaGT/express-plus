@@ -1,4 +1,3 @@
-// @ts-nocheck
 // FTS (full-text search) side-table strategy.
 //
 // A field declared with `text({ indexed: 'fts' })` gets an FTS5 virtual table
@@ -9,29 +8,47 @@
 // Zero runtime dependencies — FTS5 is a built-in SQLite extension.
 
 import * as eventHandle from './event-handle.mjs';
+                                                             
+                                            
 
-function ftsTableName(entityName, fieldName) {
+function ftsTableName(entityName        , fieldName        )         {
   return `${entityName}_${fieldName}_fts`;
 }
 
-function ftsOwnerCol(entityName) {
+function ftsOwnerCol(entityName        )         {
   return `${entityName}_id`;
 }
 
-function ftsDDL(entityName, fieldName) {
+function ftsDDL(entityName        , fieldName        )         {
   const table = ftsTableName(entityName, fieldName);
   const ownerCol = ftsOwnerCol(entityName);
   return `CREATE VIRTUAL TABLE IF NOT EXISTS ${table} USING fts5(${fieldName}, ${ownerCol} UNINDEXED);`;
 }
 
-function ftsProjectionApply({ entityName, fieldEntries, handle, event, db }) {
+                              
+                            
+ 
+
+                    
+                                                    
+ 
+
+                                
+                              
+                                                                 
+                                       
+                           
+                        
+ 
+
+function ftsProjectionApply({ entityName, fieldEntries, handle, event, db }                      )          {
   const id = event.data?.id;
   if (id === undefined || id === null) return false;
 
   if (handle.kind === eventHandle.EventKind.created) {
     let applied = false;
     for (const [fieldName] of fieldEntries) {
-      const value = event.data[fieldName];
+      const value = event.data?.[fieldName];
       if (value === undefined) continue;
       const table = ftsTableName(entityName, fieldName);
       const ownerCol = ftsOwnerCol(entityName);
@@ -51,7 +68,7 @@ function ftsProjectionApply({ entityName, fieldEntries, handle, event, db }) {
       // Delete existing FTS rows for this entity row (there should be at most one),
       // then insert the new value if it's non-null.
       db.prepare(`DELETE FROM ${table} WHERE ${ownerCol} = :entity_id`).run({ entity_id: String(id) });
-      const value = event.data[fieldName];
+      const value = event.data?.[fieldName];
       if (value !== null && value !== undefined && value !== '') {
         db.prepare(`INSERT INTO ${table} (${fieldName}, ${ownerCol}) VALUES (:field_val, :entity_id)`)
           .run({ field_val: value, entity_id: String(id) });
@@ -75,7 +92,7 @@ function ftsProjectionApply({ entityName, fieldEntries, handle, event, db }) {
 }
 
 const FTS_STRATEGY = Object.freeze({
-  matches: (descriptor) => descriptor.indexed === 'fts',
+  matches: (descriptor                    ) => descriptor.indexed === 'fts',
   eventTypes: () => [], // no additional event types — piggybacks on main CRUD events
   mutateHandlers: () => ({}), // no dispatch-level mutations — FTS is synced in projection
   projectionApply: ftsProjectionApply,

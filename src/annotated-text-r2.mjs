@@ -1,7 +1,6 @@
-// @ts-nocheck
 import { ValidationError } from './field-strategy.mjs';
 
-function validateJsonInput(value, seen = new WeakSet()) {
+function validateJsonInput(value     , seen = new WeakSet     ()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new Error('JSON number must be finite');
@@ -21,12 +20,12 @@ function validateJsonInput(value, seen = new WeakSet()) {
     return;
   }
   if (Object.getPrototypeOf(value) !== Object.prototype) throw new Error('JSON object must be plain');
-  for (const [key, item] of Object.entries(value)) {
+  for (const [, item] of Object.entries(value)) {
     validateJsonInput(item, seen);
   }
 }
 
-function freezeJson(value, seen = new WeakSet()) {
+function freezeJson(value     , seen = new WeakSet     ()) {
   if (value === null || typeof value === 'string' || typeof value === 'boolean') return value;
   if (typeof value === 'number') {
     if (!Number.isFinite(value)) throw new Error('JSON number must be finite');
@@ -49,9 +48,9 @@ function freezeJson(value, seen = new WeakSet()) {
   return Object.freeze(value);
 }
 
-export function frozenJsonSnapshot(value) {
+export function frozenJsonSnapshot(value     ) {
   validateJsonInput(value);
-  let snapshot;
+  let snapshot     ;
   try {
     snapshot = JSON.parse(JSON.stringify(value));
   } catch {
@@ -60,7 +59,7 @@ export function frozenJsonSnapshot(value) {
   return freezeJson(snapshot);
 }
 
-export function assertR2BlockSplitPayload(name, fieldName, payload) {
+export function assertR2BlockSplitPayload(name        , fieldName        , payload     ) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       Object.keys(payload).length !== 4 ||
       !Object.hasOwn(payload, 'version') || !Object.hasOwn(payload, 'id') ||
@@ -91,6 +90,6 @@ export function assertR2BlockSplitPayload(name, fieldName, payload) {
   });
 }
 
-export function deriveBlockPosition(index) {
+export function deriveBlockPosition(index        ) {
   return index.toString(36).toLowerCase().padStart(13, '0');
 }

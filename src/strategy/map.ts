@@ -1,11 +1,32 @@
-// @ts-nocheck
+import type { Capability } from '../grant.ts';
 import { read, write } from '../grant.ts';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from '../scope-sql.ts';
 import * as eventHandles from '../event-handle.ts';
 import { scopeOf } from '../scope-handle.ts';
 import { authorizeFieldOp, dispatchFieldMutation, mapMutationAction } from './shared.ts';
+import type {
+  FieldDescriptor,
+  FieldEntries,
+  MutateHandlerInput,
+  SideTableHandleInput,
+  SideTableProjectionInput,
+  SideTableStrategy,
+} from './index.ts';
 
-function mapHandle({ record, entityName, fieldName, descriptor, row, principal, dispatch, db, entityOf }) {
+// authorizeFieldOp types its capability param as string, but the row-grant
+// engine compares capability tokens by identity (read/write are frozen
+// Capability singletons). Forward the token through the narrower seam.
+function authorizeField(
+  record: unknown,
+  fieldName: string,
+  capability: Capability,
+  row: unknown,
+  principal: unknown,
+): Promise<void> {
+  return authorizeFieldOp(record, fieldName, capability as unknown as string, row, principal);
+}
+
+function mapHandle({ record, entityName, fieldName, descriptor, row, principal, dispatch, db, entityOf }: SideTableHandleInput) {
   const table = membershipTable(entityName, fieldName);
   const ownerCol = membershipOwnerCol(entityName);
   const oid = String(row.id);
@@ -15,19 +36,19 @@ function mapHandle({ record, entityName, fieldName, descriptor, row, principal, 
     : null;
   const hasRole = Array.isArray(descriptor.roles) && descriptor.roles.length > 0;
 
-  const probe = (memberId) =>
+  const probe = (memberId: unknown) =>
     db
       .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
       .get({ owner: oid, member: String(memberId) });
 
-  const probeRow = (memberId) =>
+  const probeRow = (memberId: unknown) =>
     db
       .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
       .get({ owner: oid, member: String(memberId) });
 
   return {
-    set: async (memberId, { role } = {}) => {
-      await authorizeFieldOp(record, fieldName, write, row, principal);
+    set: async (memberId: unknown, { role }: { role?: unknown } = {}) => {
+      await authorizeField(record, fieldName, write, row, principal);
       const mid = String(memberId);
       const existing = probeRow(memberId);
       const operation =
@@ -43,8 +64,8 @@ function mapHandle({ record, entityName, fieldName, descriptor, row, principal, 
         ...action,
       });
     },
-    remove: async (memberId) => {
-      await authorizeFieldOp(record, fieldName, write, row, principal);
+    remove: async (memberId: unknown) => {
+      await authorizeField(record, fieldName, write, row, principal);
       const mid = String(memberId);
       if (!probe(memberId)) return;
       const action = mapMutationAction({
@@ -55,15 +76,15 @@ function mapHandle({ record, entityName, fieldName, descriptor, row, principal, 
         ...action,
       });
     },
-    has: (memberId) => probe(memberId) !== undefined,
-    get: (memberId) => {
+    has: (memberId: unknown) => probe(memberId) !== undefined,
+    get: (memberId: unknown) => {
       const mid = String(memberId);
       return db
         .prepare(`SELECT * FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`)
         .get({ owner: oid, member: mid }) ?? undefined;
     },
     toArray: async () => {
-      await authorizeFieldOp(record, fieldName, read, row, principal);
+      await authorizeField(record, fieldName, read, row, principal);
       const selectCols = hasRole ? `${MEMBER_COLUMN} AS member_id, role` : `${MEMBER_COLUMN} AS member_id`;
       const rows = db
         .prepare(`SELECT ${selectCols} FROM ${table} WHERE ${ownerCol} = :owner`)
@@ -72,7 +93,7 @@ function mapHandle({ record, entityName, fieldName, descriptor, row, principal, 
       if (!target) return rows.map((r) => [null, hasRole ? r.role : null]);
       const targetName = target.name;
       const memberIds = rows.map((r) => r.member_id);
-      const members = [];
+      const members: Record<string, unknown>[] = [];
       for (let i = 0; i < memberIds.length; i += 500) {
         const batch = memberIds.slice(i, i + 500);
         const placeholders = batch.map(() => '?').join(',');
@@ -81,17 +102,17 @@ function mapHandle({ record, entityName, fieldName, descriptor, row, principal, 
         ).all(...batch));
       }
       for (const m of members) target.hydrate(m, principal);
-      const memberMap = Object.fromEntries(members.map((m) => [m.id, m]));
-      return rows.map((r) => [memberMap[r.member_id] ?? null, hasRole ? r.role : null]);
+      const memberMap = Object.fromEntries(members.map((m) => [m.id as string, m]));
+      return rows.map((r) => [memberMap[r.member_id as string] ?? null, hasRole ? r.role : null]);
     },
   };
 }
 
-function mapMutateHandlers(entityName, fieldEntries) {
-  const handlers = {};
+function mapMutateHandlers(entityName: string, fieldEntries: FieldEntries): Record<string, (input: MutateHandlerInput) => unknown> {
+  const handlers: Record<string, (input: MutateHandlerInput) => unknown> = {};
   for (const [mapField, descriptor] of fieldEntries) {
     const hasRole = Array.isArray(descriptor.roles) && descriptor.roles.length > 0;
-    const requireOwnerMember = (payload) => {
+    const requireOwnerMember = (payload: Record<string, unknown> | null | undefined) => {
       const { owner, member } = payload ?? {};
       if (owner == null || member == null) {
         throw Object.assign(
@@ -108,7 +129,7 @@ function mapMutateHandlers(entityName, fieldEntries) {
         handle,
         type: handle.type,
         scope: scopeOf(entityName, owner).key,
-        data: { owner, member, role: hasRole ? (payload.role ?? null) : undefined },
+        data: { owner, member, role: hasRole ? (payload?.role ?? null) : undefined },
       }];
     };
     handlers[`${entityName}.${mapField}.setRole`] = ({ payload }) => {
@@ -121,7 +142,7 @@ function mapMutateHandlers(entityName, fieldEntries) {
         handle,
         type: handle.type,
         scope: scopeOf(entityName, owner).key,
-        data: { owner, member, role: payload.role ?? null },
+        data: { owner, member, role: payload?.role ?? null },
       }];
     };
     handlers[`${entityName}.${mapField}.remove`] = ({ payload }) => {
@@ -138,16 +159,17 @@ function mapMutateHandlers(entityName, fieldEntries) {
   return handlers;
 }
 
-function mapProjectionApply({ entityName, fieldEntries, handle, event, db }) {
+function mapProjectionApply({ entityName, fieldEntries, handle, event, db }: SideTableProjectionInput): boolean {
   for (const [mapField, descriptor] of fieldEntries) {
-    if (handle.field !== mapField || handle.kind !== eventHandles.EventKind.native) continue;
+    if (handle.kind !== eventHandles.EventKind.native) continue;
+    if (handle.field !== mapField) continue;
     const sideTable = membershipTable(entityName, mapField);
     const ownerCol = membershipOwnerCol(entityName);
     const hasRole = Array.isArray(descriptor.roles) && descriptor.roles.length > 0;
     if (handle.nativeName === 'added') {
       const cols = [ownerCol, MEMBER_COLUMN];
       const vals = [':owner', ':member'];
-      const params = { owner: String(event.data?.owner), member: String(event.data?.member) };
+      const params: Record<string, unknown> = { owner: String(event.data?.owner), member: String(event.data?.member) };
       if (hasRole) { cols.push('role'); vals.push(':role'); params.role = event.data?.role ?? null; }
       db.prepare(`INSERT INTO ${sideTable} (${cols.join(', ')}) VALUES (${vals.join(', ')})`).run(params);
       return true;
@@ -166,7 +188,7 @@ function mapProjectionApply({ entityName, fieldEntries, handle, event, db }) {
   return false;
 }
 
-function mapDDL(entityName, fieldName, descriptor) {
+function mapDDL(entityName: string, fieldName: string, descriptor: FieldDescriptor): string {
   const tableName = `${entityName}_${fieldName}`;
   const ownerCol = `${entityName}_id`;
   const cols = [`${ownerCol} TEXT NOT NULL`, 'member_id TEXT NOT NULL'];
@@ -177,10 +199,10 @@ function mapDDL(entityName, fieldName, descriptor) {
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
-const MAP_SIDE_TABLE_STRATEGY = Object.freeze({
-  matches: (descriptor) => descriptor.kind === 'store' && descriptor.type === 'map',
+const MAP_SIDE_TABLE_STRATEGY: SideTableStrategy = Object.freeze({
+  matches: (descriptor: FieldDescriptor) => descriptor.kind === 'store' && descriptor.type === 'map',
   handle: mapHandle,
-  eventTypes: (entityName, fieldEntries) => fieldEntries.flatMap(([fieldName]) => [
+  eventTypes: (entityName: string, fieldEntries: FieldEntries) => fieldEntries.flatMap(([fieldName]) => [
     eventHandles.native(entityName, fieldName, 'added').type,
     eventHandles.native(entityName, fieldName, 'roleChanged').type,
     eventHandles.native(entityName, fieldName, 'removed').type,

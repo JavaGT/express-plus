@@ -1,12 +1,46 @@
-// @ts-nocheck
 import { txn } from './driver.mjs';
-import { isPrincipalSnapshotDeclaration } from './principal-snapshot-declaration.mjs';
+                                            
+import { isPrincipalSnapshotDeclaration,                                   } from './principal-snapshot-declaration.mjs';
 
-export function createPrincipalSnapshotTransaction(app) {
-  const registeredDeclarations = new Map();
-  let wakeHook = null;
+                                             
+               
+             
+ 
 
-  function registerDeclaration(declaration) {
+                                      
+               
+                                                                                                     
+ 
+
+                                         
+                                            
+                                        
+          
+
+                                               
+                                                                                
+                                                                        
+                                                             
+                                                                     
+ 
+
+                                         
+                                            
+                        
+                      
+ 
+
+                                
+                                  
+                                                   
+                                                               
+ 
+
+export function createPrincipalSnapshotTransaction(app                      )                               {
+  const registeredDeclarations = new Map                                      ();
+  let wakeHook                                   = null;
+
+  function registerDeclaration(declaration                              ) {
     if (!isPrincipalSnapshotDeclaration(declaration)) {
       throw new Error('Only principal snapshot declarations can be registered');
     }
@@ -16,15 +50,16 @@ export function createPrincipalSnapshotTransaction(app) {
     registeredDeclarations.set(declaration.name, declaration);
   }
 
-  function setWakeHook(hook) {
+  function setWakeHook(hook                                  ) {
     wakeHook = hook;
   }
 
-  function transaction(callback) {
+  function transaction(callback                                      )                   {
     if (typeof callback !== 'function') {
       return Promise.reject(new TypeError('principalSnapshots.transaction requires a synchronous callback function'));
     }
-    if (!app.db) {
+    const db = app.db;
+    if (!db) {
       return Promise.reject(new Error('principalSnapshots.transaction requires a database (app.db)'));
     }
     if (app._principalSnapshotTxActive) {
@@ -34,27 +69,28 @@ export function createPrincipalSnapshotTransaction(app) {
     return app.writeQueue.run(async () => {
       app._principalSnapshotTxActive = true;
       let committed = false;
-      let result;
-      let invalidations;
+      let result         ;
+      let invalidations                                                        ;
       try {
-        result = await txn(app.db, async () => {
+        result = await txn(db, async () => {
           invalidations = new Map();
-          const { tx, expire } = createTxObject(app.db, invalidations, registeredDeclarations);
+          const { tx, expire } = createTxObject(db, invalidations, registeredDeclarations);
 
-          let cbResult;
+          let cbResult         ;
           try {
             cbResult = callback(tx);
           } finally {
             expire();
           }
 
-          if (cbResult !== null && cbResult !== undefined && (typeof cbResult === 'object' || typeof cbResult === 'function') && typeof cbResult.then === 'function') {
+          const checked = cbResult                                         ;
+          if (checked !== null && checked !== undefined && (typeof checked === 'object' || typeof checked === 'function') && typeof checked.then === 'function') {
             throw new TypeError('principalSnapshots.transaction callback must not return a Promise; synchronous only');
           }
 
           for (const [, inv] of invalidations) {
             const { declaration, recipientType, recipientId } = inv;
-            app.db.prepare(
+            db.prepare(
               `INSERT INTO _PrincipalSnapshotRevision (declaration, principalType, principalId, revision) VALUES (?, ?, ?, 1)
                ON CONFLICT(declaration, principalType, principalId) DO UPDATE SET revision = revision + 1`
             ).run(declaration.name, recipientType, recipientId);
@@ -89,11 +125,15 @@ export function createPrincipalSnapshotTransaction(app) {
   };
 }
 
-function createTxObject(db, invalidations, registeredDeclarations) {
+function createTxObject(
+  db          ,
+  invalidations                                            ,
+  registeredDeclarations                                           ,
+)                                              {
   const state = { expired: false };
-  const tx = {
+  const tx                      = {
     db,
-    invalidate(declaration, recipient) {
+    invalidate(declaration                              , recipient                            ) {
       if (state.expired) {
         throw new Error('cannot invalidate after transaction callback returns');
       }

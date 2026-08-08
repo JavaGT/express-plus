@@ -1,7 +1,6 @@
-// @ts-nocheck
 import { ValidationError } from './field-strategy.ts';
 
-export function assertR5AnnotationDetachPayload(name, fieldName, payload) {
+export function assertR5AnnotationDetachPayload(name: string, fieldName: string, payload: any) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       Object.keys(payload).length !== 4 ||
       !Object.hasOwn(payload, 'version') || !Object.hasOwn(payload, 'id') || !Object.hasOwn(payload, 'expected') || !Object.hasOwn(payload, 'operation')) {

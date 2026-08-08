@@ -1,4 +1,3 @@
-// @ts-nocheck
 // workbench-migrations.mjs — package-owned versioned migration lane.
 //
 // Sol ruling (issue JavaGT/scope#184, comment 5175490719): the authoring
@@ -22,11 +21,13 @@ const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS _WorkbenchMigration (
 
 const PREFIX_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-function tableExists(db, name) {
+                                            
+
+function tableExists(db          , name        ) {
   return Boolean(db.prepare('SELECT 1 FROM sqlite_master WHERE type = \'table\' AND name = ?').get(name));
 }
 
-function rebuildAuthoringFamily(db, prefix) {
+function rebuildAuthoringFamily(db          , prefix        ) {
   if (PREFIX_IDENTIFIER.test(prefix) === false) {
     throw new Error(`invalid authoring stream table prefix: ${prefix}`);
   }
@@ -37,7 +38,7 @@ function rebuildAuthoringFamily(db, prefix) {
   // rebuilt: the migration is a legacy-shape upgrader and a fresh DB's data
   // must survive v1 untouched.
   const positionColumns = new Set(
-    db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => r.name)
+    db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => r.name          )
   );
   const hasCanonicalPosition = positionColumns.has('checkpoint_id') && !positionColumns.has('family_checkpoint');
   if (hasCanonicalPosition) return;
@@ -107,13 +108,20 @@ function rebuildAuthoringFamily(db, prefix) {
   );
 }
 
-export const WORKBENCH_MIGRATIONS = Object.freeze([
+                           
+                  
+                           
+                                                           
+  
+
+export const WORKBENCH_MIGRATIONS                                = Object.freeze([
   {
     version: 1,
     transaction: 'exclusive',
     up(db, { now = () => new Date().toISOString() } = {}) {
+      void now;
       for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_authoring_position'").all()) {
-        const name = row.name;
+        const name = row.name          ;
         if (!name.endsWith('_authoring_position')) continue;
         const prefix = name.slice(0, -'_authoring_position'.length);
         rebuildAuthoringFamily(db, prefix);
@@ -133,7 +141,7 @@ export const WORKBENCH_MIGRATIONS = Object.freeze([
     transaction: 'exclusive',
     up(db) {
       for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_authoring_lease'").all()) {
-        const name = row.name;
+        const name = row.name          ;
         if (!name.endsWith('_authoring_lease')) continue;
         const prefix = name.slice(0, -'_authoring_lease'.length);
         if (PREFIX_IDENTIFIER.test(prefix) === false) {
@@ -159,30 +167,31 @@ export const WORKBENCH_MIGRATIONS = Object.freeze([
     transaction: 'exclusive',
     up(db) {
       for (const row of db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name GLOB '*_authoring_position'").all()) {
-        const columns = new Set(db.prepare(`PRAGMA table_info(${row.name})`).all().map((column) => column.name));
+        const name = row.name          ;
+        const columns = new Set(db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name          ));
         if (!columns.has('redactions')) db.exec(`ALTER TABLE ${row.name} ADD COLUMN redactions TEXT NOT NULL DEFAULT '[]' CHECK (json_valid(redactions))`);
       }
     },
   },
 ]);
 
-export function ensureWorkbenchMigrationTable(db) {
+export function ensureWorkbenchMigrationTable(db          ) {
   db.exec(LEDGER_DDL);
 }
 
-export function appliedWorkbenchVersion(db) {
+export function appliedWorkbenchVersion(db          )         {
   ensureWorkbenchMigrationTable(db);
-  const row = db.prepare('SELECT MAX(version) AS v FROM _WorkbenchMigration').get();
+  const row = db.prepare('SELECT MAX(version) AS v FROM _WorkbenchMigration').get()                              ;
   return row?.v ?? 0;
 }
 
-export function runWorkbenchMigrations(db, { now = () => new Date().toISOString() } = {}) {
+export function runWorkbenchMigrations(db          , { now = () => new Date().toISOString() }                         = {}) {
   // Read-only pre-flight: avoid opening the exclusive transaction when the
   // ledger already records every migration. This never creates the table, so
   // a fresh DB (no ledger, no migration work) takes the same early return.
   const hasLedger = tableExists(db, '_WorkbenchMigration');
   if (hasLedger) {
-    const current = db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM _WorkbenchMigration').get().v;
+    const current = (db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM _WorkbenchMigration').get()                 ).v;
     if (WORKBENCH_MIGRATIONS.every((migration) => migration.version <= current)) return;
   }
   // One exclusive transaction for the entire lane: ledger creation, version
@@ -191,7 +200,7 @@ export function runWorkbenchMigrations(db, { now = () => new Date().toISOString(
   db.exec('BEGIN EXCLUSIVE');
   try {
     ensureWorkbenchMigrationTable(db);
-    const current = db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM _WorkbenchMigration').get().v;
+    const current = (db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM _WorkbenchMigration').get()                 ).v;
     for (const migration of WORKBENCH_MIGRATIONS) {
       if (migration.version <= current) continue;
       migration.up(db, { now });

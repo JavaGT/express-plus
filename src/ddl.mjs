@@ -1,4 +1,3 @@
-// @ts-nocheck
 // ddl.mjs — generate CREATE TABLE statements for compiled entities.
 //
 // The framework generates NO DDL by default (the app owns its schema). This
@@ -19,6 +18,7 @@
 //   map          → {Entity}_{field} ({Entity}_id, member_id [, role])
 //   log          → {Entity}_{field} ({Entity}_id, ...entry sub-fields)
 //   ephemeral   → {Entity}_{field} ({Entity}_id, client_id)
+                                            
 import { structCellColumn } from './field-strategy.mjs';
 import { sideTableDDL } from './side-table-strategy.mjs';
 import { frameworkLogDDL } from './committed-log.mjs';
@@ -26,17 +26,17 @@ import { defineSqliteSchema } from './sqlite-schema.mjs';
 import { deletedRowAnchorTableDDL } from './deleted-row-anchor.mjs';
 import { annotatedTextDDL, annotatedTextAuthoringStreamDDL } from './annotated-text-field.mjs';
 
-function quoteIdent(name) {
+function quoteIdent(name        )         {
   return `"${String(name).replace(/"/g, '""')}"`;
 }
 
-function assertIdentifier(name, label) {
+function assertIdentifier(name        , label        )       {
   if (typeof name !== 'string' || name.length === 0 || name.includes('\0')) {
     throw new Error(`${label} must be a non-empty SQL identifier without NUL bytes`);
   }
 }
 
-const SUPPORTED_FIELD_TYPES = Object.freeze({
+const SUPPORTED_FIELD_TYPES                                      = Object.freeze({
   value: new Set(['text', 'boolean', 'date', 'number', 'json', 'vector', 'ref']),
   crdt: new Set(['text', 'raster', 'polyline']),
   hash: new Set(['hash']),
@@ -48,12 +48,50 @@ const SUPPORTED_FIELD_TYPES = Object.freeze({
   annotatedText: new Set(['annotatedText']),
 });
 
+// A field descriptor as the DDL generator reads it: kind, value type, and the
+// option surface that decides storage shape. Kept loose — the descriptor is
+// built by field.mjs and consumed by many layers.
+                               
+               
+                
+                
+                     
+                     
+                     
+                                      
+                                  
+                    
+                   
+                         
+ 
+
+                               
+                
+                     
+                     
+                     
+                         
+ 
+
+                     
+               
+                                                                          
+                                                                             
+                   
+                                     
+                                                         
+ 
+
+function fieldsOf(entity           )                                                            {
+  return entity.fields                                                             ;
+}
+
 // Map a field's kind+type to its SQLite column type.
-function unknownField(entityName, fieldName, message) {
+function unknownField(entityName        , fieldName        , message        )        {
   throw new Error(`${message} at ${entityName}.${fieldName}`);
 }
 
-function assertSupportedField(entityName, fieldName, descriptor) {
+function assertSupportedField(entityName        , fieldName        , descriptor                     )       {
   if (descriptor === null || typeof descriptor !== 'object') {
     unknownField(entityName, fieldName, 'invalid field descriptor');
   }
@@ -73,7 +111,7 @@ function assertSupportedField(entityName, fieldName, descriptor) {
   if (supportedTypes === undefined) {
     unknownField(entityName, fieldName, `unknown field kind '${String(descriptor.kind)}'`);
   }
-  if (!supportedTypes.has(descriptor.type)) {
+  if (descriptor.type === undefined || !supportedTypes.has(descriptor.type)) {
     unknownField(
       entityName,
       fieldName,
@@ -82,7 +120,7 @@ function assertSupportedField(entityName, fieldName, descriptor) {
   }
 }
 
-function sqlType(descriptor) {
+function sqlType(descriptor                     )         {
   const { kind, type } = descriptor;
   if (kind === 'value' || kind === 'store' || kind === 'crdt' || kind === 'hash') {
     switch (type) {
@@ -96,7 +134,7 @@ function sqlType(descriptor) {
   return 'TEXT'; // fallback (state, ephemeral, etc.)
 }
 
-function isMainTableField(descriptor) {
+function isMainTableField(descriptor                                        )          {
   return descriptor?.kind === 'value'
     || descriptor?.kind === 'crdt'
     || descriptor?.kind === 'hash'
@@ -105,11 +143,12 @@ function isMainTableField(descriptor) {
     || (descriptor?.kind === 'computed' && descriptor.mode === 'stored');
 }
 
-function collectAstFields(ast, result, seen = new Set()) {
+function collectAstFields(ast         , result             , seen = new Set        ())       {
   if (ast === null || typeof ast !== 'object' || seen.has(ast)) return;
   seen.add(ast);
-  if (typeof ast.field === 'string') result.add(ast.field);
-  for (const value of Object.values(ast)) {
+  const record = ast                           ;
+  if (typeof record.field === 'string') result.add(record.field);
+  for (const value of Object.values(record)) {
     if (typeof value === 'function') continue;
     if (Array.isArray(value)) {
       for (const entry of value) collectAstFields(entry, result, seen);
@@ -119,10 +158,10 @@ function collectAstFields(ast, result, seen = new Set()) {
   }
 }
 
-function scheduleIndexNames(entity) {
-  const fields = new Set();
+function scheduleIndexNames(entity           )                                             {
+  const fields = new Set        ();
   for (const triggerOrTriggers of Object.values(entity.schedule ?? {})) {
-    const triggers = Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers];
+    const triggers = (Array.isArray(triggerOrTriggers) ? triggerOrTriggers : [triggerOrTriggers])                                                 ;
     for (const trigger of triggers) {
       if (trigger?.kind === 'schedule.at' || trigger?.kind === 'schedule.after') {
         if (trigger.fieldName) fields.add(trigger.fieldName);
@@ -131,45 +170,51 @@ function scheduleIndexNames(entity) {
     }
   }
   return [...fields]
-    .filter((fieldName) => isMainTableField(entity.fields?.[fieldName]))
+    .filter((fieldName) => isMainTableField(fieldsOf(entity)?.[fieldName]))
     .sort()
     .map((fieldName) => ({ name: `idx_${entity.name}_schedule_${fieldName}`, fieldName }));
 }
 
-function scheduleIndexDDL(entity) {
+function scheduleIndexDDL(entity           )           {
   return scheduleIndexNames(entity).map(({ name, fieldName }) => (
     `CREATE INDEX IF NOT EXISTS ${quoteIdent(name)} ` +
     `ON ${quoteIdent(entity.name)} (${quoteIdent(fieldName)});`
   ));
 }
 
-function refIndexes(entity) {
-  return Object.entries(entity.fields ?? {})
+function refIndexes(entity           )                                             {
+  return Object.entries(fieldsOf(entity) ?? {})
     .filter(([, descriptor]) => physicalRef(entity, descriptor))
     .map(([fieldName]) => ({ name: `idx_${entity.name}_${fieldName}`, fieldName }));
 }
 
-function physicalRef(entity, descriptor) {
-  return descriptor?.physical === true && descriptor?.kind === 'value' && descriptor.type === 'ref'
-    && (descriptor.target?.name || descriptor.target === entity.name);
+function physicalRef(entity           , descriptor                                        )          {
+  const target = descriptor?.target;
+  const name = typeof target === 'string' ? undefined : target?.name;
+  return descriptor?.physical === true
+    && descriptor?.kind === 'value'
+    && descriptor.type === 'ref'
+    && Boolean(name || target === entity.name);
 }
 
-function uniqueIndexes(entity) {
+function uniqueIndexes(entity           )                                                     {
   return (entity.indexes ?? []).map(({ fields }) => ({
     name: `idx_${entity.name}_unique_${fields.join('_')}`,
     fields,
   }));
 }
 
-export function generatedIndexNames(entity) {
+export function generatedIndexNames(entity           )           {
   return [...refIndexes(entity), ...scheduleIndexNames(entity), ...uniqueIndexes(entity)].map(({ name }) => name);
 }
 
 // Generate the main table DDL for one entity.
-function mainTableDDL(entity) {
-  const cols = ['id TEXT PRIMARY KEY'];
-  const { fields } = entity;
-  if (!fields) return cols;
+function mainTableDDL(entity           )         {
+  const cols           = ['id TEXT PRIMARY KEY'];
+  const fields = fieldsOf(entity);
+  // Unreachable through generateDDL (which returns early for a field-less
+  // entity); preserved verbatim for the historical internal contract.
+  if (!fields) return cols                     ;
 
   for (const [name, descriptor] of Object.entries(fields)) {
     // Pull computed fields have no stored column (computed on read).
@@ -192,7 +237,8 @@ function mainTableDDL(entity) {
   }
   for (const [name, descriptor] of Object.entries(fields)) {
     if (!physicalRef(entity, descriptor)) continue;
-    const target = descriptor.target?.name ?? (descriptor.target === entity.name ? entity.name : null);
+    const targetValue = descriptor.target;
+    const target = (typeof targetValue === 'string' ? undefined : targetValue?.name) ?? (targetValue === entity.name ? entity.name : null);
     if (!target) continue;
     assertIdentifier(target, `${entity.name}.${name} ref target`);
     // Eventful cascades emit child removals before the parent removal, but their
@@ -208,9 +254,9 @@ function mainTableDDL(entity) {
 
 // Generate a complete, ordered sequence of CREATE TABLE statements for one
 // compiled entity: the main table, then each side-table.
-export function generateDDL(entity) {
-  const statements = [];
-  const { fields } = entity;
+export function generateDDL(entity           )           {
+  const statements           = [];
+  const fields = fieldsOf(entity);
   if (!fields) return statements;
   assertIdentifier(entity.name, 'entity name');
 
@@ -228,8 +274,8 @@ export function generateDDL(entity) {
   for (const { name, fieldName } of refIndexes(entity)) {
     statements.push(`CREATE INDEX IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(entity.name)} (${quoteIdent(fieldName)});`);
   }
-  for (const { name, fields } of uniqueIndexes(entity)) {
-    statements.push(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(entity.name)} (${fields.map(quoteIdent).join(', ')});`);
+  for (const { name, fields: indexFields } of uniqueIndexes(entity)) {
+    statements.push(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteIdent(name)} ON ${quoteIdent(entity.name)} (${indexFields.map(quoteIdent).join(', ')});`);
   }
 
   return statements;
@@ -238,9 +284,9 @@ export function generateDDL(entity) {
 // Supporting tables are independent physical storage. A caller that owns the
 // entity's main table may still let Workbench own these tables, but never its
 // main-table indexes (those belong to the declaring schema too).
-export function generateSideTableDDL(entity) {
-  const statements = [];
-  const { fields } = entity;
+export function generateSideTableDDL(entity           )           {
+  const statements           = [];
+  const fields = fieldsOf(entity);
   if (!fields) return statements;
 
   for (const [name, descriptor] of Object.entries(fields)) {
@@ -268,7 +314,7 @@ export function generateSideTableDDL(entity) {
 }
 
 // Execute the generated DDL statements against a DatabaseSync handle.
-export function executeDDL(entity, db) {
+export function executeDDL(entity           , db          )       {
   for (const sql of generateDDL(entity)) {
     db.exec(sql);
   }
@@ -305,7 +351,7 @@ export function frameworkCursorSchema() {
   return FRAMEWORK_CURSOR_SCHEMA;
 }
 
-export function generateFrameworkDDL() {
+export function generateFrameworkDDL()           {
   return [
     `CREATE TABLE IF NOT EXISTS BlobStore (
   id TEXT PRIMARY KEY,
@@ -433,7 +479,7 @@ export function generateFrameworkDDL() {
   ];
 }
 
-export function executeFrameworkDDL(db) {
+export function executeFrameworkDDL(db          )       {
   for (const sql of generateFrameworkDDL()) {
     db.exec(sql);
   }
@@ -447,7 +493,7 @@ export function executeFrameworkDDL(db) {
   ensurePendingBlobColumns(db);
 }
 
-function ensurePendingBlobColumns(db) {
+function ensurePendingBlobColumns(db          )       {
   const cols = new Set(db.prepare('PRAGMA table_info(_PendingBlob)').all().map((r) => r.name));
   for (const [name, type] of [['resourceId', 'TEXT'], ['claimedAt', 'TEXT'], ['finalizedAt', 'TEXT'], ['deletedAt', 'TEXT'], ['deleteActionId', 'TEXT'], ['recoveryFailure', 'TEXT']]) {
     if (!cols.has(name)) db.exec(`ALTER TABLE _PendingBlob ADD COLUMN ${name} ${type}`);
@@ -456,15 +502,16 @@ function ensurePendingBlobColumns(db) {
   for (const row of legacyRows) {
     const prefix = `${row.scopeId}/`;
     const suffixLength = 1 + 64 + '.pending'.length;
-    if (typeof row.scopeId !== 'string' || !row.pendingKey.startsWith(prefix) || row.pendingKey.length <= prefix.length + suffixLength) {
+    const pendingKey = row.pendingKey          ;
+    if (typeof row.scopeId !== 'string' || !pendingKey.startsWith(prefix) || pendingKey.length <= prefix.length + suffixLength) {
       throw new Error(`cannot recover pending blob resource identity for '${row.pendingKey}'`);
     }
-    const resourceId = row.pendingKey.slice(prefix.length, -suffixLength);
-    db.prepare('UPDATE _PendingBlob SET resourceId = ? WHERE pendingKey = ? AND resourceId IS NULL').run(resourceId, row.pendingKey);
+    const resourceId = pendingKey.slice(prefix.length, -suffixLength);
+    db.prepare('UPDATE _PendingBlob SET resourceId = ? WHERE pendingKey = ? AND resourceId IS NULL').run(resourceId, pendingKey);
   }
 }
 
-function ensureActionReceiptColumns(db) {
+function ensureActionReceiptColumns(db          )       {
   const cols = new Set(db.prepare('PRAGMA table_info(_ActionReceipt)').all().map((r) => r.name));
   const additions = [
     ['historyOrder', 'INTEGER'],
@@ -478,8 +525,8 @@ function ensureActionReceiptColumns(db) {
     ['historyTargetActionId', 'TEXT'],
     ['historyOutcome', 'TEXT'],
   ];
-  for (const [name, sqlType] of additions) {
-    if (!cols.has(name)) db.exec(`ALTER TABLE _ActionReceipt ADD COLUMN ${name} ${sqlType}`);
+  for (const [name, sqlTypeName] of additions) {
+    if (!cols.has(name)) db.exec(`ALTER TABLE _ActionReceipt ADD COLUMN ${name} ${sqlTypeName}`);
   }
   db.exec(`UPDATE _ActionReceipt SET historyOrder = (
     SELECT COUNT(*) FROM _ActionReceipt AS earlier
@@ -489,7 +536,7 @@ function ensureActionReceiptColumns(db) {
   ) WHERE historyOrder IS NULL`);
 }
 
-function ensureJobColumns(db) {
+function ensureJobColumns(db          )       {
   const cols = new Set(db.prepare('PRAGMA table_info(_Job)').all().map((r) => r.name));
   if (!cols.has('attempts')) {
     db.exec('ALTER TABLE _Job ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0');
@@ -508,7 +555,7 @@ function ensureJobColumns(db) {
   }
 }
 
-function ensureAuthEntityColumns(db) {
+function ensureAuthEntityColumns(db          )       {
   // Entity tables (User, TwoFactor) are created by executeDDL AFTER
   // executeFrameworkDDL runs, so the tables may not exist yet on first boot.
   // Catch and skip — the entity DDL already includes the new columns.

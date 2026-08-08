@@ -1,11 +1,10 @@
-// @ts-nocheck
 // Shared packing of the v13 operated-event facts bag (issue #33 blockless).
 // Plan and admit mint the same exact key set so the envelope cannot drift
 // between the two producers. Blocks are gone: annotations carry one document
 // range, and text edits are document-wide (no block identities).
 
-export function packOperatedFacts(data) {
-  const arrays = (value) => Object.freeze(value ?? []);
+export function packOperatedFacts(data     ) {
+  const arrays = (value     ) => Object.freeze(value ?? []);
   return Object.freeze({
     family: data.family ?? null,
     annotation: data.annotation ?? null,

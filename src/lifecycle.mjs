@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Process lifecycle — graceful shutdown, signal traps, and live app registry.
 //
 // These traps belong to the PROCESS, not an app — installing them per app would
@@ -51,7 +50,7 @@ export function installProcessTraps() {
     draining = true;
     const deadline = setTimeout(() => process.exit(1), PROCESS_SHUTDOWN_DEADLINE_MS);
     Promise.allSettled(
-      [...liveApps].map((app) => Promise.resolve().then(() => app.shutdown())),
+      [...liveApps].map((app) => Promise.resolve().then(() => app.shutdown ())),
     ).then((results) => {
       for (const result of results) {
         if (result.status !== 'rejected') continue;

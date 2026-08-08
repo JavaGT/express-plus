@@ -7,10 +7,12 @@
 
 import { randomUUID } from 'node:crypto';
 
+import type { Capability } from '../grant.ts';
 import { mayFieldOp } from '../row-grant.ts';
+import type { EntityRecord } from '../row-grant.ts';
 
 export async function authorizeFieldOp(record: unknown, fieldName: string, capability: string, row: unknown, principal: unknown): Promise<void> {
-  if (principal && !(await mayFieldOp(record, fieldName, capability, row, principal))) {
+  if (principal && !(await mayFieldOp(record as EntityRecord, fieldName, capability as unknown as Capability, row, principal))) {
     throw { status: 403, message: 'forbidden' };
   }
 }

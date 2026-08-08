@@ -1,14 +1,29 @@
-// @ts-nocheck
 import {
   assertMembershipRange, assertStructuralEndpoint, compareStructuralEndpoints,
-  materializeBlock, projectEndpointToBlockOffset, rgaTraversal, resolvePositionToEndpoint,
+  materializeBlock, projectEndpointToBlockOffset, resolvePositionToEndpoint,
 } from './annotated-text-family.ts';
+import type { StructuralEndpoint, TextFamily } from './annotated-text-family.ts';
 
-function fail(message) {
+interface Annotation {
+  id: string;
+  family: string;
+  empty: 'delete' | 'orphan';
+  protectedTargetIds?: readonly string[];
+}
+
+interface Membership {
+  annotationId: string;
+  blockId: string;
+  ordinal: number;
+  start: StructuralEndpoint;
+  end: StructuralEndpoint;
+}
+
+function fail(message: string): never {
   throw new Error(`invalid annotated-text membership: ${message}`);
 }
 
-function deepFreeze(value) {
+function deepFreeze<T>(value: T): Readonly<T> {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
     for (const item of value) deepFreeze(item);
@@ -20,24 +35,24 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-function assertAnnotationId(value) {
+function assertAnnotationId(value: string) {
   if (typeof value !== 'string' || value.length === 0) fail('annotation id must be a non-empty string');
   return value;
 }
 
-function assertBlockId(value) {
+function assertBlockId(value: string) {
   if (typeof value !== 'string' || value.length === 0) fail('block id must be a non-empty string');
   return value;
 }
 
-function assertOrdinal(value) {
+function assertOrdinal(value: number) {
   if (!Number.isSafeInteger(value) || value < 0) fail('ordinal must be a non-negative safe integer');
   return value;
 }
 
 // --- Public validation ---
 
-export function assertAnnotation(annotation) {
+export function assertAnnotation(annotation: any): Annotation {
   if (!annotation || typeof annotation !== 'object' || Array.isArray(annotation)) fail('annotation must be a non-array object');
   const allowedKeys = ['id', 'family', 'empty', 'protectedTargetIds'];
   for (const key of Object.keys(annotation)) {
@@ -65,7 +80,7 @@ export function assertAnnotation(annotation) {
   });
 }
 
-export function assertMembership(membership) {
+export function assertMembership(membership: any): Membership {
   if (!membership || typeof membership !== 'object' || Array.isArray(membership)) fail('membership must be a non-array object');
   const allowedKeys = ['annotationId', 'blockId', 'ordinal', 'start', 'end'];
   for (const key of Object.keys(membership)) {
@@ -85,19 +100,19 @@ export function assertMembership(membership) {
   });
 }
 
-function assertPositiveSafeInteger(value, label) {
+function assertPositiveSafeInteger(value: number, label: string) {
   if (!Number.isSafeInteger(value) || value < 1) fail(`${label} must be a positive safe integer`);
   return value;
 }
 
-function assertEndpointTuple(value) {
+function assertEndpointTuple(value: readonly [unknown, any, any]): StructuralEndpoint {
   if (!Array.isArray(value) || value.length !== 3 || value[0] !== 'endpoint') {
     fail('orphan endpoint must be ["endpoint", frontier, point]');
   }
   return assertStructuralEndpoint({ basisFrontier: value[1], point: value[2] });
 }
 
-export function assertAnnotationLastMemberships(value) {
+export function assertAnnotationLastMemberships(value: any) {
   if (!Array.isArray(value) || value.length !== 5 ||
       value[0] !== 'workbench.annotation-last-memberships' || value[1] !== 1) {
     fail('last memberships must be a workbench.annotation-last-memberships v1 tuple');
@@ -129,42 +144,42 @@ export function assertAnnotationLastMemberships(value) {
 
 // --- Internal helpers ---
 
-function findAnnotation(annotations, annotationId) {
+function findAnnotation(annotations: Annotation[], annotationId: string) {
   return annotations.find(a => a.id === annotationId);
 }
 
-function findMembership(memberships, annotationId, blockId) {
+function findMembership(memberships: Membership[], annotationId: string, blockId: string) {
   return memberships.find(m => m.annotationId === annotationId && m.blockId === blockId);
 }
 
-function membershipsForAnnotation(memberships, annotationId) {
+function membershipsForAnnotation(memberships: Membership[], annotationId: string) {
   return memberships.filter(m => m.annotationId === annotationId);
 }
 
-function blockMemberships(memberships, blockId) {
+function blockMemberships(memberships: Membership[], blockId: string) {
   return memberships.filter(m => m.blockId === blockId);
 }
 
-function blockIndex(family, blockId) {
+function blockIndex(family: TextFamily, blockId: string) {
   return family.blocks.findIndex(b => b.id === blockId);
 }
 
-function blockVisibleLength(family, blockId) {
+function blockVisibleLength(family: TextFamily, blockId: string) {
   return materializeBlock(family, blockId).length;
 }
 
-function isBlockNonempty(family, blockId) {
+function isBlockNonempty(family: TextFamily, blockId: string) {
   return blockVisibleLength(family, blockId) > 0;
 }
 
-function normalizeOrdinals(memberships, family) {
-  const byAnnotation = new Map();
+function normalizeOrdinals(memberships: Membership[], family: TextFamily) {
+  const byAnnotation = new Map<string, Membership[]>();
   for (const m of memberships) {
     const list = byAnnotation.get(m.annotationId) ?? [];
     list.push(m);
     byAnnotation.set(m.annotationId, list);
   }
-  const result = [];
+  const result: Membership[] = [];
   for (const [, list] of byAnnotation) {
     const sorted = [...list].sort((a, b) => {
       const aIdx = blockIndex(family, a.blockId);
@@ -178,7 +193,7 @@ function normalizeOrdinals(memberships, family) {
   return result;
 }
 
-function hasProtectorOverlap(family, annotations, memberships, annotationId, blockId) {
+function hasProtectorOverlap(_family: TextFamily, annotations: Annotation[], memberships: Membership[], annotationId: string, blockId: string) {
   for (const ann of annotations) {
     if (!ann.protectedTargetIds || ann.protectedTargetIds.length === 0) continue;
     if (!ann.protectedTargetIds.includes(annotationId)) continue;
@@ -187,26 +202,26 @@ function hasProtectorOverlap(family, annotations, memberships, annotationId, blo
   return false;
 }
 
-function canonicalBlockEndpoints(family, blockId) {
+function canonicalBlockEndpoints(family: TextFamily, blockId: string): { start: StructuralEndpoint; end: StructuralEndpoint } {
   const frontier = family.checkpoint.frontier;
   const length = blockVisibleLength(family, blockId);
   if (length === 0) fail(`cannot compute canonical endpoints for fully tombstoned block: ${blockId}`);
 
-  let start;
+  let start: StructuralEndpoint;
   const bIdx = blockIndex(family, blockId);
   if (bIdx === 0) {
     start = assertStructuralEndpoint({ point: ['point', ['root'], 'left'], basisFrontier: frontier });
   } else {
-    start = resolvePositionToEndpoint(family, blockId, 0, frontier);
+    start = resolvePositionToEndpoint(family, blockId, 0, frontier, undefined as never);
   }
 
-  const end = resolvePositionToEndpoint(family, blockId, length, frontier);
+  const end = resolvePositionToEndpoint(family, blockId, length, frontier, undefined as never);
   return { start, end };
 }
 
 // --- Public API ---
 
-export function addMembership(family, annotations, memberships, annotationId, blockId, startEndpoint, endEndpoint) {
+export function addMembership(family: TextFamily, annotations: Annotation[], memberships: Membership[], annotationId: string, blockId: string, startEndpoint: StructuralEndpoint, endEndpoint: StructuralEndpoint) {
   const annotation = findAnnotation(annotations, annotationId);
   if (!annotation) fail(`annotation not found: ${annotationId}`);
 
@@ -250,7 +265,7 @@ export function addMembership(family, annotations, memberships, annotationId, bl
   });
 }
 
-export function removeMembership(family, annotations, memberships, annotationId, blockId, { structuralRevision } = {}) {
+export function removeMembership(family: TextFamily, annotations: Annotation[], memberships: Membership[], annotationId: string, blockId: string, { structuralRevision }: { structuralRevision?: number } = {}) {
   const annotation = findAnnotation(annotations, annotationId);
   if (!annotation) fail(`annotation not found: ${annotationId}`);
 
@@ -284,7 +299,7 @@ export function removeMembership(family, annotations, memberships, annotationId,
       outcomes: [deepFreeze({ type: 'delete', annotationId })],
     });
   } else {
-    assertPositiveSafeInteger(structuralRevision, 'structural revision');
+    assertPositiveSafeInteger(structuralRevision!, 'structural revision');
     const ordered = [...annMemberships].sort((left, right) => blockIndex(family, left.blockId) - blockIndex(family, right.blockId));
     const lastMemberships = assertAnnotationLastMemberships([
       'workbench.annotation-last-memberships',
@@ -311,7 +326,7 @@ export function removeMembership(family, annotations, memberships, annotationId,
   }
 }
 
-export function removeAnnotation(family, annotations, memberships, annotationId, { structuralRevision } = {}) {
+export function removeAnnotation(family: TextFamily, annotations: Annotation[], memberships: Membership[], annotationId: string, { structuralRevision }: { structuralRevision?: number } = {}) {
   const annotation = findAnnotation(annotations, annotationId);
   if (!annotation) fail(`annotation not found: ${annotationId}`);
   const removedMemberships = membershipsForAnnotation(memberships, annotationId)
@@ -331,7 +346,7 @@ export function removeAnnotation(family, annotations, memberships, annotationId,
       outcomes: [deepFreeze({ type: 'delete', annotationId })],
     });
   }
-  assertPositiveSafeInteger(structuralRevision, 'structural revision');
+  assertPositiveSafeInteger(structuralRevision!, 'structural revision');
   const lastMemberships = assertAnnotationLastMemberships([
     'workbench.annotation-last-memberships',
     1,
@@ -356,7 +371,7 @@ export function removeAnnotation(family, annotations, memberships, annotationId,
   });
 }
 
-export function splitBlockMemberships(family, annotations, memberships, blockId, newBlockId) {
+export function splitBlockMemberships(family: TextFamily, annotations: Annotation[], memberships: Membership[], blockId: string, newBlockId: string) {
   const bIdx = blockIndex(family, blockId);
   if (bIdx === -1) fail(`block not found: ${blockId}`);
   const nbIdx = blockIndex(family, newBlockId);
@@ -374,9 +389,9 @@ export function splitBlockMemberships(family, annotations, memberships, blockId,
     // The endpoints still name the same structural boundaries after a split.
     // Classify against the new boundary, then resolve each retained endpoint
     // in its new owning block so the membership remains range-valid.
-    const endsLeft = leftNonempty && compareStructuralEndpoints(family, m.end, leftEp.end) <= 0;
-    const startsRight = rightNonempty && compareStructuralEndpoints(family, m.start, rightEp.start) >= 0;
-    const add = (targetBlockId, start, end) => {
+    const endsLeft = leftNonempty && compareStructuralEndpoints(family, m.end, leftEp!.end) <= 0;
+    const startsRight = rightNonempty && compareStructuralEndpoints(family, m.start, rightEp!.start) >= 0;
+    const add = (targetBlockId: string, start: StructuralEndpoint, end: StructuralEndpoint) => {
       assertMembershipRange(family, targetBlockId, start, end);
       filtered.push(assertMembership({ annotationId: m.annotationId, blockId: targetBlockId, ordinal: 0, start, end }));
     };
@@ -385,33 +400,33 @@ export function splitBlockMemberships(family, annotations, memberships, blockId,
     // redistribute the original whole-block annotation.  A canonical left
     // range is the only representation of that case available here.
     const canonicalLeftRange = leftNonempty &&
-      compareStructuralEndpoints(family, m.start, leftEp.start) === 0 &&
-      compareStructuralEndpoints(family, m.end, leftEp.end) === 0;
+      compareStructuralEndpoints(family, m.start, leftEp!.start) === 0 &&
+      compareStructuralEndpoints(family, m.end, leftEp!.end) === 0;
     if (canonicalLeftRange && rightNonempty) {
-      add(blockId, leftEp.start, leftEp.end);
-      add(newBlockId, rightEp.start, rightEp.end);
+      add(blockId, leftEp!.start, leftEp!.end);
+      add(newBlockId, rightEp!.start, rightEp!.end);
     } else if (endsLeft && leftNonempty) {
       // Span lies entirely in the left child: keep its own [start, end], not the
       // whole left block. Forcing the block edge would expand confidential
       // coverage beyond the protected interval.
       const start = resolvePositionToEndpoint(family, blockId,
-        projectEndpointToBlockOffset(family, blockId, m.start), family.checkpoint.frontier);
+        projectEndpointToBlockOffset(family, blockId, m.start), family.checkpoint.frontier, undefined as never);
       const end = resolvePositionToEndpoint(family, blockId,
-        projectEndpointToBlockOffset(family, blockId, m.end), family.checkpoint.frontier);
+        projectEndpointToBlockOffset(family, blockId, m.end), family.checkpoint.frontier, undefined as never);
       add(blockId, start, end);
     } else if (startsRight && rightNonempty) {
       // Span lies entirely in the right child: keep its own [start, end].
       const start = resolvePositionToEndpoint(family, newBlockId,
-        projectEndpointToBlockOffset(family, newBlockId, m.start), family.checkpoint.frontier);
+        projectEndpointToBlockOffset(family, newBlockId, m.start), family.checkpoint.frontier, undefined as never);
       const end = resolvePositionToEndpoint(family, newBlockId,
-        projectEndpointToBlockOffset(family, newBlockId, m.end), family.checkpoint.frontier);
+        projectEndpointToBlockOffset(family, newBlockId, m.end), family.checkpoint.frontier, undefined as never);
       add(newBlockId, start, end);
     } else {
       if (leftNonempty) add(blockId,
-        resolvePositionToEndpoint(family, blockId, projectEndpointToBlockOffset(family, blockId, m.start), family.checkpoint.frontier),
-        leftEp.end);
-      if (rightNonempty) add(newBlockId, rightEp.start,
-        resolvePositionToEndpoint(family, newBlockId, projectEndpointToBlockOffset(family, newBlockId, m.end), family.checkpoint.frontier));
+        resolvePositionToEndpoint(family, blockId, projectEndpointToBlockOffset(family, blockId, m.start), family.checkpoint.frontier, undefined as never),
+        leftEp!.end);
+      if (rightNonempty) add(newBlockId, rightEp!.start,
+        resolvePositionToEndpoint(family, newBlockId, projectEndpointToBlockOffset(family, newBlockId, m.end), family.checkpoint.frontier, undefined as never));
     }
   }
 
@@ -422,7 +437,7 @@ export function splitBlockMemberships(family, annotations, memberships, blockId,
   });
 }
 
-export function mergeBlocksMemberships(family, annotations, memberships, leftBlockId, rightBlockId) {
+export function mergeBlocksMemberships(family: TextFamily, annotations: Annotation[], memberships: Membership[], leftBlockId: string, rightBlockId: string) {
   const leftIdx = blockIndex(family, leftBlockId);
   if (leftIdx === -1) fail(`block not found: ${leftBlockId}`);
   const rightIdx = blockIndex(family, rightBlockId);
@@ -433,7 +448,7 @@ export function mergeBlocksMemberships(family, annotations, memberships, leftBlo
   const rightMemberships = blockMemberships(memberships, rightBlockId);
 
   const rightByAnnotation = new Map(rightMemberships.map(m => [m.annotationId, m]));
-  const merged = [];
+  const merged: Membership[] = [];
   for (const m of leftMemberships) {
     const right = rightByAnnotation.get(m.annotationId);
     if (right && compareStructuralEndpoints(family, m.end, right.start) === 0) {

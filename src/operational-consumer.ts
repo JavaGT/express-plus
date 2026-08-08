@@ -1,16 +1,72 @@
-// @ts-nocheck
 import { createHash } from 'node:crypto';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.ts';
+import type { DbHandle } from './driver.ts';
 import { txn } from './driver.ts';
+import type { LogRow } from './committed-log.ts';
 
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
-const cursorName = (name) => `operational:${name}`;
+const cursorName = (name: string) => `operational:${name}`;
 
-function fail(message) { throw new TypeError(`operational consumer: ${message}`); }
+function fail(message: string): never { throw new TypeError(`operational consumer: ${message}`); }
 
-function canonical(value) { return JSON.stringify(value); }
+function canonical(value: unknown): string { return JSON.stringify(value) as string; }
 
-function fingerprint(consumer) {
+export interface OperationalConsumerMetadata {
+  committedEventId: string;
+  actionId: string;
+  scopeId: string;
+  eventType: string;
+  committedAt: string;
+}
+
+export interface OperationalConsumerPartial {
+  metadata: OperationalConsumerMetadata;
+  payload: unknown;
+  idempotencyKey?: string;
+}
+
+export interface OperationalConsumerAck {
+  kind: 'ack';
+}
+
+export interface OperationalConsumerRetry {
+  kind: 'retry';
+  afterMs?: number;
+  detail?: string;
+}
+
+export interface OperationalConsumerTerminal {
+  kind: 'terminal';
+  code: string;
+  detail: string;
+}
+
+export type OperationalConsumerResult = OperationalConsumerAck | OperationalConsumerRetry | OperationalConsumerTerminal;
+
+export interface OperationalConsumerEvent {
+  eventType: string;
+  fields: readonly string[];
+  project(fields: Readonly<Record<string, unknown>>, metadata: OperationalConsumerMetadata): unknown;
+}
+
+export interface OperationalConsumer {
+  name: string;
+  declarationVersion: string;
+  event: OperationalConsumerEvent;
+  projectionId: string;
+  effectId: string;
+  idempotencyKey(partial: OperationalConsumerPartial): string;
+  handle(partial: OperationalConsumerPartial): Promise<OperationalConsumerResult>;
+}
+
+type FailureResult = {
+  kind: 'retry' | 'terminal';
+  afterMs?: number;
+  code?: string;
+  detail?: string;
+};
+
+function fingerprint(consumer: OperationalConsumer): string {
   return createHash('sha256').update(canonical({
     name: consumer.name,
     declarationVersion: consumer.declarationVersion,
@@ -21,7 +77,7 @@ function fingerprint(consumer) {
   })).digest('hex');
 }
 
-function json(value, message) {
+function json(value: unknown, message: string): unknown {
   try {
     const encoded = JSON.stringify(value);
     if (encoded === undefined) throw new Error('undefined');
@@ -29,38 +85,80 @@ function json(value, message) {
   } catch { fail(message); }
 }
 
-function validate(consumer) {
+function validate(consumer: unknown): OperationalConsumer {
   if (!consumer || typeof consumer !== 'object') fail('must be an object');
+  const record = consumer as Record<string, unknown>;
   for (const key of ['name', 'projectionId', 'effectId']) {
-    if (typeof consumer[key] !== 'string' || !IDENTIFIER.test(consumer[key])) fail(`${key} must be an ASCII identifier`);
+    const value = record[key];
+    if (typeof value !== 'string' || !IDENTIFIER.test(value)) fail(`${key} must be an ASCII identifier`);
   }
-  if (typeof consumer.declarationVersion !== 'string' || consumer.declarationVersion.length === 0) fail('declarationVersion must be non-empty');
-  if (!consumer.event || typeof consumer.event.eventType !== 'string' || !Array.isArray(consumer.event.fields)
-    || typeof consumer.event.project !== 'function') fail('event must declare eventType, fields, and project');
-  if (new Set(consumer.event.fields).size !== consumer.event.fields.length || consumer.event.fields.some((field) => typeof field !== 'string')) fail('event fields must be unique strings');
-  if (typeof consumer.idempotencyKey !== 'function' || typeof consumer.handle !== 'function') fail('idempotencyKey and handle are required');
-  return Object.freeze({ ...consumer, event: Object.freeze({ ...consumer.event, fields: Object.freeze([...consumer.event.fields]) }) });
+  const declarationVersion = record.declarationVersion;
+  if (typeof declarationVersion !== 'string' || declarationVersion.length === 0) fail('declarationVersion must be non-empty');
+  const event = record.event as Record<string, unknown> | null | undefined;
+  if (!event || typeof event.eventType !== 'string' || !Array.isArray(event.fields)
+    || typeof event.project !== 'function') fail('event must declare eventType, fields, and project');
+  const fields = event.fields as unknown[];
+  if (new Set(fields).size !== fields.length || fields.some((field) => typeof field !== 'string')) fail('event fields must be unique strings');
+  if (typeof record.idempotencyKey !== 'function' || typeof record.handle !== 'function') fail('idempotencyKey and handle are required');
+  const normalizedEvent: OperationalConsumerEvent = {
+    eventType: event.eventType as string,
+    fields: Object.freeze([...fields] as string[]),
+    project: event.project as OperationalConsumerEvent['project'],
+  };
+  return Object.freeze({
+    name: record.name as string,
+    declarationVersion,
+    projectionId: record.projectionId as string,
+    effectId: record.effectId as string,
+    idempotencyKey: record.idempotencyKey as OperationalConsumer['idempotencyKey'],
+    handle: record.handle as OperationalConsumer['handle'],
+    event: Object.freeze(normalizedEvent),
+  });
 }
 
-export function defineOperationalEvent(spec) {
+export function defineOperationalEvent(spec: OperationalConsumerEvent): OperationalConsumerEvent {
   return validate({ name: 'Temporary', declarationVersion: '1', projectionId: 'temporary', effectId: 'temporary', event: spec, idempotencyKey: () => 'temporary', handle: async () => ({ kind: 'ack' }) }).event;
 }
 
-export function operationalConsumer(consumer) { return validate(consumer); }
+export function operationalConsumer(consumer: unknown): OperationalConsumer { return validate(consumer); }
 
-function metadata(row) {
-  return Object.freeze({ committedEventId: `${row.scope}:${row.seq}`, actionId: row.actionId, scopeId: row.scope, eventType: row.eventType, committedAt: row.committedAt });
+function metadata(row: LogRow): OperationalConsumerMetadata {
+  return Object.freeze({
+    committedEventId: `${row.scope}:${row.seq}`,
+    actionId: row.actionId,
+    scopeId: row.scope,
+    eventType: row.eventType,
+    committedAt: row.committedAt,
+  });
 }
 
-export function createOperationalConsumers(consumers = [], { writeQueue, onShutdown, now = Date.now } = {}) {
+export interface OperationalConsumersOptions {
+  writeQueue?: { run<T>(fn: () => Promise<T> | T): Promise<T> } | null;
+  onShutdown?: (name: string, hook: () => void | Promise<void>, options?: { timeoutMs?: number }) => void | unknown;
+  now?: () => number;
+}
+
+export interface OperationalConsumers {
+  engage(db: DbHandle): void;
+  consumer(events: readonly unknown[], context: { db: DbHandle }): Promise<void>;
+  reconcile(db: DbHandle): Promise<void>;
+  declared: readonly OperationalConsumer[];
+  stop(): void;
+}
+
+export function createOperationalConsumers(consumers: readonly unknown[] = [], {
+  writeQueue,
+  onShutdown,
+  now = Date.now,
+}: OperationalConsumersOptions = {}): OperationalConsumers {
   const declared = consumers.map(validate);
-  const names = new Set();
+  const names = new Set<string>();
   for (const consumer of declared) {
     if (names.has(consumer.name)) fail(`duplicate name '${consumer.name}'`);
     names.add(consumer.name);
   }
 
-  function engage(db) {
+  function engage(db: DbHandle) {
     for (const consumer of declared) {
       const declarationFingerprint = fingerprint(consumer);
       const existing = db.prepare('SELECT declarationFingerprint FROM _OperationalConsumerDeclaration WHERE name = ?').get(consumer.name);
@@ -71,7 +169,7 @@ export function createOperationalConsumers(consumers = [], { writeQueue, onShutd
     }
   }
 
-  let retryTimer = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
   let stopped = false;
 
   function clearRetryTimer() {
@@ -79,7 +177,7 @@ export function createOperationalConsumers(consumers = [], { writeQueue, onShutd
     retryTimer = null;
   }
 
-  function armRetryScheduler(db) {
+  function armRetryScheduler(db: DbHandle) {
     clearRetryTimer();
     if (stopped || declared.length === 0) return;
     const names = declared.map(({ name }) => name);
@@ -95,7 +193,7 @@ export function createOperationalConsumers(consumers = [], { writeQueue, onShutd
       const run = () => reconcile(db);
       const queued = writeQueue ? writeQueue.run(run) : Promise.resolve().then(run);
       queued.catch(() => {}).finally(() => armRetryScheduler(db));
-    }, Math.max(1, next - now()));
+    }, Math.max(1, Number(next) - now()));
     if (typeof retryTimer.unref === 'function') retryTimer.unref();
   }
 
@@ -104,34 +202,34 @@ export function createOperationalConsumers(consumers = [], { writeQueue, onShutd
     clearRetryTimer();
   }, { timeoutMs: 1000 });
 
-  async function deliver(db, consumer, row) {
+  async function deliver(db: DbHandle, consumer: OperationalConsumer, row: LogRow): Promise<boolean> {
     const declarationFingerprint = fingerprint(consumer);
     const failed = db.prepare('SELECT status, nextAttemptAt FROM _OperationalConsumerFailure WHERE consumer = ? AND scope = ? AND committedEventId = ?')
       .get(consumer.name, row.scope, `${row.scope}:${row.seq}`);
-    if (failed?.status === 'terminal' || (failed?.nextAttemptAt != null && failed.nextAttemptAt > now())) return false;
-    let data;
+    if (failed?.status === 'terminal' || (failed?.nextAttemptAt != null && Number(failed.nextAttemptAt) > now())) return false;
+    let data: Record<string, unknown>;
     try { data = JSON.parse(row.eventData); } catch { data = {}; }
-    const fields = Object.create(null);
+    const fields = Object.create(null) as Record<string, unknown>;
     for (const field of consumer.event.fields) fields[field] = data[field];
-    let payload;
+    let payload: unknown;
     try { payload = json(consumer.event.project(Object.freeze(fields), metadata(row)), 'projection result must be JSON serializable'); } catch (error) {
       await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, String(error));
       return false;
     }
     const partial = Object.freeze({ metadata: metadata(row), payload });
-    let idempotencyKey;
+    let idempotencyKey: string;
     try {
       idempotencyKey = consumer.idempotencyKey(partial);
       if (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0) fail('idempotencyKey must return a non-empty string');
       if (consumer.idempotencyKey(partial) !== idempotencyKey) fail('idempotencyKey must be deterministic');
     } catch (error) { await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, String(error)); return false; }
-    let result;
+    let result: OperationalConsumerResult;
     try { result = await consumer.handle(Object.freeze({ ...partial, idempotencyKey })); } catch (error) { result = { kind: 'retry', afterMs: 0, detail: String(error) }; }
     if (!result || !['ack', 'retry', 'terminal'].includes(result.kind)) {
       await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, 'handle must return ack, retry, or terminal');
       return false;
     }
-    if (result.kind === 'retry' && (!Number.isFinite(result.afterMs) || result.afterMs < 0)) {
+    if (result.kind === 'retry' && (!Number.isFinite(result.afterMs) || Number(result.afterMs) < 0)) {
       await recordFailure(db, consumer, row, declarationFingerprint, { kind: 'retry', afterMs: 0 }, 'retry afterMs must be a non-negative finite number');
       return false;
     }
@@ -150,7 +248,7 @@ export function createOperationalConsumers(consumers = [], { writeQueue, onShutd
     return false;
   }
 
-  async function recordFailure(db, consumer, row, declarationFingerprint, result, detail) {
+  async function recordFailure(db: DbHandle, consumer: OperationalConsumer, row: LogRow, declarationFingerprint: string, result: FailureResult, detail: string): Promise<void> {
     const terminal = result.kind === 'terminal';
     await txn(db, () => db.prepare(`INSERT INTO _OperationalConsumerFailure
       (consumer, scope, committedEventId, declarationFingerprint, code, detail, status, nextAttemptAt)
@@ -159,26 +257,26 @@ export function createOperationalConsumers(consumers = [], { writeQueue, onShutd
       .run(consumer.name, row.scope, `${row.scope}:${row.seq}`, declarationFingerprint, terminal ? String(result.code ?? 'terminal') : 'retry', detail, terminal ? 'terminal' : 'retry', terminal ? null : now() + Math.max(0, Number(result.afterMs) || 0)));
   }
 
-  async function reconcile(db) {
+  async function reconcile(db: DbHandle): Promise<void> {
     engage(db);
     try {
       for (const consumer of declared) {
         const cursors = consumerCursorMap(db, cursorName(consumer.name));
-        const blockedScopes = new Set();
+        const blockedScopes = new Set<string>();
         const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
         for (const row of rows) {
-          if (blockedScopes.has(row.scope)) continue;
-          if ((cursors.get(row.scope) ?? 0) >= row.seq) continue;
+          if (blockedScopes.has(row.scope as string)) continue;
+          if ((cursors.get(row.scope as string) ?? 0) >= (row.seq as number)) continue;
           if (row.eventType !== consumer.event.eventType) {
-            upsertConsumerCursor(db, { consumer: cursorName(consumer.name), scope: row.scope, lastSeq: row.seq });
-            cursors.set(row.scope, row.seq);
+            upsertConsumerCursor(db, { consumer: cursorName(consumer.name), scope: row.scope as string, lastSeq: row.seq as number });
+            cursors.set(row.scope as string, row.seq as number);
             continue;
           }
-          if (!await deliver(db, consumer, row)) {
-            blockedScopes.add(row.scope);
+          if (!await deliver(db, consumer, row as unknown as LogRow)) {
+            blockedScopes.add(row.scope as string);
             continue;
           }
-          cursors.set(row.scope, row.seq);
+          cursors.set(row.scope as string, row.seq as number);
         }
       }
     } finally {
@@ -186,17 +284,23 @@ export function createOperationalConsumers(consumers = [], { writeQueue, onShutd
     }
   }
 
-  const consumer = async (_events, { db } = {}) => { await reconcile(db); };
+  const consumer = async (_events: readonly unknown[], { db }: { db: DbHandle }) => { await reconcile(db); };
   return { engage, consumer, reconcile, declared, stop: () => { stopped = true; clearRetryTimer(); } };
 }
 
-export function operationalConsumerAdmin(workbench) {
+export interface OperationalConsumerAdminWorkbench {
+  db: DbHandle;
+  writeQueue?: { run<T>(fn: () => Promise<T> | T): Promise<T> } | null;
+  reconcileOperationalConsumers?: (() => unknown) | null;
+}
+
+export function operationalConsumerAdmin(workbench: OperationalConsumerAdminWorkbench) {
   return {
-    async listFailures(consumer) {
+    async listFailures(consumer: string) {
       return workbench.db.prepare(`SELECT consumer, scope AS scopeId, committedEventId, declarationFingerprint, code, detail, status
         FROM _OperationalConsumerFailure WHERE consumer = ? AND status = 'terminal' ORDER BY scope, committedEventId`).all(consumer);
     },
-    async retryFailure(failure) {
+    async retryFailure(failure: { consumer: string; scopeId: string; committedEventId: string }) {
       const update = () => workbench.db.prepare(`UPDATE _OperationalConsumerFailure SET status = 'retry', nextAttemptAt = 0
         WHERE consumer = ? AND scope = ? AND committedEventId = ? AND status = 'terminal'`).run(failure.consumer, failure.scopeId, failure.committedEventId);
       const result = await (workbench.writeQueue ? workbench.writeQueue.run(update) : update());

@@ -1,4 +1,3 @@
-// @ts-nocheck
 const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 const _sourceBrand = new WeakSet        ();
@@ -21,14 +20,14 @@ function assertBrand(label        , value         , brand                 , noun
   }
 }
 
-                            
+                                   
                            
                   
                 
                                            
  
 
-                             
+                                    
                       
                            
                  
@@ -37,7 +36,7 @@ function assertBrand(label        , value         , brand                 , noun
                              
  
 
-                          
+                                 
                
                             
                           
@@ -46,12 +45,12 @@ function assertBrand(label        , value         , brand                 , noun
                                 
  
 
-                        
+                               
                  
                                         
  
 
-                                        
+                                               
                             
                
                          
@@ -121,7 +120,7 @@ export function principalSnapshot(name        , { principalType, output }       
   if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(name)) {
     throw new Error(`principalSnapshot name must match /^[a-z][a-z0-9-]{0,63}$/, got '${name}'`);
   }
-  if (!['user', 'link', 'system', 'apiKey'].includes(principalType)) {
+  if (!['user', 'link', 'system', 'apiKey'].includes(principalType          )) {
     throw new Error(`principalSnapshot principalType must be one of user, link, system, apiKey, got '${principalType}'`);
   }
   assertBrand('principalSnapshot', output, _objectBrand, 'output object');
@@ -141,7 +140,7 @@ export function principalSnapshot(name        , { principalType, output }       
     fields: Object.freeze(fields),
   });
   _declarationBrand.add(result);
-  return result;
+  return result                                ;
 }
 
                                     
@@ -201,7 +200,7 @@ principalSnapshot.many = function many(source                  , { via, key, sel
     orderBy: orderBy === undefined ? undefined : Object.freeze([...orderBy]),
   });
   _manyBrand.add(result);
-  return result;
+  return result                  ;
 };
 
 principalSnapshot.select = function select(...handles                     )                      {
@@ -213,7 +212,7 @@ principalSnapshot.select = function select(...handles                     )     
   validateSourceFields('principalSnapshot.select', source, handles);
   const result = Object.freeze([...handles]);
   _selectBrand.add(result);
-  return result;
+  return result                       ;
 };
 
 principalSnapshot.orderBy = function orderBy(handle                   , direction                 = 'asc')                    {

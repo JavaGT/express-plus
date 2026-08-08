@@ -1,19 +1,84 @@
-// @ts-nocheck
 import { parseEventType } from './event-handle.ts';
-import { rowToEvent } from './committed-log.ts';
-import { mayRow, mayVerb as rowGrantMayVerb } from './row-grant.ts';
-import { tryParseScopeKey } from './scope-handle.ts';
-import { hasAnnotatedTextFields } from './entity-snapshot-projection.ts';
+import { rowToEvent, type LogEvent, type LogRowLike } from './committed-log.ts';
+import { mayRow, mayVerb as rowGrantMayVerb, type EntityRecord as RowGrantEntityRecord } from './row-grant.ts';
+import { tryParseScopeKey, type ScopeHandle } from './scope-handle.ts';
+import { hasAnnotatedTextFields, type EntitySnapshotRecord } from './entity-snapshot-projection.ts';
 import { publicEvent } from './event-delivery.ts';
+import type { DbHandle } from './driver.ts';
 
-function forbidden() {
-  const error = new Error('history.forbidden');
+export interface HistoryReaderPrincipal {
+  id: string | number | null;
+}
+
+export interface HistoryEntityRecord {
+  name: string;
+  fields: Record<string, { kind?: string; access?: unknown }>;
+  scopeFilter(principal: unknown): { sql: string; params: Record<string, unknown> };
+  hydrate?: (raw: Record<string, unknown>, principal: unknown) => Record<string, unknown> | null | undefined;
+  grant?: unknown;
+  runtime?: unknown;
+}
+
+export interface HistoryReadOptions {
+  scope?: string;
+  principal?: HistoryReaderPrincipal | null | undefined;
+  sinceSeq?: number;
+  limit?: number;
+}
+
+export interface HistoryReadResult {
+  events: readonly unknown[];
+  hasMore: boolean;
+}
+
+export interface HistoryReceiptOptions {
+  scope: string;
+  actionId: string;
+  principal: HistoryReaderPrincipal | null | undefined;
+}
+
+export interface HistoryReceipt {
+  scope: string;
+  actionId: string;
+  committedAt: string;
+  eventRefs: unknown;
+  actionType: string | null;
+  operation: string;
+}
+
+export interface HistoryReader {
+  readCommittedHistory(options?: HistoryReadOptions): Promise<HistoryReadResult>;
+  readReceipt(options: HistoryReceiptOptions): Promise<HistoryReceipt | null>;
+}
+
+interface RecipientContext {
+  entity: HistoryEntityRecord;
+  event: Readonly<LogEvent>;
+  principal: HistoryReaderPrincipal;
+  row: Record<string, unknown>;
+  scope: string;
+}
+
+type RecipientProjector = (ctx: RecipientContext) => readonly unknown[];
+
+type AuthorizeVerb = (entity: RowGrantEntityRecord, verb: string, row: unknown, principal: unknown) => Promise<boolean>;
+
+type ScopeVisibleCheck = (context: Readonly<{ entity: HistoryEntityRecord; principal: HistoryReaderPrincipal; scope: ScopeHandle }>) => boolean;
+
+function forbidden(): Error & { code: string; status: number } {
+  const error = new Error('history.forbidden') as Error & { code: string; status: number };
   error.code = 'history.forbidden';
   error.status = 403;
   return error;
 }
 
-function reauthFor(entityRec, principal, handle, db, scopeVisible) {
+function reauthFor(
+  entityRec: HistoryEntityRecord,
+  principal: HistoryReaderPrincipal,
+  handle: ScopeHandle,
+  db: DbHandle,
+  scopeVisible: ScopeVisibleCheck,
+): { row: Record<string, unknown> } | null {
   try {
     if (!scopeVisible({ entity: entityRec, principal, scope: handle })) return null;
     const { sql: where, params: scopeParams } = entityRec.scopeFilter(principal);
@@ -28,18 +93,33 @@ function reauthFor(entityRec, principal, handle, db, scopeVisible) {
   }
 }
 
-export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = null, projectRecipient, scopeVisible = () => true }) {
+export function createHistoryReader({
+  db,
+  entities,
+  mayVerb = null,
+  annotatedHistory = null,
+  projectRecipient,
+  scopeVisible = () => true,
+}: {
+  db: DbHandle | null | undefined;
+  entities: ReadonlyMap<string, HistoryEntityRecord> | ((name: string) => HistoryEntityRecord | undefined);
+  mayVerb?: AuthorizeVerb | null;
+  annotatedHistory?: { entities?: Set<string>; actionTypes?: Set<string> } | null;
+  projectRecipient?: RecipientProjector;
+  scopeVisible?: ScopeVisibleCheck;
+}): HistoryReader {
   if (!db) throw new Error('history reader requires a database');
   if (!entities) throw new Error('history reader requires an entity registry');
+  const database = db;
   // Authorization defaults to the framework row-grant engine — the same engine
   // the live-delivery and REST paths use. Apps may still inject their own
   // mayVerb (e.g. to customize authorization for a transport).
-  const authorizeVerb = typeof mayVerb === 'function' ? mayVerb : (entity, verb, row, principal) => rowGrantMayVerb(entity, verb, row, principal);
+  const authorizeVerb: AuthorizeVerb = typeof mayVerb === 'function' ? mayVerb : (entity, verb, row, principal) => rowGrantMayVerb(entity, verb, row, principal);
 
-  const resolveEntity = typeof entities === 'function' ? entities : (name) => entities.get(name);
-  const denyEntities = annotatedHistory?.entities ?? new Set();
+  const resolveEntity = typeof entities === 'function' ? entities : (name: string) => entities.get(name);
+  const denyEntities = annotatedHistory?.entities ?? new Set<string>();
 
-  function isAnnotatedScope(scope, entityRec) {
+  function isAnnotatedScope(scope: string, entityRec?: HistoryEntityRecord) {
     if (!entityRec) {
       const handle = tryParseScopeKey(scope);
       if (!handle) return false;
@@ -47,16 +127,16 @@ export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = 
     }
     if (!entityRec) return false;
     if (denyEntities.has(entityRec.name)) return true;
-    return hasAnnotatedTextFields(entityRec);
+    return hasAnnotatedTextFields(entityRec as unknown as EntitySnapshotRecord);
   }
 
-  async function authorize(scope, principal) {
+  async function authorize(scope: string, principal: HistoryReaderPrincipal): Promise<{ entityRec: HistoryEntityRecord; row: Record<string, unknown> }> {
     if (isAnnotatedScope(scope)) throw forbidden();
     const handle = tryParseScopeKey(scope);
     if (!handle) throw forbidden();
     const entityRec = resolveEntity(handle.entity);
     if (!entityRec) throw forbidden();
-    const auth = reauthFor(entityRec, principal, handle, db, scopeVisible);
+    const auth = reauthFor(entityRec, principal, handle, database, scopeVisible);
     if (!auth) throw forbidden();
     if (!(await mayRow(entityRec, 'subscribe', auth.row, principal, authorizeVerb))) {
       throw forbidden();
@@ -64,7 +144,7 @@ export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = 
     return { entityRec, row: auth.row };
   }
 
-  async function readCommittedHistory({ scope, principal, sinceSeq = 0, limit = 100 } = {}) {
+  async function readCommittedHistory({ scope, principal, sinceSeq = 0, limit = 100 }: HistoryReadOptions = {}): Promise<HistoryReadResult> {
     if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
     if (!principal || principal.id == null) throw forbidden();
     if (!Number.isSafeInteger(sinceSeq) || sinceSeq < 0) throw new TypeError('sinceSeq must be a non-negative integer');
@@ -76,15 +156,15 @@ export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = 
     const { entityRec, row } = await authorize(scope, principal);
 
     const effectiveLimit = limit + 1;
-    const rows = db.prepare(
+    const rows = database.prepare(
       'SELECT * FROM _Log WHERE scope = :scope AND seq > :sinceSeq ORDER BY seq LIMIT :limit',
     ).all({ scope, sinceSeq, limit: effectiveLimit });
 
     const hasMore = rows.length > limit;
     if (hasMore) rows.pop();
 
-    const events = rows.map((row) => rowToEvent(row, parseEventType));
-    const projected = [];
+    const events = rows.map((logRow) => rowToEvent(logRow as unknown as LogRowLike, parseEventType));
+    const projected: unknown[] = [];
     for (const event of events) {
       const safe = publicEvent(event);
       const ctx = Object.freeze({
@@ -104,16 +184,16 @@ export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = 
     return { events: Object.freeze(projected), hasMore };
   }
 
-  async function readReceipt({ scope, actionId, principal }) {
+  async function readReceipt({ scope, actionId, principal }: HistoryReceiptOptions): Promise<HistoryReceipt | null> {
     if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
     if (typeof actionId !== 'string' || actionId.length === 0) throw new TypeError('actionId is required');
     if (!principal || principal.id == null) throw forbidden();
 
     await authorize(scope, principal);
 
-    const row = db.prepare(
+    const row = database.prepare(
       'SELECT scope, actionId, committedAt, eventRefs, actionType, operation FROM _ActionReceipt WHERE scope = :scope AND actionId = :actionId',
-    ).get({ scope, actionId });
+    ).get({ scope, actionId }) as { scope: string; actionId: string; committedAt: string; eventRefs: string; actionType: string | null; operation: string } | undefined;
 
     if (!row) return null;
 

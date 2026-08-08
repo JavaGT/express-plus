@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Derives the canonical set of persistent framework table names from the actual
 // DDL generators — one authoritative source, no hand-maintained lists.
 // Every table the framework owns appears here: framework DDL tables, the
@@ -13,20 +12,21 @@ import { MIGRATION_DDL } from './migrations.ts';
 import {
   collectTableNamesFromDdl as collectNames,
   stripSqlComments,
+  type DdlEntry,
 } from './framework-table-names.ts';
 
 const AUTH_ENTITIES = [User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor];
 const TABLE_REF_KEYWORD = /(?:\bFROM|\bJOIN|\bINTO|\bUPDATE|\bTABLE|\bUSING)\s+/iy;
 const TABLE_IDENTIFIER = /("(?:""|[^"])+"|`(?:``|[^`])+`|\[(?:]]|[^\]])+]|[A-Za-z_][A-Za-z0-9_]*)/y;
 
-function unquoteIdentifier(name) {
+function unquoteIdentifier(name: string): string {
   if (name.startsWith('"')) return name.slice(1, -1).replaceAll('""', '"');
   if (name.startsWith('`')) return name.slice(1, -1).replaceAll('``', '`');
   if (name.startsWith('[')) return name.slice(1, -1).replaceAll(']]', ']');
   return name;
 }
 
-function skipSqlStringOrIdentifier(sql, start) {
+function skipSqlStringOrIdentifier(sql: string, start: number): number {
   const quote = sql[start];
   if (quote !== "'" && quote !== '"' && quote !== '`' && quote !== '[') return start;
   const closing = quote === '[' ? ']' : quote;
@@ -48,7 +48,7 @@ function skipSqlStringOrIdentifier(sql, start) {
   return sql.length;
 }
 
-export function collectTableNamesFromDdl(entries) {
+export function collectTableNamesFromDdl(entries: DdlEntry[]): readonly string[] {
   const names = collectNames(entries);
 
   return Object.freeze(
@@ -63,8 +63,8 @@ export function collectTableNamesFromDdl(entries) {
   );
 }
 
-function collectFrameworkTableNames() {
-  const entries = [];
+function collectFrameworkTableNames(): readonly string[] {
+  const entries: DdlEntry[] = [];
 
   for (const sql of generateFrameworkDDL()) {
     entries.push({ source: 'framework DDL', sql });
@@ -79,8 +79,8 @@ function collectFrameworkTableNames() {
   return collectTableNamesFromDdl(entries);
 }
 
-export function declaredTableNames(entities) {
-  const entries = [];
+export function declaredTableNames(entities: readonly { name: string }[]): readonly string[] {
+  const entries: DdlEntry[] = [];
   for (const entity of entities) {
     for (const sql of generateDDL(entity)) {
       entries.push({ source: `entity ${entity.name}`, sql });
@@ -89,7 +89,7 @@ export function declaredTableNames(entities) {
   return collectTableNamesFromDdl(entries);
 }
 
-export const frameworkTableNames = collectFrameworkTableNames();
+export const frameworkTableNames: readonly string[] = collectFrameworkTableNames();
 
 const FRAMEWORK_TABLE_NAME_SET = new Set(
   frameworkTableNames.map((name) => name.toLowerCase()),
@@ -100,7 +100,7 @@ const FRAMEWORK_TABLE_NAME_SET = new Set(
  * Matches FROM/JOIN/INTO/UPDATE/TABLE/USING table refs (quoted or bare).
  * Does not execute SQL. String literals and comments are ignored.
  */
-export function assertNoFrameworkTableSql(sql) {
+export function assertNoFrameworkTableSql(sql: unknown): void {
   if (typeof sql !== 'string') {
     throw new TypeError('assertNoFrameworkTableSql: sql must be a string');
   }

@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The app assembly layer — Todo C (SPEC §3, §4, §6.2; ADR #20).
 //
 // `workbench()` is the default export: a chainable app. Assembly is TWO-PHASE.
@@ -61,13 +60,13 @@ import { makeMountable } from './router.mjs';
 // `app.mount(path, router)`. `{ mergeParams: true }` lets a child read a parent
 // path param. A router resolves its routes relative to its own base ('/') and is
 // re-based when mounted.
-export function router(options = {}) {
+export function router(options      = {}) {
   const mergeParams = options.mergeParams === true;
   const surface = makeMountable({ mergeParams });
   // A router is a reusable declaration blueprint. Each parent application
   // resolves a private instance with that application's entity registry, so a
   // cached route can never retain another application's database-bound facade.
-  surface.resolveFor = async (entityOf) => {
+  surface.resolveFor = async (entityOf     ) => {
     const instance = makeMountable({ mergeParams, entityOf });
     instance.declarations.push(...surface.declarations);
     await instance.resolveRoutes();
@@ -105,7 +104,7 @@ export default function workbench({
   logRetentionIntervalMs = maintenanceDefaults.logRetentionIntervalMs,
   operationalConsumers = [],
   blobLifecycle,
-} = {}) {
+}      = {}) {
   // envGate (cso #15): fail-closed at app construction — required env vars must be set.
   for (const v of requireEnv) {
     const val = process.env[v];
@@ -151,10 +150,10 @@ export default function workbench({
   let registryLocked = false;
   const runtime = {
     db,
-    batch(...args) {
+    batch(...args       ) {
       return app.batch(...args);
     },
-    entityOf(value) {
+    entityOf(value     ) {
       if (ownedBindings.has(value)) return value;
       if (value?.runtime) {
         throw new Error(`entity '${value.name ?? 'unknown'}' belongs to a different application`);
@@ -181,7 +180,7 @@ export default function workbench({
       return bindingsByDeclaration.get(declaration);
     },
   };
-  const app = makeMountable({ entityOf: runtime.entityOf });
+  const app      = makeMountable({ entityOf: runtime.entityOf });
   app.actions = Object.freeze([...actions]);
   app.operationalConsumers = Object.freeze([...operationalConsumers]);
   app.dispatch = async () => {
@@ -191,7 +190,7 @@ export default function workbench({
     throw new Error('application is not started; call start() before batching');
   };
   app.entity = runtime.entityOf;
-  app.register = (...declared) => {
+  app.register = (...declared       ) => {
     for (const declaration of declared.flat()) runtime.entityOf(declaration);
     return app;
   };
@@ -291,7 +290,7 @@ export default function workbench({
   // Static accessor for the router constructor, so exemplars may write
   // `workbench.router({ mergeParams: true })` alongside the named import.
   // One constructor, two access paths — singular system.
-  workbench.router = router;
+  (workbench       ).router = router;
 
   // Auto-create tables for mounted entities. Runs during `app.ready` before
   // traffic, after routes resolve and before the kernel starts. The method stays
@@ -305,13 +304,13 @@ export default function workbench({
         executeFrameworkDDL(app.db);
         await app.resolveRoutes();
         registryLocked = true;
-        const schemaTables = new Map((schema?.tables ?? []).map((table) => [table.name.toLowerCase(), table]));
+        const schemaTables = new Map             ((schema?.tables ?? []).map((table     ) => [table.name.toLowerCase(), table]));
         const entityMainTables = new Set([...app.entities.values()].map((entity) => entity.name.toLowerCase()));
         const generatedTables = new Set(declaredTableNames([...app.entities.values()]).map((name) => name.toLowerCase()));
         const registeredEntities = new Map([...app.entities.values()].map((entity) => [entity.name.toLowerCase(), entity]));
         const generatedIndexes = new Map();
         for (const entity of app.entities.values()) {
-          for (const [fieldName, field] of Object.entries(entity.fields ?? {})) {
+          for (const [fieldName, field] of Object.entries(entity.fields ?? {})                        ) {
             if (field?.physical !== true || field?.kind !== 'value' || field.type !== 'ref') continue;
             // String refs remain logical for compatibility with declarations whose
             // target is supplied outside this app. A string self ref is closed.
@@ -323,7 +322,7 @@ export default function workbench({
             }
             const targetSchema = schemaTables.get(target.name.toLowerCase());
             if (targetSchema) {
-              const id = targetSchema.columns.find((column) => column.name.toLowerCase() === 'id');
+              const id = targetSchema.columns.find((column     ) => column.name.toLowerCase() === 'id');
               if (!id || String(id.type).toLowerCase() !== 'text' || id.primaryKey !== true) {
                 throw new Error(`entity '${entity.name}' field '${fieldName}' ref target '${target.name}' must have a TEXT id primary key`);
               }
@@ -382,9 +381,9 @@ export default function workbench({
   // Live delivery attaches before startup, when the kernel has not yet captured
   // its post-commit consumers. The app owns registry and authorization wiring;
   // callers provide only transport policy and declared aggregate snapshots.
-  app.attachLiveDelivery = (options) => attachApplicationLiveDelivery(app, options);
+  app.attachLiveDelivery = (options     ) => attachApplicationLiveDelivery(app, options);
 
-  app.listen = (portOrOptionsOrCallback, optionsOrCallback) => {
+  app.listen = (portOrOptionsOrCallback     , optionsOrCallback     ) => {
     // One listen path, Express-compatible overload:
     //   listen()                         → config.port
     //   listen(3000) / listen(3000, cb)  → explicit port
@@ -423,7 +422,7 @@ export default function workbench({
   // (the file-serve factory lives in views.mjs); the framework has ONE interceptor
   // mechanism, not two. A missing file falls through to the next declared
   // handler (e.g. a SPA fallback) rather than short-circuiting the request.
-  app.static = (prefix, dir) => app.use(prefix, serveStatic(dir, { prefix: prefix.replace(/\/+$/, '') }));
+  app.static = (prefix     , dir     ) => app.use(prefix, serveStatic(dir, { prefix: prefix.replace(/\/+$/, '') }));
   // `.auth()` mounts the framework-owned auth battery at `/auth` — login +
   // logout routes that set/clear the fail-closed `sid` cookie (the Set-Cookie
   // the exemplar omits, which is the whole 0→1 auth bug). Built from the SAME
@@ -432,7 +431,7 @@ export default function workbench({
   // (chainable). Fail closed: an app with no db cannot serve auth — the routes
   // write User rows and mint Sessions, and sessionPrincipalOf has nothing to
   // look a token up in. Throw at construction (loud), not mid-login (a 500).
-  app.auth = function auth(options = {}) {
+  app.auth = function auth(options      = {}) {
     if (!app.db) {
       throw new Error('app.auth() requires a db — registration writes a User row, authentication mints a Session, and the session principal source has nothing to look a token up in without one (fail closed).');
     }
@@ -453,7 +452,7 @@ export default function workbench({
       identifyBy: options.identifyBy,
       entities: authEntities,
       db: app.db,
-    }));
+    }       ));
     // Per-app session duration changes only the schedule metadata. The kernel
     // applies it to the app-bound Session facade, preserving its database-bound
     // query and mutation closures.

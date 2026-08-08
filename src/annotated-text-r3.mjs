@@ -1,8 +1,6 @@
-// @ts-nocheck
 import { ValidationError } from './field-strategy.mjs';
-import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
 
-export function assertR3BlockMergePayload(name, fieldName, payload) {
+export function assertR3BlockMergePayload(name        , fieldName        , payload     ) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       Object.keys(payload).length !== 4 ||
       !Object.hasOwn(payload, 'version') || !Object.hasOwn(payload, 'id') ||
@@ -33,11 +31,11 @@ export function assertR3BlockMergePayload(name, fieldName, payload) {
   });
 }
 
-export function canonicalJsonEqual(a, b) {
-  function canonical(value) {
+export function canonicalJsonEqual(a     , b     ) {
+  function canonical(value     )      {
     if (value === null || typeof value !== 'object') return value;
     if (Array.isArray(value)) return value.map(canonical);
-    const sorted = {};
+    const sorted                      = {};
     for (const key of Object.keys(value).sort()) {
       sorted[key] = canonical(value[key]);
     }

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { mayRow, mayFieldOp } from './row-grant.mjs';
 import { CASCADE_PREAUTHORIZED } from './entity/removal-cascade.mjs';
 import {
@@ -37,11 +36,11 @@ import { readDeletedRowAnchor } from './deleted-row-anchor.mjs';
 // can resolve them + their `admitsEffects`.
 const FRAMEWORK_ENTITIES = [User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor];
 
-function collectAppEntities(app) {
-  const handlers = {};
-  const projections = [];
+function collectAppEntities(app     ) {
+  const handlers                      = {};
+  const projections        = [];
   const cursorPolicy = new Map();
-  const entities = new Map(app.entities ?? []);
+  const entities                   = new Map(app.entities ?? []);
   for (const entity of entities.values()) {
     Object.assign(handlers, entity.crudHandlers);
     projections.push(...(entity.projections ?? [entity.projection]));
@@ -64,10 +63,10 @@ function collectAppEntities(app) {
       && (!declaration.erasure || typeof declaration.erasure !== 'object'
         || Object.keys(declaration.erasure).some((key) => !['prepare', 'tables', 'readTables'].includes(key))
         || !Array.isArray(declaration.erasure.tables)
-        || declaration.erasure.tables.some((table) => typeof table !== 'string' || table.length === 0)
+        || declaration.erasure.tables.some((table     ) => typeof table !== 'string' || table.length === 0)
         || (declaration.erasure.readTables !== undefined
           && (!Array.isArray(declaration.erasure.readTables)
-            || declaration.erasure.readTables.some((table) => typeof table !== 'string' || table.length === 0)))
+            || declaration.erasure.readTables.some((table     ) => typeof table !== 'string' || table.length === 0)))
         || typeof declaration.erasure.prepare !== 'function')) {
       throw new Error(`registered action '${declaration.type}' has an invalid erasure preparation`);
     }
@@ -75,9 +74,9 @@ function collectAppEntities(app) {
       throw new Error(`erasure action '${declaration.type}' must exclude its history cursor`);
     }
     if (handlers[declaration.type]) throw new Error(`action '${declaration.type}' is already registered`);
-    const handler = async (context) => {
+    const handler = async (context     ) => {
       const lifecycle = app.pendingBlobLifecycle;
-      const deletion = lifecycle?.fields.find((field) => field.purgeActionName === declaration.type);
+      const deletion = lifecycle?.fields.find((field     ) => field.purgeActionName === declaration.type);
       if (deletion && context.payload?.[deletion.field] !== undefined) {
         const blobRef = context.payload[deletion.field];
         const blobId = typeof blobRef === 'string' ? blobRef : blobRef?.blobId;
@@ -86,7 +85,7 @@ function collectAppEntities(app) {
           scopeId: context.scope, resourceId: context.payload?.[deletion.resourceField],
         });
       }
-      let handlerContext = context;
+      let handlerContext      = context;
       const claimedFields = [];
       if (lifecycle) {
         for (const field of lifecycle.fields) {
@@ -111,10 +110,10 @@ function collectAppEntities(app) {
       if (!commit || !Array.isArray(commit.events)) throw new Error(`registered action '${declaration.type}' must return an event array`);
       if (handlerContext.claimedBlobs) {
         const claimedBlobValues = Object.values(handlerContext.claimedBlobs);
-        const forbiddenEventMetadata = claimedBlobValues.flatMap((blob) => [blob.sha256, blob.md5, blob.byteLength, blob.mediaType]).filter((value) => value !== null);
-        const forbiddenPrivateMetadata = claimedBlobValues.flatMap((blob) => [blob.resourceId, blob.sha256, blob.md5, blob.byteLength, blob.mediaType]).filter((value) => value !== null);
+        const forbiddenEventMetadata = claimedBlobValues.flatMap((blob     ) => [blob.sha256, blob.md5, blob.byteLength, blob.mediaType]).filter((value) => value !== null);
+        const forbiddenPrivateMetadata = claimedBlobValues.flatMap((blob     ) => [blob.resourceId, blob.sha256, blob.md5, blob.byteLength, blob.mediaType]).filter((value) => value !== null);
         const attestationKeys = new Set(['resourceId', 'sha256', 'md5', 'byteLength', 'mediaType']);
-        const containsAttestationMetadata = (value, forbidden, seen = new Set()) => {
+        const containsAttestationMetadata = (value     , forbidden       , seen = new Set         ())          => {
           if (typeof value !== 'object' || value === null) return forbidden.some((candidate) => Object.is(candidate, value));
           if (seen.has(value)) return false;
           seen.add(value);
@@ -135,10 +134,10 @@ function collectAppEntities(app) {
         ...(commit.effects === undefined ? {} : { effects: commit.effects }),
       };
       for (const { field, blobId } of claimedFields) {
-        const owningEvents = commit.events.filter((event) => event?.scope === context.scope && event.data && Object.prototype.hasOwnProperty.call(event.data, field.field));
+        const owningEvents = commit.events.filter((event     ) => event?.scope === context.scope && event.data && Object.prototype.hasOwnProperty.call(event.data, field.field));
         if (owningEvents.length !== 1) throw new Error(`declared blob action '${declaration.type}' must emit exactly one owning event field '${field.field}' in its dispatch scope`);
         if (owningEvents[0].data[field.field] !== blobId) throw new Error(`declared blob action '${declaration.type}' must emit its canonical blob id in field '${field.field}'`);
-        for (const [metadataName, path] of Object.entries(field.canonicalEventMetadata ?? {})) {
+        for (const [metadataName, path] of Object.entries(field.canonicalEventMetadata ?? {})                        ) {
           let target = owningEvents[0].data;
           for (const part of path.slice(0, -1)) {
             if (!Object.prototype.hasOwnProperty.call(target, part) || typeof target[part] !== 'object' || target[part] === null || Array.isArray(target[part])) {
@@ -163,7 +162,7 @@ function collectAppEntities(app) {
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', {
-      value: (app._blobLifecycleOptions?.fields ?? []).some((field) => field.actionName === declaration.type),
+      value: (app._blobLifecycleOptions?.fields ?? []).some((field     ) => field.actionName === declaration.type),
     });
     Object.defineProperty(handler, 'erasureCapable', { value: Boolean(declaration.erasure) });
     Object.defineProperty(handler, 'erasurePrepare', {
@@ -178,7 +177,7 @@ function collectAppEntities(app) {
         ? Object.freeze([...(declaration.erasure.readTables ?? [])]) : Object.freeze([]),
     });
     Object.defineProperty(handler, 'privateFactProjection', {
-      value: declaration.projections?.some((projection) => projection?.privateFact === true) ?? false,
+      value: declaration.projections?.some((projection     ) => projection?.privateFact === true) ?? false,
     });
     handlers[declaration.type] = handler;
     for (const projection of declaration.projections ?? []) {
@@ -216,7 +215,7 @@ function collectAppEntities(app) {
   return { handlers, projections, entities, cursorPolicy };
 }
 
-function buildEffects(entities) {
+function buildEffects(entities                  ) {
   const effectsRegistry = buildEffectsRegistry([...entities.values()]);
   if (effectsRegistry.size > 0) {
     const forValidation = [...entities.values()];
@@ -228,12 +227,12 @@ function buildEffects(entities) {
   return effectsRegistry;
 }
 
-function buildDurableAdmission(app) {
+function buildDurableAdmission(app     ) {
   const registeredEventTypes = new Set(
-    (app.actions ?? []).flatMap((action) =>
-      (action.projections ?? []).flatMap((projection) => projection.eventTypes ?? [])),
+    (app.actions ?? []).flatMap((action     ) =>
+      (action.projections ?? []).flatMap((projection     ) => projection.eventTypes ?? [])),
   );
-  function admissionRowId(event) {
+  function admissionRowId(event     ) {
     // Native field events are scoped to their parent row as `owner`; lifecycle
     // events use their entity row `id` (and may independently declare an owner
     // field). The parsed handle is the authoritative discriminator.
@@ -241,7 +240,7 @@ function buildDurableAdmission(app) {
       ? event.data?.owner ?? event.data?.id
       : event?.data?.id;
   }
-  async function admitsExistingRow({ entityName, verb, principal, event }) {
+  async function admitsExistingRow({ entityName, verb, principal, event }     ) {
     const entity = app.entities?.get(entityName);
     if (!entity) return false;
     const id = admissionRowId(event);
@@ -255,9 +254,9 @@ function buildDurableAdmission(app) {
     if (!row) return false;
     return mayRow(entity, verb, row, principal);
   }
-  async function admitsAnnotatedProject({ entityName, verb, principal, event }) {
+  async function admitsAnnotatedProject({ entityName, verb, principal, event }     ) {
     const entity = app.entities?.get(entityName);
-    const descriptor = entity && Object.values(entity.fields).find((field) => field.kind === 'annotatedText');
+    const descriptor = entity && Object.values(entity.fields).find((field     ) => field.kind === 'annotatedText');
     if (!descriptor) return true;
     const project = tryParseScopeKey(event?.scope);
     const projectEntity = project && app.entities?.get(project.entity);
@@ -270,7 +269,7 @@ function buildDurableAdmission(app) {
   }
 
   return {
-    async beforeProjection({ entityName, verb, principal, event, payload, db: hookDb, now }) {
+    async beforeProjection({ entityName, verb, principal, event, payload, db: hookDb, now }     ) {
       if (registeredEventTypes.has(event?.type)) return true;
       if (event?.[CASCADE_PREAUTHORIZED]) return true;
       if (admitInvitationAcceptance({ event, principal })) return true;
@@ -325,7 +324,7 @@ function buildDurableAdmission(app) {
       }
       return admitsAnnotatedProject({ entityName, verb, principal, event });
     },
-    async afterProjection({ entityName, verb, principal, event, db: hookDb }) {
+    async afterProjection({ entityName, verb, principal, event, db: hookDb }     ) {
       if (registeredEventTypes.has(event?.type)) return true;
       if (
         entityName === Invitation.name
@@ -392,7 +391,7 @@ export const POST_COMMIT_CONSUMER_KINDS = Object.freeze([
   'best-effort-external-consumer',
 ]);
 
-function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsumer, pendingBlobConsumer, durableEffectsRegistry, operationalConsumer }) {
+function engagedPostCommitConsumerDescriptors(app     , entities     , { blobFinalizeConsumer, pendingBlobConsumer, durableEffectsRegistry, operationalConsumer }     ) {
   return [
     { name: 'blob.finalize', kind: 'durable-projection-consumer', consumer: blobFinalizeConsumer },
     { name: 'pending-blob.finalize', kind: 'durable-projection-consumer', consumer: pendingBlobConsumer },
@@ -404,9 +403,9 @@ function engagedPostCommitConsumerDescriptors(app, entities, { blobFinalizeConsu
   ].filter((d) => Boolean(d.consumer));
 }
 
-export function buildKernel(app) {
+export function buildKernel(app     ) {
   const { handlers, projections, entities, cursorPolicy } = collectAppEntities(app);
-  const generatedHistoryActions = {};
+  const generatedHistoryActions                      = {};
   for (const entity of entities.values()) {
     if (entity.historyActionRule) generatedHistoryActions[`${entity.name}.update`] = entity.historyActionRule;
     if (entity.createHistoryActionRule) generatedHistoryActions[`${entity.name}.create`] = entity.createHistoryActionRule;
@@ -449,10 +448,10 @@ export function buildKernel(app) {
   // No-op default when the email seam was never installed.
   app.reconcileEmailDelivery = app._reconcileEmailDelivery ?? (async () => ({ delivered: 0 }));
   const wordEvidenceConsumers = createWordEvidenceConsumers({ db: app.db, entities });
-  const operational = createOperationalConsumers([...app.operationalConsumers, ...wordEvidenceConsumers], {
+  const operational = createOperationalConsumers([...app.operationalConsumers, ...wordEvidenceConsumers]       , {
     writeQueue: app.writeQueue,
     onShutdown: app.onShutdown,
-  });
+  }       );
   operational.engage(app.db);
   app.reconcileOperationalConsumers = () => operational.reconcile(app.db);
 
@@ -468,34 +467,34 @@ export function buildKernel(app) {
     () => txn(app.db, () => replayPrivateFactProjections(app.db, privateFactProjections)),
   );
 
-  const registeredActions = new Map((app.actions ?? []).map((action) => [action.type, action]));
+  const registeredActions = new Map             ((app.actions ?? []).map((action     ) => [action.type, action]));
   const annotatedEntities = new Set(
     [...entities.values()]
-      .filter((entity) => Object.values(entity.fields).some((field) => field.kind === 'annotatedText'))
-      .map((entity) => entity.name),
+      .filter((entity     ) => Object.values(entity.fields).some((field     ) => field.kind === 'annotatedText'))
+      .map((entity     ) => entity.name),
   );
   const annotatedActionTypes = new Set(
-    [...entities.values()].flatMap((entity) => Object.entries(entity.fields)
-      .filter(([, field]) => field.kind === 'annotatedText')
+    [...entities.values()].flatMap((entity     ) => Object.entries(entity.fields)
+      .filter(([, field]) => (field       ).kind === 'annotatedText')
       .map(([field]) => `${entity.name}.${field}.operation`)),
   );
   const annotatedActionDetails = new Map();
   for (const entity of entities.values()) for (const [fieldName, field] of Object.entries(entity.fields)) {
-    if (field.kind !== 'annotatedText') continue;
+    if ((field       ).kind !== 'annotatedText') continue;
     annotatedActionDetails.set(`${entity.name}.${fieldName}.operation`, { entity, fieldName, field });
     annotatedActionDetails.set(`${entity.name}.${fieldName}.compensate`, { entity, fieldName, field, compensation: true });
   }
-   const isAnnotatedHistoryAction = ({ type, payload }) => {
+   const isAnnotatedHistoryAction = ({ type, payload }     ) => {
     const detail = annotatedActionDetails.get(type);
     if (!detail || detail.compensation) return false;
      try { const command = assertV9AnnotatedTextOffsetEditPayload(detail.entity.name, detail.fieldName, payload); return command.edit.kind === 'text.insert' && command.edit.text.length > 0; } catch { return false; }
   };
-    const isContribution = (fact, documentId) => fact?.version === 2 && fact.kind === 'annotated-text.contribution'
+    const isContribution = (fact     , documentId     ) => fact?.version === 2 && fact.kind === 'annotated-text.contribution'
       && fact.documentId === documentId && fact.contribution?.kind === 'text.insert'
       && (!Object.hasOwn(fact.contribution, 'blockId') || (typeof fact.contribution.blockId === 'string' && fact.contribution.blockId.length > 0))
       && Array.isArray(fact.contribution.opId)
       && typeof fact.contribution.text === 'string' && Number.isSafeInteger(fact.contribution.scalarCount);
-    const isAnnotatedHistoryFact = ({ type, payload, fact }) => {
+    const isAnnotatedHistoryFact = ({ type, payload, fact }     ) => {
       const detail = annotatedActionDetails.get(type);
       return Boolean(detail && isAnnotatedHistoryAction({ type, payload }) && isContribution(fact, payload.id));
     };
@@ -503,8 +502,8 @@ export function buildKernel(app) {
   // public action and is admitted only through the trusted history capability.
   for (const type of annotatedActionTypes) {
     generatedHistoryActions[type] = {
-      inverse: ({ origin, target, targetFact }) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'undo' } }, input: { kind: ANNOTATED_TEXT_COMPENSATION, targetFact } }),
-      redo: ({ origin, target, targetFact }) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'redo' } }, input: { kind: ANNOTATED_TEXT_COMPENSATION, targetFact } }),
+      inverse: ({ origin, target, targetFact }     ) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'undo' } }, input: { kind: ANNOTATED_TEXT_COMPENSATION, targetFact } }),
+      redo: ({ origin, target, targetFact }     ) => ({ type: `${type.replace(/\.operation$/, '')}.compensate`, payload: { version: 1, id: origin.payload.id, history: { version: 1, rootActionId: origin.actionId, targetActionId: target.actionId, direction: 'redo' } }, input: { kind: ANNOTATED_TEXT_COMPENSATION, targetFact } }),
     };
   }
 
@@ -549,7 +548,7 @@ export function buildKernel(app) {
     pipeline: durableMutationVariant({
       projectionConsumers: projections,
       admission: buildDurableAdmission(app),
-      blobAdapter,
+      blobAdapter: blobAdapter       ,
       effectsRegistry: effectsRegistry.size > 0 ? effectsRegistry : null,
       executeEffectsForEvent,
       postCommitConsumers: postCommitConsumerDescriptors.map((d) => d.consumer),

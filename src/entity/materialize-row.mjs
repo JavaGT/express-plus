@@ -1,5 +1,4 @@
-// @ts-nocheck
-import { deserializeField, structCellColumn, verifyHash } from '../field-strategy.mjs';
+import { deserializeField, structCellColumn, verifyHash,                      } from '../field-strategy.mjs';
 import { materializeText, restoreTextCheckpoint } from '../annotated-text.mjs';
 
 // Convert one SQLite result into the field values an application declared.
@@ -24,7 +23,7 @@ export function materializeStoredRow(
     if (descriptor.kind === 'struct') {
       const value                          = {};
       let present = false;
-      for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells)) {
+      for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells ?? {})) {
         const column = structCellColumn(fieldName, cellName);
         if (!Object.prototype.hasOwnProperty.call(row, column)) continue;
         const stored = row[column];
@@ -54,20 +53,8 @@ export function materializeStoredRow(
 
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind !== 'computed' || descriptor.mode !== 'pull') continue;
-    try { row[fieldName] = descriptor.compute(row); } catch {}
+    try { row[fieldName] = (descriptor.compute                                             )(row); } catch {}
   }
 
   return freeze ? Object.freeze(row)                            : row;
 }
-
-                          
-                         
- 
-
-                           
-                
-                
-                
-                                         
-                                                      
- 

@@ -1,4 +1,3 @@
-// @ts-nocheck
 // membership — concentrates the two-plane membership pattern into a single declaration.
 //
 // Before (15 lines of boilerplate per entity):
@@ -29,11 +28,64 @@ import {
   MEMBER_COLUMN,
   anyOf,
 } from '../scope-sql.ts';
+import type { AstNode, ReadScopeTemplate } from '../scope-sql.ts';
 import { scope } from '../scope.ts';
+import type { RuntimeGrantClause } from '../scope.ts';
 import { grant, deny, read, write, subscribe, admin } from '../grant.ts';
+import type { Capability, GrantDecision } from '../grant.ts';
+import type { FieldDescriptor } from '../field-strategy.ts';
 
 // Owner always receives the full capability set.
-const OWNER_CAPABILITIES = Object.freeze([read, write, subscribe, admin]);
+const OWNER_CAPABILITIES: readonly Capability[] = Object.freeze([read, write, subscribe, admin]);
+
+// A membership declaration: one named role → the capabilities it confers on the
+// rows it belongs to, plus an optional explicit field selector. `can` is the
+// allowlist that grants the role its capabilities (never a denylist).
+interface MembershipRoleConfig {
+  field?: { name?: string; role?: string | string[] };
+  can: Capability[];
+}
+
+type MembershipConfig = Record<string, MembershipRoleConfig>;
+
+// The compiled per-role mapping: which map field backs the role and the role
+// values stored in the side-table's role column.
+interface MembershipFieldMapping {
+  fieldName: string;
+  dbRoles: string[];
+  capabilities: Capability[];
+}
+
+// The `is` proxy every scope predicate / .can body destructures. Harvest calls
+// mint AST nodes; the scope compiler injects the proxy before the predicate runs.
+type MembershipIs = Record<string, () => AstNode>;
+
+// A membership check-registry entry: harvest (SQL-compilable scope face) + run
+// (per-row boolean face) — the same two-face shape the unified registry uses.
+interface MembershipCheckEntry {
+  harvest: () => AstNode;
+  run: (ctx: { entity: { id: unknown }; principal: { id: unknown }; runtime: MembershipRunRuntime }) => boolean;
+}
+
+// The minimal runtime surface a membership `run` face reads: the db handle with
+// a prepare().get() path. The concrete driver satisfies this structurally.
+interface MembershipRunRuntime {
+  db: {
+    prepare(sql: string): { get(params: Record<string, unknown>): unknown };
+  };
+}
+
+// A compiled entity record as membership() reads and augments it. Auth-bearing
+// properties are mutable so the standalone overlay can set them in place.
+interface MembershipEntityRecord {
+  name: string;
+  fields: Record<string, FieldDescriptor>;
+  grant?: unknown;
+  registry?: Record<string, { harvest?: unknown }>;
+  readScope?: { sql: string; params: Record<string, unknown> };
+  scopeAst?: unknown;
+  scopeFilter?: (principal: unknown) => { sql: string; params: Record<string, unknown> };
+}
 
 // ---- Core: compile a membership declaration into { grant, checks } ----
 // Called by the entity compiler when `membership:` is present in the declaration.
@@ -42,7 +94,14 @@ const OWNER_CAPABILITIES = Object.freeze([read, write, subscribe, admin]);
 // Returns:
 //   { grant: () => [clause], checks: { [role]: registryEntry, ... }, fieldMappings }
 // The `checks` values are registry-style entries { harvest, run }.
-export function compileMembershipAuthz(entityName, fields, config) {
+export function compileMembershipAuthz(entityName: string, fields: Record<string, FieldDescriptor>, config: MembershipConfig): {
+  grant: () => RuntimeGrantClause[];
+  checks: Record<string, MembershipCheckEntry>;
+  fieldMappings: Map<string, MembershipFieldMapping>;
+  scopePredicate: ({ is }: { is: unknown }) => AstNode;
+  canBody: ({ is }: { is: unknown }) => Promise<GrantDecision>;
+  hasOwner: boolean;
+} {
   if (!config || typeof config !== 'object' || Object.keys(config).length === 0) {
     throw new Error(
       `compileMembershipAuthz('${entityName}'): config must be a non-empty object`,
@@ -50,8 +109,8 @@ export function compileMembershipAuthz(entityName, fields, config) {
   }
 
   const roleNames = Object.keys(config);
-  const fieldMappings = new Map(); // roleName -> { fieldName, dbRoles, capabilities }
-  const checks = {};
+  const fieldMappings = new Map<string, MembershipFieldMapping>(); // roleName -> { fieldName, dbRoles, capabilities }
+  const checks: Record<string, MembershipCheckEntry> = {};
 
   for (const roleName of roleNames) {
     const roleConfig = config[roleName];
@@ -89,10 +148,11 @@ export function compileMembershipAuthz(entityName, fields, config) {
   );
 
   // Build scope predicate: anyOf(is.owner(), is.<role>(), ...)
-  const scopePredicate = ({ is }) => {
-    const predicateChecks = [];
-    if (hasOwner) predicateChecks.push(is.owner());
-    for (const roleName of roleNames) predicateChecks.push(is[roleName]());
+  const scopePredicate = ({ is }: { is: unknown }): AstNode => {
+    const isChecks = is as MembershipIs;
+    const predicateChecks: AstNode[] = [];
+    if (hasOwner) predicateChecks.push(isChecks.owner());
+    for (const roleName of roleNames) predicateChecks.push(isChecks[roleName]());
     if (predicateChecks.length === 0) {
       throw new Error(
         `membership: no checks to include in scope predicate (no owner, no roles) on entity '${entityName}'`,
@@ -102,11 +162,12 @@ export function compileMembershipAuthz(entityName, fields, config) {
   };
 
   // Build .can body
-  const canBody = async ({ is }) => {
-    if (hasOwner && (await is.owner())) return grant(...OWNER_CAPABILITIES);
+  const canBody = async ({ is }: { is: unknown }): Promise<GrantDecision> => {
+    const isChecks = is as MembershipIs;
+    if (hasOwner && (await isChecks.owner())) return grant(...OWNER_CAPABILITIES);
     for (const roleName of roleNames) {
-      if (await is[roleName]()) {
-        const caps = fieldMappings.get(roleName).capabilities;
+      if (await isChecks[roleName]()) {
+        const caps = fieldMappings.get(roleName)!.capabilities;
         return grant(...caps);
       }
     }
@@ -114,7 +175,7 @@ export function compileMembershipAuthz(entityName, fields, config) {
   };
 
   // Build grant thunk
-  const grantThunk = () => [scope(scopePredicate).can(canBody)];
+  const grantThunk = (): RuntimeGrantClause[] => [scope(scopePredicate).can(canBody)];
 
   return { grant: grantThunk, checks, fieldMappings, scopePredicate, canBody, hasOwner };
 }
@@ -124,7 +185,7 @@ export function compileMembershipAuthz(entityName, fields, config) {
 // entity.scopeFilter on the record it receives. Passing a declaration defines
 // the policy inherited by future bindings; passing an app-bound facade creates
 // an application-local policy overlay without changing the declaration.
-export function membership(entityRecord, config) {
+export function membership(entityRecord: MembershipEntityRecord, config: MembershipConfig): MembershipEntityRecord {
   if (!entityRecord || typeof entityRecord !== 'object' || !entityRecord.name) {
     throw new Error(
       'membership(entity, config): first argument must be a compiled entity record (from entity())',
@@ -166,9 +227,9 @@ export function membership(entityRecord, config) {
   const newScopeAst = readScopeResult ? readScopeResult.ast : undefined;
 
   // Build scopeFilter function (re-bound to new readScope)
-  const scopeFilterFn = (principal) => {
+  const scopeFilterFn = (principal: unknown): { sql: string; params: Record<string, unknown> } => {
     if (!newReadScope) return { sql: '1=0', params: {} };
-    const bound = bindReadScope(newReadScope, principal);
+    const bound = bindReadScope(newReadScope as ReadScopeTemplate, principal);
     return bound ? { sql: bound.sql, params: bound.params } : { sql: '1=0', params: {} };
   };
 
@@ -188,18 +249,19 @@ export function membership(entityRecord, config) {
 // ---- Internal helpers ----
 
 // Find which map field on the entity to use for a given role name.
-function resolveFieldName(fields, roleName, fieldSpec) {
+function resolveFieldName(fields: Record<string, FieldDescriptor>, roleName: string, fieldSpec?: MembershipRoleConfig['field']): string {
   // Explicit field name in config
   if (fieldSpec?.name) {
     const name = fieldSpec.name;
-    if (!fields[name]) {
+    const descriptor = fields[name];
+    if (!descriptor) {
       throw new Error(
         `membership: field '${name}' not found on entity (for role '${roleName}')`,
       );
     }
-    if (fields[name].kind !== 'store' || fields[name].type !== 'map') {
+    if (descriptor.kind !== 'store' || descriptor.type !== 'map') {
       throw new Error(
-        `membership: field '${name}' is not a map field (kind=${fields[name].kind}, type=${fields[name].type})`,
+        `membership: field '${name}' is not a map field (kind=${descriptor.kind}, type=${descriptor.type})`,
       );
     }
     return name;
@@ -239,20 +301,21 @@ function resolveFieldName(fields, roleName, fieldSpec) {
 }
 
 // Extract role values from a field descriptor, normalized to an array.
-function resolveDescriptorRoles(descriptor) {
+function resolveDescriptorRoles(descriptor: FieldDescriptor | undefined): string[] {
   if (!descriptor) return [];
-  if (Array.isArray(descriptor.role)) return [...descriptor.role];
-  if (descriptor.role) return [descriptor.role];
+  const role = descriptor.role;
+  if (Array.isArray(role)) return role.map((r) => String(r));
+  if (role) return [String(role)];
   return [];
 }
 
 // Build a check entry with harvest (SQL-compilable) and run (runtime) faces.
-function buildCheckEntry(entityName, fieldName, dbRoles) {
+function buildCheckEntry(entityName: string, fieldName: string, dbRoles: string[]): MembershipCheckEntry {
   const table = membershipTable(entityName, fieldName);
   const ownerCol = membershipOwnerCol(entityName);
 
   // Harvest face: returns an existsMembership AST node for scope→SQL lowering.
-  const harvest = () => {
+  const harvest = (): AstNode => {
     return makeNode({
       node: 'existsMembership',
       table,
@@ -262,10 +325,14 @@ function buildCheckEntry(entityName, fieldName, dbRoles) {
   };
 
   // Run face: queries the membership side-table at runtime.
-  const run = ({ entity: row, principal, runtime }) => {
+  const run = ({ entity: row, principal, runtime }: {
+    entity: { id: unknown };
+    principal: { id: unknown };
+    runtime: MembershipRunRuntime;
+  }): boolean => {
     const db = runtime.db;
     if (dbRoles.length > 0) {
-      const roleParams = {};
+      const roleParams: Record<string, unknown> = {};
       const conditions = dbRoles.map((role, i) => {
         const key = `__role_${i}`;
         roleParams[key] = role;

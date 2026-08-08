@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The mutation pipeline's type kernel: Action and Event (SPEC §7).
 //
 // An ACTION is an imperative client request that may be rejected. An EVENT is a
@@ -15,7 +14,7 @@
 import { readSeq } from './committed-log.ts';
 import { appendEvents, receiptFor, eventsFromReceipt, insertReceipt } from './committed-log.ts';
 import { lifecycleVerb, parseEventType } from './event-handle.ts';
-import { txn } from './driver.ts';
+import { txn, type DbHandle } from './driver.ts';
 import { isPlainObject, ValidationError } from './field-strategy.ts';
 import { createRequire } from 'node:module';
 import { createDurableHistoryRuntime } from './durable-history.ts';
@@ -28,15 +27,15 @@ import { declarePostCommitEffectsInTxn } from './post-commit-effects.ts';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.
-export function action(type) {
+export function action(type: string) {
   return Object.freeze({ brand: 'action', type });
 }
 
 // `event(type, reduce)` — declare a past-tense fact and the reducer that folds
 // it into state. The reducer is required; omitting it fails closed at load.
-export function event(type, reduce) {
-  const handle = type?.brand === 'event-handle' ? type : undefined;
-  const eventType = handle ? handle.type : type;
+export function event(type: string | { brand: 'event-handle'; type: string }, reduce: (state: unknown, payload: unknown) => unknown) {
+  const handle = type && typeof type === 'object' && type.brand === 'event-handle' ? type : undefined;
+  const eventType = handle ? handle.type : (type as string);
   if (typeof reduce !== 'function') {
     throw new Error(
       `event('${eventType}') has no reducer. An event with no reducer is a ` +
@@ -58,13 +57,13 @@ export function event(type, reduce) {
 // This is the "singular system" implementation (AGENTS.md): one event-application
 // path, called by both the outer dispatch and in-txn effects (ADR #6, #22).
 
-function eventWithHandle(event, handle) {
+function eventWithHandle(event: any, handle: any): any {
   const out = { ...event };
   Object.defineProperty(out, 'handle', { value: handle, enumerable: false });
   return Object.freeze(out);
 }
 
-function eventWithParsedHandle(event) {
+function eventWithParsedHandle(event: any): any {
   if (event?.handle?.brand === 'event-handle') return eventWithHandle(event, event.handle);
   try {
     return eventWithHandle(event, parseEventType(event.type));
@@ -81,12 +80,13 @@ export const NOW = Symbol('workbench.now');
 // arrays — a Date, Buffer, or class instance passes through untouched (a Date's
 // ISO form comes from its toJSON at serialization; flattening it to {} would
 // lose the value).
-function resolveNowTokens(value, now) {
+function resolveNowTokens(value: unknown, now: string): unknown {
   if (value === NOW) return now;
   if (Array.isArray(value)) return value.map((v) => resolveNowTokens(v, now));
   if (isPlainObject(value)) {
-    const out = {};
-    for (const k of Object.keys(value)) out[k] = resolveNowTokens(value[k], now);
+    const source = value as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(source)) out[k] = resolveNowTokens(source[k], now);
     return out;
   }
   return value;
@@ -105,13 +105,13 @@ export function noBlobAdapter() {
   });
 }
 
-function requireAdmission(granted) {
+function requireAdmission(granted: unknown) {
   if (!granted) throw Object.assign(new Error('forbidden'), { status: 403 });
 }
 
-function effectEventsFor(registry, executeEffectsForEvent) {
+function effectEventsFor(registry: unknown, executeEffectsForEvent: unknown) {
   if (!registry) return null;
-  return (event, { now, actionId, db }) => {
+  return (event: unknown, { now, actionId, db }: { now: string; actionId: string; db: unknown }): any => {
     const impl = executeEffectsForEvent ??
       createRequire(import.meta.url)('./effect-compiler.mjs').executeEffectsForEvent;
     return impl(event, registry, { now, actionId, db });
@@ -126,6 +126,17 @@ export function durableMutationVariant({
   executeEffectsForEvent = null,
   postCommitConsumers = [],
   maxEffectDepth = 8,
+}: {
+  projectionConsumers?: any[];
+  admission?: {
+    beforeProjection: (context: any) => Promise<unknown>;
+    afterProjection: (context: any) => Promise<unknown>;
+  };
+  blobAdapter?: { adoptInTxn: (db: unknown, events: unknown[]) => Promise<unknown> };
+  effectsRegistry?: unknown;
+  executeEffectsForEvent?: unknown;
+  postCommitConsumers?: Array<(events: unknown, context: unknown) => Promise<unknown> | unknown>;
+  maxEffectDepth?: number;
 } = {}) {
   if (!Number.isInteger(maxEffectDepth) || maxEffectDepth < 0) {
     throw new Error('durableMutationVariant: maxEffectDepth must be a non-negative integer');
@@ -133,7 +144,7 @@ export function durableMutationVariant({
   const effectsExecutor = effectEventsFor(effectsRegistry, executeEffectsForEvent);
   const variant = {
     name: 'durable.mutation',
-    async applyInTxn(db, events, {
+    async applyInTxn(db: unknown, events: any[], {
       now,
       actionId,
       nextSeq,
@@ -141,11 +152,22 @@ export function durableMutationVariant({
       depth = 0,
       payload,
       type,
-      scope,
+      scope: _scope,
       privateFact,
       claimedBlobs,
-    } = {}) {
-      const finalizedEvents = [];
+    }: {
+      now: string;
+      actionId: string;
+      nextSeq: (scope: unknown) => number;
+      principal: unknown;
+      depth?: number;
+      payload?: unknown;
+      type?: unknown;
+      scope?: unknown;
+      privateFact?: unknown;
+      claimedBlobs?: unknown;
+    }) {
+      const finalizedEvents: any[] = [];
 
       // Pre-projection admission — runs IN-TXN against the PRE-mutation row,
       // before the _Log append and before projection. Denial leaves zero
@@ -180,7 +202,7 @@ export function durableMutationVariant({
         const ev = { ...withHandle, data, seq, actionId, committedAt: now };
         finalizedEvents.push(eventWithHandle(ev, withHandle.handle));
       }
-      appendEvents(db, finalizedEvents);
+      appendEvents(db as DbHandle, finalizedEvents);
 
       // Projection consumers — materialize entity rows from events.
       // Registered-action projections pin actionType to the declaring action.
@@ -255,12 +277,12 @@ export function durableMutationVariant({
 
       return finalizedEvents;
     },
-    requiresPrivateFact(events, actionType) {
+    requiresPrivateFact(events: any[], actionType: unknown) {
       return projectionConsumers.some((consumer) => consumer.privateFact === true
         && (consumer.actionType === undefined || consumer.actionType === actionType)
         && events.some((event) => consumer.eventTypes.includes(event.type)));
     },
-    async afterCommit(events, context) {
+    async afterCommit(events: unknown, context: unknown) {
       for (const consumer of postCommitConsumers) {
         try {
           await consumer(events, context);
@@ -294,38 +316,38 @@ export function durableMutationVariant({
 // `authorize` is REQUIRED and fails closed: there is no default. A default
 // `() => true` would admit every action (fail OPEN), the opposite of the route
 
-function successOutcome(events, deduped = false) {
+function successOutcome(events: unknown, deduped = false) {
   return Object.freeze({ ok: true, deduped, events });
 }
 
-function deniedOutcome(details) {
-  return failureOutcome(failure('denied', 'Forbidden.', details));
+function deniedOutcome(details?: unknown) {
+  return failureOutcome(failure('denied', 'Forbidden.', details as Record<string, unknown> | undefined));
 }
 
-function unknownActionOutcome(type, details) {
+function unknownActionOutcome(type: unknown, details?: unknown) {
   return failureOutcome(failure(
     'unknown-action',
     `No action named '${String(type)}' is registered.`,
-    details,
+    details as Record<string, unknown> | undefined,
   ));
 }
 
-function executionFailure(error, context = {}, details) {
+function executionFailure(error: unknown, context: Record<string, unknown> = {}, details?: unknown) {
   const normalized = error instanceof ValidationError
-    ? failure('invalid-input', error.message, isPlainObject(error.failure) ? error.failure : undefined)
+    ? failure('invalid-input', (error as Error).message, isPlainObject((error as { failure?: unknown }).failure) ? (error as { failure: Record<string, unknown> }).failure : undefined)
     : failureFromError(error);
   if (normalized.category === 'internal') {
     getLog().error('dispatch', 'dispatch failed', { err: error, ...context });
   }
   const withDetails = details
-    ? failure(normalized.category, normalized.message, { ...(normalized.details ?? {}), ...details })
+    ? failure(normalized.category, normalized.message, { ...(normalized.details ?? {}), ...(details as Record<string, unknown>) })
     : normalized;
   return failureOutcome(withDetails);
 }
 
 const BATCH_HANDLER_FAILURE = Symbol('workbench.batch-handler-failure');
 
-function batchHandlerFailure(error, actionIndex) {
+function batchHandlerFailure(error: unknown, actionIndex: number) {
   return Object.freeze({ [BATCH_HANDLER_FAILURE]: true, error, actionIndex });
 }
 
@@ -339,14 +361,14 @@ function batchHandlerFailure(error, actionIndex) {
 // differs; only the post-catch boolean guard is extracted here.
 
 // Returns the handler function, or null if no handler is registered for `type`.
-function checkHandler(handlers, type) {
+function checkHandler(handlers: Record<string, any>, type: string): any {
   const handler = handlers[type];
   if (typeof handler !== 'function') return null;
   return handler;
 }
 
 // Returns the index of the first action without a handler, or -1 if all exist.
-function checkHandlers(handlers, actions) {
+function checkHandlers(handlers: Record<string, any>, actions: any[]): number {
   for (let i = 0; i < actions.length; i++) {
     if (typeof handlers[actions[i].type] !== 'function') return i;
   }
@@ -354,19 +376,19 @@ function checkHandlers(handlers, actions) {
 }
 
 // Returns deniedOutcome(details) when `result` is falsy, or null when authorized.
-function authorizedOrDenied(result, details) {
+function authorizedOrDenied(result: unknown, details?: unknown) {
   if (!result) return deniedOutcome(details);
   return null;
 }
 
 // In-memory dedupe mirrors the durable `(scope, actionId)` receipt identity.
-function checkInMemoryDedupe(dispatched, scope, actionId) {
+function checkInMemoryDedupe(dispatched: Map<string, Map<string, unknown>>, scope: string, actionId: string) {
   const scoped = dispatched.get(scope);
   if (!scoped?.has(actionId)) return null;
   return successOutcome(scoped.get(actionId), true);
 }
 
-function recordInMemoryDispatch(dispatched, scope, actionId, events) {
+function recordInMemoryDispatch(dispatched: Map<string, Map<string, unknown>>, scope: string, actionId: string, events: unknown) {
   let scoped = dispatched.get(scope);
   if (!scoped) {
     scoped = new Map();
@@ -378,22 +400,22 @@ function recordInMemoryDispatch(dispatched, scope, actionId, events) {
 // Durable dedupe: returns successOutcome when the actionId receipt exists,
 // or null for a fresh action. Handlers with private receipts can require an
 // exact request match before their resultData is replayed.
-function checkDurableDedupe(db, scope, actionId, request, receiptMatches) {
-  const receipt = receiptFor(db, scope, actionId);
+function checkDurableDedupe(db: unknown, scope: string, actionId: string, request: any, receiptMatches?: (receipt: any, request: any) => boolean) {
+  const receipt = receiptFor(db as DbHandle, scope, actionId);
   if (!receipt) return null;
   if (receiptMatches && !receiptMatches(receipt, request)) {
     return failureOutcome(failure('conflict', 'Action ID is already committed for a different request.'));
   }
-  return Object.freeze({ ...successOutcome(eventsFromReceipt(db, receipt, parseEventType), true), resultData: receipt.resultData });
+  return Object.freeze({ ...successOutcome(eventsFromReceipt(db as DbHandle, receipt, parseEventType), true), resultData: receipt.resultData });
 }
 
-function checkDurableBatchDedupe(db, scope, actionId, actions) {
-  const receipt = receiptFor(db, scope, actionId);
+function checkDurableBatchDedupe(db: unknown, scope: string, actionId: string, actions: any[]) {
+  const receipt = receiptFor(db as DbHandle, scope, actionId);
   if (!receipt) return null;
   if (receipt.actionType !== '$batch' || receipt.actionData !== JSON.stringify(actions)) {
     return failureOutcome(failure('conflict', 'Action ID is already committed for a different batch.'));
   }
-  return Object.freeze({ ...successOutcome(eventsFromReceipt(db, receipt, parseEventType), true), resultData: receipt.resultData });
+  return Object.freeze({ ...successOutcome(eventsFromReceipt(db as DbHandle, receipt, parseEventType), true), resultData: receipt.resultData });
 }
 
 // commitEvents — the durable transaction brace shared by `dispatch` and
@@ -405,11 +427,24 @@ function checkDurableBatchDedupe(db, scope, actionId, actions) {
 // `actions` array. The two genuinely differ there, so the brace is extracted but
 // the `payload` value stays per-caller. Throws non-403 errors after rolling back;
 // Post-commit delivery can no longer turn a committed mutation into a failure.
-async function commitEvents(db, events, {
+async function commitEvents(db: any, events: any, {
   now, actionId, nextSeq, principal, payload, pipeline, scope, type, authorize, historyCommit, handler,
   erasureActionContext,
+}: {
+  now: string;
+  actionId: string;
+  nextSeq: (scope: unknown) => number;
+  principal: unknown;
+  payload: unknown;
+  pipeline: any;
+  scope: string;
+  type: unknown;
+  authorize?: (context: any) => unknown | Promise<unknown>;
+  historyCommit?: any;
+  handler?: any;
+  erasureActionContext?: unknown;
 }) {
-  let committed;
+  let committed: any;
   try {
     // Wave 4.4 — Authorize INSIDE the transaction, atomic with log append,
     // cursor update, projection writes, and receipt insert. Both dispatch
@@ -430,7 +465,7 @@ async function commitEvents(db, events, {
             const result = await authorize({ type: action.type, payload: action.payload, principal });
             if (!result) {
               const err = new Error('forbidden');
-              err.status = 403;
+              (err as any).status = 403;
               throw err;
             }
           }
@@ -438,7 +473,7 @@ async function commitEvents(db, events, {
           const result = await authorize({ type, payload, principal });
           if (!result) {
             const err = new Error('forbidden');
-            err.status = 403;
+            (err as any).status = 403;
             throw err;
           }
         }
@@ -477,10 +512,10 @@ async function commitEvents(db, events, {
       // the events it references, so a retry's dedupe check and a crash
       // recovery always see either both or neither.
       if (directive !== undefined) {
-        const prepared = isErasureDirectivePreparation(directive) ? prepareErasureDirective(db, directive, { excludeActionId: actionId }) : directive;
+        const prepared = isErasureDirectivePreparation(directive) ? prepareErasureDirective(db, directive, { excludeActionId: actionId } as any) : directive;
         if (!isErasureDirective(prepared)) throw new TypeError(`action '${type}' returned an invalid erasure directive`);
         await applyErasureDirective(db, prepared, {
-          scope, actionId, actionContext: { ...erasureActionContext, committedAt: now }, prepare: handler.erasurePrepare,
+          scope, actionId, actionContext: { ...(erasureActionContext as object | null ?? {}), committedAt: now }, prepare: handler.erasurePrepare,
           tables: handler.erasurePreparationTables, readTables: handler.erasurePreparationReadTables,
         });
       }
@@ -497,11 +532,12 @@ async function commitEvents(db, events, {
       return Object.freeze({ events: result, resultData });
     });
   } catch (err) {
-    if (err?.[BATCH_HANDLER_FAILURE]) {
+    const batchError = err as { [BATCH_HANDLER_FAILURE]?: boolean; error?: unknown; actionIndex?: number } | null | undefined;
+    if (batchError?.[BATCH_HANDLER_FAILURE]) {
       return executionFailure(
-        err.error,
-        { actionId, type: payload[err.actionIndex]?.type },
-        { actionIndex: err.actionIndex },
+        batchError.error,
+        { actionId, type: (payload as any[])[batchError.actionIndex ?? 0]?.type },
+        { actionIndex: batchError.actionIndex },
       );
     }
     return executionFailure(err, { actionId });
@@ -515,7 +551,7 @@ async function commitEvents(db, events, {
   return Object.freeze({ ...successOutcome(committed.events), resultData: committed.resultData });
 }
 
-function receiptMetadata(request, historyCommit) {
+function receiptMetadata(request: any, historyCommit: any) {
   const clientId = request.clientId;
   const historySession = request.history?.session;
   const historyIdentity = request.history?.identity;
@@ -540,7 +576,16 @@ function receiptMetadata(request, historyCommit) {
 // (AGENTS.md: never a magic default); omitting it is a load-time error. When
 // Phase 2 wires this kernel to a request path, `authorize` is where the route
 // gate + grant engine compose — it is not a second, looser auth path.
-export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), history, historyActions = {}, cursorPolicy, annotatedHistory } = {}) {
+export function createServer({ handlers = {}, authorize, db, pipeline = durableMutationVariant(), history, historyActions = {}, cursorPolicy, annotatedHistory }: {
+  handlers?: Record<string, any>;
+  authorize?: (context: any) => any;
+  db?: any;
+  pipeline?: any;
+  history?: any;
+  historyActions?: Record<string, any>;
+  cursorPolicy?: any;
+  annotatedHistory?: any;
+} = {}) {
   if (typeof authorize !== 'function') {
     throw new Error(
       `createServer requires an authorize function. There is no default — a ` +
@@ -553,20 +598,21 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     throw new Error(`durable createServer requires the 'durable.mutation' pipeline variant.`);
   }
   if (history && !db) throw new Error('durable history requires a durable database');
+  const authorizeFn = authorize as (context: any) => unknown;
 
   // ---- ephemeral path (no db) — synchronous, in-memory ----
   if (!db) {
-    const log = [];                 // append-only event log
+    const log: any[] = [];     // append-only event log
     const sequences = new Map();    // scope → last assigned sequence number
     const dispatched = new Map();   // owning scope → action id → events (dedupe)
 
-    function nextSeq(scope) {
+    function nextSeq(scope: any) {
       const seq = (sequences.get(scope) ?? 0) + 1;
       sequences.set(scope, seq);
       return seq;
     }
 
-    function dispatch({ actionId, type, payload, principal, scope = '' }) {
+    function dispatch({ actionId, type, payload, principal, scope = '' }: any) {
       const handler = checkHandler(handlers, type);
       if (!handler) return unknownActionOutcome(type);
 
@@ -575,7 +621,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       // reverses the old kernel which checked dedupe before authorize.
       let authorized;
       try {
-        authorized = authorize({ type, payload, principal });
+        authorized = authorizeFn({ type, payload, principal });
       } catch (err) {
         return executionFailure(err, { actionId, type });
       }
@@ -598,7 +644,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       let events;
       try {
         const emitted = handler({ payload, principal, scope });
-        events = emitted.map((e) =>
+        events = emitted.map((e: any) =>
           Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
       } catch (err) {
         return executionFailure(err, { actionId, type });
@@ -609,7 +655,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       return successOutcome(events);
     }
 
-    function dispatchBatch({ actionId, actions = [], principal, scope = '' }) {
+    function dispatchBatch({ actionId, actions = [], principal, scope = '' }: { actionId: any; actions?: any[]; principal: any; scope?: any }) {
       if (actions.length === 0) return successOutcome([]);
       const missingIdx = checkHandlers(handlers, actions);
       if (missingIdx !== -1) {
@@ -635,7 +681,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
         const action = actions[actionIndex];
         let authorized;
         try {
-          authorized = authorize({ type: action.type, payload: action.payload, principal });
+          authorized = authorizeFn({ type: action.type, payload: action.payload, principal });
         } catch (err) {
           return executionFailure(err, { actionId, type: action.type }, { actionIndex });
         }
@@ -655,7 +701,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       }
       let events;
       try {
-        events = allEmitted.map((e) =>
+        events = allEmitted.map((e: any) =>
           Object.freeze({ ...e, seq: nextSeq(e.scope), actionId }));
       } catch (err) {
         return executionFailure(err, { actionId });
@@ -670,7 +716,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 
   // ---- durable path (db engaged) — async, SQLite-backed ----
 
-  function nextSeq(scope) {
+  function nextSeq(scope: any) {
     const seq = readSeq(db, scope) + 1;
     db.prepare(
       'INSERT INTO _Cursor (scope, lastSeq) VALUES (?, ?) ON CONFLICT(scope) DO UPDATE SET lastSeq = ?',
@@ -682,7 +728,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   // detection before dedupe) → dedupe by actionId → run handler → commit
   // events inside a write transaction. Authorize ALSO runs INSIDE the
   // transaction (Wave 4.4), atomic with log, cursor, projection, and receipt.
-  async function dispatch(request) {
+  async function dispatch(request: any) {
     const { actionId, type, payload, principal, scope = '' } = request;
     const handler = checkHandler(handlers, type);
     if (!handler) return unknownActionOutcome(type);
@@ -713,7 +759,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // for crash atomicity; the outer check is the Fork C semantic gate.
     let authResult;
     try {
-      authResult = await authorize({ type, payload, principal });
+      authResult = await authorizeFn({ type, payload, principal });
     } catch (err) {
       return executionFailure(err, { actionId, type });
     }
@@ -772,8 +818,8 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
   // Authorization runs at TWO points: Fork C outside the txn (revoked-principal
   // detection before dedupe/write) AND inside commitEvents's txn (Wave 4.4)
   // for crash atomicity with log, cursor, projection, and receipt writes.
-  async function dispatchBatch(request) {
-    const { actionId, actions = [], principal, scope = '' } = request;
+  async function dispatchBatch(request: any) {
+    const { actionId, actions = [], principal, scope = '' } = request as { actionId: any; actions?: any[]; principal: any; scope?: any };
     let historyCommit;
     try {
       historyCommit = receiptMetadata(request, request._historyCommit ?? historyRuntime?.normalCommit(request));
@@ -814,7 +860,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
       const action = actions[actionIndex];
       let authResult;
       try {
-        authResult = await authorize({ type: action.type, payload: action.payload, principal });
+        authResult = await authorizeFn({ type: action.type, payload: action.payload, principal });
       } catch (err) {
         return executionFailure(err, { actionId, type: action.type }, { actionIndex });
       }
@@ -835,7 +881,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     // Registered actions mark `inTransaction` so they receive db/now/scope inside
     // the write brace — same contract as single `dispatch`. Running them early
     // without that context made scope-checked handlers fail as Internal error.
-    const runHandlers = async (transactionContext) => {
+    const runHandlers = async (transactionContext: any = null) => {
       const handlerContext = transactionContext?.db
         ? {
           db: transactionContext.db,
@@ -875,10 +921,11 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
     if (!runInTxn) {
       try { batchCommit = await runHandlers(); }
       catch (err) {
+        const failure = err as { error?: unknown; actionIndex?: number };
         return executionFailure(
-          err.error,
-          { actionId, type: actions[err.actionIndex]?.type },
-          { actionIndex: err.actionIndex },
+          failure.error,
+          { actionId, type: actions[failure.actionIndex ?? 0]?.type },
+          { actionIndex: failure.actionIndex },
         );
       }
     }
@@ -912,7 +959,7 @@ export function createServer({ handlers = {}, authorize, db, pipeline = durableM
 //  - duplicate — idempotent skip; no fold, cursor unchanged.
 //  - gap       — do NOT apply; signal a resync.
 //  - next      — reduce once, advance the cursor to span hi.
-export function createClient({ events = [] } = {}) {
+export function createClient({ events = [] }: { events?: Array<{ type: string; reduce: (state: any, payload: any) => any }> } = {}) {
   // Reducer registry, keyed by event type. An event type with no reducer here
   // has nothing to fold — ingesting it is an error, not a silent drop.
   const reducers = new Map(events.map((e) => [e.type, e.reduce]));
@@ -920,19 +967,19 @@ export function createClient({ events = [] } = {}) {
   const states = new Map();   // scope → folded state
   const cursors = new Map();  // scope → last applied sequence number
 
-  const cursor = (scope) => cursors.get(scope) ?? 0;
-  const state = (scope) => states.get(scope);
+  const cursor = (scope: any) => cursors.get(scope) ?? 0;
+  const state = (scope: any) => states.get(scope);
 
   // Bootstrap: adopt a snapshot and set the cursor to the snapshot's sequence
   // BEFORE any live event is ingested. Ordering is load-bearing — a live event
   // ingested before the snapshot would resync into an empty state and then be
   // overwritten, losing the event (SPEC §7.1).
-  function bootstrap(scope, snapshot, seq) {
+  function bootstrap(scope: any, snapshot: any, seq: any) {
     states.set(scope, snapshot);
     cursors.set(scope, seq);
   }
 
-  function ingest(incoming) {
+  function ingest(incoming: any) {
     const { type, scope, seq, seqSpan } = incoming;
     const reduce = reducers.get(type);
     if (typeof reduce !== 'function') {

@@ -495,7 +495,7 @@ const boundWithMembership = membership(app.entity(Project), {
 });
 const stillBound: import('workbench').BoundWorkbenchEntity<ProjectRow> = boundWithMembership;
 const parsedCookie: Record<string, string> = parseCookies(`${SESSION_COOKIE}=token`);
-const rootInvitationApi = createRootInvitationApi({ Invitation: Invitations });
+const rootInvitationApi = createRootInvitationApi({ Invitation: Invitations as unknown as NonNullable<Parameters<typeof createRootInvitationApi>[0]>['Invitation'] });
 const routeMatch = matchRoute([], 'GET', '/health');
 const staticHandler = serveStatic('/tmp');
 const cookieHeader: string = sessionCookie('token');

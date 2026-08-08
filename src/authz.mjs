@@ -1,26 +1,49 @@
-// @ts-nocheck
 import { assertGuarded } from './guard/static.mjs';
 import { buildCheckRegistry } from './registry.mjs';
 import { isRuntimeGrantClause } from './scope.mjs';
 import { compileReadScope, compileInheritScope } from './scope-sql.mjs';
+                                                        
+
+// The grant declaration: either a thunk returning the clause array, or an
+// `inherit(Parent, { via })` directive object (reserved for Phase 1's inherit
+// path). The thunk form is resolved here so its `.can` bodies can be statically
+// guarded at load.
+                            
+                            
+                         
+ 
+
+                            
+                                  
+                  
+                                           
+                                           
+ 
+
+                       
+                                    
+                                
+                     
+                    
+ 
 
 // Normalize the grant declaration into an array of clauses. A grant is either a
 // thunk returning an array of `scope().can()` clauses (note.mjs) or — Phase 1
 // reserved — an `inherit(Parent, { via })` directive (comment.mjs). The thunk
 // form is resolved here so its `.can` bodies can be statically guarded at load.
-function resolveGrantClauses(grant) {
-  if (typeof grant === 'function') return grant();
+function resolveGrantClauses(grant         )          {
+  if (typeof grant === 'function') return (grant                 )();
   // an inherit directive (object) is carried through untouched for the authz
   // compiler to expand; Phase 1 lands the thunk form first.
   return grant;
 }
 
-export function compileEntityAuthz(name, { fields, grant, declaredChecks, compiledChecks }) {
+export function compileEntityAuthz(name        , { fields, grant, declaredChecks, compiledChecks }                  )              {
   // Build the unified check registry — the ONE source of truth for every named
   // check, consulted by BOTH the scope→SQL compiler (harvest face) and the
   // per-row runtime evaluator (run face). Derived role checks (ref-role),
   // declared checks, and map-role names all land here; no second path.
-  const baseRegistry = buildCheckRegistry({ fields, declaredChecks, entityName: name });
+  const baseRegistry = buildCheckRegistry({ fields, declaredChecks: declaredChecks                                             , entityName: name })                                         ;
   for (const checkName of Object.keys(compiledChecks ?? {})) {
     // A map role contributes only a runtime face; membership intentionally
     // completes/replaces that weaker entry with its paired harvest+run faces.
@@ -33,7 +56,7 @@ export function compileEntityAuthz(name, { fields, grant, declaredChecks, compil
       );
     }
   }
-  const registry = Object.freeze({ ...baseRegistry, ...compiledChecks });
+  const registry = Object.freeze({ ...baseRegistry, ...compiledChecks })                           ;
 
   // Statically guard every runtime `.can` body (not scope predicates — those
   // compile to SQL and never run as JS). At the same time, lower the entity's
@@ -43,12 +66,12 @@ export function compileEntityAuthz(name, { fields, grant, declaredChecks, compil
   // `inherit(Parent, { via })` directive (the child inherits the parent's scope
   // through a typed FK, lowered to a correlated EXISTS).
   const clauses = resolveGrantClauses(grant);
-  let readScope;
+  let readScope                               ;
   if (Array.isArray(clauses)) {
     // Every clause's runtime .can body is statically guarded.
     for (const clause of clauses) {
       if (isRuntimeGrantClause(clause)) {
-        assertGuarded(clause.can, { where: `entity('${name}') grant .can` });
+        assertGuarded((clause                                            ).can, { where: `entity('${name}') grant .can` });
       }
     }
     // The row-filtering read-scope is derived from exactly ONE scope predicate.
@@ -57,7 +80,7 @@ export function compileEntityAuthz(name, { fields, grant, declaredChecks, compil
     // restrict reads. There is no union/intersection-of-scopes semantics in
     // Phase 1; an additive read scope, if ever needed, arrives as an explicit
     // named construct — not inferred from a second array element (fail-closed).
-    const scoped = clauses.filter((c) => c && typeof c.predicate === 'function');
+    const scoped = clauses.filter((c) => c && typeof (c                           ).predicate === 'function');
     if (scoped.length > 1) {
       throw new Error(
         `entity('${name}') declares ${scoped.length} scope clauses in one grant. ` +
@@ -69,15 +92,15 @@ export function compileEntityAuthz(name, { fields, grant, declaredChecks, compil
       );
     }
     if (scoped.length === 1) {
-      readScope = compileReadScope(scoped[0].predicate, {
+      readScope = compileReadScope((scoped[0]                                            ).predicate, {
         fields,
         where: `scope on entity('${name}')`,
         registry,
         entityName: name,
       });
     }
-  } else if (clauses && clauses.inherit) {
-    readScope = compileInheritScope(clauses, { where: `inherit on entity('${name}')` });
+  } else if (clauses && (clauses                    ).inherit) {
+    readScope = compileInheritScope(clauses                    , { where: `inherit on entity('${name}')` });
   }
 
   // The harvested scope AST is retained (not just the SQL) so a child entity's

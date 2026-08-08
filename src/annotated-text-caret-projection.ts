@@ -1,16 +1,66 @@
-// @ts-nocheck
 import { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.ts';
 
-function fail(message) { throw new Error(`annotated-text caret projection: ${message}`); }
+type CaretProjection =
+  | { readonly kind: 'edge'; readonly presence: string; readonly edge: 'start' }
+  | { readonly kind: 'caret'; readonly presence: string; readonly offset: number };
 
-function exact(value, keys, label) {
+interface CanonicalAnnotation {
+  id: string;
+  family: string;
+  fields: Record<string, any>;
+  owner?: string;
+  protectedTargetIds?: string[];
+}
+
+interface CanonicalRange {
+  annotationId: string;
+  start: number;
+  end: number;
+}
+
+interface CanonicalMeasurement {
+  id: string;
+  family: string;
+  formatVersion: number;
+  payload: any;
+}
+
+interface CanonicalOrphan {
+  id: string;
+  family: string;
+  fields: Record<string, any>;
+  savedQuote: string;
+  savedRange: [number, number];
+  owner?: string;
+}
+
+interface CanonicalAnnotatedText {
+  kind: string;
+  version: number;
+  text: string;
+  annotations: CanonicalAnnotation[];
+  ranges: CanonicalRange[];
+  measurements: CanonicalMeasurement[];
+  capabilityHints: string[];
+  orphans?: CanonicalOrphan[];
+}
+
+interface ProtectorDecisions {
+  version: number;
+  protectors: Array<{ protectorId: string; outcome: string }>;
+  capabilityHints: string[];
+}
+
+function fail(message: string): never { throw new Error(`annotated-text caret projection: ${message}`); }
+
+function exact(value: unknown, keys: readonly string[], label: string): void {
   if (!value || typeof value !== 'object' || Array.isArray(value) ||
       Object.keys(value).length !== keys.length || keys.some((key) => !Object.hasOwn(value, key))) {
     fail(`${label} has invalid shape`);
   }
 }
 
-function splitsSurrogate(text, offset) {
+function splitsSurrogate(text: string, offset: number): boolean {
   if (offset <= 0 || offset >= text.length) return false;
   const before = text.charCodeAt(offset - 1);
   const after = text.charCodeAt(offset);
@@ -23,7 +73,7 @@ function splitsSurrogate(text, offset) {
 // cannot drift. When any redaction is present, the visible text cannot safely
 // locate the caret, so only a deterministic edge (start/end) with the opaque
 // presence token is disclosed — never the offset or any protected text.
-export function projectAnnotatedTextCaretForRecipient(canonical, descriptor, decisions, caret, presence) {
+export function projectAnnotatedTextCaretForRecipient(canonical: CanonicalAnnotatedText, descriptor: any, decisions: ProtectorDecisions, caret: { offset: number }, presence: string): CaretProjection {
   exact(caret, ['offset'], 'caret');
   if (!Number.isSafeInteger(caret.offset) || caret.offset < 0) {
     fail('caret location is invalid');

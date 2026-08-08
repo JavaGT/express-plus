@@ -1,9 +1,9 @@
-// @ts-nocheck
 import { ValidationError } from './field-strategy.mjs';
 import { splitBlock, materializeBlock } from './annotated-text-family.mjs';
+                                                             
 import { assertUtf16Offset } from './annotated-text.mjs';
 
-function deepFreeze(value) {
+function deepFreeze   (value   )              {
   if (value === null || typeof value !== 'object') return value;
   if (Array.isArray(value)) {
     for (const item of value) deepFreeze(item);
@@ -15,7 +15,7 @@ function deepFreeze(value) {
   return Object.freeze(value);
 }
 
-export function assertR4AnnotationApplyPayload(name, fieldName, payload) {
+export function assertR4AnnotationApplyPayload(name        , fieldName        , payload     ) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       Object.keys(payload).length !== 4 ||
       !Object.hasOwn(payload, 'version') || !Object.hasOwn(payload, 'id') ||
@@ -42,7 +42,7 @@ export function assertR4AnnotationApplyPayload(name, fieldName, payload) {
       !operation.annotation.fields || typeof operation.annotation.fields !== 'object' || Array.isArray(operation.annotation.fields) ||
       (Object.hasOwn(operation.annotation, 'protectedTargetIds') &&
         (!Array.isArray(operation.annotation.protectedTargetIds) ||
-          operation.annotation.protectedTargetIds.some((id, index, values) => typeof id !== 'string' || id.length === 0 || (index > 0 && values[index - 1] >= id))))) {
+          operation.annotation.protectedTargetIds.some((id        , index        , values          ) => typeof id !== 'string' || id.length === 0 || (index > 0 && values[index - 1] >= id))))) {
     throw new ValidationError(`${name}.${fieldName}.operation requires annotation.apply with annotation { id, family, fields, protectedTargetIds? }`);
   }
   if (!operation.selection || typeof operation.selection !== 'object' || Array.isArray(operation.selection) ||
@@ -88,7 +88,7 @@ export function assertR4AnnotationApplyPayload(name, fieldName, payload) {
  *   suffix [start,len)           → 1 split at start, selected = new block
  *   interior [start,end)         → 2 splits (start then end), selected = mid block
  */
-export function isolateAnnotationSelection(family, blockId, startUtf16Offset, endUtf16Offset, splitBlockIds) {
+export function isolateAnnotationSelection(family            , blockId        , startUtf16Offset        , endUtf16Offset        , splitBlockIds          ) {
   const sourceText = materializeBlock(family, blockId);
   if (!Number.isSafeInteger(startUtf16Offset) || !Number.isSafeInteger(endUtf16Offset) ||
       startUtf16Offset < 0 || endUtf16Offset > sourceText.length || startUtf16Offset >= endUtf16Offset) {
@@ -106,7 +106,7 @@ export function isolateAnnotationSelection(family, blockId, startUtf16Offset, en
 
   let next = family;
   let selectedBlockId = blockId;
-  const actualSplitIds = [];
+  const actualSplitIds           = [];
   let splitIndex = 0;
 
   if (startUtf16Offset > 0) {

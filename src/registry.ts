@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The unified check registry — the ONE source of truth for every named check
 // on an entity, consulted by BOTH the scope→SQL compiler (harvest face) AND the
 // per-row runtime evaluator (run face).
@@ -46,16 +45,43 @@ import {
   membershipOwnerCol,
   MEMBER_COLUMN,
 } from './scope-sql.ts';
+import type { DbHandle } from './driver.ts';
+import type { FieldDescriptor } from './field-strategy.ts';
 
-export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityName }) {
-  const registry = {};
+interface CheckRuntime {
+  db: DbHandle;
+  entityOf: (target: unknown) => unknown;
+}
+
+interface CheckRunContext {
+  entity: Record<string, unknown>;
+  principal: { id: string | null; attributes: Readonly<Record<string, unknown>> };
+  runtime: CheckRuntime;
+}
+
+interface CheckEntry {
+  harvest: (() => unknown) | undefined;
+  run: (ctx: CheckRunContext) => boolean;
+}
+
+export type CheckRegistry = Readonly<Record<string, CheckEntry>>;
+
+export interface CheckRegistryOptions {
+  fields?: Record<string, unknown>;
+  declaredChecks?: Record<string, (ctx: unknown) => boolean>;
+  entityName?: string;
+}
+
+export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityName }: CheckRegistryOptions): CheckRegistry {
+  const registry: Record<string, CheckEntry> = {};
 
   // ---- Source 1: ref-role fields ----
   for (const [fieldName, descriptor] of Object.entries(fields)) {
-    if (descriptor?.type === 'ref' && descriptor.role) {
-      registry[descriptor.role] = {
+    const field = descriptor as { type?: unknown; role?: unknown } | null | undefined;
+    if (field?.type === 'ref' && field.role) {
+      registry[String(field.role)] = {
         harvest: () => makeNode({ node: 'eq', field: fieldName, param: PRINCIPAL_ID_PARAM }),
-        run: ({ entity: row, principal, runtime }) => row[fieldName] === principal.id,
+        run: ({ entity: row, principal }) => row[fieldName] === principal.id,
       };
     }
   }
@@ -63,14 +89,14 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
   // ---- Source 2: declared checks ----
   // Build the compile self-handle once (same shape makeIsProxy built today:
   // one fieldHandle per field, keyed by entityName).
-  const compileSelfHandle = {};
+  const compileSelfHandle: Record<string, unknown> = {};
   if (entityName) {
     for (const [fName, desc] of Object.entries(fields)) {
       compileSelfHandle[fName] = fieldHandle(
         fName,
-        desc,
+        desc as FieldDescriptor,
         entityName,
-        (target) => typeof target === 'object' ? target : null,
+        (target: unknown) => typeof target === 'object' ? target : null,
       );
     }
   }
@@ -86,12 +112,13 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
     }
 
     // Run face: invoke fn per-row with a runtime self-handle.
-    const run = ({ entity: row, principal, runtime }) => {
-      const runtimeSelf = {};
+    const run = ({ entity: row, principal, runtime }: CheckRunContext): boolean => {
+      const runtimeSelf: Record<string, unknown> = {};
       if (entityName) {
         for (const [fName, desc] of Object.entries(fields)) {
+          const descriptor = desc as { kind?: unknown; type?: unknown; role?: unknown; cells?: unknown } | null | undefined;
           // For map fields, expose the membership handle. db comes from runtime.
-          if (desc?.kind === 'store' && desc.type === 'map') {
+          if (descriptor?.kind === 'store' && descriptor.type === 'map') {
             const table = membershipTable(entityName, fName);
             const ownerCol = membershipOwnerCol(entityName);
             runtimeSelf[fName] = membershipHandle(table, ownerCol, () => row.id, () => runtime.db);
@@ -102,11 +129,11 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
           // resolves here: the hydrated namespace (`row.linkShare = {token, tier}`)
           // supplies the stored value; `.is(undefined)` is false (fail-closed for
           // a non-link principal, mirroring the harvest FALSE + SQL NULL bind).
-          else if (desc?.kind === 'struct') {
-            const handle = {};
-            for (const [cellName] of Object.entries(desc.cells)) {
+          else if (descriptor?.kind === 'struct') {
+            const handle: Record<string, { is: (v: unknown) => boolean }> = {};
+            for (const [cellName] of Object.entries((descriptor as { cells?: Record<string, unknown> }).cells as Record<string, unknown>)) {
               handle[cellName] = {
-                is: (v) => v == null ? false : row[fName]?.[cellName] === v,
+                is: (v: unknown) => v == null ? false : (row[fName] as Record<string, unknown> | undefined)?.[cellName] === v,
               };
             }
             runtimeSelf[fName] = handle;
@@ -115,7 +142,7 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
           // can traverse ownership in the same shape the compiler sees:
           // Photo.album.collaborators.has(principal.id). Ref-role fields stay raw
           // because their identity check is already the single derived role face.
-          else if (desc?.kind === 'value' && desc.type === 'ref' && !desc.role) {
+          else if (descriptor?.kind === 'value' && descriptor.type === 'ref' && !descriptor.role) {
             runtimeSelf[fName] = makeRuntimeRefHandle({
               fieldName: fName,
               descriptor: desc,
@@ -144,7 +171,7 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
     // that returns a non-AST value (a raw boolean from a runtime-shaped check)
     // is rejected at load (fail closed — never silently dropped from the SQL
     // filter, which would widen row visibility).
-    const harvest = () => {
+    const harvest = (): unknown => {
       const entityContext = entityName ? { [entityName]: compileSelfHandle } : {};
       const result = fn({
         ...entityContext,
@@ -165,17 +192,18 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
   // For each map field with `roles`, add a runtime-only entry per role name.
   // These entries have NO harvest face — using them in scope must fail.
   for (const [fieldName, descriptor] of Object.entries(fields)) {
-    if (descriptor?.kind === 'store' && descriptor.type === 'map' && descriptor.roles?.length > 0) {
-      const table = membershipTable(entityName, fieldName);
-      const ownerCol = membershipOwnerCol(entityName);
+    const field = descriptor as { kind?: unknown; type?: unknown; roles?: unknown[] } | null | undefined;
+    if (field?.kind === 'store' && field.type === 'map' && Array.isArray(field.roles) && field.roles.length > 0) {
+      const table = membershipTable(entityName as string, fieldName);
+      const ownerCol = membershipOwnerCol(entityName as string);
 
-      for (const roleName of descriptor.roles) {
+      for (const roleName of field.roles) {
         // If the name already exists from a ref-role or declared check, skip it.
         // Declared/ref-role entries carry both faces and are the canonical source;
         // a map-role with the same name would be a weaker runtime-only shadow.
-        if (registry[roleName]) continue;
+        if (registry[String(roleName)]) continue;
 
-        registry[roleName] = {
+        registry[String(roleName)] = {
           // NO harvest face — runtime-only. Calling is.editor() in scope must throw.
           harvest: undefined,
           run: ({ entity: row, principal, runtime }) => {
@@ -198,16 +226,21 @@ export function buildCheckRegistry({ fields = {}, declaredChecks = {}, entityNam
 // `.get` returns the raw side-table row (or undefined) so checks can inspect a
 // member's role. `ownerId` may be null (unset FK) — fail closed. `dbOf` defers
 // the handle's db resolution to the caller's capture policy.
-function membershipHandle(table, ownerCol, ownerIdOf, dbOf) {
+function membershipHandle(
+  table: string,
+  ownerCol: string,
+  ownerIdOf: () => unknown,
+  dbOf: () => DbHandle,
+) {
   return {
-    has: (memberId) => {
+    has: (memberId: unknown): boolean => {
       const ownerId = ownerIdOf();
       if (ownerId == null) return false;
       return dbOf().prepare(
         `SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND ${MEMBER_COLUMN} = :member`,
       ).get({ owner: ownerId, member: memberId }) !== undefined;
     },
-    get: (memberId) => {
+    get: (memberId: unknown): Record<string, unknown> | undefined => {
       const ownerId = ownerIdOf();
       if (ownerId == null) return undefined;
       return dbOf().prepare(
@@ -217,44 +250,53 @@ function membershipHandle(table, ownerCol, ownerIdOf, dbOf) {
   };
 }
 
-function makeRuntimeRefHandle({ fieldName, descriptor, row, runtime }) {
-  const targetReference = descriptor.target;
+function makeRuntimeRefHandle({ fieldName, descriptor, row, runtime }: {
+  fieldName: string;
+  descriptor: unknown;
+  row: Record<string, unknown>;
+  runtime: CheckRuntime;
+}) {
+  const targetReference = (descriptor as { target?: unknown }).target;
   const targetName = typeof targetReference === 'string'
     ? targetReference
-    : targetReference?.name;
-  const target = targetReference ? runtime.entityOf(targetReference) : null;
+    : (targetReference as { name?: unknown } | undefined)?.name;
+  const target = targetReference
+    ? (runtime.entityOf(targetReference) as { name?: string; fields?: Record<string, unknown> } | null | undefined)
+    : null;
   const refId = row[fieldName];
   if (!target?.fields) return refId;
+  const targetFields = target.fields;
+  const targetTable = (target.name ?? targetName) as string;
 
-  const mapEntries = [];
-  const mapHandles = {};
-  for (const [targetFieldName, targetDescriptor] of Object.entries(target.fields)) {
-    if (targetDescriptor?.kind === 'store' && targetDescriptor.type === 'map') {
-      const table = membershipTable(target.name ?? targetName, targetFieldName);
-      const ownerCol = membershipOwnerCol(target.name ?? targetName);
+  const mapEntries: Array<[string, ReturnType<typeof membershipHandle>]> = [];
+  const mapHandles: Record<string, ReturnType<typeof membershipHandle>> = {};
+  for (const [targetFieldName, targetDescriptor] of Object.entries(targetFields)) {
+    const td = targetDescriptor as { kind?: unknown; type?: unknown } | undefined;
+    if (td?.kind === 'store' && td.type === 'map') {
+      const table = membershipTable(targetTable, targetFieldName);
+      const ownerCol = membershipOwnerCol(targetTable);
       const mh = membershipHandle(table, ownerCol, () => refId, () => runtime.db);
       mapEntries.push([targetFieldName, mh]);
       mapHandles[targetFieldName] = mh;
     }
   }
 
-  const targetTable = target.name ?? targetName;
+  const handle: Record<string, unknown> = { id: refId, ...mapHandles };
 
-  const handle = { id: refId, ...mapHandles };
-
-  handle.then = (resolve, reject) => {
+  handle.then = (resolve: (value: unknown) => void, reject: (reason?: unknown) => void): void => {
     try {
       if (refId == null) {
-        const result = { id: refId };
+        const result: Record<string, unknown> = { id: refId };
         for (const [k, v] of mapEntries) result[k] = v;
-        return resolve(result);
+        resolve(result);
+        return;
       }
       const targetRow = runtime.db.prepare(
         `SELECT * FROM ${targetTable} WHERE id = :id`,
       ).get({ id: refId });
-      const result = { id: refId };
+      const result: Record<string, unknown> = { id: refId };
       if (targetRow) {
-        for (const [k] of Object.entries(target.fields)) {
+        for (const [k] of Object.entries(targetFields)) {
           if (k === 'id') result[k] = targetRow[k];
           else if (Object.prototype.hasOwnProperty.call(targetRow, k)) {
             result[k] = targetRow[k];

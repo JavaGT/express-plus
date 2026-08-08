@@ -1,19 +1,84 @@
-// @ts-nocheck
 import { parseEventType } from './event-handle.mjs';
-import { rowToEvent } from './committed-log.mjs';
-import { mayRow, mayVerb as rowGrantMayVerb } from './row-grant.mjs';
-import { tryParseScopeKey } from './scope-handle.mjs';
-import { hasAnnotatedTextFields } from './entity-snapshot-projection.mjs';
+import { rowToEvent,                                } from './committed-log.mjs';
+import { mayRow, mayVerb as rowGrantMayVerb,                                           } from './row-grant.mjs';
+import { tryParseScopeKey,                  } from './scope-handle.mjs';
+import { hasAnnotatedTextFields,                           } from './entity-snapshot-projection.mjs';
 import { publicEvent } from './event-delivery.mjs';
+                                            
 
-function forbidden() {
-  const error = new Error('history.forbidden');
+                                         
+                             
+ 
+
+                                      
+               
+                                                              
+                                                                                    
+                                                                                                             
+                  
+                    
+ 
+
+                                     
+                 
+                                                        
+                    
+                 
+ 
+
+                                    
+                             
+                   
+ 
+
+                                        
+                
+                   
+                                                       
+ 
+
+                                 
+                
+                   
+                      
+                     
+                            
+                    
+ 
+
+                                
+                                                                                 
+                                                                              
+ 
+
+                            
+                              
+                            
+                                    
+                               
+                
+ 
+
+                                                                        
+
+                                                                                                                        
+
+                                                                                                                                                
+
+function forbidden()                                           {
+  const error = new Error('history.forbidden')                                            ;
   error.code = 'history.forbidden';
   error.status = 403;
   return error;
 }
 
-function reauthFor(entityRec, principal, handle, db, scopeVisible) {
+function reauthFor(
+  entityRec                     ,
+  principal                        ,
+  handle             ,
+  db          ,
+  scopeVisible                   ,
+)                                          {
   try {
     if (!scopeVisible({ entity: entityRec, principal, scope: handle })) return null;
     const { sql: where, params: scopeParams } = entityRec.scopeFilter(principal);
@@ -28,18 +93,33 @@ function reauthFor(entityRec, principal, handle, db, scopeVisible) {
   }
 }
 
-export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = null, projectRecipient, scopeVisible = () => true }) {
+export function createHistoryReader({
+  db,
+  entities,
+  mayVerb = null,
+  annotatedHistory = null,
+  projectRecipient,
+  scopeVisible = () => true,
+}   
+                                  
+                                                                                                           
+                                 
+                                                                                  
+                                        
+                                   
+ )                {
   if (!db) throw new Error('history reader requires a database');
   if (!entities) throw new Error('history reader requires an entity registry');
+  const database = db;
   // Authorization defaults to the framework row-grant engine — the same engine
   // the live-delivery and REST paths use. Apps may still inject their own
   // mayVerb (e.g. to customize authorization for a transport).
-  const authorizeVerb = typeof mayVerb === 'function' ? mayVerb : (entity, verb, row, principal) => rowGrantMayVerb(entity, verb, row, principal);
+  const authorizeVerb                = typeof mayVerb === 'function' ? mayVerb : (entity, verb, row, principal) => rowGrantMayVerb(entity, verb, row, principal);
 
-  const resolveEntity = typeof entities === 'function' ? entities : (name) => entities.get(name);
-  const denyEntities = annotatedHistory?.entities ?? new Set();
+  const resolveEntity = typeof entities === 'function' ? entities : (name        ) => entities.get(name);
+  const denyEntities = annotatedHistory?.entities ?? new Set        ();
 
-  function isAnnotatedScope(scope, entityRec) {
+  function isAnnotatedScope(scope        , entityRec                      ) {
     if (!entityRec) {
       const handle = tryParseScopeKey(scope);
       if (!handle) return false;
@@ -47,16 +127,16 @@ export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = 
     }
     if (!entityRec) return false;
     if (denyEntities.has(entityRec.name)) return true;
-    return hasAnnotatedTextFields(entityRec);
+    return hasAnnotatedTextFields(entityRec                                   );
   }
 
-  async function authorize(scope, principal) {
+  async function authorize(scope        , principal                        )                                                                            {
     if (isAnnotatedScope(scope)) throw forbidden();
     const handle = tryParseScopeKey(scope);
     if (!handle) throw forbidden();
     const entityRec = resolveEntity(handle.entity);
     if (!entityRec) throw forbidden();
-    const auth = reauthFor(entityRec, principal, handle, db, scopeVisible);
+    const auth = reauthFor(entityRec, principal, handle, database, scopeVisible);
     if (!auth) throw forbidden();
     if (!(await mayRow(entityRec, 'subscribe', auth.row, principal, authorizeVerb))) {
       throw forbidden();
@@ -64,7 +144,7 @@ export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = 
     return { entityRec, row: auth.row };
   }
 
-  async function readCommittedHistory({ scope, principal, sinceSeq = 0, limit = 100 } = {}) {
+  async function readCommittedHistory({ scope, principal, sinceSeq = 0, limit = 100 }                     = {})                             {
     if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
     if (!principal || principal.id == null) throw forbidden();
     if (!Number.isSafeInteger(sinceSeq) || sinceSeq < 0) throw new TypeError('sinceSeq must be a non-negative integer');
@@ -76,15 +156,15 @@ export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = 
     const { entityRec, row } = await authorize(scope, principal);
 
     const effectiveLimit = limit + 1;
-    const rows = db.prepare(
+    const rows = database.prepare(
       'SELECT * FROM _Log WHERE scope = :scope AND seq > :sinceSeq ORDER BY seq LIMIT :limit',
     ).all({ scope, sinceSeq, limit: effectiveLimit });
 
     const hasMore = rows.length > limit;
     if (hasMore) rows.pop();
 
-    const events = rows.map((row) => rowToEvent(row, parseEventType));
-    const projected = [];
+    const events = rows.map((logRow) => rowToEvent(logRow                         , parseEventType));
+    const projected            = [];
     for (const event of events) {
       const safe = publicEvent(event);
       const ctx = Object.freeze({
@@ -104,16 +184,16 @@ export function createHistoryReader({ db, entities, mayVerb, annotatedHistory = 
     return { events: Object.freeze(projected), hasMore };
   }
 
-  async function readReceipt({ scope, actionId, principal }) {
+  async function readReceipt({ scope, actionId, principal }                       )                                 {
     if (typeof scope !== 'string' || scope.length === 0) throw new TypeError('scope is required');
     if (typeof actionId !== 'string' || actionId.length === 0) throw new TypeError('actionId is required');
     if (!principal || principal.id == null) throw forbidden();
 
     await authorize(scope, principal);
 
-    const row = db.prepare(
+    const row = database.prepare(
       'SELECT scope, actionId, committedAt, eventRefs, actionType, operation FROM _ActionReceipt WHERE scope = :scope AND actionId = :actionId',
-    ).get({ scope, actionId });
+    ).get({ scope, actionId })                                                                                                                                         ;
 
     if (!row) return null;
 

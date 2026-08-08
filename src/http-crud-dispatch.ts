@@ -1,4 +1,3 @@
-// @ts-nocheck
 // CRUD dispatch for entity routes: list, read, create, update, remove.
 //
 // The route gate already admitted the request; here the SECOND default-on auth
@@ -7,26 +6,79 @@
 // an entity CRUD route cannot serve without persistence.
 
 import { randomUUID } from 'node:crypto';
-import { ValidationError } from './field-strategy.ts';
+import { ValidationError, type FieldDescriptor } from './field-strategy.ts';
 import { readProjectedCursors } from './projected-async.ts';
-import { projectedCursorHeaders } from './http-response.ts';
+import { projectedCursorHeaders, type HttpResponseLike } from './http-response.ts';
 import { mayRow } from './row-grant.ts';
+import type { EntityRecord } from './row-grant.ts';
 import { scopeOf } from './scope-handle.ts';
-import { failure } from './outcome.ts';
-import { sendFailure } from './http-failure.ts';
+import { failure, type WorkbenchFailure } from './outcome.ts';
+import { sendFailure, type SendJson } from './http-failure.ts';
 import { readDeletedRowAnchor } from './deleted-row-anchor.ts';
+import type { Principal } from './principal.ts';
+
+// Loose persistence/app handles. The entity compiler and kernel are authored in
+// modules that own their full shapes; these seams only need the surfaces below.
+export interface StatementLike {
+  get(...params: unknown[]): Record<string, unknown> | undefined;
+  all(...params: unknown[]): Record<string, unknown>[];
+  run(...params: unknown[]): { changes: number | bigint };
+}
+
+export interface DbLike {
+  prepare(sql: string): StatementLike;
+}
+
+export interface CrudEntity {
+  name: string;
+  fields: Readonly<Record<string, FieldDescriptor>>;
+  scopeFilter(principal: Principal): { sql: string; params: Record<string, unknown> };
+  deserializeRow(row: unknown): Record<string, unknown>;
+  [key: string]: unknown;
+}
+
+export interface KernelResult {
+  ok?: boolean;
+  failure?: WorkbenchFailure;
+  events?: readonly { data: Record<string, unknown> }[];
+  resultData?: unknown;
+}
+
+export interface KernelLike {
+  dispatch(action: unknown): Promise<KernelResult>;
+}
+
+export interface CrudAppLike {
+  db?: DbLike;
+  kernel?: KernelLike;
+  writeQueue?: { run<T>(fn: () => Promise<T> | T): Promise<T> };
+  [key: string]: unknown;
+}
+
+export interface RowAuthorization {
+  row?: Record<string, unknown>;
+  status?: 403 | 404;
+  historical?: boolean;
+}
 
 // One kernel mutation through the write queue, translating the failure modes
 // shared by create/update/remove: queue starvation → 503, validation → 400
 // (remove opts out — its {id} payload has nothing to validate, so a
 // ValidationError there is a real bug and propagates), grant deny → 403.
 // Responds and returns null on failure; returns the successful result otherwise.
-async function runKernelMutation(app, kernel, res, sendJson, action, { validation400 = true } = {}) {
-  let result;
+async function runKernelMutation(
+  app: CrudAppLike,
+  kernel: KernelLike,
+  res: HttpResponseLike,
+  sendJson: SendJson,
+  action: unknown,
+  { validation400 = true }: { validation400?: boolean } = {},
+): Promise<KernelResult | null> {
+  let result: KernelResult;
   try {
-    result = await app.writeQueue.run(() => kernel.dispatch(action));
+    result = await app.writeQueue!.run(() => kernel.dispatch(action));
   } catch (err) {
-    if (err?.status === 503) {
+    if ((err as { status?: unknown } | null | undefined)?.status === 503) {
       sendFailure(sendJson, res, failure('conflict', 'service busy'), { status: 503 });
       return null;
     }
@@ -43,9 +95,14 @@ async function runKernelMutation(app, kernel, res, sendJson, action, { validatio
   return result;
 }
 
-export function readScopedRow(app, entity, id, principal) {
+export function readScopedRow(
+  app: CrudAppLike,
+  entity: CrudEntity,
+  id: string,
+  principal: Principal,
+): Record<string, unknown> | undefined {
   const { sql: where, params: scopeParams } = entity.scopeFilter(principal);
-  return app.db
+  return app.db!
     .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
     .get({ ...scopeParams, id });
 }
@@ -60,29 +117,53 @@ export function readScopedRow(app, entity, id, principal) {
 // (events-since). A denial on the historical path returns 404, matching a
 // genuinely-nonexistent row — indistinguishable from the outside, so a
 // non-owner cannot use the response to learn the row ever existed.
-export async function authorizeRow(app, entity, verb, id, principal, preRow = null, { allowDeletedAnchor = false } = {}) {
+export async function authorizeRow(
+  app: CrudAppLike,
+  entity: CrudEntity,
+  verb: string,
+  id: string,
+  principal: Principal,
+  preRow: Record<string, unknown> | null = null,
+  { allowDeletedAnchor = false }: { allowDeletedAnchor?: boolean } = {},
+): Promise<RowAuthorization> {
   const row = preRow ?? readScopedRow(app, entity, id, principal);
   if (row) {
     // Authorization and route hydration have different ownership: grants see a
     // materialized copy, while callers retain the stored row for one later
     // hydration at their public boundary.
     const materialized = entity.deserializeRow({ ...row });
-    if (!(await mayRow(entity, verb, materialized, principal))) return { status: 403 };
+    if (!(await mayRow(entity as unknown as EntityRecord, verb, materialized, principal))) return { status: 403 };
     return { row };
   }
   if (allowDeletedAnchor) {
-    const anchorRow = readDeletedRowAnchor(app.db, entity.name, id);
-    const materialized = anchorRow && entity.deserializeRow({ ...anchorRow });
-    if (materialized && (await mayRow(entity, verb, materialized, principal))) {
-      return { row: anchorRow, historical: true };
+    const anchorRow = readDeletedRowAnchor(app.db! as unknown as Parameters<typeof readDeletedRowAnchor>[0], entity.name, id);
+    const materialized = anchorRow ? entity.deserializeRow({ ...(anchorRow as Record<string, unknown>) }) : undefined;
+    if (materialized && (await mayRow(entity as unknown as EntityRecord, verb, materialized, principal))) {
+      return { row: anchorRow as Record<string, unknown>, historical: true };
     }
   }
   return { status: 404 };
 }
 
+export interface DispatchCrudOptions {
+  entity: CrudEntity;
+  verb: string;
+  fieldName?: string;
+  db: DbLike | null | undefined;
+  principal: Principal;
+  params: Record<string, string>;
+  body: unknown;
+  actionId?: unknown;
+  app: CrudAppLike | null | undefined;
+  res: HttpResponseLike;
+  sendJson: SendJson;
+  committedEventHeaders: (result: unknown, actionId: string, scope: string | null) => Record<string, string>;
+  mayRow: (entity: unknown, verb: string, row: unknown, principal: unknown) => Promise<unknown>;
+}
+
 // DB-backed dispatch for one admitted verb.
 export async function dispatchCrud({ entity, verb, fieldName, db, principal, params, body, actionId: requestedActionId, app, res,
-  sendJson, committedEventHeaders, mayRow }) {
+  sendJson, committedEventHeaders, mayRow }: DispatchCrudOptions): Promise<void> {
   if (!db) {
     sendFailure(sendJson, res, failure('internal', 'Internal error.'));
     return;
@@ -99,25 +180,25 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
     // grant can admit a row via scope yet deny read in .can; without this list
     // would leak it (one auth path: list + read agree). mayRow owns inherit and
     // scope-only handling so list does not re-derive the skip.
-    const listed = [];
+    const listed: Record<string, unknown>[] = [];
     for (const row of rows) {
       if (await mayRow(entity, 'list', row, principal)) listed.push(row);
     }
-    const cursorHeaders = projectedCursorHeaders(readProjectedCursors(db, entity));
+    const cursorHeaders = projectedCursorHeaders(readProjectedCursors(db as unknown as Parameters<typeof readProjectedCursors>[0], entity as unknown as Parameters<typeof readProjectedCursors>[1]));
     sendJson(res, 200, listed, { 'x-workbench-action-id': actionId, ...cursorHeaders });
     return;
   }
 
   if (verb === 'read') {
     // Scoped load + capability check: absent-or-invisible → 404, denied → 403.
-    const auth = await authorizeRow(app, entity, 'read', params.id, principal);
+    const auth = await authorizeRow(app as CrudAppLike, entity, 'read', params.id, principal);
     if (auth.status) {
       const denied = auth.status === 404
         ? failure('not-found', 'not found')
         : failure('denied', 'forbidden');
       return void sendFailure(sendJson, res, denied);
     }
-    const cursorHeaders = projectedCursorHeaders(readProjectedCursors(db, entity));
+    const cursorHeaders = projectedCursorHeaders(readProjectedCursors(db as unknown as Parameters<typeof readProjectedCursors>[0], entity as unknown as Parameters<typeof readProjectedCursors>[1]));
     sendJson(res, 200, entity.deserializeRow({ ...auth.row }), { 'x-workbench-action-id': actionId, ...cursorHeaders });
     return;
   }
@@ -127,7 +208,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
     if (!kernel) return void sendFailure(sendJson, res, failure('internal', 'Internal error.'));
     const result = await runKernelMutation(app, kernel, res, sendJson, { actionId, type: `${table}.create`, payload: body, principal });
     if (!result) return;
-    const id = result.events[0].data.id;
+    const id = result.events![0].data.id;
     const created = db
       .prepare(`SELECT * FROM ${table} AS t0 WHERE t0.id = :id`)
       .get({ id });
@@ -138,7 +219,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
   if (verb === 'update') {
     const kernel = app?.kernel;
     if (!kernel) return void sendFailure(sendJson, res, failure('internal', 'Internal error.'));
-    const auth = await authorizeRow(app, entity, 'update', params.id, principal);
+    const auth = await authorizeRow(app as CrudAppLike, entity, 'update', params.id, principal);
     if (auth.status) {
       const denied = auth.status === 404
         ? failure('not-found', 'not found')
@@ -148,7 +229,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
     const result = await runKernelMutation(app, kernel, res, sendJson, {
       actionId,
       type: `${table}.update`,
-      payload: { ...body, id: params.id },
+      payload: { ...(body as Record<string, unknown>), id: params.id },
       principal,
     });
     if (!result) return;
@@ -160,18 +241,19 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
   if (verb === 'fieldApply') {
     const kernel = app?.kernel;
     if (!kernel) return void sendFailure(sendJson, res, failure('internal', 'Internal error.'));
-    const descriptor = entity.fields[fieldName];
+    const descriptor = entity.fields[fieldName as string];
     if (descriptor?.kind !== 'crdt' || descriptor.type !== 'text') {
       return void sendFailure(sendJson, res, failure('not-found', 'not found'));
     }
-    const auth = await authorizeRow(app, entity, 'update', params.id, principal);
+    const auth = await authorizeRow(app as CrudAppLike, entity, 'update', params.id, principal);
     if (auth.status) {
       return void sendFailure(sendJson, res, failure(auth.status === 404 ? 'not-found' : 'denied', auth.status === 404 ? 'not found' : 'forbidden'));
     }
+    const bodyRecord = body as { operation?: unknown } | null | undefined;
     const result = await runKernelMutation(app, kernel, res, sendJson, {
       actionId,
-      type: `${table}.${fieldName}.apply`,
-      payload: { id: params.id, operation: body?.operation },
+      type: `${table}.${fieldName as string}.apply`,
+      payload: { id: params.id, operation: bodyRecord?.operation },
       principal,
     });
     if (!result) return;
@@ -183,7 +265,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
   if (verb === 'remove') {
     const kernel = app?.kernel;
     if (!kernel) return void sendFailure(sendJson, res, failure('internal', 'Internal error.'));
-    const auth = await authorizeRow(app, entity, 'remove', params.id, principal);
+    const auth = await authorizeRow(app as CrudAppLike, entity, 'remove', params.id, principal);
     if (auth.status) {
       const denied = auth.status === 404
         ? failure('not-found', 'not found')

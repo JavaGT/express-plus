@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Shared live delivery envelope builder — package-private projection helper.
 //
 // One envelope grammar for all live delivery paths (committed-event core and
@@ -9,25 +8,75 @@
 // for the lifetime of the delivery seam, not recreated per batch.
 
 import { createDeltaProjector } from './field-delta.mjs';
+                                                       
 import { EventKind, parseEventType } from './event-handle.mjs';
+                                                             
+                                                        
 import { createdTextReducerSeeds } from './text-reducer-transport.mjs';
+                                                                   
 import { tryParseScopeKey } from './scope-handle.mjs';
 
-function hasAnnotatedText(entityRecord) {
+                                    
+               
+                
+              
+                      
+                    
+                                 
+                               
+ 
+
+                                     
+              
+                
+                      
+                     
+                
+                    
+ 
+
+                                  
+                       
+                            
+                     
+                                                  
+                
+                      
+                     
+ 
+
+                               
+                           
+                  
+              
+               
+                             
+                            
+                                  
+                               
+                  
+ 
+
+                                      
+                                                      
+                
+ 
+
+function hasAnnotatedText(entityRecord              ) {
   return Object.values(entityRecord.fields ?? {}).some((field) => field?.kind === 'annotatedText');
 }
 
-function assertCommittedSequence(event) {
+function assertCommittedSequence(event                    ) {
   if (!Number.isSafeInteger(event.seq) || event.seq < 0) {
     throw new Error('invalid committed event sequence');
   }
 }
 
-function recovery(ctx, entity, id, reason) {
+function recovery(ctx                 , entity        , id        , reason        )                 {
   return [{ type: 'resync', entity, id, seq: ctx.event.seq, reason }];
 }
 
-function recipientLifecycleData(ctx, handle, id) {
+function recipientLifecycleData(ctx                 , handle                     , id        )                                 {
   if (handle.kind === EventKind.removed) return { id };
   if (!ctx.row || typeof ctx.row !== 'object' || Array.isArray(ctx.row)) return null;
 
@@ -35,28 +84,17 @@ function recipientLifecycleData(ctx, handle, id) {
   // Recipient lifecycle output derives only from declarations and the
   // recipient-hydrated row, never from raw durable operation keys.
   const keys = Object.keys(declared);
-  const data = { id };
+  const data                          = { id };
   for (const key of keys) {
     if (Object.hasOwn(ctx.row, key)) data[key] = ctx.row[key];
   }
   return data;
 }
 
-export function createLiveEnvelopeBuilder({ stateful = true, includeActionId = true } = {}) {
-  const deltaProjector = stateful ? createDeltaProjector() : null;
+export function createLiveEnvelopeBuilder({ stateful = true, includeActionId = true } = {})                      {
+  const deltaProjector                        = stateful ? createDeltaProjector() : null;
 
-  /**
-   * Build WebSocket envelopes from a core projection context.
-   *
-   * @param {object} ctx
-   * @param {object} ctx.entity - entity record
-   * @param {object} ctx.event - committed event (may have eventType or type)
-   * @param {object} ctx.principal - subscription principal
-   * @param {object} ctx.row - hydrated db row
-   * @param {string} ctx.scope - scope key
-   * @returns {object[]} array of envelopes (usually one, but zero for skips)
-   */
-  function buildEnvelope(ctx) {
+  function buildEnvelope(ctx                 )                 {
     const handle = tryParseScopeKey(ctx.scope);
     if (!handle) return [];
     assertCommittedSequence(ctx.event);
@@ -70,8 +108,8 @@ export function createLiveEnvelopeBuilder({ stateful = true, includeActionId = t
 
     // _Log rows carry storage columns such as eventType/eventData. The durable
     // payload is rebuilt below from the recipient-hydrated row, never copied.
-    const loggedEvent = {
-      type: ctx.event.eventType ?? ctx.event.type,
+    const loggedEvent                    = {
+      type: ctx.event.eventType ?? (ctx.event.type          ),
       scope: ctx.event.scope,
       seq: ctx.event.seq,
       committedAt: ctx.event.committedAt,
@@ -85,7 +123,9 @@ export function createLiveEnvelopeBuilder({ stateful = true, includeActionId = t
       throw new Error('invalid committed event type');
     }
 
-    const lifecycle = [EventKind.created, EventKind.updated, EventKind.removed].includes(evHandle.kind);
+    const lifecycle = [EventKind.created, EventKind.updated, EventKind.removed].includes(
+      evHandle.kind                                                                                  ,
+    );
     if (evHandle.entity !== entityName) {
       // A composite stream can be anchored to an authorized container such as
       // Project while carrying changes to many declared child entities. Without
@@ -102,10 +142,10 @@ export function createLiveEnvelopeBuilder({ stateful = true, includeActionId = t
 
     const data = recipientLifecycleData(ctx, evHandle, id);
     if (!data) throw new Error('invalid lifecycle event data');
-    const event = { ...loggedEvent, data };
+    const event                    = { ...loggedEvent, data };
     Object.defineProperty(event, 'handle', { value: evHandle, enumerable: false });
 
-    const envelope = {
+    const envelope               = {
       type: 'event',
       entity: entityName,
       id,

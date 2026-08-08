@@ -1,47 +1,78 @@
-// @ts-nocheck
 import { effectEntries } from './effect-compiler.mjs';
 import { parseEventType } from './event-handle.mjs';
+                                                             
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
+                                            
 import { txn } from './driver.mjs';
 import { getLog } from './log.mjs';
 import { tryParseScopeKey } from './scope-handle.mjs';
+                                                     
 
 const CONSUMER = 'effect.durable';
 
-function isDurableEffectDeclaration(effect) {
-  return effect && typeof effect === 'object' && typeof effect.durable === 'string';
+                                           
+                  
+                                                                                                                                   
+ 
+
+                                     
+                       
+                                   
+ 
+
+                                     
+               
+                    
+ 
+
+                            
+               
+                
+              
+                   
+                      
+                                        
+ 
+
+                
+                                                                        
+ 
+
+function isDurableEffectDeclaration(effect         )                                     {
+  return !!effect && typeof effect === 'object' && typeof (effect                         ).durable === 'string';
 }
 
-function resolveTriggerEventType(handle) {
-  if (handle && typeof handle === 'object' && handle.brand === 'event-handle' && typeof handle.type === 'string') {
-    return handle.type;
+function resolveTriggerEventType(handle         )         {
+  const candidate = handle                                                          ;
+  if (candidate && typeof candidate === 'object' && candidate.brand === 'event-handle' && typeof candidate.type === 'string') {
+    return candidate.type;
   }
-  if (handle && typeof handle === 'object' && handle.brand === 'state-transition-handle' && typeof handle.type === 'string') {
-    return handle.type;
+  if (candidate && typeof candidate === 'object' && candidate.brand === 'state-transition-handle' && typeof candidate.type === 'string') {
+    return candidate.type;
   }
   throw new Error(`durable effect trigger '${String(handle)}' must be a typed event handle. Strings are not accepted.`);
 }
 
-export function buildDurableEffectsRegistry(entities) {
-  const registry = new Map();
+export function buildDurableEffectsRegistry(entities                                                         )                                    {
+  const registry = new Map                              ();
   for (const entityRecord of entities ?? []) {
     if (!entityRecord.effects) continue;
     for (const [triggerHandle, effect] of effectEntries(entityRecord.effects, { sourceEntityName: entityRecord.name })) {
       if (!isDurableEffectDeclaration(effect)) continue;
       const eventType = resolveTriggerEventType(triggerHandle);
       if (!registry.has(eventType)) registry.set(eventType, []);
-      registry.get(eventType).push({ sourceEntity: entityRecord.name, effect });
+      registry.get(eventType) .push({ sourceEntity: entityRecord.name, effect });
     }
   }
   return registry;
 }
 
-function durableJobId(ev, kind) {
+function durableJobId(ev                  , kind        ) {
   return `durable-effect:${ev.scope.replace(':', ':')}:${ev.seq}:${kind}`;
 }
 
-function durablePayload(ev, effect) {
-  const delta = ev.data || {};
+function durablePayload(ev                  , effect                          )                                                                                                            {
+  const delta = ev.data ?? {};
   const origin = { id: tryParseScopeKey(ev.scope)?.id };
   const data = typeof effect.with === 'function' ? effect.with({ delta, origin }) : (effect.with ?? {});
   return {
@@ -55,7 +86,7 @@ function durablePayload(ev, effect) {
   };
 }
 
-function enqueueDurableEffectsForEvent(ev, effects, jobs) {
+function enqueueDurableEffectsForEvent(ev                  , effects                               , jobs      ) {
   for (const { effect } of effects) {
     jobs.enqueue({
       id: durableJobId(ev, effect.durable),
@@ -65,14 +96,17 @@ function enqueueDurableEffectsForEvent(ev, effects, jobs) {
   }
 }
 
-async function enqueueDurableEffectsAndAdvance(db, ev, effects, jobs) {
+async function enqueueDurableEffectsAndAdvance(db          , ev                  , effects                               , jobs      )                {
   await txn(db, () => {
     enqueueDurableEffectsForEvent(ev, effects, jobs);
     upsertConsumerCursor(db, { consumer: CONSUMER, scope: ev.scope, lastSeq: ev.seq });
   });
 }
 
-export function createDurableEffectsConsumer({ durableEffectsRegistry, jobs }) {
+export function createDurableEffectsConsumer({ durableEffectsRegistry, jobs }   
+                                                                               
+                                
+ )                                                                                             {
   if (!jobs || !durableEffectsRegistry || durableEffectsRegistry.size === 0) return null;
   return async (events, { db }) => {
     for (const ev of events) {
@@ -88,33 +122,36 @@ export function createDurableEffectsConsumer({ durableEffectsRegistry, jobs }) {
   };
 }
 
-function rowToEvent(row) {
-  let handle;
+function rowToEvent(row            )                                                                          {
+  let handle                                 ;
   try {
-    handle = parseEventType(row.eventType);
+    handle = parseEventType(row.eventType          );
   } catch {
     handle = undefined;
   }
-  const ev = {
-    type: row.eventType,
-    scope: row.scope,
-    seq: row.seq,
-    actionId: row.actionId,
-    committedAt: row.committedAt,
-    data: JSON.parse(row.eventData),
+  const ev                   = {
+    type: row.eventType          ,
+    scope: row.scope          ,
+    seq: row.seq          ,
+    actionId: row.actionId          ,
+    committedAt: row.committedAt          ,
+    data: JSON.parse(row.eventData          ),
   };
   return handle ? Object.freeze({ ...ev, handle }) : Object.freeze(ev);
 }
 
-export async function reconcileDurableEffects(db, { durableEffectsRegistry, jobs }) {
+export async function reconcileDurableEffects(db          , { durableEffectsRegistry, jobs }   
+                                                                               
+                                
+ )                                {
   if (!jobs || !durableEffectsRegistry || durableEffectsRegistry.size === 0) return { enqueued: 0 };
   const recoveryByScope = consumerCursorMap(db, CONSUMER);
   const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
   let enqueued = 0;
   for (const row of rows) {
-    const applied = recoveryByScope.get(row.scope) ?? 0;
-    if (applied >= row.seq) continue;
-    const ev = rowToEvent(row);
+    const applied = recoveryByScope.get(row.scope          ) ?? 0;
+    if (applied >= (row.seq          )) continue;
+    const ev = rowToEvent(row                         );
     const effects = durableEffectsRegistry.get(ev.type);
     if (!effects || effects.length === 0) {
       upsertConsumerCursor(db, { consumer: CONSUMER, scope: ev.scope, lastSeq: ev.seq });

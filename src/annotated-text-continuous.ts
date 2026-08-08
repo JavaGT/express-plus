@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Blockless continuous annotated-text family (issue #33).
 //
 // The RGA checkpoint already holds the whole document text; blocks were a
@@ -26,39 +25,58 @@ import {
   textCheckpoint,
   applyTextOp,
 } from './annotated-text.ts';
+import type {
+  Anchor, Frontier, OpId, TextElement, TextOp, TextState,
+} from './annotated-text.ts';
 import {
   assertStructuralEndpoint,
   rgaTraversal,
 } from './annotated-text-family.ts';
+import type { StructuralEndpoint } from './annotated-text-family.ts';
 
 const ROOT_ID = 'root';
 
-function fail(message) {
+export interface ContinuousTextFamily {
+  id: string;
+  checkpoint: TextState;
+}
+
+export type OffsetEdit =
+  | { kind: 'text.insert'; at: { offset: number; affinity: 'left' | 'right' }; text: string }
+  | { kind: 'text.delete'; from: { offset: number }; to: { offset: number } };
+
+export interface StructuralEndpointPair {
+  start: StructuralEndpoint;
+  end: StructuralEndpoint;
+}
+
+function fail(message: string): never {
   throw new Error(`annotated-text continuous: ${message}`);
 }
 
-function anchorKeyStr(anchor) {
+function anchorKeyStr(anchor: Anchor): string {
   if (anchor[0] === 'root') return ROOT_ID;
   return `${anchor[1][0][0]}:${anchor[1][0][1]}:${anchor[1][1]}`;
 }
 
 /** A continuous family is the document id + the RGA checkpoint. No blocks. */
-export function restoreTextFamily(familyCheckpoint) {
-  if (!familyCheckpoint || typeof familyCheckpoint !== 'object' || Array.isArray(familyCheckpoint)) {
+export function restoreTextFamily(familyCheckpoint: unknown): ContinuousTextFamily {
+  const raw = familyCheckpoint as Record<string, any>;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
     fail('family checkpoint must be a non-array object');
   }
   const allowedKeys = new Set(['id', 'checkpoint']);
-  for (const key of Object.keys(familyCheckpoint)) {
+  for (const key of Object.keys(raw)) {
     if (!allowedKeys.has(key)) fail(`unknown family checkpoint key: ${key}`);
   }
-  if (typeof familyCheckpoint.id !== 'string' || familyCheckpoint.id.length === 0) {
+  if (typeof raw.id !== 'string' || raw.id.length === 0) {
     fail('family checkpoint id must be a non-empty string');
   }
-  const checkpoint = restoreTextCheckpoint(familyCheckpoint.checkpoint);
-  return deepFreeze({ id: familyCheckpoint.id, checkpoint });
+  const checkpoint = restoreTextCheckpoint(raw.checkpoint);
+  return deepFreeze({ id: raw.id, checkpoint });
 }
 
-export function createTextFamily(id, checkpoint) {
+export function createTextFamily(id: string, checkpoint: unknown): ContinuousTextFamily {
   if (typeof id !== 'string' || id.length === 0) fail('document id must be a non-empty string');
   const restored = restoreTextCheckpoint(checkpoint);
   return deepFreeze({ id, checkpoint: restored });
@@ -69,29 +87,29 @@ export function createTextFamily(id, checkpoint) {
  * A single multi-scalar element is the canonical import shape — mid-element
  * offset edits resolve correctly (verified) — so import is O(1), not O(chars).
  */
-export function importTextToFamily(documentId, actor, text) {
+export function importTextToFamily(documentId: string, actor: string, text: string): ContinuousTextFamily {
   if (typeof documentId !== 'string' || documentId.length === 0) fail('document id must be a non-empty string');
   if (typeof actor !== 'string' || !/^[0-9a-f]{32}$/.test(actor)) fail('import actor must be a 32-hex id');
   if (typeof text !== 'string') fail('import text must be a string');
-  let state = createTextState();
+  let state: TextState = createTextState();
   if (text.length > 0) {
     state = applyTextOp(state, ['workbench.text', 1, [actor, 1], 1, [], ['insert', ['root'], text]]);
   }
   return createTextFamily(documentId, textCheckpoint(state));
 }
 
-export function textFamilyCheckpoint(family) {
+export function textFamilyCheckpoint(family: ContinuousTextFamily): ContinuousTextFamily {
   return deepFreeze({ id: family.id, checkpoint: family.checkpoint });
 }
 
-export function materializeText(family) {
+export function materializeText(family: ContinuousTextFamily): string {
   return materializeCheckpointText(restoreTextCheckpoint(family.checkpoint));
 }
 
-function deepFreeze(value) {
+function deepFreeze<T>(value: T): T {
   if (!value || typeof value !== 'object') return value;
-  for (const child of Object.values(value)) deepFreeze(child);
-  return Object.freeze(value);
+  for (const child of Object.values(value as Record<string, unknown>)) deepFreeze(child);
+  return Object.freeze(value) as T;
 }
 
 /**
@@ -99,7 +117,7 @@ function deepFreeze(value) {
  * order where this endpoint (with its HISTORICAL basis frontier + affinity)
  * sits against the CURRENT checkpoint.
  */
-function endpointVirtualPosition(family, endpoint) {
+function endpointVirtualPosition(family: ContinuousTextFamily, endpoint: StructuralEndpoint): number {
   const checkpoint = family.checkpoint;
   const order = rgaTraversal(checkpoint);
   const anchor = endpoint.point[1];
@@ -131,7 +149,7 @@ function endpointVirtualPosition(family, endpoint) {
   return affinity === 'left' ? anchorIdx : anchorIdx + 1;
 }
 
-function assertDominatingBasis(family, endpoint, label) {
+function assertDominatingBasis(family: ContinuousTextFamily, endpoint: StructuralEndpoint, label: string): void {
   if (!frontierDominates(family.checkpoint.frontier, endpoint.basisFrontier)) {
     fail(`${label}: current frontier does not dominate endpoint basis — anchor is lost`);
   }
@@ -145,7 +163,7 @@ function assertDominatingBasis(family, endpoint, label) {
  * Compare two structural endpoints against the current checkpoint. Each keeps
  * its historical basis; both must be dominated by the current frontier.
  */
-export function compareStructuralEndpoints(family, left, right) {
+export function compareStructuralEndpoints(family: ContinuousTextFamily, left: StructuralEndpoint, right: StructuralEndpoint): number {
   assertDominatingBasis(family, left, 'compareStructuralEndpoints');
   assertDominatingBasis(family, right, 'compareStructuralEndpoints');
 
@@ -170,7 +188,7 @@ export function compareStructuralEndpoints(family, left, right) {
 }
 
 /** Materialize the visible text between two structural endpoints (zero-width allowed). */
-export function materializeRange(family, start, end) {
+export function materializeRange(family: ContinuousTextFamily, start: StructuralEndpoint, end: StructuralEndpoint): string {
   assertDominatingBasis(family, start, 'materializeRange');
   assertDominatingBasis(family, end, 'materializeRange');
   if (compareStructuralEndpoints(family, start, end) > 0) fail('materializeRange: start must not be after end');
@@ -190,7 +208,7 @@ export function materializeRange(family, start, end) {
  * endpoint. The basis must equal the current frontier (offsets are always
  * resolved against the live document).
  */
-export function resolveOffsetToEndpoint(family, utf16Offset, basisFrontier, affinity) {
+export function resolveOffsetToEndpoint(family: ContinuousTextFamily, utf16Offset: number, basisFrontier: Frontier, affinity: 'left' | 'right'): StructuralEndpoint {
   if (JSON.stringify(family.checkpoint.frontier) !== JSON.stringify(basisFrontier)) {
     fail('resolveOffsetToEndpoint requires basisFrontier equal to family checkpoint frontier');
   }
@@ -223,7 +241,7 @@ export function resolveOffsetToEndpoint(family, utf16Offset, basisFrontier, affi
   fail('failed to resolve offset to endpoint');
 }
 
-function endpointAfterLastVisible(family, order, basisFrontier) {
+function endpointAfterLastVisible(_family: ContinuousTextFamily, order: Array<[string, TextElement]>, basisFrontier: Frontier): StructuralEndpoint {
   for (let i = order.length - 1; i >= 0; i -= 1) {
     const [, element] = order[i];
     if (element.deletedBy.length === 0) {
@@ -238,7 +256,7 @@ function endpointAfterLastVisible(family, order, basisFrontier) {
  * CURRENT document. The current frontier must dominate the endpoint basis and
  * the anchor must still exist (including as a tombstone).
  */
-export function projectEndpointToOffset(family, endpoint) {
+export function projectEndpointToOffset(family: ContinuousTextFamily, endpoint: StructuralEndpoint): number {
   assertDominatingBasis(family, endpoint, 'projectEndpointToOffset');
   const order = rgaTraversal(family.checkpoint);
   const pos = endpointVirtualPosition(family, endpoint);
@@ -251,7 +269,7 @@ export function projectEndpointToOffset(family, endpoint) {
 }
 
 /** An absolute-offset insert/delete against the whole document (unique actor per edit). */
-export function textOperationForOffsetEdit(family, edit, actor, lamport) {
+export function textOperationForOffsetEdit(family: ContinuousTextFamily, edit: OffsetEdit, actor: string, lamport: number): TextOp {
   const basis = family.checkpoint.frontier;
   const text = materializeText(family);
   if (edit.kind === 'text.insert') {
@@ -266,7 +284,7 @@ export function textOperationForOffsetEdit(family, edit, actor, lamport) {
   assertUtf16Offset(text, edit.from.offset);
   assertUtf16Offset(text, edit.to.offset);
 
-  const byOp = new Map();
+  const byOp = new Map<string, number[]>();
   let offset = 0;
   for (const [, element] of rgaTraversal(family.checkpoint)) {
     if (element.deletedBy.length) continue;
@@ -280,7 +298,7 @@ export function textOperationForOffsetEdit(family, edit, actor, lamport) {
     offset = next;
   }
   if (offset !== text.length || byOp.size === 0) fail('delete range cannot be resolved');
-  const spans = [];
+  const spans: Array<[OpId, number, number]> = [];
   const sortedKeys = [...byOp.keys()].sort((a, b) => {
     const [aActor, aCounter] = a.split(':');
     const [bActor, bCounter] = b.split(':');
@@ -289,7 +307,7 @@ export function textOperationForOffsetEdit(family, edit, actor, lamport) {
   for (const key of sortedKeys) {
     const [spActor, spCounterS] = key.split(':');
     const spCounter = Number(spCounterS);
-    const ordinals = byOp.get(key).sort((a, b) => a - b);
+    const ordinals = byOp.get(key)!.sort((a, b) => a - b);
     let spanStart = ordinals[0];
     let spanCount = 1;
     for (let i = 1; i < ordinals.length; i += 1) {
@@ -307,13 +325,13 @@ export function textOperationForOffsetEdit(family, edit, actor, lamport) {
 }
 
 /** Apply a whole-document text operation, returning the next family. */
-export function applyTextOperation(family, operation) {
+export function applyTextOperation(family: ContinuousTextFamily, operation: unknown): ContinuousTextFamily {
   const state = restoreTextCheckpoint(family.checkpoint);
   const nextState = applyTextOp(state, operation);
   return createTextFamily(family.id, textCheckpoint(nextState));
 }
 
-export function assertTextEndpointPair(family, start, end, label = 'range') {
+export function assertTextEndpointPair(family: ContinuousTextFamily, start: StructuralEndpoint, end: StructuralEndpoint, label = 'range'): StructuralEndpointPair {
   assertStructuralPoint(start.point);
   assertStructuralPoint(end.point);
   assertFrontier(start.basisFrontier);

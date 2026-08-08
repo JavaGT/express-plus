@@ -1,4 +1,3 @@
-// @ts-nocheck
 // LIVE DELIVERY CORE — package-private transport-neutral committed event delivery core.
 //
 // One subscription = one async stream of committed events, re-authorised per batch.
@@ -33,40 +32,116 @@ import { readSeq, readSince } from './committed-log.ts';
 import { EventKind, parseEventType } from './event-handle.ts';
 import { mayRow } from './row-grant.ts';
 import { tryParseScopeKey } from './scope-handle.ts';
+import type { ScopeHandle } from './scope-handle.ts';
+import type { Principal } from './principal.ts';
+import type { FrameworkLog } from './log.ts';
+import type { LiveDatabase, LiveEntityRecord, MayVerb } from './live-fanout.ts';
 
 let nextSubId = 1;
 
-function generateSubId() {
+function generateSubId(): number {
   return nextSubId++;
 }
 
-function deniedError(scope) {
+function deniedError(scope: string): Error & { code?: string } {
   const error = new Error(`subscribe authorization denied for scope '${scope}'`);
-  error.code = 'live-delivery-revoked';
+  (error as { code?: string }).code = 'live-delivery-revoked';
   return error;
 }
 
-export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient, scopeVisible = () => true, log = null }) {
+export interface CoreProjectContext {
+  readonly entity: LiveEntityRecord;
+  readonly event: Readonly<Record<string, unknown>>;
+  readonly principal: Principal;
+  readonly row: Record<string, unknown> | null | undefined;
+  readonly scope: string;
+  readonly document: unknown;
+}
+
+export interface LiveDeliveryCoreOptions {
+  db: LiveDatabase;
+  entities: Map<string, LiveEntityRecord> | ((name: string) => LiveEntityRecord | undefined);
+  mayVerb: MayVerb | null;
+  projectRecipient: (ctx: CoreProjectContext) => unknown | Promise<unknown>;
+  scopeVisible?: (ctx: { entity: LiveEntityRecord; principal: Principal; scope: ScopeHandle }) => boolean;
+  log?: FrameworkLog | null;
+}
+
+interface CoreSub {
+  entityRec: LiveEntityRecord;
+  principal: Principal;
+  deliver: (batch: unknown[]) => unknown | Promise<unknown>;
+  revoke: (() => void) | null;
+  signal: AbortSignal | undefined;
+  cursor: number;
+  pending: boolean;
+  dirty: boolean;
+  paused: boolean;
+  scope: string;
+  active: boolean;
+  document: unknown;
+  activation?: Promise<number>;
+  resyncEnvelope?: unknown;
+  _abortHandler?: () => void;
+}
+
+export interface CoreSubscribeInput {
+  principal: Principal;
+  scope: string;
+  after?: number;
+  signal?: AbortSignal;
+  deliver: (batch: unknown[]) => unknown | Promise<unknown>;
+  revoke?: (() => void) | null;
+  paused?: boolean;
+  allowTerminal?: boolean;
+  document?: unknown;
+}
+
+export interface CoreActivation {
+  activate(): Promise<number | undefined>;
+}
+
+export type CoreBootstrapResult =
+  | { kind: 'snapshot'; snapshot: unknown; cursor: number }
+  | { kind: 'revoked' };
+
+export type CoreCatchupResult =
+  | { kind: 'catchup'; envelopes: unknown[]; cursor: number | undefined }
+  | { kind: 'revoked' };
+
+export interface LiveDeliveryCore {
+  bootstrap(input: { principal: Principal; scope: string; snapshot: (ctx: { principal: Principal; scope: string }) => unknown | Promise<unknown> }): Promise<CoreBootstrapResult>;
+  catchup(input: { principal: Principal; scope: string; after?: number; document?: unknown }): Promise<CoreCatchupResult>;
+  subscribe(input: CoreSubscribeInput): Promise<CoreActivation | undefined>;
+  wake(scope: string): void;
+  resync(scope: string, envelope: unknown): void;
+  resyncEntity(entityName: string, envelopeForScope: (scope: string) => unknown): void;
+  close(): void;
+  snapshot(input: { principal: Principal; scope: string }): Record<string, unknown>;
+  exceedsCatchupLimit(scope: string, after: number, limit: number): boolean;
+}
+
+export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient, scopeVisible = () => true, log = null }: LiveDeliveryCoreOptions): LiveDeliveryCore {
   if (!db) throw new Error('live-delivery-core: db is required');
   if (!entities) throw new Error('live-delivery-core: entities is required');
   if (!mayVerb) throw new Error('live-delivery-core: mayVerb is required');
   if (typeof projectRecipient !== 'function') throw new Error('live-delivery-core: projectRecipient must be a function');
 
-  const resolveEntity = typeof entities === 'function' ? entities : (name) => entities.get(name);
-  const subs = new Map();
-  const byScope = new Map();
+  const resolveEntity = typeof entities === 'function' ? entities : (name: string) => entities.get(name);
+  const subs = new Map<number, CoreSub>();
+  const byScope = new Map<string, Set<number>>();
   let closed = false;
 
-  function entityRecord(name) {
+  function entityRecord(name: string): LiveEntityRecord {
     const record = resolveEntity(name);
     if (!record) throw new Error(`unknown entity '${name}'`);
     return record;
   }
 
-  async function authorizeSnapshot(principal, scope) {
+  async function authorizeSnapshot(principal: Principal, scope: string): Promise<boolean> {
     const handle = tryParseScopeKey(scope);
     if (!handle) throw new Error(`invalid scope '${scope}'`);
-    let entityRec;
+    let entityRec: LiveEntityRecord;
     try {
       entityRec = entityRecord(handle.entity);
     } catch {
@@ -81,7 +156,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     return true;
   }
 
-  async function bootstrap({ principal, scope, snapshot }) {
+  async function bootstrap({ principal, scope, snapshot }: { principal: Principal; scope: string; snapshot: (ctx: { principal: Principal; scope: string }) => unknown | Promise<unknown> }): Promise<CoreBootstrapResult> {
     if (closed) throw new Error('live-delivery-core is closed');
     if (typeof snapshot !== 'function') throw new Error('live delivery bootstrap requires a snapshot function');
     if (!(await authorizeSnapshot(principal, scope))) return { kind: 'revoked' };
@@ -100,7 +175,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     return { kind: 'snapshot', snapshot: value, cursor };
   }
 
-  function snapshot({ principal, scope }) {
+  function snapshot({ principal, scope }: { principal: Principal; scope: string }): Record<string, unknown> {
     const handle = tryParseScopeKey(scope);
     if (!handle) throw new Error(`invalid scope '${scope}'`);
     const entityRec = entityRecord(handle.entity);
@@ -109,13 +184,13 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     return auth.row;
   }
 
-  function exceedsCatchupLimit(scope, after, limit) {
+  function exceedsCatchupLimit(scope: string, after: number, limit: number): boolean {
     const row = db.prepare('SELECT COUNT(*) AS count FROM _Log WHERE scope = :scope AND seq > :after')
       .get({ scope, after });
     return Number(row?.count ?? 0) > limit;
   }
 
-  function reauthFor(entityRec, principal, handle) {
+  function reauthFor(entityRec: LiveEntityRecord, principal: Principal, handle: ScopeHandle): { row: Record<string, unknown> } | null {
     try {
       if (!scopeVisible({ entity: entityRec, principal, scope: handle })) return null;
       const { sql: where, params: scopeParams } = entityRec.scopeFilter(principal);
@@ -134,31 +209,31 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  async function checkMayRow(entityRec, row, principal) {
+  async function checkMayRow(entityRec: LiveEntityRecord, row: Record<string, unknown>, principal: Principal): Promise<boolean> {
     try {
-      return await mayRow(entityRec, 'subscribe', row, principal, mayVerb);
+      return await mayRow(entityRec as never, 'subscribe', row, principal, mayVerb as never);
     } catch {
       return false;
     }
   }
 
-  function isTerminalRemoval(event, entityName) {
+  function isTerminalRemoval(event: { eventType?: unknown; type?: unknown }, entityName: string): boolean {
     try {
       const type = event.eventType ?? event.type;
-      const handle = parseEventType(type);
+      const handle = parseEventType(type as string);
       return handle.entity === entityName && handle.kind === EventKind.removed;
     } catch {
       return false;
     }
   }
 
-  function removeSub(subId) {
+  function removeSub(subId: number): void {
     const sub = subs.get(subId);
     if (!sub) return;
     sub.active = false;
     subs.delete(subId);
     if (sub.signal && typeof sub.signal.removeEventListener === 'function') {
-      try { sub.signal.removeEventListener('abort', sub._abortHandler); } catch { /* ignore */ }
+      try { sub.signal.removeEventListener('abort', sub._abortHandler as () => void); } catch { /* ignore */ }
     }
     const set = byScope.get(sub.scope);
     if (set) {
@@ -167,14 +242,14 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  function revokeSub(subId) {
+  function revokeSub(subId: number): void {
     const sub = subs.get(subId);
     if (!sub) return;
     try { sub.revoke?.(); } catch { /* transport lifecycle callbacks are isolated */ }
     removeSub(subId);
   }
 
-  async function catchUp(subId) {
+  async function catchUp(subId: number): Promise<void> {
     const sub = subs.get(subId);
     if (!sub || !sub.active) return;
     if (sub.paused) {
@@ -188,9 +263,9 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         sub.dirty = false;
         const handle = tryParseScopeKey(sub.scope);
         if (!handle) { removeSub(subId); log?.error?.('live', 'invalid scope', { scope: sub.scope }); throw new Error(`invalid scope '${sub.scope}'`); }
-        let events;
+        let events: Array<{ seq: number } & Readonly<Record<string, unknown>>>;
         try {
-          events = readSince(db, sub.scope, sub.cursor);
+          events = readSince(db as never, sub.scope, sub.cursor) as unknown as Array<{ seq: number } & Readonly<Record<string, unknown>>>;
         } catch (err) {
           log?.error?.('live', 'readSince failed', { scope: sub.scope, cursor: sub.cursor, err: String(err) });
           removeSub(subId);
@@ -202,7 +277,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         // removals for this entity may be projected; other committed rows in
         // the catch-up batch stay fail-closed. The terminal subscription is
         // then removed without acknowledging withheld events.
-        const terminalRemoval = !auth && events.length > 0 && events.every((event) => isTerminalRemoval(event, sub.entityRec.name));
+        const terminalRemoval = !auth && events.length > 0 && events.every((event) => isTerminalRemoval(event as { eventType?: unknown; type?: unknown }, sub.entityRec.name));
         const deliverableEvents = auth
           ? events
           : terminalRemoval ? events : [];
@@ -214,7 +289,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
           if (sub.dirty) continue;
           return;
         }
-        const batch = resyncEnvelope ? [resyncEnvelope] : [];
+        const batch: unknown[] = resyncEnvelope ? [resyncEnvelope] : [];
         for (const event of deliverableEvents) {
           if (!sub.active) return;
           const ctx = Object.freeze({
@@ -225,7 +300,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
             scope: sub.scope,
             document: sub.document ?? null,
           });
-          let projected;
+          let projected: unknown;
           try {
             projected = await projectRecipient(ctx);
           } catch (err) {
@@ -294,7 +369,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  async function subscribe({ principal, scope, after = 0, signal, deliver, revoke = null, paused = false, allowTerminal = false, document = null }) {
+  async function subscribe({ principal, scope, after = 0, signal, deliver, revoke = null, paused = false, allowTerminal = false, document = null }: CoreSubscribeInput): Promise<CoreActivation | undefined> {
     if (closed) throw new Error('live-delivery-core is closed');
     if (signal?.aborted) return;
     const handle = tryParseScopeKey(scope);
@@ -308,7 +383,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     if (typeof deliver !== 'function') {
       throw new Error('deliver must be a function');
     }
-    let entityRec;
+    let entityRec: LiveEntityRecord;
     try {
       entityRec = entityRecord(handle.entity);
     } catch {
@@ -317,7 +392,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
     const auth = reauthFor(entityRec, principal, handle);
     if (!auth) {
-      const unread = allowTerminal ? readSince(db, scope, after) : [];
+      const unread = allowTerminal ? readSince(db as never, scope, after) : [];
       if (unread.length > 0 && unread.every((event) => isTerminalRemoval(event, entityRec.name))) {
         // A catch-up may begin immediately after deletion. Only a fully
         // contiguous suffix of this anchor's terminal removals is safe to
@@ -332,7 +407,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
       throw deniedError(scope);
     }
     const subId = generateSubId();
-    const sub = { entityRec, principal, deliver, revoke, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true, document };
+    const sub: CoreSub = { entityRec, principal, deliver, revoke, signal, cursor: after, pending: false, dirty: false, paused, scope, active: true, document };
     subs.set(subId, sub);
     let set = byScope.get(scope);
     if (!set) { set = new Set(); byScope.set(scope, set); }
@@ -346,7 +421,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         throw new Error('subscription aborted');
       }
     }
-    async function activate() {
+    async function activate(): Promise<number | undefined> {
       const current = subs.get(subId);
       if (!current || !current.active) return;
       if (!current.activation) {
@@ -367,7 +442,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     await activate();
   }
 
-  async function wake(scope) {
+  async function wake(scope: string): Promise<void> {
     if (closed) return;
     const set = byScope.get(scope);
     if (!set) return;
@@ -386,7 +461,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  function resync(scope, envelope) {
+  function resync(scope: string, envelope: unknown): void {
     if (closed) return;
     const set = byScope.get(scope);
     if (!set) return;
@@ -399,14 +474,14 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     }
   }
 
-  function resyncEntity(entityName, envelopeForScope) {
+  function resyncEntity(entityName: string, envelopeForScope: (scope: string) => unknown): void {
     for (const sub of [...subs.values()]) {
       if (sub.entityRec.name !== entityName) continue;
       resync(sub.scope, envelopeForScope(sub.scope));
     }
   }
 
-  function close() {
+  function close(): void {
     closed = true;
     // Revoke every active subscription so transport skins (SSE ends its
     // response only via revoke) release their connections. Marking inactive
@@ -418,7 +493,7 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     byScope.clear();
   }
 
-  async function catchup({ principal, scope, after = 0, document = null }) {
+  async function catchup({ principal, scope, after = 0, document = null }: { principal: Principal; scope: string; after?: number; document?: unknown }): Promise<CoreCatchupResult> {
     if (!Number.isSafeInteger(after) || after < 0) {
       throw new Error(`after must be a nonnegative safe integer, got ${after}`);
     }
@@ -426,15 +501,15 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
     if (!authorized) {
       const handle = tryParseScopeKey(scope);
       const entityRec = handle ? resolveEntity(handle.entity) : null;
-      const unread = entityRec ? readSince(db, scope, after) : [];
-      if (unread.length === 0 || !unread.every((event) => isTerminalRemoval(event, entityRec.name))) {
+      const unread = entityRec ? readSince(db as never, scope, after) : [];
+      if (!entityRec || unread.length === 0 || !unread.every((event) => isTerminalRemoval(event, entityRec.name))) {
         return { kind: 'revoked' };
       }
     }
     const controller = new AbortController();
-    const envelopes = [];
+    const envelopes: unknown[] = [];
     let revoked = false;
-    let activation;
+    let activation: CoreActivation | undefined;
     try {
       activation = await subscribe({
         principal,
@@ -442,18 +517,18 @@ export function createLiveDeliveryCore({ db, entities, mayVerb, projectRecipient
         after,
         signal: controller.signal,
         paused: true,
-        deliver: async (batch) => { envelopes.push(...batch); },
+        deliver: async (batch: unknown[]) => { envelopes.push(...batch); },
         revoke: () => { revoked = true; },
         allowTerminal: true,
         document,
       });
     } catch (error) {
       controller.abort();
-      if (error?.code === 'live-delivery-revoked') return { kind: 'revoked' };
+      if ((error as { code?: unknown } | null | undefined)?.code === 'live-delivery-revoked') return { kind: 'revoked' };
       throw error;
     }
     try {
-      const cursor = await activation.activate();
+      const cursor = await activation!.activate();
       return revoked ? { kind: 'revoked' } : { kind: 'catchup', envelopes, cursor };
     } finally {
       controller.abort();

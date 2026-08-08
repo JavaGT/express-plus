@@ -1,4 +1,3 @@
-// @ts-nocheck
 export { check, resolveDecision, UnawaitedCheckError } from './check.mjs';
 export { assertGuarded } from './guard/static.mjs';
 export { text, annotatedText, annotation, protectingAnnotation, measurement, wordEvidenceFamily, annotationAction, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.mjs';

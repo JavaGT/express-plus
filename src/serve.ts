@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The HTTP transport — Phase 2, slice 1 (SPEC §3, §4).
 //
 // Phase 1 resolved a declared app into an inspectable routing table (a list of
@@ -21,7 +20,7 @@
 
 import { createServer as createHttpServer } from 'node:http';
 
-import { anonymous } from './principal.ts';
+import { anonymous, type Principal } from './principal.ts';
 import { mayVerb, mayRow } from './row-grant.ts';
 import { config } from './config.ts';
 import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.ts';
@@ -36,9 +35,13 @@ import { committedEventHeaders, responseHasStarted, warnLateResponse, sendJson }
 import { createResponseFacade } from './http-response-factory.ts';
 import { dispatchCrud } from './http-crud-dispatch.ts';
 import { failure } from './outcome.ts';
-import { sendFailure } from './http-failure.ts';
+import { sendFailure, type SendJson } from './http-failure.ts';
 import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute, handleClientSdkRoute } from './http-framework-routes.ts';
 import { handleApplicationActionHttp } from './application-action-http.ts';
+
+// sendJson's strict Http response param is wider than the transport's loose
+// `SendJson` contract (res: unknown); this alias carries it across seams.
+const sendJsonCompat: SendJson = sendJson as any;
 
 // Framework-owned snapshot + resync endpoints (spec #1, D6/D7). NOT mounted
 // `makeHandlerRes(nodeRes, onEnd)` wraps a node response in the Express-style
@@ -47,12 +50,12 @@ import { handleApplicationActionHttp } from './application-action-http.ts';
 // `onEnd` flips the intercept's handled flag so a handler that ended the
 // response short-circuits the dispatch and one that did not write falls through
 // to the next handler.
-function makeHandlerRes(nodeRes, onEnd) {
-  const res = createResponseFacade(nodeRes, { onEnd });
+function makeHandlerRes(nodeRes: any, onEnd: any) {
+  const res: any = createResponseFacade(nodeRes, { onEnd });
 
   // serve-specific: stream pipes a Web Response (or a bare ReadableStream) to
   // the Node response and calls onEnd() so the intercept short-circuits.
-  res.stream = async function (webResponse, options = {}) {
+  res.stream = async function (webResponse: any, options: any = {}) {
     const source = webResponse instanceof ReadableStream
       ? new Response(webResponse)
       : webResponse;
@@ -92,7 +95,7 @@ const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 // Returns true when the mutation is allowed, false when it is foreign (→ 403).
 // Safe methods carry no state change; the same-origin verdict (shared with the
 // WS upgrade handshake, middleware.mjs) gates every other method.
-const csrfGuard = (req) => SAFE_METHODS.has(req.method) || isSameOriginRequest(req);
+const csrfGuard = (req: any) => SAFE_METHODS.has(req.method) || isSameOriginRequest(req);
 
 // Build the node:http request handler that serves a routing table. `principalOf`
 // derives the request's principal; it defaults to a function returning anonymous
@@ -101,7 +104,16 @@ const csrfGuard = (req) => SAFE_METHODS.has(req.method) || isSameOriginRequest(r
 // hydration as the principal source (sessionPrincipalOf) — the SAME admission
 // path, not a second one. `db` is the app-level node:sqlite handle the
 // dispatcher runs against.
-export function makeRequestHandler(source, { principalOf = () => anonymous, db, env = config.env, rateLimiter = null, csp, hsts, cors, requestLog = false } = {}) {
+export function makeRequestHandler(source: any, { principalOf = () => anonymous, db, env = config.env, rateLimiter = null, csp, hsts, cors, requestLog = false }: {
+  principalOf?: (req: any) => Principal;
+  db?: any;
+  env?: string;
+  rateLimiter?: any;
+  csp?: string;
+  hsts?: boolean;
+  cors?: any;
+  requestLog?: boolean;
+} = {}) {
   // `source` is either a plain resolved routing table (an array) or an app whose
   // table resolves asynchronously (two-phase boot). When it is an app, every
   // request first awaits `app.ready` so the socket may accept connections before
@@ -114,15 +126,15 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
   const requestCount = { count: 0 };
 
   // Handles the default route matching + dispatch after the handler chain.
-  async function handleRouteMatch(req, res, routes, url) {
-    const { route, params, pathMatched } = matchRoute(routes, req.method, url.pathname);
+  async function handleRouteMatch(req: any, res: any, routes: any, url: any) {
+    const { route, params, pathMatched } = matchRoute(routes, req.method, url.pathname) as any;
 
     // no path match → 404; path matched but method did not → 405.
     if (!route) {
       if (pathMatched) {
-        sendFailure(sendJson, res, failure('invalid-input', 'method not allowed'), { status: 405 });
+        sendFailure(sendJsonCompat, res, failure('invalid-input', 'method not allowed'), { status: 405 });
       } else {
-        sendFailure(sendJson, res, failure('not-found', 'not found'));
+        sendFailure(sendJsonCompat, res, failure('not-found', 'not found'));
       }
       return;
     }
@@ -130,13 +142,13 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
     // the first default-on auth layer: the route gate decides admission.
     const principal = principalOf(req);
     if (!route.gate(principal)) {
-      sendFailure(sendJson, res, failure('denied', 'unauthorized'), { status: 401 });
+      sendFailure(sendJsonCompat, res, failure('denied', 'unauthorized'), { status: 401 });
       return;
     }
 
     // read a body for mutating entity verbs and every imperative route. Entity
     // CRUD stays JSON-only; handlers may accept browser form posts.
-    let body = {};
+    let body: any = {};
     if (route.handlers || route.verb === 'create' || route.verb === 'update' || route.verb === 'fieldApply') {
       try {
         body = await readRequestBody(req, { jsonOnly: !route.handlers });
@@ -144,7 +156,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
         // a refused body carries its own status (413 oversized, 400 malformed).
         if (err instanceof BodyError) {
           return void sendFailure(
-            sendJson,
+            sendJsonCompat,
             res,
             failure('invalid-input', err.message),
             { status: err.status },
@@ -162,17 +174,17 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
     if (route.handlers) {
       await runChain(route.handlers, req, res, { principal, params, body, query: url.searchParams, autoLoad: route.autoLoad, app: source }, { env });
     } else {
-      await dispatchCrud({ entity: route.entity, verb: route.verb, fieldName: route.fieldName, db, principal, params, body, actionId: req.headers['x-workbench-action-id'], app: isApp ? source : null, res, sendJson, committedEventHeaders, mayRow });
+      await dispatchCrud({ entity: route.entity, verb: route.verb, fieldName: route.fieldName, db, principal, params, body, actionId: req.headers['x-workbench-action-id'], app: isApp ? source : null, res, sendJson: sendJsonCompat, committedEventHeaders, mayRow } as any);
     }
   }
 
-  async function handle(req, res) {
+  async function handle(req: any, res: any) {
     const startTime = Date.now();
     if (isApp) requestCount.count += 1;
     if (shouldLogRequest) {
       let statusCode = 200;
       const origWriteHead = res.writeHead;
-      res.writeHead = function patchedWriteHead(code, ...args) {
+      res.writeHead = function patchedWriteHead(code: any, ...args: any[]) {
         statusCode = code;
         return origWriteHead.apply(this, [code, ...args]);
       };
@@ -218,7 +230,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
         if (!r.allowed) {
           res.setHeader('Retry-After', String(Math.ceil(r.retryAfterMs / 1000)));
           sendFailure(
-            sendJson,
+            sendJsonCompat,
             res,
             failure('conflict', 'rate limit exceeded', { retryAfterMs: r.retryAfterMs }),
             { status: 429 },
@@ -231,7 +243,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       // rejected before it reaches the route gate or any state change. Bare
       // non-browser requests (no Origin/Referer — Node fetch, curl) pass.
       if (isApp && !csrfGuard(req)) {
-        sendFailure(sendJson, res, failure('denied', 'forbidden'));
+        sendFailure(sendJsonCompat, res, failure('denied', 'forbidden'));
         return;
       }
 
@@ -316,7 +328,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
         // package-owned registered-action kernel.
         {
           match: () => isApp,
-          handle: async () => handleApplicationActionHttp(source, req, res, principalOf, sendJson),
+          handle: async () => handleApplicationActionHttp(source, req, res, principalOf, sendJsonCompat),
         },
         // Application-integrated SSE delivery is package-owned: this mounted
         // handler has no access to raw log rows or action callbacks.
@@ -380,7 +392,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
       renderError(res, err, { env });
     }
   }
-  return (req, res) => withLog(log, () => handle(req, res));
+  return (req: any, res: any) => withLog(log, () => handle(req, res));
 }
 
 // Open a real node:http server for a resolved app and start listening. The
@@ -396,7 +408,7 @@ export function makeRequestHandler(source, { principalOf = () => anonymous, db, 
 // Graceful shutdown (SPEC §3) is framework-owned: SIGTERM/SIGINT close the live
 // server, and an unhandledRejection/uncaughtException is trapped. The app mounts
 // none of this — `app.shutdown()` is the close the traps call (and tests use).
-export function listen(app, port, optionsOrCallback = {}) {
+export function listen(app: any, port: any, optionsOrCallback: any = {}) {
   if (app.httpServer) {
     throw new Error('application is already listening');
   }
@@ -426,7 +438,7 @@ export function listen(app, port, optionsOrCallback = {}) {
     : null;
   const apiKeyResolver = app.db ? apiKeyPrincipalOf(app.db) : null;
   const defaultPrincipalOf = sessionResolver
-    ? (req) => {
+    ? (req: any) => {
         const p = sessionResolver(req);
         if (p.type !== 'anonymous') return p;
         return apiKeyResolver ? apiKeyResolver(req) : p;
@@ -463,8 +475,8 @@ export function listen(app, port, optionsOrCallback = {}) {
   // only starts if at least one exists (avoids a no-op timer). ONE reconciliation
   // path — the engine dispatches under a system principal through `kernel.dispatch`,
   // admitted in-txn by the durable variant's `admission.beforeProjection` seam.
-  let failTransport;
-  app._transportReady = new Promise((resolve, reject) => {
+  let failTransport: ((err: any) => void) | undefined;
+  app._transportReady = new Promise<void>((resolve, reject) => {
     const cleanup = () => {
       httpServer.off('listening', onReady);
       httpServer.off('error', onError);
@@ -474,7 +486,7 @@ export function listen(app, port, optionsOrCallback = {}) {
       cleanup();
       resolve();
     };
-    const onError = (err) => {
+    const onError = (err: any) => {
       cleanup();
       reject(err);
     };
@@ -502,13 +514,13 @@ export function listen(app, port, optionsOrCallback = {}) {
   if (app.db && !app._applicationLiveDelivery) {
     app.live = createLiveDelivery(httpServer, {
       path: '/events',
-      mayVerb: (entity, verb, row, principal) => mayVerb(entity, verb, row, principal),
+      mayVerb: (entity: any, verb: any, row: any, principal: any) => mayVerb(entity, verb, row, principal),
       principalOf,
       db: app.db,
-      resolveEntity: (name) => app.entities?.get(name),
+      resolveEntity: (name: any) => app.entities?.get(name),
       ready: () => app.ready,
       log: app.log,
-    });
+    } as any);
   }
   app._transportAttached = true;
 
@@ -519,7 +531,7 @@ export function listen(app, port, optionsOrCallback = {}) {
   // delivers to WebSocket subscribers. The event stays durable in _Log for
   // cursor catch-up either way. The fan-out is only for non-_Log ephemerals.
   if (app.jobs) {
-    app._detachJobLive = app.jobs.onEvent((ev) => {
+    app._detachJobLive = app.jobs.onEvent((ev: any) => {
       if (!ev.scope) return;
       if (app._applicationLiveDelivery) app._applicationLiveDelivery.wake(ev.scope);
       else app.live?.wake(ev.scope);
@@ -533,7 +545,7 @@ export function listen(app, port, optionsOrCallback = {}) {
   try {
     httpServer.listen(port);
   } catch (err) {
-    failTransport(err);
+    failTransport?.(err);
     // `listen()` retains Node's synchronous argument-error contract. Attach an
     // observer to the same rejected readiness promise so callers that catch the
     // synchronous error are not also handed an unhandled rejection.

@@ -1,4 +1,3 @@
-// @ts-nocheck
 // views.mjs — a minimal, zero-deps view engine (SPEC §3).
 //
 // `resolveTemplate(viewsDir, name, data)` reads an HTML file from the views
@@ -23,14 +22,14 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { resolve, sep } from 'node:path';
-import { failure } from './outcome.ts';
-import { sendFailure } from './http-failure.ts';
-import { sendJson } from './http-response.ts';
+import { failure, type WorkbenchFailure } from './outcome.ts';
+import { sendFailure, type SendJson } from './http-failure.ts';
+import { sendJson, type HttpResponseLike } from './http-response.ts';
 
 // HTML-context escaping (OWASP): the five characters that can break out of text
 // or an attribute value. `&` is replaced first so an already-escaped entity is
 // not double-escaped by a later rule.
-const HTML_ESCAPES = Object.freeze({
+const HTML_ESCAPES: Readonly<Record<string, string>> = Object.freeze({
   '&': '&amp;',
   '<': '&lt;',
   '>': '&gt;',
@@ -38,29 +37,29 @@ const HTML_ESCAPES = Object.freeze({
   "'": '&#39;',
 });
 
-export function escapeHtml(value) {
+export function escapeHtml(value: unknown): string {
   return String(value).replace(/[&<>"']/g, (ch) => HTML_ESCAPES[ch]);
 }
 
-export function resolveTemplate(viewsDir, name, data = {}) {
+export function resolveTemplate(viewsDir: string, name: string, data: Record<string, unknown> = {}): string {
   const filePath = resolve(viewsDir, `${name}`);
   const source = readFileSync(filePath, 'utf-8');
   // Triple-brace (raw) is matched before double-brace (escaped) so the greedier
   // form wins. `[^{}]` for the key forbids nested braces, keeping the two forms
   // unambiguous.
   return source
-    .replace(/\{\{\{([^{}]+?)\}\}\}/g, (_, key) => {
+    .replace(/\{\{\{([^{}]+?)\}\}\}/g, (_match, key: string) => {
       const k = key.trim();
       return Object.hasOwn(data, k) ? String(data[k]) : `{{{${k}}}}`;
     })
-    .replace(/\{\{([^{}]+?)\}\}/g, (_, key) => {
+    .replace(/\{\{([^{}]+?)\}\}/g, (_match, key: string) => {
       const k = key.trim();
       return Object.hasOwn(data, k) ? escapeHtml(data[k]) : `{{${k}}}`;
     });
 }
 
 // Simple content-type map for common static file extensions.
-const MIME_TYPES = Object.freeze({
+const MIME_TYPES: Readonly<Record<string, string>> = Object.freeze({
   '.html': 'text/html; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   // Browsers refuse ES modules whose Content-Type is not a JavaScript MIME
@@ -79,13 +78,13 @@ const MIME_TYPES = Object.freeze({
   '.woff2': 'font/woff2',
 });
 
-export function matchExtension(filename) {
+export function matchExtension(filename: string): string {
   const ext = filename.slice(filename.lastIndexOf('.')).toLowerCase();
   return MIME_TYPES[ext] ?? 'application/octet-stream';
 }
 
 // Guard: a requested static path must not escape the root directory.
-export function isSafePath(root, requested) {
+export function isSafePath(root: string, requested: string): boolean {
   const resolved = resolve(root, requested);
   return resolved.startsWith(resolve(root) + sep) || resolved === resolve(root);
 }
@@ -93,11 +92,20 @@ export function isSafePath(root, requested) {
 // `stripPrefix` recovers the path tail under a URL prefix. The `?query` is
 // dropped (the caller already has it as `url.searchParams`); a missing prefix is
 // a pass-through so the factory is usable bare.
-export function stripPrefix(url, prefix) {
+export function stripPrefix(url: string, prefix?: string): string {
   if (!prefix) return url;
   const q = url.indexOf('?');
   const path = q === -1 ? url : url.slice(0, q);
   return path.startsWith(prefix) ? path.slice(prefix.length) : path;
+}
+
+export interface StaticRequest {
+  url?: string;
+  params?: { path?: string };
+}
+
+export interface ServeStaticOptions {
+  prefix?: string;
 }
 
 // `serveStatic(dir, options)` is a catch-all request handler factory for the
@@ -108,9 +116,9 @@ export function stripPrefix(url, prefix) {
 // URL prefix already trimmed of trailing slashes; the tail is taken from
 // `req.params.path` when the intercept has already stripped it, else from the
 // raw URL.
-export function serveStatic(dir, options = {}) {
-  return (req, res, next) => {
-    const rel = req.params?.path ?? stripPrefix(req.url, options.prefix);
+export function serveStatic(dir: string, options: ServeStaticOptions = {}) {
+  return (req: StaticRequest, res: HttpResponseLike, next?: (err?: unknown) => unknown) => {
+    const rel = req.params?.path ?? stripPrefix(req.url ?? '', options.prefix);
     const relPath = String(rel).replace(/^\/+/, '');
     if (!relPath || !isSafePath(dir, relPath)) return next ? next() : sendStaticFailure(res, failure('not-found', 'not found'));
     const fullPath = resolve(dir, relPath);
@@ -132,6 +140,6 @@ export function serveStatic(dir, options = {}) {
 }
 
 // Static files share the same failure encoder as every other HTTP edge.
-function sendStaticFailure(res, workbenchFailure) {
-  return sendFailure(sendJson, res, workbenchFailure);
+function sendStaticFailure(res: HttpResponseLike, workbenchFailure: WorkbenchFailure): unknown {
+  return sendFailure(sendJson as unknown as SendJson, res, workbenchFailure);
 }

@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { structCellColumn } from './field-strategy.mjs';
 
 function quoteIdent(name        )         {
@@ -28,7 +27,7 @@ function defaultValue(column                   )                {
                                                          
 
 function entityColumns(entity              )                              {
-  const columns = new Map                                                  ([['id', { type: 'TEXT', notNull: false, primaryKey: true }]]);
+  const columns = new Map                                                   ([['id', { type: 'TEXT', notNull: false, primaryKey: true }]]);
   for (const [name, field] of Object.entries(entity.fields ?? {})) {
     if (field.kind === 'computed' && field.mode === 'pull') continue;
     if (field.kind === 'struct') {

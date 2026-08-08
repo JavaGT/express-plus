@@ -1,11 +1,21 @@
-// @ts-nocheck
-import { resolveStrategy } from './field-strategy.ts';
+import { resolveStrategy, type FieldDescriptor } from './field-strategy.ts';
 import { getLog } from './log.ts';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.ts';
-import { upsert } from './driver.ts';
+import { upsert, type DbHandle } from './driver.ts';
 import { tryParseScopeKey } from './scope-handle.ts';
 
-export function resolveProjectedAsyncTriggerTypes(desc, entityName) {
+export interface ProjectedAsyncFieldDescriptor {
+  from?: string | string[];
+  compute: (row: Record<string, unknown>, context: { db: DbHandle }) => unknown | Promise<unknown>;
+}
+
+export interface ProjectedAsyncEntityRecord {
+  name: string;
+  fields: Record<string, unknown>;
+  projectedAsyncFields?: Array<[string, ProjectedAsyncFieldDescriptor]>;
+}
+
+export function resolveProjectedAsyncTriggerTypes(desc: ProjectedAsyncFieldDescriptor, entityName: string): string[] {
   if (!desc.from) return [`${entityName}.created`, `${entityName}.updated`];
   if (typeof desc.from === 'string') {
     const from = desc.from;
@@ -14,12 +24,12 @@ export function resolveProjectedAsyncTriggerTypes(desc, entityName) {
   return desc.from.map((f) => f.includes('.') ? f : `${entityName}.${f}`);
 }
 
-function projectedAsyncRow(entityRecord, row) {
-  const filteredRow = {};
+function projectedAsyncRow(entityRecord: ProjectedAsyncEntityRecord, row: Record<string, unknown>): Record<string, unknown> {
+  const filteredRow: Record<string, unknown> = {};
   if (row.id !== undefined) filteredRow.id = row.id;
   for (const [k, v] of Object.entries(row)) {
     if (Object.prototype.hasOwnProperty.call(entityRecord.fields, k)) {
-      const desc = entityRecord.fields[k];
+      const desc = entityRecord.fields[k] as FieldDescriptor | undefined;
       if (desc?.kind === 'value' || desc?.kind === 'projected' || (desc?.kind === 'computed' && desc?.mode === 'stored')) {
         try { filteredRow[k] = resolveStrategy(desc.kind).deserialize?.(v, desc) ?? v; } catch { filteredRow[k] = v; }
       } else {
@@ -30,13 +40,18 @@ function projectedAsyncRow(entityRecord, row) {
   return filteredRow;
 }
 
+interface RecomputeField {
+  fieldName: string;
+  compute: ProjectedAsyncFieldDescriptor['compute'];
+}
+
 // Recompute every projected.async field for one row and write the results back,
 // advancing the staleness version counter per field. Returns true iff every
 // field computed successfully. Shared by the post-commit consumer (triggered
 // fields only) and the boot reconcile (all fields) so there is ONE write-back
 // path — not two that drift. `fields` is an array of {fieldName, compute}; the
 // caller selects which fields (triggered subset vs all).
-async function recomputeFields(entityRecord, entityName, rowId, db, fields, { scope }) {
+async function recomputeFields(entityRecord: ProjectedAsyncEntityRecord, entityName: string, rowId: string, db: DbHandle, fields: RecomputeField[], { scope }: { scope: string }): Promise<boolean> {
   const row = db.prepare(`SELECT * FROM ${entityName} WHERE id = :id`).get({ id: rowId });
   if (!row) return false;
   const filteredRow = projectedAsyncRow(entityRecord, row);
@@ -44,14 +59,14 @@ async function recomputeFields(entityRecord, entityName, rowId, db, fields, { sc
   for (const { fieldName, compute } of fields) {
     try {
       const result = await compute(filteredRow, { db });
-      const serialized = resolveStrategy('projected').serialize(result);
+      const serialized = resolveStrategy('projected').serialize!(result);
       db.prepare(`UPDATE ${entityName} SET ${fieldName} = :val WHERE id = :id`).run({
         val: serialized, id: rowId,
       });
       const cursorRow = db.prepare(
         'SELECT lastSeq FROM _ProjectedCursor WHERE entity = :e AND field = :f',
       ).get({ e: entityName, f: fieldName });
-      const next = (cursorRow?.lastSeq ?? 0) + 1;
+      const next = ((cursorRow?.lastSeq as number | undefined) ?? 0) + 1;
       upsert(db, {
         table: '_ProjectedCursor',
         keyColumns: ['entity', 'field'],
@@ -66,7 +81,9 @@ async function recomputeFields(entityRecord, entityName, rowId, db, fields, { sc
   return allSucceeded;
 }
 
-export function createProjectedAsyncConsumer({ entities }) {
+export type ProjectedAsyncEvent = { scope: string; type: string; seq?: number };
+
+export function createProjectedAsyncConsumer({ entities }: { entities: ReadonlyMap<string, ProjectedAsyncEntityRecord> }): (events: ProjectedAsyncEvent[], context: { db: DbHandle }) => Promise<void> {
   return async (events, { db }) => {
     for (const ev of events) {
       const handle = tryParseScopeKey(ev.scope);
@@ -75,7 +92,7 @@ export function createProjectedAsyncConsumer({ entities }) {
       const rowId = handle.id;
       const entityRecord = entities?.get(entityName);
       if (!entityRecord || !entityRecord.projectedAsyncFields?.length) continue;
-      const triggered = [];
+      const triggered: RecomputeField[] = [];
       for (const [fieldName, desc] of entityRecord.projectedAsyncFields) {
         const triggerTypes = resolveProjectedAsyncTriggerTypes(desc, entityName);
         if (triggerTypes.includes(ev.type)) triggered.push({ fieldName, compute: desc.compute });
@@ -110,22 +127,22 @@ export function createProjectedAsyncConsumer({ entities }) {
 // current regardless of how many events were missed. Scopes whose row was
 // removed have their recovery cursor cleaned up. Idempotent: a scope already at
 // head is untouched, so running twice changes nothing.
-export function readProjectedCursors(db, entity) {
+export function readProjectedCursors(db: DbHandle, entity: ProjectedAsyncEntityRecord): Array<{ field: string; lastSeq: number }> {
   if (!entity.projectedAsyncFields || entity.projectedAsyncFields.length === 0) return [];
-  const cursors = new Map(
+  const cursors = new Map<string, number>(
     db.prepare('SELECT field, lastSeq FROM _ProjectedCursor WHERE entity = :e')
       .all({ e: entity.name })
-      .map(r => [r.field, r.lastSeq])
+      .map((r) => [r.field as string, r.lastSeq as number]),
   );
   return entity.projectedAsyncFields
     .filter(([fieldName]) => cursors.has(fieldName))
-    .map(([fieldName]) => ({ field: fieldName, lastSeq: cursors.get(fieldName) }));
+    .map(([fieldName]) => ({ field: fieldName, lastSeq: cursors.get(fieldName) as number }));
 }
 
-export async function reconcileProjectedRecovery(db, entities) {
+export async function reconcileProjectedRecovery(db: DbHandle, entities: ReadonlyMap<string, ProjectedAsyncEntityRecord> | undefined): Promise<{ recomputed: number; cleaned: number }> {
   const CONSUMER = 'projected.async';
   // Only entities that declare projected.async fields have anything to recover.
-  const projectedEntities = new Map();
+  const projectedEntities = new Map<string, ProjectedAsyncEntityRecord>();
   for (const entityRecord of entities?.values() ?? []) {
     if (entityRecord.projectedAsyncFields?.length) {
       projectedEntities.set(entityRecord.name, entityRecord);
@@ -141,7 +158,7 @@ export async function reconcileProjectedRecovery(db, entities) {
   // fields (skipped below) and removed rows (cursor cleaned up).
   const scopes = db.prepare(
     'SELECT scope, MAX(seq) AS head FROM _Log GROUP BY scope',
-  ).all();
+  ).all() as Array<{ scope: string; head: number }>;
   const recoveryByScope = consumerCursorMap(db, CONSUMER);
 
   for (const { scope, head } of scopes) {
@@ -154,7 +171,7 @@ export async function reconcileProjectedRecovery(db, entities) {
     const applied = recoveryByScope.get(scope) ?? 0;
     if (applied >= head) continue; // current — leave the row untouched
 
-    const allFields = [...entityRecord.projectedAsyncFields].map(
+    const allFields: RecomputeField[] = [...(entityRecord.projectedAsyncFields ?? [])].map(
       ([fieldName, desc]) => ({ fieldName, compute: desc.compute }),
     );
     const rowExists = !!db.prepare(`SELECT 1 FROM ${entityName} WHERE id = :id`).get({ id: rowId });

@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Recipient-safe annotated-text fold envelopes for live delivery (issue #33
 // blockless model).
 //
@@ -15,7 +14,7 @@
 
 import { parseEventType, EventKind } from './event-handle.mjs';
 import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
-import { restoreTextFamily, textFamilyCheckpoint, materializeText } from './annotated-text-continuous.mjs';
+import { restoreTextFamily, textFamilyCheckpoint, materializeText,                           } from './annotated-text-continuous.mjs';
 import { frontierDominates } from './annotated-text.mjs';
 import {
   ensureStream,
@@ -25,30 +24,91 @@ import {
   buildAuthoringEnvelope,
 } from './annotated-text-authoring-stream.mjs';
 import { authoringRedactionsForRecipient } from './annotated-text-recipient-projection.mjs';
+                                                
+                                                           
+                                                         
+
+                         
+                                               
+                               
+                                 
+ 
+
+                  
+                                      
+                             
+ 
+
+                        
+                           
+                     
+                    
+                                                 
+                              
+ 
+
+                     
+                                
+                     
+                
+                 
+              
+                       
+                                    
+ 
+
+                   
+                   
+                                          
+                
+ 
+
+                         
+              
+                         
+ 
+
+                           
+              
+             
+                                                        
+                                                       
+                       
+                 
+ 
+
+                         
+             
+                 
+                
+                   
+                               
+                                                   
+ 
 
 // The v13 operated-event facts bag is one exact key set (mirrors
 // annotated-text-operated-facts.mjs and the row projection). Anything else —
 // including a block-era facts bag — fails closed and falls through.
 const OPERATED_FACTS_KEYS = ['actorId', 'annotation', 'emptiedAnnotations', 'family', 'lifecycle', 'measurements', 'ranges', 'removedAnnotationIds', 'result', 'selectedRange'];
 
-function recovery(ctx, entity, id, reason) {
+function recovery(ctx         , entity        , id        , reason        )           {
   return [{ type: 'resync', entity, id, seq: ctx.event.seq, reason }];
 }
 
-function exactKeys(value, keys) {
+function exactKeys(value     , keys                   )          {
   return value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).length === keys.length
     && keys.every((key) => Object.hasOwn(value, key));
 }
 
-function revision(value) {
+function revision(value     )          {
   return value && typeof value === 'object' && !Array.isArray(value)
     && Object.keys(value).sort().join() === 'frontier,structuralRevision'
     && Number.isSafeInteger(value.structuralRevision) && value.structuralRevision >= 1
     && Array.isArray(value.frontier);
 }
 
-function deepFreeze(value) {
+function deepFreeze   (value   )    {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
     for (const child of Object.values(value)) deepFreeze(child);
     Object.freeze(value);
@@ -59,7 +119,7 @@ function deepFreeze(value) {
 // A foldable edit is a whole-document text transition only. `operations` is
 // always an array of RGA ops applied in sequence: one op for text.apply, the
 // delete+insert pair for text.replace.
-function foldableTextEdit(operation) {
+function foldableTextEdit(operation     )                                                                    {
   if (!operation || typeof operation !== 'object' || Array.isArray(operation)) return null;
   if (operation.kind === 'text.apply' && Array.isArray(operation.operation)) {
     return { kind: 'text.apply', operations: [operation.operation] };
@@ -67,13 +127,13 @@ function foldableTextEdit(operation) {
   if (operation.kind === 'text.replace'
     && Array.isArray(operation.operations)
     && operation.operations.length === 2
-    && operation.operations.every((candidate) => Array.isArray(candidate))) {
+    && operation.operations.every((candidate         ) => Array.isArray(candidate))) {
     return { kind: 'text.replace', operations: operation.operations };
   }
   return null;
 }
 
-function opsWellFormed(operations, beforeFrontier) {
+function opsWellFormed(operations       , beforeFrontier         )          {
   if (!Array.isArray(operations) || operations.length === 0) return false;
   for (const operation of operations) {
     if (!Array.isArray(operation) || operation.length !== 6
@@ -87,7 +147,7 @@ function opsWellFormed(operations, beforeFrontier) {
   return JSON.stringify(operations[0][4]) === JSON.stringify(beforeFrontier);
 }
 
-function scopeParts(scope) {
+function scopeParts(scope         )                                               {
   if (typeof scope !== 'string') return { entity: null, id: null };
   const idx = scope.indexOf(':');
   if (idx <= 0) return { entity: null, id: null };
@@ -100,7 +160,7 @@ function scopeParts(scope) {
  *
  * @returns {Promise<object[]|null>}
  */
-export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) {
+export async function tryBuildAnnotatedTextFoldEnvelopes(ctx         , { db, document }                                        )                           {
   if (!document || document.descriptor?.kind !== 'annotatedText') return null;
   const event = ctx.event;
   const data = event?.data;
@@ -108,7 +168,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
 
   let evHandle;
   try {
-    evHandle = parseEventType(event.eventType ?? event.type);
+    evHandle = parseEventType((event.eventType ?? event.type)          );
   } catch {
     return null;
   }
@@ -224,7 +284,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
     return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
   }
 
-  const loggedEvent = {
+  const loggedEvent                                                                                                                                    = {
     type: event.eventType ?? event.type,
     scope: event.scope,
     seq: event.seq,
@@ -278,7 +338,13 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx, { db, document }) 
  * caller gates redacted recipients before minting). Returns null when the
  * client nonce is missing or authoring capacity is exhausted.
  */
-function mintFoldAuthoring({ db, document, principal, fence, family }) {
+function mintFoldAuthoring({ db, document, principal, fence, family }   
+             
+                         
+                                          
+                
+                               
+ )                       {
   const prefix = `${document.entity.name}_${document.fieldName}`;
   if (typeof document.clientNonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(document.clientNonce)) {
     return null;

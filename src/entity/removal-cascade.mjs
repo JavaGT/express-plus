@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { mayRow } from '../row-grant.mjs';
 
 export const CASCADE_PREAUTHORIZED                = Symbol('workbench.cascade-preauthorized');
@@ -9,6 +8,7 @@ export const CASCADE_DESCENDANT                = Symbol('workbench.cascade-desce
                 
                     
                                       
+                   
  
 
                         
@@ -49,7 +49,7 @@ export function installRemovalCascades(entities                           )     
     const [[fieldName, field]] = refs;
     if (field?.kind !== 'value' || field.type !== 'ref') throw new Error(`${entity.name}.${fieldName}.onRemove requires ref(...)`);
     if (field.onRemove !== 'cascade') throw new Error(`${entity.name}.${fieldName}.onRemove must be 'cascade'`);
-    const parent = entities.get(targetName(field));
+    const parent = entities.get(targetName(field) );
     if (!parent) throw new Error(`${entity.name}.${fieldName} references unknown cascade target '${targetName(field)}'`);
     children.get(parent.name) .push({ entity, fieldName });
   }
@@ -90,7 +90,7 @@ export function installRemovalCascades(entities                           )     
     Object.defineProperty(root, 'removalCascade', { value: async (id        , principal         , db          )                          => {
       const descendants = await enumerate(id, db, principal, false);
       const row = db.prepare(`SELECT * FROM ${root.name} WHERE id = ?`).get(id);
-      return [...descendants, { entity: root, id: row.id           }];
+      return [...descendants, { entity: root, id: (row                  ).id }];
     } });
     Object.defineProperty(root, 'removalCascadeDescendants', { value: (id        , db          ) => enumerate(id, db, null, false) });
     Object.defineProperty(root.crudHandlers[`${root.name}.remove`], 'inTransaction', { value: true });

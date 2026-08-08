@@ -1,4 +1,3 @@
-// @ts-nocheck
 // WebSocket server — handshake + frame parser/sender (zero-deps, RFC 6455).
 //
 // Node's http.WebSocket is client-only. The server side uses the HTTP server's
@@ -30,7 +29,7 @@ const MAX_PAYLOAD = 64 * 1024; // 64 KiB
 
 export class FrameSender {
   // Build a text frame (opcode 0x1).
-  text(payload) {
+  text(payload         )         {
     const data = Buffer.from(String(payload), 'utf-8');
     if (data.length > MAX_PAYLOAD) {
       throw new Error(`WebSocket text payload too large: ${data.length} bytes (max ${MAX_PAYLOAD})`);
@@ -40,8 +39,8 @@ export class FrameSender {
 
   // Build a close frame (opcode 0x8). The optional code is a 2-byte status code
   // (§7.4); reason is a short UTF-8 string.
-  close(code, reason) {
-    let body;
+  close(code                    , reason         )         {
+    let body        ;
     if (code !== undefined) {
       const codeBuf = Buffer.alloc(2);
       codeBuf.writeUInt16BE(code, 0);
@@ -57,16 +56,16 @@ export class FrameSender {
   }
 
   // Build a pong frame (opcode 0xA) echoing the ping payload verbatim (§5.5.2).
-  pong(payload) {
+  pong(payload         )         {
     const data = Buffer.isBuffer(payload) ? payload : Buffer.from(String(payload), 'utf-8');
     return buildFrame(0xa, data);
   }
 }
 
 // Assemble one outgoing frame: FIN=1, no MASK (server→client), opcode, payload.
-function buildFrame(opcode, payload) {
+function buildFrame(opcode        , payload        )         {
   const len = payload.length;
-  let header;
+  let header        ;
   if (len < 126) {
     header = Buffer.alloc(2);
     header[0] = 0x80 | opcode; // FIN=1
@@ -97,10 +96,20 @@ const STATE = Object.freeze({
   EXTENDED_8: 'ext8',     // reading extended 8-byte length
   MASK: 'mask',            // reading 4-byte masking key
   PAYLOAD: 'payload',      // reading the payload data
-});
+}         );
+
+                                                     
+
+                        
+                 
+                   
+                 
+                     
+                       
+ 
 
 export class FrameParser {
-  #state = STATE.HEADER;
+  #state             = STATE.HEADER;
   #buffer = Buffer.alloc(0);
   #opcode = 0;
   #fin = 0;
@@ -111,11 +120,11 @@ export class FrameParser {
   #payloadRead = 0;
   #fragmentedOpcode = 0;    // opcode of the first fragment
   #fragmented = Buffer.alloc(0);
-  #messages = [];
-  #pongs = [];              // ping payloads that need a pong response
+  #messages                 = [];
+  #pongs           = [];    // ping payloads that need a pong response
   #skipBytes = 0;           // bytes to drain when skipping a malformed frame body
 
-  #reset() {
+  #reset()       {
     this.#state = STATE.HEADER;
     this.#opcode = 0;
     this.#fin = 0;
@@ -127,25 +136,25 @@ export class FrameParser {
     this.#skipBytes = 0;
   }
 
-  feed(chunk) {
+  feed(chunk        )       {
     this.#buffer = Buffer.concat([this.#buffer, chunk]);
     this.#processBuffer();
   }
 
-  drainMessages() {
+  drainMessages()                 {
     const msgs = this.#messages;
     this.#messages = [];
     return msgs;
   }
 
   // Ping frames produce pong payloads that the caller MUST echo back.
-  drainPongs() {
+  drainPongs()           {
     const pongs = this.#pongs;
     this.#pongs = [];
     return pongs;
   }
 
-  #processBuffer() {
+  #processBuffer()       {
     // Loop while there is buffered data OR we are sitting in the PAYLOAD state
     // with a zero-length payload still to finalize. A masked close frame with an
     // empty body (undici sends `88 80 <mask>` — 6 bytes, no payload) consumes its
@@ -229,7 +238,7 @@ export class FrameParser {
       if (this.#state === STATE.PAYLOAD) {
         const needed = this.#payloadLen - this.#payloadRead;
         if (this.#buffer.length < needed) return;
-        
+
         const chunk = this.#buffer.slice(0, needed);
         this.#buffer = this.#buffer.slice(needed);
 
@@ -252,7 +261,7 @@ export class FrameParser {
     }
   }
 
-  #handleCompleteFrame() {
+  #handleCompleteFrame()       {
     const opcode = this.#opcode;
     const fin = this.#fin;
     const payload = this.#payload;
@@ -304,7 +313,24 @@ export class FrameParser {
 
 // --- WebSocket upgrade handshake (§4.2.2) ---------------------------------------
 
-export function upgradeWebSocket(req, socket) {
+                                          
+                                                         
+ 
+
+                                         
+                               
+                     
+ 
+
+                                         
+                 
+              
+ 
+
+export function upgradeWebSocket(
+  req                         ,
+  socket                        ,
+)                                {
   const h = req.headers;
 
   // Validate the upgrade request

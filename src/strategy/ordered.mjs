@@ -1,13 +1,35 @@
-// @ts-nocheck
 import { randomUUID } from 'node:crypto';
 
+                                              
 import { read, write } from '../grant.mjs';
 import { membershipTable, membershipOwnerCol } from '../scope-sql.mjs';
 import * as eventHandles from '../event-handle.mjs';
 import { scopeOf } from '../scope-handle.mjs';
 import { authorizeFieldOp, dispatchFieldMutation } from './shared.mjs';
+             
+                 
+                  
+               
+                     
+                       
+                           
+                    
+                    
 
-function orderedHandle({ record, entityName, fieldName, row, principal, dispatch, db }) {
+// authorizeFieldOp types its capability param as string, but the row-grant
+// engine compares capability tokens by identity (read/write are frozen
+// Capability singletons). Forward the token through the narrower seam.
+function authorizeField(
+  record         ,
+  fieldName        ,
+  capability            ,
+  row         ,
+  principal         ,
+)                {
+  return authorizeFieldOp(record, fieldName, capability                     , row, principal);
+}
+
+function orderedHandle({ record, entityName, fieldName, row, principal, dispatch, db }                      ) {
   const table = membershipTable(entityName, fieldName);
   const ownerCol = membershipOwnerCol(entityName);
   const oid = String(row.id);
@@ -17,33 +39,32 @@ function orderedHandle({ record, entityName, fieldName, row, principal, dispatch
       .prepare(`SELECT id, key, item FROM ${table} WHERE ${ownerCol} = :owner ORDER BY key`)
       .all({ owner: oid });
 
-  const keyBetween = (low, high) => {
-    if (low == null && high == null) return 0;
+  const keyBetween = (low               , high               )         => {
+    if (high == null) return low == null ? 0 : low + 1;
     if (low == null) return high - 1;
-    if (high == null) return low + 1;
     return (low + high) / 2;
   };
 
   return {
-    insertAt: async (index, value) => {
-      await authorizeFieldOp(record, fieldName, write, row, principal);
+    insertAt: async (index        , value         ) => {
+      await authorizeField(record, fieldName, write, row, principal);
       const rows = rowsOrdered();
-      const low = index > 0 ? rows[index - 1].key : null;
-      const high = index < rows.length ? rows[index].key : null;
+      const low = index > 0 ? rows[index - 1].key           : null;
+      const high = index < rows.length ? rows[index].key           : null;
       const key = keyBetween(low, high);
-      const result = await dispatchFieldMutation({
+      const result = (await dispatchFieldMutation({
         entityName, fieldName, dispatch, principal,
         type: `${entityName}.${fieldName}.insert`,
         payload: { owner: oid, key, value },
-      });
+      }))                  ;
       return result.events?.find((e) => e.type === `${entityName}.${fieldName}.inserted`)?.data?.id;
     },
-    move: async (id, index) => {
-      await authorizeFieldOp(record, fieldName, write, row, principal);
+    move: async (id         , index        ) => {
+      await authorizeField(record, fieldName, write, row, principal);
       const sid = String(id);
       const others = rowsOrdered().filter((r) => r.id !== sid);
-      const low = index > 0 ? others[index - 1].key : null;
-      const high = index < others.length ? others[index].key : null;
+      const low = index > 0 ? others[index - 1].key           : null;
+      const high = index < others.length ? others[index].key           : null;
       const key = keyBetween(low, high);
       await dispatchFieldMutation({
         entityName, fieldName, dispatch, principal,
@@ -51,8 +72,8 @@ function orderedHandle({ record, entityName, fieldName, row, principal, dispatch
         payload: { owner: oid, id: sid, key },
       });
     },
-    reorder: async (ids) => {
-      await authorizeFieldOp(record, fieldName, write, row, principal);
+    reorder: async (ids           ) => {
+      await authorizeField(record, fieldName, write, row, principal);
       const entries = ids.map((entryId, i) => ({ id: String(entryId), key: i }));
       await dispatchFieldMutation({
         entityName, fieldName, dispatch, principal,
@@ -60,35 +81,35 @@ function orderedHandle({ record, entityName, fieldName, row, principal, dispatch
         payload: { owner: oid, entries },
       });
     },
-    remove: async (id) => {
-      await authorizeFieldOp(record, fieldName, write, row, principal);
+    remove: async (id         ) => {
+      await authorizeField(record, fieldName, write, row, principal);
       await dispatchFieldMutation({
         entityName, fieldName, dispatch, principal,
         type: `${entityName}.${fieldName}.remove`,
         payload: { owner: oid, id: String(id) },
       });
     },
-    has: (id) =>
+    has: (id         ) =>
       db
         .prepare(`SELECT 1 FROM ${table} WHERE ${ownerCol} = :owner AND id = :id`)
         .get({ owner: oid, id: String(id) }) !== undefined,
-    get: (id) => {
+    get: (id         ) => {
       const r = db
         .prepare(`SELECT item FROM ${table} WHERE ${ownerCol} = :owner AND id = :id`)
         .get({ owner: oid, id: String(id) });
-      return r ? JSON.parse(r.item) : undefined;
+      return r ? JSON.parse(r.item          ) : undefined;
     },
     toArray: async () => {
-      await authorizeFieldOp(record, fieldName, read, row, principal);
-      return rowsOrdered().map((r) => JSON.parse(r.item));
+      await authorizeField(record, fieldName, read, row, principal);
+      return rowsOrdered().map((r) => JSON.parse(r.item          ));
     },
   };
 }
 
-function orderedMutateHandlers(entityName, fieldEntries) {
-  const handlers = {};
+function orderedMutateHandlers(entityName        , fieldEntries              )                                                         {
+  const handlers                                                         = {};
   for (const [ordField] of fieldEntries) {
-    const requireOwner = (payload) => {
+    const requireOwner = (payload                                            ) => {
       const { owner } = payload ?? {};
       if (owner == null) {
         throw Object.assign(new Error(`${entityName}.${ordField} action requires an owner`), { status: 400 });
@@ -97,7 +118,7 @@ function orderedMutateHandlers(entityName, fieldEntries) {
     };
     handlers[`${entityName}.${ordField}.insert`] = ({ payload }) => {
       const owner = requireOwner(payload);
-      if (payload.key == null) {
+      if (payload?.key == null) {
         throw Object.assign(new Error(`${entityName}.${ordField}.insert requires a key`), { status: 400 });
       }
       const id = randomUUID();
@@ -111,7 +132,7 @@ function orderedMutateHandlers(entityName, fieldEntries) {
     };
     handlers[`${entityName}.${ordField}.move`] = ({ payload }) => {
       const owner = requireOwner(payload);
-      if (payload.id == null || payload.key == null) {
+      if (payload?.id == null || payload?.key == null) {
         throw Object.assign(new Error(`${entityName}.${ordField}.move requires an id + key`), { status: 400 });
       }
       const handle = eventHandles.native(entityName, ordField, 'moved');
@@ -124,7 +145,9 @@ function orderedMutateHandlers(entityName, fieldEntries) {
     };
     handlers[`${entityName}.${ordField}.reorder`] = ({ payload }) => {
       const owner = requireOwner(payload);
-      const entries = Array.isArray(payload.entries) ? payload.entries : [];
+      const entries = Array.isArray(payload?.entries)
+        ? (payload.entries                                        )
+        : [];
       const handle = eventHandles.native(entityName, ordField, 'reordered');
       return [{
         handle,
@@ -135,7 +158,7 @@ function orderedMutateHandlers(entityName, fieldEntries) {
     };
     handlers[`${entityName}.${ordField}.remove`] = ({ payload }) => {
       const owner = requireOwner(payload);
-      if (payload.id == null) {
+      if (payload?.id == null) {
         throw Object.assign(new Error(`${entityName}.${ordField}.remove requires an id`), { status: 400 });
       }
       const handle = eventHandles.native(entityName, ordField, 'removed');
@@ -150,9 +173,10 @@ function orderedMutateHandlers(entityName, fieldEntries) {
   return handlers;
 }
 
-function orderedProjectionApply({ entityName, fieldEntries, handle, event, db }) {
+function orderedProjectionApply({ entityName, fieldEntries, handle, event, db }                          )          {
   for (const [ordField] of fieldEntries) {
-    if (handle.field !== ordField || handle.kind !== eventHandles.EventKind.native) continue;
+    if (handle.kind !== eventHandles.EventKind.native) continue;
+    if (handle.field !== ordField) continue;
     const sideTable = membershipTable(entityName, ordField);
     const ownerCol = membershipOwnerCol(entityName);
     if (handle.nativeName === 'inserted') {
@@ -167,7 +191,7 @@ function orderedProjectionApply({ entityName, fieldEntries, handle, event, db })
     }
     if (handle.nativeName === 'reordered') {
       const stmt = db.prepare(`UPDATE ${sideTable} SET key = :key WHERE ${ownerCol} = :owner AND id = :id`);
-      for (const e of (event.data?.entries ?? [])) {
+      for (const e of (event.data?.entries ?? [])                                        ) {
         stmt.run({ owner: String(event.data?.owner), id: e.id, key: e.key });
       }
       return true;
@@ -181,7 +205,7 @@ function orderedProjectionApply({ entityName, fieldEntries, handle, event, db })
   return false;
 }
 
-function orderedDDL(entityName, fieldName) {
+function orderedDDL(entityName        , fieldName        )         {
   const tableName = `${entityName}_${fieldName}`;
   const ownerCol = `${entityName}_id`;
   const cols = [
@@ -194,10 +218,10 @@ function orderedDDL(entityName, fieldName) {
   return `CREATE TABLE IF NOT EXISTS ${tableName} (\n  ${cols.join(',\n  ')}\n);`;
 }
 
-const ORDERED_SIDE_TABLE_STRATEGY = Object.freeze({
-  matches: (descriptor) => descriptor.kind === 'ordered',
+const ORDERED_SIDE_TABLE_STRATEGY                    = Object.freeze({
+  matches: (descriptor                 ) => descriptor.kind === 'ordered',
   handle: orderedHandle,
-  eventTypes: (entityName, fieldEntries) => fieldEntries.flatMap(([fieldName]) => [
+  eventTypes: (entityName        , fieldEntries              ) => fieldEntries.flatMap(([fieldName]) => [
     eventHandles.native(entityName, fieldName, 'inserted').type,
     eventHandles.native(entityName, fieldName, 'moved').type,
     eventHandles.native(entityName, fieldName, 'reordered').type,

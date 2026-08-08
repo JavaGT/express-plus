@@ -1,5 +1,4 @@
-// @ts-nocheck
-import { txn } from './driver.mjs';
+import { txn,                                 } from './driver.mjs';
 import { operationalConsumer } from './operational-consumer.mjs';
 import {
   importTextFamilyFromBlocks,
@@ -7,6 +6,8 @@ import {
   projectEndpointToBlockOffset,
   resolvePositionToEndpoint,
   restoreTextFamilyCheckpoint,
+                          
+                  
 } from './annotated-text-family.mjs';
 import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
 
@@ -20,17 +21,32 @@ import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
 
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 
-export function assertWordEvidenceFamilyName(name) {
+                                                
+                              
+                                 
+                                              
+ 
+
+                                                
+                      
+                                  
+                                          
+                                        
+                                             
+                                                                                                               
+ 
+
+export function assertWordEvidenceFamilyName(name        )       {
   if (typeof name !== 'string' || !IDENTIFIER.test(name)) {
     throw new Error(`word evidence family name '${String(name)}' is not a valid identifier`);
   }
 }
 
-function assertBlockText(blockText) {
+function assertBlockText(blockText        )       {
   if (typeof blockText !== 'string') throw new Error('blockText is required');
 }
 
-function assertWordIds(ids) {
+function assertWordIds(ids                    )       {
   if (!Array.isArray(ids) || ids.length === 0) {
     throw new Error('word evidence requires a non-empty ids array');
   }
@@ -42,7 +58,7 @@ function assertWordIds(ids) {
   }
 }
 
-function assertSafeUtf16Offsets(startsUtf16, endsUtf16, blockText) {
+function assertSafeUtf16Offsets(startsUtf16                   , endsUtf16                   , blockText        )       {
   const length = startsUtf16.length;
   if (endsUtf16.length !== length) throw new Error('word evidence startsUtf16 and endsUtf16 must be aligned');
   for (let i = 0; i < length; i++) {
@@ -54,7 +70,7 @@ function assertSafeUtf16Offsets(startsUtf16, endsUtf16, blockText) {
   }
 }
 
-function assertOriginalTokens(originalTokens, startsUtf16, endsUtf16, blockText) {
+function assertOriginalTokens(originalTokens         , startsUtf16                   , endsUtf16                   , blockText        )           {
   if (originalTokens === undefined) {
     // Derive original tokens from the source text when not supplied.
     return startsUtf16.map((start, index) => blockText.slice(start, endsUtf16[index]));
@@ -62,7 +78,7 @@ function assertOriginalTokens(originalTokens, startsUtf16, endsUtf16, blockText)
   if (!Array.isArray(originalTokens) || originalTokens.length !== startsUtf16.length || originalTokens.some((token) => typeof token !== 'string')) {
     throw new Error('word evidence originalTokens must be strings aligned to ids');
   }
-  return [...originalTokens];
+  return [...originalTokens]            ;
 }
 
 /**
@@ -74,49 +90,57 @@ function assertOriginalTokens(originalTokens, startsUtf16, endsUtf16, blockText)
  * @param {{ families: readonly unknown[], blockText: string }} context
  * @returns frozen canonical envelope
  */
-export function assertWordEvidencePayload(value, { families = [], blockText }) {
+export function assertWordEvidencePayload(
+  value         ,
+  { families = [], blockText }                                                                            ,
+)                                {
   assertBlockText(blockText);
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new Error('word evidence must be a non-array object');
   }
-  if (value.version !== 1) throw new Error('word evidence requires version 1');
-  const { ids, startsUtf16, endsUtf16 } = value;
-  assertWordIds(ids);
-  if (!Array.isArray(startsUtf16) || !Array.isArray(endsUtf16) || startsUtf16.length !== ids.length) {
+  const raw = value                           ;
+  if (raw.version !== 1) throw new Error('word evidence requires version 1');
+  const ids = raw.ids;
+  const startsUtf16 = raw.startsUtf16;
+  const endsUtf16 = raw.endsUtf16;
+  assertWordIds(ids                      );
+  const idList = ids                      ;
+  if (!Array.isArray(startsUtf16) || !Array.isArray(endsUtf16) || startsUtf16.length !== idList.length) {
     throw new Error('word evidence startsUtf16 must be aligned to ids');
   }
   assertSafeUtf16Offsets(startsUtf16, endsUtf16, blockText);
-  const originalTokens = assertOriginalTokens(value.originalTokens, startsUtf16, endsUtf16, blockText);
+  const originalTokens = assertOriginalTokens(raw.originalTokens, startsUtf16, endsUtf16, blockText);
 
   const declared = new Map(families.map((family) => [family.familyName, family]));
-  const rawFamilies = value.families;
+  const rawFamilies = raw.families;
   if (!rawFamilies || typeof rawFamilies !== 'object' || Array.isArray(rawFamilies)) {
     throw new Error('word evidence families must be a non-array object');
   }
   const familyNames = Object.keys(rawFamilies);
   if (familyNames.length === 0) throw new Error('word evidence families must not be empty');
-  const canonicalFamilies = {};
+  const canonicalFamilies                                                                                  = {};
   for (const familyName of familyNames) {
     const declaration = declared.get(familyName);
     if (!declaration) throw new Error(`word evidence family '${familyName}' is not declared on this field`);
-    const familyInput = rawFamilies[familyName];
+    const familyInput = (rawFamilies                           )[familyName];
     if (!familyInput || typeof familyInput !== 'object' || Array.isArray(familyInput)) {
       throw new Error(`word evidence family '${familyName}' must be a non-array object`);
     }
-    if (familyInput.formatVersion !== declaration.formatVersion) {
+    const familyObject = familyInput                                                 ;
+    if (familyObject.formatVersion !== declaration.formatVersion) {
       throw new Error(`word evidence family '${familyName}' formatVersion must be ${declaration.formatVersion}`);
     }
-    if (!Array.isArray(familyInput.values) || familyInput.values.length !== ids.length) {
+    if (!Array.isArray(familyObject.values) || familyObject.values.length !== idList.length) {
       throw new Error(`word evidence family '${familyName}' values must be aligned to ids`);
     }
-    const values = familyInput.values.map((entry, index) => {
-      let parsed;
+    const values = familyObject.values.map((entry, index) => {
+      let parsed         ;
       try {
         parsed = declaration.parse(entry);
       } catch (error) {
-        throw new Error(`word evidence family '${familyName}' value ${index} failed validation: ${error.message}`);
+        throw new Error(`word evidence family '${familyName}' value ${index} failed validation: ${error instanceof Error ? error.message : String(error)}`);
       }
-      let frozen;
+      let frozen         ;
       try {
         frozen = frozenJsonSnapshot(parsed);
       } catch {
@@ -129,7 +153,7 @@ export function assertWordEvidencePayload(value, { families = [], blockText }) {
 
   return Object.freeze({
     version: 1,
-    ids: Object.freeze([...ids]),
+    ids: Object.freeze([...idList])                     ,
     startsUtf16: Object.freeze([...startsUtf16]),
     endsUtf16: Object.freeze([...endsUtf16]),
     originalTokens: Object.freeze(originalTokens),
@@ -138,11 +162,11 @@ export function assertWordEvidencePayload(value, { families = [], blockText }) {
 }
 
 /** Canonical word-evidence table name for a generated annotated-text field. */
-export function wordEvidenceTableName(entityName, fieldName) {
+export function wordEvidenceTableName(entityName        , fieldName        )         {
   return `${entityName}_${fieldName}_word_evidence`;
 }
 
-function upsertStatement(db, tableName) {
+function upsertStatement(db          , tableName        )              {
   const columns = [
     'scope', 'document_id', 'word_id', 'family', 'source_block_id', 'source_ordinal',
     'start_anchor', 'end_anchor', 'source_start_utf16', 'source_end_utf16', 'original_token',
@@ -161,7 +185,13 @@ function upsertStatement(db, tableName) {
  * idempotency: one `${scope}:${committedEventId}` key, one DB transaction
  * covering every block, word and family in the event.
  */
-export function createWordEvidenceConsumer({ db, entityName, fieldName, tableName, families }) {
+export function createWordEvidenceConsumer({ db, entityName, fieldName, tableName, families }   
+               
+                     
+                    
+                    
+                                                     
+ ) {
   const declared = new Map(families.map((family) => [family.familyName, family]));
   const consumerName = `${entityName}.${fieldName}.word-evidence`;
   return operationalConsumer({
@@ -172,14 +202,14 @@ export function createWordEvidenceConsumer({ db, entityName, fieldName, tableNam
     event: {
       eventType: `${entityName}.created`,
       fields: ['id', '__workbench'],
-      project(fields) {
+      project(fields     ) {
         return { id: String(fields.id ?? ''), __workbench: fields.__workbench };
       },
     },
-    idempotencyKey(delivery) {
+    idempotencyKey(delivery     ) {
       return `${delivery.metadata.scopeId}:${delivery.metadata.committedEventId}`;
     },
-    async handle(delivery) {
+    async handle(delivery     ) {
       try {
         const payload = delivery.payload;
         const annotated = payload.__workbench?.annotatedText?.[fieldName];
@@ -229,9 +259,17 @@ export function createWordEvidenceConsumer({ db, entityName, fieldName, tableNam
   });
 }
 
+                                  
+               
+                                                                                                       
+ 
+
 /** Build the engaged word-evidence consumers for every declared field. */
-export function createWordEvidenceConsumers({ db, entities }) {
-  const consumers = [];
+export function createWordEvidenceConsumers({ db, entities }   
+               
+                                                        
+ )            {
+  const consumers            = [];
   for (const entity of entities.values()) {
     for (const [fieldName, descriptor] of Object.entries(entity.fields ?? {})) {
       if (descriptor?.kind !== 'annotatedText') continue;
@@ -250,7 +288,12 @@ export function createWordEvidenceConsumers({ db, entities }) {
 }
 
 /** A frozen handle to a field's declared word-evidence families. */
-export function wordEvidenceFieldHandle(entityName, fieldName, descriptor) {
+export function wordEvidenceFieldHandle(entityName        , fieldName        , descriptor                                                             )   
+                     
+                    
+                    
+                                                                               
+  {
   const families = Object.freeze(
     (descriptor.wordEvidence ?? []).map((family) => Object.freeze({ familyName: family.familyName, formatVersion: family.formatVersion })),
   );
@@ -262,6 +305,19 @@ export function wordEvidenceFieldHandle(entityName, fieldName, descriptor) {
   });
 }
 
+                         
+           
+                           
+                           
+                         
+                       
+                              
+                            
+                           
+    
+                                    
+ 
+
 /**
  * Resolve a field's immutable word-evidence anchors against the document's
  * current text (framework-native read). Reads the evidence rows and the
@@ -269,10 +325,18 @@ export function wordEvidenceFieldHandle(entityName, fieldName, descriptor) {
  * anchor no longer projects to its original token is marked `edited`. The
  * caller compares the returned `structureVersion` with its live document.
  */
-export function readWordEvidence({ database, entityName, fieldName, tableName, scope, documentId, families }) {
+export function readWordEvidence({ database, entityName, fieldName, tableName, scope, documentId, families }   
+                     
+                     
+                    
+                    
+                
+                     
+                               
+ )                                                                  {
   const state = database.prepare(`SELECT structure_version, family_checkpoint FROM ${entityName}_${fieldName}_state WHERE document_id = ?`).get(documentId);
   if (!state) return null;
-  const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint));
+  const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint          ));
   const familyFilter = families && families.length > 0 ? families : null;
   const rows = familyFilter
     ? database.prepare(`SELECT * FROM ${tableName} WHERE scope = ? AND document_id = ? AND family IN (${familyFilter.map(() => '?').join(', ')}) ORDER BY source_ordinal`)
@@ -281,8 +345,20 @@ export function readWordEvidence({ database, entityName, fieldName, tableName, s
   return pivotEvidenceRows(family, state.structure_version, rows);
 }
 
-function pivotEvidenceRows(family, structureVersion, rows) {
-  const byWord = new Map();
+function pivotEvidenceRows(family            , structureVersion         , rows                                    )   
+                            
+                            
+                   
+                           
+                  
+                
+                 
+                    
+                           
+                                                
+       
+  {
+  const byWord = new Map                       ();
   for (const row of rows) {
     const shared = {
       sourceBlockId: row.source_block_id,
@@ -293,43 +369,54 @@ function pivotEvidenceRows(family, structureVersion, rows) {
       sourceEndUtf16: row.source_end_utf16,
       originalToken: row.original_token,
     };
-    const existing = byWord.get(row.word_id);
+    const wordId = String(row.word_id);
+    const existing = byWord.get(wordId);
     if (existing) {
+      const existingShared = existing.shared                           ;
       for (const key of Object.keys(shared)) {
-        if (existing.shared[key] !== shared[key]) {
-          throw new Error(`word-evidence corruption: word '${row.word_id}' has disagreeing ${key} across family rows`);
+        if (existingShared[key] !== (shared                           )[key]) {
+          throw new Error(`word-evidence corruption: word '${wordId}' has disagreeing ${key} across family rows`);
         }
       }
-      existing.evidence[row.family] = JSON.parse(row.payload);
+      existing.evidence[String(row.family)] = JSON.parse(row.payload          );
     } else {
-      byWord.set(row.word_id, { shared, evidence: { [row.family]: JSON.parse(row.payload) } });
+      byWord.set(wordId, { shared, evidence: { [String(row.family)]: JSON.parse(row.payload          ) } });
     }
   }
-  const words = [];
+  const words         
+                   
+                           
+                  
+                
+                 
+                    
+                           
+                                                
+     = [];
   for (const [wordId, entry] of byWord) {
     const { sourceBlockId, sourceOrdinal, startAnchor, endAnchor, sourceStartUtf16, sourceEndUtf16, originalToken } = entry.shared;
-    let start;
-    let end;
-    let blockId = null;
+    let start        ;
+    let end        ;
+    let blockId                = null;
     let edited = false;
     try {
-      start = projectEndpointToBlockOffset(family, sourceBlockId, JSON.parse(startAnchor));
-      end = projectEndpointToBlockOffset(family, sourceBlockId, JSON.parse(endAnchor));
-      blockId = sourceBlockId;
+      start = projectEndpointToBlockOffset(family, String(sourceBlockId), JSON.parse(startAnchor          )                      );
+      end = projectEndpointToBlockOffset(family, String(sourceBlockId), JSON.parse(endAnchor          )                      );
+      blockId = String(sourceBlockId);
     } catch {
-      start = sourceStartUtf16;
-      end = sourceEndUtf16;
+      start = sourceStartUtf16          ;
+      end = sourceEndUtf16          ;
       edited = true;
     }
-    let text = originalToken;
+    let text = String(originalToken);
     if (blockId) {
       try {
         text = materializeBlock(family, blockId).slice(start, end);
       } catch {
-        text = originalToken;
+        text = String(originalToken);
       }
     }
-    if (text !== originalToken) edited = true;
+    if (text !== String(originalToken)) edited = true;
     words.push({
       wordId,
       blockId,
@@ -341,7 +428,7 @@ function pivotEvidenceRows(family, structureVersion, rows) {
       evidence: Object.freeze({ ...entry.evidence }),
     });
   }
-  words.sort((a, b) => a.sourceOrdinal - b.sourceOrdinal || a.wordId.localeCompare(b.wordId));
+  words.sort((a, b) => (a.sourceOrdinal          ) - (b.sourceOrdinal          ) || a.wordId.localeCompare(b.wordId));
   return {
     structureVersion,
     words: Object.freeze(words.map((word) => Object.freeze(word))),

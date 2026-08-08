@@ -1,40 +1,94 @@
-// @ts-nocheck
 import { randomUUID } from 'node:crypto';
 import { mayRow } from './row-grant.ts';
 import { projectAnnotatedTextCaretSnapshot } from './annotated-text-snapshot.ts';
 import { scopeOf } from './scope-handle.ts';
 import { getAnnotatedTextCompiledMetadata } from './annotated-text-field.ts';
 
-function invalid(message) { throw Object.assign(new Error(message), { status: 400 }); }
+interface CaretConnection {
+  id: unknown;
+  principal: unknown;
+  closed: boolean;
+  send(message: unknown): void;
+}
 
-function parse(message) {
+interface CaretEntityRecord {
+  name: string;
+  fields: Record<string, any>;
+  scopeFilter(principal: unknown): { sql: string; params: Record<string, unknown> };
+  hydrate?: (raw: unknown, principal: unknown) => unknown;
+}
+
+interface CaretFanout {
+  hasCaretInterest(conn: CaretConnection, scope: string, field: string): boolean;
+  recipients(scope: string, field: string): Iterable<[CaretConnection, unknown]>;
+  setOnCaretInterestChange?: (callback: (conn: CaretConnection, scope: string, removedFields: string[]) => void) => void;
+}
+
+interface CaretSlot {
+  connection: CaretConnection;
+  entity: string;
+  id: string;
+  field: string;
+  presence: string;
+  generation: number;
+  recipients: Set<CaretConnection>;
+}
+
+interface CaretUpdateMessage {
+  type: 'caret.update';
+  entity: string;
+  id: string;
+  field: string;
+  offset: number;
+}
+
+interface CaretClearMessage {
+  type: 'caret.clear';
+  entity: string;
+  id: string;
+  field: string;
+}
+
+type MayVerb = (entityRecord: unknown, verb: string, row: unknown, principal: unknown) => Promise<boolean>;
+
+function invalid(message: string): never { throw Object.assign(new Error(message), { status: 400 }); }
+
+function parse(message: unknown): CaretUpdateMessage {
   if (!message || typeof message !== 'object' || Array.isArray(message)) invalid('Invalid caret message.');
-  const keys = Object.keys(message).sort();
+  const record = message as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
   const required = ['entity', 'field', 'id', 'offset', 'type'];
   if (keys.length !== required.length || keys.some((key, index) => key !== required[index]) ||
-    message.type !== 'caret.update' || typeof message.entity !== 'string' || typeof message.id !== 'string' ||
-    typeof message.field !== 'string' || !Number.isSafeInteger(message.offset) || message.offset < 0) {
+    record.type !== 'caret.update' || typeof record.entity !== 'string' || typeof record.id !== 'string' ||
+    typeof record.field !== 'string' || !Number.isSafeInteger(record.offset) || (record.offset as number) < 0) {
     invalid('Invalid caret message.');
   }
-  return message;
+  return message as CaretUpdateMessage;
 }
 
-function parseClear(message) {
+function parseClear(message: unknown): CaretClearMessage {
   if (!message || typeof message !== 'object' || Array.isArray(message)) invalid('Invalid caret message.');
-  const keys = Object.keys(message).sort();
+  const record = message as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
   const required = ['entity', 'field', 'id', 'type'];
   if (keys.length !== required.length || keys.some((key, index) => key !== required[index]) ||
-    message.type !== 'caret.clear' || typeof message.entity !== 'string' || typeof message.id !== 'string' || typeof message.field !== 'string') {
+    record.type !== 'caret.clear' || typeof record.entity !== 'string' || typeof record.id !== 'string' || typeof record.field !== 'string') {
     invalid('Invalid caret message.');
   }
-  return message;
+  return message as CaretClearMessage;
 }
 
-export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanout, delay = null }) {
-  const slots = new Map();
-  const key = (conn, entity, id, field) => `${conn.id}\0${entity}\0${id}\0${field}`;
+export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanout, delay = null }: {
+  db: { prepare(sql: string): { get(...args: unknown[]): any; all(...args: unknown[]): any[]; run(...args: unknown[]): { changes: number } } };
+  resolveEntity: (name: string) => CaretEntityRecord | null | undefined;
+  mayVerb: MayVerb;
+  fanout: CaretFanout;
+  delay?: number | (() => Promise<unknown>) | null;
+}): { update: (conn: CaretConnection, message: unknown) => Promise<void>; clear: (conn: CaretConnection, message: unknown) => Promise<void>; removeConnection: (conn: CaretConnection, scope?: string | null) => Promise<void> } {
+  const slots = new Map<string, CaretSlot>();
+  const key = (conn: CaretConnection, entity: string, id: string, field: string) => `${conn.id}\0${entity}\0${id}\0${field}`;
 
-  async function rowFor(entity, id, principal) {
+  async function rowFor(entity: CaretEntityRecord, id: string, principal: unknown): Promise<{ raw: unknown; row: unknown } | null> {
     const { sql, params } = entity.scopeFilter(principal);
     const raw = db.prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${sql} AND t0.id = :id`).get({ ...params, id });
     if (!raw) return null;
@@ -42,11 +96,11 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     return await mayRow(entity, 'subscribe', row, principal, mayVerb) ? { raw, row } : null;
   }
 
-  async function update(conn, message) {
+  async function update(conn: CaretConnection, message: unknown): Promise<void> {
     const input = parse(message);
     const entity = resolveEntity(input.entity);
     const descriptor = entity?.fields?.[input.field];
-    if (!descriptor || descriptor.kind !== 'annotatedText' || !getAnnotatedTextCompiledMetadata(descriptor)?.caret) invalid('Invalid caret message.');
+    if (!entity || !descriptor || descriptor.kind !== 'annotatedText' || !getAnnotatedTextCompiledMetadata(descriptor)?.caret) invalid('Invalid caret message.');
     const scope = scopeOf(entity.name, input.id).key;
     if (!fanout.hasCaretInterest(conn, scope, input.field)) invalid('Caret subscription is required.');
     const slotKey = key(conn, entity.name, input.id, input.field);
@@ -54,7 +108,7 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     // Allocate/fence the slot generation BEFORE any async rowFor / projection.
     // A clear, disconnect, or newer update during the async gap bumps the
     // generation, so this batch's results cannot be delivered as stale.
-    const slot = slots.get(slotKey) ?? { connection: conn, entity: entity.name, id: input.id, field: input.field, presence: randomUUID(), generation: 0, recipients: new Set() };
+    const slot = slots.get(slotKey) ?? { connection: conn, entity: entity.name, id: input.id, field: input.field, presence: randomUUID(), generation: 0, recipients: new Set<CaretConnection>() };
     slots.set(slotKey, slot);
     const generation = ++slot.generation;
 
@@ -115,7 +169,7 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     }
   }
 
-  function retract(slotKey) {
+  function retract(slotKey: string): void {
     const slot = slots.get(slotKey);
     if (!slot) return;
     slots.delete(slotKey);
@@ -130,14 +184,14 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     }
   }
 
-  async function clear(conn, message) {
+  async function clear(conn: CaretConnection, message: unknown): Promise<void> {
     const input = parseClear(message);
     // A clear fans out removes to tracked recipients, so it must carry the
     // same declared caret interest and source row authorization as an update
     // (a caller cannot clear presence it never had a right to set).
     const entity = resolveEntity(input.entity);
     const descriptor = entity?.fields?.[input.field];
-    if (!descriptor || descriptor.kind !== 'annotatedText' || !getAnnotatedTextCompiledMetadata(descriptor)?.caret) invalid('Invalid caret message.');
+    if (!entity || !descriptor || descriptor.kind !== 'annotatedText' || !getAnnotatedTextCompiledMetadata(descriptor)?.caret) invalid('Invalid caret message.');
     const scope = scopeOf(entity.name, input.id).key;
     if (!fanout.hasCaretInterest(conn, scope, input.field)) invalid('Caret subscription is required.');
     if (!(await rowFor(entity, input.id, conn.principal))) invalid('Caret clear is denied.');
@@ -146,7 +200,7 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     // throwaway slot with a new generation still prevents delayed updates.
     const slotKey = key(conn, input.entity, input.id, input.field);
     if (!slots.has(slotKey)) {
-      const slot = { connection: conn, entity: input.entity, id: input.id, field: input.field, presence: randomUUID(), generation: 0, recipients: new Set() };
+      const slot = { connection: conn, entity: input.entity, id: input.id, field: input.field, presence: randomUUID(), generation: 0, recipients: new Set<CaretConnection>() };
       ++slot.generation;
       slots.set(slotKey, slot);
     }
@@ -155,7 +209,7 @@ export function createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanou
     await retract(slotKey);
   }
 
-  async function removeConnection(conn, scope = null) {
+  async function removeConnection(conn: CaretConnection, scope: string | null = null): Promise<void> {
     const sourceKeys = [...slots.keys()].filter((slotKey) => {
       const slot = slots.get(slotKey);
       if (!slot || slot.connection !== conn) return false;

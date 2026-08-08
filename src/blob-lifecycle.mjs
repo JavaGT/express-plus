@@ -1,8 +1,8 @@
-// @ts-nocheck
 import { parseEventType } from './event-handle.mjs';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
-import { txn } from './driver.mjs';
+import { txn,               } from './driver.mjs';
 import { getLog } from './log.mjs';
+                                                 
 
 // Durable, cursor-backed recovery for blob finalize — the same proven pattern
 // as effect.durable (durable-effects.mjs) and projected.async (projected-
@@ -17,7 +17,27 @@ import { getLog } from './log.mjs';
 // no scope-cursor equivalent.
 const CONSUMER = 'blob.finalize';
 
-export function createBlobLifecycle({ blobs, entities }) {
+                              
+                                                      
+                       
+                                        
+                        
+                      
+ 
+
+                               
+               
+                                             
+ 
+
+                                
+                                                                                                                         
+                                                                                                              
+                                                        
+                                                                          
+ 
+
+export function createBlobLifecycle({ blobs, entities }                                                                                  )                {
   if (!blobs) {
     return {
       blobAdapter: undefined,
@@ -27,12 +47,12 @@ export function createBlobLifecycle({ blobs, entities }) {
     };
   }
 
-  const blobFields = new Map();
-  const blobColumns = [];
+  const blobFields = new Map                  ();
+  const blobColumns                                           = [];
   for (const [name, ent] of entities) {
-    const fields = [];
+    const fields           = [];
     for (const [fname, descriptor] of Object.entries(ent.fields ?? {})) {
-      if (descriptor && descriptor.blob === true) fields.push(fname);
+      if (descriptor && (descriptor                      ).blob === true) fields.push(fname);
     }
     if (fields.length > 0) {
       blobFields.set(name, fields);
@@ -49,22 +69,22 @@ export function createBlobLifecycle({ blobs, entities }) {
     };
   }
 
-  const resolveBlobIds = (event) => {
+  const resolveBlobIds = (event                    )           => {
     const entityName = event.handle?.brand === 'event-handle'
-      ? event.handle.entity
-      : (() => { try { return parseEventType(event.type).entity; } catch { return ''; } })();
+      ? event.handle.entity          
+      : (() => { try { return parseEventType(event.type          ).entity; } catch { return ''; } })();
     const fields = blobFields.get(entityName) ?? [];
-    const ids = [];
+    const ids           = [];
     for (const fieldName of fields) {
       const value = event.data?.[fieldName];
-      if (value) ids.push(value);
+      if (value) ids.push(value          );
     }
     return ids;
   };
 
   const blobAdapter = {
-    async adoptInTxn(txnDb, events) {
-      const blobIds = new Set();
+    async adoptInTxn(txnDb                           , events                      )                {
+      const blobIds = new Set        ();
       for (const event of events) for (const id of resolveBlobIds(event)) blobIds.add(id);
       for (const id of blobIds) blobs.adopt(txnDb, id);
     },
@@ -79,18 +99,18 @@ export function createBlobLifecycle({ blobs, entities }) {
   // missing pending slot"), so a recovery-sweep replay of the same id is
   // always a no-op — the txn below makes the CHECKPOINT atomic with "finalize
   // was attempted for this scope's events," not the byte rename itself.
-  async function finalizeAndAdvance(db, { scope, seq }, ids) {
+  const finalizeAndAdvance = async (db          , { scope, seq }                                , ids          )                => {
     for (const id of ids) blobs.finalize(id);
     await txn(db, () => {
       upsertConsumerCursor(db, { consumer: CONSUMER, scope, lastSeq: seq });
     });
-  }
+  };
 
-  const blobFinalizeConsumer = async (events, { db } = {}) => {
+  const blobFinalizeConsumer                                        = async (events, { db } = {}) => {
     // Dedup across the WHOLE batch, not per event: two events in one
     // afterCommit call (e.g. created + updated referencing the same blob)
     // must finalize that id once, matching the pre-cursor behavior.
-    const finalizedInBatch = new Set();
+    const finalizedInBatch = new Set        ();
     // Once a scope's cursor advance fails, stop advancing THAT scope's
     // cursor for the rest of this batch — even if a later same-scope event
     // would otherwise succeed. Events for one scope arrive in ascending seq
@@ -99,7 +119,7 @@ export function createBlobLifecycle({ blobs, entities }) {
     // goes up) and a boot-time reconcile would never retry it. Deferring the
     // rest of the scope to reconcile is simple and safe — a re-attempted
     // later finalize is a harmless no-op (finalize() is idempotent).
-    const blockedScopes = new Set();
+    const blockedScopes = new Set        ();
     for (const event of events) {
       if (event.scope != null && blockedScopes.has(event.scope)) continue;
       const ids = resolveBlobIds(event);
@@ -113,7 +133,7 @@ export function createBlobLifecycle({ blobs, entities }) {
         continue;
       }
       try {
-        await finalizeAndAdvance(db, event, toFinalize);
+        await finalizeAndAdvance(db            , { scope: event.scope          , seq: event.seq }, toFinalize);
       } catch (err) {
         // The cursor did not advance — a failed finalize (or a blocked
         // cursor insert) leaves this scope behind, so the next reconcile
@@ -125,21 +145,21 @@ export function createBlobLifecycle({ blobs, entities }) {
     }
   };
 
-  async function reconcileBlobFinalize(db) {
+  async function reconcileBlobFinalize(db          )                                 {
     const recoveryByScope = consumerCursorMap(db, CONSUMER);
-    const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
+    const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all()                                                                               ;
     // Same per-scope blocking as the consumer above, for the same reason:
     // rows are ordered scope-then-seq, so a later same-scope row succeeding
     // after an earlier one failed must not advance the cursor past the
     // failure — that would permanently hide the earlier miss from every
     // future reconcile run, not just this one.
-    const blockedScopes = new Set();
+    const blockedScopes = new Set        ();
     let finalized = 0;
     for (const row of rows) {
       if (blockedScopes.has(row.scope)) continue;
       const applied = recoveryByScope.get(row.scope) ?? 0;
       if (applied >= row.seq) continue;
-      let data;
+      let data                         ;
       try { data = JSON.parse(row.eventData); } catch { data = {}; }
       const ids = resolveBlobIds({ type: row.eventType, data });
       if (ids.length === 0) {

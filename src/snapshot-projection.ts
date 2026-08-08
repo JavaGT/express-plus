@@ -1,210 +1,329 @@
-// @ts-nocheck
+import type { DbHandle } from './driver.ts';
 import { mayRow } from './row-grant.ts';
 
-function entityOf(value) {
-  if (!value || typeof value !== 'object' || typeof value.name !== 'string' || !value.fields) throw new TypeError('snapshot relation requires a declared entity');
-  return value;
+// A field descriptor as snapshot projection reads it: kind, value type, and the
+// ref target (entity name or declared entity object). Kept loose — the
+// descriptor is built by field.mjs and consumed by many layers.
+interface SnapshotFieldDescriptor {
+  kind?: string;
+  type?: string;
+  target?: { name?: string } | string | null;
+  access?: unknown;
+  [key: string]: unknown;
 }
 
-function isRegisteredEntity(entity, resolveEntity) {
+// The snapshot entity shape: name, declared fields, and the bound facets used
+// by the runtime half (scope visibility filter and row hydration). The declared
+// anchor may lack the bound facets until bindOutput/boundEntity resolve them.
+interface SnapshotEntity {
+  name: string;
+  fields: Record<string, SnapshotFieldDescriptor>;
+  scopeFilter?(principal: unknown): { sql: string; params: Record<string, unknown> };
+  hydrate?(row: Record<string, unknown>, principal?: unknown): Record<string, unknown> | null | undefined;
+}
+
+type ResolveEntity = (name: string, declaration?: unknown) => unknown;
+
+function entityOf(value: unknown): SnapshotEntity {
+  if (!value || typeof value !== 'object' || typeof (value as { name?: unknown }).name !== 'string' || !(value as { fields?: unknown }).fields) throw new TypeError('snapshot relation requires a declared entity');
+  return value as SnapshotEntity;
+}
+
+function isRegisteredEntity(entity: SnapshotEntity, resolveEntity: ResolveEntity): boolean {
   const registered = resolveEntity(entity.name, entity);
-  return registered === entity || registered?.declaration === entity;
+  return registered === entity || (registered as { declaration?: unknown } | null | undefined)?.declaration === entity;
 }
 
 /** Prefer the application-bound entity (runtime db + hydrate) over the unbound declaration. */
-function boundEntity(entity, resolveEntity) {
+function boundEntity(entity: SnapshotEntity, resolveEntity: ResolveEntity): SnapshotEntity {
   const registered = resolveEntity(entity.name, entity);
-  if (registered === entity || registered?.declaration === entity) return registered;
+  if (registered === entity || (registered as { declaration?: unknown } | null | undefined)?.declaration === entity) return registered as SnapshotEntity;
   throw new TypeError(`snapshot entity '${entity.name}' must be registered`);
 }
 
-function identifier(name, label) {
+function identifier(name: string, label: string): string {
   if (typeof name !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) throw new TypeError(`${label} must be a SQL identifier`);
   return name;
 }
 
-function scalar(entity, field) {
+function scalar(entity: SnapshotEntity, field: unknown): void {
   if (field === 'id') return;
-  const descriptor = entity.fields[field];
-  if (!descriptor || descriptor.kind !== 'value' || !['text', 'boolean', 'date', 'number', 'ref', 'json'].includes(descriptor.type)) {
-    throw new TypeError(`snapshot field '${entity.name}.${field}' is not a supported scalar codec`);
+  const descriptor = entity.fields[field as string];
+  if (!descriptor || descriptor.kind !== 'value' || !['text', 'boolean', 'date', 'number', 'ref', 'json'].includes(descriptor.type ?? '')) {
+    throw new TypeError(`snapshot field '${entity.name}.${String(field)}' is not a supported scalar codec`);
   }
 }
 
-function targetName(descriptor) {
+function targetName(descriptor: SnapshotFieldDescriptor | null | undefined): string | undefined {
   const target = descriptor?.target;
   return typeof target === 'string' ? target : target?.name;
 }
 
-function relation(from, to, inverse, via) {
+function relation(from: SnapshotEntity, to: SnapshotEntity, inverse: boolean, via: unknown): string {
   const owner = inverse ? to : from;
   const target = inverse ? from : to;
-  const descriptor = owner.fields[via];
+  const descriptor = owner.fields[via as string];
   if (descriptor?.kind !== 'value' || descriptor.type !== 'ref' || targetName(descriptor) !== target.name) {
-    throw new TypeError(`snapshot relation ${from.name} -> ${to.name} via '${via}' must be a declared ref(${target.name})`);
+    throw new TypeError(`snapshot relation ${from.name} -> ${to.name} via '${String(via)}' must be a declared ref(${target.name})`);
   }
-  return via;
+  return via as string;
 }
 
-function outputFor(node) {
-  return node?.kind === 'object' ? node : null;
+// ---- compiled output branches ----
+
+interface RequireRule {
+  entity: SnapshotEntity;
+  childRef: string;
+  fk: string;
 }
 
-function compileOutput(entity, output, ancestors = new Set()) {
+interface RelationSnapshotEntry {
+  key: string;
+  kind: 'one' | 'many' | 'keyed' | 'count';
+  entity: SnapshotEntity;
+  fk: string;
+  inverse: boolean;
+  selected: readonly string[] | null;
+  nested: SnapshotBranch | null;
+  order: { field: string; direction: string } | null;
+  require: RequireRule | null;
+}
+
+type SnapshotEntry =
+  | RelationSnapshotEntry
+  | { key: string; kind: 'select'; fields: readonly string[]; entity?: undefined; nested?: undefined; fk?: undefined; inverse?: undefined; selected?: undefined; order?: undefined; require?: undefined }
+  | { key: string; kind: 'user'; fk: string; entity?: undefined; nested?: undefined; require?: undefined };
+
+interface SnapshotBranch {
+  entity: SnapshotEntity;
+  entries: readonly SnapshotEntry[];
+}
+
+interface SnapshotOutputLike {
+  kind: 'object';
+  shape: Record<string, unknown>;
+}
+
+function outputFor(node: unknown): SnapshotOutputLike | null {
+  const candidate = node as { kind?: unknown } | null | undefined;
+  return candidate?.kind === 'object' ? (node as SnapshotOutputLike) : null;
+}
+
+interface DeclaredSnapshotNode {
+  kind?: string;
+  fields?: readonly unknown[];
+  via?: unknown;
+  entity?: unknown;
+  require?: unknown;
+  orderBy?: unknown;
+  select?: unknown;
+  output?: unknown;
+  include?: unknown;
+  [key: string]: unknown;
+}
+
+function compileOutput(entity: SnapshotEntity, output: unknown, ancestors = new Set<SnapshotEntity>()): SnapshotBranch {
   const object = outputFor(output);
   if (!object) throw new TypeError(`snapshot output for '${entity.name}' must be object(...)`);
   if (ancestors.has(entity)) throw new TypeError(`snapshot output is cyclic at '${entity.name}'`);
   ancestors.add(entity);
-  const entries = [];
+  const entries: SnapshotEntry[] = [];
   let hasSelect = false;
   for (const [key, value] of Object.entries(object.shape)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) throw new TypeError(`snapshot output key '${key}' is invalid`);
-    if (value?.kind === 'select') {
+    const node = value as DeclaredSnapshotNode | null | undefined;
+    if (node?.kind === 'select') {
       if (hasSelect) throw new TypeError(`snapshot output for '${entity.name}' declares select(...) more than once`);
       hasSelect = true;
-      for (const field of value.fields) scalar(entity, field);
-      entries.push(Object.freeze({ key, kind: 'select', fields: value.fields }));
+      for (const field of node.fields as readonly unknown[]) scalar(entity, field);
+      entries.push(Object.freeze({ key, kind: 'select', fields: node.fields as readonly string[] }));
       continue;
     }
-    if (value?.kind === 'user') {
-      const descriptor = entity.fields[value.via];
-      if (descriptor?.kind !== 'value' || descriptor.type !== 'ref' || targetName(descriptor) !== 'User') throw new TypeError(`snapshot user '${key}' via '${value?.via}' must be a declared ref(User)`);
-      entries.push(Object.freeze({ key, kind: 'user', fk: value.via }));
+    if (node?.kind === 'user') {
+      const descriptor = entity.fields[node.via as string];
+      if (descriptor?.kind !== 'value' || descriptor.type !== 'ref' || targetName(descriptor) !== 'User') throw new TypeError(`snapshot user '${key}' via '${node?.via}' must be a declared ref(User)`);
+      entries.push(Object.freeze({ key, kind: 'user', fk: node.via as string }));
       continue;
     }
-    if (!['one', 'many', 'keyed', 'count'].includes(value?.kind)) throw new TypeError(`snapshot output '${key}' must use select, one, many, keyed, count, or user`);
-    if (value.kind === 'one' && value.require !== undefined) throw new TypeError(`snapshot relation '${key}' cannot use require on one`);
-    const child = entityOf(value.entity);
-    const inverse = value.kind !== 'one';
-    const fk = relation(entity, child, inverse, value.via);
-    const selectNode = value.select ?? value.output;
-    const nested = value.include ?? value.output;
-    const selected = selectNode?.kind === 'select' ? selectNode.fields : null;
+    if (!node || !['one', 'many', 'keyed', 'count'].includes(node?.kind ?? '')) throw new TypeError(`snapshot output '${key}' must use select, one, many, keyed, count, or user`);
+    if (node.kind === 'one' && node.require !== undefined) throw new TypeError(`snapshot relation '${key}' cannot use require on one`);
+    const child = entityOf(node.entity);
+    const inverse = node.kind !== 'one';
+    const fk = relation(entity, child, inverse, node.via);
+    const selectNode = (node.select ?? node.output) as { kind?: string; fields?: readonly string[] } | null | undefined;
+    const nested = (node.include ?? node.output) as SnapshotOutputLike | null | undefined;
+    const selected = selectNode?.kind === 'select' ? (selectNode.fields as readonly string[]) : null;
     if (selected) for (const field of selected) scalar(child, field);
     const nestedCompiled = nested?.kind === 'object' ? compileOutput(child, nested, ancestors) : null;
-    if (!selected && !nestedCompiled && value.kind !== 'count') throw new TypeError(`snapshot relation '${key}' requires select(...) or include(...)`);
-    const order = value.orderBy;
+    if (!selected && !nestedCompiled && node.kind !== 'count') throw new TypeError(`snapshot relation '${key}' requires select(...) or include(...)`);
+    const order = node.orderBy as { kind?: string; field?: unknown; direction?: unknown } | null | undefined;
     if (order !== undefined) {
       if (order?.kind !== 'orderBy') throw new TypeError(`snapshot relation '${key}' orderBy must use orderBy(...)`);
       scalar(child, order.field);
     }
-    const required = value.require;
-    let require = null;
+    const required = node.require;
+    let require: RequireRule | null = null;
     if (required !== undefined) {
-      if (!required || required.kind !== 'related' || Object.keys(required).length !== 5
-        || typeof required.childRef !== 'string' || typeof required.via !== 'string') {
+      const declared = required as { kind?: string; childRef?: unknown; via?: unknown; childEntity?: unknown; parentEntity?: unknown } | null | undefined;
+      if (!declared || declared.kind !== 'related' || Object.keys(declared).length !== 5
+        || typeof declared.childRef !== 'string' || typeof declared.via !== 'string') {
         throw new TypeError(`snapshot relation '${key}' require must use related(childRef, { via })`);
       }
-      const childRef = child.fields[required.childRef];
-      if (required.childEntity !== child.name) {
+      const childRef = child.fields[declared.childRef as string];
+      if (declared.childEntity !== child.name) {
         throw new TypeError(`snapshot relation '${key}' related childRef must belong to ${child.name}`);
       }
       if (childRef?.kind !== 'value' || childRef.type !== 'ref') {
         throw new TypeError(`snapshot relation '${key}' related childRef must belong to ${child.name} and be a declared ref`);
       }
-      const related = typeof childRef.target === 'string' ? null : childRef.target;
-      if (!related || typeof related.name !== 'string' || !related.fields) {
+      const relatedTarget = typeof childRef.target === 'string' ? null : (childRef.target as { name?: string; fields?: unknown } | null | undefined);
+      if (!relatedTarget || typeof relatedTarget.name !== 'string' || !relatedTarget.fields) {
         throw new TypeError(`snapshot relation '${key}' related childRef must target a declared entity`);
       }
-      const parentRef = related.fields[required.via];
-      if (required.parentEntity !== related.name) {
+      const related = relatedTarget as SnapshotEntity;
+      const parentRef = related.fields[declared.via as string];
+      if (declared.parentEntity !== related.name) {
         throw new TypeError(`snapshot relation '${key}' related via must belong to ${related.name}`);
       }
       if (parentRef?.kind !== 'value' || parentRef.type !== 'ref' || targetName(parentRef) !== entity.name) {
         throw new TypeError(`snapshot relation '${key}' related via must belong to ${related.name} and be a declared ref(${entity.name})`);
       }
-      require = Object.freeze({ entity: related, childRef: required.childRef, fk: required.via });
+      require = Object.freeze({ entity: related, childRef: declared.childRef, fk: declared.via });
     }
-    entries.push(Object.freeze({ key, kind: value.kind, entity: child, fk, inverse, selected, nested: nestedCompiled, order: order ?? null, require }));
+    entries.push(Object.freeze({
+      key,
+      kind: node.kind as 'one' | 'many' | 'keyed' | 'count',
+      entity: child,
+      fk,
+      inverse,
+      selected,
+      nested: nestedCompiled,
+      order: (order ?? null) as { field: string; direction: string } | null,
+      require,
+    }));
   }
   ancestors.delete(entity);
   return Object.freeze({ entity, entries: Object.freeze(entries) });
 }
 
-function physicalForeignKey(db, from, field, target, { retainTarget = false } = {}) {
-  if (!db) return;
-  const foreignKeys = db.prepare(`PRAGMA foreign_key_list(${identifier(from.name, 'snapshot entity')})`).all();
-  const matching = foreignKeys.filter((row) => row.from === field && row.table === target.name && row.to === 'id');
-  if (matching.length !== 1 || foreignKeys.filter((row) => row.from === field).length !== 1) throw new TypeError(`snapshot relation ${from.name}.${field} requires exactly one physical FOREIGN KEY to ${target.name}.id`);
-  if (retainTarget && !['RESTRICT', 'NO ACTION'].includes(matching[0].on_delete)) throw new TypeError(`snapshot terminal tombstone scope ${from.name}.${field} FOREIGN KEY must use ON DELETE RESTRICT or NO ACTION`);
+// ---- tombstones ----
+
+interface DeclaredTombstonesRule {
+  kind?: string;
+  target?: unknown;
+  entity?: unknown;
+  entityId?: unknown;
+  scopeId?: unknown;
+  terminalScope?: unknown;
+  targetScope?: unknown;
+  targetScopeId?: unknown;
+  targetScopeEntity?: unknown;
+  kindField?: unknown;
+  state?: unknown;
+  kindValue?: unknown;
+  hidden?: unknown;
+  [key: string]: unknown;
 }
 
-function compileTombstones(declaration, resolveEntity) {
+interface DeclaredSnapshotDeclaration {
+  kind?: string;
+  anchor?: unknown;
+  output?: unknown;
+  tombstones?: unknown;
+  [key: string]: unknown;
+}
+
+interface TombstoneRule {
+  target: SnapshotEntity;
+  entity: SnapshotEntity;
+  entityId: string;
+  scopeId: string | null;
+  scopeTarget: SnapshotEntity | null;
+  targetScopeId: string | null;
+  terminalScope: SnapshotEntity | null;
+  kind: string;
+  state: string;
+  kindValue: string;
+  hidden: readonly string[];
+}
+
+function compileTombstones(declaration: DeclaredSnapshotDeclaration, resolveEntity: ResolveEntity): TombstoneRule | null {
   const rule = declaration.tombstones;
   if (rule === undefined) return null;
-  if (rule?.kind !== 'tombstones') throw new TypeError('snapshot tombstones must use tombstones(...)');
-  const target = entityOf(rule.target);
-  if (target !== declaration.anchor) throw new TypeError(`snapshot tombstones target must be anchor '${declaration.anchor.name}'`);
+  const declared = rule as DeclaredTombstonesRule | null | undefined;
+  if (declared?.kind !== 'tombstones') throw new TypeError('snapshot tombstones must use tombstones(...)');
+  const target = entityOf(declared.target);
+  if (target !== declaration.anchor) throw new TypeError(`snapshot tombstones target must be anchor '${(declaration.anchor as { name?: unknown } | null)?.name}'`);
   if (!isRegisteredEntity(target, resolveEntity)) throw new TypeError(`snapshot tombstones target '${target.name}' must be registered`);
-  const entity = entityOf(rule.entity);
+  const entity = entityOf(declared.entity);
   if (!isRegisteredEntity(entity, resolveEntity)) throw new TypeError(`snapshot tombstone entity '${entity.name}' must be registered`);
-  const entityId = entity.fields[rule.entityId];
-  const terminalScope = rule.terminalScope === undefined ? null : entityOf(rule.terminalScope);
-  if (rule.targetScope !== undefined && rule.targetScopeId === undefined) {
+  const entityId = entity.fields[declared.entityId as string];
+  const terminalScope = declared.terminalScope === undefined ? null : entityOf(declared.terminalScope);
+  if (declared.targetScope !== undefined && declared.targetScopeId === undefined) {
     throw new TypeError('snapshot tombstone targetScope requires targetScopeId');
   }
-  if (rule.targetScopeId !== undefined && rule.targetScope === undefined) {
+  if (declared.targetScopeId !== undefined && declared.targetScope === undefined) {
     throw new TypeError('snapshot tombstone targetScopeId requires targetScope');
   }
-  let scopeTarget = null;
-  let targetScopeId = null;
+  let scopeTarget: SnapshotEntity | null = null;
+  let targetScopeId: string | null = null;
   if (terminalScope) {
     if (!isRegisteredEntity(terminalScope, resolveEntity)) throw new TypeError(`snapshot terminal tombstone scope '${terminalScope.name}' must be registered`);
     if (Object.keys(terminalScope.fields).length !== 0) throw new TypeError('snapshot terminal tombstone scope must be an identity-only entity');
-    if (rule.scopeId === undefined) throw new TypeError('snapshot terminal tombstone scope requires scopeId');
+    if (declared.scopeId === undefined) throw new TypeError('snapshot terminal tombstone scope requires scopeId');
   }
-  if (rule.scopeId === undefined) {
+  if (declared.scopeId === undefined) {
     if (entityId?.kind !== 'value' || entityId.type !== 'ref' || targetName(entityId) !== target.name) {
       throw new TypeError(`snapshot tombstones entityId must be a declared ref(${target.name})`);
     }
   } else {
     if (entityId?.kind !== 'value' || entityId.type !== 'text') throw new TypeError('snapshot polymorphic tombstones entityId must be a declared text field');
-    const scopeId = entity.fields[rule.scopeId];
+    const scopeId = entity.fields[declared.scopeId as string];
     if (scopeId?.kind !== 'value' || scopeId.type !== 'ref') throw new TypeError(`snapshot polymorphic tombstones scopeId must be a declared ref(${terminalScope?.name ?? target.name})`);
     if (terminalScope && targetName(scopeId) !== terminalScope.name) throw new TypeError(`snapshot polymorphic tombstones scopeId must be a declared ref(${terminalScope.name})`);
     scopeTarget = terminalScope ?? entityOf(scopeId.target);
     if (!isRegisteredEntity(scopeTarget, resolveEntity)) throw new TypeError(`snapshot tombstone scope '${scopeTarget.name}' must be registered`);
     // Terminal roots use their identity. Owned targets must name their owner
     // reference explicitly; a coincidentally same-named scalar is not authority.
-    const sameNamedOwner = target.fields[rule.scopeId];
+    const sameNamedOwner = target.fields[declared.scopeId as string];
     const compatibleOwner = terminalScope && sameNamedOwner?.kind === 'value' && sameNamedOwner.type === 'ref'
-      ? rule.scopeId
+      ? declared.scopeId
       : undefined;
-    const explicitOwner = rule.targetScopeId ?? compatibleOwner;
-    if (rule.targetScopeId !== undefined && !terminalScope) {
+    const explicitOwner = declared.targetScopeId ?? compatibleOwner;
+    if (declared.targetScopeId !== undefined && !terminalScope) {
       throw new TypeError('snapshot tombstone targetScopeId is only valid with terminalScope');
     }
     if (explicitOwner !== undefined) {
-      const owner = target.fields[explicitOwner];
-      if (rule.targetScopeEntity !== target.name) {
+      const owner = target.fields[explicitOwner as string];
+      if (declared.targetScopeEntity !== target.name) {
         throw new TypeError(`snapshot tombstone target owner scope must belong to ${target.name}`);
       }
       if (owner?.kind !== 'value' || owner.type !== 'ref') {
         throw new TypeError(`snapshot tombstone target '${target.name}' owner scope '${explicitOwner}' must be a declared ref`);
       }
-      const declaredOwnerScope = rule.targetScope === undefined ? null : entityOf(rule.targetScope);
+      const declaredOwnerScope = declared.targetScope === undefined ? null : entityOf(declared.targetScope);
       if (declaredOwnerScope && (!isRegisteredEntity(declaredOwnerScope, resolveEntity) || targetName(owner) !== declaredOwnerScope.name)) {
         throw new TypeError(`snapshot tombstone target '${target.name}' owner scope '${explicitOwner}' must reference registered ${declaredOwnerScope.name}`);
       }
     }
-    const ownerFields = explicitOwner ? [explicitOwner] : terminalScope || scopeTarget === target ? ['id'] : Object.entries(target.fields)
-      .filter(([, field]) => field?.kind === 'value' && field.type === 'ref' && targetName(field) === scopeTarget.name)
+    const ownerFields = explicitOwner ? [explicitOwner as string] : terminalScope || scopeTarget === target ? ['id'] : Object.entries(target.fields)
+      .filter(([, field]) => field?.kind === 'value' && field.type === 'ref' && targetName(field) === scopeTarget!.name)
       .map(([name]) => name);
-    if (ownerFields.length !== 1) throw new TypeError(`snapshot tombstone target '${target.name}' must have exactly one declared ref(${scopeTarget.name}) owner scope`);
+    if (ownerFields.length !== 1) throw new TypeError(`snapshot tombstone target '${target.name}' must have exactly one declared ref(${scopeTarget!.name}) owner scope`);
     targetScopeId = ownerFields[0];
   }
-  for (const field of [rule.kindField, rule.state]) {
-    const descriptor = entity.fields[field];
+  for (const field of [declared.kindField, declared.state]) {
+    const descriptor = entity.fields[field as string];
     if (descriptor?.kind !== 'value' || descriptor.type !== 'text') throw new TypeError(`snapshot tombstones field '${field}' must be a declared text field`);
   }
-  if (typeof rule.kindValue !== 'string' || rule.kindValue.length === 0) throw new TypeError('snapshot tombstones kindValue must be a non-empty literal');
-  if (!Array.isArray(rule.hidden) || rule.hidden.length === 0 || rule.hidden.some((value) => typeof value !== 'string' || value.length === 0) || new Set(rule.hidden).size !== rule.hidden.length) {
+  if (typeof declared.kindValue !== 'string' || declared.kindValue.length === 0) throw new TypeError('snapshot tombstones kindValue must be a non-empty literal');
+  if (!Array.isArray(declared.hidden) || declared.hidden.length === 0 || declared.hidden.some((value) => typeof value !== 'string' || value.length === 0) || new Set(declared.hidden).size !== declared.hidden.length) {
     throw new TypeError('snapshot tombstones hidden must contain non-empty string literals');
   }
-  return Object.freeze({ target, entity, entityId: rule.entityId, scopeId: rule.scopeId ?? null, scopeTarget, targetScopeId, terminalScope, kind: rule.kindField, state: rule.state, kindValue: rule.kindValue, hidden: Object.freeze([...rule.hidden]) });
+  return Object.freeze({ target, entity, entityId: declared.entityId as string, scopeId: declared.scopeId as string | null, scopeTarget, targetScopeId, terminalScope, kind: declared.kindField as string, state: declared.state as string, kindValue: declared.kindValue, hidden: Object.freeze([...(declared.hidden as string[])]) });
 }
 
-function bindOutput(branch, resolveEntity) {
+function bindOutput(branch: SnapshotBranch, resolveEntity: ResolveEntity): SnapshotBranch {
   return Object.freeze({
     entity: boundEntity(branch.entity, resolveEntity),
     entries: Object.freeze(branch.entries.map((entry) => {
@@ -219,7 +338,7 @@ function bindOutput(branch, resolveEntity) {
   });
 }
 
-function bindTombstone(rule, resolveEntity) {
+function bindTombstone(rule: TombstoneRule | null, resolveEntity: ResolveEntity): TombstoneRule | null {
   if (!rule) return null;
   return Object.freeze({
     ...rule,
@@ -230,33 +349,54 @@ function bindTombstone(rule, resolveEntity) {
   });
 }
 
-export function compileSnapshots(declarations, resolveEntity, db = null) {
+function physicalForeignKey(db: DbHandle | null, from: SnapshotEntity, field: string, target: SnapshotEntity, { retainTarget = false }: { retainTarget?: boolean } = {}): void {
+  if (!db) return;
+  const foreignKeys = db.prepare(`PRAGMA foreign_key_list(${identifier(from.name, 'snapshot entity')})`).all();
+  const matching = foreignKeys.filter((row) => row.from === field && row.table === target.name && row.to === 'id');
+  if (matching.length !== 1 || foreignKeys.filter((row) => row.from === field).length !== 1) throw new TypeError(`snapshot relation ${from.name}.${field} requires exactly one physical FOREIGN KEY to ${target.name}.id`);
+  if (retainTarget && !['RESTRICT', 'NO ACTION'].includes(matching[0].on_delete as string)) throw new TypeError(`snapshot terminal tombstone scope ${from.name}.${field} FOREIGN KEY must use ON DELETE RESTRICT or NO ACTION`);
+}
+
+export interface SnapshotDeclaration {
+  anchor: SnapshotEntity;
+  output: SnapshotBranch;
+  tombstone: TombstoneRule | null;
+  tombstones: readonly TombstoneRule[];
+}
+
+export function compileSnapshots(declarations: unknown, resolveEntity: ResolveEntity, db: DbHandle | null = null): Map<string, SnapshotDeclaration> {
   if (declarations === undefined) return new Map();
   if (!Array.isArray(declarations)) throw new TypeError('snapshots must be an array');
-  const internalEntities = new Set(declarations.flatMap((declaration) => [declaration?.tombstones?.entity?.name, declaration?.tombstones?.terminalScope?.name]).filter((name) => typeof name === 'string'));
-  const compiled = new Map();
+  const internalEntities = new Set<string>(
+    declarations.flatMap((declaration) => {
+      const rule = (declaration as DeclaredSnapshotDeclaration | null | undefined)?.tombstones as { entity?: { name?: string }; terminalScope?: { name?: string } } | null | undefined;
+      return [rule?.entity?.name, rule?.terminalScope?.name].filter((name): name is string => typeof name === 'string');
+    }),
+  );
+  const compiled = new Map<string, SnapshotDeclaration>();
   for (const declaration of declarations) {
-    if (declaration?.kind !== 'snapshot') throw new TypeError('snapshots accepts only snapshot(...) declarations');
-    const declaredAnchor = entityOf(declaration.anchor);
+    const declared = declaration as DeclaredSnapshotDeclaration | null | undefined;
+    if (declared?.kind !== 'snapshot') throw new TypeError('snapshots accepts only snapshot(...) declarations');
+    const declaredAnchor = entityOf(declared.anchor);
     if (internalEntities.has(declaredAnchor.name)) throw new TypeError(`snapshot tombstone entity '${declaredAnchor.name}' is read-internal and cannot be an anchor`);
     if (!isRegisteredEntity(declaredAnchor, resolveEntity)) throw new TypeError(`snapshot anchor '${declaredAnchor.name}' must be registered`);
     if (compiled.has(declaredAnchor.name)) throw new TypeError(`snapshot anchor '${declaredAnchor.name}' is declared more than once`);
     // Authorization and hydrate need the application-bound entity (runtime.db),
     // not the unbound declaration the app author wrote. Resolve once at compile.
     const anchor = boundEntity(declaredAnchor, resolveEntity);
-    const output = bindOutput(compileOutput(declaredAnchor, declaration.output), resolveEntity);
-    const tombstones = bindTombstone(compileTombstones(declaration, resolveEntity), resolveEntity);
-    const forbidTombstoneOutput = (branch) => branch.entries.forEach((entry) => {
+    const output = bindOutput(compileOutput(declaredAnchor, declared.output), resolveEntity);
+    const tombstones = bindTombstone(compileTombstones(declared, resolveEntity), resolveEntity);
+    const forbidTombstoneOutput = (branch: SnapshotBranch): void => branch.entries.forEach((entry) => {
       if (entry.entity && internalEntities.has(entry.entity.name)) throw new TypeError(`snapshot tombstone entity '${entry.entity.name}' is read-internal and cannot be output`);
       if (entry.nested) forbidTombstoneOutput(entry.nested);
     });
     forbidTombstoneOutput(output);
     // Every relation target must be registered, not merely structurally similar.
-    const check = (branch) => branch.entries.forEach((entry) => {
+    const check = (branch: SnapshotBranch): void => branch.entries.forEach((entry) => {
       if (entry.kind === 'user') {
         const User = resolveEntity('User');
         if (!User) throw new TypeError('snapshot user requires registered User entity');
-        physicalForeignKey(db, branch.entity, entry.fk, User);
+        physicalForeignKey(db, branch.entity, entry.fk, User as SnapshotEntity);
         return;
       }
       if (entry.entity && !isRegisteredEntity(entry.entity, resolveEntity)) throw new TypeError(`snapshot entity '${entry.entity.name}' must be registered`);
@@ -270,18 +410,19 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
     });
     check(output);
     if (tombstones) physicalForeignKey(db, tombstones.entity, tombstones.scopeId ?? tombstones.entityId, tombstones.scopeTarget ?? tombstones.target, { retainTarget: Boolean(tombstones.terminalScope) });
-    compiled.set(anchor.name, Object.freeze({ anchor, output, tombstone: tombstones }));
+    compiled.set(declaredAnchor.name, Object.freeze({ anchor, output, tombstone: tombstones }) as unknown as SnapshotDeclaration);
   }
   // A related-row requirement is an entity exposure invariant, not a property
   // of one convenient aggregate path. Once declared for an entity, every
   // projection path must carry the identical requirement and that entity cannot
   // be requested as a standalone anchor (where no trusted parent exists).
-  const requiredEntities = new Map();
-  const requirementKey = (entry) => entry.require
+  const requiredEntities = new Map<string, string>();
+  const requirementKey = (entry: RelationSnapshotEntry): string | null => entry.require
     ? `${entry.fk}\u0000${entry.require.entity.name}\u0000${entry.require.childRef}\u0000${entry.require.fk}`
     : null;
-  const visitEntries = (branch, visit) => branch.entries.forEach((entry) => {
-    if (entry.entity) visit(entry);
+  const visitEntries = (branch: SnapshotBranch, visit: (entry: RelationSnapshotEntry) => void): void => branch.entries.forEach((entry) => {
+    if (entry.kind === 'select' || entry.kind === 'user') return;
+    visit(entry);
     if (entry.nested) visitEntries(entry.nested, visit);
   });
   for (const declaration of compiled.values()) visitEntries(declaration.output, (entry) => {
@@ -289,7 +430,7 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
     const key = requirementKey(entry);
     const prior = requiredEntities.get(entry.entity.name);
     if (prior && prior !== key) throw new TypeError(`snapshot entity '${entry.entity.name}' declares conflicting required relations`);
-    requiredEntities.set(entry.entity.name, key);
+    requiredEntities.set(entry.entity.name, key as string);
   });
   for (const [name, declaration] of compiled) {
     if (requiredEntities.has(name)) throw new TypeError(`snapshot entity '${name}' has a required relation and cannot be a standalone anchor`);
@@ -299,7 +440,7 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
         throw new TypeError(`snapshot entity '${entry.entity.name}' must use its declared required relation on every exposure path`);
       }
     });
-    const rejectRequiredUsers = (branch) => branch.entries.forEach((entry) => {
+    const rejectRequiredUsers = (branch: SnapshotBranch): void => branch.entries.forEach((entry) => {
       if (entry.kind === 'user' && requiredEntities.has('User')) {
         throw new TypeError("snapshot entity 'User' must use its declared required relation on every exposure path");
       }
@@ -310,19 +451,24 @@ export function compileSnapshots(declarations, resolveEntity, db = null) {
   Object.defineProperty(compiled, 'requiredEntities', {
     value: Object.freeze(new Set(requiredEntities.keys())), enumerable: false,
   });
-  const tombstones = Object.freeze([...compiled.values()].map((declaration) => declaration.tombstone).filter(Boolean));
+  const tombstones = Object.freeze([...compiled.values()].map((declaration) => declaration.tombstone).filter(Boolean)) as readonly TombstoneRule[];
   for (const [name, declaration] of compiled) compiled.set(name, Object.freeze({ ...declaration, tombstones }));
   return compiled;
 }
 
-function detached(raw) {
+function detached(raw: Record<string, unknown>): Record<string, unknown> {
   return Object.freeze({ ...raw });
 }
 
-function readRows(db, entity, principal, fk, value, inverse, order, tombstones) {
-  const filter = entity.scopeFilter(principal);
+interface SnapshotOrder {
+  field: string;
+  direction: string;
+}
+
+function readRows(db: DbHandle, entity: SnapshotEntity, principal: unknown, fk: string, value: unknown, inverse: boolean, order: SnapshotOrder | null, tombstones: readonly TombstoneRule[] | null | undefined): Record<string, unknown>[] {
+  const filter = entity.scopeFilter!(principal);
   const rule = tombstones?.find((candidate) => entity === candidate.target);
-  const scopeVisibility = rule?.scopeId ? ` AND tombstone.${identifier(rule.scopeId, 'snapshot tombstone scopeId')} = t0.${identifier(rule.targetScopeId, 'snapshot tombstone target scope')}` : '';
+  const scopeVisibility = rule?.scopeId ? ` AND tombstone.${identifier(rule.scopeId, 'snapshot tombstone scopeId')} = t0.${identifier(rule.targetScopeId as string, 'snapshot tombstone target scope')}` : '';
   const visibility = rule
     ? ` AND NOT EXISTS (SELECT 1 FROM ${identifier(rule.entity.name, 'snapshot tombstone entity')} AS tombstone WHERE tombstone.${identifier(rule.entityId, 'snapshot tombstone entityId')} = t0.id${scopeVisibility} AND tombstone.${identifier(rule.kind, 'snapshot tombstone kind')} = :snapshot_tombstone_kind AND tombstone.${identifier(rule.state, 'snapshot tombstone state')} IN (${rule.hidden.map((_, index) => `:snapshot_tombstone_hidden_${index}`).join(', ')}))`
     : '';
@@ -330,15 +476,15 @@ function readRows(db, entity, principal, fk, value, inverse, order, tombstones) 
     ? `SELECT * FROM ${identifier(entity.name, 'snapshot entity')} AS t0 WHERE (${filter.sql}) AND t0.${identifier(fk, 'snapshot foreign key')} = :snapshot_parent${visibility}`
     : `SELECT * FROM ${identifier(entity.name, 'snapshot entity')} AS t0 WHERE (${filter.sql}) AND t0.id = :snapshot_parent${visibility}`;
   const suffix = order ? ` ORDER BY t0.${identifier(order.field, 'snapshot order field')} ${order.direction.toUpperCase()}, t0.id ASC` : ' ORDER BY t0.id ASC';
-  const params = { ...filter.params, snapshot_parent: value };
-  if (visibility) {
+  const params: Record<string, unknown> = { ...filter.params, snapshot_parent: value };
+  if (visibility && rule) {
     params.snapshot_tombstone_kind = rule.kindValue;
     rule.hidden.forEach((state, index) => { params[`snapshot_tombstone_hidden_${index}`] = state; });
   }
   return db.prepare(sql + suffix).all(params).map(detached);
 }
 
-function readUser(db, id, tombstones) {
+function readUser(db: DbHandle, id: unknown, tombstones: readonly TombstoneRule[] | null | undefined): Record<string, unknown> | null {
   try {
     const columns = db.prepare('PRAGMA table_info(User)').all().map((column) => column.name);
     for (const required of ['id', 'name', 'displayName', 'image']) {
@@ -346,11 +492,11 @@ function readUser(db, id, tombstones) {
     }
     const deleted = columns.includes('deletedAt') ? ' AND deletedAt IS NULL' : '';
     const rule = tombstones?.find((candidate) => candidate.target.name === 'User');
-    const scopeVisibility = rule?.scopeId ? ` AND tombstone.${identifier(rule.scopeId, 'snapshot tombstone scopeId')} = User.${identifier(rule.targetScopeId, 'snapshot tombstone target scope')}` : '';
+    const scopeVisibility = rule?.scopeId ? ` AND tombstone.${identifier(rule.scopeId, 'snapshot tombstone scopeId')} = User.${identifier(rule.targetScopeId as string, 'snapshot tombstone target scope')}` : '';
     const visibility = rule
       ? ` AND NOT EXISTS (SELECT 1 FROM ${identifier(rule.entity.name, 'snapshot tombstone entity')} AS tombstone WHERE tombstone.${identifier(rule.entityId, 'snapshot tombstone entityId')} = User.id${scopeVisibility} AND tombstone.${identifier(rule.kind, 'snapshot tombstone kind')} = :snapshot_tombstone_kind AND tombstone.${identifier(rule.state, 'snapshot tombstone state')} IN (${rule.hidden.map((_, index) => `:snapshot_tombstone_hidden_${index}`).join(', ')}))`
       : '';
-    const params = { snapshot_user: id };
+    const params: Record<string, unknown> = { snapshot_user: id };
     if (rule) {
       params.snapshot_tombstone_kind = rule.kindValue;
       rule.hidden.forEach((state, index) => { params[`snapshot_tombstone_hidden_${index}`] = state; });
@@ -367,28 +513,47 @@ function readUser(db, id, tombstones) {
 
 // Capture only raw, scope-filtered candidates while SQLite is synchronous. No
 // authorization may await inside this read boundary.
-export function captureSnapshot({ db, principal, anchor, id, output, tombstones = null }) {
-  function capture(entity, raw, branch) {
-    const children = new Map();
+interface SnapshotNode {
+  raw: Record<string, unknown>;
+  required?: RequireNode | false | null;
+  children: Map<SnapshotEntry, SnapshotNode[]>;
+}
+
+interface RequireNode {
+  entity: SnapshotEntity;
+  raw: Record<string, unknown>;
+  children: Map<SnapshotEntry, SnapshotNode[]>;
+}
+
+export function captureSnapshot({ db, principal, anchor, id, output, tombstones = null }: {
+  db: DbHandle;
+  principal: unknown;
+  anchor: SnapshotEntity;
+  id: string;
+  output: SnapshotBranch;
+  tombstones?: readonly TombstoneRule[] | null;
+}): SnapshotNode | null {
+  function capture(_entity: SnapshotEntity, raw: Record<string, unknown>, branch: SnapshotBranch): SnapshotNode {
+    const children = new Map<SnapshotEntry, SnapshotNode[]>();
     for (const entry of branch.entries) {
       if (entry.kind === 'select') continue;
       if (entry.kind === 'user') {
         const user = raw[entry.fk] == null ? null : readUser(db, raw[entry.fk], tombstones);
-        children.set(entry, user ? [Object.freeze({ raw: user, children: new Map() })] : []);
+        children.set(entry, user ? [Object.freeze({ raw: user, children: new Map<SnapshotEntry, SnapshotNode[]>() })] : []);
         continue;
       }
       const rows = readRows(db, entry.entity, principal, entry.fk, entry.inverse ? raw.id : raw[entry.fk], entry.inverse, entry.order, tombstones);
       children.set(entry, rows.map((child) => {
-        let required = null;
+        let required: RequireNode | false | null = null;
         if (entry.require) {
           required = false;
           const related = readRows(db, entry.require.entity, principal, 'id', child[entry.require.childRef], false, null, tombstones);
           // The related row must be co-owned by this exact branch parent.
           if (related.length === 1 && related[0][entry.require.fk] === raw.id) {
-            required = Object.freeze({ entity: entry.require.entity, raw: related[0], children: new Map() });
+            required = Object.freeze({ entity: entry.require.entity, raw: related[0], children: new Map<SnapshotEntry, SnapshotNode[]>() });
           }
         }
-        return Object.freeze({ raw: child, required, children: entry.nested ? capture(entry.entity, child, entry.nested).children : new Map() });
+        return Object.freeze({ raw: child, required, children: entry.nested ? capture(entry.entity, child, entry.nested).children : new Map<SnapshotEntry, SnapshotNode[]>() });
       }));
     }
     return Object.freeze({ raw, children });
@@ -397,10 +562,22 @@ export function captureSnapshot({ db, principal, anchor, id, output, tombstones 
   return rows.length === 1 ? capture(anchor, rows[0], output) : null;
 }
 
-export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb }) {
-  const authorized = new WeakMap();
-  const rowAuthorization = new Map();
-  async function authorize(entity, node) {
+type SnapshotMayVerb = (entity: unknown, verb: string, row: unknown, principal: unknown) => Promise<boolean>;
+
+interface SnapshotRowDecision {
+  row: Record<string, unknown> | null | undefined;
+  allowed: boolean;
+}
+
+export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb }: {
+  principal: unknown;
+  anchor: SnapshotEntity;
+  candidate: SnapshotNode;
+  mayVerb: SnapshotMayVerb;
+}): Promise<{ anchorAllowed: boolean; authorized: WeakMap<SnapshotNode, Record<string, unknown>> }> {
+  const authorized = new WeakMap<SnapshotNode, Record<string, unknown>>();
+  const rowAuthorization = new Map<SnapshotEntity, Map<unknown, SnapshotRowDecision>>();
+  async function authorize(entity: SnapshotEntity, node: SnapshotNode): Promise<boolean> {
     try {
       let entityRows = rowAuthorization.get(entity);
       if (!entityRows) rowAuthorization.set(entity, entityRows = new Map());
@@ -416,10 +593,10 @@ export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb 
       }
       let requiredAllowed = node.required !== false;
       if (node.required && requiredAllowed) requiredAllowed = await authorize(node.required.entity, node.required);
-      if (decision.allowed && requiredAllowed) authorized.set(node, decision.row);
+      if (decision.allowed && requiredAllowed) authorized.set(node, decision.row as Record<string, unknown>);
       for (const [entry, children] of node.children) {
         if (entry.kind === 'user') continue;
-        for (const child of children) await authorize(entry.entity, child);
+        for (const child of children) await authorize(entry.entity!, child);
       }
       return decision.allowed && requiredAllowed;
     } catch {
@@ -430,11 +607,16 @@ export async function authorizeSnapshot({ principal, anchor, candidate, mayVerb 
   return Object.freeze({ anchorAllowed, authorized });
 }
 
-export function projectSnapshot({ anchor, candidate, output, authorized }) {
-  function project(entity, node, branch) {
+export function projectSnapshot({ anchor, candidate, output, authorized }: {
+  anchor: SnapshotEntity;
+  candidate: SnapshotNode;
+  output: SnapshotBranch;
+  authorized: WeakMap<SnapshotNode, Record<string, unknown>>;
+}): Record<string, unknown> | null {
+  function project(_entity: SnapshotEntity, node: SnapshotNode, branch: SnapshotBranch): Record<string, unknown> | null {
     const current = authorized.get(node);
     if (!current) return null;
-    const result = { id: current.id };
+    const result: Record<string, unknown> = { id: current.id };
     const selected = branch.entries.find((entry) => entry.kind === 'select');
     if (selected) Object.assign(result, Object.fromEntries(selected.fields.map((field) => [field, current[field]])));
     for (const entry of branch.entries) {
@@ -448,9 +630,9 @@ export function projectSnapshot({ anchor, candidate, output, authorized }) {
         }) : null;
         continue;
       }
-      const rows = [];
+      const rows: Record<string, unknown>[] = [];
       for (const child of node.children.get(entry) ?? []) {
-        const projected = project(entry.entity, child, entry.nested ?? { entries: entry.selected ? [{ kind: 'select', fields: entry.selected }] : [] });
+        const projected = project(entry.entity, child, entry.nested ?? { entity: entry.entity, entries: entry.selected ? [Object.freeze({ key: 'select', kind: 'select' as const, fields: entry.selected })] : [] });
         if (projected) rows.push(projected);
       }
       if (entry.kind === 'count') result[entry.key] = rows.length;

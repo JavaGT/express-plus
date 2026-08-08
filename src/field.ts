@@ -1,4 +1,3 @@
-// @ts-nocheck
 // The field-type plugin contract (Phase 1, SPEC §5.1 / §5.4, ADR #9).
 //
 // A field constructor returns an immutable FIELD DESCRIPTOR. The descriptor is
@@ -16,21 +15,41 @@
 // state machine), `struct` (nested structure). Each is deferred-incremental: the
 // descriptor ships at import; its persistence/merge/diff strategy fires later.
 
+// The descriptor's runtime access function (a field `.can(fn)` body). The shape
+// is deliberately loose: the row-grant engine invokes it as
+// `access({ is, entity: row }, defaults)` and a protecting annotation as
+// `access({ is, entity: row, annotation })`.
+export type FieldAccessFn = (context: Record<string, unknown>, defaults?: unknown) => unknown;
+
+// A declared `validate` option: returns `true` or a human-readable reason.
+type FieldValidator = (value: unknown) => string | true;
+
 // A field descriptor is frozen so no later layer can mutate a declared field.
 // `.can(fn)` returns a NEW frozen descriptor carrying the access function — it
 // never mutates the original (declarations are immutable).
-function makeDescriptor(props) {
-  const descriptor = { access: undefined, ...props };
-  descriptor.can = (fn) => {
+export interface FieldDescriptor {
+  readonly kind: string;
+  readonly type?: string;
+  readonly validate?: FieldValidator | undefined;
+  readonly access?: FieldAccessFn | undefined;
+  readonly can: (fn: FieldAccessFn) => FieldDescriptor;
+  readonly [property: string]: unknown;
+}
+
+type FieldOptions = Record<string, unknown>;
+
+function makeDescriptor(props: FieldOptions): FieldDescriptor {
+  const descriptor: Record<string, unknown> = { access: undefined, ...props };
+  descriptor.can = (fn: FieldAccessFn): FieldDescriptor => {
     const { can, ...fields } = descriptor;
     return makeDescriptor({ ...fields, access: fn });
   };
-  return Object.freeze(descriptor);
+  return Object.freeze(descriptor) as unknown as FieldDescriptor;
 }
 
 // `value` kind — a single stored value with whole-value diff. The default
 // mechanism (the bare kind is the sensible default per the naming rule).
-export function text(options = {}) {
+export function text(options: FieldOptions = {}): FieldDescriptor {
   const { oneOf, validate, canonicalize, indexed, ...rest } = options;
   if (canonicalize !== undefined && typeof canonicalize !== 'function') {
     throw new Error('text({ canonicalize }) requires a function');
@@ -48,7 +67,7 @@ export function text(options = {}) {
       kind: 'value',
       type: 'text',
       oneOf: values,
-      validate: (v) => {
+      validate: (v: unknown) => {
         if (!allowed.has(v)) return `expected one of [${values.join(', ')}]`;
         return typeof validate === 'function' ? validate(v) : true;
       },
@@ -60,7 +79,7 @@ export function text(options = {}) {
   return makeDescriptor({ kind: 'value', type: 'text', validate, ...(canonicalize ? { canonicalize } : {}), ...(indexed ? { indexed } : {}), ...rest });
 }
 
-export function annotatedText(options = {}) {
+export function annotatedText(options: FieldOptions = {}): FieldDescriptor {
   return makeDescriptor({
     kind: 'annotatedText',
     type: 'annotatedText',
@@ -77,14 +96,17 @@ export function annotatedText(options = {}) {
 export { annotation, protectingAnnotation, measurement, annotationAction, wordEvidenceFamily } from './annotated-text-field.ts';
 // `text.crdt()` — the `crdt` kind instance for collaborative text. One instance
 // of the crdt contract, not a privileged special case (ADR #9).
-text.crdt = (options = {}) =>
+type TextFactory = typeof text & {
+  crdt(options?: FieldOptions): FieldDescriptor;
+};
+(text as TextFactory).crdt = (options: FieldOptions = {}) =>
   makeDescriptor({ kind: 'crdt', type: 'text', ...options });
 
 // `raster.crdt()` — the crdt kind instance for collaborative pixel buffers
 // (photo-editor). Stores binary pixel data per-layer; per-region Porter-Duff
 // compositing merge is deferred (whole-value replace for MVP).
 export const raster = {
-  crdt: (options = {}) =>
+  crdt: (options: FieldOptions = {}) =>
     makeDescriptor({ kind: 'crdt', type: 'raster', ...options }),
 };
 
@@ -92,28 +114,28 @@ export const raster = {
 // (drawing-canvas). Stores an ordered array of point segments; per-element
 // merge is deferred (whole-value replace for MVP).
 export const polyline = {
-  crdt: (options = {}) =>
+  crdt: (options: FieldOptions = {}) =>
     makeDescriptor({ kind: 'crdt', type: 'polyline', ...options }),
 };
 
-export function boolean(options = {}) {
+export function boolean(options: FieldOptions = {}): FieldDescriptor {
   return makeDescriptor({ kind: 'value', type: 'boolean', ...options });
 }
 
-export function date(options = {}) {
+export function date(options: FieldOptions = {}): FieldDescriptor {
   return makeDescriptor({ kind: 'value', type: 'date', ...options });
 }
 
 // `number()` — a value-kind scalar (integer or float), stored as-is (SQLite
 // binds JS numbers directly).
-export function number(options = {}) {
+export function number(options: FieldOptions = {}): FieldDescriptor {
   return makeDescriptor({ kind: 'value', type: 'number', ...options });
 }
 
 // `json(shape)` — a value-kind structured JSON cell stored as TEXT. `shape` is
 // declared config retained for future path/index support; app-specific runtime
 // validation still belongs in the ordinary `validate` option.
-export function json(shape = null, options = {}) {
+export function json(shape: unknown = null, options: FieldOptions = {}): FieldDescriptor {
   return makeDescriptor({ kind: 'value', type: 'json', shape, ...options });
 }
 
@@ -127,21 +149,21 @@ export function json(shape = null, options = {}) {
 // vector of length 1536). Cosine similarity search is brute-force (pure JS,
 // zero runtime dependencies) — loads all rows, computes similarity, returns
 // top-K. Same pattern as Scope's `Json` Prisma type.
-export function vector(dimensions, options = {}) {
+export function vector(dimensions: number, options: FieldOptions = {}): FieldDescriptor {
   if (typeof dimensions !== 'number' || dimensions <= 0 || !Number.isInteger(dimensions)) {
     throw new Error('vector(dimensions) requires a positive integer dimension count');
   }
   return makeDescriptor({ kind: 'value', type: 'vector', dimensions, ...options });
 }
 
-export function hash(options = {}) {
+export function hash(options: FieldOptions = {}): FieldDescriptor {
   return makeDescriptor({ kind: 'hash', type: 'hash', ...options });
 }
 
 // `ref(Target)` — a typed foreign key. `target` is explicit (no opaque sugar).
 // `role` lets the entity compiler derive `is.<role>()` from the FK (the only
 // thing the FK derives — no zero-to-one default grant, ADR #7).
-export function ref(target, options = {}) {
+export function ref(target: unknown, options: FieldOptions = {}): FieldDescriptor {
   return makeDescriptor({ kind: 'value', type: 'ref', target, ...options });
 }
 
@@ -151,7 +173,7 @@ export function ref(target, options = {}) {
 // create/update carrying a blob id adopts that blob IN the dispatch commit
 // (spec #2). The marker rides the descriptor; one declared field feeds the
 // read/write/grant paths AND the adopter, not a parallel registration.
-export function blob(options = {}) {
+export function blob(options: FieldOptions = {}): FieldDescriptor {
   return makeDescriptor({ kind: 'value', type: 'text', blob: true, ...options });
 }
 
@@ -192,7 +214,7 @@ export function blob(options = {}) {
 // `.toArray()` against the `<Entity>_<field>` side-table (entity.mjs
 // makeMapHandle). Map mutation events are entity-specific native event handles
 // (`native('Doc', 'collaborators', 'added')`), not generic descriptor properties.
-export function map(of, { role, default: fallback } = {}) {
+export function map(of: unknown, { role, default: fallback }: { role?: readonly unknown[]; default?: unknown } = {}): FieldDescriptor {
   return makeDescriptor({
     kind: 'store',
     type: 'map',
@@ -209,7 +231,7 @@ export function map(of, { role, default: fallback } = {}) {
 // declared by the `entry` shape (doc.mjs: `log({ sender: ref('User'), body:
 // text() })` — a chat log whose entries each carry a User-FK sender and text
 // body). Like `map`, membership lives ON the owning entity (AGENTS: an owned
-// relation is a field, not a join table), not a separate entries table.
+// relation is a field, not a separate entries table), not a separate entries table.
 //
 //   - entry — the per-entry sub-field descriptor map (each a value/ref/text
 //             descriptor); declared shape, frozen so a later layer cannot mutate it.
@@ -218,7 +240,7 @@ export function map(of, { role, default: fallback } = {}) {
 // compiler accepts. The append mutation, the `:appended:<id>` event handle, and
 // any per-entry query are the `store` kind's Phase-2 merge/event behavior (the
 // strategy's apply/diff already fail closed with a loud Phase-2 throw).
-export function log(entry = {}) {
+export function log(entry: Record<string, unknown> = {}): FieldDescriptor {
   return makeDescriptor({
     kind: 'store',
     type: 'log',
@@ -243,7 +265,7 @@ export function log(entry = {}) {
 // `.move(id, i)`/`.reorder([id, …])`/`.remove(id)`/`.toArray()` against the
 // `<Entity>_<field>` side-table (entity.mjs makeOrderedListHandle). The
 // per-element diff reconciles to this stored model in P6e's delta broadcast.
-export function list(of, options = {}) {
+export function list(of: unknown, options: FieldOptions = {}): FieldDescriptor {
   return makeDescriptor({
     kind: 'ordered',
     type: 'list',
@@ -254,7 +276,9 @@ export function list(of, options = {}) {
 
 // `computed({ compute })` — a read-time computed field. It stores no column;
 // hydration recomputes it from the row every time.
-export function computed({ compute } = {}) {
+type ComputeFn = (...args: unknown[]) => unknown;
+
+export function computed({ compute }: { compute?: ComputeFn } = {}): FieldDescriptor {
   if (typeof compute !== 'function') {
     throw new Error('computed requires a compute function');
   }
@@ -266,7 +290,10 @@ export function computed({ compute } = {}) {
   });
 }
 
-computed.stored = ({ compute } = {}) => {
+type ComputedFactory = typeof computed & {
+  stored(options?: { compute?: ComputeFn }): FieldDescriptor;
+};
+(computed as ComputedFactory).stored = ({ compute }: { compute?: ComputeFn } = {}) => {
   if (typeof compute !== 'function') {
     throw new Error('computed.stored requires a compute function');
   }
@@ -291,7 +318,7 @@ computed.stored = ({ compute } = {}) => {
 // writes it. A read sees the last-written value (may be stale between writes
 // — the staleness contract is explicit, not silently invisible).
 export const projected = {
-  async: ({ compute, from } = {}) => {
+  async: ({ compute, from }: { compute?: ComputeFn; from?: unknown } = {}) => {
     if (typeof compute !== 'function') {
       throw new Error('projected.async requires a compute function');
     }
@@ -319,7 +346,7 @@ export const projected = {
 // Import-surface scope: this constructor delivers the descriptor the entity
 // compiler accepts. The per-connection broadcast and volatile coalescing are
 // the ephemeral kind's deferred live behavior.
-export function ephemeral(cells = {}) {
+export function ephemeral(cells: Record<string, unknown> = {}): FieldDescriptor {
   return makeDescriptor({
     kind: 'ephemeral',
     type: 'ephemeral',
@@ -348,7 +375,12 @@ export function ephemeral(cells = {}) {
 //
 // Import-surface scope: this constructor delivers the descriptor the entity
 // compiler accepts. The compiler owns transition enforcement and auto lowering.
-export function state({ values, transitions, effects, auto } = {}) {
+export function state({ values, transitions, effects, auto }: {
+  values?: readonly unknown[];
+  transitions?: Record<string, unknown>;
+  effects?: Record<string, unknown>;
+  auto?: unknown;
+} = {}): FieldDescriptor {
   return makeDescriptor({
     kind: 'state',
     type: 'state',
@@ -361,14 +393,23 @@ export function state({ values, transitions, effects, auto } = {}) {
 // A typed transition handle. It stringifies to a stable identifier encoding the
 // from→to pair, so the same pair always yields the same computed-object key in
 // an `effects` map — a derived identifier, never a magic string literal.
-state.transition = (from, to) => {
-  const handle = { brand: 'state-transition-handle', from, to };
+type TransitionHandle = {
+  readonly brand: 'state-transition-handle';
+  readonly from: unknown;
+  readonly to: unknown;
+  readonly type: string;
+  readonly toString: () => string;
+};
+(state as typeof state & {
+  transition: (from: unknown, to: unknown) => TransitionHandle;
+}).transition = (from: unknown, to: unknown): TransitionHandle => {
+  const handle: Record<string, unknown> = { brand: 'state-transition-handle', from, to };
   Object.defineProperty(handle, 'type', { value: `transition:${from}->${to}`, enumerable: true });
   Object.defineProperty(handle, 'toString', { value: () => handle.type, enumerable: false });
-  return Object.freeze(handle);
+  return Object.freeze(handle) as unknown as TransitionHandle;
 };
 
-export function link({ tiers, tier, token } = {}) {
+export function link({ tiers, tier, token }: { tiers?: readonly unknown[]; tier?: unknown; token?: unknown } = {}): FieldDescriptor {
   return makeDescriptor({
     kind: 'struct',
     type: 'link',

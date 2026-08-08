@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Framework-owned HTTP routes — snapshot, events-since, blob upload, job queue,
 // and the browser SDK endpoint.
 //
@@ -13,20 +12,66 @@ import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { sendJson } from './http-response.mjs';
-import { failureForHttpError, sendFailure } from './http-failure.mjs';
-import { readScopedRow, authorizeRow } from './http-crud-dispatch.mjs';
+import { sendJson,                       } from './http-response.mjs';
+import { failureForHttpError, sendFailure,               } from './http-failure.mjs';
+import { readScopedRow, authorizeRow,                                   } from './http-crud-dispatch.mjs';
 import { readSeq, readSince, minSeqForScope } from './committed-log.mjs';
+                                            
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
 import { scopeOf, tryParseScopeKey } from './scope-handle.mjs';
 import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.mjs';
 import { publicEvent } from './event-delivery.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
+                                                
 
-function reject(res, status, message, details) {
+                            
+               
+                  
+                                              
+                                                                   
+                                                                    
+                   
+                    
+                    
+                      
+ 
+
+                         
+                                           
+                                                     
+                                                                
+                                                      
+                                                                                                           
+                                                                        
+                                                                   
+                         
+ 
+
+                       
+                 
+             
+                                
+ 
+
+                       
+                     
+                  
+                       
+ 
+
+                                            
+                                             
+                                                               
+                                                                                                           
+                       
+                                                                        
+                         
+ 
+
+function reject(res                  , status        , message        , details          )       {
   const workbenchFailure = failureForHttpError({ status, message, details });
-  sendFailure(sendJson, res, workbenchFailure, { status });
+  sendFailure(sendJson                       , res, workbenchFailure, { status });
 }
 
 // routes — resolved at request time from `/snapshot/:entity/:id` and
@@ -37,8 +82,13 @@ function reject(res, status, message, details) {
 //
 // Returns true when the request was handled (the caller short-circuits); false
 // when the path is not a framework resync route (fall through to matchRoute).
-export async function handleResyncRoute(app, req, res, principal) {
-  const url = new URL(req.url, 'http://localhost');
+export async function handleResyncRoute(
+  app                                 ,
+  req                  ,
+  res                  ,
+  principal                              ,
+)                   {
+  const url = new URL(req.url ?? '/', 'http://localhost');
   const seg = url.pathname.split('/').filter(Boolean);
   const isSnapshot = seg[0] === 'snapshot';
   const isEventsSince = seg[0] === 'events-since';
@@ -66,35 +116,46 @@ export async function handleResyncRoute(app, req, res, principal) {
   const row = hasAnnotatedTextFields(entity) ? app.db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id) : null;
   const annotatedEntry = Object.entries(entity.fields).find(([, field]) => field.kind === 'annotatedText');
   const [, descriptor] = annotatedEntry ?? [];
-  const retiredScope = !row && descriptor && app.db.prepare("SELECT scope FROM _Log WHERE json_extract(eventData, '$.id') = ? ORDER BY rowid DESC LIMIT 1")
-    .get(id)?.scope;
-  const scopeKey = descriptor ? (row ? resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key : retiredScope ?? scopeOf(entityName, id).key) : scopeOf(entityName, id).key;
+  const retiredScope = !row && descriptor
+    ? (app.db.prepare("SELECT scope FROM _Log WHERE json_extract(eventData, '$.id') = ? ORDER BY rowid DESC LIMIT 1")
+        .get(id)                                   )?.scope
+    : undefined;
+  const scopeKey         = descriptor
+    ? (row ? resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key : (retiredScope                      ) ?? scopeOf(entityName, id).key)
+    : scopeOf(entityName, id).key;
   if (isSnapshot) return snapshotRoute(app, entity, id, scopeKey, principal, res);
   const cursor = Number(url.searchParams.get('cursor') ?? 0);
   return eventsSinceRoute(app, entity, scopeKey, id, principal, res, cursor);
 }
 
-async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
+async function snapshotRoute(
+  app              ,
+  entity            ,
+  id        ,
+  scopeKey        ,
+  principal           ,
+  res                  ,
+)                   {
   // Read the row + the scope cursor in ONE synchronous block — no await between
   // them — then authorize. A concurrent dispatch commit cannot split the pair
   // (eng-review Tier-1 #2): the cursor is captured alongside the row, before the
   // async mayVerb yields. The pair we authorize is the pair we return.
   const row = readScopedRow(app, entity, id, principal);
   const { sql: where, params } = entity.scopeFilter(principal);
-  const storedRow = app.db.prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
+  const storedRow = app.db .prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
     .get({ ...params, id });
-  const lastSeq = readSeq(app.db, scopeKey);
+  const lastSeq = readSeq(app.db , scopeKey);
   const auth = await authorizeRow(app, entity, 'read', id, principal, row);
   if (auth.status) {
     reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
-  let snapshot;
+  let snapshot                         ;
   try {
-    snapshot = await projectEntitySnapshot({ db: app.db, entity, row: auth.row, principal });
+    snapshot = await projectEntitySnapshot({ db: app.db, entity, row: auth.row , principal });
     // Projection can await policy checks. Do not pair facts assembled across a
     // concurrent scope mutation with the cursor captured before those checks.
-    if (hasAnnotatedTextFields(entity) && readSeq(app.db, scopeKey) !== lastSeq) throw new Error('snapshot changed while projecting');
+    if (hasAnnotatedTextFields(entity) && readSeq(app.db , scopeKey) !== lastSeq) throw new Error('snapshot changed while projecting');
   } catch {
     reject(res, 403, 'forbidden');
     return true;
@@ -102,12 +163,17 @@ async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
   sendJson(res, 200, {
     snapshot,
     seq: lastSeq,
-    reducers: textReducerCheckpoints(entity, storedRow),
+    reducers: textReducerCheckpoints(entity, storedRow                                                ),
   });
   return true;
 }
 
-async function snapshotScopeRoute(app, scope, principal, res) {
+async function snapshotScopeRoute(
+  app              ,
+  scope        ,
+  principal           ,
+  res                  ,
+)                   {
   // The cursor is read as the LAST synchronous step before responding — after
   // every await that can yield to a concurrent dispatch commit (authorizeScope,
   // and the app-supplied async scopeSnapshot aggregation) — never before. A
@@ -121,17 +187,18 @@ async function snapshotScopeRoute(app, scope, principal, res) {
     reject(res, access.status, access.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
+  const anchor = access.anchor ;
   if (access.direct) {
-    const lastSeq = readSeq(app.db, scope);
-    const storedRow = app.db.prepare(`SELECT * FROM ${access.anchor.entity} WHERE id = ?`).get(access.anchor.id);
-    const entity = app.entities.get(access.anchor.entity);
+    const lastSeq = readSeq(app.db , scope);
+    const storedRow = app.db .prepare(`SELECT * FROM ${anchor.entity} WHERE id = ?`).get(anchor.id);
+    const entity = app.entities .get(anchor.entity) ;
     try {
-        const snapshot = await projectEntitySnapshot({ db: app.db, entity, row: access.anchor.row, principal });
-      if (readSeq(app.db, scope) !== lastSeq) throw new Error('snapshot changed while projecting');
+      const snapshot = await projectEntitySnapshot({ db: app.db, entity, row: anchor.row , principal });
+      if (readSeq(app.db , scope) !== lastSeq) throw new Error('snapshot changed while projecting');
       sendJson(res, 200, {
         snapshot,
         cursors: { [scope]: lastSeq },
-        reducers: textReducerCheckpoints(entity, storedRow),
+        reducers: textReducerCheckpoints(entity, storedRow                                                ),
       });
     } catch {
       reject(res, 403, 'forbidden');
@@ -143,22 +210,22 @@ async function snapshotScopeRoute(app, scope, principal, res) {
   // that already-authorized anchor; it is a data projection hook, never a
   // second authorization engine.
   const scopeSnapshot = typeof app.scopeSnapshot === 'function'
-    ? await app.scopeSnapshot(scope, principal, access.anchor)
+    ? await app.scopeSnapshot(scope, principal, anchor)
     : null;
   if (scopeSnapshot !== null && scopeSnapshot !== undefined) {
     // An aggregate callback has no recipient annotated-text grammar. Never let
     // it become an unprojected alternate delivery path for an annotated entity.
-    const lastSeq = readSeq(app.db, scope);
-    const entity = app.entities.get(access.anchor.entity);
+    const lastSeq = readSeq(app.db , scope);
+    const entity = app.entities .get(anchor.entity) ;
     if (hasAnnotatedTextFields(entity)) {
       reject(res, 403, 'forbidden');
       return true;
     }
-    const storedAnchor = app.db.prepare(`SELECT * FROM ${access.anchor.entity} WHERE id = ?`).get(access.anchor.id);
+    const storedAnchor = app.db .prepare(`SELECT * FROM ${anchor.entity} WHERE id = ?`).get(anchor.id);
     sendJson(res, 200, {
       snapshot: scopeSnapshot,
       cursors: { [scope]: lastSeq },
-      reducers: textReducerCheckpoints(entity, storedAnchor),
+      reducers: textReducerCheckpoints(entity, storedAnchor                                                ),
     });
     return true;
   }
@@ -166,25 +233,32 @@ async function snapshotScopeRoute(app, scope, principal, res) {
   return true;
 }
 
-async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
+async function eventsSinceScopeRoute(
+  app              ,
+  scope        ,
+  principal           ,
+  res                  ,
+  cursor        ,
+)                   {
   const access = await authorizeScope(app, scope, principal);
   if (access.status) {
     reject(res, access.status, access.status === 404 ? 'not found' : 'forbidden');
     return true;
   }
-  const entity = app.entities.get(access.anchor.entity);
+  const anchor = access.anchor ;
+  const entity = app.entities .get(anchor.entity) ;
   // A custom aggregate has no annotated-text recipient grammar. Deny before
   // retention handling so it cannot acquire a transport-specific disposition.
   if (hasAnnotatedTextFields(entity) && !access.direct) {
     reject(res, 403, 'forbidden');
     return true;
   }
-  const minSeq = minSeqForScope(app.db, scope);
+  const minSeq = minSeqForScope(app.db                        , scope);
   if (minSeq !== null && cursor + 1 < minSeq) {
     sendJson(res, 200, { resync: 'stale', reason: 'cursor-behind-retention' });
     return true;
   }
-  const rows = readSince(app.db, scope, cursor);
+  const rows = readSince(app.db                        , scope, cursor);
   // The T5b snapshot reader is the only recipient grammar for annotated text.
   // Historical operation facts cannot cross replay until a projected event
   // grammar exists, so force the client through that reader instead.
@@ -194,42 +268,54 @@ async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
       return true;
     }
   }
-  const events = rows.map((r) => {
-    const data = JSON.parse(r.eventData);
-    const reducers = createdTextReducerSeeds(app.entities.get(tryParseScopeKey(r.scope)?.entity), { type: r.eventType, data });
-    return publicEvent({ scope: r.scope, seq: r.seq, type: r.eventType, data, actionId: r.actionId, committedAt: r.committedAt, ...(reducers ? { reducers } : {}) });
+  const events = rows.map((r         ) => {
+    const record = r                                                                                                                         ;
+    const data = JSON.parse(record.eventData);
+    const reducers = createdTextReducerSeeds(app.entities .get(tryParseScopeKey(record.scope          )?.entity ?? ''), { type: record.eventType          , data });
+    return publicEvent({ scope: record.scope, seq: record.seq, type: record.eventType, data, actionId: record.actionId, committedAt: record.committedAt, ...(reducers ? { reducers } : {}) });
   });
   sendJson(res, 200, { scope, cursor, events });
   return true;
 }
 
-async function authorizeScope(app, scope, principal) {
+async function authorizeScope(app              , scope        , principal           )                       {
   const handle = tryParseScopeKey(scope);
-  const directEntity = handle ? app.entities.get(handle.entity) : null;
-  let anchor = directEntity ? { entity: handle.entity, id: handle.id } : null;
+  const directEntity = handle ? app.entities?.get(handle.entity) : null;
+  let anchor                                        = directEntity ? { entity: handle .entity, id: handle .id } : null;
   let direct = Boolean(directEntity);
 
   if (!anchor) {
-    if (typeof app.resolveScope !== 'function') return { status: 404 };
-    anchor = await app.resolveScope(scope);
+    if (typeof app.resolveScope !== 'function') return { status: 404, direct: false };
+    const resolved = await app.resolveScope(scope)                                                         ;
+    anchor = resolved && typeof resolved.entity === 'string' && resolved.id != null
+      ? { entity: resolved.entity, id: String(resolved.id) }
+      : null;
     direct = false;
   }
   if (!anchor || typeof anchor.entity !== 'string' || anchor.id == null) {
-    return { status: 404 };
+    return { status: 404, direct: false };
   }
-  const entity = app.entities.get(anchor.entity);
-  if (!entity) return { status: 404 };
+  const entity = app.entities?.get(anchor.entity);
+  if (!entity) return { status: 404, direct: false };
 
   const row = readScopedRow(app, entity, String(anchor.id), principal);
   const auth = await authorizeRow(app, entity, 'read', String(anchor.id), principal, row);
-  if (auth.status) return { status: auth.status };
+  if (auth.status) return { status: auth.status, direct };
   return {
     anchor: { entity: anchor.entity, id: String(anchor.id), row: auth.row },
     direct,
   };
 }
 
-async function eventsSinceRoute(app, entity, scopeKey, documentId, principal, res, cursor) {
+async function eventsSinceRoute(
+  app              ,
+  entity            ,
+  scopeKey        ,
+  documentId        ,
+  principal           ,
+  res                  ,
+  cursor        ,
+)                   {
   // events-since authorizes against the CURRENT row, falling back to the
   // deleted-row history anchor when the row is gone (Wave 3.7 Contract 1): an
   // owner who held read+subscribe at the moment of deletion can still resync
@@ -246,11 +332,11 @@ async function eventsSinceRoute(app, entity, scopeKey, documentId, principal, re
   // replay of the canonical events that preceded deletion. This wins over
   // retention because a stale response would demand an impossible snapshot.
   if (auth.historical && hasAnnotatedTextFields(entity)) {
-    const last = app.db.prepare('SELECT MAX(seq) AS seq FROM _Log WHERE scope = ?').get(scopeKey)?.seq ?? 0;
-    sendJson(res, 200, { resync: 'deleted', seq: Math.max(readSeq(app.db, scopeKey), last) });
+    const last = (app.db .prepare('SELECT MAX(seq) AS seq FROM _Log WHERE scope = ?').get(scopeKey)                                 )?.seq ?? 0;
+    sendJson(res, 200, { resync: 'deleted', seq: Math.max(readSeq(app.db , scopeKey), last          ) });
     return true;
   }
-  const minSeq = minSeqForScope(app.db, scopeKey);
+  const minSeq = minSeqForScope(app.db                        , scopeKey);
   // The client wants events > cursor; the first wanted is cursor+1. If that is
   // older than the oldest RETAINED event, the gap can never be filled → HARD-FAIL.
   // Never a silent truncate (SPEC §3.6 — the single non-negotiable property).
@@ -258,7 +344,7 @@ async function eventsSinceRoute(app, entity, scopeKey, documentId, principal, re
     sendJson(res, 200, { resync: 'stale', reason: 'cursor-behind-retention' });
     return true;
   }
-  const rows = readSince(app.db, scopeKey, cursor);
+  const rows = readSince(app.db                        , scopeKey, cursor);
   // Do not selectively redact event.data: annotated-text events also carry
   // canonical family facts in reducers and framework metadata. A nonempty
   // replay is terminally redirected to the recipient-projected snapshot.
@@ -266,10 +352,11 @@ async function eventsSinceRoute(app, entity, scopeKey, documentId, principal, re
     sendJson(res, 200, { resync: 'stale', reason: 'annotated-text-snapshot-required' });
     return true;
   }
-  const events = rows.map((r) => {
-    const data = r.data ?? null;
-    const reducers = createdTextReducerSeeds(entity, { type: r.eventType, data });
-    return publicEvent({ type: r.eventType, scope: r.scope, seq: r.seq, data, actionId: r.actionId, committedAt: r.committedAt, ...(reducers ? { reducers } : {}) });
+  const events = rows.map((r         ) => {
+    const record = r                                                                                                                      ;
+    const data = record.data ?? null;
+    const reducers = createdTextReducerSeeds(entity, { type: record.eventType          , data: data ?? undefined });
+    return publicEvent({ type: record.eventType, scope: record.scope, seq: record.seq, data: data                                  , actionId: record.actionId, committedAt: record.committedAt, ...(reducers ? { reducers } : {}) });
   });
   sendJson(res, 200, { events });
   return true;
@@ -286,8 +373,13 @@ async function eventsSinceRoute(app, entity, scopeKey, documentId, principal, re
 // through to matchRoute.
 const BLOB_LIMIT = 50_000_000; // ~50mb upload cap (SPEC §3 size-guard default).
 
-export async function handleBlobUploadRoute(app, req, res, principal) {
-  const url = new URL(req.url, 'http://localhost');
+export async function handleBlobUploadRoute(
+  app                                 ,
+  req                  ,
+  res                  ,
+  principal                              ,
+)                   {
+  const url = new URL(req.url ?? '/', 'http://localhost');
   if (url.pathname !== '/blobs' || req.method !== 'POST') return false;
   if (!app || !app.blobs) return false;
   // route gate (requireUser) — fail closed for anonymous, same as a mounted route.
@@ -295,7 +387,7 @@ export async function handleBlobUploadRoute(app, req, res, principal) {
     reject(res, 401, 'unauthorized');
     return true;
   }
-  let bytes;
+  let bytes        ;
   try {
     bytes = await readRawBody(req, BLOB_LIMIT);
   } catch (err) {
@@ -319,8 +411,12 @@ export async function handleBlobUploadRoute(app, req, res, principal) {
 // worker is not a logged-in principal; the bearer IS the credential. Workers are
 // non-browser clients (no Origin/Referer) so they pass the foreign-only CSRF guard.
 // Returns true when handled; false to fall through to matchRoute.
-export async function handleJobRoute(app, req, res) {
-  const url = new URL(req.url, 'http://localhost');
+export async function handleJobRoute(
+  app                                 ,
+  req                  ,
+  res                  ,
+)                   {
+  const url = new URL(req.url ?? '/', 'http://localhost');
   if (req.method !== 'POST' || !app?.jobs) return false;
   const jobs = app.jobs;
 
@@ -328,12 +424,12 @@ export async function handleJobRoute(app, req, res) {
   const bearer = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim() || null;
 
   if (url.pathname === '/workers/register') {
-    let body;
+    let body         ;
     try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
       if (err instanceof BodyError) { reject(res, err.status, err.message); return true; }
       throw err;
     }
-    const w = jobs.registerWorker(body.secret);
+    const w = jobs.registerWorker((body                        ).secret);
     if (!w) { reject(res, 401, 'invalid shared secret'); return true; }
     sendJson(res, 200, w);
     return true;
@@ -363,14 +459,16 @@ export async function handleJobRoute(app, req, res) {
   if (pg) {
     const workerId = jobs.authenticate(bearer);
     if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
-    let body;
+    let body         ;
     try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
       if (err instanceof BodyError) { reject(res, err.status, err.message); return true; }
       throw err;
     }
-    const updated = jobs.updateProgress({ jobId: pg[1], workerId, progress: body.progress, stage: body.stage });
+    const bodyRecord = body                                           ;
+    const updated = jobs.updateProgress({ jobId: pg[1], workerId, progress: bodyRecord.progress, stage: bodyRecord.stage });
     if (!updated) { reject(res, 403, 'not the owning worker or job not in progress'); return true; }
-    sendJson(res, 200, { id: updated.id, progress: updated.progress, stage: updated.stage, status: updated.status });
+    const progress = updated                                                                           ;
+    sendJson(res, 200, { id: progress.id, progress: progress.progress, stage: progress.stage, status: progress.status });
     return true;
   }
 
@@ -378,15 +476,15 @@ export async function handleJobRoute(app, req, res) {
   if (rs) {
     const workerId = jobs.authenticate(bearer);
     if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
-    let body;
+    let body         ;
     try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
       if (err instanceof BodyError) { reject(res, err.status, err.message); return true; }
       throw err;
     }
-    let result;
-    try { result = jobs.submitResult(rs[1], workerId, body); }
-    catch (err) { reject(res, 400, err.message); return true; }
-    if (!result.accepted) { reject(res, 403, 'not the owning worker or job not in progress'); return true; }
+    let result                                          ;
+    try { result = jobs.submitResult(rs[1], workerId, body)                                            ; }
+    catch (err) { reject(res, 400, (err         ).message); return true; }
+    if (!result?.accepted) { reject(res, 403, 'not the owning worker or job not in progress'); return true; }
     sendJson(res, 200, result);
     return true;
   }
@@ -395,7 +493,7 @@ export async function handleJobRoute(app, req, res) {
   if (cn) {
     const workerId = jobs.authenticate(bearer);
     if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
-    const cancelled = jobs.cancelJob({ jobId: cn[1], workerId });
+    const cancelled = jobs.cancelJob({ jobId: cn[1], workerId })                                                                                                  ;
     if (!cancelled) { reject(res, 404, 'job not found'); return true; }
     if (cancelled.forbidden) { reject(res, 403, 'not the owning worker'); return true; }
     if (cancelled.terminal) { reject(res, 400, 'job already terminal — cannot cancel'); return true; }
@@ -422,9 +520,13 @@ const ANNOTATED_TEXT_ACTION_SDK_PATH = dirname(fileURLToPath(import.meta.url)).r
 const ANNOTATED_TEXT_EDITOR_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-editor.mjs';
 const ANNOTATED_TEXT_CONTINUOUS_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-continuous.mjs';
 
-export function handleClientSdkRoute(app, req, res) {
+export function handleClientSdkRoute(
+  app                                 ,
+  req                  ,
+  res                  ,
+)          {
   if (req.method !== 'GET') return false;
-  const url = new URL(req.url, 'http://localhost');
+  const url = new URL(req.url ?? '/', 'http://localhost');
   if (url.pathname === '/workbench-annotated-text.mjs') {
     if (!app || !app.db) return false;
     const body = readFileSync(ANNOTATED_TEXT_SDK_PATH);
@@ -434,7 +536,7 @@ export function handleClientSdkRoute(app, req, res) {
   }
   if (url.pathname === '/workbench-annotated-text-family.mjs') {
     if (!app || !app.db) return false;
-    // Family source imports ./annotated-text.mjs; rewrite to the browser SDK path
+    // Family source imports ./annotated-text.ts; rewrite to the browser SDK path
     // so the same module folds under Node (public re-export) and HTTP delivery.
     const body = readFileSync(ANNOTATED_TEXT_FAMILY_SDK_PATH, 'utf8')
       .replaceAll("from './annotated-text.mjs'", "from './workbench-annotated-text.mjs'");
@@ -497,7 +599,7 @@ export function handleClientSdkRoute(app, req, res) {
   }
   if (url.pathname !== '/workbench.mjs') return false;
   if (!app || !app.db) return false;
-  let body;
+  let body        ;
   try {
     body = readFileSync(CLIENT_SDK_PATH);
   } catch {

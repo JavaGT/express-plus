@@ -7,10 +7,12 @@
 
 import { randomUUID } from 'node:crypto';
 
+                                              
 import { mayFieldOp } from '../row-grant.mjs';
+                                                    
 
 export async function authorizeFieldOp(record         , fieldName        , capability        , row         , principal         )                {
-  if (principal && !(await mayFieldOp(record, fieldName, capability, row, principal))) {
+  if (principal && !(await mayFieldOp(record                , fieldName, capability                         , row, principal))) {
     throw { status: 403, message: 'forbidden' };
   }
 }

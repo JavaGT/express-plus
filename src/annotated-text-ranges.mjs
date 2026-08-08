@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Blockless annotation ranges (issue #33 step 3).
 //
 // An annotation is a character range on the continuous family:
@@ -20,40 +19,50 @@ import {
   compareStructuralEndpoints,
 } from './annotated-text-continuous.mjs';
 import { assertAnnotation } from './annotated-text-membership.mjs';
+                                                                           
+                                                                     
+                                                       
 
-function fail(message) {
+function fail(message        )        {
   throw new Error(`annotated-text ranges: ${message}`);
 }
+
+                                  
+                       
+                            
+                          
+ 
 
 /**
  * Validate a character range over a continuous family. Endpoints must be
  * dominated by the current frontier; start must not be after end (zero-width
  * ranges are allowed and handled by the empty policy).
  */
-export function assertAnnotationRange(family, range, label = 'annotation range') {
+export function assertAnnotationRange(family                      , range         , label = 'annotation range')                  {
   if (!range || typeof range !== 'object' || Array.isArray(range)) fail(`${label}: must be a non-array object`);
+  const raw = range                       ;
   const allowedKeys = ['annotationId', 'start', 'end'];
-  for (const key of Object.keys(range)) {
+  for (const key of Object.keys(raw)) {
     if (!allowedKeys.includes(key)) fail(`${label}: unknown key '${key}'`);
   }
-  if (typeof range.annotationId !== 'string' || range.annotationId.length === 0) {
+  if (typeof raw.annotationId !== 'string' || raw.annotationId.length === 0) {
     fail(`${label}: annotationId must be a non-empty string`);
   }
-  if (!range.start || !range.end) fail(`${label}: start and end endpoints are required`);
-  if (compareStructuralEndpoints(family, range.start, range.end) > 0) {
+  if (!raw.start || !raw.end) fail(`${label}: start and end endpoints are required`);
+  if (compareStructuralEndpoints(family, raw.start, raw.end) > 0) {
     fail(`${label}: start must not be after end`);
   }
-  return deepFreeze({ annotationId: range.annotationId, start: range.start, end: range.end });
+  return deepFreeze({ annotationId: raw.annotationId, start: raw.start, end: raw.end });
 }
 
-function deepFreeze(value) {
+function deepFreeze   (value   )    {
   if (!value || typeof value !== 'object') return value;
-  for (const child of Object.values(value)) deepFreeze(child);
-  return Object.freeze(value);
+  for (const child of Object.values(value                           )) deepFreeze(child);
+  return Object.freeze(value)     ;
 }
 
 /** Project a range to absolute offsets in the current document. */
-export function projectRangeToOffsets(family, range) {
+export function projectRangeToOffsets(family                      , range                 )                                 {
   assertAnnotationRange(family, range);
   return deepFreeze({
     start: projectEndpointToOffset(family, range.start),
@@ -62,29 +71,29 @@ export function projectRangeToOffsets(family, range) {
 }
 
 /** The visible text covered by a range. */
-export function rangeText(family, range) {
+export function rangeText(family                      , range                 )         {
   assertAnnotationRange(family, range);
   return materializeRange(family, range.start, range.end);
 }
 
 /** The visible UTF-16 width of a range. */
-export function rangeWidth(family, range) {
+export function rangeWidth(family                      , range                 )         {
   return rangeText(family, range).length;
 }
 
 /** A range that has lost all visible width needs its empty policy run. */
-export function rangeIsEmpty(family, range) {
+export function rangeIsEmpty(family                      , range                 )          {
   return rangeWidth(family, range) === 0;
 }
 
 /** True when an absolute document offset falls inside the range. */
-export function rangeContainsOffset(family, range, offset) {
+export function rangeContainsOffset(family                      , range                 , offset        )          {
   const { start, end } = projectRangeToOffsets(family, range);
   return offset >= start && offset < end;
 }
 
 /** Two ranges overlap (used for protector activation). */
-export function rangesIntersect(family, left, right) {
+export function rangesIntersect(family                      , left                 , right                 )          {
   const a = projectRangeToOffsets(family, left);
   const b = projectRangeToOffsets(family, right);
   return a.start < b.end && b.start < a.end;
@@ -95,7 +104,7 @@ export function rangesIntersect(family, left, right) {
  * declared policy. `'delete'` removes the annotation; `'orphan'` keeps a
  * zero-width marker so a later insertion can re-open it.
  */
-export function emptyPolicy(annotation) {
+export function emptyPolicy(annotation     )                      {
   assertAnnotation(annotation);
   return annotation.empty === 'orphan' ? 'orphan' : 'delete';
 }
@@ -105,7 +114,7 @@ export function emptyPolicy(annotation) {
  * targets' ranges. Whole-document (start/end at the doc root and end) counts as
  * covering everything.
  */
-export function protectorIsActive(family, protectorRange, targetRanges) {
+export function protectorIsActive(family                      , protectorRange                 , targetRanges                   )          {
   assertAnnotationRange(family, protectorRange);
   const { start: pStart, end: pEnd } = projectRangeToOffsets(family, protectorRange);
   const wholeDocument = pStart === 0 && pEnd === familyDocumentLength(family);
@@ -117,7 +126,7 @@ export function protectorIsActive(family, protectorRange, targetRanges) {
   return false;
 }
 
-function familyDocumentLength(family) {
+function familyDocumentLength(family                      )         {
   let length = 0;
   for (const [, element] of orderOf(family)) {
     if (element.deletedBy.length === 0) length += element.scalar.length;
@@ -125,18 +134,18 @@ function familyDocumentLength(family) {
   return length;
 }
 
-function orderOf(family) {
+function orderOf(family                      )                               {
   const checkpoint = family.checkpoint;
-  const children = new Map();
+  const children = new Map                                      ();
   for (const [key, element] of Object.entries(checkpoint.elements)) {
     const parent = element.parent;
     if (!children.has(parent)) children.set(parent, []);
-    children.get(parent).push([key, element]);
+    children.get(parent) .push([key, element]);
   }
-  const order = [];
-  const stack = [...(children.get('root') ?? [])].reverse();
+  const order                               = [];
+  const stack                               = [...(children.get('root') ?? [])].reverse();
   while (stack.length > 0) {
-    const entry = stack.pop();
+    const entry = stack.pop()                         ;
     order.push(entry);
     const descendants = children.get(entry[0]);
     if (descendants) stack.push(...descendants.slice().reverse());

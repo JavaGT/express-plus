@@ -1,4 +1,3 @@
-// @ts-nocheck
 // session.mjs — session/auth wiring (SPEC §3, §572, §660).
 //
 // The principal a request carries is built SERVER-SIDE from its session. The
@@ -12,11 +11,40 @@
 // replaces, never a second auth path. When an app is constructed with a db
 // (`workbench({ db })`), session hydration becomes the default principal source.
 
-import { principal, anonymous } from '../principal.mjs';
+import { principal, anonymous,                                    } from '../principal.mjs';
 import { config } from '../config.mjs';
 import { createHash } from 'node:crypto';
 
-function sha256hex(s) {
+// The minimal request shape session hydration reads: the raw `Cookie` header
+// (node:http exposes the string) and the `Authorization` header for Bearer keys.
+// The transport types the full request; this is the fail-closed subset.
+                       
+                                                        
+ 
+
+// The SQLite statement/db surface session hydration uses. The concrete driver
+// (better-sqlite3-shaped) satisfies this structurally; a broken db still fails
+// closed because every lookup happens inside the try/catch below.
+                        
+                                                          
+                                     
+                                       
+ 
+
+                 
+                                     
+ 
+
+// The Session row projected by the hydration lookup. `type` is validated by
+// principal() against the closed union; `createdAt` is validated by
+// sessionCreatedAtMs. A corrupt stored row therefore resolves to anonymous.
+                      
+                       
+                     
+                      
+ 
+
+function sha256hex(s        )         {
   return createHash('sha256').update(s).digest('hex');
 }
 
@@ -28,8 +56,8 @@ export const SESSION_COOKIE = 'sid';
 // name→value map. Values are url-decoded. A missing/empty header is an empty map.
 // Zero-dependency: node:http exposes the raw header string, nothing parses it.
 // Malformed percent-escapes are skipped (fail closed) — never throw 500 (cso M1).
-export function parseCookies(header) {
-  const cookies = {};
+export function parseCookies(header                           )                         {
+  const cookies                         = {};
   if (!header) return cookies;
   for (const pair of header.split(';')) {
     const eq = pair.indexOf('=');
@@ -51,7 +79,7 @@ export function parseCookies(header) {
 // (TLS-only), Path=/. `secure` may be dropped for a non-TLS context (local dev /
 // tests over plain http); HttpOnly and SameSite are never dropped.
 // cso M2: In production, secure:false is refused — tokens must be TLS-only.
-export function sessionCookie(token, { secure = true, env = config.env } = {}) {
+export function sessionCookie(token        , { secure = true, env = config.env }                                     = {})         {
   if (env === 'production' && !secure) {
     throw new Error('sessionCookie secure:false is not permitted in production');
   }
@@ -67,11 +95,11 @@ export function sessionCookie(token, { secure = true, env = config.env } = {}) {
 // stable per-session key — a single client cannot rotate another user's token,
 // and the IP gate (which runs first) is the non-spoofable base that holds when no
 // cookie is present. sessionPrincipalOf reuses this same read.
-export function sessionTokenOf(req) {
+export function sessionTokenOf(req             )                     {
   return parseCookies(req.headers?.cookie)[SESSION_COOKIE] || undefined;
 }
 
-function sessionCreatedAtMs(value) {
+function sessionCreatedAtMs(value         )                {
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
   if (value instanceof Date) {
     const timestamp = value.getTime();
@@ -92,7 +120,7 @@ function sessionCreatedAtMs(value) {
 // cookie, looks the token up in the Session table, and constructs the principal
 // SERVER-SIDE from the stored identity. Any failure — no cookie, no token, no
 // matching row, or a malformed stored type — yields `anonymous` (fail closed).
-export function sessionPrincipalOf(db, { durationMs = config.sessionDurationMs, now = Date.now } = {}) {
+export function sessionPrincipalOf(db       , { durationMs = config.sessionDurationMs, now = Date.now }                                              = {})                                  {
   return (req) => {
     const token = sessionTokenOf(req);
     if (!token) return anonymous;
@@ -104,7 +132,7 @@ export function sessionPrincipalOf(db, { durationMs = config.sessionDurationMs, 
       // closed type union, so a corrupt stored type is anonymous too.
       const row = db
         .prepare('SELECT principalType AS type, principalId AS id, createdAt FROM Session WHERE token = ?')
-        .get(token);
+        .get(token)                                 ;
       if (!row) return anonymous;
       // Session cleanup reclaims expired rows eventually; authorization must not
       // wait for that scheduler. Validate timestamps in JavaScript because SQLite
@@ -140,7 +168,7 @@ export function sessionPrincipalOf(db, { durationMs = config.sessionDurationMs, 
 // Any failure — no header, no matching row, expired — yields `anonymous`
 // (fail closed). The resolution runs through the SAME authorization engine as
 // session principals — no second auth path.
-export function apiKeyPrincipalOf(db) {
+export function apiKeyPrincipalOf(db       )                                  {
   return (req) => {
     const auth = (req.headers?.authorization ?? '').trim();
     if (!auth) return anonymous;
@@ -150,10 +178,11 @@ export function apiKeyPrincipalOf(db) {
     if (!token) return anonymous;
     try {
       const tokenHash = sha256hex(token);
-      const row = db.prepare('SELECT * FROM ApiKey WHERE tokenHash = ? LIMIT 1').get(tokenHash);
+      const row = db.prepare('SELECT * FROM ApiKey WHERE tokenHash = ? LIMIT 1').get(tokenHash)                                ;
       if (!row) return anonymous;
       // Expiration: an expired key is anonymous.
-      if (row.expiresAt != null && row.expiresAt <= Date.now()) return anonymous;
+      const expiresAt = row.expiresAt                             ;
+      if (expiresAt != null && expiresAt <= Date.now()) return anonymous;
       return principal({
         type: 'apiKey',
         id: row.id,
@@ -167,3 +196,13 @@ export function apiKeyPrincipalOf(db) {
     }
   };
 }
+
+// The ApiKey row projected by the Bearer lookup. `expiresAt` is an epoch-ms
+// value the driver may store as a number or a numeric string; comparing it here
+// keeps a corrupt value from granting admission.
+                     
+                     
+                      
+                             
+                       
+ 

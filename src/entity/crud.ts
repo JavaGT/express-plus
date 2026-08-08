@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Entity CRUD handler generation — the mutation handlers for create, update,
 // and remove, extracted from the entity compiler so the compiler stays focused
 // on validation and assembly, not handler bodies.
@@ -35,7 +34,7 @@ export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 export const ANNOTATED_TEXT_COMPENSATION = Symbol('workbench.annotated-text-compensation');
 
 /** Prefer the dispatch scope when it is the inherited parent shell for this row. */
-export function resolveGeneratedEventScope(record, { id, row, payload, scope }) {
+export function resolveGeneratedEventScope(record: any, { id, row, payload, scope }: any) {
   const inherit = record.inherit;
   if (inherit && typeof scope === 'string' && scope.length > 0) {
     const ownerId = row?.[inherit.via] ?? payload?.[inherit.via];
@@ -43,14 +42,14 @@ export function resolveGeneratedEventScope(record, { id, row, payload, scope }) 
       return scope;
     }
   }
-  if (Object.values(record.fields).some((descriptor) => descriptor.kind === 'annotatedText')) {
-    const annotated = Object.entries(record.fields).find(([, descriptor]) => descriptor.kind === 'annotatedText');
-    return resolveAnnotatedTextOwningScope(annotated[1], record.fields, row ?? payload ?? {}).key;
+  if (Object.values(record.fields).some((descriptor: any) => descriptor.kind === 'annotatedText')) {
+    const annotated = Object.entries(record.fields).find(([, descriptor]: [string, any]) => descriptor.kind === 'annotatedText');
+    return resolveAnnotatedTextOwningScope(annotated![1], record.fields, row ?? payload ?? {}).key;
   }
   return scopeOf(record.name, id).key;
 }
 
-export function assertAnnotatedTextOperationPayload(name, fieldName, payload) {
+export function assertAnnotatedTextOperationPayload(name: string, fieldName: string, payload: any): any {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
       Object.keys(payload).length !== 4 ||
       !Object.hasOwn(payload, 'version') || !Object.hasOwn(payload, 'id') ||
@@ -80,7 +79,7 @@ export function assertAnnotatedTextOperationPayload(name, fieldName, payload) {
   });
 }
 
-export function assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload) {
+export function assertV9AnnotatedTextOffsetEditPayload(name: string, fieldName: string, payload: any): any {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload) || Object.keys(payload).length !== 4 ||
       payload.version !== 9 || typeof payload.id !== 'string' || payload.id.length === 0 ||
       !payload.authoring || typeof payload.authoring !== 'object' || Array.isArray(payload.authoring) ||
@@ -91,7 +90,7 @@ export function assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload)
       !payload.edit || typeof payload.edit !== 'object' || Array.isArray(payload.edit)) {
     throw new ValidationError(`${name}.${fieldName}.operation requires version 9 { id, authoring: { version, stream, lease, mutationId }, edit }`);
   }
-  const pToken = (value, label) => {
+  const pToken = (value: any, label: string) => {
     if (!value || typeof value !== 'object' || Array.isArray(value) || Object.keys(value).length !== 3 ||
         typeof value.positionToken !== 'string' || value.positionToken.length === 0 ||
         !Number.isSafeInteger(value.offset) || value.offset < 0 ||
@@ -103,12 +102,12 @@ export function assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload)
   let edit;
   const e = payload.edit;
   if (e.kind === 'text.insert' && Object.keys(e).length === 3 && typeof e.text === 'string' && e.text.length > 0) {
-    try { assertWellFormedText(e.text); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation inserted text ${error.message}`); }
+    try { assertWellFormedText(e.text); } catch (error: any) { throw new ValidationError(`${name}.${fieldName}.operation inserted text ${error.message}`); }
     edit = Object.freeze({ kind: 'text.insert', at: pToken(e.at, 'insert position'), text: e.text });
   } else if (e.kind === 'text.delete' && Object.keys(e).length === 3) {
     edit = Object.freeze({ kind: 'text.delete', from: pToken(e.from, 'delete start'), to: pToken(e.to, 'delete end') });
   } else if (e.kind === 'text.replace' && Object.keys(e).length === 4 && typeof e.text === 'string' && e.text.length > 0) {
-    try { assertWellFormedText(e.text); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation replacement text ${error.message}`); }
+    try { assertWellFormedText(e.text); } catch (error: any) { throw new ValidationError(`${name}.${fieldName}.operation replacement text ${error.message}`); }
     edit = Object.freeze({ kind: 'text.replace', from: pToken(e.from, 'replace start'), to: pToken(e.to, 'replace end'), text: e.text });
   } else if (e.kind === 'block.split' && Object.keys(e).length === 3 && typeof e.temporaryBlock === 'string' && e.temporaryBlock.length > 0) {
     edit = Object.freeze({ kind: 'block.split', at: pToken(e.at, 'split position'), temporaryBlock: e.temporaryBlock });
@@ -135,15 +134,15 @@ export function assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload)
   return Object.freeze({ version: 9, id: payload.id, authoring: Object.freeze({ version: 1, stream: payload.authoring.stream, lease: payload.authoring.lease, mutationId: payload.authoring.mutationId }), edit });
 }
 
-function assertV9GroupSelection(name, fieldName, value) {
+function assertV9GroupSelection(name: string, fieldName: string, value: any): any {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ValidationError(`${name}.${fieldName}.operation selection is invalid`);
   if (value.kind === 'one' && Object.keys(value).length === 2 && typeof value.groupToken === 'string' && value.groupToken) return Object.freeze({ kind: 'one', groupToken: value.groupToken });
-  if ((value.kind === 'consecutive' || value.kind === 'listed') && Object.keys(value).length === 2 && Array.isArray(value.groupTokens) && value.groupTokens.length && value.groupTokens.every((token) => typeof token === 'string' && token) && new Set(value.groupTokens).size === value.groupTokens.length) return Object.freeze({ kind: value.kind, groupTokens: Object.freeze([...value.groupTokens]) });
+  if ((value.kind === 'consecutive' || value.kind === 'listed') && Object.keys(value).length === 2 && Array.isArray(value.groupTokens) && value.groupTokens.length && value.groupTokens.every((token: any) => typeof token === 'string' && token) && new Set(value.groupTokens).size === value.groupTokens.length) return Object.freeze({ kind: value.kind, groupTokens: Object.freeze([...value.groupTokens]) });
   throw new ValidationError(`${name}.${fieldName}.operation selection is invalid`);
 }
 
-function ownerFieldOf(entity) {
-  for (const [fieldName, descriptor] of Object.entries(entity.fields)) {
+function ownerFieldOf(entity: any) {
+  for (const [fieldName, descriptor] of Object.entries(entity.fields) as Array<[string, any]>) {
     if (descriptor.type === 'ref' && descriptor.role && descriptor.readonly) {
       return fieldName;
     }
@@ -151,12 +150,12 @@ function ownerFieldOf(entity) {
   return null;
 }
 
-function materializeDefault(defaultValue) {
+function materializeDefault(defaultValue: any) {
   const value = typeof defaultValue === 'function' ? defaultValue() : defaultValue;
   return value !== null && typeof value === 'object' ? structuredClone(value) : value;
 }
 
-function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
+function assertAnnotatedTextImportPayload(name: string, fieldName: string, descriptor: any, value: any) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new ValidationError(`${name}.${fieldName} annotated-text import must be a non-array object`);
   }
@@ -187,7 +186,7 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
     for (const key of Object.keys(block)) {
       if (!allowedBlock.has(key)) throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}] has unknown key '${key}'`);
     }
-    try { assertWellFormedText(block.text); } catch (error) {
+    try { assertWellFormedText(block.text); } catch (error: any) {
       throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].text ${error.message}`);
     }
     if (block.text.length === 0) {
@@ -203,7 +202,7 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
         }
       }
     }
-    const fields = {};
+    const fields: Record<string, any> = {};
     for (const declaredName of blockFieldNames) {
       const fieldDescriptor = descriptor.block[declaredName];
       let fieldValue;
@@ -239,7 +238,7 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
         families.add(measurement.family);
         if (importedMeasurementFamilies.has(measurement.family)) throw new ValidationError(`${name}.${fieldName} annotated-text import has duplicate measurement family '${measurement.family}' across source blocks`);
         importedMeasurementFamilies.add(measurement.family);
-        const config = descriptor.measurements.find((entry) => entry.measurementName === measurement.family);
+        const config = descriptor.measurements.find((entry: any) => entry.measurementName === measurement.family);
         if (!config) throw new ValidationError(`${name}.${fieldName} annotated-text import has unknown measurement family '${measurement.family}'`);
         let payload;
         try { payload = frozenJsonSnapshot(measurement.payload); } catch { throw new ValidationError(`${name}.${fieldName} annotated-text import measurement payload is not JSON`); }
@@ -256,7 +255,7 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
     if (block.wordEvidence !== undefined) {
       try {
         wordEvidence = assertWordEvidencePayload(block.wordEvidence, { families: descriptor.wordEvidence, blockText: block.text });
-      } catch (error) {
+      } catch (error: any) {
         throw new ValidationError(`${name}.${fieldName} annotated-text import blocks[${i}].wordEvidence ${error.message}`);
       }
     }
@@ -271,9 +270,9 @@ function assertAnnotatedTextImportPayload(name, fieldName, descriptor, value) {
   return Object.freeze({ version: 1, actor: randomUUID().replaceAll('-', ''), blocks: Object.freeze(canonicalBlocks) });
 }
 
-export function materializeCreateDefaults(record, payload) {
+export function materializeCreateDefaults(record: any, payload: any) {
   const data = { ...payload };
-  for (const [fieldName, descriptor] of Object.entries(record.fields)) {
+  for (const [fieldName, descriptor] of Object.entries(record.fields) as Array<[string, any]>) {
     if (!(fieldName in data) && descriptor.default !== undefined) {
       data[fieldName] = materializeDefault(descriptor.default);
       data[fieldName] = validateMaterializedField(record, fieldName, data[fieldName]);
@@ -282,18 +281,23 @@ export function materializeCreateDefaults(record, payload) {
   return data;
 }
 
-export function createCrudHandlers({ record, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }) {
+export function createCrudHandlers({ record, sideTableStrategyEntries, conditionalHistory = false, conditionalCreateHistory = false }: {
+  record: any;
+  sideTableStrategyEntries: any[];
+  conditionalHistory?: boolean;
+  conditionalCreateHistory?: boolean;
+}) {
   const { name, fields, verbs } = record;
   const ownerField = ownerFieldOf({ name, fields });
 
-  const handlers = {
-    [`${name}.create`]: ({ payload, principal, db, history, scope }) => {
+  const handlers: Record<string, any> = {
+    [`${name}.create`]: ({ payload, principal, db, history, scope }: any) => {
       if (Object.hasOwn(payload, '__workbench')) {
         throw new ValidationError(`${name}.__workbench is reserved for framework event metadata`);
       }
       const { id: requestedId, ...fieldsPayload } = payload;
-      const annotatedImports = {};
-      for (const [fieldName, descriptor] of Object.entries(fields)) {
+      const annotatedImports: Record<string, any> = {};
+      for (const [fieldName, descriptor] of Object.entries(fields) as Array<[string, any]>) {
         if (descriptor.kind === 'annotatedText' && Object.hasOwn(fieldsPayload, fieldName)) {
           annotatedImports[fieldName] = assertAnnotatedTextImportPayload(name, fieldName, descriptor, fieldsPayload[fieldName]);
           delete fieldsPayload[fieldName];
@@ -311,19 +315,19 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (!conditionalCreateHistory || history.operation !== 'redo' || !history.input || Object.keys(history.input).length !== 2) throw new ValidationError(`${name}.create history input is invalid`);
         const replacement = history.input.replacement;
         if (history.input.expected !== null || !replacement || replacement.id !== id) throw new ValidationError(`${name}.create history input rows are invalid`);
-        const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
-        if (Object.keys(replacement).length !== columns.length || columns.some((column) => !Object.hasOwn(replacement, column)) || db.prepare(`SELECT 1 FROM ${name} WHERE id = ?`).get(id)) {
+        const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column: any) => column.name);
+        if (Object.keys(replacement).length !== columns.length || columns.some((column: any) => !Object.hasOwn(replacement, column)) || db.prepare(`SELECT 1 FROM ${name} WHERE id = ?`).get(id)) {
           throw Object.assign(new Error(`${name}.create history expected row conflicts`), { status: 409 });
         }
-        const restored = { id };
-        for (const [fieldName, descriptor] of Object.entries(fields)) restored[fieldName] = deserializeField(descriptor, replacement[fieldName]);
+        const restored: Record<string, any> = { id };
+        for (const [fieldName, descriptor] of Object.entries(fields) as Array<[string, any]>) restored[fieldName] = deserializeField(descriptor, replacement[fieldName]);
         return { events: [{ handle: verbs.created.handle, type: verbs.created.type, scope: resolveGeneratedEventScope(record, { id, payload: replacement, scope }), data: restored }], privateFact: { before: null, after: replacement } };
       }
       const data = materializeCreateDefaults(record, { ...validatedFields, id });
       if (ownerField) data[ownerField] = principal?.id;
       const annotatedText = Object.fromEntries(
         Object.entries(fields)
-          .filter(([, descriptor]) => descriptor.kind === 'annotatedText')
+          .filter(([, descriptor]: [string, any]) => descriptor.kind === 'annotatedText')
           .map(([fieldName]) => {
             const value = annotatedImports[fieldName] ?? Object.freeze({
             version: 1,
@@ -345,15 +349,15 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       if (!conditionalCreateHistory) return events;
       // The durable fact must be complete before it is stored; projections cannot
       // repair an already-persisted private fact after the fact.
-      const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
-      const after = Object.fromEntries(columns.map((column) => {
+      const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column: any) => column.name);
+      const after = Object.fromEntries(columns.map((column: any) => {
         if (column === 'id') return [column, id];
         const descriptor = fields[column];
         return [column, descriptor && Object.hasOwn(data, column) ? serializeField(descriptor, data[column]) : null];
       }));
       return { events, privateFact: { before: null, after } };
     },
-    [`${name}.update`]: ({ payload, principal: _p, db, history, scope }) => {
+    [`${name}.update`]: ({ payload, principal: _p, db, history, scope }: any) => {
       const { id, ...rest } = payload;
       if (!id) throw Object.assign(new Error('update requires an id'), { status: 400 });
       if (Object.keys(rest).length === 0) {
@@ -364,12 +368,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       if (history) {
         if (!conditionalHistory || !history || (history.operation !== 'undo' && history.operation !== 'redo') || !history.input || Object.keys(history.input).length !== 2) throw new ValidationError(`${name}.update history input is invalid`);
         const { expected, replacement } = history.input;
-        const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
-        const validRow = (row) => row && typeof row === 'object' && !Array.isArray(row) && Object.keys(row).length === columns.length && columns.every((column) => Object.hasOwn(row, column));
+        const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column: any) => column.name);
+        const validRow = (row: any) => row && typeof row === 'object' && !Array.isArray(row) && Object.keys(row).length === columns.length && columns.every((column: any) => Object.hasOwn(row, column));
         if (!validRow(expected) || !validRow(replacement) || expected.id !== id || replacement.id !== id) throw new ValidationError(`${name}.update history input rows are invalid`);
-        if (!columns.every((column) => Object.is(currentStored[column], expected[column]))) throw Object.assign(new Error(`${name}.update history expected row conflicts`), { status: 409 });
-        const data = {};
-        for (const [fieldName, descriptor] of Object.entries(fields)) {
+        if (!columns.every((column: any) => Object.is(currentStored[column], expected[column]))) throw Object.assign(new Error(`${name}.update history expected row conflicts`), { status: 409 });
+        const data: Record<string, any> = {};
+        for (const [fieldName, descriptor] of Object.entries(fields) as Array<[string, any]>) {
           if (descriptor.kind === 'struct') {
             const cells = Object.keys(descriptor.cells).map((cell) => `${fieldName}__${cell}`);
             if (cells.some((cell) => !Object.is(currentStored[cell], replacement[cell]))) {
@@ -398,7 +402,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       // current row and verify the move is in the declared transition graph.
       // Runs after structural validation so invalid targets report as domain
       // errors before transition errors (clearer diagnostic order).
-      for (const [fieldName, descriptor] of Object.entries(fields)) {
+      for (const [fieldName, descriptor] of Object.entries(fields) as Array<[string, any]>) {
         if (descriptor.kind !== 'state') continue;
         if (!(fieldName in validatedFields)) continue;
         let current;
@@ -436,8 +440,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }
         stateTransitions.push({ fieldName, from: currentValue, to: validatedFields[fieldName] });
       }
-      const data = { ...validatedFields, id };
-      for (const [fieldName, descriptor] of Object.entries(fields)) {
+      const data: Record<string, any> = { ...validatedFields, id };
+      for (const [fieldName, descriptor] of Object.entries(fields) as Array<[string, any]>) {
         if (descriptor.touch) data[fieldName] = new Date();
       }
       const updateRow = db?.prepare?.(`SELECT * FROM ${name} WHERE id = ?`).get(id) ?? null;
@@ -454,21 +458,21 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           const descriptor = fields[fieldName];
           if (!descriptor || descriptor.kind === 'store') continue;
           if (descriptor.kind === 'struct') Object.assign(after, Object.fromEntries(Object.entries(flattenStruct(fieldName, descriptor, value))));
-          else after[fieldName] = resolveStrategy(descriptor.kind).serialize(value, descriptor);
+          else after[fieldName] = serializeField(descriptor, value);
         }
-        for (const [fieldName, descriptor] of Object.entries(fields)) if (descriptor.touch) after[fieldName] = serializeField(descriptor, data[fieldName]);
+        for (const [fieldName, descriptor] of Object.entries(fields) as Array<[string, any]>) if (descriptor.touch) after[fieldName] = serializeField(descriptor, data[fieldName]);
         return { events: result, privateFact: { before: currentStored, after } };
       }
       return result;
     },
-    [`${name}.remove`]: async ({ payload, principal, db, history, scope }) => {
+    [`${name}.remove`]: async ({ payload, principal, db, history, scope }: any) => {
       if (!payload.id) throw Object.assign(new Error('remove requires an id'), { status: 400 });
       if (history) {
         if (!conditionalCreateHistory || history.operation !== 'undo' || !history.input || Object.keys(history.input).length !== 2) throw new ValidationError(`${name}.remove history input is invalid`);
         if (!history.input.expected || history.input.replacement !== null || history.input.expected.id !== payload.id) throw new ValidationError(`${name}.remove history input row is invalid`);
-        const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name);
+        const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column: any) => column.name);
         const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
-        if (!current || Object.keys(history.input.expected).length !== columns.length || columns.some((column) => !Object.hasOwn(history.input.expected, column)) || !columns.every((column) => Object.is(current[column], history.input.expected[column]))) {
+        if (!current || Object.keys(history.input.expected).length !== columns.length || columns.some((column: any) => !Object.hasOwn(history.input.expected, column)) || !columns.every((column: any) => Object.is(current[column], history.input.expected[column]))) {
           throw Object.assign(new Error(`${name} remove conflicts`), { status: 409 });
         }
         if (record.removalCascade && (await record.removalCascadeDescendants(payload.id, db)).length > 0) {
@@ -478,8 +482,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }
       if (record.removalCascade) {
         return record.removalCascade(payload.id, principal, db)
-          .then((rows) => {
-            const events = rows.map(({ entity, id }, index) => ({
+          .then((rows: any) => {
+            const events = rows.map(({ entity, id }: any, index: number) => ({
               ...entity.removedEvent(id, db),
               [CASCADE_PREAUTHORIZED]: true,
               ...(index < rows.length - 1 ? { [CASCADE_DESCENDANT]: true } : {}),
@@ -507,8 +511,8 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       return { events, privateFact: { before: admissionRow, after: null } };
     },
   };
-  const cursorPolicy = {};
-  const annotatedEntries = Object.entries(fields).filter(([, descriptor]) => descriptor.kind === 'annotatedText');
+  const cursorPolicy: Record<string, any> = {};
+  const annotatedEntries = Object.entries(fields).filter(([, descriptor]: [string, any]) => descriptor.kind === 'annotatedText');
   if (conditionalHistory) {
     Object.defineProperty(handlers[`${name}.update`], 'inTransaction', { value: true });
   }
@@ -523,12 +527,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
   }
   if (annotatedEntries.length > 0) {
     const retirementType = `${name}.annotatedText.retire`;
-      const retirementHandler = async ({ payload, principal, db, scope }) => {
+      const retirementHandler = async ({ payload, principal, db, scope }: any) => {
       if (!payload || Object.keys(payload).length !== 1 || typeof payload.id !== 'string' || !payload.id) throw new ValidationError(`${retirementType} requires { id }`);
       const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
       const owningScope = row && resolveAnnotatedTextOwningScope(annotatedEntries[0][1], fields, row).key;
       if (!row || scope !== owningScope) throw new ValidationError(`${retirementType} requires its declared project scope`);
-        if (!row || principal?.id == null || annotatedEntries.some(([, descriptor]) => String(row[descriptor.owner]) !== String(principal.id))) throw Object.assign(new Error('forbidden'), { status: 403 });
+        if (!row || principal?.id == null || annotatedEntries.some(([, descriptor]: [string, any]) => String(row[descriptor.owner]) !== String(principal.id))) throw Object.assign(new Error('forbidden'), { status: 403 });
         for (const [fieldName] of annotatedEntries) clearAuthoringState(db, `${name}_${fieldName}`, payload.id);
       const targetActionTypes = new Set([`${name}.create`, `${name}.update`, `${name}.remove`, ...annotatedEntries.map(([fieldName]) => `${name}.${fieldName}.operation`)]);
       const targetEventTypes = new Set([verbs.created.type, verbs.updated.type, verbs.removed.type, ...annotatedEntries.map(([fieldName]) => eventHandles.native(name, fieldName, 'operated').type)]);
@@ -541,12 +545,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         return { handle, type: handle.type, scope: owningScope, data: Object.freeze({ version: 1, id: payload.id, generation, retiredAt: new Date().toISOString() }) };
       });
       const removed = { handle: verbs.removed.handle, type: verbs.removed.type, scope: owningScope, data: { id: payload.id } };
-      const commit = {
+      const commit: Record<string, any> = {
         events: [...events, removed],
       };
       if (hasErasureTargets) commit.directive = erasureDirectivePreparation({ owningScope, subject: payload.id, census: { version: 1, rules: [
-          ...censusRows.map(({ type }) => ({ kind: 'action', type, disposition: targetActionTypes.has(type) ? 'target' : 'retain', identityPointers: targetActionTypes.has(type) ? ['/id'] : [] })),
-          ...censusEvents.map(({ type }) => ({ kind: 'event', type, disposition: targetEventTypes.has(type) ? 'target' : 'retain', identityPointers: targetEventTypes.has(type) ? ['/id'] : [] })),
+          ...censusRows.map(({ type }: any) => ({ kind: 'action', type, disposition: targetActionTypes.has(type) ? 'target' : 'retain', identityPointers: targetActionTypes.has(type) ? ['/id'] : [] })),
+          ...censusEvents.map(({ type }: any) => ({ kind: 'event', type, disposition: targetEventTypes.has(type) ? 'target' : 'retain', identityPointers: targetEventTypes.has(type) ? ['/id'] : [] })),
         ] } });
       return commit;
     };
@@ -555,9 +559,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     cursorPolicy[retirementType] = 'excluded';
   }
 
-  for (const [fieldName, descriptor] of Object.entries(fields)) {
+  for (const [fieldName, descriptor] of Object.entries(fields) as Array<[string, any]>) {
     if (descriptor.kind !== 'crdt' || descriptor.type !== 'text') continue;
-    handlers[`${name}.${fieldName}.apply`] = ({ payload }) => {
+    handlers[`${name}.${fieldName}.apply`] = ({ payload }: any) => {
       if (!payload || typeof payload.id !== 'string' || Object.keys(payload).length !== 2 || !Object.hasOwn(payload, 'operation')) {
         throw new ValidationError(`${name}.${fieldName}.apply requires exactly { id, operation }`);
       }
@@ -568,20 +572,20 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     cursorPolicy[`${name}.${fieldName}.apply`] = 'excluded';
   }
 
-  for (const [fieldName, descriptor] of Object.entries(fields)) {
+  for (const [fieldName, descriptor] of Object.entries(fields) as Array<[string, any]>) {
     if (descriptor.kind !== 'annotatedText') continue;
     const operationType = `${name}.${fieldName}.operation`;
     const prefix = `${name}_${fieldName}`;
     const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
     const measurementConfigs = compiledMeta?.measurementConfigs ?? {};
     const measurementFamilyList = compiledMeta?.measurementFamilyList ?? [];
-    const owningDocumentScope = (db, id) => {
+    const owningDocumentScope = (db: any, id: any) => {
       const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id);
       if (!row) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       return resolveAnnotatedTextOwningScope(descriptor, fields, row).key;
     };
 
-    const assertDocumentScope = ({ payload, scope, db, internal = false }) => {
+    const assertDocumentScope = ({ payload, scope, db, internal = false }: any) => {
       let command;
       if (payload.version === 9) command = assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload);
       else if (internal && payload.version === 1) command = assertAnnotatedTextOperationPayload(name, fieldName, payload);
@@ -620,10 +624,10 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       return command;
     };
 
-    const assertV9AuthoringBinding = ({ command, db, principal }) =>
+    const assertV9AuthoringBinding = ({ command, db, principal }: any) =>
       assertV9AuthoringBindingFromAdmit({ name, fieldName, prefix, command, db, principal });
 
-    const r1Handler = async ({ payload, db, scope, principal, actionId }) => {
+    const r1Handler = async ({ payload, db, scope, principal, actionId }: any) => {
       if (payload.version === 9) {
         const command = assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload);
         return admitV9AnnotatedTextEdit({ name, fieldName, prefix, descriptor, record, compiledMeta, command, db, scope, principal, actionId, handlers: { splitHandler, r3Handler, r4Handler, r5Handler } });
@@ -646,7 +650,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       let nextFamily;
       try {
         nextFamily = applyTextOperationToBlock(family, command.operation.blockId, command.operation.operation);
-      } catch (error) {
+      } catch (error: any) {
         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
       }
       const handle = eventHandles.native(name, fieldName, 'operated');
@@ -665,7 +669,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }];
     };
 
-    const splitHandler = ({ payload, db, scope, structural = null }) => {
+    const splitHandler = ({ payload, db, scope, structural = null }: any) => {
       const command = assertDocumentScope({ payload, scope, db, internal: true });
       const documentScope = owningDocumentScope(db, command.id);
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
@@ -680,7 +684,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       let blockText;
       try {
         blockText = materializeBlock(family, blockId);
-      } catch (error) {
+      } catch (error: any) {
         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
       }
 
@@ -692,7 +696,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       let splitResult;
       try {
         splitResult = splitBlock(family, blockId, newBlockId, utf16Offset);
-      } catch (error) {
+      } catch (error: any) {
         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
       }
       if (splitResult.type === 'unchanged') {
@@ -705,7 +709,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       if (!leftBlockStored) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
 
       const blockFields = Object.keys(descriptor.block ?? {});
-      const leftBlockFields = {};
+      const leftBlockFields: Record<string, any> = {};
       for (const bf of blockFields) {
         const bd = descriptor.block[bf];
         leftBlockFields[bf] = deserializeField(bd, leftBlockStored[bf]);
@@ -717,7 +721,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         fields: Object.freeze(leftBlockFields),
       });
 
-      const rightBlockFields = {};
+      const rightBlockFields: Record<string, any> = {};
       for (const bf of blockFields) {
         const bd = descriptor.block[bf];
         rightBlockFields[bf] = deserializeField(bd, leftBlockStored[bf]);
@@ -737,7 +741,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
            JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
           WHERE annotation.document_id = ?`,
       ).all(command.id);
-      const pureMemberships = memberships.map(m => ({
+      const pureMemberships = memberships.map((m: any) => ({
         annotationId: m.annotation_id,
         blockId: m.block_id,
         ordinal: m.ordinal,
@@ -746,12 +750,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }));
 
       const annotations = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ?`).all(command.id);
-      const pureAnnotations = annotations.map(a => ({ id: a.id, family: a.family }));
+      const pureAnnotations = annotations.map((a: any) => ({ id: a.id, family: a.family }));
 
       const membershipResult = splitBlockMemberships(
-        splitResult.family, pureAnnotations, pureMemberships, blockId, newBlockId,
+        splitResult.family as any, pureAnnotations, pureMemberships, blockId, newBlockId,
       );
-      const affectedAnnotationIds = new Set(pureMemberships.filter(m => m.blockId === blockId).map(m => m.annotationId));
+      const affectedAnnotationIds = new Set(pureMemberships.filter((m: any) => m.blockId === blockId).map((m: any) => m.annotationId));
 
       const measurementFacts = [];
       if (measurementFamilyList.length > 0) {
@@ -780,7 +784,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             payload: oldPayload,
           });
 
-          const validatePayload = (payload, blockText) => {
+          const validatePayload = (payload: any, blockText: any) => {
             try {
               const result = extSpec.validate(Object.freeze({
                 version: 1,
@@ -862,7 +866,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           const annotation = structural.annotation;
           const familyName = annotation?.family;
           const familyMeta = compiledMeta.annotationHandles[familyName];
-          const familyDecl = descriptor.annotations.find((d) => d.annotationName === familyName);
+          const familyDecl = descriptor.annotations.find((d: any) => d.annotationName === familyName);
           if (!familyMeta || !familyDecl || familyDecl.kind !== 'annotation' || familyMeta.appliesTo !== 'block-group' || familyMeta.cardinality !== 'one' ||
                !annotation || Object.keys(annotation).sort().join() !== 'family,fields,id' || typeof annotation.id !== 'string' || !annotation.id ||
               db.prepare(`SELECT 1 FROM ${prefix}_annotation WHERE id = ?`).get(annotation.id) ||
@@ -874,7 +878,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         }
       }
       const handle = eventHandles.native(name, fieldName, 'operated');
-      const eventData = {
+      const eventData: Record<string, any> = {
         version: structural ? 8 : 2,
         id: command.id,
         before: Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier }),
@@ -906,7 +910,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }];
     };
 
-    const r3Handler = ({ payload, db, scope }) => {
+    const r3Handler = ({ payload, db, scope }: any) => {
       const command = assertDocumentScope({ payload, scope, db, internal: true });
       const documentScope = owningDocumentScope(db, command.id);
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
@@ -929,12 +933,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
 
       const blockFields = Object.keys(descriptor.block ?? {});
 
-      const leftBlockCells = {};
+      const leftBlockCells: Record<string, any> = {};
       for (const bf of blockFields) {
         const bd = descriptor.block[bf];
         leftBlockCells[bf] = deserializeField(bd, leftBlockStored[bf]);
       }
-      const rightBlockCells = {};
+      const rightBlockCells: Record<string, any> = {};
       for (const bf of blockFields) {
         const bd = descriptor.block[bf];
         rightBlockCells[bf] = deserializeField(bd, rightBlockStored[bf]);
@@ -952,7 +956,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       let mergeResult;
       try {
         mergeResult = mergeBlocks(family, leftBlockId, rightBlockId);
-      } catch (error) {
+      } catch (error: any) {
         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
       }
 
@@ -962,7 +966,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
            JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
           WHERE annotation.document_id = ?`,
       ).all(command.id);
-      const pureMemberships = memberships.map(m => ({
+      const pureMemberships = memberships.map((m: any) => ({
         annotationId: m.annotation_id,
         blockId: m.block_id,
         ordinal: m.ordinal,
@@ -971,27 +975,27 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }));
 
       const annotations = db.prepare(`SELECT id, family FROM ${prefix}_annotation WHERE document_id = ?`).all(command.id);
-      const pureAnnotations = annotations.map(a => ({ id: a.id, family: a.family }));
+      const pureAnnotations = annotations.map((a: any) => ({ id: a.id, family: a.family }));
 
       let membershipResult;
       try {
         membershipResult = mergeBlocksMemberships(
-          family, pureAnnotations, pureMemberships, leftBlockId, rightBlockId,
+          family as any, pureAnnotations, pureMemberships, leftBlockId, rightBlockId,
         );
-      } catch (error) {
+      } catch (error: any) {
         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
       }
 
-      const affectedAnnotationIds = new Set(pureMemberships.filter(m => m.blockId === leftBlockId || m.blockId === rightBlockId).map(m => m.annotationId));
+      const affectedAnnotationIds = new Set(pureMemberships.filter((m: any) => m.blockId === leftBlockId || m.blockId === rightBlockId).map((m: any) => m.annotationId));
 
       const measurementFacts = [];
       if (measurementFamilyList.length > 0) {
         const leftMeasurements = db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id = ? ORDER BY family`).all(leftBlockId);
         const rightMeasurements = db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id = ? ORDER BY family`).all(rightBlockId);
 
-        const leftByFamily = {};
+        const leftByFamily: Record<string, any> = {};
         for (const row of leftMeasurements) leftByFamily[row.family] = row;
-        const rightByFamily = {};
+        const rightByFamily: Record<string, any> = {};
         for (const row of rightMeasurements) rightByFamily[row.family] = row;
 
         const allFamilies = new Set([...Object.keys(leftByFamily), ...Object.keys(rightByFamily)]);
@@ -1027,7 +1031,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           if (leftRow) leftBlockText = materializeBlock(family, leftBlockId);
           if (rightRow) rightBlockText = materializeBlock(family, rightBlockId);
 
-          const validatePayload = (payload, blockText) => {
+          const validatePayload = (payload: any, blockText: any) => {
             try {
               const result = extSpec.validate(Object.freeze({
                 version: 1,
@@ -1133,7 +1137,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }];
     };
 
-    const r4Handler = ({ payload, db, scope, principal }) => {
+    const r4Handler = ({ payload, db, scope, principal }: any) => {
       const command = assertDocumentScope({ payload, scope, db, internal: true });
       const documentScope = owningDocumentScope(db, command.id);
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
@@ -1155,7 +1159,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
        try {
          blockText = materializeBlock(family, blockId);
          endBlockText = materializeBlock(family, endBlockId);
-      } catch (error) {
+      } catch (error: any) {
         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
       }
        const startIndex = family.blocks.findIndex((block) => block.id === blockId);
@@ -1169,7 +1173,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
 
       const compiledMeta = getAnnotatedTextCompiledMetadata(descriptor);
       const annotationFamilyMeta = compiledMeta.annotationFields[annInput.family];
-      const annotationDescriptor = descriptor.annotations.find((entry) => entry.annotationName === annInput.family);
+      const annotationDescriptor = descriptor.annotations.find((entry: any) => entry.annotationName === annInput.family);
       if (!annotationFamilyMeta || !annotationDescriptor) {
         throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family '${annInput.family}'`);
       }
@@ -1199,7 +1203,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
 
       const familyFieldDescs = annotationDescriptor.fields;
       const canonicalFields = { ...annInput.fields };
-      for (const [key, desc] of Object.entries(familyFieldDescs)) {
+      for (const [key, desc] of Object.entries(familyFieldDescs) as Array<[string, any]>) {
         if (key in canonicalFields) {
           const strategy = resolveStrategy(desc.kind);
           const validationResult = strategy.validate(canonicalFields[key], desc);
@@ -1241,7 +1245,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
            JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
           WHERE annotation.document_id = ?`,
       ).all(command.id);
-      let pureMemberships = sourceMemberships.map(m => ({
+      let pureMemberships = sourceMemberships.map((m: any) => ({
         annotationId: m.annotation_id,
         blockId: m.block_id,
         ordinal: m.ordinal,
@@ -1258,7 +1262,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         ids.push(target.target_annotation_id);
         targetsByAnnotation.set(target.annotation_id, ids);
       }
-      let pureAnnotations = annotationRows.map(a => ({ id: a.id, family: a.family, protectedTargetIds: targetsByAnnotation.get(a.id) ?? [] }));
+      let pureAnnotations = annotationRows.map((a: any) => ({ id: a.id, family: a.family, protectedTargetIds: targetsByAnnotation.get(a.id) ?? [] }));
 
       const blockFields = Object.keys(descriptor.block ?? {});
       const blockFacts = [];
@@ -1272,12 +1276,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
          storedBlockById.set(endBlockId, endStoredBlock);
        }
 
-      const readMeasurements = (bid) => {
+      const readMeasurements = (bid: any) => {
         if (measurementFamilyList.length === 0) return [];
         return db.prepare(`SELECT id, family, format_version, payload FROM ${prefix}_measurement WHERE block_id = ? ORDER BY family`).all(bid);
       };
 
-      let measurementState = null;
+      let measurementState: Record<string, any> | null = null;
        const splitSources = new Set();
        if (needsLeftSplit) splitSources.add(blockId);
        if (needsRightSplit) splitSources.add(endBlockId);
@@ -1285,7 +1289,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
          measurementState = Object.fromEntries([...splitSources].map((id) => [id, readMeasurements(id)]));
        }
 
-      const partitionMeasurements = (sourceBlockId, newBlockId, offset, familyAtSplit, splitFamily) => {
+      const partitionMeasurements = (sourceBlockId: any, newBlockId: any, offset: any, familyAtSplit: any, splitFamily: any) => {
         if (!measurementState || !measurementState[sourceBlockId]) return [];
         const measList = measurementState[sourceBlockId];
         const sourceBlockVisibleText = materializeBlock(familyAtSplit, sourceBlockId);
@@ -1302,7 +1306,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
           let oldPayload;
           try { oldPayload = frozenJsonSnapshot(JSON.parse(row.payload)); } catch { throw new ValidationError(`${name}.${fieldName}.operation measurement payload is not valid JSON`); }
           const partitionInput = Object.freeze({ version: 1, formatVersion: measConfig.formatVersion, blockText: sourceBlockVisibleText, utf16Offset: offset, payload: oldPayload });
-          const validatePayload = (payload, blockText) => {
+          const validatePayload = (payload: any, blockText: any) => {
             try { const result = extSpec.validate(Object.freeze({ version: 1, formatVersion: measConfig.formatVersion, blockText, payload: frozenJsonSnapshot(payload) })); if (result !== undefined) throw new Error('returned a value'); } catch { throw new ValidationError(`${name}.${fieldName}.operation measurement validation failed`); }
           };
           validatePayload(oldPayload, sourceBlockVisibleText);
@@ -1326,21 +1330,21 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         return [...leftFacts, ...rightFacts];
       };
 
-       const splitOne = (sourceId, offset, selectsRight) => {
+       const splitOne = (sourceId: any, offset: any, selectsRight: any) => {
          const newBlockId = randomUUID();
          let splitResult;
-         try { splitResult = splitBlock(currentFamily, sourceId, newBlockId, offset); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
+         try { splitResult = splitBlock(currentFamily, sourceId, newBlockId, offset); } catch (error: any) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
         if (splitResult.type === 'unchanged') throw new ValidationError(`${name}.${fieldName}.operation split at start offset returned unchanged`);
         let membershipResult;
-         try { membershipResult = splitBlockMemberships(splitResult.family, pureAnnotations, pureMemberships, sourceId, newBlockId); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
+         try { membershipResult = splitBlockMemberships(splitResult.family as any, pureAnnotations, pureMemberships, sourceId, newBlockId); } catch (error: any) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
         pureAnnotations = membershipResult.annotations;
         pureMemberships = membershipResult.memberships;
 
          const leftBlockStored = storedBlockById.get(sourceId);
         if (!leftBlockStored) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
-        const leftBlockCells = {};
+        const leftBlockCells: Record<string, any> = {};
         for (const bf of blockFields) { const bd = descriptor.block[bf]; leftBlockCells[bf] = deserializeField(bd, leftBlockStored[bf]); }
-        const rightBlockCells = {};
+        const rightBlockCells: Record<string, any> = {};
         for (const bf of blockFields) { const bd = descriptor.block[bf]; rightBlockCells[bf] = deserializeField(bd, leftBlockStored[bf]); }
          blockFacts.push(Object.freeze({ id: sourceId, epoch: leftBlockStored.epoch, fields: Object.freeze(leftBlockCells) }));
         blockFacts.push(Object.freeze({ id: newBlockId, epoch: leftBlockStored.epoch, fields: Object.freeze(rightBlockCells) }));
@@ -1366,18 +1370,18 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
          const endSourceId = blockId === endBlockId && needsLeftSplit ? selectedBlockId : endBlockId;
          const splitSourceOffset = blockId === endBlockId && needsLeftSplit ? adjustedOffset - startUtf16Offset : adjustedOffset;
          let splitResult;
-         try { splitResult = splitBlock(currentFamily, endSourceId, newBlockId, splitSourceOffset); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
+         try { splitResult = splitBlock(currentFamily, endSourceId, newBlockId, splitSourceOffset); } catch (error: any) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
         if (splitResult.type === 'unchanged') throw new ValidationError(`${name}.${fieldName}.operation split at end offset returned unchanged`);
         let membershipResult;
-         try { membershipResult = splitBlockMemberships(splitResult.family, pureAnnotations, pureMemberships, endSourceId, newBlockId); } catch (error) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
+         try { membershipResult = splitBlockMemberships(splitResult.family as any, pureAnnotations, pureMemberships, endSourceId, newBlockId); } catch (error: any) { throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`); }
         pureAnnotations = membershipResult.annotations;
         pureMemberships = membershipResult.memberships;
 
          const sourceBlockStored = storedBlockById.get(endSourceId);
         if (!sourceBlockStored) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
-        const leftBlockCells = {};
+        const leftBlockCells: Record<string, any> = {};
         for (const bf of blockFields) { const bd = descriptor.block[bf]; leftBlockCells[bf] = deserializeField(bd, sourceBlockStored[bf]); }
-        const rightBlockCells = {};
+        const rightBlockCells: Record<string, any> = {};
         for (const bf of blockFields) { const bd = descriptor.block[bf]; rightBlockCells[bf] = deserializeField(bd, sourceBlockStored[bf]); }
          blockFacts.push(Object.freeze({ id: endSourceId, epoch: sourceBlockStored.epoch, fields: Object.freeze(leftBlockCells) }));
         blockFacts.push(Object.freeze({ id: newBlockId, epoch: sourceBlockStored.epoch, fields: Object.freeze(rightBlockCells) }));
@@ -1395,8 +1399,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       if (anySplit) afterRevision = state.structure_version + 1;
 
        const basisFrontier = currentFamily.checkpoint.frontier;
-       const selectedBlockText = materializeBlock(currentFamily, selectedBlockId);
-       try { resolvePositionToEndpoint(currentFamily, selectedBlockId, 0, basisFrontier); } catch (error) {
+       try { resolvePositionToEndpoint(currentFamily, selectedBlockId, 0, basisFrontier, 'right'); } catch (error: any) {
          throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
        }
 
@@ -1411,26 +1414,26 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
          if (sameBlockProtecting) {
            // Protective span: one partial membership at the requested
            // [startUtf16Offset,endUtf16Offset) structural endpoints, no splits.
-           const start = resolvePositionToEndpoint(currentFamily, selectedBlockId, startUtf16Offset, basisFrontier);
-           const end = resolvePositionToEndpoint(currentFamily, selectedBlockId, endUtf16Offset, basisFrontier);
-           addMembershipResult = addMembership(currentFamily, virtualAnnotations, addMembershipResult.memberships, annInput.id, selectedBlockId, start, end);
+           const start = resolvePositionToEndpoint(currentFamily, selectedBlockId, startUtf16Offset, basisFrontier, 'right');
+           const end = resolvePositionToEndpoint(currentFamily, selectedBlockId, endUtf16Offset, basisFrontier, 'right');
+           addMembershipResult = addMembership(currentFamily as any, virtualAnnotations, addMembershipResult.memberships, annInput.id, selectedBlockId, start, end);
          } else {
            for (const selectedId of selectedBlockIds) {
              const selectedText = materializeBlock(currentFamily, selectedId);
-             const start = resolvePositionToEndpoint(currentFamily, selectedId, 0, basisFrontier);
-             const end = resolvePositionToEndpoint(currentFamily, selectedId, selectedText.length, basisFrontier);
-             addMembershipResult = addMembership(currentFamily, virtualAnnotations, addMembershipResult.memberships, annInput.id, selectedId, start, end);
+             const start = resolvePositionToEndpoint(currentFamily, selectedId, 0, basisFrontier, 'right');
+             const end = resolvePositionToEndpoint(currentFamily, selectedId, selectedText.length, basisFrontier, 'right');
+             addMembershipResult = addMembership(currentFamily as any, virtualAnnotations, addMembershipResult.memberships, annInput.id, selectedId, start, end);
            }
          }
-       } catch (error) {
+       } catch (error: any) {
          throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
        }
 
-       const affectedAnnotationIds = new Set(sourceMemberships.filter(m => m.block_id === blockId).map(m => m.annotation_id));
+       const affectedAnnotationIds = new Set(sourceMemberships.filter((m: any) => m.block_id === blockId).map((m: any) => m.annotation_id));
        for (const sourceId of splitSources) {
          for (const m of sourceMemberships) if (m.block_id === sourceId) affectedAnnotationIds.add(m.annotation_id);
        }
-       const membershipFacts = addMembershipResult.memberships.filter(m => m.annotationId === annInput.id || affectedAnnotationIds.has(m.annotationId)).map(m => ({
+       const membershipFacts = addMembershipResult.memberships.filter((m: any) => m.annotationId === annInput.id || affectedAnnotationIds.has(m.annotationId)).map((m: any) => ({
         annotationId: m.annotationId,
         blockId: m.blockId,
         ordinal: m.ordinal,
@@ -1485,7 +1488,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }];
     };
 
-    const r5Handler = ({ payload, db, scope }) => {
+    const r5Handler = ({ payload, db, scope }: any) => {
       const command = assertDocumentScope({ payload, scope, db, internal: true });
       const documentScope = owningDocumentScope(db, command.id);
       const state = db.prepare(`SELECT structure_version, family_checkpoint FROM ${prefix}_state WHERE document_id = ?`).get(command.id);
@@ -1502,7 +1505,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
            JOIN ${prefix}_annotation AS annotation ON annotation.id = membership.annotation_id
           WHERE annotation.document_id = ?`,
       ).all(command.id);
-      const memberships = sourceMemberships.map((membership) => ({
+      const memberships = sourceMemberships.map((membership: any) => ({
         annotationId: membership.annotation_id,
         blockId: membership.block_id,
         ordinal: membership.ordinal,
@@ -1515,20 +1518,20 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       ).all(command.id);
       const targetsByAnnotation = new Map();
       for (const target of targets) targetsByAnnotation.set(target.annotation_id, [...(targetsByAnnotation.get(target.annotation_id) ?? []), target.target_annotation_id]);
-      const annotations = annotationRows.map((annotation) => {
+      const annotations = annotationRows.map((annotation: any) => {
         const metadata = compiledMeta.annotationHandles[annotation.family];
         if (!metadata) throw new ValidationError(`${name}.${fieldName}.operation unknown annotation family '${annotation.family}'`);
         return { id: annotation.id, family: annotation.family, empty: metadata.empty, protectedTargetIds: targetsByAnnotation.get(annotation.id) ?? [] };
       });
-      const targetAnnotation = annotations.find((annotation) => annotation.id === command.operation.annotationId);
+      const targetAnnotation = annotations.find((annotation: any) => annotation.id === command.operation.annotationId);
       if (!targetAnnotation) throw new ValidationError(`${name}.${fieldName}.operation annotation not found`);
       let reduced;
       try {
-        reduced = removeMembership(family, annotations, memberships, command.operation.annotationId, command.operation.blockId, { structuralRevision: state.structure_version });
-      } catch (error) {
+        reduced = removeMembership(family as any, annotations, memberships, command.operation.annotationId, command.operation.blockId, { structuralRevision: state.structure_version });
+      } catch (error: any) {
         throw new ValidationError(`${name}.${fieldName}.operation ${error.message}`);
       }
-      const outcome = reduced.outcomes[0];
+      const outcome: any = reduced.outcomes[0];
       const changedProtectors = reduced.annotations
         .filter((annotation) => JSON.stringify(annotation.protectedTargetIds ?? []) !== JSON.stringify(targetsByAnnotation.get(annotation.id) ?? []))
         .map((annotation) => Object.freeze({ annotationId: annotation.id, protectsPostimage: Object.freeze([...(annotation.protectedTargetIds ?? [])]) }))
@@ -1564,7 +1567,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }];
     };
 
-    const handler = ({ payload, db, scope, principal, actionId, history }) => {
+    const handler = ({ payload, db, scope, principal, actionId, history }: any) => {
       if (!history?.input && payload?.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
       const command = payload.version === 9 ? assertV9AnnotatedTextOffsetEditPayload(name, fieldName, payload) : null;
       if (history?.input?.kind === ANNOTATED_TEXT_COMPENSATION) {
@@ -1596,7 +1599,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (!operation) return { events: [], privateFact: { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'noop' } }, historyOutcome: 'noop' };
         const nextFamily = applyTextOperation(family, operation);
         const handle = eventHandles.native(name, fieldName, 'operated');
-        const compensation = { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'applied' }, contribution: { kind: 'text.insert', opId: operation[2], anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount } };
+        const compensation: Record<string, any> = { version: 2, kind: 'annotated-text.compensation', documentId: payload.id, linkage: { rootActionId: payload.history.rootActionId, targetActionId: payload.history.targetActionId, direction: payload.history.direction, outcome: 'applied' }, contribution: { kind: 'text.insert', opId: operation[2], anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount } };
         if (payload.history.direction === 'undo') compensation.redo = { kind: 'text.insert', opId: originalOp, anchor: contribution.anchor, text: contribution.text, scalarCount: contribution.scalarCount };
         const before = Object.freeze({ structuralRevision: state.structure_version, frontier: family.checkpoint.frontier });
         const after = Object.freeze({ structuralRevision: state.structure_version, frontier: nextFamily.checkpoint.frontier });
@@ -1605,14 +1608,14 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         return { events: [Object.freeze({ handle, type: handle.type, scope, data: Object.freeze(envelope) })], privateFact: compensation, historyOutcome: 'applied' };
       }
       if (payload.version === 1) throw new ValidationError('annotated text compensation is history-authored only');
-      return Promise.resolve(r1Handler({ payload, db, scope, principal, actionId })).then((events) => {
+      return Promise.resolve(r1Handler({ payload, db, scope, principal, actionId })).then((events: any) => {
         if (payload.version !== 9) return events;
         return {
           events,
           privateFact: command.edit.kind === 'text.insert'
             ? { version: 2, kind: 'annotated-text.contribution', documentId: command.id, contribution: { kind: 'text.insert', opId: events[0].data.operation.operation[2], anchor: events[0].data.operation.operation[5][1], text: command.edit.text, scalarCount: scalarCount(command.edit.text) } }
             : { version: 2, kind: 'annotated-text.barrier', documentId: command.id },
-          authoringReceipt: ({ db: receiptDb, confirmedThrough }) => {
+          authoringReceipt: ({ db: receiptDb, confirmedThrough }: any) => {
             // Blockless (issue #33): issue ONE document-scoped position frame
             // bound to the post-commit family so the authoring client can keep
             // typing. The snapshot insert joins this origin transaction.
@@ -1625,9 +1628,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             const envelope = buildAuthoringEnvelope({
               streamToken: command.authoring.stream,
               leaseToken: command.authoring.lease,
-              snapshotToken: issued.snapshot.id,
+              snapshotToken: issued!.snapshot.id,
               fence: confirmedThrough,
-              positionFrames: issued.positionFrames,
+              positionFrames: issued!.positionFrames,
             });
             return Object.freeze({ version: 1, actionId, confirmedThrough, authoring: Object.freeze({
               ...envelope,
@@ -1639,15 +1642,15 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     };
     Object.defineProperty(handler, 'inTransaction', { value: true });
     Object.defineProperty(handler, 'batchForbidden', { value: true });
-    Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope, db, principal, history }) => {
+    Object.defineProperty(handler, 'preDedupe', { value: ({ payload, scope, db, principal, history }: any) => {
       if (history?.input?.kind === ANNOTATED_TEXT_COMPENSATION) return;
       const command = assertDocumentScope({ payload, scope, db });
       if (command.version === 9) assertV9AuthoringBinding({ command, db, principal });
     }});
-    Object.defineProperty(handler, 'dedupeReceiptMatches', { value: (receipt, request) =>
+    Object.defineProperty(handler, 'dedupeReceiptMatches', { value: (receipt: any, request: any) =>
       receipt.actionType === operationType && receipt.actionData === JSON.stringify(request.payload) });
     handlers[operationType] = handler;
-    const compensationHandler = (context) => {
+    const compensationHandler = (context: any) => {
       if (!context.history?.input || context.history.input.kind !== ANNOTATED_TEXT_COMPENSATION) {
         throw new ValidationError('annotated text compensation is history-authored only');
       }
@@ -1656,12 +1659,12 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     Object.defineProperties(compensationHandler, {
       inTransaction: { value: true },
       batchForbidden: { value: true },
-      preDedupe: { value: ({ history }) => {
+      preDedupe: { value: ({ history }: any) => {
         if (!history?.input || history.input.kind !== ANNOTATED_TEXT_COMPENSATION) {
           throw new ValidationError('annotated text compensation is history-authored only');
         }
       } },
-      dedupeReceiptMatches: { value: (receipt, request) =>
+      dedupeReceiptMatches: { value: (receipt: any, request: any) =>
         receipt.actionType === `${name}.${fieldName}.compensate` && receipt.actionData === JSON.stringify(request.payload) },
     });
     handlers[`${name}.${fieldName}.compensate`] = compensationHandler;

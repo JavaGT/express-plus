@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Pure commit planning for annotated-text operations (issue #33 blockless).
 //
 // One continuous RGA text per document; annotations are document-scoped
@@ -18,21 +17,66 @@ import {
 } from './annotated-text-continuous.ts';
 import { canonicalTextOp } from './annotated-text.ts';
 import { packOperatedFacts } from './annotated-text-operated-facts.ts';
+import type { ContinuousTextFamily } from './annotated-text-continuous.ts';
+import type { StructuralEndpoint } from './annotated-text-family.ts';
+import type { Frontier } from './annotated-text.ts';
 
-function deepFreeze(value) {
+function deepFreeze<T>(value: T): T {
   if (value === null || typeof value !== 'object') return value;
-  if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value); }
+  if (Array.isArray(value)) { value.forEach(deepFreeze); return Object.freeze(value) as T; }
   const proto = Object.getPrototypeOf(value);
   if (proto !== null && proto !== Object.prototype) return value;
-  Object.values(value).forEach(deepFreeze);
-  return Object.freeze(value);
+  Object.values(value as Record<string, unknown>).forEach(deepFreeze);
+  return Object.freeze(value) as T;
 }
 
-function before(family, structuralRevision) {
+interface PlanBefore {
+  structuralRevision: number;
+  frontier: Frontier;
+}
+
+interface TextPlan {
+  version: 13;
+  id: string;
+  before: PlanBefore;
+  after: { structuralRevision: number; frontier: Frontier };
+  operation: any;
+  facts: any;
+}
+
+interface Annotation {
+  id: string;
+  family: string;
+  empty: 'delete' | 'orphan';
+}
+
+interface AnnotationRange {
+  annotationId: string;
+  start: StructuralEndpoint;
+  end: StructuralEndpoint;
+}
+
+type OffsetEdit =
+  | { kind: 'text.insert'; at: { offset: number; affinity: 'left' | 'right' }; text: string }
+  | { kind: 'text.delete'; from: { offset: number }; to: { offset: number } }
+  | { kind: 'text.replace'; text: string; from: { offset: number; affinity: 'left' | 'right' }; to: { offset: number } };
+
+interface EmptiedAnnotation {
+  annotationId: string;
+  empty: 'delete' | 'orphan';
+  disposition: {
+    kind: 'orphaned' | 'deleted';
+    family: string;
+    savedQuote: string | null;
+    lastRange: number[] | null;
+  };
+}
+
+function before(family: ContinuousTextFamily, structuralRevision: number): PlanBefore {
   return Object.freeze({ structuralRevision, frontier: family.checkpoint.frontier });
 }
 
-function unifiedPlan(data) {
+function unifiedPlan(data: Record<string, any>): TextPlan {
   return deepFreeze({
     version: 13,
     id: data.id,
@@ -43,15 +87,23 @@ function unifiedPlan(data) {
   });
 }
 
-function assertForwardOffset(text, fromOffset, toOffset) {
+function assertForwardOffset(text: string, fromOffset: number, toOffset: number) {
   if (!Number.isSafeInteger(fromOffset) || !Number.isSafeInteger(toOffset) || fromOffset < 0 || toOffset < fromOffset || toOffset > text.length) {
-    const error = new Error('selection must be a forward, in-bounds range'); error.code = 'position-invalid'; throw error;
+    const error = new Error('selection must be a forward, in-bounds range') as Error & { code: string };
+    error.code = 'position-invalid';
+    throw error;
   }
 }
 
 /** A range becomes empty when its visible width drops to zero after an edit. */
-function emptiedRanges({ beforeFamily, afterFamily, ranges, annotations, structureVersion }) {
-  const emptied = [];
+function emptiedRanges({ beforeFamily, afterFamily, ranges, annotations, structureVersion }: {
+  beforeFamily: ContinuousTextFamily;
+  afterFamily: ContinuousTextFamily;
+  ranges: AnnotationRange[];
+  annotations: Annotation[];
+  structureVersion: number;
+}): EmptiedAnnotation[] {
+  const emptied: EmptiedAnnotation[] = [];
   for (const range of ranges) {
     if (projectEndpointToOffset(afterFamily, range.start) < projectEndpointToOffset(afterFamily, range.end)) continue;
     const annotation = annotations.find((candidate) => candidate.id === range.annotationId);
@@ -68,7 +120,7 @@ function emptiedRanges({ beforeFamily, afterFamily, ranges, annotations, structu
   return emptied;
 }
 
-function materializeRangeBetween(family, range) {
+function materializeRangeBetween(family: ContinuousTextFamily, range: AnnotationRange): string {
   let text = '';
   const startPos = projectEndpointToOffset(family, range.start);
   const endPos = projectEndpointToOffset(family, range.end);
@@ -81,7 +133,16 @@ function materializeRangeBetween(family, range) {
  * Plan a document-wide text insert/delete/replace. The edit names ABSOLUTE
  * offsets; the operation applies to the whole continuous family.
  */
-export function planTextOffsetEdit({ documentId, structureVersion, family, actor, lamport, edit, annotations = [], ranges = [] }) {
+export function planTextOffsetEdit({ documentId, structureVersion, family, actor, lamport, edit, annotations = [], ranges = [] }: {
+  documentId: string;
+  structureVersion: number;
+  family: ContinuousTextFamily;
+  actor: string;
+  lamport: number;
+  edit: OffsetEdit;
+  annotations?: Annotation[];
+  ranges?: AnnotationRange[];
+}): TextPlan {
   const text = materializeText(family);
   if (edit.kind === 'text.insert') {
     assertForwardOffset(text, edit.at.offset, edit.at.offset);
@@ -98,13 +159,15 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
   if (edit.kind === 'text.delete' || edit.kind === 'text.replace') {
     assertForwardOffset(text, edit.from.offset, edit.to.offset);
     if (edit.from.offset === edit.to.offset) {
-      const error = new Error('delete range must be non-empty'); error.code = 'position-invalid'; throw error;
+      const error = new Error('delete range must be non-empty') as Error & { code: string };
+      error.code = 'position-invalid';
+      throw error;
     }
     if (edit.kind === 'text.replace') {
       const deleteOperation = textOperationForOffsetEdit(family, { kind: 'text.delete', from: edit.from, to: edit.to }, `${actor.slice(0, 30)}d0`, lamport);
       const intermediate = applyTextOperation(family, deleteOperation);
       const anchor = resolveOffsetToEndpoint(intermediate, edit.from.offset, intermediate.checkpoint.frontier, edit.from.affinity).point[1];
-      let insertOperation = ['workbench.text', 1, [`${actor.slice(0, 30)}e0`, 1], lamport + 1, intermediate.checkpoint.frontier, ['insert', anchor, edit.text]];
+      let insertOperation: unknown = ['workbench.text', 1, [`${actor.slice(0, 30)}e0`, 1], lamport + 1, intermediate.checkpoint.frontier, ['insert', anchor, edit.text]];
       insertOperation = canonicalTextOp(insertOperation);
       const nextFamily = applyTextOperation(intermediate, insertOperation);
       // A replacement can empty an annotation range exactly like a delete does;
@@ -131,21 +194,34 @@ export function planTextOffsetEdit({ documentId, structureVersion, family, actor
       emptiedAnnotations: Object.freeze(emptied),
     });
   }
-  const error = new Error(`unsupported edit kind: ${edit.kind}`); error.code = 'position-invalid'; throw error;
+  const error = new Error(`unsupported edit kind: ${(edit as any).kind}`) as Error & { code: string };
+  error.code = 'position-invalid';
+  throw error;
 }
 
 /** Plan a document-range annotation.apply: one contiguous range, no blocks. */
-export function planTextRangeApply({ documentId, structureVersion, family, annotation, from, to, ranges = [], actorId }) {
+export function planTextRangeApply({ documentId, structureVersion, family, annotation, from, to, ranges = [], actorId }: {
+  documentId: string;
+  structureVersion: number;
+  family: ContinuousTextFamily;
+  annotation: Annotation;
+  from: { offset: number; affinity: 'left' | 'right' };
+  to: { offset: number; affinity: 'left' | 'right' };
+  ranges?: AnnotationRange[];
+  actorId: string;
+}): TextPlan {
   const text = materializeText(family);
   const startOffset = from.offset;
   const endOffset = to.offset;
   assertForwardOffset(text, startOffset, endOffset);
   if (startOffset === endOffset) {
-    const error = new Error('annotation selection must be a forward, non-empty range'); error.code = 'position-invalid'; throw error;
+    const error = new Error('annotation selection must be a forward, non-empty range') as Error & { code: string };
+    error.code = 'position-invalid';
+    throw error;
   }
   const start = resolveOffsetToEndpoint(family, startOffset, family.checkpoint.frontier, from.affinity);
   const end = resolveOffsetToEndpoint(family, endOffset, family.checkpoint.frontier, to.affinity);
-  const range = { annotationId: annotation.id, start, end };
+  const range: AnnotationRange = { annotationId: annotation.id, start, end };
   const existing = ranges.filter((entry) => entry.annotationId === annotation.id);
   const nextRanges = [...ranges.filter((entry) => entry.annotationId !== annotation.id), range];
   void existing;
@@ -164,7 +240,14 @@ export function planTextRangeApply({ documentId, structureVersion, family, annot
 }
 
 /** Plan a document-range annotation.remove. */
-export function planAnnotationRemove({ documentId, structureVersion, family, annotationId, annotations, ranges }) {
+export function planAnnotationRemove({ documentId, structureVersion, family, annotationId, annotations, ranges }: {
+  documentId: string;
+  structureVersion: number;
+  family: ContinuousTextFamily;
+  annotationId: string;
+  annotations: Annotation[];
+  ranges: AnnotationRange[];
+}): TextPlan {
   const target = annotations.find((annotation) => annotation.id === annotationId);
   if (!target) throw new Error('annotation not found');
   const retained = ranges.filter((entry) => entry.annotationId !== annotationId);
@@ -181,6 +264,8 @@ export function planAnnotationRemove({ documentId, structureVersion, family, ann
   });
 }
 
-export function planAnnotationApplyOffsets() {
-  const error = new Error('planAnnotationApplyOffsets is block-era; use planTextRangeApply'); error.code = 'position-invalid'; throw error;
+export function planAnnotationApplyOffsets(): never {
+  const error = new Error('planAnnotationApplyOffsets is block-era; use planTextRangeApply') as Error & { code: string };
+  error.code = 'position-invalid';
+  throw error;
 }

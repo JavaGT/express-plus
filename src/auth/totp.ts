@@ -1,4 +1,3 @@
-// @ts-nocheck
 // totp.mjs — TOTP (Time-based One-Time Password) per RFC 6238.
 //
 // Zero runtime dependencies: `node:crypto` only. Implements HOTP/TOTP with
@@ -22,7 +21,7 @@ import crypto from 'node:crypto';
 
 const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
-export function base32Encode(buffer) {
+export function base32Encode(buffer: Uint8Array): string {
   let result = '';
   let bits = 0;
   let value = 0;
@@ -40,11 +39,11 @@ export function base32Encode(buffer) {
   return result;
 }
 
-export function base32Decode(str) {
+export function base32Decode(str: string): Buffer {
   const cleaned = str.toUpperCase().replace(/=+$/, '');
   let bits = 0;
   let value = 0;
-  const result = [];
+  const result: number[] = [];
   for (const char of cleaned) {
     const idx = BASE32_ALPHABET.indexOf(char);
     if (idx === -1) throw new Error(`invalid base32 character: "${char}"`);
@@ -60,7 +59,7 @@ export function base32Decode(str) {
 
 // ---- HOTP (RFC 4226) / TOTP (RFC 6238) ---------------------------------------
 
-function sha256hex(s) {
+function sha256hex(s: string): string {
   return crypto.createHash('sha256').update(s).digest('hex');
 }
 
@@ -69,7 +68,7 @@ function sha256hex(s) {
 //   - Dynamic truncation: offset = last 4 bits of HMAC
 //   - P = (hmac[offset..offset+3]) & 0x7fffffff
 //   - OTP = P % 10^6, zero-padded to 6 digits
-export function hotp(secret, counter) {
+export function hotp(secret: string, counter: number): string {
   const key = base32Decode(secret);
   const counterBuf = Buffer.alloc(8);
   // Write counter as 8-byte big-endian unsigned integer (RFC 4226 §5.1).
@@ -89,7 +88,7 @@ export function hotp(secret, counter) {
 // verifyTotp(secret, token) — verify a 6-digit token against the stored base32
 // secret. Accepts the current 30s window AND ±1 adjacent windows (90s tolerance).
 // Returns true iff the token matches any of the three windows.
-export function verifyTotp(secret, token, atTime = Date.now()) {
+export function verifyTotp(secret: string, token: string | number, atTime: number = Date.now()): boolean {
   const T0 = 0;
   const step = 30;
   const counter = Math.floor((Math.floor(atTime / 1000) - T0) / step);
@@ -107,7 +106,7 @@ export function verifyTotp(secret, token, atTime = Date.now()) {
 // Generates 20 random bytes, base32-encodes them (RFC 4648, no padding), and
 // builds an otpauth:// URI for QR-code display. The URI uses the standard
 // TOTP params: SHA1, 6 digits, 30s period, issuer=workbench.
-export function generateSecret(username = 'user') {
+export function generateSecret(username = 'user'): { secret: string; uri: string } {
   const bytes = crypto.randomBytes(20);
   const secret = base32Encode(bytes);
   const encodedUsername = encodeURIComponent(username);
@@ -121,9 +120,9 @@ export function generateSecret(username = 'user') {
 // Generates n random backup codes. Each code is 4 random bytes → 8 hex chars.
 // The plain codes are returned ONCE (for display to the user); the hashed
 // codes (SHA-256) are stored for one-way verification.
-export function generateBackupCodes(n = 8) {
-  const plainCodes = [];
-  const hashedCodes = [];
+export function generateBackupCodes(n = 8): { plainCodes: string[]; hashedCodes: string[] } {
+  const plainCodes: string[] = [];
+  const hashedCodes: string[] = [];
   for (let i = 0; i < n; i++) {
     const code = crypto.randomBytes(4).toString('hex');
     plainCodes.push(code);
@@ -137,7 +136,7 @@ export function generateBackupCodes(n = 8) {
 // the consumed code is removed from the array (one-time use). Returns false if
 // the code is not in the stored set. The `hashedCodes` array is MUTATED in place
 // — callers must persist the updated array.
-export function verifyBackupCode(hashedCodes, code) {
+export function verifyBackupCode(hashedCodes: string[], code: string): boolean {
   const hash = sha256hex(code);
   const idx = hashedCodes.indexOf(hash);
   if (idx === -1) return false;

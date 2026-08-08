@@ -1,4 +1,3 @@
-// @ts-nocheck
 // passkey.mjs — WebAuthn (passkey) challenge and verification logic.
 //
 // Zero runtime dependencies: implemented on `node:crypto` only. The framework
@@ -20,20 +19,32 @@
 //   - parseAuthenticatorData(buf) → { rpIdHash, flags, signCount }
 
 import crypto from 'node:crypto';
+                                             
 
 // ---- RP configuration --------------------------------------------------------
 // Sensible defaults; overridable via config.rp per-app.
 
-const defaultRp = Object.freeze({
+// The RP identity an app overrides per-app (cfg.rp) and the frozen default.
+                    
+               
+             
+                 
+ 
+
+const defaultRp                     = Object.freeze({
   name: 'workbench',
   id: 'localhost',
   origin: 'http://localhost:3000',
 });
 
+                     
+                         
+ 
+
 // rpConfig(cfg) → frozen { name, id, origin }. Picks per-app overrides from
 // cfg.rp; absent keys fall back to the defaultRp. The shape is frozen so no
 // later layer can mutate the RP identity.
-export function rpConfig(cfg = {}) {
+export function rpConfig(cfg            = {})                     {
   const rp = cfg?.rp ?? {};
   return Object.freeze({
     name: rp.name ?? defaultRp.name,
@@ -46,7 +57,7 @@ export function rpConfig(cfg = {}) {
 
 // generateChallenge(length) → base64url-encoded random bytes. The default
 // 32 bytes (256 bits of entropy) is the WebAuthn recommendation.
-export function generateChallenge(length = 32) {
+export function generateChallenge(length = 32)         {
   return crypto.randomBytes(length).toString('base64url');
 }
 
@@ -54,11 +65,25 @@ export function generateChallenge(length = 32) {
 
 const DEFAULT_CHALLENGE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
+// A stored challenge entry: the caller's data plus the creation timestamp the
+// TTL sweep and the expiry check read.
+                          
+                  
+                         
+ 
+
+                                 
+                                                                 
+                                                
+                                                    
+                  
+ 
+
 // createChallengeStore(ttlMs) → { set, get, consume, destroy }. An in-memory Map
 // with TTL-based expiry: entries older than ttlMs are dropped. `consume` is a
 // single-use read (get + delete) so a challenge cannot be replayed.
-export function createChallengeStore(ttlMs = DEFAULT_CHALLENGE_TTL_MS) {
-  const store = new Map();
+export function createChallengeStore(ttlMs = DEFAULT_CHALLENGE_TTL_MS)                 {
+  const store = new Map                        ();
 
   // Periodic cleanup sweeps expired entries every 60 seconds. The interval is
   // unref'd so it doesn't keep the process alive.
@@ -101,7 +126,7 @@ export const challengeStore = createChallengeStore();
 
 // ---- base64url helpers -------------------------------------------------------
 
-function base64urlToBuffer(str) {
+function base64urlToBuffer(str        )         {
   // Replace URL-safe chars, pad to multiple of 4.
   let s = str.replace(/-/g, '+').replace(/_/g, '/');
   while (s.length % 4) s += '=';
@@ -112,14 +137,14 @@ function base64urlToBuffer(str) {
 
 // parseClientDataJSON(base64urlStr) → decoded JSON object. `clientDataJSON` is
 // a base64url-encoded JSON string with { challenge, origin, type, ... }.
-export function parseClientDataJSON(base64urlStr) {
+export function parseClientDataJSON(base64urlStr        )                          {
   const buf = base64urlToBuffer(base64urlStr);
   return JSON.parse(buf.toString('utf-8'));
 }
 
 // ---- SHA-256 helper ----------------------------------------------------------
 
-function sha256(data) {
+function sha256(data        )         {
   return crypto.createHash('sha256').update(data).digest();
 }
 
@@ -130,7 +155,7 @@ function sha256(data) {
 //   bytes 0–31:  SHA-256 of RP ID
 //   byte 32:     flags (bit 0: UP, bit 2: UV, bit 6: AT, bit 7: ED)
 //   bytes 33–36: sign counter (32-bit big-endian)
-export function parseAuthenticatorData(authData) {
+export function parseAuthenticatorData(authData        )                                                         {
   const rpIdHash = authData.slice(0, 32);
   const flags = authData[32];
   const signCount = authData.readUInt32BE(33);
@@ -145,7 +170,14 @@ export function parseAuthenticatorData(authData) {
 //   - text string (major 3)
 //   - map (major 5)
 
-function decodeCborLen(buf, offset) {
+// The decoder's return shape: the decoded value (number, string, Buffer, or a
+// map record) plus the offset just past the consumed bytes.
+                      
+                 
+              
+ 
+
+function decodeCborLen(buf        , offset        )                               {
   const ai = buf[offset] & 0x1f;
   if (ai < 24) return { len: ai, pos: offset + 1 };
   if (ai === 24) return { len: buf[offset + 1], pos: offset + 2 };
@@ -159,10 +191,9 @@ function decodeCborLen(buf, offset) {
   throw new Error(`unsupported CBOR length encoding: ${ai}`);
 }
 
-function decodeCbor(buf, offset = 0) {
+function decodeCbor(buf        , offset = 0)             {
   const byte = buf[offset];
   const major = byte >> 5;
-  const ai = byte & 0x1f;
 
   switch (major) {
     case 0: { // unsigned integer
@@ -183,12 +214,12 @@ function decodeCbor(buf, offset = 0) {
     }
     case 5: { // map
       const { len: count, pos: afterLen } = decodeCborLen(buf, offset);
-      const map = {};
+      const map                          = {};
       let p = afterLen;
       for (let i = 0; i < count; i++) {
         const key = decodeCbor(buf, p);
         const val = decodeCbor(buf, key.pos);
-        map[key.value] = val.value;
+        map[String(key.value)] = val.value;
         p = val.pos;
       }
       return { value: map, pos: p };
@@ -202,13 +233,13 @@ function decodeCbor(buf, offset = 0) {
 
 // parseAttestationObject(base64urlStr) → { fmt, attStmt, authData }.
 // Decodes the base64url-encoded CBOR attestation object from the client.
-function parseAttestationObject(base64urlStr) {
+function parseAttestationObject(base64urlStr        )                                                       {
   const buf = base64urlToBuffer(base64urlStr);
   const { value } = decodeCbor(buf, 0);
   if (value == null || typeof value !== 'object') {
     throw new Error('attestation object is not a CBOR map');
   }
-  const { fmt, attStmt, authData } = value;
+  const { fmt, attStmt, authData } = value                           ;
   if (!Buffer.isBuffer(authData)) {
     throw new Error('attestation object missing authData byte string');
   }
@@ -221,7 +252,7 @@ function parseAttestationObject(base64urlStr) {
 // authData is the authenticator data Buffer; offset is the start of the attested
 // credential data section (byte 37 of the full authData). Extracts the
 // credential ID and the COSE-encoded public key.
-function extractAttestedCredentialData(authData, offset = 37) {
+function extractAttestedCredentialData(authData        , offset = 37)                                              {
   // AAGUID: 16 bytes
   const aaguidOffset = offset + 16;
   // Credential ID length: 2 bytes big-endian
@@ -252,11 +283,12 @@ function extractAttestedCredentialData(authData, offset = 37) {
 //       04   — uncompressed point prefix
 //       <x> <y> — 32 bytes each
 
-function decodeCosePublicKey(coseBuf) {
-  const { value: coseKey } = decodeCbor(coseBuf, 0);
-  if (coseKey == null || typeof coseKey !== 'object') {
+function decodeCosePublicKey(coseBuf        )         {
+  const { value } = decodeCbor(coseBuf, 0);
+  if (value == null || typeof value !== 'object') {
     throw new Error('credential public key is not a CBOR map');
   }
+  const coseKey = value                                    ;
 
   // Validate it's an EC2 P-256 key
   if (coseKey[1] !== 2) throw new Error('COSE key kty is not EC2');
@@ -300,10 +332,10 @@ function decodeCosePublicKey(coseBuf) {
 }
 
 // encodeDerLength(n) → DER length encoding bytes
-function encodeDerLength(n) {
+function encodeDerLength(n        )         {
   if (n < 0x80) return Buffer.from([n]);
   // Long form: first byte = 0x80 | numOctets, then the octets
-  const octets = [];
+  const octets           = [];
   let rem = n;
   while (rem > 0) {
     octets.unshift(rem & 0xff);
@@ -314,6 +346,35 @@ function encodeDerLength(n) {
 
 // ---- registration verification -----------------------------------------------
 
+// The client-supplied credential in a WebAuthn ceremony (registration or
+// assertion). `response` carries the base64url-encoded ceremony payloads the
+// server verifies; the optional metadata (name/transports/backedUp) is stored
+// alongside the credential on registration.
+                               
+              
+                 
+                
+                
+                                 
+                     
+             
+                           
+                               
+                               
+                       
+                        
+    
+ 
+
+// The stored Credential entity row the assertion verifier reads: the credential
+// id (base64url), the public key (DER/SPKI, base64url), and the last-seen sign
+// counter (replay protection).
+                            
+                       
+                    
+                     
+ 
+
 // verifyRegistration(challenge, credential, rp) → { credentialId, publicKey, signCount }
 // Verifies a WebAuthn registration (attestation) response.
 //
@@ -322,7 +383,7 @@ function encodeDerLength(n) {
 //
 // Throws on any validation failure (fail closed). On success, returns the
 // extracted credential material to store in the Credential entity.
-export function verifyRegistration(challenge, credential, rp) {
+export function verifyRegistration(challenge        , credential                     , rp                    )                                                                 {
   // 1. Parse and validate clientDataJSON
   const clientData = parseClientDataJSON(credential.response.clientDataJSON);
 
@@ -337,7 +398,7 @@ export function verifyRegistration(challenge, credential, rp) {
   }
 
   // 2. Parse attestation object (CBOR)
-  const attObj = parseAttestationObject(credential.response.attestationObject);
+  const attObj = parseAttestationObject(credential.response.attestationObject );
   const authData = attObj.authData;
 
   // 3. Parse authenticator data header
@@ -381,7 +442,7 @@ export function verifyRegistration(challenge, credential, rp) {
 //
 // Throws on any validation failure; on success returns the new signCount to
 // update the stored credential (replay protection).
-export function verifyAuthentication(challenge, credential, storedCredential, rp) {
+export function verifyAuthentication(challenge        , credential                     , storedCredential                  , rp                    )                        {
   // 1. Parse and validate clientDataJSON
   const clientData = parseClientDataJSON(credential.response.clientDataJSON);
 
@@ -396,7 +457,7 @@ export function verifyAuthentication(challenge, credential, storedCredential, rp
   }
 
   // 2. Parse authenticator data
-  const authData = base64urlToBuffer(credential.response.authenticatorData);
+  const authData = base64urlToBuffer(credential.response.authenticatorData );
   const parsed = parseAuthenticatorData(authData);
 
   // 3. Verify RP ID hash
@@ -423,7 +484,7 @@ export function verifyAuthentication(challenge, credential, storedCredential, rp
   // 6. Verify signature over authenticatorData || SHA256(clientDataJSON)
   const clientDataHash = sha256(base64urlToBuffer(credential.response.clientDataJSON));
   const signatureBase = Buffer.concat([authData, clientDataHash]);
-  const signature = base64urlToBuffer(credential.response.signature);
+  const signature = base64urlToBuffer(credential.response.signature );
 
   const publicKey = crypto.createPublicKey({
     key: base64urlToBuffer(storedCredential.publicKey),
@@ -445,7 +506,7 @@ export function verifyAuthentication(challenge, credential, storedCredential, rp
 // through the real verify path.
 
 // buildRpIdHash(rpId) → SHA-256 of the RP ID string.
-export function buildRpIdHash(rpId) {
+export function buildRpIdHash(rpId        )         {
   return sha256(Buffer.from(rpId));
 }
 
@@ -453,7 +514,13 @@ export function buildRpIdHash(rpId) {
 // → Buffer. Constructs a complete authenticatorData binary from the named parts.
 // When credentialId and publicKey are provided, the attested credential data
 // section is included (flags should have AT bit 0x40 set).
-export function buildAuthenticatorData({ rpIdHash, flags, signCount, credentialId, publicKey }) {
+export function buildAuthenticatorData({ rpIdHash, flags, signCount, credentialId, publicKey }   
+                   
+                
+                    
+                        
+                     
+ )         {
   const parts = [rpIdHash, Buffer.from([flags])];
   // 4-byte big-endian sign counter
   const counter = Buffer.alloc(4);
@@ -478,14 +545,18 @@ export function buildAuthenticatorData({ rpIdHash, flags, signCount, credentialI
 }
 
 // buildClientDataJSON({ challenge, origin, type }) → base64url-encoded string.
-export function buildClientDataJSON({ challenge, origin, type }) {
+export function buildClientDataJSON({ challenge, origin, type }   
+                    
+                 
+               
+ )         {
   const json = JSON.stringify({ challenge, origin, type });
   return Buffer.from(json, 'utf-8').toString('base64url');
 }
 
 // signAssertion(privateKey, authenticatorData, clientDataJSON) → base64url sig.
 // Signs authenticatorData || SHA256(clientDataJSON) with the given privateKey.
-export function signAssertion(privateKey, authenticatorDataBuf, clientDataJSONBase64url) {
+export function signAssertion(privateKey           , authenticatorDataBuf        , clientDataJSONBase64url        )         {
   const clientDataHash = sha256(base64urlToBuffer(clientDataJSONBase64url));
   const signatureBase = Buffer.concat([authenticatorDataBuf, clientDataHash]);
   return crypto.sign('sha256', signatureBase, privateKey).toString('base64url');
@@ -494,10 +565,12 @@ export function signAssertion(privateKey, authenticatorDataBuf, clientDataJSONBa
 // cosePublicKeyFromKeyPair(keypair) → base64url of COSE-encoded P-256 public key.
 // For constructing synthetic attestation authData with the keypair's public key
 // in the COSE format an authenticator would embed.
-export function cosePublicKeyFromKeyPair(keypair) {
+export function cosePublicKeyFromKeyPair(keypair   
+                                                                                
+ )         {
   const jwk = keypair.publicKey.export({ format: 'jwk' });
-  const x = base64urlToBuffer(jwk.x);
-  const y = base64urlToBuffer(jwk.y);
+  const x = base64urlToBuffer(jwk.x );
+  const y = base64urlToBuffer(jwk.y );
 
   // Build COSE_Key for P-256 (ES256):
   //   { 1: 2, 3: -7, -1: 1, -2: h'x', -3: h'y' }
@@ -524,7 +597,10 @@ export function cosePublicKeyFromKeyPair(keypair) {
 // buildAttestationObject({ fmt, authData }) → base64url-encoded CBOR.
 // Constructs a minimal CBOR attestation object for test registration.
 //   { "fmt": fmt, "attStmt": {}, "authData": authData }
-export function buildAttestationObject({ fmt = 'none', authData }) {
+export function buildAttestationObject({ fmt = 'none', authData }   
+               
+                            
+ )         {
   const authDataBuf = typeof authData === 'string' ? base64urlToBuffer(authData) : authData;
   const fmtBuf = Buffer.from(fmt, 'utf-8');
 

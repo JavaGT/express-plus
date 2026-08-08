@@ -1,4 +1,3 @@
-// @ts-nocheck
 import { structCellColumn } from './field-strategy.ts';
 
 function quoteIdent(name: string): string {
@@ -28,7 +27,7 @@ interface EntityRecord {
 type DeclaredColumn = { type: string; notNull: boolean };
 
 function entityColumns(entity: EntityRecord): Map<string, DeclaredColumn> {
-  const columns = new Map<string, DeclaredColumn & { primaryKey: boolean }>([['id', { type: 'TEXT', notNull: false, primaryKey: true }]]);
+  const columns = new Map<string, DeclaredColumn & { primaryKey?: boolean }>([['id', { type: 'TEXT', notNull: false, primaryKey: true }]]);
   for (const [name, field] of Object.entries(entity.fields ?? {})) {
     if (field.kind === 'computed' && field.mode === 'pull') continue;
     if (field.kind === 'struct') {

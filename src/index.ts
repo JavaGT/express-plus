@@ -1,4 +1,3 @@
-// @ts-nocheck
 export { text, boolean, date, number, json, ref, hash, blob, link, map, list, log, ephemeral, state, computed, projected, raster, polyline, vector } from './field.ts';
 export { annotatedText, annotation, protectingAnnotation, measurement, annotationAction, wordEvidenceFamily, registerAnnotatedTextContract, registerAnnotatedTextStructuralExtension, annotatedTextAction, annotatedTextCreateAction, annotatedTextRetireAction, exportAnnotatedText, readAnnotatedTextForRecipient, assertWordEvidencePayload, readWordEvidence, wordEvidenceFieldHandle, wordEvidenceTableName } from './annotated-text-public.ts';
 export { annotatedTextClientHandle } from './annotated-text-field.ts';

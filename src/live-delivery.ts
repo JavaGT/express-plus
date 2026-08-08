@@ -1,4 +1,3 @@
-// @ts-nocheck
 // Live Delivery — singular public seam for the Deliver loop (SPEC §8).
 //
 // One factory: createLiveDelivery(httpServer, opts) →
@@ -20,14 +19,22 @@
 // Internals (live-fanout, live-connection, live-admission, websocket) stay
 // private implementation of this seam — callers do not import them for wiring.
 
+import type { Server, IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
+
 import { upgradeWebSocket } from './websocket.ts';
 import { isSameOriginRequest } from './middleware.ts';
 import { createLiveFanout } from './live-fanout.ts';
+import type { LiveEntityRecord, LiveFanoutHandle, MayVerb } from './live-fanout.ts';
 import { createLiveDeliveryCore } from './live-delivery-core.ts';
+import type { CoreProjectContext, LiveDeliveryCore } from './live-delivery-core.ts';
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.ts';
 import { LiveConnection } from './live-connection.ts';
 import { createAnnotatedTextCaretLive } from './annotated-text-caret-live.ts';
 import { readSeq } from './cursor.ts';
+import type { Principal } from './principal.ts';
+import type { FrameworkLog } from './log.ts';
+import type { LiveDatabase } from './live-fanout.ts';
 
 /**
  * Create the Live Delivery subsystem and attach it to an HTTP server.
@@ -43,22 +50,30 @@ import { readSeq } from './cursor.ts';
  * @param {object|null} [options.log] — application-owned structured logger
  * @returns {{ count: Function, close: Function, createConsumer: Function, wake: Function }}
  */
-export function createLiveDelivery(httpServer, {
+export function createLiveDelivery(httpServer: Server, {
   path = '/events',
   mayVerb = null,
-  principalOf = () => ({ type: 'anonymous', id: null }),
+  principalOf = (() => ({ type: 'anonymous', id: null }) as Principal),
   db = null,
   resolveEntity = null,
   ready = () => Promise.resolve(),
   log = null,
+}: {
+  path?: string;
+  mayVerb?: MayVerb | null;
+  principalOf?: (req: IncomingMessage) => Principal | Promise<Principal>;
+  db?: LiveDatabase | null;
+  resolveEntity?: ((name: string) => LiveEntityRecord | undefined | null) | null;
+  ready?: () => Promise<unknown>;
+  log?: FrameworkLog | null;
 } = {}) {
-  const fanout = createLiveFanout({ mayVerb });
-  const carets = createAnnotatedTextCaretLive({ db, resolveEntity, mayVerb, fanout });
-  const connections = new Set();
-  const pendingUpgrades = new Set();
+  const fanout: LiveFanoutHandle = createLiveFanout({ mayVerb });
+  const carets = createAnnotatedTextCaretLive({ db: db as never, resolveEntity: resolveEntity as never, mayVerb: mayVerb as never, fanout });
+  const connections = new Set<LiveConnection>();
+  const pendingUpgrades = new Set<Duplex>();
   let closed = false;
 
-  const currentSeq = (scope) => readSeq(db, scope);
+  const currentSeq = (scope: string) => readSeq(db, scope);
 
   // Shared envelope builder — one delta projector for the whole delivery seam.
   const envelopeBuilder = createLiveEnvelopeBuilder();
@@ -66,19 +81,19 @@ export function createLiveDelivery(httpServer, {
   // Committed-event delivery core — the single authority for committed events.
   // The projectRecipient uses the shared envelope builder for delta/reducer
   // parity with the fan-out path.
-  const core = createLiveDeliveryCore({
-    db,
-    entities: resolveEntity ? (name) => resolveEntity(name) : new Map(),
+  const core: LiveDeliveryCore = createLiveDeliveryCore({
+    db: db as LiveDatabase,
+    entities: resolveEntity ? (name: string) => resolveEntity(name) as LiveEntityRecord | undefined : new Map(),
     mayVerb,
-    projectRecipient: (ctx) => envelopeBuilder.buildEnvelope(ctx),
+    projectRecipient: (ctx: CoreProjectContext) => envelopeBuilder.buildEnvelope(ctx as unknown as Parameters<typeof envelopeBuilder.buildEnvelope>[0]),
     log,
   });
 
-  function count() {
+  function count(): number {
     return connections.size;
   }
 
-  function close() {
+  function close(): void {
     closed = true;
     core.close();
     envelopeBuilder.clear();
@@ -91,11 +106,11 @@ export function createLiveDelivery(httpServer, {
     fanout.close();
   }
 
-  function wake(scope) {
+  function wake(scope: string): void {
     core.wake(scope);
   }
 
-  httpServer.on('upgrade', (req, socket, head) => {
+  httpServer.on('upgrade', (req, socket, _head) => {
     const url = req.url ? new URL(req.url, 'http://localhost') : { pathname: '' };
     if (url.pathname !== path) {
       socket.destroy();
@@ -145,7 +160,7 @@ export function createLiveDelivery(httpServer, {
           carets,
           onClose: () => connections.delete(conn),
         });
-        conn.setPrincipal(principalOf(req));
+        conn.setPrincipal(principalOf(req) as unknown as Principal);
         connections.add(conn);
       })
       .catch(() => {
@@ -159,8 +174,8 @@ export function createLiveDelivery(httpServer, {
    * core re-reads _Log, re-authorises, projects, and delivers. No longer emits
    * directly through the fan-out (the fan-out is for non-_Log events only).
    */
-  function createConsumer() {
-    const woken = new Set();
+  function createConsumer(): (events: Array<{ scope?: string }>) => Promise<void> {
+    const woken = new Set<string>();
     return async (events) => {
       woken.clear();
       for (const ev of events) {
