@@ -267,8 +267,10 @@ function applyAnnotatedTextOperation({ name, fields, handle, event, db }: { name
   if (!data || typeof data !== 'object' || typeof data.id !== 'string' || data.id.length === 0) {
     throw new Error(`${name}.${handle.field}.operated event has no data`);
   }
-  if (data.version === 13) return applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data: data as unknown as OperatedEnvelope });
-  throw new Error(`${name}.${handle.field}.operated event has unknown version ${data.version}`);
+  if (data.version !== 13) {
+    throw new Error(`${name}.${handle.field}.operated event version ${data.version} is not supported: only operated version 13 is admitted; pre-13 lattice rows were retired and are never replayed (issue #23)`);
+  }
+  return applySpanNativeAnnotatedTextOperation({ name, handle, db, descriptor, data: data as unknown as OperatedEnvelope });
 }
 
 // The active durable codec is one exact envelope.  The operation-specific
