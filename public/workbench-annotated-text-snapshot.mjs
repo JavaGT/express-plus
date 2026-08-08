@@ -134,5 +134,22 @@ export function projectRangesOverText(ranges, beforeText, afterText) {
     beforeEnd -= 1;
     afterEnd -= 1;
   }
-  return projectRangesOverEdit(ranges, from, beforeEnd, afterText.slice(from, afterEnd));
+  from = scalarStart(beforeText, scalarStart(afterText, from));
+  beforeEnd = scalarEnd(beforeText, beforeEnd);
+  return projectRangesOverEdit(ranges, from, beforeEnd, afterText.slice(from, scalarEnd(afterText, afterEnd)));
+}
+
+// Bounds may land between a surrogate pair when the transition crosses an
+// astral character; back off to the scalar boundary so offsets stay on
+// character edges (mirrors the editor's changedRange scalar handling).
+function scalarStart(text, offset) {
+  if (offset > 0 && offset < text.length && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff
+    && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff) return offset - 1;
+  return offset;
+}
+
+function scalarEnd(text, offset) {
+  if (offset > 0 && offset < text.length && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff
+    && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff) return offset + 1;
+  return offset;
 }

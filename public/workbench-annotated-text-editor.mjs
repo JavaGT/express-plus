@@ -751,6 +751,14 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     }
     const block = orderedVisible().find((candidate) => candidate.id === selected.from.blockId);
     if (!block) return;
+    // A redacted recipient reads a display text with placeholders whose display
+    // offsets do not map onto the wire offsets the session authors. Fail closed
+    // instead of submitting mis-translated offsets (matching the redaction
+    // coords invariant and the no-fold-for-redacted-recipients stance).
+    if ((block.redactions?.length ?? 0) > 0) {
+      onError(new Error('annotated text is redacted in this view and cannot be edited'));
+      return;
+    }
     if (event.inputType === 'insertText' || event.inputType === 'insertFromPaste' || event.inputType === 'insertFromDrop') {
       if (mutationIsBlocked(block.id)) return;
       const text = event.dataTransfer?.getData?.('text/plain') ?? event.data ?? '';
@@ -790,6 +798,13 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       return;
     }
     const block = orderedVisible().find((candidate) => candidate.id === selected.from.blockId);
+    if ((block?.redactions?.length ?? 0) > 0) {
+      blockedComposition = true;
+      event.preventDefault();
+      render();
+      onError(new Error('annotated text is redacted in this view and cannot be edited'));
+      return;
+    }
     if (block) {
       if (submitted?.blockId === block.id) {
         clearTimeout(queuedTimer);

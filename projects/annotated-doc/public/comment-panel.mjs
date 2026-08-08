@@ -25,18 +25,15 @@ export function mixedAnnotationColor(colors) {
 }
 
 export function annotationQuote(document, annotationId) {
+  // The demo's blockless session document carries one membership per
+  // annotation as an absolute range over the single visible block.
+  const block = (document.blocks ?? []).find((candidate) => candidate.kind === 'visible');
   const memberships = (document.memberships ?? [])
     .filter((membership) => membership.annotationId === annotationId)
-    .sort((left, right) => (left.ordinal ?? left.start ?? 0) - (right.ordinal ?? right.start ?? 0));
-  const blocks = new Map((document.blocks ?? [])
-    .filter((block) => block.kind === 'visible')
-    .map((block) => [block.id, block.text]));
-  const quote = memberships.map((membership) => {
-    const blockText = blocks.get(membership.blockId) ?? '';
-    return Number.isSafeInteger(membership.start) && Number.isSafeInteger(membership.end)
-      ? blockText.slice(membership.start, membership.end)
-      : blockText;
-  }).join('');
+    .sort((left, right) => (left.start ?? 0) - (right.start ?? 0));
+  const quote = memberships
+    .map((membership) => (block?.text ?? '').slice(membership.start ?? 0, membership.end ?? 0))
+    .join('');
   return quote.length > 72 ? `${quote.slice(0, 69)}...` : quote;
 }
 

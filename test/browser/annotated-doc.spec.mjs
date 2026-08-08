@@ -745,6 +745,12 @@ test('two pages converge through session ingest without repair writes', async ({
 });
 
 test('two pages converge on identical final text through sequential typing', async ({ browser }) => {
+  // Concurrent same-position typing fails CLOSED in the blockless client: a
+  // keystroke whose captured basis moved (a foreign insert landed first) is
+  // rejected with "authoring basis is stale" rather than rebased (verified
+  // empirically and locked by the http-session/receipt tests). The demo's
+  // collaborative guarantee is delivery convergence, exercised here by typing
+  // in each tab after the other's change has settled and propagated.
   const context = await browser.newContext();
   const first = await context.newPage();
   const id = await createDocument(first);
@@ -842,5 +848,16 @@ test('a confidential span shows the real text to the owner and a redacted placeh
   await expect(readerRestricted).toHaveText('[restricted]');
   await expect(readerRestricted).toHaveCSS('background-color', 'rgb(17, 17, 17)');
   await expect(readerRestricted).toHaveCSS('color', 'rgb(255, 255, 255)');
+  // A redacted recipient reads display offsets that do not map onto the wire
+  // offsets the session authors; editing fails closed instead of submitting
+  // mis-translated offsets (and never mutates the owner's document).
+  const readerErrors = [];
+  readerPage.on('console', (message) => {
+    if (message.type() === 'error') readerErrors.push(message.text());
+  });
+  await readerEditor.click();
+  await readerEditor.pressSequentially('X', { delay: 0 });
+  await expect(readerEditor).toHaveText('hello [restricted] world');
+  await expect.poll(() => readerErrors).toContainEqual(expect.stringContaining('redacted'));
   await context.close();
 });

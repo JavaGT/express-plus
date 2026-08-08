@@ -9,6 +9,7 @@ import workbench, {
 } from '../src/internal.mjs';
 import { exportAnnotatedText } from '../src/index.mjs';
 import { materializeText, restoreTextFamily } from '../src/annotated-text-continuous.mjs';
+import { projectRangeToOffsets } from '../src/annotated-text-ranges.mjs';
 import { native } from '../src/event-handle.mjs';
 import { withAuthoringBinding } from './annotated-text-authoring-fixture.mjs';
 
@@ -430,4 +431,93 @@ test('block-era structure edits and invalid families are rejected without partia
   }
   assert.deepEqual(durableAnnotatedTextState(db), before);
   await app.close?.();
+});
+
+// Boundary insert affinity is the behavior the browser demo tests assert (the
+// editor's interval markers and the client-side fold projection both follow
+// it). Pin it server-side so the client projection and the demo tests cannot
+// drift from the authoritative family projection.
+test('boundary inserts join the range at its start and stay out at its end', async () => {
+  let binding;
+  const at = (offset, affinity = 'right') => ({ positionToken: binding.documentPositionToken, offset, affinity });
+  const dispatch = (ctx, b, actionId, edit) => ctx.app.dispatch({
+    actionId, type: 'R8IntegrationDocument.body.operation', scope: 'Project:p1', principal: { id: 'u1' },
+    payload: { version: 9, id: 'd1', authoring: ctx.authoringOf(b, `m-${actionId}`), edit },
+  });
+  const committedRange = async ({ db, refreshBinding }) => {
+    binding = await refreshBinding();
+    const state = db.prepare("SELECT family_checkpoint FROM R8IntegrationDocument_body_state WHERE document_id = 'd1'").get();
+    const family = restoreTextFamily(JSON.parse(state.family_checkpoint));
+    const membership = db.prepare("SELECT * FROM R8IntegrationDocument_body_membership WHERE annotation_id = 'edge-1'").get();
+    return {
+      text: materializeText(family),
+      range: membership
+        ? projectRangeToOffsets(family, {
+          annotationId: 'edge-1',
+          start: JSON.parse(membership.start_point),
+          end: JSON.parse(membership.end_point),
+        })
+        : null,
+    };
+  };
+  const applyRange = async (ctx) => {
+    const applied = await dispatch(ctx, ctx.binding, `edge-apply-${Math.random()}`, {
+      kind: 'annotation.apply',
+      annotation: { id: 'edge-1', family: 'comment', fields: {} },
+      from: at(1, 'right'),
+      to: at(3, 'right'),
+    });
+    assert.equal(applied.ok, true, applied.failure?.message);
+    return committedRange(ctx);
+  };
+
+  // Insert at the range START joins the comment: the range grows to include it.
+  {
+    const ctx = await setupDoc('abcd');
+    binding = ctx.binding;
+    const before = await applyRange(ctx);
+    assert.deepEqual(before.range, { start: 1, end: 3 });
+    const applied = await dispatch(ctx, binding, 'edge-insert-start', {
+      kind: 'text.insert', at: at(1, 'right'), text: 'X',
+    });
+    assert.equal(applied.ok, true, applied.failure?.message);
+    const after = await committedRange(ctx);
+    assert.equal(after.text, 'aXbcd');
+    assert.deepEqual(after.range, { start: 1, end: 4 }, 'insert at the range start joins the range');
+    await ctx.app.close?.();
+  }
+
+  // Insert at the range END stays outside: the range is unchanged.
+  {
+    const ctx = await setupDoc('abcd');
+    binding = ctx.binding;
+    await applyRange(ctx);
+    const applied = await dispatch(ctx, binding, 'edge-insert-end', {
+      kind: 'text.insert', at: at(3, 'right'), text: 'X',
+    });
+    assert.equal(applied.ok, true, applied.failure?.message);
+    const after = await committedRange(ctx);
+    assert.equal(after.text, 'abcXd');
+    assert.deepEqual(after.range, { start: 1, end: 3 }, 'insert at the range end stays outside');
+    await ctx.app.close?.();
+  }
+
+  // A replace covering the range empties it (orphan policy): the membership
+  // disappears from the projection.
+  {
+    const ctx = await setupDoc('abcd');
+    binding = ctx.binding;
+    await applyRange(ctx);
+    const applied = await dispatch(ctx, binding, 'edge-replace', {
+      kind: 'text.replace',
+      from: at(0, 'right'),
+      to: at(4, 'right'),
+      text: 'XY',
+    });
+    assert.equal(applied.ok, true, applied.failure?.message);
+    const after = await committedRange(ctx);
+    assert.equal(after.text, 'XY');
+    assert.equal(after.range, null, 'a covering replace empties the range (orphan)');
+    await ctx.app.close?.();
+  }
 });
