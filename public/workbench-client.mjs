@@ -47,6 +47,12 @@ function decideReplay(cursor, seqOrSpan) {
 }
 // --- END GENERATED from src/replay-decision.ts ---
 
+// Shared capped-exponential-backoff delay. Pure: timers and attempt counters
+// stay at the call sites, which differ in reset/clear semantics.
+function backoffDelay(attempt, base, max) {
+  return Math.min(base * 2 ** attempt, max);
+}
+
 function normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent) {
   if (typeof optionsOrOnEvent === 'function' || optionsOrOnEvent === undefined || optionsOrOnEvent === null) {
     return { options: {}, onEvent: optionsOrOnEvent };
@@ -661,10 +667,7 @@ class LiveSyncSession {
   _scheduleReconnect() {
     if (this._closed || this._reconnectTimer) return;
     this._emitConnectionStatus('reconnecting');
-    const delay = Math.min(
-      this._backoffBase * Math.pow(2, this._reconnectAttempt),
-      this._maxBackoff,
-    );
+    const delay = backoffDelay(this._reconnectAttempt, this._backoffBase, this._maxBackoff);
     this._reconnectAttempt++;
     this._reconnectTimer = setTimeout(async () => {
       this._reconnectTimer = null;
@@ -1152,10 +1155,7 @@ export class LiveList {
 
   _scheduleResync() {
     if (this._closed || this._resyncRetryTimer) return;
-    const delay = Math.min(
-      this._resyncBackoffBase * Math.pow(2, this._resyncAttempt),
-      this._maxResyncBackoff,
-    );
+    const delay = backoffDelay(this._resyncAttempt, this._resyncBackoffBase, this._maxResyncBackoff);
     this._resyncAttempt++;
     this._resyncRetryTimer = setTimeout(() => {
       this._resyncRetryTimer = null;
@@ -2301,7 +2301,7 @@ export function createLiveDeliverySession({
   }
 
   function waitForRecoveryRetry(attempt) {
-    const delay = Math.min(50 * (2 ** attempt), 1000);
+    const delay = backoffDelay(attempt, 50, 1000);
     return new Promise((resolve) => {
       const waiter = { timeout: null, resolve };
       waiter.timeout = setTimeout(() => {
@@ -3797,7 +3797,7 @@ export function createScopeLiveStore({
 
   function scheduleResync() {
     if (closed || resyncRetryTimer) return;
-    const delay = Math.min(resyncBackoffBase * Math.pow(2, resyncAttempt), maxResyncBackoff);
+    const delay = backoffDelay(resyncAttempt, resyncBackoffBase, maxResyncBackoff);
     resyncAttempt += 1;
     resyncRetryTimer = setTimeout(() => {
       resyncRetryTimer = null;
