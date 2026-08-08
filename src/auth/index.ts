@@ -3,16 +3,16 @@
 
 export {
   User, Session, Inbox, Credential, Invitation, ApiKey, TwoFactor,
-} from './entities.mjs';
-export { authRoutes } from './routes.mjs';
+} from './entities.ts';
+export { authRoutes } from './routes.ts';
 export {
   parseCookies, sessionCookie, sessionPrincipalOf, sessionTokenOf,
   apiKeyPrincipalOf, SESSION_COOKIE,
-} from './session.mjs';
+} from './session.ts';
 export {
   createInvitationApi,
-} from './invitation.mjs';
-export { membership, compileMembershipAuthz } from './membership.mjs';
+} from './invitation.ts';
+export { membership, compileMembershipAuthz } from './membership.ts';
 export {
   generateSecret, generateBackupCodes, verifyTotp, verifyBackupCode,
-} from './totp.mjs';
+} from './totp.ts';

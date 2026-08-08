@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { getLog } from '../log.mjs';
 import { serializeField, flattenStruct, resolveStrategy } from '../field-strategy.mjs';
 import * as eventHandle from '../event-handle.mjs';

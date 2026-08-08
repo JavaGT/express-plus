@@ -1,3 +1,4 @@
+// @ts-nocheck
 // blob-store.mjs — durable blob storage with pending/adopted lifecycle.
 //
 // Upload writes atomically to a pending slot with computed hashes, then records

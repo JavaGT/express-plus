@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Shared live delivery envelope builder — package-private projection helper.
 //
 // One envelope grammar for all live delivery paths (committed-event core and

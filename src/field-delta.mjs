@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { EventKind } from './event-handle.mjs';
 import { resolveStrategy } from './field-strategy.mjs';
 import { config } from './config.mjs';

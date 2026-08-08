@@ -1,3 +1,4 @@
+// @ts-nocheck
 // job-queue.mjs — the job-queue substrate (eng-review spec #5, Walk 2, §3.3).
 //
 // A job is a unit of work with its own lifecycle (queued→claimed→running→

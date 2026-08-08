@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { lowerToSql } from '../scope-sql.mjs';
 import { cosineSimilarity, applyNearest } from '../vector.mjs';
 

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { MAP_SIDE_TABLE_STRATEGY } from './map.mjs';
 import { ORDERED_SIDE_TABLE_STRATEGY } from './ordered.mjs';
 import { LOG_SIDE_TABLE_STRATEGY } from './log.mjs';

@@ -1,6 +1,6 @@
 // Recipient snapshots replace annotated-text storage with the package-owned
 // projection before a transport can serialize it.
-import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.mjs';
+import { projectAnnotatedTextSnapshot } from './annotated-text-snapshot.ts';
 
 export interface EntityFieldDescriptor {
   kind?: string;

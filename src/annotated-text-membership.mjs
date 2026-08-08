@@ -1,3 +1,4 @@
+// @ts-nocheck
 import {
   assertMembershipRange, assertStructuralEndpoint, compareStructuralEndpoints,
   materializeBlock, projectEndpointToBlockOffset, rgaTraversal, resolvePositionToEndpoint,

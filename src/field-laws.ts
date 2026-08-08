@@ -1,4 +1,4 @@
-import { lawsOf } from './field-strategy.mjs';
+import { lawsOf } from './field-strategy.ts';
 
 export function canUndoField(kind: string): boolean {
   const laws = lawsOf(kind) as { invertible?: boolean };

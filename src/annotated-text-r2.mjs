@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { ValidationError } from './field-strategy.mjs';
 
 function validateJsonInput(value, seen = new WeakSet()) {

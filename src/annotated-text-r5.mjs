@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { ValidationError } from './field-strategy.mjs';
 
 export function assertR5AnnotationDetachPayload(name, fieldName, payload) {

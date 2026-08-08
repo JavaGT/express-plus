@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { eventsFromReceipt, insertReceipt, receiptFor, rowToEvent } from './committed-log.mjs';
 import { readSeq } from './cursor.mjs';
 import { parseEventType } from './event-handle.mjs';

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { ValidationError } from './field-strategy.mjs';
 import { frozenJsonSnapshot } from './annotated-text-r2.mjs';
 

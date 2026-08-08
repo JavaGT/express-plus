@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Live fan-out core — scope-keyed subscription registry, delivery-time
 // re-authorization, pace buffers, and event delivery.
 //

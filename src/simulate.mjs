@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { getLog } from './log.mjs';
 import { principal as makePrincipal } from './principal.mjs';
 import { createClockRunner } from './clock-runner.mjs';

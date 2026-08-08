@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The framework-owned auth battery — the routes `projects/session.mjs` hand-rolls,
 // PLUS the Set-Cookie handling that sample omits (the 0→1 auth bug: a client
 // following the exemplar is anonymous on every subsequent request because

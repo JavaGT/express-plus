@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { principalSnapshotScope, parsePrincipalSnapshotScope } from './principal-snapshot-scope.mjs';
 import { isPrincipalSnapshotDeclaration } from './principal-snapshot-declaration.mjs';
 

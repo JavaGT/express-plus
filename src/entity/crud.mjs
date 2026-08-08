@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Entity CRUD handler generation — the mutation handlers for create, update,
 // and remove, extracted from the entity compiler so the compiler stays focused
 // on validation and assembly, not handler bodies.

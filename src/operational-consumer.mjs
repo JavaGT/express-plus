@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { createHash } from 'node:crypto';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
 import { txn } from './driver.mjs';

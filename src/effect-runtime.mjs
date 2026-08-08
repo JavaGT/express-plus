@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Effect runtime — in-transaction effect execution (ADR #6, #22, P6b/P6c).
 //
 // Effects are declared on entities and compiled by effect-compiler.mjs. This

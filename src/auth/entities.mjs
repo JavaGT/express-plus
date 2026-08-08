@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The framework-provided auth entities: User, Session, Credential, and Inbox.
 //
 // session.mjs (the binding exemplar) imports these FROM the framework rather than

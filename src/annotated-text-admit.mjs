@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Commit admission for annotated-text operations (issue #33 blockless).
 //
 // One continuous RGA text per document; annotations are document-scoped

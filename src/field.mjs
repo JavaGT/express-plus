@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The field-type plugin contract (Phase 1, SPEC §5.1 / §5.4, ADR #9).
 //
 // A field constructor returns an immutable FIELD DESCRIPTOR. The descriptor is

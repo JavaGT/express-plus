@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Node-only capabilities used to assemble and operate a Workbench application.
 // Declaration grammar stays at `workbench`; the zero-import browser runtime
 // stays at `workbench/client`. This module deliberately does not expose the

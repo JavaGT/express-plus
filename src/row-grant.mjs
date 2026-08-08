@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The row grant's RUNTIME half — the second default-on auth layer (SPEC §6).
 //
 // Two default-on auth layers protect every request. The route GATE (route-gate.mjs)

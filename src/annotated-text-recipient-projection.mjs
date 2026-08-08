@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Public recipient projection for the blockless annotated-text model (issue #33).
 //
 // The canonical document is ONE continuous text plus document-scoped

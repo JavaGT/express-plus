@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { rowCapabilities, mayVerb, fieldCapabilities } from './row-grant.mjs';
+import { rowCapabilities, mayVerb, fieldCapabilities } from './row-grant.ts';
 import { isRuntimeGrantClause } from './scope.ts';
 
 interface CheckEntry {

@@ -1,1 +1,1 @@
-export * from './strategy/index.mjs';
+export * from './strategy/index.ts';

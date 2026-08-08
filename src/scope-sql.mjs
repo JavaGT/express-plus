@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The scope→SQL compiler: the grant's READ half, lowered to a parameterized
 // SQL WHERE fragment (SPEC §6.1, §11, §13; ADR #2).
 //

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { begin, commit, rollback } from './driver.mjs';
 import { runMigrations } from './migrations.mjs';
 

@@ -1,6 +1,6 @@
 // @ts-nocheck
-import { deserializeField, structCellColumn, verifyHash } from '../field-strategy.mjs';
-import { materializeText, restoreTextCheckpoint } from '../annotated-text.mjs';
+import { deserializeField, structCellColumn, verifyHash } from '../field-strategy.ts';
+import { materializeText, restoreTextCheckpoint } from '../annotated-text.ts';
 
 // Convert one SQLite result into the field values an application declared.
 // This is deliberately pure: it installs no database-backed collection handles,

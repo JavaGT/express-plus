@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Schedule / state validation helpers extracted from compile.mjs.
 //
 // Pure extraction — zero behavioral change. These functions validate schedule

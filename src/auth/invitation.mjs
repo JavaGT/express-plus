@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Generic invitations are application-scoped. The bound Invitation facade is
 // the authority for both the database and the entity registry, which prevents
 // a caller from pairing an entity from one application with another database.

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { randomBytes } from 'node:crypto';
 import { assertWellFormedText } from './annotated-text.mjs';
 import { resolveDeclarationMeasurementExtension } from './annotated-text-field.mjs';

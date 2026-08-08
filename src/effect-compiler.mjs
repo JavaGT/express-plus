@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Effect compiler — compile-time validation of effect declarations (ADR #6, #22).
 //
 // Effects are declared on an entity as array pairs so typed trigger handles are

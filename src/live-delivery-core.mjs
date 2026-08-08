@@ -1,3 +1,4 @@
+// @ts-nocheck
 // LIVE DELIVERY CORE — package-private transport-neutral committed event delivery core.
 //
 // One subscription = one async stream of committed events, re-authorised per batch.

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // entity(name, { <fields>, grant, checks?, routes?, ... }) — the entity compiler.
 //
 // The declaration is fields-less: every top-level key that is not a reserved

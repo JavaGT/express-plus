@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { randomUUID } from 'node:crypto';
 import { mayRow } from './row-grant.mjs';
 import { projectAnnotatedTextCaretSnapshot } from './annotated-text-snapshot.mjs';

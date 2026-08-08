@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The unified check registry — the ONE source of truth for every named check
 // on an entity, consulted by BOTH the scope→SQL compiler (harvest face) AND the
 // per-row runtime evaluator (run face).

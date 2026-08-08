@@ -43,7 +43,7 @@
 //   });
 //
 // USAGE:
-//   import { getLog } from './log.mjs';
+//   import { getLog } from './log.ts';
 //   const log = getLog();
 //   log.info('http', 'GET /notes/abc 200', { method: 'GET', path: '/notes/abc', status: 200, durationMs: 12 });
 //   log.warn('auth', 'update denied', { entity: 'Note', id: 'n1', principal: 'bob', verb: 'update', reason: 'not owner' });

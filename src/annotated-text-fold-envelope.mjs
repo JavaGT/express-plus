@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Recipient-safe annotated-text fold envelopes for live delivery (issue #33
 // blockless model).
 //

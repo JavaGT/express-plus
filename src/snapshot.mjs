@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Declared relational recipient snapshots. The grammar carries entities and
 // field handles, so callers cannot smuggle SQL, tables, or callbacks into live
 // delivery.

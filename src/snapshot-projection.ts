@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { mayRow } from './row-grant.mjs';
+import { mayRow } from './row-grant.ts';
 
 function entityOf(value) {
   if (!value || typeof value !== 'object' || typeof value.name !== 'string' || !value.fields) throw new TypeError('snapshot relation requires a declared entity');

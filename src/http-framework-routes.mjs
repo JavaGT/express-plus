@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Framework-owned HTTP routes — snapshot, events-since, blob upload, job queue,
 // and the browser SDK endpoint.
 //

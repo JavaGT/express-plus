@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The app assembly layer — Todo C (SPEC §3, §4, §6.2; ADR #20).
 //
 // `workbench()` is the default export: a chainable app. Assembly is TWO-PHASE.

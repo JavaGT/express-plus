@@ -201,4 +201,4 @@ export {
   rearmChangedScheduleReceipts,
   clearRemovedScheduleReceipts,
   pruneInactiveScheduleReceipts,
-} from './schedule-runtime.mjs';
+} from './schedule-runtime.ts';

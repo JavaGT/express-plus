@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { assertGuarded } from './guard/static.mjs';
 import { buildCheckRegistry } from './registry.mjs';
 import { isRuntimeGrantClause } from './scope.mjs';

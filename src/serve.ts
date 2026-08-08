@@ -22,23 +22,23 @@
 import { createServer as createHttpServer } from 'node:http';
 
 import { anonymous } from './principal.ts';
-import { mayVerb, mayRow } from './row-grant.mjs';
+import { mayVerb, mayRow } from './row-grant.ts';
 import { config } from './config.ts';
-import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.mjs';
-import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/session.mjs';
-import { createLiveDelivery } from './live-delivery.mjs';
+import { applySecurityHeaders, renderError, isSameOriginRequest } from './middleware.ts';
+import { sessionPrincipalOf, sessionTokenOf, apiKeyPrincipalOf } from './auth/session.ts';
+import { createLiveDelivery } from './live-delivery.ts';
 import { getLog, withLog } from './log.ts';
 import { createRateLimiter } from './rate-limit.ts';
 import { BodyError, readRequestBody } from './http-body.ts';
-import { runChain } from './http-handler-chain.mjs';
+import { runChain } from './http-handler-chain.ts';
 import { matchRoute } from './http-route-match.ts';
 import { committedEventHeaders, responseHasStarted, warnLateResponse, sendJson } from './http-response.ts';
 import { createResponseFacade } from './http-response-factory.ts';
-import { dispatchCrud } from './http-crud-dispatch.mjs';
+import { dispatchCrud } from './http-crud-dispatch.ts';
 import { failure } from './outcome.ts';
 import { sendFailure } from './http-failure.ts';
-import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute, handleClientSdkRoute } from './http-framework-routes.mjs';
-import { handleApplicationActionHttp } from './application-action-http.mjs';
+import { handleResyncRoute, handleBlobUploadRoute, handleJobRoute, handleClientSdkRoute } from './http-framework-routes.ts';
+import { handleApplicationActionHttp } from './application-action-http.ts';
 
 // Framework-owned snapshot + resync endpoints (spec #1, D6/D7). NOT mounted
 // `makeHandlerRes(nodeRes, onEnd)` wraps a node response in the Express-style

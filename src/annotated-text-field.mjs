@@ -1,3 +1,4 @@
+// @ts-nocheck
 // T3 owns declarations and schema. T4 adds structural prerequisites here, but
 // action handlers remain separate so a descriptor cannot imply a partial write.
 

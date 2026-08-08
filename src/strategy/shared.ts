@@ -7,7 +7,7 @@
 
 import { randomUUID } from 'node:crypto';
 
-import { mayFieldOp } from '../row-grant.mjs';
+import { mayFieldOp } from '../row-grant.ts';
 
 export async function authorizeFieldOp(record: unknown, fieldName: string, capability: string, row: unknown, principal: unknown): Promise<void> {
   if (principal && !(await mayFieldOp(record, fieldName, capability, row, principal))) {

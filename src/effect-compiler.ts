@@ -1,0 +1,430 @@
+// @ts-nocheck
+// Effect compiler — compile-time validation of effect declarations (ADR #6, #22).
+//
+// Effects are declared on an entity as array pairs so typed trigger handles are
+// preserved rather than stringified by JavaScript object-key coercion:
+//   effects: (Note) => [
+//     [Note.created, { mutate: Inbox, with: ({ delta, origin }) => ({...}) }],
+//     [Note.collaborators.added, { mutate: Counter, with: { count: inc(1) } }],
+//   ]
+//
+// Runtime effect execution lives in ./effect-runtime.mjs.
+
+export { inc, dec, self, many, executeEffect, executeEffectsForEvent } from './effect-runtime.ts';
+
+// ---- effect namespace — compound trigger combinators (P6c-C step 3) ----
+
+// Backing store for anyOf symbol → original handles (module lifetime).
+const anyOfTriggers = new Map();
+
+function isEventHandle(handle) {
+  return handle && typeof handle === 'object' && handle.brand === 'event-handle' && typeof handle.type === 'string';
+}
+
+function isStateTransitionHandle(handle) {
+  return handle && typeof handle === 'object' && handle.brand === 'state-transition-handle' && typeof handle.type === 'string';
+}
+
+function isTriggerHandle(handle) {
+  return isEventHandle(handle) || isStateTransitionHandle(handle) || typeof handle === 'symbol';
+}
+
+function isDurableEffectDeclaration(effect) {
+  return effect && typeof effect === 'object' && typeof effect.durable === 'string';
+}
+
+export function effectEntries(effects, { sourceEntityName } = {}) {
+  if (effects === null || effects === undefined) return [];
+  if (!Array.isArray(effects)) {
+    throw new Error(
+      `effects on entity '${sourceEntityName ?? '<unknown>'}' must be an array of ` +
+      `[triggerHandle, effect] pairs. Object-keyed effects stringify typed handles; ` +
+      `use effects: (Self) => [[Self.created, { ... }]].`,
+    );
+  }
+  return effects.map((entry, index) => {
+    if (!Array.isArray(entry) || entry.length !== 2) {
+      throw new Error(`effects[${index}] on entity '${sourceEntityName ?? '<unknown>'}' must be [triggerHandle, effect].`);
+    }
+    return entry;
+  });
+}
+
+// effect.anyOf(...triggers) — mints a Symbol key for compound fan-IN.
+// The N original triggers are stored keyed by the symbol, and fanned out
+// at registry-build time to N event-type slots.
+// VALIDATION: throws if triggers.length <= 0 (fail-closed).
+export const effect = Object.freeze({
+  anyOf(...triggers) {
+    if (triggers.length === 0) {
+      throw new Error(
+        'effect.anyOf() requires at least one trigger handle — ' +
+        'a compound trigger with zero members is meaningless.',
+      );
+    }
+    for (const trigger of triggers) {
+      if (!isEventHandle(trigger) && !isStateTransitionHandle(trigger)) {
+        throw new Error(
+          `effect.anyOf() trigger '${stringifyTrigger(trigger)}' must be a typed event handle ` +
+          `or state transition handle. Strings are not accepted.`,
+        );
+      }
+    }
+    const sym = Symbol('effect.anyOf');
+    anyOfTriggers.set(sym, Object.freeze([...triggers]));
+    return sym;
+  },
+});
+
+// ---- Compile-time validation ----
+
+// Validate an effect declaration at load time.
+// Returns { valid: true } or throws a load-time error.
+// For Part 1, validates: mutate (typed entity handle), with (fn or object), when? (fn)
+export function validateEffectDeclaration(effect, { triggerHandle, sourceEntityName }) {
+  if (!effect || typeof effect !== 'object') {
+    throw new Error(
+      `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+      `must be an object with { mutate, with, when? }.`,
+    );
+  }
+  if (!isTriggerHandle(triggerHandle)) {
+    throw new Error(
+      `effect trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+      `must be a typed event handle, state transition handle, or effect.anyOf(...). Strings are not accepted.`,
+    );
+  }
+
+  // mutate: must be a typed entity handle (e.g. Inbox) OR the `self` sentinel OR `many` fan-out
+  const isSelf = effect.mutate && typeof effect.mutate === 'object' && effect.mutate.kind === 'self';
+  const isMany = effect.mutate && typeof effect.mutate === 'object' && effect.mutate.kind === 'many';
+  if (!effect.mutate || typeof effect.mutate !== 'object' || (!effect.mutate.name && !isSelf && !isMany)) {
+    throw new Error(
+      `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+      `must have 'mutate' as a typed entity handle (e.g. mutate: Inbox), the 'self' sentinel, or 'many' fan-out.`,
+    );
+  }
+
+  // Validate `many` sentinel: requires target entity with .name and overField descriptor
+  if (isMany) {
+    if (!effect.mutate.target || !effect.mutate.target.name) {
+      throw new Error(
+        `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+        `uses 'many' but target entity is missing or has no .name.`,
+      );
+    }
+    if (!effect.mutate.overField || typeof effect.mutate.overField !== 'object') {
+      throw new Error(
+        `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+        `uses 'many' but 'over' field descriptor is missing or not an object.`,
+      );
+    }
+  }
+
+  // with: must be a function ({delta, origin}) => {...} OR an object with field operators
+  if (!effect.with || (typeof effect.with !== 'function' && typeof effect.with !== 'object')) {
+    throw new Error(
+      `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+      `must have 'with' as a function or object template.`,
+    );
+  }
+
+  // when (optional): must be a function ({delta, origin}) => boolean
+  if (effect.when !== undefined && typeof effect.when !== 'function') {
+    throw new Error(
+      `effect for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+      `'when' must be a function ({delta, origin}) => boolean.`,
+    );
+  }
+
+  // Validate the `when` predicate is compilable (only references delta+origin)
+  // A non-compilable when (references I/O, external state) is a LOAD-TIME error.
+  if (effect.when) {
+    validateWhenPredicate(effect.when, { triggerHandle, sourceEntityName });
+  }
+
+  return { valid: true, targetEntity: effect.mutate };
+}
+
+// Validate a when predicate — developer guardrail, not a security boundary.
+// Effect bodies are app-developer code registered at entity declaration time, not
+// runtime user input. An attacker who can inject code into the entity declaration
+// already controls the process. The regex check is a best-effort lint to catch
+// accidental I/O or external state access in a when clause.
+function validateWhenPredicate(fn, { triggerHandle, sourceEntityName }) {
+  const fnStr = fn.toString();
+  // Forbidden patterns: anything that suggests I/O or external scope access
+  const forbidden = [
+    /\bfetch\s*\(/,
+    /\bdb\b(?![_\.])/,  // bare 'db' but not 'db_' or 'db.'
+    /\brequire\s*\(/,
+    /\bimport\s*\(/,
+    /\bprocess\./,
+    /\bglobal\./,
+  ];
+  for (const pattern of forbidden) {
+    if (pattern.test(fnStr)) {
+      throw new Error(
+        `effect 'when' predicate for trigger '${stringifyTrigger(triggerHandle)}' on entity '${sourceEntityName}' ` +
+        `references forbidden scope (I/O or external state). 'when' may only reference delta and origin.`,
+      );
+    }
+  }
+}
+
+// Compile all declared effects for an entity at load time.
+// Returns a compiled effects map or null if no effects declared.
+export function compileEntityEffects(entityRecord, allEntities) {
+  const { name, effects } = entityRecord;
+  if (!effects) return null;
+
+  const compiledEffects = new Map();
+  const effectGraphEntry = new Set(); // target entities for cycle detection
+
+  for (const [triggerHandle, effect] of effectEntries(effects, { sourceEntityName: name })) {
+    if (isDurableEffectDeclaration(effect)) continue;
+    const validation = validateEffectDeclaration(effect, {
+      triggerHandle,
+      sourceEntityName: name,
+    });
+
+    if (validation.valid) {
+      compiledEffects.set(triggerHandle, effect);
+
+      // Graph edge: self has no edge, many uses .target.name, plain uses .name
+      let edgeName;
+      if (validation.targetEntity?.kind === 'many') {
+        edgeName = validation.targetEntity.target?.name;
+      } else if (validation.targetEntity?.name) {
+        edgeName = validation.targetEntity.name;
+      }
+      if (edgeName) {
+        effectGraphEntry.add(edgeName);
+      }
+    }
+  }
+
+  return {
+    compiledEffects,
+    effectGraphEntry,
+  };
+}
+
+// Resolve a typed trigger handle to an event-type string.
+function resolveTriggerEventType(handle, { entityRecord }) {
+  if (isEventHandle(handle)) {
+    return handle.type;
+  }
+  if (isStateTransitionHandle(handle)) {
+    return handle.type;
+  }
+  throw new Error(
+    `effect trigger handle on entity '${entityRecord.name}' must be a typed event handle ` +
+    `or state transition handle. Strings are not accepted.`,
+  );
+}
+
+// Build an effects registry from compiled entities.
+// Returns Map<eventType, Array<{sourceEntity, effect}>>
+export function buildEffectsRegistry(entities) {
+  const registry = new Map();
+
+  for (const entityRecord of entities) {
+    const { name, effects } = entityRecord;
+    if (!effects) continue;
+
+    for (const [key, effect] of effectEntries(effects, { sourceEntityName: name })) {
+      if (isDurableEffectDeclaration(effect)) continue;
+      const isSymbol = typeof key === 'symbol';
+      if (!isTriggerHandle(key)) {
+        throw new Error(
+          `Effect declaration on entity '${name}' uses trigger '${stringifyTrigger(key)}'; ` +
+          `use a typed event handle, state transition handle, or effect.anyOf(...).`,
+        );
+      }
+
+      const triggerHandles = isSymbol
+        ? (anyOfTriggers.has(key) ? anyOfTriggers.get(key) : (() => {
+            throw new Error(
+              `Effect declaration on entity '${name}' uses an unknown symbol trigger key ` +
+              `(did you mean effect.anyOf(...)?).`,
+            );
+          })())
+        : [key];
+
+      // Dedupe resolved event types (so anyOf(X.updated, X.updated) fires once)
+      const resolvedEventTypes = new Set();
+      for (const handle of triggerHandles) {
+        resolvedEventTypes.add(resolveTriggerEventType(handle, { entityRecord }));
+      }
+
+      // Resolve overFieldName for `many` effects (shared logic for string + symbol paths)
+      let overFieldName = null;
+      if (effect.mutate?.kind === 'many') {
+        overFieldName = entityRecord.fields
+          ? Object.keys(entityRecord.fields).find(
+              (k) => entityRecord.fields[k] === effect.mutate.overField,
+            )
+          : null;
+        if (!overFieldName) {
+          throw new Error(
+            `effect for trigger '${isSymbol ? String(key) : stringifyTrigger(key)}' on entity '${name}' ` +
+              `uses 'many' but 'over' does not resolve to a declared field on '${name}'.`,
+          );
+        }
+      }
+
+      // Build the entry ONCE, push to each resolved event-type slot
+      const entry = { sourceEntity: name, effect };
+      if (overFieldName) entry.overFieldName = overFieldName;
+
+      for (const eventType of resolvedEventTypes) {
+        if (!registry.has(eventType)) {
+          registry.set(eventType, []);
+        }
+        registry.get(eventType).push(entry);
+      }
+    }
+  }
+
+  return registry;
+}
+
+// Detect structural cycles across all entities' effects.
+// effectsGraph: Map<sourceEntityName, Set<targetEntityName>>
+export function detectCrossEntityCycles(effectsGraph) {
+  const graph = new Map();
+
+  for (const [source, targets] of effectsGraph) {
+    if (!graph.has(source)) graph.set(source, new Set());
+    for (const target of targets) {
+      graph.get(source).add(target);
+    }
+  }
+
+  // DFS-based cycle detection
+  const visited = new Set();
+  const recStack = new Set();
+  const cyclePath = [];
+
+  function dfs(node) {
+    visited.add(node);
+    recStack.add(node);
+    cyclePath.push(node);
+
+    const neighbors = graph.get(node) || new Set();
+    for (const neighbor of neighbors) {
+      if (!visited.has(neighbor)) {
+        const cycle = dfs(neighbor);
+        if (cycle) return cycle;
+      } else if (recStack.has(neighbor)) {
+        const cycleStart = cyclePath.indexOf(neighbor);
+        return cyclePath.slice(cycleStart).concat([neighbor]);
+      }
+    }
+
+    cyclePath.pop();
+    recStack.delete(node);
+    return null;
+  }
+
+  for (const node of graph.keys()) {
+    if (!visited.has(node)) {
+      const cycle = dfs(node);
+      if (cycle) {
+        throw new Error(
+          `Structural cycle detected in effect graph: ${cycle.join(' → ')}. ` +
+          `Effects form a directed graph where A→B means A's effect mutates B. ` +
+          `A cycle is a load-time error (ADR #22). Break the cycle by removing one effect.`,
+        );
+      }
+    }
+  }
+
+  return true;
+}
+
+// Verify admission handshake: each effect target must admit effects from its sources.
+export function verifyAdmissionHandshake(effectsGraph, allEntities) {
+  const errors = [];
+  const entityMap = new Map(allEntities.map(e => [e.name, e]));
+
+  for (const [sourceName, targets] of effectsGraph) {
+    for (const targetName of targets) {
+      const targetEntity = entityMap.get(targetName);
+      if (!targetEntity) {
+        errors.push(`Target entity '${targetName}' not found for effect from '${sourceName}'`);
+        continue;
+      }
+
+      const admitsFn = targetEntity.admitsEffects;
+      if (!admitsFn) {
+        errors.push(
+          `entity '${targetName}' has no 'admitsEffects' declaration, but is the target of ` +
+          `an effect from '${sourceName}'. Add admitsEffects: ({ effect }) => is.<check>() to the target entity.`,
+        );
+        continue;
+      }
+
+      // Verify the admits function is callable
+      if (typeof admitsFn !== 'function') {
+        errors.push(
+          `entity '${targetName}' admitsEffects is not a function (got ${typeof admitsFn})`,
+        );
+      }
+    }
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Effect admission errors:\n${errors.join('\n')}`);
+  }
+}
+
+// Build the cross-entity effects graph from a set of entities.
+// Returns Map<sourceEntityName, Set<targetEntityName>> — the input shape for
+// detectCrossEntityCycles + verifyAdmissionHandshake. A node with no effects (or
+// an entity whose effects all use `when` false) still appears as a source if it
+// declares effects, so its targets are admitted. Entities without effects are
+// absent (a no-op graph → validateEffects is a no-op for an app with no effects,
+// zero blast radius for the existing suite).
+export function buildEffectsGraph(entities) {
+  const graph = new Map();
+  for (const entityRecord of entities) {
+    const { name, effects } = entityRecord;
+    if (!effects) continue;
+    const targets = new Set();
+    for (const [, effect] of effectEntries(effects, { sourceEntityName: name })) {
+      if (isDurableEffectDeclaration(effect)) continue;
+      const tgt = effect && effect.mutate;
+      if (tgt) {
+        // self: skip (no edge), many: use .target.name, plain use .name
+        if (tgt.name) {
+          targets.add(tgt.name);
+        } else if (tgt.kind === 'many' && tgt.target?.name) {
+          targets.add(tgt.target.name);
+        }
+      }
+    }
+    if (targets.size > 0) graph.set(name, targets);
+  }
+  return graph;
+}
+
+// Global validation pass (gap #4). Runs at app boot, AFTER every entity is known,
+// to make effect safety load-time-enforced rather than exported-but-uncalled.
+// Builds the effects graph, detects structural cycles (A→B→A), and verifies the
+// admission handshake (every target declares admitsEffects). A failure throws —
+// the app fails to boot, fail-closed (ADR #22). No-op when no effects declared.
+export function validateEffects(entities) {
+  const graph = buildEffectsGraph(entities);
+  if (graph.size === 0) return;
+  detectCrossEntityCycles(graph);
+  verifyAdmissionHandshake(graph, entities);
+}
+
+// ---- Helpers ----
+
+const stringifyTrigger = (h) =>
+  typeof h === 'string' ? h
+  : typeof h === 'symbol' ? h.toString()
+  : h?.toString?.() ?? String(h);

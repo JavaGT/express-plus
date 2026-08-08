@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Node HTTP/SSE skin for public LiveDelivery. Applications mount this handler
 // directly; it never receives raw log rows or application projection callbacks.
 

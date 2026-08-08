@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Layer (2) of the async `is.*` guard: LOAD-TIME STATIC ANALYSIS (ADR #16).
 //
 // The primary guard. At entity-load, the framework scans every `.can`/`scope`

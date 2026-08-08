@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { read, write, subscribe, admin } from './grant.mjs';
 import { readScopedRow } from './http-crud-dispatch.mjs';
 import { mayRow } from './row-grant.mjs';

@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { txn } from './driver.mjs';
 import { isPrincipalSnapshotDeclaration } from './principal-snapshot-declaration.mjs';
 

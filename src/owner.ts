@@ -1,4 +1,4 @@
-import { ref } from './field.mjs';
+import { ref } from './field.ts';
 import { scope } from './scope.ts';
 import { grant, deny, read, write, subscribe, admin } from './grant.ts';
 

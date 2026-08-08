@@ -1,3 +1,4 @@
+// @ts-nocheck
 // ddl.mjs — generate CREATE TABLE statements for compiled entities.
 //
 // The framework generates NO DDL by default (the app owns its schema). This

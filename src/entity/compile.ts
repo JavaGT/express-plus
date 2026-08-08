@@ -1,0 +1,653 @@
+// @ts-nocheck
+// entity(name, { <fields>, grant, checks?, routes?, ... }) — the entity compiler.
+//
+// The declaration is fields-less: every top-level key that is not a reserved
+// framework slot IS a field descriptor. Reserved slots are grant, checks, routes,
+// create, effects, admitsEffects, schedule, gate, on. (The old `fields:` wrapper
+// is retired — one way to declare a field, not two.)
+//
+// Compiles a declared entity into a frozen, validated record. This is where the
+// fail-closed load-time guards live (SPEC §6.1, §13; ADRs #7, #16):
+//
+//  - No grant is a LOAD-TIME ERROR (ADR #7): there is no zero-to-one default
+//    grant; the smoothest path is still an explicit one.
+//  - A `ref` field with `role: 'x'` auto-derives a check `is.x()` — the ONE
+//    thing the FK derives (SPEC §6.2): the single source of truth for "who is
+//    the x of this row". A developer-declared check of the same name is a
+//    LOAD-TIME ERROR: a ref-role check cannot be redeclared (DECISIONLOG #54;
+//    the one registry derives both the SQL filter face and the runtime boolean
+//    face from the one field — a second hand-written body is the split-brain
+//    the unified registry exists to forbid).
+//  - Every `.can` body is statically guarded (assertGuarded, ADR #16). A `scope`
+//    predicate is NOT guarded: it compiles to SQL and never runs as JS, so its
+//    `is.*` calls are correctly un-awaited (SPEC §6.1).
+
+import { randomUUID } from 'node:crypto';
+import { fieldHandle, bindReadScope } from '../scope-sql.ts';
+import { compileEntityAuthz } from '../authz.ts';
+import { getLog } from '../log.ts';
+import {
+  serializeField, validateMutation, ValidationError, flattenStruct,
+  structCellColumn,
+} from '../field-strategy.ts';
+import { materializeStoredRow } from './materialize-row.ts';
+import { action, event } from '../pipeline.ts';
+import * as eventHandle from '../event-handle.ts';
+import { created, updated, removed } from '../event-handle.ts';
+import { generateDDL } from '../ddl.ts';
+import { resolveRouteGate } from '../route-gate.ts';
+import { effectEntries, validateEffectDeclaration } from '../effect-compiler.ts';
+import { triggerList } from '../schedule.ts';
+import { compileMembershipAuthz } from '../auth/membership.ts';
+import { collectSideTableStrategies } from '../side-table-strategy.ts';
+import { createEntityProjection, createConditionalHistoryProjection, createConditionalCreateHistoryProjection } from './projection.ts';
+import { createCrudHandlers, materializeCreateDefaults } from './crud.ts';
+import { installEntityQueries } from './query.ts';
+import { validateScheduleTrigger, autoStateScheduleTrigger, stateEffectEntries, assertSqlIdentifier, mintToken } from './schedule-compile.ts';
+import { validateAnnotatedTextDeclaration } from '../annotated-text-field.ts';
+import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from '../annotated-text-field.ts';
+import { scopeOf } from '../scope-handle.ts';
+
+// Reserved top-level declaration slots. Every other key on the declaration is a
+// field descriptor. A field name that collides with a reserved slot is a
+// load-time error: the developer would have written a field whose name the
+// compiler owns, which silently drops the field (fail closed).
+const RESERVED_DECLARATION_SLOTS = new Set([
+  'fields', 'grant', 'checks', 'routes', 'create', 'effects', 'admitsEffects',
+  'schedule', 'simulation', 'gate', 'on', 'membership', 'field', 'history', 'indexes',
+  'applicationHttpActions',
+]);
+const APPLICATION_HTTP_CRUD_VERBS = Object.freeze(['create', 'update', 'remove']);
+
+function looksLikeFieldDescriptor(value) {
+  return value !== null && typeof value === 'object' && typeof value.kind === 'string';
+}
+
+export function entity(name, declaration = {}) {
+  if (Object.hasOwn(declaration, 'fields')) {
+    throw new Error(
+      `entity('${name}') uses the retired fields wrapper. Declare fields directly on ` +
+        `the entity object; 'fields' is a reserved declaration slot.`,
+    );
+  }
+  for (const key of RESERVED_DECLARATION_SLOTS) {
+    const value = declaration[key];
+    const isDeclaredSimulation = key === 'simulation' && value?.kind === 'simulate';
+    if (Object.hasOwn(declaration, key) && looksLikeFieldDescriptor(value) && !isDeclaredSimulation) {
+      throw new Error(
+        `entity('${name}') field '${key}' collides with a reserved declaration slot. ` +
+          `Rename the field.`,
+      );
+    }
+  }
+
+  const { grant, checks: declaredChecksIn = {}, membership: membershipDecl, routes, create: createPolicy, effects = null, admitsEffects = null, schedule = {}, simulation = null, gate: declaredGate = {}, history: historyDecl, indexes: indexesDecl, applicationHttpActions: declaredApplicationHttpActions } = declaration;
+  if (historyDecl !== undefined && (typeof historyDecl !== 'object' || historyDecl === null || Array.isArray(historyDecl) || Object.keys(historyDecl).some((key) => key !== 'update' && key !== 'create') || ['update', 'create'].some((key) => historyDecl[key] !== undefined && historyDecl[key] !== 'conditional'))) {
+    throw new Error(`entity('${name}') history must be { create?: 'conditional', update?: 'conditional' }`);
+  }
+  const conditionalHistory = historyDecl?.update === 'conditional';
+  const conditionalCreateHistory = historyDecl?.create === 'conditional';
+  let applicationHttpActions = Object.freeze([]);
+  if (declaredApplicationHttpActions !== undefined) {
+    if (!Array.isArray(declaredApplicationHttpActions) || declaredApplicationHttpActions.length === 0) {
+      throw new Error(`entity('${name}') applicationHttpActions must be a non-empty array of 'create' | 'update' | 'remove'`);
+    }
+    const seen = new Set();
+    for (const verb of declaredApplicationHttpActions) {
+      if (!APPLICATION_HTTP_CRUD_VERBS.includes(verb)) {
+        throw new Error(
+          `entity('${name}') applicationHttpActions has unknown verb '${verb}'. ` +
+            `Allowed verbs are ${APPLICATION_HTTP_CRUD_VERBS.join(', ')}.`,
+        );
+      }
+      if (seen.has(verb)) {
+        throw new Error(`entity('${name}') applicationHttpActions lists '${verb}' more than once`);
+      }
+      seen.add(verb);
+    }
+    applicationHttpActions = Object.freeze(APPLICATION_HTTP_CRUD_VERBS.filter((verb) => seen.has(verb)));
+  }
+
+  // The entity name becomes a table name interpolated into SQL — validate first.
+  assertSqlIdentifier('entity', name);
+
+  // 'PrincipalSnapshot' is reserved for principal snapshot identity and cannot
+  // be declared as a regular entity name.
+  if (name === 'PrincipalSnapshot') {
+    throw new Error(
+      `entity('${name}') is a reserved framework name and cannot be declared as an entity.`,
+    );
+  }
+
+  // Fields-less declaration: every non-reserved top-level key is a field
+  // descriptor. A reserved-slot name used as a field is a load-time error (the
+  // developer intended a field, the compiler owns the slot — fail closed rather
+  // than silently drop the field).
+  const fields = {};
+  for (const [key, value] of Object.entries(declaration)) {
+    if (RESERVED_DECLARATION_SLOTS.has(key)) continue;
+    fields[key] = value;
+  }
+
+  // membership: augments/replaces grant and checks from a declarative role→capability map.
+  // If the developer wrote both `grant:` and `membership:`, the explicit `grant:` takes
+  // precedence (the membership entry is a convenience shortcut, not a second path).
+  let effectiveGrant = grant;
+  let declaredChecks = { ...declaredChecksIn };
+  let compiledMembershipChecks = null;
+  if (membershipDecl && (grant === undefined || grant === null)) {
+    const membershipResult = compileMembershipAuthz(name, fields, membershipDecl);
+    effectiveGrant = membershipResult.grant;
+    // Membership checks are already registry entries with harvest + run faces.
+    // `declaredChecks` contains app functions which buildCheckRegistry compiles
+    // into that shape, so feeding entries through it would call an object as a
+    // function while harvesting the scope predicate.
+    compiledMembershipChecks = membershipResult.checks;
+  }
+
+  // ADR #7: an entity must declare a grant (explicitly via `grant:` or `membership:`,
+  // or later via the standalone `membership()` call). No grant is allowed at compile
+  // time for the standalone path — the entity has no readScope, so scopeFilter
+  // returns '1=1' (the route gate is the first auth layer). The standalone
+  // membership() call then sets a proper scope.
+  if (effectiveGrant === undefined || effectiveGrant === null) {
+    getLog().warn(
+      'entity',
+      `entity('${name}') has no grant at compile time — all access will be denied ` +
+        `until a grant is set via membership() or an equivalent mechanism.`,
+    );
+  }
+
+  // A structured field generates `<field>__<cell>` columns; a declared field or
+  // sub-cell name containing the `__` separator could collide with a generated
+  // column, so it is a load-time error (fail closed — the generated namespace
+  // and the declared namespace must never alias).
+  for (const [fieldName, descriptor] of Object.entries(fields)) {
+    // A field name becomes a column (and, for a struct, a `<field>__<cell>`
+    // column) interpolated into SQL — validate it is a bare identifier first,
+    // then reject the reserved '__' separator that would alias the generated
+    // struct-column namespace.
+    assertSqlIdentifier(`entity('${name}') field`, fieldName);
+    if (descriptor.immutable === true && (descriptor.readonly === true || descriptor.touch === true)) {
+      const conflictingMode = descriptor.touch === true ? 'touch' : 'readonly';
+      throw new Error(
+        `entity('${name}') field '${fieldName}' cannot combine immutable with ${conflictingMode}. ` +
+          'Immutable fields are supplied by a client on create and frozen afterwards; ' +
+          `${conflictingMode} fields are owned by the framework.`,
+      );
+    }
+    if (fieldName.includes('__')) {
+      throw new Error(
+        `entity('${name}') field '${fieldName}' contains the reserved '__' separator, ` +
+          `which is used to generate structured-field columns. Rename the field.`,
+      );
+    }
+    // Lifecycle event handles are reserved member names on the entity handle
+    // (Doc.created / Doc.updated / Doc.removed — typed event handles). A declared
+    // field of the same name would shadow the handle, so it is a load-time error.
+    if (fieldName === 'created' || fieldName === 'updated' || fieldName === 'removed') {
+      throw new Error(
+        `entity('${name}') field '${fieldName}' collides with the reserved lifecycle ` +
+          `event handle ${name}.${fieldName}. Rename the field — the lifecycle handle ` +
+          `is the derived identifier for effects keyed on ${name}.${fieldName}.`,
+      );
+    }
+    if (descriptor.kind === 'struct') {
+      for (const cellName of Object.keys(descriptor.cells)) {
+        assertSqlIdentifier(`entity('${name}') field '${fieldName}' sub-cell`, cellName);
+        if (cellName.includes('__')) {
+          throw new Error(
+            `entity('${name}') field '${fieldName}' has a sub-cell '${cellName}' containing ` +
+              `the reserved '__' separator. Rename the sub-cell.`,
+          );
+        }
+      }
+    }
+    if (descriptor.kind === 'annotatedText') {
+      validateAnnotatedTextDeclaration(name, fieldName, descriptor, fields);
+    }
+  }
+
+  const indexes = [];
+  if (indexesDecl !== undefined) {
+    if (!Array.isArray(indexesDecl)) throw new Error(`entity('${name}') indexes must be an array`);
+    const seenIndexes = new Set();
+    for (const index of indexesDecl) {
+      if (!index || typeof index !== 'object' || Array.isArray(index) || index.unique !== true || !Array.isArray(index.fields)
+        || Object.keys(index).some((key) => key !== 'fields' && key !== 'unique')) {
+        throw new Error(`entity('${name}') indexes entries must be { fields: [..], unique: true }`);
+      }
+      if (index.fields.length < 2 || index.fields.some((fieldName) => typeof fieldName !== 'string')) {
+        throw new Error(`entity('${name}') index fields must contain at least two field names`);
+      }
+      const fieldsKey = [...index.fields].sort().join('\u0000');
+      if (new Set(index.fields).size !== index.fields.length) {
+        throw new Error(`entity('${name}') index fields must not contain duplicates`);
+      }
+      if (seenIndexes.has(fieldsKey)) {
+        throw new Error(`entity('${name}') duplicate index declaration for fields [${index.fields.join(', ')}]`);
+      }
+      seenIndexes.add(fieldsKey);
+      for (const fieldName of index.fields) {
+        const descriptor = fields[fieldName];
+        if (!descriptor || !(
+          descriptor.kind === 'value' || descriptor.kind === 'crdt' ||
+          descriptor.kind === 'hash' || descriptor.kind === 'state'
+        )) {
+          throw new Error(`entity('${name}') index field '${fieldName}' must be a stored main-table field`);
+        }
+      }
+      indexes.push(Object.freeze({ fields: Object.freeze([...index.fields]), unique: true }));
+    }
+  }
+
+  const annotatedOwningRefs = new Set(Object.values(fields)
+    .filter((descriptor) => descriptor?.kind === 'annotatedText')
+    .map((descriptor) => descriptor.project));
+  if (annotatedOwningRefs.size > 1) {
+    throw new Error(`entity('${name}') annotatedText fields must share one owning project ref`);
+  }
+
+  const caretCells = new Set();
+  for (const [, descriptor] of Object.entries(fields)) {
+    if (descriptor.kind !== 'annotatedText') continue;
+    const caret = getAnnotatedTextCompiledMetadata(descriptor)?.caret;
+    if (!caret) continue;
+    const key = `${caret.field}\u0000${caret.cell}`;
+    if (caretCells.has(key)) {
+      throw new Error(`entity('${name}') caret cell '${caret.field}.${caret.cell}' is linked to more than one annotatedText field`);
+    }
+    caretCells.add(key);
+  }
+
+  const { registry, readScope, scopeAst, clauses } = compileEntityAuthz(name, {
+    fields,
+    grant: effectiveGrant,
+    declaredChecks,
+    compiledChecks: compiledMembershipChecks,
+  });
+
+  // Self-handle for effects thunk resolution. The effects thunk receives a
+  // handle that resolves field names to their typed handles — a minimal proxy
+  // distinct from registerEntityHandle (which also sets runtime active-entity
+  // state). Kept minimal so the two handles can't drift (same resolving logic,
+  // different lifecycle purpose).
+  const selfHandle = new Proxy(Object.create(null), {
+    get(_target, key) {
+      if (key === 'id') return { fieldName: 'id' };
+      if (key === 'name') return name;
+      if (key === 'created') return created(name);
+      if (key === 'updated') return updated(name);
+      if (key === 'removed') return removed(name);
+      if (Object.prototype.hasOwnProperty.call(fields, key)) return fieldHandle(key, fields[key], name);
+      return undefined;
+    },
+  });
+
+  // Validate declared effects at load time (but not cycle detection — that runs
+  // globally after all entities are defined). Each effect must have valid
+  // { mutate, with, when? } shape. A non-compilable 'when' predicate is a
+  // load-time error (ADR #22). Trigger handles resolve through the effect compiler;
+  // map mutations use entity-specific typed handles such as
+  // Doc.collaborators.added, not generic field-local aliases.
+  const declaredEffectsArray = typeof effects === 'function' ? effects(selfHandle) : effects;
+  const entries = [
+    ...effectEntries(declaredEffectsArray, { sourceEntityName: name }),
+    ...Object.entries(fields).flatMap(([fieldName, descriptor]) =>
+      descriptor.kind === 'state' ? stateEffectEntries(name, fieldName, descriptor) : []),
+  ];
+  const validatedEffects = entries.length > 0 ? Object.freeze([...entries]) : null;
+  for (const [triggerHandle, effect] of entries) {
+    if (effect && typeof effect === 'object' && typeof effect.durable === 'string') continue;
+    validateEffectDeclaration(effect, { triggerHandle, sourceEntityName: name });
+  }
+
+  const declaredSchedule = { ...schedule };
+  for (const [fieldName, descriptor] of Object.entries(fields)) {
+    if (descriptor.kind !== 'state' || descriptor.auto == null) continue;
+    const trigger = autoStateScheduleTrigger(name, fieldName, descriptor, fields);
+    declaredSchedule.update = [...triggerList(declaredSchedule.update), trigger];
+  }
+
+  let validatedSchedule = null;
+  const scheduleKeys = Object.keys(declaredSchedule);
+  if (scheduleKeys.length > 0) {
+    validatedSchedule = {};
+    for (const [verbName, triggerOrTriggers] of Object.entries(declaredSchedule)) {
+      if (typeof verbName !== 'string' || verbName.length === 0) {
+        throw new Error(`schedule: verb name must be a non-empty string, got ${verbName}`);
+      }
+      if (!['create', 'update', 'remove'].includes(verbName)) {
+        throw new Error(`schedule verb '${verbName}' must be one of create | update | remove (entity '${name}')`);
+      }
+      const triggers = triggerList(triggerOrTriggers);
+      if (triggers.length === 0) {
+        throw new Error(`schedule.${verbName}: expected at least one schedule trigger`);
+      }
+      const validated = triggers.map((trigger) => validateScheduleTrigger({
+        name,
+        verbName,
+        trigger,
+        fields,
+        registry,
+      }));
+      const triggerIds = new Set();
+      for (const trigger of validated) {
+        if (
+          verbName === 'update'
+          && (trigger.kind === 'schedule.at' || trigger.kind === 'schedule.after')
+          && !trigger.autoState
+          && fields[trigger.fieldName]?.touch === true
+        ) {
+          throw new Error(
+            `schedule.${verbName} on entity '${name}': deadline field '${trigger.fieldName}' ` +
+              'cannot be a touch field because the scheduled update would move its own deadline and fire repeatedly',
+          );
+        }
+        if (triggerIds.has(trigger.triggerId)) {
+          throw new Error(
+            `schedule.${verbName}: duplicate trigger identity '${trigger.triggerId}' on entity '${name}'; ` +
+              `give each trigger a distinct { key }`,
+          );
+        }
+        triggerIds.add(trigger.triggerId);
+      }
+      validatedSchedule[verbName] = triggers.length === 1 ? Object.freeze(validated[0]) : Object.freeze(validated);
+    }
+    validatedSchedule = Object.freeze(validatedSchedule);
+  }
+
+  // projected.async fields: each entry is [fieldName, { compute }] for the
+  // post-commit consumer to iterate.
+  const projectedAsyncFields = Object.entries(fields)
+    .filter(([, d]) => d.kind === 'projected' && d.mode === 'async');
+  // computed.stored fields: run in-transaction in the projection's apply handler.
+  const storedComputedFields = Object.entries(fields)
+    .filter(([, d]) => d.kind === 'computed' && d.mode === 'stored');
+  if (conditionalHistory && storedComputedFields.length > 0) {
+    throw new Error(`entity('${name}') conditional update history does not support stored computed fields`);
+  }
+
+  // The route gate is the FIRST default-on auth layer (SPEC §6.2, ADR #20). It
+  // lives ON the entity declaration next to `grant` — one authorization story —
+  // and is resolved once at compile time through the same resolveRouteGate the
+  // router used to run: unknown verbs / non-function gates fail closed, and
+  // every unlisted verb defaults to requireUser() (the default-on gate). The row
+  // grant stays a separate layer and is untouched here.
+  const gate = resolveRouteGate(declaredGate);
+
+  const record = {
+    name,
+    fields: Object.freeze({ ...fields }),
+    // Only put grant on the record when it's defined, so the set trap can
+    // store a later override (via membership()) without violating the Proxy
+    // invariant (non-writable, non-configurable property with a different value).
+    ...(effectiveGrant !== undefined && effectiveGrant !== null ? { grant: effectiveGrant } : {}),
+    registry,
+    // Keep a `checks` object for tests that read entity.checks.<name>(...).
+    // Each key is the RUN face — the canonical home is `registry`, but existing
+    // tests expect `checks` to expose callable functions. Uses `this.registry`
+    // so it dynamically picks up overrides set by membership().
+    get checks() {
+      const checksObj = {};
+      for (const [name, entry] of Object.entries(this.registry ?? {})) {
+        if (entry.run) checksObj[name] = entry.run;
+      }
+      return Object.freeze(checksObj);
+    },
+    routes,
+    gate,
+    applicationHttpActions,
+    inherit: clauses?.inherit
+      ? Object.freeze({ parent: clauses.inherit.name, via: clauses.via })
+      : null,
+    readScope: readScope ? Object.freeze({ sql: readScope.sql, params: readScope.params }) : undefined,
+    scopeAst,
+    scopeFilter(principal) {
+      if (this.grant == null) return { sql: '1=0', params: {} };
+      if (!readScope) return { sql: '1=1', params: {} };
+      const bound = bindReadScope(readScope, principal);
+      return bound ? { sql: bound.sql, params: bound.params } : { sql: '1=1', params: {} };
+    },
+    effects: validatedEffects,
+    admitsEffects,
+    schedule: validatedSchedule,
+    simulation,
+    projectedAsyncFields: Object.freeze(projectedAsyncFields),
+    storedComputedFields: Object.freeze(storedComputedFields),
+    conditionalHistory,
+    conditionalCreateHistory,
+    indexes: Object.freeze(indexes),
+  };
+
+  const sideTableStrategyEntries = collectSideTableStrategies(fields);
+  if (conditionalCreateHistory && (sideTableStrategyEntries.length > 0 || storedComputedFields.length > 0 || Object.values(fields).some((descriptor) => descriptor.kind === 'annotatedText' || descriptor.kind === 'crdt' || descriptor.kind === 'struct' || descriptor.kind === 'hash'))) {
+    throw new Error(`entity('${name}') conditional create history supports only replayable stored value fields`);
+  }
+
+  function createEntityHydrator({ record, entityName, fields, sideTableStrategyEntries, runtime }) {
+    // Keep the long-standing public contract: callers may ignore this return
+    // value and still observe the row deserialized in place. Lifecycle code
+    // uses materializeStoredRow directly when it needs a detached snapshot.
+    const deserializeStoredCells = (row) => {
+      if (!row) return row;
+      const materialized = materializeStoredRow(row, fields);
+      for (const key of Object.keys(row)) {
+        if (!Object.prototype.hasOwnProperty.call(materialized, key)) delete row[key];
+      }
+      Object.assign(row, materialized);
+      return row;
+    };
+
+    const hydrate = (row, principal = null, dispatch = null) => {
+      if (!row) return row;
+      row = deserializeStoredCells(row);
+      for (const { strategy, fields: strategyFields } of sideTableStrategyEntries) {
+        for (const [fieldName, descriptor] of strategyFields) {
+          if (typeof strategy.handle === 'function') {
+            row[fieldName] = strategy.handle({
+              record,
+              entityName,
+              fieldName,
+              descriptor,
+              row,
+              principal,
+              dispatch,
+              db: runtime.db,
+              entityOf: runtime.entityOf,
+            });
+          }
+        }
+      }
+      return row;
+    };
+
+    return { hydrate, deserializeStoredCells };
+  }
+
+  // insert(cells) — the trusted low-level write core: serialize each declared
+  // field's value to its stored cell, INSERT, and return the hydrated new row.
+  // It does NOT run validateMutation — its caller has already decided the cells
+  // are legitimate (the generic create validates an untrusted payload first; a
+  // create POLICY mints server-side cells it owns). This is the ONE place the
+  // INSERT/return-row mechanics live; both write paths compose it (singular
+  // system, deletion test: the policy override adds intent, not a second insert).
+  record.verbs = Object.freeze({
+    create: action(`${name}.create`),
+    created: event(eventHandle.created(name), (state, { data }) => ({ ...state, ...data })),
+    update: action(`${name}.update`),
+    updated: event(eventHandle.updated(name), (state, { data }) => ({ ...state, ...data })),
+    remove: action(`${name}.remove`),
+    removed: event(eventHandle.removed(name), (state) => ({ ...state, _removed: true })),
+  });
+
+  record.removedEvent = (id, db) => ({
+    handle: record.verbs.removed.handle,
+    type: record.verbs.removed.type,
+    scope: Object.values(fields).some((descriptor) => descriptor.kind === 'annotatedText')
+      ? resolveAnnotatedTextOwningScope(Object.values(fields).find((descriptor) => descriptor.kind === 'annotatedText'), fields, db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id) ?? {}).key
+      : scopeOf(name, id).key,
+    data: { id },
+  });
+
+  record.projection = createEntityProjection({
+    name,
+    fields,
+    verbs: record.verbs,
+    storedComputedFields,
+    sideTableStrategyEntries,
+    conditionalHistory,
+    conditionalCreateHistory,
+  });
+  record.projections = Object.freeze([
+    record.projection,
+    ...(conditionalHistory ? [createConditionalHistoryProjection({ name, verbs: record.verbs })] : []),
+    ...(conditionalCreateHistory ? createConditionalCreateHistoryProjection({ name, verbs: record.verbs }) : []),
+  ]);
+
+  record.generateDDL = () => generateDDL(record);
+
+  const LIFECYCLE_HANDLES = Object.freeze({
+    created: (name) => created(name),
+    updated: (name) => updated(name),
+    removed: (name) => removed(name),
+  });
+
+  // Don't freeze the entire record — only `fields` is frozen (above). Auth-related
+  // properties (grant, registry, readScope, scopeAst) are mutable so membership()
+  // and similar post-compilation augmentations can set them in place.
+  function handleProxy(target, resolveEntity, { mutableAuth = false } = {}) {
+    const fieldNamespace = new Proxy(Object.create(null), {
+      get(_namespace, key) {
+        if (key === 'id') return { fieldName: 'id' };
+        if (typeof key === 'string' && Object.hasOwn(fields, key)) {
+          return fieldHandle(key, fields[key], name, resolveEntity);
+        }
+        return undefined;
+      },
+      set() { return false; },
+    });
+    return new Proxy(target, {
+      get(target, key, receiver) {
+        if (key === 'field') return fieldNamespace;
+        // Lifecycle handles and legacy direct field handles are resolved only
+        // for string keys not owned by the record. `.field` is the unambiguous
+        // path when a field name collides with entity metadata such as `name`.
+        if (key in target || typeof key !== 'string') {
+          return Reflect.get(target, key, receiver);
+        }
+        if (key === 'id') return { fieldName: 'id' };
+        if (LIFECYCLE_HANDLES[key]) return LIFECYCLE_HANDLES[key](name);
+        if (Object.hasOwn(fields, key)) {
+          return fieldHandle(key, fields[key], name, resolveEntity);
+        }
+        return undefined;
+      },
+      set(target, key, value, _receiver) {
+        if (mutableAuth && (key === 'grant' || key === 'registry' || key === 'readScope' || key === 'scopeAst' || key === 'scopeFilter')) {
+          target[key] = value;
+          return true;
+        }
+        return false;
+      },
+    });
+  }
+
+  // A declaration owns schema, policy, events, projection and DDL. It owns no
+  // database operations. Binding is deliberately app-scoped so the same
+  // declaration can be mounted by several applications without ambient state.
+  Object.defineProperty(record, 'bind', {
+    enumerable: false,
+    value(runtime) {
+      if (!runtime || typeof runtime.entityOf !== 'function') {
+        throw new Error(`cannot bind entity '${name}' without an application runtime`);
+      }
+      const requireDb = () => {
+        if (!runtime.db) {
+          throw new Error(`entity '${name}' database operation requires an application database`);
+        }
+        return runtime.db;
+      };
+      // A database-less app can still resolve and inspect routes. Database
+      // operations remain present but fail loudly when invoked, preserving one
+      // facade shape across construction and startup.
+      const queryDb = Object.freeze({
+        prepare(...args) {
+          return requireDb().prepare(...args);
+        },
+      });
+
+      const boundRecord = Object.create(record);
+      Object.defineProperties(boundRecord, {
+        declaration: { value: proxy, enumerable: false },
+        runtime: { value: runtime, enumerable: false },
+      });
+      const bound = handleProxy(boundRecord, runtime.entityOf, { mutableAuth: true });
+      const { hydrate, deserializeStoredCells } = createEntityHydrator({
+        record: bound,
+        entityName: name,
+        fields,
+        sideTableStrategyEntries,
+        runtime,
+      });
+
+      installEntityQueries(boundRecord, {
+        name,
+        hydrate,
+        deserializeStoredCells,
+        db: queryDb,
+      });
+
+      const insert = (cells) => {
+        const id = cells.id ?? randomUUID();
+        const stored = { id };
+        for (const [key, value] of Object.entries(cells)) {
+          if (key === 'id') continue;
+          const descriptor = fields[key];
+          if (descriptor?.kind === 'store' && descriptor.type === 'map') continue;
+          if (descriptor && (descriptor.kind === 'projected' || descriptor.kind === 'computed')) continue;
+          if (descriptor?.kind === 'struct') {
+            Object.assign(stored, flattenStruct(key, descriptor, value));
+            continue;
+          }
+          if (descriptor) stored[key] = serializeField(descriptor, value);
+        }
+        const cols = Object.keys(stored);
+        const db = requireDb();
+        db
+          .prepare(`INSERT INTO ${name} (${cols.join(', ')}) VALUES (${cols.map((c) => `:${c}`).join(', ')})`)
+          .run(stored);
+        return hydrate(db.prepare(`SELECT * FROM ${name} AS t0 WHERE t0.id = :id`).get({ id }));
+      };
+
+      boundRecord.create = (payload) => {
+        if (typeof createPolicy === 'function') {
+          return createPolicy(payload, { insert, mintToken });
+        }
+        const validated = validateMutation(bound, payload);
+        return insert(materializeCreateDefaults(bound, validated));
+      };
+      boundRecord.insert = insert;
+      boundRecord.delete = (id) => {
+        requireDb().prepare(`DELETE FROM ${name} WHERE id = :id`).run({ id });
+      };
+      boundRecord.crudHandlers = createCrudHandlers({ record: bound, sideTableStrategyEntries, conditionalHistory, conditionalCreateHistory });
+      if (conditionalHistory) boundRecord.historyActionRule = Object.freeze({
+        inverse: ({ action, fact }) => ({ type: `${name}.update`, payload: { id: action.payload.id }, input: { expected: fact.after, replacement: fact.before } }),
+        redo: ({ action, fact }) => ({ type: `${name}.update`, payload: { id: action.payload.id }, input: { expected: fact.before, replacement: fact.after } }),
+      });
+      if (conditionalCreateHistory) boundRecord.createHistoryActionRule = Object.freeze({
+        inverse: ({ action, fact }) => ({ type: `${name}.remove`, payload: { id: action.payload.id }, input: { expected: fact.after, replacement: null } }),
+        redo: ({ action, fact }) => ({ type: `${name}.create`, payload: { id: action.payload.id }, input: { expected: null, replacement: fact.after } }),
+      });
+      return bound;
+    },
+  });
+
+  const proxy = handleProxy(
+    record,
+    (target) => typeof target === 'object' ? target : null,
+    { mutableAuth: true },
+  );
+  return proxy;
+}

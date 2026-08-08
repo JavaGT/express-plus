@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { projectAnnotatedTextForRecipient } from './annotated-text-recipient-projection.mjs';
 
 function fail(message) { throw new Error(`annotated-text caret projection: ${message}`); }

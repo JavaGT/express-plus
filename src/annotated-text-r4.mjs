@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { ValidationError } from './field-strategy.mjs';
 import { splitBlock, materializeBlock } from './annotated-text-family.mjs';
 import { assertUtf16Offset } from './annotated-text.mjs';

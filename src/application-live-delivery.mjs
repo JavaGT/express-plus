@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Application-integrated live delivery. This is intentionally not a server
 // export: the app supplies its own entity registry and authorization engine,
 // while callers provide only transport policy and declared aggregate snapshots.

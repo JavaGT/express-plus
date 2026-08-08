@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { mayRow, mayFieldOp } from './row-grant.mjs';
 import { CASCADE_PREAUTHORIZED } from './entity/removal-cascade.mjs';
 import {

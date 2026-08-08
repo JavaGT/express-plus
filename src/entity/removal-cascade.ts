@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { mayRow } from '../row-grant.mjs';
+import { mayRow } from '../row-grant.ts';
 
 export const CASCADE_PREAUTHORIZED: unique symbol = Symbol('workbench.cascade-preauthorized');
 export const CASCADE_DESCENDANT: unique symbol = Symbol('workbench.cascade-descendant');

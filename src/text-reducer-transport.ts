@@ -1,4 +1,4 @@
-import { textCheckpoint, createTextState } from './annotated-text.mjs';
+import { textCheckpoint, createTextState } from './annotated-text.ts';
 
 const TEXT_REDUCER = 'workbench.text';
 

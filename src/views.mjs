@@ -1,3 +1,4 @@
+// @ts-nocheck
 // views.mjs — a minimal, zero-deps view engine (SPEC §3).
 //
 // `resolveTemplate(viewsDir, name, data)` reads an HTML file from the views

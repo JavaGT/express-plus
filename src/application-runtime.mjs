@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Application runtime ownership. This is the one boot path for both headless
 // and HTTP applications: declaration/schema finalization, Kernel assembly,
 // recovery, maintenance, clocks, and graceful shutdown registration.

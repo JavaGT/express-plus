@@ -12,19 +12,19 @@
 // (AGENTS.md, one reconciliation path).
 
 // Lazy import of effect compiler (avoids circular dependency at module load time).
-import { readSeq } from './committed-log.mjs';
-import { appendEvents, receiptFor, eventsFromReceipt, insertReceipt } from './committed-log.mjs';
+import { readSeq } from './committed-log.ts';
+import { appendEvents, receiptFor, eventsFromReceipt, insertReceipt } from './committed-log.ts';
 import { lifecycleVerb, parseEventType } from './event-handle.ts';
 import { txn } from './driver.ts';
-import { isPlainObject, ValidationError } from './field-strategy.mjs';
+import { isPlainObject, ValidationError } from './field-strategy.ts';
 import { createRequire } from 'node:module';
-import { createDurableHistoryRuntime } from './durable-history.mjs';
+import { createDurableHistoryRuntime } from './durable-history.ts';
 import { decideReplay } from './replay-decision.ts';
 import { getLog } from './log.ts';
 import { failure, failureFromError, failureOutcome } from './outcome.ts';
 import { principalKeyOf } from './principal.ts';
-import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparation, prepareErasureDirective } from './erasure-directive.mjs';
-import { declarePostCommitEffectsInTxn } from './post-commit-effects.mjs';
+import { applyErasureDirective, isErasureDirective, isErasureDirectivePreparation, prepareErasureDirective } from './erasure-directive.ts';
+import { declarePostCommitEffectsInTxn } from './post-commit-effects.ts';
 
 // `action(type)` — declare an imperative request type. The handler that turns it
 // into events is attached later by the entity/dispatch wiring.

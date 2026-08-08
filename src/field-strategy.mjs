@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The field-type persistence strategy table + the validate pipeline stage.
 //
 // SPEC §5.1, §7 (stage 1: validate), §7.2 ("the field-type plugin owns the

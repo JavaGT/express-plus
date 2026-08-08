@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Blockless annotation ranges (issue #33 step 3).
 //
 // An annotation is a character range on the continuous family:

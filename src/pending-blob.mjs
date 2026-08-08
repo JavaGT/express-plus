@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { txn } from './driver.mjs';
 import { principalKeyOf } from './principal.mjs';

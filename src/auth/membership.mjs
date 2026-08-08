@@ -1,3 +1,4 @@
+// @ts-nocheck
 // membership — concentrates the two-plane membership pattern into a single declaration.
 //
 // Before (15 lines of boilerplate per entity):

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // FTS (full-text search) side-table strategy.
 //
 // A field declared with `text({ indexed: 'fts' })` gets an FTS5 virtual table

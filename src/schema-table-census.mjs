@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Derives the canonical set of persistent framework table names from the actual
 // DDL generators — one authoritative source, no hand-maintained lists.
 // Every table the framework owns appears here: framework DDL tables, the

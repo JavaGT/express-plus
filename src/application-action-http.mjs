@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Package-owned browser transport for registered actions and explicitly
 // opted-in generated entity CRUD. It deliberately accepts one opaque envelope
 // instead of exposing entity-specific REST writes.

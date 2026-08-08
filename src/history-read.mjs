@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { parseEventType } from './event-handle.mjs';
 import { rowToEvent } from './committed-log.mjs';
 import { mayRow, mayVerb as rowGrantMayVerb } from './row-grant.mjs';

@@ -1,3 +1,4 @@
+// @ts-nocheck
 // T1 owns the stable annotated-text operation grammar. T2 owns reduction.
 
 const ACTOR = /^[0-9a-f]{32}$/;
@@ -243,7 +244,7 @@ function assertState(state) {
   return state;
 }
 
-export function createTextState(options) {
+export function createTextState(options ) {
   return Object.freeze(makeState(options));
 }
 

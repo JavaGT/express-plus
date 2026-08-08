@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Route resolution and building — extracted from app.mjs.
 //
 // The shared core of the mountable surface factory, route resolution, and

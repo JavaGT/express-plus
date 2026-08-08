@@ -1,3 +1,4 @@
+// @ts-nocheck
 // A live WebSocket connection — socket I/O, frame parsing/sending,
 // message routing, and the connection lifecycle.
 //

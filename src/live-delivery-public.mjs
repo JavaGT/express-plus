@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Public, transport-neutral committed delivery. The package owns reread,
 // authorization, projection, and cursor semantics; adapters only deliver the
 // recipient-safe batch and acknowledge it by resolving their callback.

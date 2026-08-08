@@ -1,3 +1,4 @@
+// @ts-nocheck
 import {
   assertFrontier, assertStructuralPoint, assertUtf16Offset,
   compareOpId, createTextState, frontierDominates, restoreTextCheckpoint,

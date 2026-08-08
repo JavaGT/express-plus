@@ -1,3 +1,4 @@
+// @ts-nocheck
 // The committed _Log — the single durable event store.
 //
 // This module owns the _Log table (DDL, append, read, dedupe) so pipeline.mjs

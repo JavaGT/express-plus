@@ -1,3 +1,4 @@
+// @ts-nocheck
 // middleware.mjs — the baked-in default behaviors the framework applies to every
 // response (SPEC §3). The app mounts none of this by hand; if it had to, that
 // would be a leak (AGENTS.md → Defaults). Each default here is fail-closed and

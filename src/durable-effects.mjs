@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { effectEntries } from './effect-compiler.mjs';
 import { parseEventType } from './event-handle.mjs';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';

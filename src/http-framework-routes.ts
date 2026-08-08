@@ -1,0 +1,513 @@
+// @ts-nocheck
+// Framework-owned HTTP routes — snapshot, events-since, blob upload, job queue,
+// and the browser SDK endpoint.
+//
+// These are NOT mounted routes: they are framework defaults intercepted before
+// route matching in the request handler, like /health. Auth runs through the
+// SAME engine as REST (mayVerb / mayRow / readScope), not a second path.
+//
+// Exports: handleResyncRoute, handleBlobUploadRoute, handleJobRoute,
+// handleClientSdkRoute.
+
+import { readFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { sendJson } from './http-response.ts';
+import { failureForHttpError, sendFailure } from './http-failure.ts';
+import { readScopedRow, authorizeRow } from './http-crud-dispatch.ts';
+import { readSeq, readSince, minSeqForScope } from './committed-log.ts';
+import { BodyError, readRawBody, readRequestBody } from './http-body.ts';
+import { scopeOf, tryParseScopeKey } from './scope-handle.ts';
+import { createdTextReducerSeeds, textReducerCheckpoints } from './text-reducer-transport.ts';
+import { publicEvent } from './event-delivery.ts';
+import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.ts';
+import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
+
+function reject(res, status, message, details) {
+  const workbenchFailure = failureForHttpError({ status, message, details });
+  sendFailure(sendJson, res, workbenchFailure, { status });
+}
+
+// routes — resolved at request time from `/snapshot/:entity/:id` and
+// `/events-since/:entity/:id`. The entity table IS the snapshot (scope's proven
+// shape); the committed `_Log` is the RESYNC source. Authorization runs the SAME
+// mayVerb('read') engine as REST `read` (the viewer bar), after the same
+// readScope row filter — one auth engine, no second path (SPEC §7, §7.1).
+//
+// Returns true when the request was handled (the caller short-circuits); false
+// when the path is not a framework resync route (fall through to matchRoute).
+export async function handleResyncRoute(app, req, res, principal) {
+  const url = new URL(req.url, 'http://localhost');
+  const seg = url.pathname.split('/').filter(Boolean);
+  const isSnapshot = seg[0] === 'snapshot';
+  const isEventsSince = seg[0] === 'events-since';
+  if (!isSnapshot && !isEventsSince) return false;
+  if (!app || !app.entities || !app.db) return false;
+
+  if (!principal || principal.id == null) {
+    reject(res, 401, 'unauthorized');
+    return true;
+  }
+
+  // Scope-level requests: GET /snapshot?scope=project:p1 etc.
+  const scopeParam = url.searchParams.get('scope');
+  if (scopeParam) {
+    if (isSnapshot) return snapshotScopeRoute(app, scopeParam, principal, res);
+    const cursor = Number(url.searchParams.get('cursor') ?? 0);
+    return eventsSinceScopeRoute(app, scopeParam, principal, res, cursor);
+  }
+
+  // Per-entity requests: GET /snapshot/:entity/:id or /events-since/:entity/:id
+  if (seg.length !== 3) { reject(res, 404, 'not found'); return true; }
+  const [, entityName, id] = seg;
+  const entity = app.entities.get(entityName);
+  if (!entity) { reject(res, 404, 'not found'); return true; }
+  const row = hasAnnotatedTextFields(entity) ? app.db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id) : null;
+  const annotatedEntry = Object.entries(entity.fields).find(([, field]) => field.kind === 'annotatedText');
+  const [, descriptor] = annotatedEntry ?? [];
+  const retiredScope = !row && descriptor && app.db.prepare("SELECT scope FROM _Log WHERE json_extract(eventData, '$.id') = ? ORDER BY rowid DESC LIMIT 1")
+    .get(id)?.scope;
+  const scopeKey = descriptor ? (row ? resolveAnnotatedTextOwningScope(descriptor, entity.fields, row).key : retiredScope ?? scopeOf(entityName, id).key) : scopeOf(entityName, id).key;
+  if (isSnapshot) return snapshotRoute(app, entity, id, scopeKey, principal, res);
+  const cursor = Number(url.searchParams.get('cursor') ?? 0);
+  return eventsSinceRoute(app, entity, scopeKey, id, principal, res, cursor);
+}
+
+async function snapshotRoute(app, entity, id, scopeKey, principal, res) {
+  // Read the row + the scope cursor in ONE synchronous block — no await between
+  // them — then authorize. A concurrent dispatch commit cannot split the pair
+  // (eng-review Tier-1 #2): the cursor is captured alongside the row, before the
+  // async mayVerb yields. The pair we authorize is the pair we return.
+  const row = readScopedRow(app, entity, id, principal);
+  const { sql: where, params } = entity.scopeFilter(principal);
+  const storedRow = app.db.prepare(`SELECT * FROM ${entity.name} AS t0 WHERE ${where} AND t0.id = :id`)
+    .get({ ...params, id });
+  const lastSeq = readSeq(app.db, scopeKey);
+  const auth = await authorizeRow(app, entity, 'read', id, principal, row);
+  if (auth.status) {
+    reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
+    return true;
+  }
+  let snapshot;
+  try {
+    snapshot = await projectEntitySnapshot({ db: app.db, entity, row: auth.row, principal });
+    // Projection can await policy checks. Do not pair facts assembled across a
+    // concurrent scope mutation with the cursor captured before those checks.
+    if (hasAnnotatedTextFields(entity) && readSeq(app.db, scopeKey) !== lastSeq) throw new Error('snapshot changed while projecting');
+  } catch {
+    reject(res, 403, 'forbidden');
+    return true;
+  }
+  sendJson(res, 200, {
+    snapshot,
+    seq: lastSeq,
+    reducers: textReducerCheckpoints(entity, storedRow),
+  });
+  return true;
+}
+
+async function snapshotScopeRoute(app, scope, principal, res) {
+  // The cursor is read as the LAST synchronous step before responding — after
+  // every await that can yield to a concurrent dispatch commit (authorizeScope,
+  // and the app-supplied async scopeSnapshot aggregation) — never before. A
+  // custom scopeSnapshot callback may read fresh state at its own resolution
+  // time (it is not required to derive purely from the pre-authorized anchor
+  // row), so the cursor paired with it must be captured at that same moment;
+  // reading it any earlier risks returning a snapshot from one epoch next to a
+  // cursor from an older one (Wave 3.7 Contract 4 detail).
+  const access = await authorizeScope(app, scope, principal);
+  if (access.status) {
+    reject(res, access.status, access.status === 404 ? 'not found' : 'forbidden');
+    return true;
+  }
+  if (access.direct) {
+    const lastSeq = readSeq(app.db, scope);
+    const storedRow = app.db.prepare(`SELECT * FROM ${access.anchor.entity} WHERE id = ?`).get(access.anchor.id);
+    const entity = app.entities.get(access.anchor.entity);
+    try {
+        const snapshot = await projectEntitySnapshot({ db: app.db, entity, row: access.anchor.row, principal });
+      if (readSeq(app.db, scope) !== lastSeq) throw new Error('snapshot changed while projecting');
+      sendJson(res, 200, {
+        snapshot,
+        cursors: { [scope]: lastSeq },
+        reducers: textReducerCheckpoints(entity, storedRow),
+      });
+    } catch {
+      reject(res, 403, 'forbidden');
+    }
+    return true;
+  }
+  // A custom scope may aggregate several rows, but its resolver must first map
+  // it to one normal entity row that owns authorization. The callback receives
+  // that already-authorized anchor; it is a data projection hook, never a
+  // second authorization engine.
+  const scopeSnapshot = typeof app.scopeSnapshot === 'function'
+    ? await app.scopeSnapshot(scope, principal, access.anchor)
+    : null;
+  if (scopeSnapshot !== null && scopeSnapshot !== undefined) {
+    // An aggregate callback has no recipient annotated-text grammar. Never let
+    // it become an unprojected alternate delivery path for an annotated entity.
+    const lastSeq = readSeq(app.db, scope);
+    const entity = app.entities.get(access.anchor.entity);
+    if (hasAnnotatedTextFields(entity)) {
+      reject(res, 403, 'forbidden');
+      return true;
+    }
+    const storedAnchor = app.db.prepare(`SELECT * FROM ${access.anchor.entity} WHERE id = ?`).get(access.anchor.id);
+    sendJson(res, 200, {
+      snapshot: scopeSnapshot,
+      cursors: { [scope]: lastSeq },
+      reducers: textReducerCheckpoints(entity, storedAnchor),
+    });
+    return true;
+  }
+  reject(res, 404, 'not found');
+  return true;
+}
+
+async function eventsSinceScopeRoute(app, scope, principal, res, cursor) {
+  const access = await authorizeScope(app, scope, principal);
+  if (access.status) {
+    reject(res, access.status, access.status === 404 ? 'not found' : 'forbidden');
+    return true;
+  }
+  const entity = app.entities.get(access.anchor.entity);
+  // A custom aggregate has no annotated-text recipient grammar. Deny before
+  // retention handling so it cannot acquire a transport-specific disposition.
+  if (hasAnnotatedTextFields(entity) && !access.direct) {
+    reject(res, 403, 'forbidden');
+    return true;
+  }
+  const minSeq = minSeqForScope(app.db, scope);
+  if (minSeq !== null && cursor + 1 < minSeq) {
+    sendJson(res, 200, { resync: 'stale', reason: 'cursor-behind-retention' });
+    return true;
+  }
+  const rows = readSince(app.db, scope, cursor);
+  // The T5b snapshot reader is the only recipient grammar for annotated text.
+  // Historical operation facts cannot cross replay until a projected event
+  // grammar exists, so force the client through that reader instead.
+  if (hasAnnotatedTextFields(entity)) {
+    if (rows.length > 0) {
+      sendJson(res, 200, { resync: 'stale', reason: 'annotated-text-snapshot-required' });
+      return true;
+    }
+  }
+  const events = rows.map((r) => {
+    const data = JSON.parse(r.eventData);
+    const reducers = createdTextReducerSeeds(app.entities.get(tryParseScopeKey(r.scope)?.entity), { type: r.eventType, data });
+    return publicEvent({ scope: r.scope, seq: r.seq, type: r.eventType, data, actionId: r.actionId, committedAt: r.committedAt, ...(reducers ? { reducers } : {}) });
+  });
+  sendJson(res, 200, { scope, cursor, events });
+  return true;
+}
+
+async function authorizeScope(app, scope, principal) {
+  const handle = tryParseScopeKey(scope);
+  const directEntity = handle ? app.entities.get(handle.entity) : null;
+  let anchor = directEntity ? { entity: handle.entity, id: handle.id } : null;
+  let direct = Boolean(directEntity);
+
+  if (!anchor) {
+    if (typeof app.resolveScope !== 'function') return { status: 404 };
+    anchor = await app.resolveScope(scope);
+    direct = false;
+  }
+  if (!anchor || typeof anchor.entity !== 'string' || anchor.id == null) {
+    return { status: 404 };
+  }
+  const entity = app.entities.get(anchor.entity);
+  if (!entity) return { status: 404 };
+
+  const row = readScopedRow(app, entity, String(anchor.id), principal);
+  const auth = await authorizeRow(app, entity, 'read', String(anchor.id), principal, row);
+  if (auth.status) return { status: auth.status };
+  return {
+    anchor: { entity: anchor.entity, id: String(anchor.id), row: auth.row },
+    direct,
+  };
+}
+
+async function eventsSinceRoute(app, entity, scopeKey, documentId, principal, res, cursor) {
+  // events-since authorizes against the CURRENT row, falling back to the
+  // deleted-row history anchor when the row is gone (Wave 3.7 Contract 1): an
+  // owner who held read+subscribe at the moment of deletion can still resync
+  // the tail of that scope's history (its own `Note.removed` event included).
+  // Fail closed either way: an out-of-scope or genuinely-nonexistent row, or
+  // a deleted row the principal never held a grant on, yields 404.
+  const auth = await authorizeRow(app, entity, 'read', documentId, principal, null, { allowDeletedAnchor: true });
+  if (auth.status) {
+    reject(res, auth.status, auth.status === 404 ? 'not found' : 'forbidden');
+    return true;
+  }
+  // A deleted annotated document has no recipient snapshot to recover from.
+  // Its historical row grant permits only an opaque terminal disposition, not
+  // replay of the canonical events that preceded deletion. This wins over
+  // retention because a stale response would demand an impossible snapshot.
+  if (auth.historical && hasAnnotatedTextFields(entity)) {
+    const last = app.db.prepare('SELECT MAX(seq) AS seq FROM _Log WHERE scope = ?').get(scopeKey)?.seq ?? 0;
+    sendJson(res, 200, { resync: 'deleted', seq: Math.max(readSeq(app.db, scopeKey), last) });
+    return true;
+  }
+  const minSeq = minSeqForScope(app.db, scopeKey);
+  // The client wants events > cursor; the first wanted is cursor+1. If that is
+  // older than the oldest RETAINED event, the gap can never be filled → HARD-FAIL.
+  // Never a silent truncate (SPEC §3.6 — the single non-negotiable property).
+  if (minSeq !== null && cursor + 1 < minSeq) {
+    sendJson(res, 200, { resync: 'stale', reason: 'cursor-behind-retention' });
+    return true;
+  }
+  const rows = readSince(app.db, scopeKey, cursor);
+  // Do not selectively redact event.data: annotated-text events also carry
+  // canonical family facts in reducers and framework metadata. A nonempty
+  // replay is terminally redirected to the recipient-projected snapshot.
+  if (hasAnnotatedTextFields(entity) && rows.length > 0) {
+    sendJson(res, 200, { resync: 'stale', reason: 'annotated-text-snapshot-required' });
+    return true;
+  }
+  const events = rows.map((r) => {
+    const data = r.data ?? null;
+    const reducers = createdTextReducerSeeds(entity, { type: r.eventType, data });
+    return publicEvent({ type: r.eventType, scope: r.scope, seq: r.seq, data, actionId: r.actionId, committedAt: r.committedAt, ...(reducers ? { reducers } : {}) });
+  });
+  sendJson(res, 200, { events });
+  return true;
+}
+
+// Framework-owned blob upload endpoint (spec #2, eng-review Walk 1b). NOT a
+// mounted route: `POST /blobs` streams the request body to the BlobStore as a
+// PENDING blob (`.pending` file + row), returning { id, md5, sha256, size, mime }.
+// The blob is ADOPTED later by the dispatch that references it (an entity field
+// marked `blob: true` carrying the blob id) — adopted IN that dispatch's
+// transaction, finalized post-commit. A rolled-back dispatch leaves it pending
+// for the reaper. Route-gate fail-closed: anonymous → 401 (same admission as a
+// mounted route — no second auth path). Returns true when handled; false to fall
+// through to matchRoute.
+const BLOB_LIMIT = 50_000_000; // ~50mb upload cap (SPEC §3 size-guard default).
+
+export async function handleBlobUploadRoute(app, req, res, principal) {
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname !== '/blobs' || req.method !== 'POST') return false;
+  if (!app || !app.blobs) return false;
+  // route gate (requireUser) — fail closed for anonymous, same as a mounted route.
+  if (!principal || principal.id == null) {
+    reject(res, 401, 'unauthorized');
+    return true;
+  }
+  let bytes;
+  try {
+    bytes = await readRawBody(req, BLOB_LIMIT);
+  } catch (err) {
+    if (err instanceof BodyError) {
+      reject(res, err.status, err.message);
+      return true;
+    }
+    throw err;
+  }
+  const mime = (req.headers['content-type'] ?? 'application/octet-stream').split(';')[0].trim();
+  const meta = app.blobs.upload({ bytes, mime });
+  sendJson(res, 201, meta);
+  return true;
+}
+
+// Framework-owned job-queue endpoints (spec #5, Walk 2). NOT mounted routes: the
+// worker / job API is a framework default, intercepted before route matching (like
+// /blobs, /health, /snapshot). Auth is its OWN path — a per-worker bearer token,
+// constant-time compared + revocable (cso: never the shared secret, which is used
+// only at /workers/register). These routes are anonymous w.r.t. the route gate — a
+// worker is not a logged-in principal; the bearer IS the credential. Workers are
+// non-browser clients (no Origin/Referer) so they pass the foreign-only CSRF guard.
+// Returns true when handled; false to fall through to matchRoute.
+export async function handleJobRoute(app, req, res) {
+  const url = new URL(req.url, 'http://localhost');
+  if (req.method !== 'POST' || !app?.jobs) return false;
+  const jobs = app.jobs;
+
+  // Bearer extraction: `Authorization: Bearer <workerId>.<token>`.
+  const bearer = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '').trim() || null;
+
+  if (url.pathname === '/workers/register') {
+    let body;
+    try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
+      if (err instanceof BodyError) { reject(res, err.status, err.message); return true; }
+      throw err;
+    }
+    const w = jobs.registerWorker(body.secret);
+    if (!w) { reject(res, 401, 'invalid shared secret'); return true; }
+    sendJson(res, 200, w);
+    return true;
+  }
+
+  if (url.pathname === '/jobs/claim') {
+    const workerId = jobs.authenticate(bearer);
+    if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
+    const scope = url.searchParams.get('scope') || null;
+    const job = jobs.claim(workerId, scope ? { scope } : undefined);
+    if (!job) { res.writeHead(204); res.end(); return true; } // no queued work
+    sendJson(res, 200, job);
+    return true;
+  }
+
+  const hb = url.pathname.match(/^\/jobs\/([^/]+)\/heartbeat$/);
+  if (hb) {
+    const workerId = jobs.authenticate(bearer);
+    if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
+    const ok = jobs.heartbeat(hb[1], workerId);
+    if (!ok) { reject(res, 403, 'not the owning worker or job not running'); return true; }
+    sendJson(res, 200, { ok: true });
+    return true;
+  }
+
+  const pg = url.pathname.match(/^\/jobs\/([^/]+)\/progress$/);
+  if (pg) {
+    const workerId = jobs.authenticate(bearer);
+    if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
+    let body;
+    try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
+      if (err instanceof BodyError) { reject(res, err.status, err.message); return true; }
+      throw err;
+    }
+    const updated = jobs.updateProgress({ jobId: pg[1], workerId, progress: body.progress, stage: body.stage });
+    if (!updated) { reject(res, 403, 'not the owning worker or job not in progress'); return true; }
+    sendJson(res, 200, { id: updated.id, progress: updated.progress, stage: updated.stage, status: updated.status });
+    return true;
+  }
+
+  const rs = url.pathname.match(/^\/jobs\/([^/]+)\/result$/);
+  if (rs) {
+    const workerId = jobs.authenticate(bearer);
+    if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
+    let body;
+    try { body = await readRequestBody(req, { jsonOnly: true }); } catch (err) {
+      if (err instanceof BodyError) { reject(res, err.status, err.message); return true; }
+      throw err;
+    }
+    let result;
+    try { result = jobs.submitResult(rs[1], workerId, body); }
+    catch (err) { reject(res, 400, err.message); return true; }
+    if (!result.accepted) { reject(res, 403, 'not the owning worker or job not in progress'); return true; }
+    sendJson(res, 200, result);
+    return true;
+  }
+
+  const cn = url.pathname.match(/^\/jobs\/([^/]+)\/cancel$/);
+  if (cn) {
+    const workerId = jobs.authenticate(bearer);
+    if (!workerId) { reject(res, 401, 'unauthorized'); return true; }
+    const cancelled = jobs.cancelJob({ jobId: cn[1], workerId });
+    if (!cancelled) { reject(res, 404, 'job not found'); return true; }
+    if (cancelled.forbidden) { reject(res, 403, 'not the owning worker'); return true; }
+    if (cancelled.terminal) { reject(res, 400, 'job already terminal — cannot cancel'); return true; }
+    sendJson(res, 200, { id: cancelled.id, status: cancelled.status });
+    return true;
+  }
+
+  return false;
+}
+
+// Framework-owned browser SDK endpoint: `GET /workbench.mjs` serves the client
+// side of the /events live protocol. Resolved relative to THIS file via
+// import.meta.url, never process.cwd(). Only engaged when a db is present (the
+// live kernel is running); a db-less app has no live protocol and falls through.
+// Returns true when handled; false to fall through.
+const CLIENT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-client.mjs';
+const ANNOTATED_TEXT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/src') + '/annotated-text.mjs';
+const ANNOTATED_TEXT_FAMILY_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/src') + '/annotated-text-family.mjs';
+const TEXT_EDIT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-text-edit.mjs';
+const ANNOTATED_TEXT_SNAPSHOT_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot.mjs';
+const ANNOTATED_TEXT_SNAPSHOT_INTERNAL_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-snapshot-internal.mjs';
+const ANNOTATED_TEXT_REDACTION_COORDS_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-redaction-coords.mjs';
+const ANNOTATED_TEXT_ACTION_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/src') + '/annotated-text-action-builder.mjs';
+const ANNOTATED_TEXT_EDITOR_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-editor.mjs';
+const ANNOTATED_TEXT_CONTINUOUS_SDK_PATH = dirname(fileURLToPath(import.meta.url)).replace(/\/src$/, '/public') + '/workbench-annotated-text-continuous.mjs';
+
+export function handleClientSdkRoute(app, req, res) {
+  if (req.method !== 'GET') return false;
+  const url = new URL(req.url, 'http://localhost');
+  if (url.pathname === '/workbench-annotated-text.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(ANNOTATED_TEXT_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-annotated-text-family.mjs') {
+    if (!app || !app.db) return false;
+    // Family source imports ./annotated-text.mjs; rewrite to the browser SDK path
+    // so the same module folds under Node (public re-export) and HTTP delivery.
+    const body = readFileSync(ANNOTATED_TEXT_FAMILY_SDK_PATH, 'utf8')
+      .replaceAll("from './annotated-text.ts'", "from './workbench-annotated-text.mjs'");
+    const bytes = Buffer.from(body);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': bytes.byteLength });
+    res.end(bytes);
+    return true;
+  }
+  if (url.pathname === '/workbench-text-edit.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(TEXT_EDIT_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-annotated-text-snapshot.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(ANNOTATED_TEXT_SNAPSHOT_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-annotated-text-continuous.mjs') {
+    if (!app || !app.db) return false;
+    // Browser port of the blockless continuous family (issue #33). Its imports
+    // already name the browser SDK paths (./workbench-annotated-text.mjs,
+    // ./workbench-annotated-text-family.mjs), so no rewrite is needed.
+    const body = readFileSync(ANNOTATED_TEXT_CONTINUOUS_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-annotated-text-snapshot-internal.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(ANNOTATED_TEXT_SNAPSHOT_INTERNAL_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-annotated-text-redaction-coords.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(ANNOTATED_TEXT_REDACTION_COORDS_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-annotated-text-action.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(ANNOTATED_TEXT_ACTION_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname === '/workbench-annotated-text-editor.mjs') {
+    if (!app || !app.db) return false;
+    const body = readFileSync(ANNOTATED_TEXT_EDITOR_SDK_PATH);
+    res.writeHead(200, { 'content-type': 'text/javascript; charset=utf-8', 'content-length': Buffer.byteLength(body) });
+    res.end(body);
+    return true;
+  }
+  if (url.pathname !== '/workbench.mjs') return false;
+  if (!app || !app.db) return false;
+  let body;
+  try {
+    body = readFileSync(CLIENT_SDK_PATH);
+  } catch {
+    reject(res, 404, 'not found');
+    return true;
+  }
+  res.writeHead(200, {
+    'content-type': 'text/javascript; charset=utf-8',
+    'content-length': Buffer.byteLength(body),
+  });
+  res.end(body);
+  return true;
+}

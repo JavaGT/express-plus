@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { parseEventType } from './event-handle.mjs';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
 import { txn } from './driver.mjs';

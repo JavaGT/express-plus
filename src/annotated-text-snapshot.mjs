@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { deserializeField } from './field-strategy.mjs';
 import { restoreTextFamily, materializeText, projectEndpointToOffset, textFamilyCheckpoint } from './annotated-text-continuous.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';

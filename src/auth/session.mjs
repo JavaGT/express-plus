@@ -1,3 +1,4 @@
+// @ts-nocheck
 // session.mjs — session/auth wiring (SPEC §3, §572, §660).
 //
 // The principal a request carries is built SERVER-SIDE from its session. The

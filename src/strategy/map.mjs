@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { read, write } from '../grant.mjs';
 import { membershipTable, membershipOwnerCol, MEMBER_COLUMN } from '../scope-sql.mjs';
 import * as eventHandles from '../event-handle.mjs';

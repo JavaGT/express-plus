@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { DatabaseSync } from 'node:sqlite';
 
 import { generateDDL } from './ddl.mjs';

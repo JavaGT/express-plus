@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { resolveStrategy } from './field-strategy.mjs';
 import { getLog } from './log.mjs';
 import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';

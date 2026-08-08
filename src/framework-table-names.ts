@@ -1,6 +1,6 @@
 // Lightweight package-table census for security-sensitive code that cannot
 // import the auth compile graph without introducing an initialization cycle.
-import { generateFrameworkDDL } from './ddl.mjs';
+import { generateFrameworkDDL } from './ddl.ts';
 import { MIGRATION_DDL } from './migrations.ts';
 
 const AUTH_TABLE_NAMES = ['User', 'Session', 'Inbox', 'Credential', 'Invitation', 'ApiKey', 'TwoFactor'];

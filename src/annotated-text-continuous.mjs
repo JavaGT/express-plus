@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Blockless continuous annotated-text family (issue #33).
 //
 // The RGA checkpoint already holds the whole document text; blocks were a

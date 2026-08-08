@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { structCellColumn } from './field-strategy.mjs';
+import { structCellColumn } from './field-strategy.ts';
 
 function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;

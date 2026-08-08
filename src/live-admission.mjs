@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Subscribe-time admission: validate the subscribe message, bind read scope,
 // run mayVerb('subscribe') authorization, and return an admission decision.
 //
