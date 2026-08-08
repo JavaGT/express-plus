@@ -1,65 +1,65 @@
 // @ts-nocheck
 const SQL_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-const _sourceBrand = new WeakSet        ();
-const _sourceFieldBrand = new WeakSet        ();
-const _selectBrand = new WeakSet        ();
-const _orderBrand = new WeakSet        ();
-const _manyBrand = new WeakSet        ();
-const _objectBrand = new WeakSet        ();
-const _declarationBrand = new WeakSet        ();
+const _sourceBrand = new WeakSet<object>();
+const _sourceFieldBrand = new WeakSet<object>();
+const _selectBrand = new WeakSet<object>();
+const _orderBrand = new WeakSet<object>();
+const _manyBrand = new WeakSet<object>();
+const _objectBrand = new WeakSet<object>();
+const _declarationBrand = new WeakSet<object>();
 
-function assertSqlIdentifier(label        , value         )       {
+function assertSqlIdentifier(label: string, value: unknown): void {
   if (typeof value !== 'string' || !SQL_IDENTIFIER.test(value)) {
     throw new Error(`${label} "${value}" is not a valid SQL identifier`);
   }
 }
 
-function assertBrand(label        , value         , brand                 , noun        )       {
+function assertBrand(label: string, value: unknown, brand: WeakSet<object>, noun: string): void {
   if (!value || typeof value !== 'object' || !brand.has(value)) {
     throw new Error(`${label} requires a valid ${noun}`);
   }
 }
 
-                            
-                           
-                  
-                
-                                           
- 
+interface ProjectionSource {
+  kind: 'projectionSource';
+  schema: unknown;
+  table: string;
+  field: Record<string, SourceFieldHandle>;
+}
 
-                             
-                      
-                           
-                 
-                     
-                    
-                             
- 
+interface SourceFieldHandle {
+  kind: 'sourceField';
+  source: ProjectionSource;
+  column: string;
+  entityName: string;
+  fieldName: string;
+  direction?: 'asc' | 'desc';
+}
 
-                          
-               
-                            
-                          
-                          
-                               
-                                
- 
+interface ManyCollection {
+  kind: 'many';
+  source?: ProjectionSource;
+  via?: SourceFieldHandle;
+  key?: SourceFieldHandle;
+  select?: SourceFieldHandle[];
+  orderBy?: SourceFieldHandle[];
+}
 
-                        
-                 
-                                        
- 
+interface OutputObject {
+  kind: 'object';
+  shape: Record<string, ManyCollection>;
+}
 
-                                        
-                            
-               
-                         
-                       
-                                         
- 
+interface PrincipalSnapshotDeclaration {
+  kind: 'principalSnapshot';
+  name: string;
+  principalType: unknown;
+  output: OutputObject;
+  fields: Record<string, ManyCollection>;
+}
 
-function fieldHandleFor(source                  , column        )                    {
+function fieldHandleFor(source: ProjectionSource, column: string): SourceFieldHandle {
   assertSqlIdentifier(`projectionSource field`, column);
   const handle = Object.freeze({
     kind: 'sourceField',
@@ -72,7 +72,7 @@ function fieldHandleFor(source                  , column        )               
   return handle;
 }
 
-export function projectionSource(schema         , table        )                   {
+export function projectionSource(schema: unknown, table: string): ProjectionSource {
   if (schema === null || schema === undefined || typeof schema !== 'object' || Array.isArray(schema)) {
     throw new Error('projectionSource requires an object schema');
   }
@@ -83,7 +83,7 @@ export function projectionSource(schema         , table        )                
     throw new Error('projectionSource requires a non-empty table name');
   }
   assertSqlIdentifier('projectionSource table', table);
-  const source                   = {
+  const source: ProjectionSource = {
     kind: 'projectionSource',
     schema,
     table,
@@ -99,25 +99,25 @@ export function projectionSource(schema         , table        )                
   return result;
 }
 
-function validateSource(label        , actual         , expected         )       {
+function validateSource(label: string, actual: unknown, expected: unknown): void {
   if (actual !== expected) {
     throw new Error(`${label} must come from the same projection source`);
   }
 }
 
-function validateSourceFields(label        , source         , handles                     )       {
+function validateSourceFields(label: string, source: unknown, handles: SourceFieldHandle[]): void {
   for (const handle of handles) {
     assertBrand(label, handle, _sourceFieldBrand, 'source field handle');
     validateSource(label, handle.source, source);
   }
 }
 
-                                    
-                         
-                       
- 
+interface PrincipalSnapshotOptions {
+  principalType: unknown;
+  output: OutputObject;
+}
 
-export function principalSnapshot(name        , { principalType, output }                          )                               {
+export function principalSnapshot(name: string, { principalType, output }: PrincipalSnapshotOptions): PrincipalSnapshotDeclaration {
   if (typeof name !== 'string' || !/^[a-z][a-z0-9-]{0,63}$/.test(name)) {
     throw new Error(`principalSnapshot name must match /^[a-z][a-z0-9-]{0,63}$/, got '${name}'`);
   }
@@ -125,7 +125,7 @@ export function principalSnapshot(name        , { principalType, output }       
     throw new Error(`principalSnapshot principalType must be one of user, link, system, apiKey, got '${principalType}'`);
   }
   assertBrand('principalSnapshot', output, _objectBrand, 'output object');
-  const fields                                 = {};
+  const fields: Record<string, ManyCollection> = {};
   for (const [key, rel] of Object.entries(output.shape)) {
     assertBrand(`principalSnapshot output field '${key}'`, rel, _manyBrand, 'many collection');
     if (rel.source === undefined) {
@@ -144,18 +144,18 @@ export function principalSnapshot(name        , { principalType, output }       
   return result;
 }
 
-                                    
-                                                              
-                                                                        
-                                                               
-                                                                                    
- 
+export interface principalSnapshot {
+  object(shape: Record<string, ManyCollection>): OutputObject;
+  many(source: ProjectionSource, options?: ManyOptions): ManyCollection;
+  select(...handles: SourceFieldHandle[]): SourceFieldHandle[];
+  orderBy(handle: SourceFieldHandle, direction?: 'asc' | 'desc'): SourceFieldHandle;
+}
 
-principalSnapshot.object = function object(shape                                )               {
+principalSnapshot.object = function object(shape: Record<string, ManyCollection>): OutputObject {
   if (!shape || typeof shape !== 'object' || Array.isArray(shape)) {
     throw new Error('principalSnapshot.object requires an output object shape');
   }
-  const resolved                                 = {};
+  const resolved: Record<string, ManyCollection> = {};
   for (const [key, value] of Object.entries(shape)) {
     assertBrand(`principalSnapshot.object field '${key}'`, value, _manyBrand, 'many collection');
     resolved[key] = value;
@@ -165,19 +165,19 @@ principalSnapshot.object = function object(shape                                
   return result;
 };
 
-                       
-                          
-                          
-                               
-                                
- 
+interface ManyOptions {
+  via?: SourceFieldHandle;
+  key?: SourceFieldHandle;
+  select?: SourceFieldHandle[];
+  orderBy?: SourceFieldHandle[];
+}
 
-principalSnapshot.many = function many(source                  , { via, key, select, orderBy }              = {})                 {
+principalSnapshot.many = function many(source: ProjectionSource, { via, key, select, orderBy }: ManyOptions = {}): ManyCollection {
   assertBrand('principalSnapshot.many source', source, _sourceBrand, 'projectionSource');
   assertBrand('principalSnapshot.many via', via, _sourceFieldBrand, 'source field handle');
-  validateSource('principalSnapshot.many via', via .source, source);
+  validateSource('principalSnapshot.many via', via!.source, source);
   assertBrand('principalSnapshot.many key', key, _sourceFieldBrand, 'source field handle');
-  validateSource('principalSnapshot.many key', key .source, source);
+  validateSource('principalSnapshot.many key', key!.source, source);
   if (!select || !Array.isArray(select) || select.length === 0) {
     throw new Error('principalSnapshot.many requires one or more select field handles');
   }
@@ -204,7 +204,7 @@ principalSnapshot.many = function many(source                  , { via, key, sel
   return result;
 };
 
-principalSnapshot.select = function select(...handles                     )                      {
+principalSnapshot.select = function select(...handles: SourceFieldHandle[]): SourceFieldHandle[] {
   if (handles.length === 0) {
     throw new Error('principalSnapshot.select requires one or more field handles');
   }
@@ -216,7 +216,7 @@ principalSnapshot.select = function select(...handles                     )     
   return result;
 };
 
-principalSnapshot.orderBy = function orderBy(handle                   , direction                 = 'asc')                    {
+principalSnapshot.orderBy = function orderBy(handle: SourceFieldHandle, direction: 'asc' | 'desc' = 'asc'): SourceFieldHandle {
   assertBrand('principalSnapshot.orderBy', handle, _orderBrand, 'source field handle');
   if (direction !== 'asc' && direction !== 'desc') {
     throw new Error("principalSnapshot.orderBy direction must be 'asc' or 'desc'");
@@ -226,6 +226,6 @@ principalSnapshot.orderBy = function orderBy(handle                   , directio
   return result;
 };
 
-export function isPrincipalSnapshotDeclaration(value         )          {
+export function isPrincipalSnapshotDeclaration(value: unknown): boolean {
   return value !== null && typeof value === 'object' && _declarationBrand.has(value);
 }

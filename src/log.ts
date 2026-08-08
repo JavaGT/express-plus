@@ -54,39 +54,39 @@
 
 import { AsyncLocalStorage } from 'node:async_hooks';
 
-                                                 
+export type LogContext = Record<string, unknown>;
 
-                               
-                
-                                   
-                 
-                                                                  
-                                                                  
-                                                                 
-                                                                 
-                                                                  
- 
+export interface FrameworkLog {
+  level: number;
+  channels: Record<string, string>;
+  format: string;
+  trace(channel: string, message: string, ctx?: LogContext): void;
+  debug(channel: string, message: string, ctx?: LogContext): void;
+  info(channel: string, message: string, ctx?: LogContext): void;
+  warn(channel: string, message: string, ctx?: LogContext): void;
+  error(channel: string, message: string, ctx?: LogContext): void;
+}
 
-                                   
-                 
-                                    
-                  
-                                                                  
- 
+export interface CreateLogOptions {
+  level?: string;
+  channels?: Record<string, string>;
+  format?: string;
+  output?: NodeJS.WritableStream | ((...args: unknown[]) => void);
+}
 
-const applicationLog = new AsyncLocalStorage              ();
-let fallbackLog                      = null;
+const applicationLog = new AsyncLocalStorage<FrameworkLog>();
+let fallbackLog: FrameworkLog | null = null;
 
-const LEVELS                         = Object.freeze({ error: 0, warn: 1, info: 2, debug: 3, trace: 4 });
+const LEVELS: Record<string, number> = Object.freeze({ error: 0, warn: 1, info: 2, debug: 3, trace: 4 });
 
-function numericLevel(name        )         {
+function numericLevel(name: string): number {
   return LEVELS[name] ?? LEVELS.info;
 }
 
 // Color escape codes (terminal). Only used in 'human' format.
-const ANSI                         = Object.freeze({ red: '\x1b[31m', yellow: '\x1b[33m', cyan: '\x1b[36m', dim: '\x1b[2m', reset: '\x1b[0m' });
+const ANSI: Record<string, string> = Object.freeze({ red: '\x1b[31m', yellow: '\x1b[33m', cyan: '\x1b[36m', dim: '\x1b[2m', reset: '\x1b[0m' });
 
-function colorForLevel(level        )         {
+function colorForLevel(level: string): string {
   switch (level) {
     case 'error': return ANSI.red;
     case 'warn':  return ANSI.yellow;
@@ -97,29 +97,29 @@ function colorForLevel(level        )         {
   }
 }
 
-function isoNow()         {
+function isoNow(): string {
   return new Date().toISOString();
 }
 
 // Upgrade an Error-like object into a safe { message, code, stack } record.
 // Null/undefined/plain values pass through — only Error instances are expanded.
-function serializeError(err         )          {
+function serializeError(err: unknown): unknown {
   if (!err) return err;
   if (err instanceof Error) {
-    return { message: err.message, code: (err                     ).code ?? undefined, stack: err.stack ?? undefined };
+    return { message: err.message, code: (err as { code?: string }).code ?? undefined, stack: err.stack ?? undefined };
   }
   return err;
 }
 
-function formatHuman(level        , channel        , message        , ctx                        , _at        )         {
+function formatHuman(level: string, channel: string, message: string, ctx: LogContext | undefined, _at: string): string {
   const c = colorForLevel(level);
   const tag = `${c}[${level.padEnd(5).toUpperCase()} ${channel.padEnd(8)}]${ANSI.reset}`;
   let line = `${tag} ${message}`;
   if (ctx && Object.keys(ctx).length > 0) {
-    const parts           = [];
+    const parts: string[] = [];
     for (const [k, v] of Object.entries(ctx)) {
       if (k === 'err' || k === 'error') {
-        parts.push(`${k}=${(serializeError(v)                                    )?.message ?? v}`);
+        parts.push(`${k}=${(serializeError(v) as { message?: string } | undefined)?.message ?? v}`);
       } else if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
         parts.push(`${k}=${v}`);
       }
@@ -129,19 +129,19 @@ function formatHuman(level        , channel        , message        , ctx       
   return line;
 }
 
-export function createLog({ level = 'info', channels = {}, format = 'json', output = process.stderr }                   = {})               {
+export function createLog({ level = 'info', channels = {}, format = 'json', output = process.stderr }: CreateLogOptions = {}): FrameworkLog {
   const globalFloor = numericLevel(level);
-  const channelFloors                         = {};
+  const channelFloors: Record<string, number> = {};
   for (const [ch, lvl] of Object.entries(channels)) {
     channelFloors[ch] = numericLevel(lvl);
   }
 
-  function shouldLog(channel        , msgLevel        )          {
+  function shouldLog(channel: string, msgLevel: string): boolean {
     const floor = channelFloors[channel] ?? globalFloor;
     return numericLevel(msgLevel) <= floor;
   }
 
-  function emit(levelName        , channel        , message        , ctx                         = {}) {
+  function emit(levelName: string, channel: string, message: string, ctx: LogContext | undefined = {}) {
     if (!shouldLog(channel, levelName)) return;
 
     if (typeof output === 'function') {
@@ -150,9 +150,9 @@ export function createLog({ level = 'info', channels = {}, format = 'json', outp
     }
 
     if (format === 'json') {
-      const entry                          = { level: levelName, channel, at: isoNow(), msg: message };
+      const entry: Record<string, unknown> = { level: levelName, channel, at: isoNow(), msg: message };
       if (ctx && Object.keys(ctx).length > 0) {
-        const safeCtx                          = {};
+        const safeCtx: Record<string, unknown> = {};
         for (const [k, v] of Object.entries(ctx)) {
           safeCtx[k] = k === 'err' || k === 'error' ? serializeError(v) : v;
         }
@@ -164,7 +164,7 @@ export function createLog({ level = 'info', channels = {}, format = 'json', outp
     }
   }
 
-  const log               = {
+  const log: FrameworkLog = {
     level: globalFloor,
     channels,
     format,
@@ -180,14 +180,14 @@ export function createLog({ level = 'info', channels = {}, format = 'json', outp
 
 // Retained for compatibility with callers that configure framework work lacking
 // an application owner. Application construction never calls this function.
-export function setAmbientLog(log                     ) { fallbackLog = log; }
+export function setAmbientLog(log: FrameworkLog | null) { fallbackLog = log; }
 
-export function withLog(log                                 , operation               )          {
+export function withLog(log: FrameworkLog | null | undefined, operation: () => unknown): unknown {
   if (!log) return operation();
   return applicationLog.run(log, operation);
 }
 
-export function getLog()               {
+export function getLog(): FrameworkLog {
   const ownedLog = applicationLog.getStore();
   if (ownedLog) return ownedLog;
   if (!fallbackLog) {

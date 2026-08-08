@@ -1,34 +1,34 @@
 // @ts-nocheck
 import { structCellColumn } from './field-strategy.mjs';
 
-function quoteIdent(name        )         {
+function quoteIdent(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-function defaultValue(column                   )                {
+function defaultValue(column: ColumnDeclaration): string | null {
   if (column.defaultExpression !== undefined) return column.defaultExpression;
   if (column.default === undefined) return null;
   return typeof column.default === 'number' ? String(column.default) : `'${column.default.replace(/'/g, "''")}'`;
 }
 
-                           
-                
-                
-                
-                                  
-                     
-                     
- 
+interface FieldDescriptor {
+  kind?: string;
+  mode?: string;
+  type?: string;
+  cells?: Record<string, unknown>;
+  nullable?: boolean;
+  optional?: boolean;
+}
 
-                        
-               
-                                           
- 
+interface EntityRecord {
+  name: string;
+  fields?: Record<string, FieldDescriptor>;
+}
 
-                                                         
+type DeclaredColumn = { type: string; notNull: boolean };
 
-function entityColumns(entity              )                              {
-  const columns = new Map                                                  ([['id', { type: 'TEXT', notNull: false, primaryKey: true }]]);
+function entityColumns(entity: EntityRecord): Map<string, DeclaredColumn> {
+  const columns = new Map<string, DeclaredColumn & { primaryKey: boolean }>([['id', { type: 'TEXT', notNull: false, primaryKey: true }]]);
   for (const [name, field] of Object.entries(entity.fields ?? {})) {
     if (field.kind === 'computed' && field.mode === 'pull') continue;
     if (field.kind === 'struct') {
@@ -43,22 +43,22 @@ function entityColumns(entity              )                              {
       : field.type === 'number' ? 'REAL' : 'TEXT';
     columns.set(name, { type, notNull: !(field.nullable || field.optional) });
   }
-  return columns                               ;
+  return columns as Map<string, DeclaredColumn>;
 }
 
-function fail(entity              , message        )        {
+function fail(entity: EntityRecord, message: string): never {
   throw new Error(`schema-owned entity table "${entity.name}" ${message}`);
 }
 
-                           
-                
-                    
-                              
-                   
-                   
- 
+interface ForeignKeyShape {
+  table: string;
+  columns: string[];
+  referencedColumns: string[];
+  onDelete: string;
+  onUpdate: string;
+}
 
-function canonicalForeignKey(foreignKey                 )         {
+function canonicalForeignKey(foreignKey: ForeignKeyShape): string {
   return JSON.stringify([
     foreignKey.table.toLowerCase(),
     foreignKey.columns.map((column) => column.toLowerCase()),
@@ -68,11 +68,11 @@ function canonicalForeignKey(foreignKey                 )         {
   ]);
 }
 
-function isIdentifierCharacter(character        )          {
+function isIdentifierCharacter(character: string): boolean {
   return character !== '' && ((character.codePointAt(0) ?? 0) > 0x7f || /[A-Z0-9_$]/i.test(character));
 }
 
-function hasSqlKeyword(sql        , keyword        )          {
+function hasSqlKeyword(sql: string, keyword: string): boolean {
   for (let index = 0; index < sql.length; index += 1) {
     const character = sql[index];
     if (character === "'" || character === '"' || character === '`') {
@@ -112,53 +112,53 @@ function hasSqlKeyword(sql        , keyword        )          {
   return false;
 }
 
-function hasUnsupportedTableClause(sql        )          {
+function hasUnsupportedTableClause(sql: string): boolean {
   return ['ASC', 'CHECK', 'COLLATE', 'CONFLICT', 'DEFERRABLE', 'DESC', 'MATCH', 'STRICT', 'WITHOUT'].some((keyword) => hasSqlKeyword(sql, keyword));
 }
 
-                     
-                                                            
- 
+interface Statement {
+  all(...params: unknown[]): Array<Record<string, unknown>>;
+}
 
-                  
-                                  
- 
+interface DbLike {
+  prepare(sql: string): Statement;
+}
 
-                             
-               
-                
-                    
-                       
-                             
-                            
- 
+interface ColumnDeclaration {
+  name: string;
+  type?: string;
+  notNull?: boolean;
+  primaryKey?: boolean;
+  defaultExpression?: string;
+  default?: string | number;
+}
 
-                                 
-                                                   
-                    
-                    
-                    
- 
+interface ForeignKeyDeclaration {
+  references: { table: string; columns: string[] };
+  columns: string[];
+  onDelete?: string;
+  onUpdate?: string;
+}
 
-                            
-               
-                   
-                    
- 
+interface IndexDeclaration {
+  name: string;
+  unique?: boolean;
+  columns: string[];
+}
 
-                            
-               
-                               
-                        
-                                        
-                               
- 
+interface TableDeclaration {
+  name: string;
+  columns: ColumnDeclaration[];
+  primaryKey?: string[];
+  foreignKeys?: ForeignKeyDeclaration[];
+  indexes?: IndexDeclaration[];
+}
 
-export function validateSchemaOwnedEntityTable(db        , entity              , declaration                  )       {
+export function validateSchemaOwnedEntityTable(db: DbLike, entity: EntityRecord, declaration: TableDeclaration): void {
   const master = db.prepare("SELECT type, sql FROM sqlite_schema WHERE lower(name) = lower(?)").all(declaration.name);
   if (master.length !== 1 || master[0].type !== 'table') fail(entity, 'must exist as a real table');
-  if (/^CREATE\s+VIRTUAL\s+TABLE/i.test((master[0].sql ?? '')          )) fail(entity, 'must not be virtual');
-  if (hasUnsupportedTableClause((master[0].sql ?? '')          )) fail(entity, 'must not contain unsupported constraints or table options');
+  if (/^CREATE\s+VIRTUAL\s+TABLE/i.test((master[0].sql ?? '') as string)) fail(entity, 'must not be virtual');
+  if (hasUnsupportedTableClause((master[0].sql ?? '') as string)) fail(entity, 'must not contain unsupported constraints or table options');
   const temp = db.prepare("SELECT type FROM sqlite_temp_schema WHERE lower(name) = lower(?)").all(declaration.name);
   if (temp.length > 0) fail(entity, 'must not have a TEMP shadow');
   for (const schema of ['sqlite_schema', 'sqlite_temp_schema']) {
@@ -170,7 +170,7 @@ export function validateSchemaOwnedEntityTable(db        , entity              ,
   if (actual.some((column) => column.hidden !== 0)) fail(entity, 'must not contain hidden or generated columns');
   const declared = new Map(declaration.columns.map((column) => [column.name.toLowerCase(), column]));
   const logical = entityColumns(entity);
-  const actualNames = new Set(actual.map((column) => (column.name          ).toLowerCase()));
+  const actualNames = new Set(actual.map((column) => (column.name as string).toLowerCase()));
   if (actualNames.size !== actual.length || actualNames.size !== declared.size) fail(entity, 'has undeclared or missing columns');
 
   for (const [name, required] of logical) {
@@ -180,18 +180,18 @@ export function validateSchemaOwnedEntityTable(db        , entity              ,
     if (name !== 'id' && Boolean(column.notNull) !== required.notNull) fail(entity, `declares "${name}" with incompatible nullability`);
   }
   for (const column of actual) {
-    const expected = declared.get((column.name          ).toLowerCase());
+    const expected = declared.get((column.name as string).toLowerCase());
     if (!expected) fail(entity, `has undeclared column "${column.name}"`);
-    if (column.name !== expected.name || String(column.type).toUpperCase() !== expected.type .toUpperCase()
+    if (column.name !== expected.name || String(column.type).toUpperCase() !== expected.type!.toUpperCase()
       || (column.notnull === 1) !== Boolean(expected.notNull)
       || (column.dflt_value ?? null) !== defaultValue(expected)) fail(entity, `column "${column.name}" does not match its declaration`);
   }
-  const id = actual.find((column) => (column.name          ).toLowerCase() === 'id');
+  const id = actual.find((column) => (column.name as string).toLowerCase() === 'id');
   if (!id || id.name !== 'id' || String(id.type).toUpperCase() !== 'TEXT' || id.pk !== 1 || id.dflt_value !== null) {
     fail(entity, 'must declare id as TEXT PRIMARY KEY without a default');
   }
 
-  const primaryKey = actual.filter((column) => (column.pk          ) > 0).sort((a, b) => (a.pk          ) - (b.pk          )).map((column) => column.name          );
+  const primaryKey = actual.filter((column) => (column.pk as number) > 0).sort((a, b) => (a.pk as number) - (b.pk as number)).map((column) => column.name as string);
   const expectedPrimaryKey = declaration.primaryKey ?? declaration.columns.filter((column) => column.primaryKey).map((column) => column.name);
   if (JSON.stringify(primaryKey) !== JSON.stringify(expectedPrimaryKey)) fail(entity, 'primary key does not match its declaration');
 
@@ -200,24 +200,24 @@ export function validateSchemaOwnedEntityTable(db        , entity              ,
     onDelete: foreignKey.onDelete ?? 'NO ACTION', onUpdate: foreignKey.onUpdate ?? 'NO ACTION',
   })).sort();
   const actualFks = db.prepare(`PRAGMA foreign_key_list(${quoteIdent(declaration.name)})`).all().reduce((groups, row) => {
-    const group = groups.get(row.id) ?? { table: row.table          , columns: []            , referencedColumns: []            , onDelete: row.on_delete          , onUpdate: row.on_update           };
-    group.columns[row.seq          ] = row.from          ;
-    group.referencedColumns[row.seq          ] = row.to          ;
+    const group = groups.get(row.id) ?? { table: row.table as string, columns: [] as string[], referencedColumns: [] as string[], onDelete: row.on_delete as string, onUpdate: row.on_update as string };
+    group.columns[row.seq as number] = row.from as string;
+    group.referencedColumns[row.seq as number] = row.to as string;
     groups.set(row.id, group);
     return groups;
-  }, new Map                          ());
+  }, new Map<unknown, ForeignKeyShape>());
   if (JSON.stringify([...actualFks.values()].map(canonicalForeignKey).sort()) !== JSON.stringify(expectedFks)) fail(entity, 'foreign keys do not match its declaration');
 
   const expectedIndexes = new Map((declaration.indexes ?? []).map((index) => [index.name.toLowerCase(), index]));
   const actualIndexes = db.prepare(`PRAGMA index_list(${quoteIdent(declaration.name)})`).all();
   for (const index of actualIndexes) {
     if (index.origin === 'pk') continue;
-    const expected = expectedIndexes.get((index.name          ).toLowerCase());
+    const expected = expectedIndexes.get((index.name as string).toLowerCase());
     if (!expected || index.origin !== 'c' || (index.unique === 1) !== Boolean(expected.unique) || index.partial !== 0) fail(entity, `has unexpected index "${index.name}"`);
-    const columns = db.prepare(`PRAGMA index_xinfo(${quoteIdent(index.name          )})`).all().filter((term) => term.key === 1).sort((a, b) => (a.seqno          ) - (b.seqno          ));
+    const columns = db.prepare(`PRAGMA index_xinfo(${quoteIdent(index.name as string)})`).all().filter((term) => term.key === 1).sort((a, b) => (a.seqno as number) - (b.seqno as number));
     if (columns.some((term) => term.name === null || term.desc !== 0 || term.coll !== 'BINARY')
       || JSON.stringify(columns.map((term) => term.name)) !== JSON.stringify(expected.columns)) fail(entity, `index "${index.name}" does not match its declaration`);
-    expectedIndexes.delete((index.name          ).toLowerCase());
+    expectedIndexes.delete((index.name as string).toLowerCase());
   }
   if (expectedIndexes.size > 0) fail(entity, `is missing index "${[...expectedIndexes.values()][0].name}"`);
 }

@@ -5,34 +5,34 @@
 // accumulate listeners (a leak, and a MaxListeners warning). They are installed
 // ONCE; the signal handler closes every registered app.
 
-import { getLog } from './log.mjs';
+import { getLog } from './log.ts';
 
-                        
-               
-                    
-                    
- 
+interface ShutdownHook {
+  name: string;
+  fn: () => unknown;
+  timeoutMs: number;
+}
 
-                   
-                                  
-                                                                                           
-                                    
-                                                     
-                             
-                                          
-                
-                        
-                                          
-                                  
-                                 
-           
-                                      
-                                            
-                                          
- 
+interface AppLike {
+  _shutdownHooks?: ShutdownHook[];
+  onShutdown?: (name: string, fn: () => unknown, options?: { timeoutMs?: number }) => void;
+  shutdown?: () => Promise<unknown>;
+  _shutdownFromStartFailure?: () => Promise<unknown>;
+  _shutdownStarted?: boolean;
+  _startPromise?: Promise<unknown> | null;
+  httpServer?: {
+    listening?: boolean;
+    close(callback?: () => void): unknown;
+    closeIdleConnections?(): void;
+    closeAllConnections?(): void;
+  } | null;
+  live?: { close?(): unknown } | null;
+  writeQueue?: { close?(): unknown } | null;
+  _detachJobLive?: (() => unknown) | null;
+}
 
 // The set of live apps to close on a shutdown signal.
-const liveApps = new Set         ();
+const liveApps = new Set<AppLike>();
 let processTrapsInstalled = false;
 const PROCESS_SHUTDOWN_DEADLINE_MS = 10_000;
 
@@ -56,7 +56,7 @@ export function installProcessTraps() {
       for (const result of results) {
         if (result.status !== 'rejected') continue;
         getLog().error('system', 'application shutdown failed', { err: result.reason });
-        process.stderr.write(`application shutdown failed: ${(result.reason                                          )?.stack ?? result.reason}\n`);
+        process.stderr.write(`application shutdown failed: ${(result.reason as { stack?: unknown } | null | undefined)?.stack ?? result.reason}\n`);
       }
     }).finally(() => {
       clearTimeout(deadline);
@@ -87,7 +87,7 @@ export function installProcessTraps() {
 // Hooks run in registration order on shutdown; each bounded by its timeoutMs.
 // A hook exceeding its deadline is force-abandoned (resolve with timeout error, log,
 // continue to next).
-export function prepareGracefulShutdown(app         )          {
+export function prepareGracefulShutdown(app: AppLike): AppLike {
   if (!app._shutdownHooks) {
     app._shutdownHooks = [];
   }
@@ -98,8 +98,8 @@ export function prepareGracefulShutdown(app         )          {
     };
   }
   if (!app.shutdown) {
-    let shutdownPromise                              ;
-    const beginShutdown = ({ waitForStart }                           )                   => {
+    let shutdownPromise: Promise<unknown> | undefined;
+    const beginShutdown = ({ waitForStart }: { waitForStart: boolean }): Promise<unknown> => {
       if (shutdownPromise) return shutdownPromise;
       app._shutdownStarted = true;
       shutdownPromise = (async () => {
@@ -107,7 +107,7 @@ export function prepareGracefulShutdown(app         )          {
         // timers; the HTTP close promise resolves after accepted requests end.
         try { app.live?.close?.(); } catch { /* best-effort transport close */ }
         try { app._detachJobLive?.(); } catch { /* best-effort listener detach */ }
-        const serverClosed = new Promise      ((resolve) => {
+        const serverClosed = new Promise<void>((resolve) => {
           const server = app.httpServer;
           if (!server?.listening) return resolve();
           server.close(() => resolve());
@@ -127,8 +127,8 @@ export function prepareGracefulShutdown(app         )          {
         // queue. Each hook has a real, cleared deadline timer and cannot prevent
         // later owners from being released.
         for (const hook of hooks) {
-          let timeoutId                            ;
-          const deadline = new Promise         ((_, reject) => {
+          let timeoutId: NodeJS.Timeout | undefined;
+          const deadline = new Promise<unknown>((_, reject) => {
             timeoutId = setTimeout(
               () => reject(new Error(`onShutdown hook '${hook.name}' exceeded ${hook.timeoutMs}ms deadline`)),
               hook.timeoutMs,
@@ -138,7 +138,7 @@ export function prepareGracefulShutdown(app         )          {
             await Promise.race([Promise.resolve().then(() => hook.fn()), deadline]);
           } catch (err) {
             getLog().warn('system', `onShutdown hook '${hook.name}' failed`, { err, hook: hook.name });
-            process.stderr.write(`onShutdown hook '${hook.name}' failed: ${(err         ).message}\n`);
+            process.stderr.write(`onShutdown hook '${hook.name}' failed: ${(err as Error).message}\n`);
           } finally {
             clearTimeout(timeoutId);
           }
@@ -161,7 +161,7 @@ export function prepareGracefulShutdown(app         )          {
   return app;
 }
 
-export function installGracefulShutdown(app         )       {
+export function installGracefulShutdown(app: AppLike): void {
   prepareGracefulShutdown(app);
   liveApps.add(app);
   installProcessTraps();

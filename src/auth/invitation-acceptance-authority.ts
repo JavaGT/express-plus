@@ -1,30 +1,30 @@
-import { EventKind } from '../event-handle.mjs';
+import { EventKind } from '../event-handle.ts';
 
-                                                                       
-                       
-                    
-                       
-                   
-                   
-               
-                       
-                                           
-                    
- 
+interface InvitationAcceptanceDetails extends Record<string, unknown> {
+  targetEntity: string;
+  fieldName: string;
+  mapOperation: string;
+  targetId: string;
+  memberId: string;
+  role: string;
+  invitationId: string;
+  invitationOperation: 'update' | 'remove';
+  useCount: unknown;
+}
 
-                                     
-            
-                    
-                   
-                  
-                        
-    
-                                        
- 
+interface InvitationAcceptanceEvent {
+  handle?: {
+    entity?: string;
+    field?: string;
+    kind?: string;
+    nativeName?: string;
+  };
+  data?: Record<string, unknown> | null;
+}
 
-const invitationAcceptanceAuthorities = new WeakMap                                            ();
+const invitationAcceptanceAuthorities = new WeakMap<object, InvitationAcceptanceDetails | null>();
 
-export function invitationAcceptancePrincipal(user                                                              )         {
+export function invitationAcceptancePrincipal(user: { id: unknown; attributes?: Record<string, unknown> | null }): object {
   const authority = Object.freeze({
     type: 'user',
     id: user.id,
@@ -34,11 +34,11 @@ export function invitationAcceptancePrincipal(user                              
   return authority;
 }
 
-export function authorizeInvitationAcceptance(authority        , details                             )       {
-  invitationAcceptanceAuthorities.set(authority, Object.freeze(details)                               );
+export function authorizeInvitationAcceptance(authority: object, details: InvitationAcceptanceDetails): void {
+  invitationAcceptanceAuthorities.set(authority, Object.freeze(details) as InvitationAcceptanceDetails);
 }
 
-export function admitInvitationAcceptance({ event, principal }                                                                            )          {
+export function admitInvitationAcceptance({ event, principal }: { event: InvitationAcceptanceEvent | null | undefined; principal: object }): boolean {
   const details = invitationAcceptanceAuthorities.get(principal);
   if (!details || !event?.handle) return false;
   const { handle, data } = event;
@@ -59,7 +59,7 @@ export function admitInvitationAcceptance({ event, principal }                  
   return details.invitationOperation === 'remove' && handle.kind === EventKind.removed;
 }
 
-export function admitsInvitationRemoval(principal        , invitationId         )          {
+export function admitsInvitationRemoval(principal: object, invitationId: unknown): boolean {
   const details = invitationAcceptanceAuthorities.get(principal);
   return details?.invitationOperation === 'remove'
     && details.invitationId === String(invitationId);

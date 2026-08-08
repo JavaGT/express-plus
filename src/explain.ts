@@ -1,83 +1,83 @@
 // @ts-nocheck
 import { rowCapabilities, mayVerb, fieldCapabilities } from './row-grant.mjs';
-import { isRuntimeGrantClause } from './scope.mjs';
+import { isRuntimeGrantClause } from './scope.ts';
 
-                      
-                                        
-                    
- 
-
-                           
-                
-                
-                
-                   
-                   
- 
-
-                        
-               
-                  
-                                        
-                                           
-                                                                                         
-                    
- 
-
-                      
-               
-                       
-                          
- 
-
-                            
-                            
-               
- 
-
-                         
-                          
-                        
-                              
- 
-
-                
-                                                                                        
-                                            
-                                           
-                                       
-
-                     
-              
-                                  
- 
-
-                        
-                       
-               
-                     
-               
-                 
- 
-
-                         
-               
-                 
-                    
-                                                                              
-                   
-                                                                 
-                                                                    
- 
-
-function grantClauses(entityRecord              )          {
-  const grant = entityRecord.grant;
-  return typeof grant === 'function' ? (grant                 )() : grant;
+interface CheckEntry {
+  run?: (...args: unknown[]) => unknown;
+  harvest?: unknown;
 }
 
-function checksSource(entityRecord              )                             {
+interface FieldDescriptor {
+  type?: string;
+  role?: string;
+  kind?: string;
+  roles?: string[];
+  access?: unknown;
+}
+
+interface EntityRecord {
+  name: string;
+  grant?: unknown;
+  registry?: Record<string, CheckEntry>;
+  fields?: Record<string, FieldDescriptor>;
+  scopeFilter?: (principal: unknown) => { sql: string; params: Record<string, unknown> };
+  runtime?: unknown;
+}
+
+interface SourceInfo {
+  kind: string;
+  field: string | null;
+  scopeAvailable: boolean;
+}
+
+interface InheritDirective {
+  inherit: { name: string };
+  via?: string;
+}
+
+interface GrantInfoBase {
+  capabilities: unknown[];
+  verbAdmitted: boolean;
+  verbRequired: string | null;
+}
+
+type GrantInfo =
+  | (GrantInfoBase & { type: 'inherit'; chain: { parentEntity: string; via?: string } })
+  | (GrantInfoBase & { type: 'scope-only' })
+  | (GrantInfoBase & { type: 'own-scope' })
+  | (GrantInfoBase & { type: 'none' });
+
+interface ScopeInfo {
+  sql: string;
+  params: Record<string, unknown>;
+}
+
+interface ExplainInput {
+  entity: EntityRecord;
+  row: unknown;
+  principal: unknown;
+  verb: string;
+  field?: string;
+}
+
+interface ExplainOutput {
+  verb: string;
+  entity: string;
+  admitted: boolean;
+  checks: Record<string, { source: string; scope: boolean; result: boolean }>;
+  grant: GrantInfo;
+  scope: { sql: string; params: Record<string, unknown> } | null;
+  field?: { name: string; hasAccessFn: boolean; admitted: boolean };
+}
+
+function grantClauses(entityRecord: EntityRecord): unknown {
+  const grant = entityRecord.grant;
+  return typeof grant === 'function' ? (grant as () => unknown)() : grant;
+}
+
+function checksSource(entityRecord: EntityRecord): Record<string, SourceInfo> {
   const fields = entityRecord.fields || {};
-  const sources                             = {};
+  const sources: Record<string, SourceInfo> = {};
 
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor?.type === 'ref' && descriptor.role) {
@@ -98,14 +98,14 @@ function checksSource(entityRecord              )                             {
   return sources;
 }
 
-export async function explain({ entity, row, principal, verb, field }              )                         {
-  const checks                                                                      = {};
+export async function explain({ entity, row, principal, verb, field }: ExplainInput): Promise<ExplainOutput> {
+  const checks: Record<string, { source: string; scope: boolean; result: boolean }> = {};
   const registry = entity.registry || {};
   const mappedSources = checksSource(entity);
 
   for (const [name, entry] of Object.entries(registry)) {
     if (!entry.run) continue;
-    let result         ;
+    let result: boolean;
     try {
       const raw = entry.run({ entity: row, principal, runtime: entity.runtime });
       if (raw instanceof Promise) {
@@ -120,25 +120,25 @@ export async function explain({ entity, row, principal, verb, field }           
     checks[name] = { source: source.kind, scope: source.scopeAvailable, result };
   }
 
-  let grantInfo           ;
-  let scopeInfo                  ;
+  let grantInfo: GrantInfo;
+  let scopeInfo: ScopeInfo | null;
   const clauses = grantClauses(entity);
 
-  if (clauses && (clauses                    ).inherit) {
+  if (clauses && (clauses as InheritDirective).inherit) {
     grantInfo = {
       type: 'inherit',
-      chain: { parentEntity: (clauses                    ).inherit.name, via: (clauses                    ).via },
+      chain: { parentEntity: (clauses as InheritDirective).inherit.name, via: (clauses as InheritDirective).via },
       capabilities: [],
       verbAdmitted: false,
       verbRequired: null,
     };
-    const scoped = entity.scopeFilter (principal);
+    const scoped = entity.scopeFilter!(principal);
     scopeInfo = scoped.sql !== '1=1' ? scoped : null;
   } else if (Array.isArray(clauses)) {
     const hasCan = clauses.some((c) => isRuntimeGrantClause(c));
-    const scoped = clauses.find((c) => c && typeof (c                           ).predicate === 'function');
+    const scoped = clauses.find((c) => c && typeof (c as { predicate?: unknown }).predicate === 'function');
     if (scoped) {
-      const filtered = entity.scopeFilter (principal);
+      const filtered = entity.scopeFilter!(principal);
       scopeInfo = filtered.sql !== '1=1' ? filtered : null;
     } else {
       scopeInfo = null;
@@ -180,7 +180,7 @@ export async function explain({ entity, row, principal, verb, field }           
     }
   }
 
-  const out                = {
+  const out: ExplainOutput = {
     verb,
     entity: entity.name,
     admitted,

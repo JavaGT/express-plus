@@ -29,64 +29,64 @@
 //     delivery. The transport is called as a post-commit side effect, never
 //     blocking the calling transaction.
 
-import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.mjs';
-import { txn,               } from './driver.mjs';
+import { consumerCursorMap, upsertConsumerCursor } from './consumer-cursor.ts';
+import { txn, type DbHandle } from './driver.ts';
 
 const CONSUMER = 'email';
 
-                        
-              
-                   
-                
- 
+interface EmailPayload {
+  to: unknown;
+  subject: unknown;
+  body: unknown;
+}
 
-                                                    
+type Transport = (payload: EmailPayload) => unknown;
 
-                       
-                
-                                 
-                 
-               
- 
+interface EventRecord {
+  type?: string;
+  data?: Record<string, unknown>;
+  scope?: string;
+  seq?: number;
+}
 
-                   
-                                                                                                    
-                           
-                                    
- 
+interface AppLike {
+  jobs?: { enqueue(opts: { id: string; kind: string; payload: Record<string, unknown> }): unknown };
+  _emailConsumer?: unknown;
+  _reconcileEmailDelivery?: unknown;
+}
 
-                     
-                              
-                                                                           
-                                                                       
-                                                  
-                       
- 
+interface EmailSeam {
+  install(app: AppLike): void;
+  consumer(events: EventRecord[], opts?: { db?: DbHandle }): Promise<void>;
+  reconcileEmailDelivery(db: DbHandle): Promise<{ delivered: number }>;
+  send(app: AppLike, payload: EmailPayload): void;
+  transport: Transport;
+}
 
-export const noopTransport            = async ({ to, subject, body }) => {
+export const noopTransport: Transport = async ({ to, subject, body }) => {
   console.log(`[email] to=${to} subject="${subject}" body=${String(body ?? '').length} chars`);
 };
 
-function extractEmailPayload(event                                )                      {
+function extractEmailPayload(event: EventRecord | null | undefined): EmailPayload | null {
   if (!event || event.type !== 'email.send' || !event.data) return null;
   const { to, subject, body } = event.data;
   if (to == null || subject == null || body == null) return null;
   return { to, subject, body };
 }
 
-export function emailSeam({ transport = noopTransport }                            = {})            {
+export function emailSeam({ transport = noopTransport }: { transport?: Transport } = {}): EmailSeam {
   // deliverAndAdvance mirrors blob-lifecycle.mjs's finalizeAndAdvance: the
   // transport call happens OUTSIDE the SQL transaction (it's not a database
   // write), then the cursor write is wrapped in its own txn. Only the
   // checkpoint is atomic; the send itself cannot be rolled back by SQL.
-  async function deliverAndAdvance(db          , { scope, seq }                                , payload                     )                {
+  async function deliverAndAdvance(db: DbHandle, { scope, seq }: { scope: string; seq: number }, payload: EmailPayload | null): Promise<void> {
     if (payload) await transport(payload);
     await txn(db, () => {
       upsertConsumerCursor(db, { consumer: CONSUMER, scope, lastSeq: seq });
     });
   }
 
-  const consumer = async (events               , { db }                    = {})                => {
+  const consumer = async (events: EventRecord[], { db }: { db?: DbHandle } = {}): Promise<void> => {
     // Same per-scope blocking as blob-lifecycle.mjs's consumer, for the same
     // reason: events for one scope arrive in ascending seq order within a
     // batch, and a later same-scope success must not advance the cursor past
@@ -95,7 +95,7 @@ export function emailSeam({ transport = noopTransport }                         
     // one). Deferring the rest of a blocked scope to reconcile is simple and
     // safe here too, at the cost this seam already accepts: a re-attempted
     // later send may duplicate one that technically already went out.
-    const blockedScopes = new Set        ();
+    const blockedScopes = new Set<string>();
     for (const event of events) {
       if (event.scope != null && blockedScopes.has(event.scope)) continue;
       const payload = extractEmailPayload(event);
@@ -107,39 +107,39 @@ export function emailSeam({ transport = noopTransport }                         
           try {
             await transport(payload);
           } catch (err) {
-            console.error('[email] transport error:', (err         ).message);
+            console.error('[email] transport error:', (err as Error).message);
           }
         }
         continue;
       }
       try {
-        await deliverAndAdvance(db, { scope: event.scope          , seq: event.seq }, payload);
+        await deliverAndAdvance(db, { scope: event.scope as string, seq: event.seq }, payload);
       } catch (err) {
         if (event.scope != null) blockedScopes.add(event.scope);
-        console.error('[email] delivery consumer failed:', (err         ).message);
+        console.error('[email] delivery consumer failed:', (err as Error).message);
       }
     }
   };
 
-  async function reconcileEmailDelivery(db          )                                 {
+  async function reconcileEmailDelivery(db: DbHandle): Promise<{ delivered: number }> {
     const recoveryByScope = consumerCursorMap(db, CONSUMER);
     const rows = db.prepare('SELECT * FROM _Log ORDER BY scope, seq').all();
-    const blockedScopes = new Set        ();
+    const blockedScopes = new Set<string>();
     let delivered = 0;
     for (const row of rows) {
-      if (blockedScopes.has(row.scope          )) continue;
-      const applied = recoveryByScope.get(row.scope          ) ?? 0;
-      if (applied >= (row.seq          )) continue;
-      let data                         ;
-      try { data = JSON.parse(row.eventData          )                           ; } catch { data = {}; }
-      const payload = extractEmailPayload({ type: row.eventType          , data });
+      if (blockedScopes.has(row.scope as string)) continue;
+      const applied = recoveryByScope.get(row.scope as string) ?? 0;
+      if (applied >= (row.seq as number)) continue;
+      let data: Record<string, unknown>;
+      try { data = JSON.parse(row.eventData as string) as Record<string, unknown>; } catch { data = {}; }
+      const payload = extractEmailPayload({ type: row.eventType as string, data });
       try {
-        await deliverAndAdvance(db, { scope: row.scope          , seq: row.seq           }, payload);
-        recoveryByScope.set(row.scope          , row.seq          );
+        await deliverAndAdvance(db, { scope: row.scope as string, seq: row.seq as number }, payload);
+        recoveryByScope.set(row.scope as string, row.seq as number);
         if (payload) delivered += 1;
       } catch (err) {
-        blockedScopes.add(row.scope          );
-        console.error('[email] delivery recovery failed:', (err         ).message);
+        blockedScopes.add(row.scope as string);
+        console.error('[email] delivery recovery failed:', (err as Error).message);
       }
     }
     return { delivered };
@@ -148,7 +148,7 @@ export function emailSeam({ transport = noopTransport }                         
   // send(app, { to, subject, body }) — enqueue an email for delivery through the
   // post-commit pipeline. This is a convenience for server-side code that wants
   // to trigger an email without declaring a durable effect on an entity.
-  function send(app         , { to, subject, body }              )       {
+  function send(app: AppLike, { to, subject, body }: EmailPayload): void {
     if (!app || !app.jobs) {
       console.warn('[email] cannot send — no job queue configured on the app');
       return;
@@ -161,7 +161,7 @@ export function emailSeam({ transport = noopTransport }                         
   }
 
   return {
-    install(app         )       {
+    install(app: AppLike): void {
       // Store the consumer + reconcile sweep on the app so buildKernel can
       // wire both into the postCommitConsumers pipeline / boot sequence.
       app._emailConsumer = consumer;

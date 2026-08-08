@@ -6,23 +6,23 @@ import { materializeText, restoreTextCheckpoint } from '../annotated-text.mjs';
 // This is deliberately pure: it installs no database-backed collection handles,
 // so it is safe for lifecycle callbacks and projection computations.
 export function materializeStoredRow(
-  storedRow                                            ,
-  fields                                 ,
-  { freeze = false }                       = {},
-)                                             {
+  storedRow: Record<string, unknown> | null | undefined,
+  fields: Record<string, FieldDescriptor>,
+  { freeze = false }: { freeze?: boolean } = {},
+): Record<string, unknown> | null | undefined {
   if (!storedRow) return storedRow;
-  const row                          = { ...storedRow };
+  const row: Record<string, unknown> = { ...storedRow };
 
   for (const [fieldName, descriptor] of Object.entries(fields)) {
     if (descriptor.kind === 'crdt' && descriptor.type === 'text') {
       if (!Object.prototype.hasOwnProperty.call(row, fieldName)) continue;
-      const checkpoint = JSON.parse(row[fieldName]          );
+      const checkpoint = JSON.parse(row[fieldName] as string);
       const state = restoreTextCheckpoint(checkpoint);
       row[fieldName] = materializeText(state);
       continue;
     }
     if (descriptor.kind === 'struct') {
-      const value                          = {};
+      const value: Record<string, unknown> = {};
       let present = false;
       for (const [cellName, cellDescriptor] of Object.entries(descriptor.cells)) {
         const column = structCellColumn(fieldName, cellName);
@@ -41,7 +41,7 @@ export function materializeStoredRow(
       const stored = row[fieldName];
       row[fieldName] = stored == null
         ? stored
-        : Object.freeze({ verify: (plaintext         ) => verifyHash(plaintext, stored) });
+        : Object.freeze({ verify: (plaintext: unknown) => verifyHash(plaintext, stored) });
       continue;
     }
     try {
@@ -57,17 +57,17 @@ export function materializeStoredRow(
     try { row[fieldName] = descriptor.compute(row); } catch {}
   }
 
-  return freeze ? Object.freeze(row)                            : row;
+  return freeze ? Object.freeze(row) as Record<string, unknown> : row;
 }
 
-                          
-                         
- 
+interface CellDescriptor {
+  [key: string]: unknown;
+}
 
-                           
-                
-                
-                
-                                         
-                                                      
- 
+interface FieldDescriptor {
+  kind?: string;
+  type?: string;
+  mode?: string;
+  cells?: Record<string, CellDescriptor>;
+  compute?: (row: Record<string, unknown>) => unknown;
+}

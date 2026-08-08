@@ -1,2 +1,10 @@
 export function textCheckpoint(state: unknown): unknown;
 export function createTextState(...args: unknown[]): unknown;
+export function materializeText(...args: any[]): any;
+export function restoreTextCheckpoint(...args: any[]): any;
+export function applyTextOp(...args: any[]): any;
+export function assertWellFormedText(...args: any[]): any;
+export function canonicalTextOp(...args: any[]): any;
+export function assertFrontier(...args: any[]): any;
+export function frontierDominates(...args: any[]): any;
+export function scalarCount(...args: any[]): any;
