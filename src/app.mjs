@@ -363,7 +363,7 @@ export default function workbench({
         // Migrations run last, pre-traffic, after every entity table exists. Each
         // is its own transaction (DDL + meta-version bump atomic). Runs only when
         // declared — an app with no migrations is untouched (no _Migration table).
-        runWorkbenchMigrations(app.db);
+        await runWorkbenchMigrations(app.db);
         if (allMigrations.length) runMigrations(app.db, allMigrations);
         if (schema) schema.prepare(app.db, { skipMigrations: true });
         for (const entity of app.entities.values()) {

@@ -21,7 +21,7 @@ const LEDGER_DDL = `CREATE TABLE IF NOT EXISTS _WorkbenchMigration (
 
 const PREFIX_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-                                            
+import { exclusiveTxn,               } from './driver.mjs';
 
 function tableExists(db          , name        ) {
   return Boolean(db.prepare('SELECT 1 FROM sqlite_master WHERE type = \'table\' AND name = ?').get(name));
@@ -185,7 +185,7 @@ export function appliedWorkbenchVersion(db          )         {
   return row?.v ?? 0;
 }
 
-export function runWorkbenchMigrations(db          , { now = () => new Date().toISOString() }                         = {}) {
+export async function runWorkbenchMigrations(db          , { now = () => new Date().toISOString() }                         = {}) {
   // Read-only pre-flight: avoid opening the exclusive transaction when the
   // ledger already records every migration. This never creates the table, so
   // a fresh DB (no ledger, no migration work) takes the same early return.
@@ -196,9 +196,9 @@ export function runWorkbenchMigrations(db          , { now = () => new Date().to
   }
   // One exclusive transaction for the entire lane: ledger creation, version
   // read, every migration's rebuild, and the version-record insert commit or
-  // roll back together (Sol ruling 5175490719).
-  db.exec('BEGIN EXCLUSIVE');
-  try {
+  // roll back together (Sol ruling 5175490719). exclusiveTxn owns the
+  // BEGIN EXCLUSIVE / COMMIT / ROLLBACK bracket; the lane's work is the body.
+  await exclusiveTxn(db, () => {
     ensureWorkbenchMigrationTable(db);
     const current = (db.prepare('SELECT COALESCE(MAX(version), 0) AS v FROM _WorkbenchMigration').get()                 ).v;
     for (const migration of WORKBENCH_MIGRATIONS) {
@@ -206,9 +206,5 @@ export function runWorkbenchMigrations(db          , { now = () => new Date().to
       migration.up(db, { now });
       db.prepare('INSERT INTO _WorkbenchMigration (version, appliedAt) VALUES (?, ?)').run(migration.version, now());
     }
-    db.exec('COMMIT');
-  } catch (error) {
-    try { db.exec('ROLLBACK'); } catch { /* transaction already unusable */ }
-    throw error;
-  }
+  });
 }

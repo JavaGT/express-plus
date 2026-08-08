@@ -10,7 +10,7 @@
 
 import { readSeq as cursorReadSeq, type CursorDatabase } from './cursor.ts';
 import type { EventIdentityHandle } from './event-handle.ts';
-import type { DbHandle } from './driver.ts';
+import { txn, type DbHandle } from './driver.ts';
 
 // ---- DDL ----
 
@@ -254,8 +254,7 @@ export function appendEvents(db: DbHandle, events: AppendedEvent[]) {
 // retentionPrune — delete log entries older than a cutoff date. Used by the
 // log retention reaper (serve.mjs). Runs under the writeQueue mutex.
 export function retentionPrune(db: DbHandle, cutoffIso: string) {
-  db.exec('BEGIN IMMEDIATE');
-  try {
+  return txn(db, () => {
     const expired = new Set(db.prepare(
       'SELECT scope, actionId FROM _ActionReceipt WHERE committedAt < :cutoff',
     ).all({ cutoff: cutoffIso }).map((row) => `${row.scope as string}\u0000${row.actionId as string}`));
@@ -271,11 +270,7 @@ export function retentionPrune(db: DbHandle, cutoffIso: string) {
     db.prepare('UPDATE _ActionReceipt SET actionData = NULL WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
     db.prepare('DELETE FROM _PrivateActionFact WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
     db.prepare('DELETE FROM _Log WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
-    db.exec('COMMIT');
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
+  });
 }
 
 // ---- shared shapes ----

@@ -178,9 +178,9 @@ function engageMaintenance(app            , log              )       {
     });
   }
   if (options.logRetentionDays > 0) {
-    app.sweepLog = () => app.writeQueue.run(() => {
+    app.sweepLog = () => app.writeQueue.run(async () => {
       const cutoff = new Date(Date.now() - options.logRetentionDays * 86_400_000).toISOString();
-      retentionPrune(app.db         , cutoff);
+      await retentionPrune(app.db         , cutoff);
       (app.db                   ).prepare('DELETE FROM _ProjectedCursor WHERE lastSeq = 0').run();
     });
     app.clock.add({

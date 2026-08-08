@@ -178,9 +178,9 @@ function engageMaintenance(app: RuntimeApp, log: FrameworkLog): void {
     });
   }
   if (options.logRetentionDays > 0) {
-    app.sweepLog = () => app.writeQueue.run(() => {
+    app.sweepLog = () => app.writeQueue.run(async () => {
       const cutoff = new Date(Date.now() - options.logRetentionDays * 86_400_000).toISOString();
-      retentionPrune(app.db as never, cutoff);
+      await retentionPrune(app.db as never, cutoff);
       (app.db as RuntimeDatabase).prepare('DELETE FROM _ProjectedCursor WHERE lastSeq = 0').run();
     });
     app.clock.add({

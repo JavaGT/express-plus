@@ -10,7 +10,7 @@
 
 import { readSeq as cursorReadSeq,                     } from './cursor.mjs';
                                                              
-                                            
+import { txn,               } from './driver.mjs';
 
 // ---- DDL ----
 
@@ -254,8 +254,7 @@ export function appendEvents(db          , events                 ) {
 // retentionPrune — delete log entries older than a cutoff date. Used by the
 // log retention reaper (serve.mjs). Runs under the writeQueue mutex.
 export function retentionPrune(db          , cutoffIso        ) {
-  db.exec('BEGIN IMMEDIATE');
-  try {
+  return txn(db, () => {
     const expired = new Set(db.prepare(
       'SELECT scope, actionId FROM _ActionReceipt WHERE committedAt < :cutoff',
     ).all({ cutoff: cutoffIso }).map((row) => `${row.scope          }\u0000${row.actionId          }`));
@@ -271,11 +270,7 @@ export function retentionPrune(db          , cutoffIso        ) {
     db.prepare('UPDATE _ActionReceipt SET actionData = NULL WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
     db.prepare('DELETE FROM _PrivateActionFact WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
     db.prepare('DELETE FROM _Log WHERE committedAt < :cutoff').run({ cutoff: cutoffIso });
-    db.exec('COMMIT');
-  } catch (error) {
-    db.exec('ROLLBACK');
-    throw error;
-  }
+  });
 }
 
 // ---- shared shapes ----

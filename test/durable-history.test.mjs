@@ -808,7 +808,7 @@ test('receipt references deny mixed history even after annotated log retention',
     payload: { text: 'secret canonical fact' }, history: { session: 'tab-a' },
   });
 
-  retentionPrune(db, '9999-01-01T00:00:00.000Z');
+  await retentionPrune(db, '9999-01-01T00:00:00.000Z');
   await assert.rejects(server.history.actions({ scope: 'custom:1', principal, after: 99, limit: 1 }), { status: 403 });
   await assert.rejects(server.history.events({ scope: 'custom:1', principal, after: 99, limit: 1 }), { status: 403 });
 });
@@ -956,7 +956,7 @@ test('machine actions preserve provenance but never enter a human cursor', async
 test('retention atomically retires cursor targets and redacts action payload', async () => {
   const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db); const server = makeServer(db);
   await set(server, { actionId: 'old-a1', value: 'secret', before: 0, session: 'tab-a' });
-  retentionPrune(db, '9999-01-01T00:00:00.000Z');
+  await retentionPrune(db, '9999-01-01T00:00:00.000Z');
   assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 0, redo: 0 });
   assert.equal(db.prepare("SELECT actionData FROM _ActionReceipt WHERE actionId = 'old-a1'").get().actionData, null);
   assert.equal((await server.dispatch({ actionId: 'old-a1', type: 'document.set', payload: { value: 9 }, principal, scope })).deduped, true);
@@ -965,7 +965,7 @@ test('retention atomically retires cursor targets and redacts action payload', a
 test('retention erases private facts and cursor recovery cannot resurrect a redacted target', async () => {
   const db = new DatabaseSync(':memory:'); executeFrameworkDDL(db); const server = makeServer(db);
   await set(server, { actionId: 'retired-a1', value: 'after', before: 'before', session: 'tab-a' });
-  retentionPrune(db, '9999-01-01T00:00:00.000Z');
+  await retentionPrune(db, '9999-01-01T00:00:00.000Z');
   assert.equal(db.prepare('SELECT COUNT(*) count FROM _PrivateActionFact').get().count, 0);
   db.prepare('DELETE FROM _HistoryCursor').run();
   assert.partialDeepStrictEqual(await server.history.cursor({ scope, principal, session: 'tab-a' }), { undo: 0, redo: 0 });

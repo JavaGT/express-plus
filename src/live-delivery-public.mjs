@@ -9,6 +9,7 @@ import { tryBuildAnnotatedTextFoldEnvelopes } from './annotated-text-fold-envelo
 import { tryParseScopeKey } from './scope-handle.mjs';
                                                      
 import { readSeq } from './committed-log.mjs';
+import { readSnapshotTxn } from './driver.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
@@ -181,19 +182,19 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
     // complete candidate graph and its two committed fences before authorizing.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       let captured                                                                       ;
-      db.exec('BEGIN');
       try {
-        captured = Object.freeze({
-          anchor: readSeq(db, scope),
-          aggregate: aggregateRevision(),
-          candidate: captureSnapshot({ db: db         , principal, anchor: declaration.anchor         , id: handle .id, output: declaration.output         , tombstones: declaration.tombstones          }),
-        });
+        captured = (await readSnapshotTxn(db         , () =>
+          Object.freeze({
+            anchor: readSeq(db, scope),
+            aggregate: aggregateRevision(),
+            candidate: captureSnapshot({ db: db         , principal, anchor: declaration.anchor         , id: handle .id, output: declaration.output         , tombstones: declaration.tombstones          }),
+          }),
+        ))                                                             ;
       } catch {
         // A visibility read that cannot establish absence is a denied snapshot,
-        // never a partially projected recipient view.
+        // never a partially projected recipient view. The read snapshot txn is
+        // already released (the door COMMITs in a finally before rethrowing).
         return { kind: 'revoked' };
-      } finally {
-        db.exec('COMMIT');
       }
       if (!captured .candidate) return { kind: 'revoked' };
       const authorization = await authorizeSnapshot({ principal, anchor: declaration.anchor         , candidate: captured .candidate         , mayVerb: mayVerb          });

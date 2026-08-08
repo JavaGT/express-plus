@@ -6,7 +6,12 @@
 //   {
 //     prepare(sql) -> { run(...args), get(...args), all(...args) },
 //     exec(sql),
-//     txn(fn)      -> async; BEGIN IMMEDIATE / await fn() / COMMIT, ROLLBACK on throw,
+//     txn(fn)            -> async; BEGIN IMMEDIATE / await fn() / COMMIT, ROLLBACK on throw,
+//     exclusiveTxn(fn)   -> async; BEGIN EXCLUSIVE / await fn() / COMMIT, ROLLBACK on throw
+//                         (the exclusive-upgrade lane — e.g. package schema migrations),
+//     readSnapshotTxn(fn)-> async; BEGIN (deferred) / await fn() / COMMIT in a finally,
+//                         never ROLLBACK — a read-only consistent snapshot that does NOT
+//                         take the write lock,
 //     begin(),       commit(),       rollback(),       // sync primitives for callers
 //                                                   // that cannot use the callback form
 //     upsert({ table, keyColumns, columns, values }),
@@ -26,9 +31,13 @@
 //
 // The framework never calls `BEGIN`/`COMMIT`/`ROLLBACK` literals or hand-rolled
 // upsert SQL itself. Call sites go through the dispatcher functions below
-// (`txn`, `begin`, `commit`, `rollback`, `upsert`), which route to the driver's
-// own methods when present and otherwise fall back to the SQLite defaults
-// implemented here. That fallback is what lets a raw node:sqlite DatabaseSync
+// (`txn`, `exclusiveTxn`, `readSnapshotTxn`, `begin`, `commit`, `rollback`,
+// `upsert`), which route to the driver's own methods when present and otherwise
+// fall back to the SQLite defaults implemented here. Those three transaction
+// modes are the ONLY transaction shapes the framework may use — the standard
+// immediate txn, the exclusive-upgrade lane, and the read-only consistent
+// snapshot — and driver.ts is the only module that issues BEGIN/COMMIT/ROLLBACK
+// literals. That fallback is what lets a raw node:sqlite DatabaseSync
 // (the shape ~29 test files pass straight to createServer) work unchanged: it is
 // a valid driver because wrapDriver attaches the defaults to it.
 
@@ -44,6 +53,8 @@
                                     
                              
                                                                    
+                                                                            
+                                                                               
                      
                       
                         
@@ -74,6 +85,40 @@ async function sqliteTxn(db          , fn               )                   {
   }
   db.exec('COMMIT');
   return result;
+}
+
+// Exclusive-upgrade lane: BEGIN EXCLUSIVE / await fn / COMMIT, ROLLBACK on throw
+// — the same shape as sqliteTxn but with the exclusive variant. Used by the
+// package schema migrations where deferred would break the one-lane ruling.
+async function sqliteExclusiveTxn(db          , fn               )                   {
+  db.exec('BEGIN EXCLUSIVE');
+  let result         ;
+  try {
+    result = await fn();
+  } catch (err) {
+    try {
+      db.exec('ROLLBACK');
+    } catch {
+      /* already rolled back or txn unusable */
+    }
+    throw err;
+  }
+  db.exec('COMMIT');
+  return result;
+}
+
+// Read-only consistent snapshot: BEGIN (deferred, no write lock) / await fn /
+// COMMIT in a finally. Never ROLLBACKs — a capture error still releases the read
+// transaction and propagates to the caller, which decides what a failed capture
+// means (e.g. a denied snapshot). Deferred must stay deferred: this mode runs
+// BEFORE authorization awaits and must not take the write lock.
+async function sqliteReadSnapshotTxn(db          , fn               )                   {
+  db.exec('BEGIN');
+  try {
+    return await fn();
+  } finally {
+    db.exec('COMMIT');
+  }
 }
 
 function sqliteBegin(db          ) {
@@ -117,6 +162,16 @@ function sqliteUpsert(
 export async function txn(db          , fn               )                   {
   if (typeof db.txn === 'function') return db.txn(fn);
   return sqliteTxn(db, fn);
+}
+
+export async function exclusiveTxn(db          , fn               )                   {
+  if (typeof db.exclusiveTxn === 'function') return db.exclusiveTxn(fn);
+  return sqliteExclusiveTxn(db, fn);
+}
+
+export async function readSnapshotTxn(db          , fn               )                   {
+  if (typeof db.readSnapshotTxn === 'function') return db.readSnapshotTxn(fn);
+  return sqliteReadSnapshotTxn(db, fn);
 }
 
 export function begin(db          ) {
@@ -168,6 +223,8 @@ export function wrapDriver(dbOrDriver                             )             
   // Attach the SQLite defaults. `this` inside the arrow closures is lexical, so
   // we bind to the handle explicitly by closure (not `this`).
   dbOrDriver.txn = (fn) => sqliteTxn(dbOrDriver, fn);
+  dbOrDriver.exclusiveTxn = (fn) => sqliteExclusiveTxn(dbOrDriver, fn);
+  dbOrDriver.readSnapshotTxn = (fn) => sqliteReadSnapshotTxn(dbOrDriver, fn);
   dbOrDriver.begin = () => sqliteBegin(dbOrDriver );
   dbOrDriver.commit = () => sqliteCommit(dbOrDriver );
   dbOrDriver.rollback = () => sqliteRollback(dbOrDriver );

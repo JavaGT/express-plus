@@ -9,6 +9,7 @@ import { tryBuildAnnotatedTextFoldEnvelopes } from './annotated-text-fold-envelo
 import { tryParseScopeKey } from './scope-handle.ts';
 import type { ScopeHandle } from './scope-handle.ts';
 import { readSeq } from './committed-log.ts';
+import { readSnapshotTxn } from './driver.ts';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.ts';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.ts';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
@@ -181,19 +182,19 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
     // complete candidate graph and its two committed fences before authorizing.
     for (let attempt = 0; attempt < 3; attempt += 1) {
       let captured: { anchor: number; aggregate: number; candidate: unknown } | undefined;
-      db.exec('BEGIN');
       try {
-        captured = Object.freeze({
-          anchor: readSeq(db, scope),
-          aggregate: aggregateRevision(),
-          candidate: captureSnapshot({ db: db as never, principal, anchor: declaration.anchor as never, id: handle!.id, output: declaration.output as never, tombstones: declaration.tombstones as never }),
-        });
+        captured = (await readSnapshotTxn(db as never, () =>
+          Object.freeze({
+            anchor: readSeq(db, scope),
+            aggregate: aggregateRevision(),
+            candidate: captureSnapshot({ db: db as never, principal, anchor: declaration.anchor as never, id: handle!.id, output: declaration.output as never, tombstones: declaration.tombstones as never }),
+          }),
+        )) as { anchor: number; aggregate: number; candidate: unknown };
       } catch {
         // A visibility read that cannot establish absence is a denied snapshot,
-        // never a partially projected recipient view.
+        // never a partially projected recipient view. The read snapshot txn is
+        // already released (the door COMMITs in a finally before rethrowing).
         return { kind: 'revoked' };
-      } finally {
-        db.exec('COMMIT');
       }
       if (!captured!.candidate) return { kind: 'revoked' };
       const authorization = await authorizeSnapshot({ principal, anchor: declaration.anchor as never, candidate: captured!.candidate as never, mayVerb: mayVerb as never });

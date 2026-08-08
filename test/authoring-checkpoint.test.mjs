@@ -352,7 +352,7 @@ test('A6: concurrent leases isolate checkpoints', () => {
   assert.equal(count(db, `${prefix}_authoring_checkpoint WHERE lease_id = '${lease2.id}'`), 1);
 });
 
-test('A8: migration — legacy schema upgrades atomically, preserves durable data', () => {
+test('A8: migration — legacy schema upgrades atomically, preserves durable data', async () => {
   const db = setupLegacy();
   // Populate a legacy stream with full chip-slot state.
   const stream = ensureStream({ db, prefix, documentId: 'doc-7', principalType: 'user', principalId: 'u1' });
@@ -368,7 +368,7 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
   db.prepare('INSERT INTO durable_marker (id, value) VALUES (?, ?)').run('m1', 'keep');
 
   // Run the built-in Workbench migration (fresh apply).
-  runWorkbenchMigrations(db);
+  await runWorkbenchMigrations(db);
   assert.equal(appliedWorkbenchVersion(db), 3);
 
   // Canonical shape: position has checkpoint_id NOT NULL, no family_checkpoint.
@@ -389,11 +389,11 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
   assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1);
 
   // Second startup is a no-op.
-  runWorkbenchMigrations(db);
+  await runWorkbenchMigrations(db);
   assert.equal(appliedWorkbenchVersion(db), 3);
 });
 
-test('A8-rollback: induced migration failure rolls back and leaves legacy schema intact', () => {
+test('A8-rollback: induced migration failure rolls back and leaves legacy schema intact', async () => {
   const db = setupLegacy();
   const stream = ensureStream({ db, prefix, documentId: 'doc-9', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
@@ -407,7 +407,7 @@ test('A8-rollback: induced migration failure rolls back and leaves legacy schema
   // a trigger that aborts the rebuild). Simplest: a BEFORE DELETE trigger on
   // legacy position that aborts — failure inside the exclusive txn rolls back.
   db.exec(`CREATE TRIGGER fail_migration BEFORE DELETE ON ${prefix}_authoring_position BEGIN SELECT RAISE(ABORT, 'injected failure'); END;`);
-  assert.throws(() => runWorkbenchMigrations(db), /injected failure/);
+  await assert.rejects(runWorkbenchMigrations(db), /injected failure/);
 
   // Rollback: legacy shape preserved, version not recorded, no partial state.
   assert.equal(appliedWorkbenchVersion(db), 0, 'no version on rollback');
@@ -418,11 +418,11 @@ test('A8-rollback: induced migration failure rolls back and leaves legacy schema
 
   // With the trigger removed, the same run succeeds (idempotent re-apply after rollback).
   db.exec(`DROP TRIGGER fail_migration`);
-  runWorkbenchMigrations(db);
+  await runWorkbenchMigrations(db);
   assert.equal(appliedWorkbenchVersion(db), 3);
 });
 
-test('A8-v2: migration invalidates defective ephemeral state and preserves durable state', () => {
+test('A8-v2: migration invalidates defective ephemeral state and preserves durable state', async () => {
   const db = setupCanonical();
   wireDoc(db, 'doc-10');
   db.exec('CREATE TABLE durable_marker (id TEXT PRIMARY KEY, value TEXT NOT NULL)');
@@ -437,8 +437,8 @@ test('A8-v2: migration invalidates defective ephemeral state and preserves durab
   assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1);
 
   // Upgrade from the deployed v1 build invalidates every opaque authoring token.
-  runWorkbenchMigrations(db);
-  runWorkbenchMigrations(db);
+  await runWorkbenchMigrations(db);
+  await runWorkbenchMigrations(db);
   assert.equal(appliedWorkbenchVersion(db), 3);
   assert.equal(count(db, `${prefix}_authoring_stream`), 0, 'streams from the defective build are invalidated');
   assert.equal(count(db, `${prefix}_authoring_lease`), 0, 'leases from the defective build are invalidated');
@@ -453,20 +453,20 @@ test('A8-v2: migration invalidates defective ephemeral state and preserves durab
   assert.equal(positionColumns.has('family_checkpoint'), false, 'no family_checkpoint column');
 });
 
-test('A8-incomplete: partial authoring family fails closed and rolls back', () => {
+test('A8-incomplete: partial authoring family fails closed and rolls back', async () => {
   const db = setupLegacy();
   wireDoc(db, 'doc-10b');
   // Omit the authoring_group table → incomplete legacy family.
   db.exec('DROP TABLE Doc_body_authoring_group');
 
-  assert.throws(() => runWorkbenchMigrations(db), /incomplete authoring stream table family/);
+  await assert.rejects(runWorkbenchMigrations(db), /incomplete authoring stream table family/);
   assert.equal(appliedWorkbenchVersion(db), 0, 'no version recorded on fail-closed refusal');
   // The legacy position table is untouched (nothing cleared).
   const positionColumns = new Set(db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => r.name));
   assert.ok(positionColumns.has('family_checkpoint'), 'legacy position table preserved on refusal');
 });
 
-test('A8-parity: migrated schema matches fresh canonical schema exactly', () => {
+test('A8-parity: migrated schema matches fresh canonical schema exactly', async () => {
   const fresh = setupCanonical();
   const migrated = setupLegacy();
   // Populate a legacy row so the rebuild runs, then migrate.
@@ -474,7 +474,7 @@ test('A8-parity: migrated schema matches fresh canonical schema exactly', () => 
   const lease = ensureLease({ db: migrated, prefix, streamId: stream.id, clientNonceHash: 'c' });
   migrated.prepare(`INSERT INTO ${prefix}_authoring_position (token, lease_id, issued_fence, block_id, family_checkpoint, visible_at_issue, created_at) VALUES ('p1', ?, 1, 'b1', '{"a":1}', 1, '2020-01-01')`).run(lease.id);
   migrated.prepare(`INSERT INTO ${prefix}_authoring_lease (id, stream_id, client_nonce_hash, acknowledged_fence, created_at, expires_at) VALUES ('lease-x', 's1', 'n1', 0, '2020-01-01', '2099-01-01')`).run();
-  runWorkbenchMigrations(migrated);
+  await runWorkbenchMigrations(migrated);
 
   const describe = (db) => ({
     position: db.prepare(`PRAGMA table_info(${prefix}_authoring_position)`).all().map((r) => `${r.name}:${r.type}:${r.notnull}:${r.pk}:${r.dflt_value ?? ''}`),
