@@ -861,3 +861,116 @@ test('a confidential span shows the real text to the owner and a redacted placeh
   await expect.poll(() => readerErrors).toContainEqual(expect.stringContaining('redacted'));
   await context.close();
 });
+
+test('paste appends text and typing at the comment end stays outside', async ({ page }) => {
+  const { id, editor, marked } = await createCommentedDocument(page, { text: 'before selected after', from: 7, to: 15 });
+  // Paste at the document end: insertFromPaste routes through the buffered
+  // replace path with the pasted plain text.
+  await editor.evaluate((element) => {
+    const block = element.querySelector('[data-block-id]');
+    const walker = element.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let last = null;
+    let node;
+    while ((node = walker.nextNode())) last = node;
+    const range = document.createRange();
+    range.setStart(last, last.data.length);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    const transfer = new DataTransfer();
+    transfer.setData('text/plain', '!!');
+    element.dispatchEvent(new InputEvent('beforeinput', {
+      bubbles: true, cancelable: true, inputType: 'insertFromPaste', dataTransfer: transfer,
+    }));
+  });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('before selected after!!');
+  await expect(marked).toHaveText('selected');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('before selected after!!');
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('selected');
+});
+
+test('IME composition inside a comment grows the comment range and persists', async ({ page }) => {
+  const { id, editor, marked } = await createCommentedDocument(page, { text: '1234567890', from: 3, to: 5 });
+  // The comment covers '45'. Compose between '4' and '5' (caret at marked
+  // offset 1): the marked span becomes '4語5' and the range grows with it.
+  await marked.evaluate((element) => {
+    const range = document.createRange();
+    range.setStart(element.firstChild, 1);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, cancelable: true }));
+    element.firstChild.data = '4語5';
+    element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '語' }));
+  });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await expect(editor).toHaveText('1234語567890');
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('4語5');
+  await page.reload();
+  await openDocument(page, id);
+  await expect(editor).toHaveText('1234語567890');
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('4語5');
+});
+
+test('a reader selection that crosses a placeholder is rejected and never edits', async ({ page, browser }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('hello secret world', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.firstElementChild.firstChild;
+    const range = document.createRange();
+    range.setStart(node, 6);
+    range.setEnd(node, 12);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('button', { name: 'Mark confidential' }).click();
+  await expect(page.locator('#status')).toHaveText('confidential span marked');
+
+  const context = await browser.newContext();
+  await context.addInitScript(() => sessionStorage.setItem('annotated-doc-view-as', 'reader'));
+  const reader = await context.newPage();
+  await reader.goto(origin);
+  await reader.locator('.doc', { hasText: id }).click();
+  await expect(reader.locator('#status')).toContainText('live', { timeout: 15000 });
+  const readerEditor = reader.locator('#editor');
+  await expect(readerEditor).toHaveText('hello [restricted] world');
+  // A selection spanning the placeholder maps to no valid annotated-text
+  // range, so the marker buttons stay disabled and no action can be applied.
+  await readerEditor.evaluate((element) => {
+    const block = element.querySelector('[data-block-id]');
+    const walker = element.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    let node;
+    while ((node = walker.nextNode())) nodes.push(node);
+    let offset = 0;
+    const at = (target) => {
+      for (const n of nodes) {
+        const next = offset + n.data.length;
+        if (target <= next) return [n, target - offset];
+        offset = next;
+      }
+      throw new Error('oob');
+    };
+    const [sn, so] = at(2);
+    const [en, eo] = at(20);
+    const range = document.createRange();
+    range.setStart(sn, so);
+    range.setEnd(en, eo);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await expect(reader.getByRole('button', { name: 'Add comment marker' })).toBeDisabled();
+  await expect(reader.getByRole('button', { name: 'Mark confidential' })).toBeDisabled();
+  // The owner's document is untouched.
+  await expect(editor).toHaveText('hello secret world');
+  await context.close();
+});
