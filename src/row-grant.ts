@@ -348,3 +348,27 @@ export async function mayFieldOp(
   if (!decision.granted) return false;
   return decision.capabilities.includes(capability);
 }
+
+// The ONE row-admission decision every admission path asks: given a materialized
+// row, does `principal` hold the requested operation on it? The operation is a
+// named whole — either a row VERB (mayRow: create/update/remove/read/...) or a
+// FIELD operation (mayFieldOp: the `capability` on the named field) — never a
+// set of orthogonal flags. An absent row is a denial (fail closed): every
+// admission site already treated a missing row as deny, just spelled differently
+// (`!row`, `!!row &&`, `!admissionRow ||`, `row &&`), so the helper owns that
+// default once. A site that genuinely needs a different absent-row policy (the
+// create-history move admits a missing anchor; the remove handler short-circuits
+// the Invitation fallback on a missing row) keeps that decision at its own site
+// and passes a present row only.
+export type AdmitRowRequest =
+  | { kind: 'verb'; entity: EntityRecord; row: unknown; principal: unknown; verb: string }
+  | { kind: 'fieldOp'; entity: EntityRecord; row: unknown; principal: unknown; fieldName: string; capability: Capability };
+
+export async function admitRow(request: AdmitRowRequest): Promise<boolean> {
+  const { entity, row, principal } = request;
+  if (!row) return false;
+  if (request.kind === 'fieldOp') {
+    return mayFieldOp(entity, request.fieldName, request.capability, row, principal);
+  }
+  return mayRow(entity, request.verb, row, principal);
+}

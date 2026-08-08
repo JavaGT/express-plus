@@ -23,7 +23,7 @@ import { assertR5AnnotationDetachPayload } from '../annotated-text-r5.ts';
 import { assertWordEvidencePayload } from '../word-evidence.ts';
 import { erasureDirectivePreparation } from '../erasure-directive.ts';
 import { CASCADE_DESCENDANT, CASCADE_PREAUTHORIZED } from './removal-cascade.ts';
-import { mayRow } from '../row-grant.ts';
+import { admitRow } from '../row-grant.ts';
 import { admitsInvitationRemoval } from '../auth/invitation-acceptance-authority.ts';
 import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope } from '../annotated-text-authoring-stream.ts';
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.ts';
@@ -572,7 +572,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       // A conditional remove reads its private preimage below, so authorize the
       // target row first rather than allowing that read to precede admission.
       const admissionRow = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
-      if (!admissionRow || (!(await mayRow(record, 'remove', admissionRow, principal))
+      if (!admissionRow || (!(await admitRow({ kind: 'verb', entity: record, row: admissionRow, principal, verb: 'remove' }))
         && !(record.name === 'Invitation' && admitsInvitationRemoval(principal, payload.id)))) {
         throw Object.assign(new Error('forbidden'), { status: 403 });
       }

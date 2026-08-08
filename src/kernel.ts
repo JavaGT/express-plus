@@ -1,4 +1,4 @@
-import { mayRow, mayFieldOp } from './row-grant.ts';
+import { admitRow } from './row-grant.ts';
 import { CASCADE_PREAUTHORIZED } from './entity/removal-cascade.ts';
 import {
   admitSystemMutation,
@@ -252,8 +252,7 @@ function buildDurableAdmission(app: any) {
     } catch {
       row = null;
     }
-    if (!row) return false;
-    return mayRow(entity, verb, row, principal);
+    return admitRow({ kind: 'verb', entity, row, principal, verb });
   }
   async function admitsAnnotatedProject({ entityName, verb, principal, event }: any) {
     const entity = app.entities?.get(entityName);
@@ -266,7 +265,7 @@ function buildDurableAdmission(app: any) {
     if (!projectEntity) return true;
     let row = null;
     try { row = projectEntity.findById(project.id, principal); } catch { row = null; }
-    return !!row && mayRow(projectEntity, verb, row, principal);
+    return admitRow({ kind: 'verb', entity: projectEntity, row, principal, verb });
   }
 
   return {
@@ -518,7 +517,15 @@ export function buildKernel(app: any) {
         const id = context.payload?.id;
         if (typeof id !== 'string' || id.length === 0) return false;
         const row = rawRow(app.db, annotated.entity.name, id);
-        return Boolean(row && await mayFieldOp(annotated.entity, annotated.fieldName, write, annotated.entity.deserializeRow({ ...row }), context.principal));
+        if (!row) return false;
+        return admitRow({
+          kind: 'fieldOp',
+          entity: annotated.entity,
+          row: annotated.entity.deserializeRow({ ...row }),
+          fieldName: annotated.fieldName,
+          capability: write,
+          principal: context.principal,
+        });
       }
       const declaration = registeredActions.get(context.type);
       if (!declaration) {
@@ -534,7 +541,7 @@ export function buildKernel(app: any) {
         // always has either the live row or its deletion anchor to check.
         if (!stored) return verb === 'create';
         const row = entity.deserializeRow({ ...stored });
-        return mayRow(entity, verb === 'create' ? 'remove' : 'update', row, context.principal);
+        return admitRow({ kind: 'verb', entity, row, principal: context.principal, verb: verb === 'create' ? 'remove' : 'update' });
       }
       const authorize = isAuthorizedRows(declaration.authorize)
         ? bindAuthorizedRows(declaration.authorize, app)
