@@ -1,4 +1,5 @@
 import { mayRow } from '../row-grant.ts';
+import { rawRow } from './query.ts';
 
 export const CASCADE_PREAUTHORIZED: unique symbol = Symbol('workbench.cascade-preauthorized');
 export const CASCADE_DESCENDANT: unique symbol = Symbol('workbench.cascade-descendant');
@@ -73,7 +74,7 @@ export function installRemovalCascades(entities: Map<string, EntityRecord>): Map
     async function enumerate(id: string, db: DbHandle, authorize: unknown, includeRoot: boolean): Promise<CascadeEntry[]> {
       const result: CascadeEntry[] = [];
       async function visit(entity: EntityRecord, rowId: string): Promise<void> {
-        const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(rowId);
+        const row = rawRow(db, entity.name, rowId);
         if (!row) throw Object.assign(new Error(`${entity.name} '${rowId}' not found`), { status: 404 });
         if (authorize && !(await mayRow(entity, 'remove', row, authorize))) {
           throw Object.assign(new Error('forbidden'), { status: 403 });
@@ -89,7 +90,7 @@ export function installRemovalCascades(entities: Map<string, EntityRecord>): Map
     }
     Object.defineProperty(root, 'removalCascade', { value: async (id: string, principal: unknown, db: DbHandle): Promise<CascadeEntry[]> => {
       const descendants = await enumerate(id, db, principal, false);
-      const row = db.prepare(`SELECT * FROM ${root.name} WHERE id = ?`).get(id);
+      const row = rawRow(db, root.name, id);
       return [...descendants, { entity: root, id: (row as { id: string }).id }];
     } });
     Object.defineProperty(root, 'removalCascadeDescendants', { value: (id: string, db: DbHandle) => enumerate(id, db, null, false) });

@@ -29,6 +29,7 @@ import { clearAuthoringState, issueAuthoringSnapshot, buildAuthoringEnvelope } f
 import { admitV9AnnotatedTextEdit, assertV9AuthoringBinding as assertV9AuthoringBindingFromAdmit } from '../annotated-text-admit.mjs';
 import { packOperatedFacts } from '../annotated-text-operated-facts.mjs';
 import { applyTextOperation, restoreTextFamily, textFamilyCheckpoint as continuousTextFamilyCheckpoint } from '../annotated-text-continuous.mjs';
+import { rawRow } from './query.mjs';
 
 export const CRUD_CURSOR_POLICY = Symbol('workbench.crud-cursor-policy');
 export const ANNOTATED_TEXT_COMPENSATION = Symbol('workbench.annotated-text-compensation');
@@ -438,7 +439,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       if (Object.keys(rest).length === 0) {
         if (!history) throw new ValidationError(`${name}.update requires at least one field to change`);
       }
-      const currentStored = conditionalHistory ? db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id) : null;
+      const currentStored = conditionalHistory ? rawRow(db, name, id) : null;
       if (conditionalHistory && !currentStored) throw Object.assign(new Error(`${name} ${id} not found`), { status: 404 });
       if (history) {
         if (!conditionalHistory || !history || (history.operation !== 'undo' && history.operation !== 'redo') || !history.input || Object.keys(history.input).length !== 2) throw new ValidationError(`${name}.update history input is invalid`);
@@ -519,7 +520,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       for (const [fieldName, descriptor] of Object.entries(fields)                        ) {
         if (descriptor.touch) data[fieldName] = new Date();
       }
-      const updateRow = db?.prepare?.(`SELECT * FROM ${name} WHERE id = ?`).get(id) ?? null;
+      const updateRow = rawRow(db, name, id) ?? null;
       const result = [{
         handle: verbs.updated.handle,
         type: verbs.updated.type,
@@ -546,7 +547,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         if (!conditionalCreateHistory || history.operation !== 'undo' || !history.input || Object.keys(history.input).length !== 2) throw new ValidationError(`${name}.remove history input is invalid`);
         if (!history.input.expected || history.input.replacement !== null || history.input.expected.id !== payload.id) throw new ValidationError(`${name}.remove history input row is invalid`);
         const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column     ) => column.name);
-        const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
+        const current = rawRow(db, name, payload.id);
         if (!current || Object.keys(history.input.expected).length !== columns.length || columns.some((column     ) => !Object.hasOwn(history.input.expected, column)) || !columns.every((column     ) => Object.is(current[column], history.input.expected[column]))) {
           throw Object.assign(new Error(`${name} remove conflicts`), { status: 409 });
         }
@@ -565,13 +566,13 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
             }));
             if (!conditionalCreateHistory) return events;
             const parent = rows.at(-1);
-            const before = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(parent.id);
+            const before = rawRow(db, name, parent.id);
             return { events, privateFact: { before, after: null } };
           });
       }
       // A conditional remove reads its private preimage below, so authorize the
       // target row first rather than allowing that read to precede admission.
-      const admissionRow = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
+      const admissionRow = rawRow(db, name, payload.id);
       if (!admissionRow || (!(await admitRow({ kind: 'verb', entity: record, row: admissionRow, principal, verb: 'remove' }))
         && !(record.name === 'Invitation' && admitsInvitationRemoval(principal, payload.id)))) {
         throw Object.assign(new Error('forbidden'), { status: 403 });
@@ -604,7 +605,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     const retirementType = `${name}.annotatedText.retire`;
       const retirementHandler = async ({ payload, principal, db, scope }     ) => {
       if (!payload || Object.keys(payload).length !== 1 || typeof payload.id !== 'string' || !payload.id) throw new ValidationError(`${retirementType} requires { id }`);
-      const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(payload.id);
+      const row = rawRow(db, name, payload.id);
       const owningScope = row && resolveAnnotatedTextOwningScope(annotatedEntries[0][1], fields, row).key;
       if (!row || scope !== owningScope) throw new ValidationError(`${retirementType} requires its declared project scope`);
         if (!row || principal?.id == null || annotatedEntries.some(([, descriptor]               ) => String(row[descriptor.owner]) !== String(principal.id))) throw Object.assign(new Error('forbidden'), { status: 403 });
@@ -655,7 +656,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
     const measurementConfigs = compiledMeta?.measurementConfigs ?? {};
     const measurementFamilyList = compiledMeta?.measurementFamilyList ?? [];
     const owningDocumentScope = (db     , id     ) => {
-      const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id);
+      const row = rawRow(db, name, id);
       if (!row) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       return resolveAnnotatedTextOwningScope(descriptor, fields, row).key;
     };
@@ -690,7 +691,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       }
       else if (internal && payload.version === 5) command = assertR5AnnotationDetachPayload(name, fieldName, payload);
       else throw new ValidationError(`${name}.${fieldName}.operation requires version 9`);
-      const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(command.id);
+      const row = rawRow(db, name, command.id);
       if (!row) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
       const documentScope = resolveAnnotatedTextOwningScope(descriptor, fields, row).key;
       if (scope !== documentScope) {
@@ -780,7 +781,7 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
 
       const afterRevision = state.structure_version + 1;
 
-      const leftBlockStored = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(blockId);
+      const leftBlockStored = rawRow(db, `${prefix}_block`, blockId);
       if (!leftBlockStored) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
 
       const blockFields = Object.keys(descriptor.block ?? {});
@@ -1001,9 +1002,9 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
         throw new ValidationError(`${name}.${fieldName}.operation left and right block IDs must be different`);
       }
 
-      const leftBlockStored = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(leftBlockId);
+      const leftBlockStored = rawRow(db, `${prefix}_block`, leftBlockId);
       if (!leftBlockStored) throw new ValidationError(`${name}.${fieldName}.operation left block not found`);
-      const rightBlockStored = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(rightBlockId);
+      const rightBlockStored = rawRow(db, `${prefix}_block`, rightBlockId);
       if (!rightBlockStored) throw new ValidationError(`${name}.${fieldName}.operation right block not found`);
 
       const blockFields = Object.keys(descriptor.block ?? {});
@@ -1342,11 +1343,11 @@ export function createCrudHandlers({ record, sideTableStrategyEntries, condition
       const blockFields = Object.keys(descriptor.block ?? {});
       const blockFacts = [];
        const storedBlockById = new Map();
-       const sourceStoredBlock = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(blockId);
+       const sourceStoredBlock = rawRow(db, `${prefix}_block`, blockId);
        if (!sourceStoredBlock) throw new ValidationError(`${name}.${fieldName}.operation source block not found`);
        storedBlockById.set(blockId, sourceStoredBlock);
        if (endBlockId !== blockId) {
-         const endStoredBlock = db.prepare(`SELECT * FROM ${prefix}_block WHERE id = ?`).get(endBlockId);
+         const endStoredBlock = rawRow(db, `${prefix}_block`, endBlockId);
          if (!endStoredBlock) throw new ValidationError(`${name}.${fieldName}.operation end block not found`);
          storedBlockById.set(endBlockId, endStoredBlock);
        }

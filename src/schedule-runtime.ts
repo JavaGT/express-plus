@@ -12,6 +12,7 @@ import type { FieldDescriptor } from './field-strategy.ts';
 import type { DbHandle } from './driver.ts';
 import { materializeStoredRow } from './entity/materialize-row.ts';
 import { triggerList, schedulerSource, tickSource } from './schedule.ts';
+import { rawRow } from './entity/query.ts';
 
 const DEADLINE_SCAN_INTERVAL_MS = 1000;
 
@@ -327,7 +328,7 @@ export function admitSystemMutation({ entity, verb, rowId, payload, principal, d
     return false;
   }
 
-  const storedRow = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(rowId);
+  const storedRow = rawRow(db, entity.name, rowId);
   if (!storedRow) return false;
   const row = materializeStoredRow(storedRow, entity.fields ?? {}, { freeze: true }) as Record<string, unknown>;
 

@@ -17,6 +17,7 @@ import { frozenJsonSnapshot } from '../annotated-text-r2.ts';
 import { markAnnotatedEntityProjection } from '../annotated-text-history.ts';
 import type { DbHandle } from '../driver.ts';
 import type { SideTableStrategyEntry, ProjectionEvent } from '../side-table-strategy.ts';
+import { rawRow } from './query.ts';
 
 type Row = Record<string, unknown>;
 type Db = DbHandle;
@@ -388,7 +389,7 @@ function projectBlocklessAnnotationApplyRange({ name, handle, db, descriptor, da
   if (JSON.stringify(current.checkpoint.frontier) !== JSON.stringify(data.after.frontier) ||
       data.after.structuralRevision !== data.before.structuralRevision) throw new Error(`${name}.${handle.field}.operated v13 annotation apply must not change the text family`);
   if (JSON.stringify(continuousTextFamilyCheckpoint(current)) !== JSON.stringify(f.family)) throw new Error(`${name}.${handle.field}.operated v13 annotation family does not match the document`);
-  const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(data.id);
+  const row = rawRow(db, name, data.id);
   if (!row) throw new Error(`${name}.${handle.field}.operated v13 document row is missing`);
   const declared = descriptor.annotations!.find((entry) => entry.annotationName === annOp.family);
   if (!declared) throw new Error(`${name}.${handle.field}.operated v13 annotation family is not declared`);
@@ -621,7 +622,7 @@ export function createEntityProjection({ name, fields, verbs, storedComputedFiel
         // Capture the deleted-row history anchor BEFORE the delete, in the
         // same projection-consumer call (same transaction as the DELETE) —
         // atomic, so a committed removal can never leave the anchor missing.
-        const existingRow = id ? db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(id) : undefined;
+        const existingRow = id ? rawRow(db, table, id) : undefined;
         if (existingRow) captureDeletedRowAnchor(db as Parameters<typeof captureDeletedRowAnchor>[0], name, id as string, existingRow, event.committedAt as string);
         // A protecting annotation's target edge is ON DELETE RESTRICT. The row
         // delete cascades into the annotation rows, so tear down the document's
@@ -659,7 +660,7 @@ export function createConditionalHistoryProjection({ name, verbs }: { name: stri
       if (!before || !after || before.id !== after.id || event.data?.id !== before.id) throw new Error(`${name}.update private fact is invalid`);
       const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name as string);
       if (columns.some((column) => !Object.hasOwn(before, column) || !Object.hasOwn(after, column))) throw new Error(`${name}.update private fact is incomplete`);
-      const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(before.id);
+      const current = rawRow(db, name, before.id);
       if (!current) throw Object.assign(new Error(`${name} ${before.id} not found`), { status: 404 });
       if (!columns.every((column) => Object.is(current[column], before[column]))) throw Object.assign(new Error(`${name} update conflicts`), { status: 409 });
       const params: Record<string, unknown> = {};
@@ -688,14 +689,14 @@ export function createConditionalCreateHistoryProjection({ name, verbs }: { name
     const columns = db.prepare(`PRAGMA table_info(${name})`).all().map((column) => column.name as string);
     if (event.type === verbs.created.type) {
       if (before !== null || !after || after.id !== event.data?.id) throw new Error(`${name}.create private fact is invalid`);
-      const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(after.id);
+      const current = rawRow(db, name, after.id);
       if (!current) throw Object.assign(new Error(`${name}.create projection conflicts`), { status: 409 });
       if (Object.keys(after).length !== columns.length || columns.some((column) => !Object.hasOwn(after, column)) || !columns.every((column) => Object.is(current[column], after[column]))) {
         throw Object.assign(new Error(`${name}.create projection conflicts`), { status: 409 });
       }
     } else {
       if (!before || after !== null || before.id !== event.data?.id || Object.keys(before).length !== columns.length || columns.some((column) => !Object.hasOwn(before, column))) throw new Error(`${name}.remove private fact is invalid`);
-      const current = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(before.id);
+      const current = rawRow(db, name, before.id);
       if (!current) throw Object.assign(new Error(`${name} ${before.id} not found`), { status: 404 });
       if (!columns.every((column) => Object.is(current[column], before[column]))) throw Object.assign(new Error(`${name} remove conflicts`), { status: 409 });
       captureDeletedRowAnchor(db as Parameters<typeof captureDeletedRowAnchor>[0], name, before.id as string, current, event.committedAt as string);

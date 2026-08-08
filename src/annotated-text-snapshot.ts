@@ -7,6 +7,7 @@ import { mayRow, protectingAnnotationCapabilities } from './row-grant.ts';
 import { read } from './grant.ts';
 import { resolveStream, resolveLease, issueAuthoringSnapshot, buildAuthoringEnvelope } from './annotated-text-authoring-stream.ts';
 import { readSeq } from './cursor.ts';
+import { rawRow } from './entity/query.ts';
 import { scopeOf } from './scope-handle.ts';
 import type { ContinuousTextFamily } from './annotated-text-continuous.ts';
 
@@ -243,7 +244,7 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
   const descriptor = entity.fields?.[fieldName];
   if (!descriptor || descriptor.kind !== 'annotatedText') fail('export field is not annotatedText');
   for (let attempt = 0; attempt < RECIPIENT_READ_ATTEMPTS; attempt += 1) {
-    const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(documentId);
+    const row = rawRow(db, entity.name, documentId);
     if (!row) fail('document is missing');
     const owningScope = resolveAnnotatedTextOwningScope(descriptor, entity.fields, row);
     if (owningScope.entity !== expectedOwningScope.entity.name || owningScope.id !== expectedOwningScope.id) {
@@ -257,7 +258,7 @@ export async function exportAnnotatedText({ app, entity, field, documentId, expe
     try {
       const scopeEntity = app.entities.get(owningScope.entity);
       if (!scopeEntity) fail('declared owning scope entity is not registered with the application');
-      const scopeRow = db.prepare(`SELECT * FROM ${scopeEntity.name} WHERE id = ?`).get(owningScope.id);
+      const scopeRow = rawRow(db, scopeEntity.name, owningScope.id);
       if (!scopeRow || !await mayRow(scopeEntity, 'admin', scopeRow, principal)) {
         fail('owning scope admin authorization failed');
       }
@@ -345,7 +346,7 @@ export async function readAnnotatedTextForRecipient(input: any): Promise<any> {
     let capturedOwningScopeKey: string | null = null;
     let capturedOwningScopeCursor: number | null = null;
     try {
-      const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(documentId);
+      const row = rawRow(db, entity.name, documentId);
       if (!row) {
         const before = readSeq(db, scopeOf(expectedOwningScope.entity.name, expectedOwningScope.id).key);
         if (unchangedCursor(db, scopeOf(expectedOwningScope.entity.name, expectedOwningScope.id).key, before)) return recipientUnavailable;
@@ -370,7 +371,7 @@ export async function readAnnotatedTextForRecipient(input: any): Promise<any> {
         if (unchangedCursor(db, owningScope.key, before)) return recipientUnavailable;
         continue;
       }
-      const scopeRow = db.prepare(`SELECT * FROM ${scopeEntity.name} WHERE id = ?`).get(owningScope.id);
+      const scopeRow = rawRow(db, scopeEntity.name, owningScope.id);
       if (!scopeRow) {
         const before = readSeq(db, owningScope.key);
         if (unchangedCursor(db, owningScope.key, before)) return recipientUnavailable;

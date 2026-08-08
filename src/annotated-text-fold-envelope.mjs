@@ -27,6 +27,7 @@ import { authoringRedactionsForRecipient } from './annotated-text-recipient-proj
                                                 
                                                            
                                                          
+import { rawRow } from './entity/query.mjs';
 
                          
                                                
@@ -203,7 +204,7 @@ export async function tryBuildAnnotatedTextFoldEnvelopes(ctx         , { db, doc
   const entityName = scopeEntity ?? document.entity.name;
   const id = scopeId ?? document.documentId;
 
-  const row = db.prepare(`SELECT * FROM ${document.entity.name} WHERE id = ?`).get(document.documentId);
+  const row = rawRow(db, document.entity.name, document.documentId);
   if (!row) return recovery(ctx, entityName, id, 'annotated-text-snapshot-required');
 
   let recipient;

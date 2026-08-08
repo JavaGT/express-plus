@@ -7,6 +7,7 @@ import { failure, isWorkbenchFailure,                       } from './outcome.mj
 import { sendFailure,               } from './http-failure.mjs';
 import { annotatedTextHistorySession, resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
 import { scopeOf } from './scope-handle.mjs';
+import { rawRow } from './entity/query.mjs';
                                                            
                                                 
 
@@ -241,7 +242,7 @@ function resolveDocumentScope(app                , document                  )  
   const entity = app.entities?.get(document.entity);
   const descriptor = entity?.fields?.[document.field];
   if (!entity || descriptor?.kind !== 'annotatedText') return null;
-  const row = app.db .prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(document.documentId);
+  const row = rawRow(app.db , entity.name, document.documentId);
   if (!row) return null;
   try { return resolveAnnotatedTextOwningScope(descriptor, entity.fields                       , row                       ).key; } catch { return null; }
 }
@@ -279,7 +280,7 @@ function resolveInheritedOwnerScope(app                , entity           , verb
   }
   const id = payloadRecord?.id;
   if (typeof id !== 'string' || id.length === 0) return null;
-  const row = app.db .prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id);
+  const row = rawRow(app.db , entity.name, id);
   if (!row) return null;
   const ownerId = (row                           )[inherit.via];
   if (typeof ownerId !== 'string' || ownerId.length === 0) return null;
@@ -299,7 +300,7 @@ function admitsAnnotatedTextAction(app                , request                 
     if (request.type === `${entity.name}.create`) {
       try { owningScope = resolveAnnotatedTextOwningScope(annotatedEntries[0][1], entity.fields                       , request.payload                       ).key; } catch { return false; }
     } else {
-      const row = app.db .prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id);
+      const row = rawRow(app.db , entity.name, id);
       if (!row) return false;
       owningScope = resolveAnnotatedTextOwningScope(annotatedEntries[0][1], entity.fields                       , row                       ).key;
     }

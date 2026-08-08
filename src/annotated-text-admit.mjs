@@ -18,6 +18,7 @@ import { readSeq } from './committed-log.mjs';
 import { planAnnotationRemove, planTextOffsetEdit, planTextRangeApply } from './annotated-text-plan.mjs';
                                                                      
                                                 
+import { rawRow } from './entity/query.mjs';
 
                      
                                                
@@ -185,7 +186,7 @@ function loadRanges({ db, prefix, documentId }
 /** Cross-cutting admission shared by every edit kind. */
 async function assertV9AuthoringPrelude(ctx                )                     {
   const { name, fieldName, prefix, descriptor, record, compiledMeta, command, db, scope, principal, actionId } = ctx;
-  const row = db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(command.id);
+  const row = rawRow(db, name, command.id);
   if (!row) throw new ValidationError(`${name}.${fieldName}.operation document does not exist`);
   const documentScope = resolveAnnotatedTextOwningScope(descriptor, record.fields, row).key;
   if (scope !== documentScope) throw new ValidationError(`${name}.${fieldName}.operation requires document scope '${documentScope}'`);

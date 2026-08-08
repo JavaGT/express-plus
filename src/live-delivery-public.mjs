@@ -13,6 +13,7 @@ import { readSnapshotTxn } from './driver.mjs';
 import { compileSnapshots, captureSnapshot, authorizeSnapshot, projectSnapshot } from './snapshot-projection.mjs';
 import { hasAnnotatedTextFields, projectEntitySnapshot } from './entity-snapshot-projection.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
+import { rawRow } from './entity/query.mjs';
 import { ensureStream, ensureLease, hashClientNonce, resolveStream, resolveLease, acknowledgeAndPruneSnapshot } from './annotated-text-authoring-stream.mjs';
 import { createPrincipalSnapshotDelivery, isPrincipalSnapshotScope, validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
                                                 
@@ -262,7 +263,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       const entity = resolveEntity(entityName);
       const descriptor = entity?.fields?.[fieldName];
       if (!entity || descriptor?.kind !== 'annotatedText' || typeof documentId !== 'string' || !documentId) return null;
-      const row = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(documentId);
+      const row = rawRow(db, entity.name, documentId);
       if (!row) return null;
       return Object.freeze({ scope: resolveAnnotatedTextOwningScope(descriptor, entity.fields                       , row                       ).key, entity, row, fieldName, descriptor, documentId });
     },

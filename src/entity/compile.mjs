@@ -40,7 +40,7 @@ import { compileMembershipAuthz } from '../auth/membership.mjs';
 import { collectSideTableStrategies } from '../side-table-strategy.mjs';
 import { createEntityProjection, createConditionalHistoryProjection, createConditionalCreateHistoryProjection } from './projection.mjs';
 import { createCrudHandlers, materializeCreateDefaults } from './crud.mjs';
-import { installEntityQueries } from './query.mjs';
+import { installEntityQueries, rawRow } from './query.mjs';
 import { validateScheduleTrigger, autoStateScheduleTrigger, stateEffectEntries, assertSqlIdentifier, mintToken } from './schedule-compile.mjs';
 import { validateAnnotatedTextDeclaration } from '../annotated-text-field.mjs';
 import { getAnnotatedTextCompiledMetadata, resolveAnnotatedTextOwningScope } from '../annotated-text-field.mjs';
@@ -485,7 +485,7 @@ export function entity(name     , declaration      = {}) {
     handle: record.verbs.removed.handle,
     type: record.verbs.removed.type,
     scope: Object.values(fields).some((descriptor) => descriptor.kind === 'annotatedText')
-      ? resolveAnnotatedTextOwningScope(Object.values(fields).find((descriptor) => descriptor.kind === 'annotatedText'), fields, db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id) ?? {}).key
+      ? resolveAnnotatedTextOwningScope(Object.values(fields).find((descriptor) => descriptor.kind === 'annotatedText'), fields, rawRow(db, name, id) ?? {}).key
       : scopeOf(name, id).key,
     data: { id },
   });

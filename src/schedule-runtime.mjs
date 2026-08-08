@@ -12,6 +12,7 @@ import { createClockRunner } from './clock-runner.mjs';
                                             
 import { materializeStoredRow } from './entity/materialize-row.mjs';
 import { triggerList, schedulerSource, tickSource } from './schedule.mjs';
+import { rawRow } from './entity/query.mjs';
 
 const DEADLINE_SCAN_INTERVAL_MS = 1000;
 
@@ -327,7 +328,7 @@ export function admitSystemMutation({ entity, verb, rowId, payload, principal, d
     return false;
   }
 
-  const storedRow = db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(rowId);
+  const storedRow = rawRow(db, entity.name, rowId);
   if (!storedRow) return false;
   const row = materializeStoredRow(storedRow, entity.fields ?? {}, { freeze: true })                           ;
 

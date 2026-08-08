@@ -50,6 +50,7 @@ import { getLog } from './log.ts';
 import { appendEvents, readSeq, type AppendedEvent } from './committed-log.ts';
 import type { DbHandle } from './driver.ts';
 import type { Clock } from './clock.ts';
+import { rawRow } from './entity/query.ts';
 
 const STATES = { QUEUED: 'queued', CLAIMED: 'claimed', RUNNING: 'running', COMPLETED: 'completed', FAILED: 'failed', CANCELLED: 'cancelled' } as const;
 
@@ -246,7 +247,7 @@ export function createJobQueue({
     db.prepare(
       'INSERT INTO _Job (id, kind, payload, status, enqueuedAt, scope, workerId, claimedAt, leaseUntil) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL)',
     ).run(jobId, kind, payload != null ? JSON.stringify(payload) : null, STATES.QUEUED, t, scope ?? null);
-    const job = parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
+    const job = parseJob(rawRow(db, '_Job', jobId));
     if (job && job.scope != null) {
       emit(buildEvent(job, 'enqueued', t));
     }
@@ -300,7 +301,7 @@ export function createJobQueue({
       // in-flight job reassigned to another worker (duplicate execution).
       db.prepare('UPDATE _Worker SET lastHeartbeat = ? WHERE id = ?').run(t, workerId);
       if (wasClaimed && pre.scope != null) {
-        const job = parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
+        const job = parseJob(rawRow(db, '_Job', jobId));
         if (job && job.scope != null) {
           emit(buildEvent(job, 'running', t));
         }
@@ -338,7 +339,7 @@ export function createJobQueue({
       ).run(status, output != null ? JSON.stringify(output) : null, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
       if (res.changes > 0) {
         if (current.scope != null) {
-          const job = parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
+          const job = parseJob(rawRow(db, '_Job', jobId));
           if (job) emit(buildEvent(job, 'completed', now()));
         }
         return { accepted: true, noop: false };
@@ -355,7 +356,7 @@ export function createJobQueue({
       ).run(STATES.QUEUED, attempts, now() + backoffMs, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
       if (res.changes > 0) {
         if (current.scope != null) {
-          const job = parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
+          const job = parseJob(rawRow(db, '_Job', jobId));
           if (job) emit(buildEvent(job, 'retried', now()));
         }
         return { accepted: true, retried: true, attempts };
@@ -368,7 +369,7 @@ export function createJobQueue({
     ).run(status, output != null ? JSON.stringify(output) : null, attempts, jobId, workerId, STATES.CLAIMED, STATES.RUNNING);
     if (res.changes > 0) {
       if (current.scope != null) {
-        const job = parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
+        const job = parseJob(rawRow(db, '_Job', jobId));
         if (job) emit(buildEvent(job, 'deadLettered', now()));
       }
       return { accepted: true, deadLettered: true, attempts };
@@ -389,7 +390,7 @@ export function createJobQueue({
     db.prepare(
       'UPDATE _Job SET progress = ?, stage = ? WHERE id = ?',
     ).run(clamped, stage ?? null, jobId);
-    const job = parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
+    const job = parseJob(rawRow(db, '_Job', jobId));
     if (job && job.scope != null) {
       emit(buildEvent(job, 'progress', now()));
     }
@@ -407,7 +408,7 @@ export function createJobQueue({
     // owner) are cancellable without ownership check.
     if (current.workerId != null && current.workerId !== workerId) return { forbidden: true };
     db.prepare('UPDATE _Job SET status = ? WHERE id = ?').run(STATES.CANCELLED, jobId);
-    const job = parseJob(db.prepare('SELECT * FROM _Job WHERE id = ?').get(jobId));
+    const job = parseJob(rawRow(db, '_Job', jobId));
     if (job && job.scope != null) {
       emit(buildEvent(job, 'cancelled', now()));
     }
