@@ -5,6 +5,7 @@ import { describe, it, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLocalStore, createLocalRelay, normalizeEnvelope } from '../public/workbench-local-store.mjs';
 import { openLocalLog } from '../public/workbench-local-log.mjs';
+import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -25,54 +26,6 @@ function tick() {
 /** Yield a bit longer for async chains to settle. */
 function tickAsync() {
   return new Promise(r => setTimeout(r, 50));
-}
-
-/** Build a FakeChannel compatible with LiveChannel's subscribe interface. */
-function makeFakeChannel() {
-  const subs = new Map(); // key → onEvent
-  return {
-    subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
-      const onEvent = typeof optionsOrOnEvent === 'function' ? optionsOrOnEvent : maybeOnEvent;
-      const key = `${entity}\0${String(id)}`;
-      subs.set(key, onEvent);
-      return Promise.resolve({ currentSeq: 1 });
-    },
-    unsubscribe(entity, id) {
-      subs.delete(`${entity}\0${String(id)}`);
-      return Promise.resolve();
-    },
-    close() { subs.clear(); },
-    emit(entity, id, envelope) {
-      const key = `${entity}\0${String(id)}`;
-      const onEvent = subs.get(key);
-      if (onEvent) onEvent(envelope);
-    },
-  };
-}
-
-/** Build a fake fetch with routes: [{ match, response }] or [{ match, responseFn }]. */
-function makeFakeFetch(routes) {
-  return async (url, opts) => {
-    const urlStr = typeof url === 'string' ? url : String(url);
-    for (const route of routes) {
-      if (urlStr.includes(route.match)) {
-        const body = typeof route.responseFn === 'function'
-          ? route.responseFn(urlStr)
-          : route.response;
-        return {
-          ok: true,
-          status: route.status ?? 200,
-          headers: {
-            get(name) {
-              return route.headers?.[name.toLowerCase()] ?? null;
-            },
-          },
-          json: async () => body,
-        };
-      }
-    }
-    return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-  };
 }
 
 // Build a standard WS event envelope for a Todo entity.
@@ -149,7 +102,7 @@ describe('local relay delivery isolation', () => {
       await relay.subscribe('Todo', 'id1', {}, () => {
         throw new Error('consumer failed');
       });
-      channel.emit('Todo', 'id1', todoEnvelope('id1', 'act-1', 'Todo.updated', { title: 'next' }));
+      channel.emit(todoEnvelope('id1', 'act-1', 'Todo.updated', { title: 'next' }));
       await tickAsync();
       assert.deepEqual(unhandled, []);
     } finally {
@@ -172,7 +125,7 @@ describe('createLocalRelay', () => {
 
     // Emit a WS event through the fake channel
     const env = todoEnvelope('id1', 'act-1', 'Todo.created', { id: 'id1', title: 'Hello' });
-    channel.emit('Todo', 'id1', env);
+    channel.emit(env);
 
     // Allow async log write + broadcast to settle
     await tickAsync();
@@ -204,7 +157,7 @@ describe('createLocalRelay', () => {
     await relay.subscribe('Todo', 'id1', {}, () => {});
 
     const env = todoEnvelope('id1', 'act-1', 'Todo.created', { id: 'id1', title: 'Hello' });
-    channel.emit('Todo', 'id1', env);
+    channel.emit(env);
 
     await tickAsync();
 
@@ -231,7 +184,7 @@ describe('createLocalRelay', () => {
 
     // Emit through relay1's channel
     const env = todoEnvelope('id1', 'act-1', 'Todo.created', { id: 'id1', title: 'FromRelay1' });
-    ch1.emit('Todo', 'id1', env);
+    ch1.emit(env);
 
     // Wait for broadcast propagation — fake-indexeddb may need extra time
     // for cross-connection transaction visibility.
@@ -280,7 +233,7 @@ describe('createLocalRelay', () => {
     let deliveries = 0;
 
     await relay.subscribe('Todo', 'id1', {}, () => { deliveries += 1; });
-    channel.emit('Todo', 'id1', todoEnvelope(
+    channel.emit(todoEnvelope(
       'id1', 'act-close', 'Todo.updated', { id: 'id1', title: 'late' }, 1,
     ));
     relay.close();
@@ -307,7 +260,7 @@ describe('createLocalRelay', () => {
       ['Todo.updated', { id: 'id1', title: 'Third' }],
     ]) {
       seq++;
-      channel.emit('Todo', 'id1', todoEnvelope('id1', `act-${seq}`, type, data, seq));
+      channel.emit(todoEnvelope('id1', `act-${seq}`, type, data, seq));
     }
 
     await tickAsync();
@@ -390,7 +343,7 @@ describe('createLocalStore', () => {
     assert.deepEqual(list.state, { id: '1', title: 'initial' });
 
     // Now emit a live event through the fake channel
-    channel.emit('Todo', '1', todoEnvelope('1', 'act-ws', 'Todo.updated', { id: '1', title: 'updated-via-ws' }));
+    channel.emit(todoEnvelope('1', 'act-ws', 'Todo.updated', { id: '1', title: 'updated-via-ws' }));
 
     await tickAsync();
 
@@ -440,7 +393,7 @@ describe('createLocalStore', () => {
     assert.deepEqual(list2.state, { id: '1', title: 'start' });
 
     // Emit event on store 1's channel
-    ch1.emit('Todo', '1', todoEnvelope('1', 'act-1', 'Todo.updated', { id: '1', title: 'from-ch1' }));
+    ch1.emit(todoEnvelope('1', 'act-1', 'Todo.updated', { id: '1', title: 'from-ch1' }));
 
     // Wait for broadcast propagation to store2.
     // fake-indexeddb needs extra time for cross-connection visibility.
@@ -592,7 +545,7 @@ describe('leader election', () => {
     assert.equal(followerSubscriptions, 1, 'new leader opens its desired upstream subscription');
 
     const envelope = todoEnvelope('id1', 'act-promote', 'Todo.updated', { id: 'id1', title: 'live' });
-    followerChannel.emit('Todo', 'id1', envelope);
+    followerChannel.emit(envelope);
     await tickAsync();
     assert.deepEqual(received, envelope);
     follower.close();
@@ -670,7 +623,7 @@ describe('leader election', () => {
     await tickAsync();
 
     const env = todoEnvelope('id2', 'act-leader', 'Todo.created', { id: 'id2', title: 'from-leader' });
-    leaderCh.emit('Todo', 'id2', env);
+    leaderCh.emit(env);
 
     // Wait for: log write → broadcast postMessage → follower broadcast.onmessage → log read → onEnvelope
     await tickAsync();
@@ -707,7 +660,7 @@ describe('leader election', () => {
 
     await tickAsync();
 
-    leaderCh.emit('Todo', 'id1', todoEnvelope('id1', 'act-1', 'Todo.created', { id: 'id1', title: 'persisted' }));
+    leaderCh.emit(todoEnvelope('id1', 'act-1', 'Todo.created', { id: 'id1', title: 'persisted' }));
 
     await tickAsync();
     await tickAsync();

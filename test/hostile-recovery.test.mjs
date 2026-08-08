@@ -11,6 +11,7 @@ import { DatabaseSync } from 'node:sqlite';
 import workbench, {
   entity } from '../src/internal.mjs';
 import { LiveList } from '../public/workbench-client.mjs';
+import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,59 +57,9 @@ async function harness(t, principalId = 'u1') {
 const json = (r) => r.json();
 
 // ---------------------------------------------------------------------------
-// Fake channel + fetch — same pattern as live-list.test.mjs
+// Fake channel + fetch — shared with the rest of the suite, see
+// test/fixtures/fake-transport.mjs (includes onCheckpoint delivery).
 // ---------------------------------------------------------------------------
-
-function makeFakeChannel() {
-  const subs = new Map();
-  const checkpoints = new Map();
-  let subscribeAck = { currentSeq: 1 };
-
-  const channel = {
-    _setAck(ack) { subscribeAck = ack; },
-    subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
-      const onEvent = typeof optionsOrOnEvent === 'function' ? optionsOrOnEvent : maybeOnEvent;
-      const key = `${entity}\0${String(id)}`;
-      if (subs.has(key)) throw new Error(`already subscribed to ${entity}:${id}`);
-      subs.set(key, onEvent);
-      if (typeof optionsOrOnEvent?.onCheckpoint === 'function') {
-        checkpoints.set(key, optionsOrOnEvent.onCheckpoint);
-      }
-      return Promise.resolve(subscribeAck);
-    },
-    unsubscribe(entity, id) {
-      const key = `${entity}\0${String(id)}`;
-      subs.delete(key);
-      checkpoints.delete(key);
-      return Promise.resolve();
-    },
-    close() {},
-    emit(envelope) {
-      const key = `${envelope.entity}\0${String(envelope.id)}`;
-      const onEvent = subs.get(key);
-      if (onEvent) onEvent(envelope);
-    },
-    checkpoint(entity, id, currentSeq) {
-      checkpoints.get(`${entity}\0${String(id)}`)?.({ currentSeq });
-    },
-  };
-  return channel;
-}
-
-function makeFakeFetch(routes) {
-  return async (url) => {
-    const urlStr = typeof url === 'string' ? url : String(url);
-    for (const route of routes) {
-      if (urlStr.includes(route.match)) {
-        const body = typeof route.responseFn === 'function'
-          ? route.responseFn(urlStr)
-          : route.response;
-        return { ok: true, json: async () => body };
-      }
-    }
-    return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-  };
-}
 
 function snapshotUrl(e, id) { return `/api/${e}/${id}/snapshot`; }
 function eventsSinceUrl(e, id, cursor) { return `/api/${e}/${id}/events?cursor=${cursor}`; }

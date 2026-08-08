@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 
 import { createClient } from '../src/pipeline.mjs';
 import { LiveList } from '../public/workbench-client.mjs';
+import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 import {
   LIFECYCLE,
   LIFECYCLE_THEN_REMOVE,
@@ -14,41 +15,6 @@ import {
   REPLAY_EDGES,
   noteLifecycleEvents,
 } from './fixtures/fold-golden.mjs';
-
-function makeFakeChannel() {
-  const subs = new Map();
-  let subscribeAck = { currentSeq: 0 };
-  return {
-    _setAck(ack) { subscribeAck = ack; },
-    subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
-      const onEvent = typeof optionsOrOnEvent === 'function' ? optionsOrOnEvent : maybeOnEvent;
-      subs.set(`${entity}\0${String(id)}`, onEvent);
-      return Promise.resolve(subscribeAck);
-    },
-    unsubscribe(entity, id) {
-      subs.delete(`${entity}\0${String(id)}`);
-      return Promise.resolve();
-    },
-    close() {},
-    emit(envelope) {
-      const onEvent = subs.get(`${envelope.entity}\0${String(envelope.id)}`);
-      if (onEvent) onEvent(envelope);
-    },
-  };
-}
-
-function makeFakeFetch(snapshot, seq) {
-  return async (url) => {
-    const s = String(url);
-    if (s.includes('snapshot') || s.includes('/snapshot')) {
-      return { ok: true, json: async () => ({ snapshot, seq }) };
-    }
-    if (s.includes('events') || s.includes('events-since')) {
-      return { ok: true, json: async () => ({ events: [] }) };
-    }
-    return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-  };
-}
 
 async function openLiveList(fixture) {
   const channel = makeFakeChannel();
@@ -59,7 +25,10 @@ async function openLiveList(fixture) {
     entity: fixture.entity,
     id: fixture.id,
     channel,
-    fetchImpl: makeFakeFetch(snap, seq),
+    fetchImpl: makeFakeFetch([
+      { match: '/snapshot', response: { snapshot: snap, seq } },
+      { match: '/events', response: { events: [] } },
+    ]),
     snapshotUrl: (e, id) => `/api/${e}/${id}/snapshot`,
     eventsSinceUrl: (e, id, c) => `/api/${e}/${id}/events?cursor=${c}`,
   });

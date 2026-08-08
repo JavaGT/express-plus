@@ -18,6 +18,7 @@ import workbench from '../src/app.mjs';
 import { createLiveStore, LiveChannel, decodeResult } from '../public/workbench-client.mjs';
 import { SESSION_COOKIE } from '../src/auth/session.mjs';
 import { canUndoField, undoableFieldKinds } from '../src/field-laws.mjs';
+import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -210,51 +211,11 @@ test('W3: cancel a claimed job returns cancelled', async (t) => {
 // W5 — client engine (createLiveStore, canUndoField)
 // ---------------------------------------------------------------------------
 
-function makeFakeChannel() {
-  const subs = new Map();
-  return {
-    subscribe(entity, id, _opts, onEvent) {
-      const handler = typeof _opts === 'function' ? _opts : onEvent;
-      subs.set(`${entity}\0${String(id)}`, handler);
-      return Promise.resolve({ currentSeq: 1 });
-    },
-    unsubscribe() { return Promise.resolve(); },
-    close() {},
-    emit(envelope) {
-      const key = `${envelope.entity}\0${String(envelope.id)}`;
-      const cb = subs.get(key);
-      if (cb) cb(envelope);
-    },
-  };
-}
-
-function makeFakeFetch(routes) {
-  return async (url, opts) => {
-    const urlStr = typeof url === 'string' ? url : String(url);
-    for (const route of routes) {
-      if (urlStr.includes(route.match)) {
-        const body = typeof route.responseFn === 'function'
-          ? route.responseFn(urlStr, opts)
-          : route.response;
-        return {
-          ok: route.ok ?? true,
-          status: route.status ?? 200,
-          headers: {
-            get(name) { return route.headers?.[name.toLowerCase()] ?? null; },
-          },
-          json: async () => body,
-        };
-      }
-    }
-    return { ok: false, status: 404, json: async () => ({}), headers: { get() { return null; } } };
-  };
-}
-
 test('W5: createLiveStore surfaces CRUD methods', () => {
   const channel = makeFakeChannel();
   const fetchImpl = makeFakeFetch([
-    { match: '/snapshot/Note', status: 200, body: { snapshot: { id: 'n1', title: 'Test' }, seq: 0 } },
-    { match: '/notes', status: 201, body: { id: 'n2', title: 'New' }, headers: { 'x-workbench-seq': '1' } },
+    { match: '/snapshot/Note', status: 200, response: { snapshot: { id: 'n1', title: 'Test' }, seq: 0 } },
+    { match: '/notes', status: 201, response: { id: 'n2', title: 'New' }, headers: { 'x-workbench-seq': '1' } },
   ]);
 
   const store = createLiveStore({

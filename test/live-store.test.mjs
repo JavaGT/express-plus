@@ -2,6 +2,7 @@
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { createLiveStore, LiveList, LiveChannel, decodeResult } from '../public/workbench-client.mjs';
+import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -12,62 +13,6 @@ function deferred() {
   let resolve, reject;
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
-}
-
-/** Build a FakeChannel. */
-function makeFakeChannel() {
-  const subs = new Map();
-  let subscribeAck = { currentSeq: 1 };
-
-  const channel = {
-    calls: [],
-    _setAck(ack) { subscribeAck = ack; },
-    subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
-      const options = typeof optionsOrOnEvent === 'function' ? {} : (optionsOrOnEvent ?? {});
-      const onEvent = typeof optionsOrOnEvent === 'function' ? optionsOrOnEvent : maybeOnEvent;
-      const key = `${entity}\0${String(id)}`;
-      if (subs.has(key)) throw new Error(`already subscribed to ${entity}:${id}`);
-      subs.set(key, onEvent);
-      this.calls.push({ entity, id, options });
-      return Promise.resolve(subscribeAck);
-    },
-    unsubscribe(entity, id) {
-      subs.delete(`${entity}\0${String(id)}`);
-      return Promise.resolve();
-    },
-    close() {},
-    emit(envelope) {
-      const key = `${envelope.entity}\0${String(envelope.id)}`;
-      const onEvent = subs.get(key);
-      if (onEvent) onEvent(envelope);
-    },
-  };
-  return channel;
-}
-
-/** Build a fake fetch with routes: [{ match, response }] or [{ match, responseFn }]. */
-function makeFakeFetch(routes) {
-  return async (url) => {
-    const urlStr = typeof url === 'string' ? url : String(url);
-    for (const route of routes) {
-      if (urlStr.includes(route.match)) {
-        const body = typeof route.responseFn === 'function'
-          ? route.responseFn(urlStr)
-          : route.response;
-        return {
-          ok: true,
-          status: route.status ?? 200,
-          headers: {
-            get(name) {
-              return route.headers?.[name.toLowerCase()] ?? null;
-            },
-          },
-          json: async () => body,
-        };
-      }
-    }
-    return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-  };
 }
 
 /** Yield control to the event loop. */

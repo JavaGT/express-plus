@@ -3,6 +3,7 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { LiveList } from '../public/workbench-client.mjs';
 import { applyTextOp, createTextState, textCheckpoint } from '../src/annotated-text.mjs';
+import { makeFakeChannel, makeFakeFetch } from './fixtures/fake-transport.mjs';
 
 const TEXT_ACTOR = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
 const textInsert = ['workbench.text', 1, [TEXT_ACTOR, 1], 1, [], ['insert', ['root'], 'hello']];
@@ -16,67 +17,6 @@ function deferred() {
   let resolve, reject;
   const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
-}
-
-/** Build a FakeChannel. */
-function makeFakeChannel() {
-  const subs = new Map();
-  const checkpoints = new Map();
-  const resyncs = new Map();
-  let subscribeAck = { currentSeq: 1 };
-
-  const channel = {
-    _setAck(ack) { subscribeAck = ack; },
-    subscribe(entity, id, optionsOrOnEvent, maybeOnEvent) {
-      const onEvent = typeof optionsOrOnEvent === 'function' ? optionsOrOnEvent : maybeOnEvent;
-      const key = `${entity}\0${String(id)}`;
-      if (subs.has(key)) throw new Error(`already subscribed to ${entity}:${id}`);
-      subs.set(key, onEvent);
-      if (typeof optionsOrOnEvent?.onCheckpoint === 'function') {
-        checkpoints.set(key, optionsOrOnEvent.onCheckpoint);
-      }
-      if (typeof optionsOrOnEvent?.onResync === 'function') {
-        resyncs.set(key, optionsOrOnEvent.onResync);
-      }
-      return Promise.resolve(subscribeAck);
-    },
-    unsubscribe(entity, id) {
-      const key = `${entity}\0${String(id)}`;
-      subs.delete(key);
-      checkpoints.delete(key);
-      resyncs.delete(key);
-      return Promise.resolve();
-    },
-    close() {},
-    emit(envelope) {
-      const key = `${envelope.entity}\0${String(envelope.id)}`;
-      const onEvent = subs.get(key);
-      if (onEvent) onEvent(envelope);
-    },
-    checkpoint(entity, id, currentSeq) {
-      checkpoints.get(`${entity}\0${String(id)}`)?.({ currentSeq });
-    },
-    resync(entity, id, control) {
-      resyncs.get(`${entity}\0${String(id)}`)?.(control);
-    },
-  };
-  return channel;
-}
-
-/** Build a fake fetch with routes: [{ match, response }] or [{ match, responseFn }]. */
-function makeFakeFetch(routes) {
-  return async (url) => {
-    const urlStr = typeof url === 'string' ? url : String(url);
-    for (const route of routes) {
-      if (urlStr.includes(route.match)) {
-        const body = typeof route.responseFn === 'function'
-          ? route.responseFn(urlStr)
-          : route.response;
-        return { ok: true, json: async () => body };
-      }
-    }
-    return { ok: false, status: 404, json: async () => ({ error: 'not found' }) };
-  };
 }
 
 function snapshotUrl(e, id) { return `/api/${e}/${id}/snapshot`; }
