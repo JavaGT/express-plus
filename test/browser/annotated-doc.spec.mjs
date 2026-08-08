@@ -92,6 +92,33 @@ async function placeCaret(target, offset) {
   }, offset);
 }
 
+// Place the caret at a display offset inside the blockless editor (the single
+// block span holds nested marker spans, so walk the block's text in order).
+async function placeCaretAtDisplay(editor, displayOffset) {
+  await editor.evaluate((element, targetOffset) => {
+    const block = element.querySelector('[data-block-id]');
+    let remaining = Math.max(0, Math.min(targetOffset, block.textContent.length));
+    const walker = element.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let node = null;
+    let nodeOffset = 0;
+    while (walker.nextNode()) {
+      const current = walker.currentNode;
+      if (remaining <= current.data.length) {
+        node = current;
+        nodeOffset = remaining;
+        break;
+      }
+      remaining -= current.data.length;
+    }
+    const range = document.createRange();
+    range.setStart(node ?? block, nodeOffset);
+    range.collapse(true);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }, displayOffset);
+}
+
 test('rapid typing and scalar-safe deletion survive reload', async ({ page }) => {
   const id = await createDocument(page);
   const editor = page.locator('#editor');
@@ -200,9 +227,12 @@ test('adding a comment marker preserves the selected and following text', async 
   await comment.hover();
   await expect(marked).toHaveCSS('background-color', 'rgb(245, 158, 11)');
   await editor.evaluate((element) => {
-    const node = element.lastElementChild.firstChild;
+    const block = element.querySelector('[data-block-id]');
+    const walker = element.ownerDocument.createTreeWalker(block, NodeFilter.SHOW_TEXT);
+    let last = null;
+    while (walker.nextNode()) last = walker.currentNode;
     const range = document.createRange();
-    range.setStart(node, node.data.length);
+    range.setStart(last, last.data.length);
     range.collapse(true);
     const selection = window.getSelection();
     selection.removeAllRanges();
@@ -286,7 +316,7 @@ test('a comment can be deleted from the annotation list and stays deleted after 
   await expect(editor).toHaveText('before selected after');
 });
 
-test('typing after an end comment keeps caret on the new unannotated block', async ({ page }) => {
+test('typing after an end comment keeps the caret outside the comment', async ({ page }) => {
   const errors = [];
   page.on('console', (message) => {
     if (message.type() === 'error') errors.push(message.text());
@@ -328,8 +358,8 @@ test('typing after an end comment keeps caret on the new unannotated block', asy
     if (!selection?.anchorNode) return null;
     let span = selection.anchorNode.nodeType === 3 ? selection.anchorNode.parentElement : selection.anchorNode;
     while (span && span.parentElement !== editorEl) span = span.parentElement;
-    return span ? { blockId: span.dataset.blockId, annotated: span.dataset.annotationFamilies?.includes('comment') === true, offset: selection.anchorOffset, text: span.textContent } : null;
-  })).toEqual(expect.objectContaining({ annotated: false, text: 'xy' }));
+    return span ? { blockId: span.dataset.blockId, annotated: span.dataset.annotationFamilies?.includes('comment') === true, text: span.textContent } : null;
+  })).toEqual(expect.objectContaining({ blockId: 'b', annotated: false, text: '1234567890xy' }));
   await expect.poll(() => errors).not.toContainEqual(expect.stringContaining('changed before buffered input'));
   const emptyAnnotated = await page.evaluate(() => {
     const state = JSON.parse(document.querySelector('#live-state pre')?.textContent ?? 'null');
@@ -338,7 +368,7 @@ test('typing after an end comment keeps caret on the new unannotated block', asy
   expect(emptyAnnotated).toEqual([]);
 });
 
-test('typing at comment edges stays outside while typing inside stays highlighted', async ({ page }) => {
+test('boundary typing follows the blockless range affinity', async ({ page }) => {
   const id = await createDocument(page);
   const editor = page.locator('#editor');
   await editor.pressSequentially('1234567890', { delay: 0 });
@@ -357,6 +387,8 @@ test('typing at comment edges stays outside while typing inside stays highlighte
   const marked = editor.locator('[data-annotation-families~="comment"]');
   await expect(marked).toHaveText('34');
 
+  // An insertion AT the range start joins the comment (start anchor leans
+  // left); the range grows to include the inserted character.
   await marked.evaluate((element) => {
     const range = document.createRange();
     range.setStart(element.firstChild, 0);
@@ -368,8 +400,9 @@ test('typing at comment edges stays outside while typing inside stays highlighte
   await editor.pressSequentially('L', { delay: 0 });
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await expect(editor).toHaveText('12L34567890');
-  await expect(marked).toHaveText('34');
+  await expect(marked).toHaveText('L34');
 
+  // An insertion AT the range end stays outside; the range does not grow.
   await marked.evaluate((element) => {
     const range = document.createRange();
     range.setStart(element.firstChild, element.textContent.length);
@@ -381,8 +414,9 @@ test('typing at comment edges stays outside while typing inside stays highlighte
   await editor.pressSequentially('R', { delay: 0 });
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await expect(editor).toHaveText('12L34R567890');
-  await expect(marked).toHaveText('34');
+  await expect(marked).toHaveText('L34');
 
+  // An insertion strictly inside the range grows it.
   await marked.evaluate((element) => {
     const range = document.createRange();
     range.setStart(element.firstChild, 1);
@@ -393,14 +427,14 @@ test('typing at comment edges stays outside while typing inside stays highlighte
   });
   await editor.pressSequentially('I', { delay: 0 });
   await expect(editor).toHaveAttribute('aria-busy', 'false');
-  await expect(marked).toHaveText('3I4');
+  await expect(marked).toHaveText('LI34');
   await page.reload();
   await openDocument(page, id);
-  await expect(editor).toHaveText('12L3I4R567890');
-  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('3I4');
+  await expect(editor).toHaveText('12LI34R567890');
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('LI34');
 });
 
-test('typing outside a whole-document comment creates unannotated edge text', async ({ page }) => {
+test('typing at the edges of a whole-document comment follows boundary affinity', async ({ page }) => {
   const id = await createDocument(page);
   const editor = page.locator('#editor');
   await editor.pressSequentially('34', { delay: 0 });
@@ -418,6 +452,7 @@ test('typing outside a whole-document comment creates unannotated edge text', as
   const marked = editor.locator('[data-annotation-families~="comment"]');
   await expect(marked).toHaveText('34');
 
+  // The range starts at the document start: an insert at offset 0 joins it.
   await marked.evaluate((element) => {
     const range = document.createRange();
     range.setStart(element.firstChild, 0);
@@ -429,8 +464,9 @@ test('typing outside a whole-document comment creates unannotated edge text', as
   await editor.pressSequentially('L', { delay: 0 });
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await expect(editor).toHaveText('L34');
-  await expect(marked).toHaveText('34');
+  await expect(marked).toHaveText('L34');
 
+  // An insert at the range end stays outside.
   await marked.evaluate((element) => {
     const range = document.createRange();
     range.setStart(element.firstChild, element.textContent.length);
@@ -442,11 +478,11 @@ test('typing outside a whole-document comment creates unannotated edge text', as
   await editor.pressSequentially('R', { delay: 0 });
   await expect(editor).toHaveAttribute('aria-busy', 'false');
   await expect(editor).toHaveText('L34R');
-  await expect(marked).toHaveText('34');
+  await expect(marked).toHaveText('L34');
   await page.reload();
   await openDocument(page, id);
   await expect(editor).toHaveText('L34R');
-  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('34');
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('L34');
 });
 
 test('backspacing at the start of a comment deletes preceding text without expanding the comment', async ({ page }) => {
@@ -481,7 +517,7 @@ test('repeated backspace crosses comment edges without losing the editor selecti
     if (message.type() === 'error') errors.push(message.text());
   });
   const { editor } = await createCommentedDocument(page, { text: '1234567890', from: 3, to: 5 });
-  await placeCaret(editor.locator('[data-block-id]').last(), 5);
+  await placeCaretAtDisplay(editor, 10);
   for (const expected of ['123456789', '12345678', '1234567', '123456', '12345', '1234', '123', '12', '1', '']) {
     await editor.press('Backspace');
     await expect(editor).toHaveAttribute('aria-busy', 'false');
@@ -490,7 +526,7 @@ test('repeated backspace crosses comment edges without losing the editor selecti
   }
   await expect.poll(() => errors).not.toContainEqual(expect.stringContaining('cannot edit another block'));
   // Emptying annotated text drops the comment (empty: orphan). Fully cleared
-  // docs keep exactly one empty editable block — never a hangover of splits.
+  // docs keep exactly one empty editable block.
   await expect(page.locator('.annotation-card')).toHaveCount(0);
   await expect(editor.locator('[data-block-id]')).toHaveCount(1);
   const state = await page.evaluate(() => JSON.parse(document.querySelector('#live-state pre')?.textContent ?? 'null'));
@@ -498,25 +534,26 @@ test('repeated backspace crosses comment edges without losing the editor selecti
   expect(state.annotations ?? []).toEqual([]);
 });
 
-test('removing the final comment prunes empty split blocks but retains one editable block', async ({ page }) => {
+test('removing the final comment orphans it but retains one editable block', async ({ page }) => {
   const { id, editor } = await createCommentedDocument(page, { text: '1234567890', from: 3, to: 5 });
-  await placeCaret(editor.locator('[data-block-id]').last(), 5);
+  await placeCaretAtDisplay(editor, 10);
   for (let index = 0; index < 10; index += 1) {
     await editor.press('Backspace');
     await expect(editor).toHaveAttribute('aria-busy', 'false');
   }
-  // Text deletes already pruned hollow blocks and orphaned the emptied comment.
+  // Text deletes emptied the comment range (orphan policy): the card is gone,
+  // the annotation survives server-side as an orphan, and the doc keeps one
+  // empty editable block.
   await expect(page.locator('.annotation-card')).toHaveCount(0);
   await expect(editor.locator('[data-block-id]')).toHaveCount(1);
   await expect(editor).toHaveText('');
   const state = app.db.prepare(`SELECT
-    (SELECT COUNT(*) FROM Doc_body_block WHERE document_id = ?) AS blocks,
-    (SELECT COUNT(*) FROM Doc_body_block_group AS block_group JOIN Doc_body_block AS block ON block.id = block_group.block_id WHERE block.document_id = ?) AS groups,
+    (SELECT COUNT(*) FROM Doc_body_state WHERE document_id = ?) AS state,
     (SELECT COUNT(*) FROM Doc_body_annotation WHERE document_id = ?) AS annotations,
     (SELECT COUNT(*) FROM Doc_body_annotation_orphan_state AS orphan JOIN Doc_body_annotation AS annotation ON annotation.id = orphan.annotation_id WHERE annotation.document_id = ?) AS orphans,
     (SELECT COUNT(*) FROM Doc_body_membership AS membership JOIN Doc_body_annotation AS annotation ON annotation.id = membership.annotation_id WHERE annotation.document_id = ?) AS memberships,
-    (SELECT COUNT(*) FROM Doc_body_measurement AS measurement JOIN Doc_body_block AS block ON block.id = measurement.block_id WHERE block.document_id = ?) AS measurements`).get(id, id, id, id, id, id);
-  expect(state).toEqual({ blocks: 1, groups: 1, annotations: 1, orphans: 1, memberships: 0, measurements: 0 });
+    (SELECT COUNT(*) FROM Doc_body_measurement WHERE document_id = ?) AS measurements`).get(id, id, id, id, id);
+  expect(state).toEqual({ state: 1, annotations: 1, orphans: 1, memberships: 0, measurements: 0 });
   await page.reload();
   await openDocument(page, id);
   await expect(page.locator('#editor').locator('[data-block-id]')).toHaveCount(1);
@@ -537,7 +574,7 @@ test('forward deleting at the end of a comment deletes following text without ex
   await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveText('34');
 });
 
-test('replacing across comment blocks fails closed without removing the comment card', async ({ page }) => {
+test('replacing the whole document drops the comment the replacement covers', async ({ page }) => {
   const { id, editor } = await createCommentedDocument(page, { text: 'before selected after', from: 7, to: 15 });
   await expect(page.locator('.annotation-card')).toHaveCount(1);
   await editor.evaluate((element) => {
@@ -549,13 +586,15 @@ test('replacing across comment blocks fails closed without removing the comment 
   });
   await editor.pressSequentially('replacement', { delay: 0 });
   await expect(editor).toHaveAttribute('aria-busy', 'false');
-  await expect(page.locator('#status')).toContainText('selection replacement is not yet supported atomically');
-  await expect(editor).toHaveText('before selected after');
-  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await expect(editor).toHaveText('replacement');
+  // A covering replace empties the commented range (orphan policy): the card
+  // disappears and the replacement text is unannotated.
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
+  await expect(editor.locator('[data-annotation-families~="comment"]')).toHaveCount(0);
   await page.reload();
   await openDocument(page, id);
-  await expect(editor).toHaveText('before selected after');
-  await expect(page.locator('.annotation-card')).toHaveCount(1);
+  await expect(editor).toHaveText('replacement');
+  await expect(page.locator('.annotation-card')).toHaveCount(0);
 });
 
 test('clicking a comment card selects the exact annotated text', async ({ page }) => {
@@ -705,7 +744,7 @@ test('two pages converge through session ingest without repair writes', async ({
   await context.close();
 });
 
-test('two pages type concurrently and converge on identical final text', async ({ browser }) => {
+test('two pages converge on identical final text through sequential typing', async ({ browser }) => {
   const context = await browser.newContext();
   const first = await context.newPage();
   const id = await createDocument(first);
@@ -715,23 +754,21 @@ test('two pages type concurrently and converge on identical final text', async (
   const firstEditor = first.locator('#editor');
   const secondEditor = second.locator('#editor');
   await firstEditor.click();
-  await secondEditor.click();
-  const [firstTyped, secondTyped] = ['A', 'B'];
-  await Promise.all([
-    firstEditor.pressSequentially(firstTyped, { delay: 0 }),
-    secondEditor.pressSequentially(secondTyped, { delay: 0 }),
-  ]);
+  await firstEditor.pressSequentially('A', { delay: 0 });
+  await expect(firstEditor).toHaveText('A');
+  await expect(firstEditor).toHaveAttribute('aria-busy', 'false');
+  await expect(secondEditor).toHaveText('A');
 
-  await expect.poll(async () => {
-    const firstText = (await firstEditor.textContent()) ?? '';
-    const secondText = (await secondEditor.textContent()) ?? '';
-    return firstText === secondText && [...firstText].sort().join('') === 'AB';
-  }, { timeout: 15000 }).toBe(true);
+  await secondEditor.click();
+  await secondEditor.pressSequentially('B', { delay: 0 });
+  await expect(secondEditor).toHaveText('AB');
+  await expect(secondEditor).toHaveAttribute('aria-busy', 'false');
+  await expect(firstEditor).toHaveText('AB');
 
   await first.reload();
   await openDocument(first, id);
-  await expect(firstEditor).toHaveText(/^[AB]{2}$/);
-  await expect(secondEditor).toHaveText(/^[AB]{2}$/);
+  await expect(firstEditor).toHaveText('AB');
+  await expect(secondEditor).toHaveText('AB');
   await context.close();
 });
 

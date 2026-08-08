@@ -25,14 +25,18 @@ export function mixedAnnotationColor(colors) {
 }
 
 export function annotationQuote(document, annotationId) {
-  const memberIds = new Set((document.memberships ?? [])
+  const memberships = (document.memberships ?? [])
     .filter((membership) => membership.annotationId === annotationId)
-    .sort((left, right) => left.ordinal - right.ordinal)
-    .map((membership) => membership.blockId));
-  const quote = (document.blocks ?? [])
-    .filter((block) => block.kind === 'visible' && memberIds.has(block.id))
-    .map((block) => block.text)
-    .join('');
+    .sort((left, right) => (left.ordinal ?? left.start ?? 0) - (right.ordinal ?? right.start ?? 0));
+  const blocks = new Map((document.blocks ?? [])
+    .filter((block) => block.kind === 'visible')
+    .map((block) => [block.id, block.text]));
+  const quote = memberships.map((membership) => {
+    const blockText = blocks.get(membership.blockId) ?? '';
+    return Number.isSafeInteger(membership.start) && Number.isSafeInteger(membership.end)
+      ? blockText.slice(membership.start, membership.end)
+      : blockText;
+  }).join('');
   return quote.length > 72 ? `${quote.slice(0, 69)}...` : quote;
 }
 

@@ -2,6 +2,7 @@
 // treat placeholder interiors as non-editable and reject selections crossing
 // them; these helpers translate between display and wire coordinates.
 import { classifyDisplayOffset, selectionCrossesDisplayRedaction } from './workbench-annotated-text-redaction-coords.mjs';
+import { projectRangesOverEdit } from './workbench-annotated-text-snapshot.mjs';
 
 function visibleBlocks(document) {
   return document?.blocks?.filter((block) => block.kind === 'visible') ?? [];
@@ -36,14 +37,47 @@ function changedRange(before, after) {
   return { from, to: scalarEnd(before, beforeEnd), text: after.slice(from, scalarEnd(after, afterEnd)) };
 }
 
+// Display-space coordinate mapping over the block's DOM. In the blockless
+// interval model a block holds nested marker spans (annotation runs and
+// redaction placeholders) plus plain text nodes, so a selection point maps to
+// the display offset by walking the block's text in document order rather than
+// assuming one direct text child.
+
+// NodeFilter.SHOW_TEXT is 4 per spec; jsdom does not expose a global
+// NodeFilter, so use the numeric constant to walk text nodes in any host.
+const SHOW_TEXT = 4;
+
+function textWalker(root) {
+  return root.ownerDocument.createTreeWalker(root, SHOW_TEXT);
+}
+
+function textLengthBefore(span, target) {
+  let total = 0;
+  const walker = textWalker(span);
+  while (walker.nextNode()) {
+    const current = walker.currentNode;
+    if (current === target) return total;
+    if (target.contains(current)) break;
+    total += current.data.length;
+  }
+  return total;
+}
+
 function pointInSpan(span, node, offset) {
   if (node === span) {
     if (offset === 0) return 0;
     if (offset === span.childNodes.length) return (span.textContent ?? '').length;
     return null;
   }
-  if (node.nodeType === 3 && node.parentNode === span) return offset;
-  return null;
+  if (!span.contains(node)) return null;
+  if (node.nodeType === 3) {
+    if (offset < 0 || offset > node.data.length) return null;
+    return textLengthBefore(span, node) + offset;
+  }
+  if (offset < 0 || offset > node.childNodes.length) return null;
+  let local = textLengthBefore(span, node);
+  for (let index = 0; index < offset; index += 1) local += (node.childNodes[index]?.textContent ?? '').length;
+  return local;
 }
 
 /** Bind a block-aware plain-text contenteditable to an annotated-text session. */
@@ -147,12 +181,113 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     const selection = element.ownerDocument.defaultView?.getSelection();
     if (!selection) return;
     const range = element.ownerDocument.createRange();
-    const textNode = span.firstChild;
-    if (textNode?.nodeType === 3) range.setStart(textNode, Math.max(0, Math.min(offset, textNode.data.length)));
-    else range.setStart(span, 0);
+    let target = null;
+    let nodeOffset = 0;
+    let remaining = Math.max(0, Math.min(offset, (span.textContent ?? '').length));
+    const walker = textWalker(span);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (remaining <= node.data.length) {
+        target = node;
+        nodeOffset = remaining;
+        break;
+      }
+      remaining -= node.data.length;
+    }
+    if (target === null) {
+      target = span;
+      nodeOffset = 0;
+    }
+    range.setStart(target, nodeOffset);
     range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
+  }
+
+  /**
+   * Interval-rendered inline spans (issue #33 step 8). A blockless document is
+   * ONE text with absolute annotation ranges and zero-width redaction markers;
+   * the editor renders maximal flat runs of constant annotation-id set as
+   * marker spans, plus a `data-restricted` placeholder span per redaction.
+   * Display offsets count placeholder widths, matching the redaction coords
+   * module; wire offsets name the text without placeholders.
+   */
+
+  function blockPaintSignature(text, ranges, redactions) {
+    const rangePart = (ranges ?? []).map((range) => `${range.annotationId}:${range.start}:${range.end}`).join(',');
+    const redactionPart = (redactions ?? []).map((redaction) => `${redaction.start}:${redaction.placeholder}`).join(',');
+    return `${text}|${rangePart}|${redactionPart}`;
+  }
+
+  function paintBlock(span, text, ranges, annotationsById, redactions = []) {
+    const doc = span.ownerDocument;
+    const positiveRanges = (ranges ?? []).filter((range) => range.start < range.end);
+    const points = new Set();
+    for (const range of positiveRanges) {
+      points.add(range.start);
+      points.add(range.end);
+    }
+    for (const redaction of redactions) points.add(redaction.start);
+    const sorted = [...points].sort((left, right) => left - right);
+    const children = [];
+    const emitRun = (from, to) => {
+      if (to <= from) return;
+      const activeIds = positiveRanges
+        .filter((range) => range.start < to && range.end > from)
+        .map((range) => range.annotationId);
+      const segment = text.slice(from, to);
+      if (activeIds.length === 0) {
+        children.push(doc.createTextNode(segment));
+        return;
+      }
+      const marker = doc.createElement('span');
+      marker.dataset.annotationIds = activeIds.sort().join(' ');
+      const families = [...new Set(activeIds.map((id) => annotationsById.get(id)).filter(Boolean))].sort();
+      if (families.length) marker.dataset.annotationFamilies = families.join(' ');
+      marker.textContent = segment;
+      children.push(marker);
+    };
+    let cursor = 0;
+    for (const point of sorted) {
+      if (point > cursor) emitRun(cursor, point);
+      for (const redaction of redactions) {
+        if (redaction.start !== point) continue;
+        const restricted = doc.createElement('span');
+        restricted.dataset.restricted = 'true';
+        restricted.contentEditable = 'false';
+        restricted.textContent = redaction.placeholder;
+        children.push(restricted);
+      }
+      cursor = point;
+    }
+    if (cursor < text.length) emitRun(cursor, text.length);
+    span.textContent = '';
+    for (const child of children) span.appendChild(child);
+  }
+
+  const painted = new WeakMap();
+
+  /**
+   * Paint one visible block span. Block-era documents (no `ranges` key) carry
+   * annotation attrs on the block span; blockless documents render interval
+   * marker spans. Returns true when the DOM changed. `draftEdit` projects the
+   * ranges through a pending local draft so optimistic text paints markers at
+   * their shifted positions.
+   */
+  function paintDisplay(span, document, block, text, draftEdit) {
+    if (!Array.isArray(document?.ranges)) {
+      if (span.textContent === text) return false;
+      span.textContent = text;
+      return true;
+    }
+    const ranges = draftEdit
+      ? projectRangesOverEdit(document.ranges, draftEdit.from, draftEdit.to, draftEdit.text)
+      : document.ranges;
+    const signature = blockPaintSignature(text, ranges, block.redactions);
+    if (painted.get(span) === signature) return false;
+    paintBlock(span, text, ranges, new Map((document.annotations ?? []).map((annotation) => [annotation.id, annotation.family])), block.redactions);
+    painted.set(span, signature);
+    return true;
   }
 
   /**
@@ -346,6 +481,7 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       }
     }
     if (queued) displayed.set(queued.blockId, queued.text);
+    const draftEdit = queued ? changedRange(queued.baseText, queued.text) : null;
     const existing = new Map([...element.children].map((child) => [child.dataset.blockId, child]));
     rendering = true;
     let domMutated = false;
@@ -369,6 +505,12 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
         span.dataset.restricted = 'true';
         delete span.dataset.annotationFamilies;
         delete span.dataset.annotationIds;
+      } else if (Array.isArray(document?.ranges)) {
+        delete span.dataset.restricted;
+        delete span.dataset.annotationFamilies;
+        delete span.dataset.annotationIds;
+        const text = displayed.has(block.id) ? displayed.get(block.id) : block.text;
+        if (paintDisplay(span, document, block, text, queued?.blockId === block.id ? draftEdit : null)) domMutated = true;
       } else {
         delete span.dataset.restricted;
         const annotationIds = [...new Set(block.annotationIds ?? [])].sort();
@@ -508,7 +650,8 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       if (span) span.remove();
       moveCaretOffPrunedBlock(block.id);
     } else {
-      if (span) span.textContent = queued.text;
+      if (span) paintDisplay(span, session.document, block, queued.text,
+        queued.blockId === block.id ? changedRange(queued.baseText, queued.text) : null);
       setCaret(block.id, from + text.length);
     }
     rendering = false;

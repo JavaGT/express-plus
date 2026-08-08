@@ -15,7 +15,7 @@
 import { applyTextOp, createTextState, materializeText, restoreTextCheckpoint } from './workbench-annotated-text.mjs';
 import { deleteText, insertText } from './workbench-text-edit.mjs';
 import { createAnnotatedTextSnapshotSessionBinding, revokeAnnotatedTextSnapshotSessionBinding } from './workbench-annotated-text-snapshot-internal.mjs';
-import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument } from './workbench-annotated-text-snapshot.mjs';
+import { materializeAnnotatedTextSnapshot, projectPendingAnnotatedTextDocument, projectRangesOverText, pruneEmptiedRanges } from './workbench-annotated-text-snapshot.mjs';
 import { applyTextOperation, materializeText as materializeFamilyText, restoreTextFamily, textFamilyCheckpoint } from './workbench-annotated-text-continuous.mjs';
 import { annotatedTextAction } from './workbench-annotated-text-action.mjs';
 export { bindAnnotatedTextEditor } from './workbench-annotated-text-editor.mjs';
@@ -3331,9 +3331,19 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       throw new Error('annotated text fold requires a family checkpoint seeded by the snapshot');
     }
     let family = restoreTextFamily(familyCheckpoint);
+    // A fold ships text operations only; the annotation ranges must track the
+    // same transition. Project the authoritative snapshot ranges through the
+    // fold's COMBINED text change (a replace is one delete+insert pair whose
+    // combined effect empties a covered range without re-opening it), then
+    // drop annotations the edit collapsed to zero width.
+    const beforeText = materializeFamilyText(family);
     for (const operation of fold.text.operations) {
       family = applyTextOperation(family, operation);
     }
+    const afterText = materializeFamilyText(family);
+    const foldedRanges = beforeText === afterText
+      ? currentDocument.ranges
+      : projectRangesOverText(currentDocument.ranges, beforeText, afterText);
     if (materializeFamilyText(family) !== fold.projection.text) {
       throw new Error('annotated text fold projection disagrees with family');
     }
@@ -3351,7 +3361,8 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
     familyCheckpoint = textFamilyCheckpoint(family);
     installAuthoringFromFold(fold.authoring, fence);
     if (onFoldApplied) onFoldApplied(fold, performance.now() - startedAt);
-    return Object.freeze({ ...currentDocument, text: fold.projection.text });
+    const foldedDocument = Object.freeze({ ...currentDocument, text: fold.projection.text, ranges: foldedRanges });
+    return pruneEmptiedRanges(foldedDocument);
   }
 
   const session = createLiveDeliveryHttpSession({

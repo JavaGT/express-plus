@@ -425,8 +425,10 @@
       Promise.resolve().then(async () => {
         // Apply the protected target (`sensitive`), then the protecting span
         // over the same range. The target is projection-visible so we re-derive
-        // its block from the settled document; the protecting span itself is
-        // projection-only and never appears in the recipient document.
+        // its range from the settled document; the protecting span itself is
+        // projection-only and never appears in the recipient document. The
+        // blockless membership IS the sensitive range: a protecting span over
+        // the whole single-block view would restrict the entire document.
         const applied = await session.applyAnnotation({
           mutationId: crypto.randomUUID(),
           annotation: sensitive,
@@ -438,12 +440,15 @@
           .find((membership) => membership.annotationId === sensitiveId);
         const memberBlock = (session.document?.blocks ?? [])
           .find((block) => block.kind === 'visible' && block.id === sensitiveMembership?.blockId);
-        if (!sensitiveMembership || !memberBlock) throw new Error('sensitive span did not settle into a visible membership');
+        if (!sensitiveMembership || !memberBlock
+          || !Number.isSafeInteger(sensitiveMembership.start) || !Number.isSafeInteger(sensitiveMembership.end)) {
+          throw new Error('sensitive span did not settle into a visible range');
+        }
         const protectedApplied = await session.applyAnnotation({
           mutationId: crypto.randomUUID(),
           annotation: confidential,
-          from: { blockId: memberBlock.id, offset: 0, affinity: 'right' },
-          to: { blockId: memberBlock.id, offset: memberBlock.text.length, affinity: 'right' },
+          from: { blockId: memberBlock.id, offset: sensitiveMembership.start, affinity: 'right' },
+          to: { blockId: memberBlock.id, offset: sensitiveMembership.end, affinity: 'right' },
         });
         await awaitSettlement(protectedApplied, { failMessage: 'confidential span was not applied' });
         setStatus('confidential span marked', 'ok');

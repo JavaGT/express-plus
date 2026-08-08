@@ -18,7 +18,7 @@ export default [
 		},
 	},
 	{
-		files: ['public/**/*.mjs', 'samples/**/*.mjs'],
+		files: ['public/**/*.mjs', 'samples/**/*.mjs', 'projects/**/public/*.mjs'],
 		languageOptions: {
 			ecmaVersion: 2024,
 			sourceType: 'module',
