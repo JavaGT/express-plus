@@ -273,6 +273,9 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
   function paintBlock(span, text, ranges, annotationsById, redactions = []) {
     const doc = span.ownerDocument;
     const positiveRanges = (ranges ?? []).filter((range) => range.start < range.end);
+    // Show-through: a zero-width range that coincides with a redaction marker
+    // wraps the placeholder in an annotation marker span.
+    const zeroWidthRanges = (ranges ?? []).filter((range) => range.start === range.end);
     const points = new Set();
     for (const range of positiveRanges) {
       points.add(range.start);
@@ -307,7 +310,20 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
         restricted.dataset.restricted = 'true';
         restricted.contentEditable = 'false';
         restricted.textContent = redaction.placeholder;
-        children.push(restricted);
+        const showThrough = zeroWidthRanges
+          .filter((range) => range.start === redaction.start)
+          .map((range) => range.annotationId)
+          .sort();
+        if (showThrough.length === 0) {
+          children.push(restricted);
+          continue;
+        }
+        const marker = doc.createElement('span');
+        marker.dataset.annotationIds = showThrough.join(' ');
+        const families = [...new Set(showThrough.map((id) => annotationsById.get(id)).filter(Boolean))].sort();
+        if (families.length) marker.dataset.annotationFamilies = families.join(' ');
+        marker.appendChild(restricted);
+        children.push(marker);
       }
       cursor = point;
     }

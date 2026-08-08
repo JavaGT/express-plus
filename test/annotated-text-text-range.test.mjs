@@ -207,10 +207,11 @@ test('recipient projection clips a text-range around an inline redaction', async
   await app.close?.();
 });
 
-test('recipient projection omits a text-range fully inside a redaction (ADR 0008 tradeoff)', async () => {
+test('a whole-document denied protector restricts a text-range document fail-closed', async () => {
   const { app, RangeDoc } = await setupDoc('abcdefghij');
 
-  // Deny everything [0,10): the code range [2,4) is fully inside and drops out.
+  // Deny everything [0,10): the whole-document denial restricts the recipient
+  // view (fail closed) and delivers no ranges or annotations at all.
   const recipient = projectAnnotatedTextForRecipient({
     kind: 'workbench.annotatedText.canonical',
     version: 1,
@@ -229,8 +230,8 @@ test('recipient projection omits a text-range fully inside a redaction (ADR 0008
     capabilityHints: [],
   }, RangeDoc.fields.body, { version: 1, protectors: [{ protectorId: 'conf-1', outcome: 'deny' }], capabilityHints: [] });
 
-  // Fully-redacted text-range membership is omitted; its annotation drops from
-  // delivery. Whole-document denial restricts the recipient view.
+  // Restricted projections deliver no ranges or annotations regardless of any
+  // annotation that would otherwise show through.
   assert.equal(recipient.ranges.find((r) => r.annotationId === 'code-hidden'), undefined);
   assert.equal(recipient.annotations.find((a) => a.id === 'code-hidden'), undefined);
   assert.equal(recipient.restricted, true);

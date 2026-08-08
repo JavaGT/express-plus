@@ -246,7 +246,7 @@ test('whole-document denied protector restricts the recipient fail-closed', () =
   assert.equal(serialized.includes('leak'), false);
 });
 
-test('annotation fully inside a redaction drops out of the recipient', () => {
+test('annotation fully inside a redaction shows through at the redaction marker', () => {
   const text = 'before SECRET after';
   const c = {
     kind: 'workbench.annotatedText.canonical', version: 1,
@@ -267,8 +267,13 @@ test('annotation fully inside a redaction drops out of the recipient', () => {
     version: 1, protectors: [{ protectorId: 'protect', outcome: 'deny' }], capabilityHints: [],
   });
   assert.equal(projected.text, 'before  after');
-  assert.deepEqual(projected.annotations.map((a) => a.id), ['code']);
-  assert.equal(JSON.stringify(projected).includes('inside'), false);
+  assert.deepEqual(projected.redactions, [{ start: 7, end: 7, placeholder: '[Private]' }]);
+  assert.deepEqual(projected.ranges, [
+    { annotationId: 'code', start: 0, end: 13 },
+    { annotationId: 'inner', start: 7, end: 7 },
+  ]);
+  assert.deepEqual(projected.annotations.map((a) => a.id), ['code', 'inner']);
+  assert.deepEqual(projected.annotations.find((a) => a.id === 'inner').fields, { note: 'inside' });
   assert.equal(JSON.stringify(projected).includes('SECRET'), false);
 });
 

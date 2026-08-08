@@ -96,7 +96,7 @@ test('a whole-document denied protector restricts the document (fail closed)', (
   assert.deepEqual(authoringRedactionsForRecipient(r), []);
 });
 
-test('a range fully inside a redaction drops out of delivery (no show-through)', () => {
+test('a protected target fully inside a redaction drops out while later comments still deliver', () => {
   const c = canonical({
     text: 'hello secret tail',
     annotations: [ann('s1', 'sensitive'), ann('c1', 'confidential', { protectedTargetIds: ['s1'] }), ann('a1', 'comment')],
@@ -111,7 +111,9 @@ test('a range fully inside a redaction drops out of delivery (no show-through)',
   // The comment range is entirely AFTER the redaction; its offsets shift left
   // by the hidden width (6).
   assert.deepEqual(r.ranges, [{ annotationId: 'a1', start: 7, end: 11 }]);
-  // The protected sensitive annotation is dropped from delivery.
+  // `s1` is the denied protector's own protected target — the hidden thing —
+  // so it drops from delivery even though show-through retains ordinary
+  // annotations over redacted text.
   assert.ok(!r.annotations.some((a) => a.id === 's1'));
 });
 

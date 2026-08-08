@@ -228,6 +228,14 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
     return canonicalOffset - hidden;
   };
 
+  // The protected things of DENIED protectors stay hidden even where
+  // show-through would otherwise retain a fully-redacted annotation.
+  const deniedProtectedTargets = new Set<string>();
+  for (const id of active) {
+    if (outcomes.get(id) !== 'deny') continue;
+    for (const targetId of annotations.get(id)!.protectedTargetIds ?? []) deniedProtectedTargets.add(targetId);
+  }
+
   const recipientRanges: Array<{ annotationId: string; start: number; end: number }> = [];
   const retainedAnnotationIds = new Set<string>();
   for (const [annotationId, range] of rangeByAnnotation) {
@@ -235,11 +243,18 @@ export function projectAnnotatedTextForRecipient(canonical: CanonicalAnnotatedTe
     if (Object.hasOwn(meta.protectingFamilies, family)) continue;
     const start = visibleOffsetFor(range.start);
     const end = visibleOffsetFor(range.end);
-    // Fully inside a redaction → no positive visible span; the annotation drops
-    // out of delivery (no show-through for fully-redacted ranges).
-    if (end <= start) continue;
-    retainedAnnotationIds.add(annotationId);
-    recipientRanges.push({ annotationId, start, end });
+    if (end > start) {
+      retainedAnnotationIds.add(annotationId);
+      recipientRanges.push({ annotationId, start, end });
+      continue;
+    }
+    // Show-through: an annotation fully inside the redacted union still shows
+    // at the zero-width marker (start === end) — unless it is itself a denied
+    // protector's protected target, which is the hidden thing and drops.
+    if (start === end && redactions.some((redaction) => redaction.start === start) && !deniedProtectedTargets.has(annotationId)) {
+      retainedAnnotationIds.add(annotationId);
+      recipientRanges.push({ annotationId, start, end });
+    }
   }
 
   const result = {

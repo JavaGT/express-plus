@@ -546,6 +546,27 @@ test('annotated editor renders redaction placeholders inside the one root span',
   harness.binding.close();
 });
 
+test('annotated editor wraps a redaction placeholder in an annotation marker at a zero-width comment range', () => {
+  const document = {
+    version: 1, text: 'hello  world',
+    ranges: [{ annotationId: 'comment-1', start: 6, end: 6 }],
+    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
+    redactions: [{ start: 6, end: 6, placeholder: '[restricted]' }],
+  };
+  const harness = setup('', document);
+  assert.equal(harness.element.textContent, 'hello [restricted] world');
+  const marker = harness.element.querySelector('[data-annotation-ids="comment-1"]');
+  assert.ok(marker);
+  assert.equal(marker.dataset.annotationFamilies, 'comment');
+  assert.equal(marker.hasAttribute('contenteditable'), false);
+  assert.equal(marker.textContent, '[restricted]');
+  const restricted = marker.querySelector('[data-restricted="true"]');
+  assert.ok(restricted);
+  assert.equal(restricted.contentEditable, 'false');
+  assert.equal(restricted.textContent, '[restricted]');
+  harness.binding.close();
+});
+
 test('annotated editor exposes annotation families and identities on interval markers', () => {
   const document = {
     version: 1, text: 'marked', ranges: [{ annotationId: 'comment-1', start: 0, end: 6 }],
