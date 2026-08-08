@@ -18,6 +18,7 @@ import { getLog, withLog } from './log.ts';
 import type { FrameworkLog } from './log.ts';
 import { installBatchHttpDispatcher, installHistoryHttpDispatcher } from './application-action-http.ts';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.ts';
+import { rawRow } from './entity/query.ts';
 import type { FieldDescriptor, LiveEntityRecord } from './live-fanout.ts';
 
 const BLOB_REAP_INTERVAL_MS = 10 * 60_000;
@@ -151,7 +152,7 @@ function bindAnnotatedTextScope(app: RuntimeApp, args: Record<string, unknown> |
   if (typeof id !== 'string' || !id) return args;
   const row = type === `${entity.name}.create`
     ? args.payload
-    : app.db?.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id);
+    : rawRow(app.db, entity.name, id);
   if (!row) return args;
   return { ...args, scope: resolveAnnotatedTextOwningScope(descriptor, entity.fields as Record<string, any>, row as Record<string, any>).key };
 }

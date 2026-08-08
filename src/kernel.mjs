@@ -28,6 +28,7 @@ import { write } from './grant.mjs';
 import { replayPrivateFactProjections } from './post-commit-effects.mjs';
 import { txn } from './driver.mjs';
 import { installRemovalCascades } from './entity/removal-cascade.mjs';
+import { rawRow } from './entity/query.mjs';
 import { readDeletedRowAnchor } from './deleted-row-anchor.mjs';
 
 // Framework auth entities are always-available effect targets (an app's effect
@@ -516,7 +517,7 @@ export function buildKernel(app     ) {
       if (annotated) {
         const id = context.payload?.id;
         if (typeof id !== 'string' || id.length === 0) return false;
-        const row = app.db.prepare(`SELECT * FROM ${annotated.entity.name} WHERE id = ?`).get(id);
+        const row = rawRow(app.db, annotated.entity.name, id);
         return Boolean(row && await mayFieldOp(annotated.entity, annotated.fieldName, write, annotated.entity.deserializeRow({ ...row }), context.principal));
       }
       const declaration = registeredActions.get(context.type);
@@ -526,7 +527,7 @@ export function buildKernel(app     ) {
         if (!entity || (verb === 'update' && !entity.conditionalHistory) || (verb === 'create' && !entity.conditionalCreateHistory)) return true;
         const id = context.payload?.id;
         if (typeof id !== 'string' || id.length === 0) return false;
-        const stored = app.db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id)
+        const stored = rawRow(app.db, entity.name, id)
           ?? (verb === 'create' ? readDeletedRowAnchor(app.db, entity.name, id) : null);
         // Initial creates have no row (or deletion anchor) to authorize yet;
         // normal lifecycle admission remains their authority. A history move

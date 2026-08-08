@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 import { sendJson,                       } from './http-response.mjs';
 import { failureForHttpError, sendFailure,               } from './http-failure.mjs';
 import { readScopedRow, authorizeRow,                                   } from './http-crud-dispatch.mjs';
+import { rawRow } from './entity/query.mjs';
 import { readSeq, readSince, minSeqForScope } from './committed-log.mjs';
                                             
 import { BodyError, readRawBody, readRequestBody } from './http-body.mjs';
@@ -113,7 +114,7 @@ export async function handleResyncRoute(
   const [, entityName, id] = seg;
   const entity = app.entities.get(entityName);
   if (!entity) { reject(res, 404, 'not found'); return true; }
-  const row = hasAnnotatedTextFields(entity) ? app.db.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id) : null;
+  const row = hasAnnotatedTextFields(entity) ? rawRow(app.db, entity.name, id) : null;
   const annotatedEntry = Object.entries(entity.fields).find(([, field]) => field.kind === 'annotatedText');
   const [, descriptor] = annotatedEntry ?? [];
   const retiredScope = !row && descriptor
@@ -190,7 +191,7 @@ async function snapshotScopeRoute(
   const anchor = access.anchor ;
   if (access.direct) {
     const lastSeq = readSeq(app.db , scope);
-    const storedRow = app.db .prepare(`SELECT * FROM ${anchor.entity} WHERE id = ?`).get(anchor.id);
+    const storedRow = rawRow(app.db , anchor.entity, anchor.id);
     const entity = app.entities .get(anchor.entity) ;
     try {
       const snapshot = await projectEntitySnapshot({ db: app.db, entity, row: anchor.row , principal });
@@ -221,7 +222,7 @@ async function snapshotScopeRoute(
       reject(res, 403, 'forbidden');
       return true;
     }
-    const storedAnchor = app.db .prepare(`SELECT * FROM ${anchor.entity} WHERE id = ?`).get(anchor.id);
+    const storedAnchor = rawRow(app.db , anchor.entity, anchor.id);
     sendJson(res, 200, {
       snapshot: scopeSnapshot,
       cursors: { [scope]: lastSeq },

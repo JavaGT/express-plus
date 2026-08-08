@@ -23,6 +23,26 @@ import { cosineSimilarity, applyNearest,                  } from '../vector.mjs'
 
                                          
 
+// The one shape every caller's db satisfies: only `get` on a prepared statement
+// is used, so a driver or app handle returning `unknown` from `get` still works.
+                 
+                                                             
+  
+
+// One shared raw-stored-row read: `SELECT * FROM <entity> WHERE id = ?` exactly
+// as the inline sites wrote it. Returns the stored cells as they are — no
+// hydration, no authorization. The permission-checked, hydrated read is
+// findById; a raw read never replaces it.
+export function rawRow(
+  db                             ,
+  entity                           ,
+  id         ,
+)                  {
+  if (!db) return undefined;
+  const name = typeof entity === 'string' ? entity : entity.name;
+  return db.prepare(`SELECT * FROM ${name} WHERE id = ?`).get(id)                   ;
+}
+
 export function makeQueryBuilder({ name, predicate, hydrate, defaultLimit = null, db }   
                
                      

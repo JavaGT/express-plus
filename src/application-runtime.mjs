@@ -18,6 +18,7 @@ import { getLog, withLog } from './log.mjs';
                                              
 import { installBatchHttpDispatcher, installHistoryHttpDispatcher } from './application-action-http.mjs';
 import { resolveAnnotatedTextOwningScope } from './annotated-text-field.mjs';
+import { rawRow } from './entity/query.mjs';
                                                                           
 
 const BLOB_REAP_INTERVAL_MS = 10 * 60_000;
@@ -151,7 +152,7 @@ function bindAnnotatedTextScope(app            , args                           
   if (typeof id !== 'string' || !id) return args;
   const row = type === `${entity.name}.create`
     ? args.payload
-    : app.db?.prepare(`SELECT * FROM ${entity.name} WHERE id = ?`).get(id);
+    : rawRow(app.db, entity.name, id);
   if (!row) return args;
   return { ...args, scope: resolveAnnotatedTextOwningScope(descriptor, entity.fields                       , row                       ).key };
 }

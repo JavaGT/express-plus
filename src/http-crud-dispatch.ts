@@ -15,6 +15,7 @@ import { scopeOf } from './scope-handle.ts';
 import { failure, type WorkbenchFailure } from './outcome.ts';
 import { sendFailure, type SendJson } from './http-failure.ts';
 import { readDeletedRowAnchor } from './deleted-row-anchor.ts';
+import { rawRow } from './entity/query.ts';
 import type { Principal } from './principal.ts';
 
 // Loose persistence/app handles. The entity compiler and kernel are authored in
@@ -209,9 +210,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
     const result = await runKernelMutation(app, kernel, res, sendJson, { actionId, type: `${table}.create`, payload: body, principal });
     if (!result) return;
     const id = result.events![0].data.id;
-    const created = db
-      .prepare(`SELECT * FROM ${table} AS t0 WHERE t0.id = :id`)
-      .get({ id });
+    const created = rawRow(db, table, id);
     sendJson(res, 201, entity.deserializeRow(created), committedEventHeaders(result, actionId, scopeOf(table, id).key));
     return;
   }
@@ -233,7 +232,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
       principal,
     });
     if (!result) return;
-    const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
+    const updated = rawRow(db, table, params.id);
     sendJson(res, 200, entity.deserializeRow(updated), committedEventHeaders(result, actionId, scopeOf(table, params.id).key));
     return;
   }
@@ -257,7 +256,7 @@ export async function dispatchCrud({ entity, verb, fieldName, db, principal, par
       principal,
     });
     if (!result) return;
-    const updated = db.prepare(`SELECT * FROM ${table} WHERE id = ?`).get(params.id);
+    const updated = rawRow(db, table, params.id);
     sendJson(res, 200, entity.deserializeRow(updated), committedEventHeaders(result, actionId, scopeOf(table, params.id).key));
     return;
   }
