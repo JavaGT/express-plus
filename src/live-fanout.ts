@@ -145,18 +145,24 @@ export function createLiveFanout({ mayVerb = null }: { mayVerb?: MayVerb | null 
     return connSubs.get(conn)?.has(scopeOrEntity) ?? false;
   }
 
-  function addSubscription(a: string | ScopeHandle | LiveEntityRecord, b: LiveConn, c: Record<string, true> | null | undefined = null, d: PaceProfile | null | undefined = null, e: Record<string, unknown> = {}): void {
-    // Scope key form (contains ':') or Scope handle → scope-keyed path.
-    // Legacy entity+id form still works; both concentrate through Scope handle.
+  function addSubscription(a: string | ScopeHandle | LiveEntityRecord, b: LiveConn, c: Record<string, true> | null | undefined = null, d: PaceProfile | null | undefined = null, e: Record<string, unknown> | null = null): void {
+    // The legacy positional form is (entity, id, conn, fields, pace): the same
+    // `e` slot carries interest for scope-keyed calls and pace for legacy calls.
     if (typeof a === 'string' && a.includes(':')) {
-      addSubscriptionScope(a, b, c, d, e);
+      addSubscriptionScope(a, b, c, d, e ?? {});
       return;
     }
     if (a && (a as { brand?: unknown }).brand === 'scope-handle') {
-      addSubscriptionScope((a as ScopeHandle).key, b, c, d, e);
+      addSubscriptionScope((a as ScopeHandle).key, b, c, d, e ?? {});
       return;
     }
-    addSubscriptionLegacy(a as string, b as unknown, c as unknown as LiveConn, d as never);
+    addSubscriptionLegacy(
+      a as string,
+      b as unknown,
+      c as unknown as LiveConn,
+      d as Record<string, true> | null | undefined,
+      e as PaceProfile | null | undefined,
+    );
   }
 
   function addSubscriptionScope(scope: string, conn: LiveConn, fields: Record<string, true> | null = null, pace: PaceProfile | null = null, interest: Record<string, unknown> = {}): void {

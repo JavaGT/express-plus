@@ -145,18 +145,24 @@ export function createLiveFanout({ mayVerb = null }                             
     return connSubs.get(conn)?.has(scopeOrEntity) ?? false;
   }
 
-  function addSubscription(a                                         , b          , c                                          = null, d                                 = null, e                          = {})       {
-    // Scope key form (contains ':') or Scope handle → scope-keyed path.
-    // Legacy entity+id form still works; both concentrate through Scope handle.
+  function addSubscription(a                                         , b          , c                                          = null, d                                 = null, e                                 = null)       {
+    // The legacy positional form is (entity, id, conn, fields, pace): the same
+    // `e` slot carries interest for scope-keyed calls and pace for legacy calls.
     if (typeof a === 'string' && a.includes(':')) {
-      addSubscriptionScope(a, b, c, d, e);
+      addSubscriptionScope(a, b, c, d, e ?? {});
       return;
     }
     if (a && (a                       ).brand === 'scope-handle') {
-      addSubscriptionScope((a               ).key, b, c, d, e);
+      addSubscriptionScope((a               ).key, b, c, d, e ?? {});
       return;
     }
-    addSubscriptionLegacy(a          , b           , c                       , d         );
+    addSubscriptionLegacy(
+      a          ,
+      b           ,
+      c                       ,
+      d                                           ,
+      e                                  ,
+    );
   }
 
   function addSubscriptionScope(scope        , conn          , fields                              = null, pace                     = null, interest                          = {})       {

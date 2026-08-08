@@ -3,12 +3,12 @@ import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
 import {
+  AUTHORING_STREAM_LIMITS,
   acknowledgeAndPruneSnapshot,
   ensureLease,
   ensureStream,
   issueAuthoringSnapshot,
   issuePositionFrame,
-  recordSplit,
   resolvePosition,
 } from '../src/annotated-text-authoring-stream.mjs';
 import { annotatedTextAuthoringStreamDDL } from '../src/annotated-text-field.mjs';
@@ -19,10 +19,6 @@ const prefix = 'Doc_body';
 // Canonical (fresh-DB) authoring stream tables, exactly as the package DDL emits.
 function baseDocTable() {
   return 'CREATE TABLE Doc (id TEXT PRIMARY KEY);';
-}
-
-function insertDoc(db, documentId) {
-  db.prepare('INSERT OR IGNORE INTO Doc (id) VALUES (?)').run(documentId);
 }
 
 function setupCanonical() {
@@ -82,7 +78,7 @@ function count(db, table) {
 function retainedBytesForLease(db, prefix, leaseId) {
   const byteSum = (sql, ...params) => Number(db.prepare(sql).get(...params).bytes ?? 0);
   const positionBytes = byteSum(
-    `SELECT COALESCE(SUM(length(CAST(token AS BLOB)) + length(CAST(lease_id AS BLOB)) + length(CAST(issued_fence AS BLOB)) + length(CAST(block_id AS BLOB)) + length(CAST(checkpoint_id AS BLOB))), 0) AS bytes FROM ${prefix}_authoring_position WHERE lease_id = ?`,
+    `SELECT COALESCE(SUM(length(CAST(token AS BLOB)) + length(CAST(lease_id AS BLOB)) + length(CAST(issued_fence AS BLOB)) + length(CAST(checkpoint_id AS BLOB)) + length(CAST(visible_at_issue AS BLOB)) + length(CAST(redactions AS BLOB)) + length(CAST(created_at AS BLOB))), 0) AS bytes FROM ${prefix}_authoring_position WHERE lease_id = ?`,
     leaseId,
   );
   const checkpointBytes = byteSum(
@@ -101,8 +97,8 @@ test('A1: production-shape bootstrap — one checkpoint, 100 positions, fits cap
 
   assert.ok(Buffer.byteLength(JSON.stringify(familyCheckpoint), 'utf8') > 700_000, 'fixture checkpoint too small');
 
-  const positions = Array.from({ length: 100 }, (_, i) => ({ blockId: `block-${i}`, familyCheckpoint, visibleAtIssue: true }));
-  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions, groups: [] });
+  const positions = Array.from({ length: 100 }, () => ({ familyCheckpoint, visibleAtIssue: true }));
+  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions });
   assert.ok(snapshot);
 
   assert.equal(count(db, `${prefix}_authoring_position`), 100);
@@ -125,9 +121,9 @@ test('A2: capacity refusal — oversized single basis refuses atomically', () =>
   // refused as a unit: no partial checkpoint/position rows may survive.
   const familyCheckpoint = largeCheckpoint(1);
   familyCheckpoint.checkpoint.elements['block-0'].text = 'X'.repeat(18 * 1024 * 1024);
-  const positions = [{ blockId: 'block-0', familyCheckpoint, visibleAtIssue: true }];
+  const positions = [{ familyCheckpoint, visibleAtIssue: true }];
 
-  const result = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions, groups: [] });
+  const result = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions });
   assert.equal(result, null, 'oversized single basis must be refused');
   assert.equal(count(db, `${prefix}_authoring_checkpoint`), 0, 'no partial checkpoint from refused issuance');
   assert.equal(count(db, `${prefix}_authoring_position`), 0, 'no partial positions from refused issuance');
@@ -140,8 +136,8 @@ test('A2b: capacity refusal — churn beyond the cap refuses while prior state s
   const stream = ensureStream({ db, prefix, documentId: 'doc-2b', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
 
-  const positions = Array.from({ length: 100 }, (_, i) => ({ blockId: `block-${i}`, familyCheckpoint: largeCheckpoint(100), visibleAtIssue: true }));
-  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions, groups: [] });
+  const positions = Array.from({ length: 100 }, () => ({ familyCheckpoint: largeCheckpoint(100), visibleAtIssue: true }));
+  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions });
   assert.ok(snapshot);
   const basisCheckpoint = db.prepare(`SELECT id FROM ${prefix}_authoring_checkpoint WHERE lease_id = ?`).get(lease.id).id;
 
@@ -151,7 +147,7 @@ test('A2b: capacity refusal — churn beyond the cap refuses while prior state s
   for (let i = 0; i < 20; i += 1) {
     const churnCheckpoint = { ...largeCheckpoint(1), id: `churn-${i}` };
     churnCheckpoint.checkpoint.elements['block-0'].text = 'Y'.repeat(1024 * 1024 + (i * 1024));
-    const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: `churn-${i}`, fence: 2, familyCheckpoint: churnCheckpoint, visibleAtIssue: true });
+    const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, fence: 2, familyCheckpoint: churnCheckpoint, visibleAtIssue: true });
     if (frame) fitted += 1;
     else refused += 1;
   }
@@ -175,11 +171,11 @@ test('A2c: heterogeneous bases in one snapshot reject atomically with a determin
   // A snapshot must be one coherent basis. Mixing serialized family
   // checkpoints is an authoring-invariant violation and must fail atomically.
   const positions = [
-    { blockId: 'blk-a', familyCheckpoint: basisA, visibleAtIssue: true },
-    { blockId: 'blk-b', familyCheckpoint: basisB, visibleAtIssue: true },
+    { familyCheckpoint: basisA, visibleAtIssue: true },
+    { familyCheckpoint: basisB, visibleAtIssue: true },
   ];
   assert.throws(
-    () => issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions, groups: [] }),
+    () => issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions }),
     /inconsistent position family checkpoints/,
   );
   // Atomic rejection: no partial checkpoint, position, or snapshot rows.
@@ -190,16 +186,15 @@ test('A2c: heterogeneous bases in one snapshot reject atomically with a determin
 
   // The invariant error is deterministic and reserved for this failure, not a
   // plain capacity refusal.
-  assert.throws(() => issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions, groups: [] }), /inconsistent position family checkpoints/);
+  assert.throws(() => issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions }), /inconsistent position family checkpoints/);
 
   // Dedup path: identical bases on the same lease dedupe once (equal bases).
   const same = issueAuthoringSnapshot({
     db, prefix, leaseId: lease.id, fence: 2,
     positions: [
-      { blockId: 'blk-1', familyCheckpoint: basisA, visibleAtIssue: true },
-      { blockId: 'blk-2', familyCheckpoint: basisA, visibleAtIssue: true },
+      { familyCheckpoint: basisA, visibleAtIssue: true },
+      { familyCheckpoint: basisA, visibleAtIssue: true },
     ],
-    groups: [],
   });
   assert.ok(same, 'homogeneous snapshot issues');
   assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1, 'equal bases dedupe once per lease');
@@ -213,12 +208,12 @@ test('A3: ack/prune keeps tracked checkpoint until unreferenced then removes it'
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
 
   const checkpointA = largeCheckpoint(10);
-  const snapshotA = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: Array.from({ length: 10 }, (_, i) => ({ blockId: `a-${i}`, familyCheckpoint: checkpointA, visibleAtIssue: true })), groups: [] });
+  const snapshotA = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: Array.from({ length: 10 }, () => ({ familyCheckpoint: checkpointA, visibleAtIssue: true })) });
   const checkpointIdA = db.prepare(`SELECT checkpoint_id FROM ${prefix}_authoring_position WHERE token = ?`).get(snapshotA.positionFrames[0].token).checkpoint_id;
   assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1);
 
   // A replacement basis shares nothing; both bases stay tracked.
-  const snapshotB = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 2, positions: Array.from({ length: 5 }, (_, i) => ({ blockId: `b-${i}`, familyCheckpoint: largeCheckpoint(5), visibleAtIssue: true })), groups: [] });
+  const snapshotB = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 2, positions: Array.from({ length: 5 }, () => ({ familyCheckpoint: largeCheckpoint(5), visibleAtIssue: true })) });
   assert.equal(count(db, `${prefix}_authoring_checkpoint`), 2);
 
   // Acknowledge A. Its own position fence equals its fence so nothing prunes,
@@ -238,60 +233,85 @@ test('A3: ack/prune keeps tracked checkpoint until unreferenced then removes it'
   // A third basis C replaces B (B already acknowledged): now B's checkpoint is
   // unreferenced after prune and is removed.
   const checkpointIdB = db.prepare(`SELECT checkpoint_id FROM ${prefix}_authoring_position WHERE token = ?`).get(snapshotB.positionFrames[0].token).checkpoint_id;
-  const snapshotC = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 3, positions: Array.from({ length: 3 }, (_, i) => ({ blockId: `c-${i}`, familyCheckpoint: largeCheckpoint(3), visibleAtIssue: true })), groups: [] });
+  const snapshotC = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 3, positions: Array.from({ length: 3 }, () => ({ familyCheckpoint: largeCheckpoint(3), visibleAtIssue: true })) });
   acknowledgeAndPruneSnapshot({ db, prefix, leaseId: lease.id, snapshotId: snapshotC.snapshot.id });
   assert.equal(db.prepare(`SELECT 1 FROM ${prefix}_authoring_checkpoint WHERE id = ?`).get(checkpointIdB), undefined, 'B checkpoint removed after its positions pruned');
   assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1, 'only C checkpoint remains');
   assert.equal(count(db, `${prefix}_authoring_position`), 3, 'anew acknowledged snapshot keeps its own positions');
 });
 
-test('A4: split lifecycle mints the post-split basis and protects it until resolved', () => {
+test('A4: blockless position-frame lifecycle — basis mint, dedupe, hydration, prune', () => {
   const db = setupCanonical();
   wireDoc(db, 'doc-4');
   const stream = ensureStream({ db, prefix, documentId: 'doc-4', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
 
+  // A document-scoped position frame names the whole family checkpoint basis,
+  // not a block. Issuing it must mint a checkpoint row and hydratable frame.
   const basis = largeCheckpoint(3);
-  const snapshotA = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ blockId: 'left', familyCheckpoint: basis, visibleAtIssue: true }], groups: [] });
-  const source = db.prepare(`SELECT * FROM ${prefix}_authoring_position WHERE token = ?`).get(snapshotA.positionFrames[0].token);
-  const sourceCheckpointId = source.checkpoint_id;
+  const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, fence: 1, familyCheckpoint: basis, visibleAtIssue: true });
+  assert.ok(frame, 'position frame must issue');
+  const frameCheckpointId = db.prepare(`SELECT checkpoint_id FROM ${prefix}_authoring_position WHERE token = ?`).get(frame.token).checkpoint_id;
+  assert.equal(
+    db.prepare(`SELECT family_checkpoint FROM ${prefix}_authoring_checkpoint WHERE id = ?`).get(frameCheckpointId).family_checkpoint,
+    JSON.stringify(basis),
+    'frame checkpoint payload is the issued family basis',
+  );
+  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1);
 
-  // A split-created frame carries the POST-split family, so it must mint (or
-  // dedupe to) the post-split basis checkpoint — never inherit the pre-split
-  // checkpoint even though the family is derived from the source position's.
-  const postSplitFamily = largeCheckpoint(3);
-  postSplitFamily.id = 'post-split-basis';
-  postSplitFamily.blocks.push('right');
-  postSplitFamily.checkpoint.frontier.push('right');
-  postSplitFamily.checkpoint.elements.right = { id: 'right', type: 'text', text: 'right side', run: [{ style: 'plain' }] };
-  const frame = issuePositionFrame({ db, prefix, leaseId: lease.id, blockId: 'right', fence: 1, familyCheckpoint: postSplitFamily, visibleAtIssue: true });
-  assert.ok(frame);
-  const splitCheckpointId = db.prepare(`SELECT checkpoint_id FROM ${prefix}_authoring_position WHERE token = ?`).get(frame.token).checkpoint_id;
-  assert.notEqual(splitCheckpointId, sourceCheckpointId, 'split frame must not inherit the pre-split checkpoint');
-  assert.equal(db.prepare(`SELECT family_checkpoint FROM ${prefix}_authoring_checkpoint WHERE id = ?`).get(splitCheckpointId).family_checkpoint, JSON.stringify(postSplitFamily), 'split frame checkpoint payload is the post-split family');
-  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 2, 'pre and post-split bases are distinct');
-  assert.equal(db.prepare(`SELECT COUNT(*) AS c FROM ${prefix}_authoring_checkpoint WHERE id = ?`).get(splitCheckpointId).c, 1, 'post-split basis dedupes once per lease');
-  const resolvedFrame = resolvePosition({ db, prefix, positionToken: frame.token, leaseId: lease.id });
-  assert.equal(resolvedFrame.checkpoint_id, splitCheckpointId, 'split frame hydrates the post-split checkpoint');
-  assert.deepEqual(JSON.parse(resolvedFrame.family_checkpoint), postSplitFamily);
-  assert.equal(JSON.parse(resolvedFrame.family_checkpoint).checkpoint.elements.right.text, 'right side', 'hydrated basis contains the new right block');
+  // A second frame built on the identical basis dedupes to the same checkpoint.
+  const twin = issuePositionFrame({ db, prefix, leaseId: lease.id, fence: 1, familyCheckpoint: basis, visibleAtIssue: true });
+  assert.ok(twin);
+  assert.equal(db.prepare(`SELECT checkpoint_id FROM ${prefix}_authoring_position WHERE token = ?`).get(twin.token).checkpoint_id, frameCheckpointId, 'equal bases dedupe to one checkpoint');
+  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1);
 
-  // Unresolved split protects the split position and therefore the checkpoint.
-  recordSplit({ db, prefix, leaseId: lease.id, temporaryBlock: 'temp', authoritativeBlockId: 'right', positionToken: frame.token, actionId: 'a1', mutationId: 'm1', fence: 1 });
-  const snapshotB = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 2, positions: [{ blockId: 'right', familyCheckpoint: largeCheckpoint(2), visibleAtIssue: true }], groups: [] });
+  // resolvePosition hydrates the frame: family_checkpoint joins back.
+  const resolved = resolvePosition({ db, prefix, positionToken: frame.token, leaseId: lease.id });
+  assert.ok(resolved, 'resolvePosition must hydrate a position frame');
+  assert.equal(resolved.checkpoint_id, frameCheckpointId);
+  assert.deepEqual(JSON.parse(resolved.family_checkpoint), basis);
 
-  // Acknowledge A first: nothing prunes (fence 1 not < 1) and the unresolved
-  // split still protects the source checkpoint.
-  acknowledgeAndPruneSnapshot({ db, prefix, leaseId: lease.id, snapshotId: snapshotA.snapshot.id });
-  assert.ok(db.prepare(`SELECT 1 FROM ${prefix}_authoring_checkpoint WHERE id = ?`).get(sourceCheckpointId), 'unresolved split protects the checkpoint');
-
-  // Acknowledge B: B covers the split authoritative block 'right', deleting the
-  // split; the split frame and source position (fence 1 < 2, uncovered)
-  // become prunable; the checkpoint is then unreferenced and removed.
+  // Acknowledge a superseding snapshot: the standalone (unowned) frames are
+  // pruned and their checkpoint becomes unreferenced, so the sweep removes it.
+  const snapshotB = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 2, positions: [{ familyCheckpoint: largeCheckpoint(2), visibleAtIssue: true }] });
   acknowledgeAndPruneSnapshot({ db, prefix, leaseId: lease.id, snapshotId: snapshotB.snapshot.id });
-  assert.equal(db.prepare(`SELECT 1 FROM ${prefix}_authoring_checkpoint WHERE id = ?`).get(sourceCheckpointId), undefined, 'resolved split releases the checkpoint when unreferenced');
-  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1, 'only the snapshot B checkpoint remains');
-  assert.equal(count(db, `${prefix}_authoring_position`), 1, 'only snapshot B position remains');
+  assert.equal(count(db, `${prefix}_authoring_position`), 1, 'only the acknowledged snapshot position remains');
+  assert.equal(db.prepare(`SELECT 1 FROM ${prefix}_authoring_checkpoint WHERE id = ?`).get(frameCheckpointId), undefined, 'unreferenced frame basis checkpoint removed');
+  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1, 'only the snapshotB checkpoint remains');
+});
+
+test('A4b: AUTHORING_STREAM_LIMITS — documented capacity caps are enforced', () => {
+  const db = setupCanonical();
+  wireDoc(db, 'doc-4b');
+  const stream = ensureStream({ db, prefix, documentId: 'doc-4b', principalType: 'user', principalId: 'u1' });
+
+  // The documented caps are baked into the stream module's limits table.
+  assert.equal(AUTHORING_STREAM_LIMITS.maxRetainedPerLease, 16 * 1024 * 1024);
+  assert.equal(AUTHORING_STREAM_LIMITS.maxRetainedPerStream, 64 * 1024 * 1024);
+  assert.equal(AUTHORING_STREAM_LIMITS.maxLeasesPerStream, 16);
+  assert.equal(AUTHORING_STREAM_LIMITS.leaseTtlMs, 24 * 60 * 60 * 1000);
+
+  // A lease whose retained frames alone cross maxRetainedPerLease refuses.
+  const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
+  const big = { basis: 'big', payload: 'x'.repeat(AUTHORING_STREAM_LIMITS.maxRetainedPerLease + 1024) };
+  const result = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ familyCheckpoint: big, visibleAtIssue: true }] });
+  assert.equal(result, null, 'single frame exceeding maxRetainedPerLease is refused');
+  assert.equal(count(db, `${prefix}_authoring_position`), 0, 'no partial positions from refused frame');
+  assert.equal(count(db, `${prefix}_authoring_checkpoint`), 0, 'no partial checkpoint from refused frame');
+
+  // maxLeasesPerStream: the cap is 16 concurrent leases per stream; the initial
+  // 'client' lease already counts toward it, so this stream accepts 15 more.
+  for (let i = 0; i < AUTHORING_STREAM_LIMITS.maxLeasesPerStream - 1; i += 1) {
+    const l = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: `client-${i}` });
+    assert.ok(l, `lease ${i} fits within maxLeasesPerStream`);
+  }
+  const overflow = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client-overflow' });
+  assert.equal(overflow, null, 'lease beyond maxLeasesPerStream is refused');
+  assert.equal(
+    db.prepare(`SELECT COUNT(*) AS c FROM ${prefix}_authoring_lease WHERE stream_id = ?`).get(stream.id).c,
+    AUTHORING_STREAM_LIMITS.maxLeasesPerStream,
+    'stream lease count never exceeds maxLeasesPerStream',
+  );
 });
 
 test('A5: hydrate — resolvePosition returns family_checkpoint for consumers', () => {
@@ -300,7 +320,7 @@ test('A5: hydrate — resolvePosition returns family_checkpoint for consumers', 
   const stream = ensureStream({ db, prefix, documentId: 'doc-5', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
   const familyCheckpoint = largeCheckpoint(2);
-  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ blockId: 'b', familyCheckpoint, visibleAtIssue: true }], groups: [] });
+  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ familyCheckpoint, visibleAtIssue: true }] });
 
   const resolved = resolvePosition({ db, prefix, positionToken: snapshot.positionFrames[0].token, leaseId: lease.id });
   assert.ok(resolved, 'resolvePosition must hydrate a position');
@@ -315,8 +335,8 @@ test('A6: concurrent leases isolate checkpoints', () => {
   const lease1 = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client-1' });
   const lease2 = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client-2' });
 
-  issueAuthoringSnapshot({ db, prefix, leaseId: lease1.id, fence: 1, positions: Array.from({ length: 5 }, (_, i) => ({ blockId: `a-${i}`, familyCheckpoint: largeCheckpoint(5), visibleAtIssue: true })), groups: [] });
-  issueAuthoringSnapshot({ db, prefix, leaseId: lease2.id, fence: 1, positions: Array.from({ length: 3 }, (_, i) => ({ blockId: `b-${i}`, familyCheckpoint: largeCheckpoint(3), visibleAtIssue: true })), groups: [] });
+  issueAuthoringSnapshot({ db, prefix, leaseId: lease1.id, fence: 1, positions: Array.from({ length: 5 }, () => ({ familyCheckpoint: largeCheckpoint(5), visibleAtIssue: true })) });
+  issueAuthoringSnapshot({ db, prefix, leaseId: lease2.id, fence: 1, positions: Array.from({ length: 3 }, () => ({ familyCheckpoint: largeCheckpoint(3), visibleAtIssue: true })) });
 
   assert.equal(count(db, `${prefix}_authoring_checkpoint WHERE lease_id = '${lease1.id}'`), 1);
   assert.equal(count(db, `${prefix}_authoring_checkpoint WHERE lease_id = '${lease2.id}'`), 1);
@@ -364,7 +384,7 @@ test('A8: migration — legacy schema upgrades atomically, preserves durable dat
   // Fresh bootstrap works on the migrated schema.
   const freshStream = ensureStream({ db, prefix, documentId: 'doc-8', principalType: 'user', principalId: 'u1' });
   const freshLease = ensureLease({ db, prefix, streamId: freshStream.id, clientNonceHash: 'client-fresh' });
-  const snap = issueAuthoringSnapshot({ db, prefix, leaseId: freshLease.id, fence: 1, positions: [{ blockId: 'b', familyCheckpoint: largeCheckpoint(2), visibleAtIssue: true }], groups: [] });
+  const snap = issueAuthoringSnapshot({ db, prefix, leaseId: freshLease.id, fence: 1, positions: [{ familyCheckpoint: largeCheckpoint(2), visibleAtIssue: true }] });
   assert.ok(snap);
   assert.equal(count(db, `${prefix}_authoring_checkpoint`), 1);
 
@@ -470,10 +490,10 @@ test('A-emptyp: a snapshot with zero visible blocks issues without touching chec
   const stream = ensureStream({ db, prefix, documentId: 'doc-emptyp', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
 
-  const result = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [], groups: [{ groupId: 'g1', visibleBlocks: ['b1'], assignable: true }] });
+  const result = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [] });
   assert.ok(result, 'empty-positions snapshot issues successfully');
   assert.equal(result.positionFrames.length, 0);
-  assert.equal(result.groupFrames.length, 1);
+  assert.equal('groupFrames' in result, false, 'no groupFrames in the blockless contract');
   assert.equal(count(db, `${prefix}_authoring_checkpoint`), 0, 'no checkpoint created for empty positions');
   assert.equal(count(db, `${prefix}_authoring_position`), 0, 'no position rows for empty positions');
 });
@@ -483,14 +503,13 @@ test('A9: contract parity — envelope/token fixtures unchanged', () => {
   wireDoc(db, 'doc-11');
   const stream = ensureStream({ db, prefix, documentId: 'doc-11', principalType: 'user', principalId: 'u1' });
   const lease = ensureLease({ db, prefix, streamId: stream.id, clientNonceHash: 'client' });
-  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ blockId: 'b', familyCheckpoint: { id: 'basis', checkpoint: { version: 1, frontier: ['b'], elements: { b: { id: 'b', type: 'text', text: 'x', run: [] } } }, blocks: ['b'] }, visibleAtIssue: true }], groups: [] });
+  const snapshot = issueAuthoringSnapshot({ db, prefix, leaseId: lease.id, fence: 1, positions: [{ familyCheckpoint: { id: 'basis', checkpoint: { version: 1, frontier: ['b'], elements: { b: { id: 'b', type: 'text', text: 'x', run: [] } } }, blocks: ['b'] }, visibleAtIssue: true }] });
 
   assert.ok(snapshot.snapshot.id);
   assert.ok(snapshot.positionFrames.length === 1);
   const frame = snapshot.positionFrames[0];
   assert.ok(frame.token, 'position token still opaque');
   assert.equal(frame.token.includes(':'), false, 'no checkpoint/lease structure leaks into the token');
-  assert.equal(frame.blockId, 'b');
 });
 
 test('A10: app.prepareSchema upgrades a legacy authoring schema via the built-in lane', async () => {

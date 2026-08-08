@@ -1,14 +1,14 @@
 import { txn, type DbHandle, type DbStatement } from './driver.ts';
 import { operationalConsumer } from './operational-consumer.ts';
 import {
-  importTextFamilyFromBlocks,
-  materializeBlock,
-  projectEndpointToBlockOffset,
-  resolvePositionToEndpoint,
-  restoreTextFamilyCheckpoint,
-  type StructuralEndpoint,
-  type TextFamily,
-} from './annotated-text-family.ts';
+  importTextToFamily,
+  materializeText,
+  projectEndpointToOffset,
+  resolveOffsetToEndpoint,
+  restoreTextFamily,
+} from './annotated-text-continuous.ts';
+import type { ContinuousTextFamily } from './annotated-text-continuous.ts';
+import type { StructuralEndpoint } from './annotated-text-family.ts';
 import { frozenJsonSnapshot } from './annotated-text-r2.ts';
 
 // Word evidence is the general, framework-native form of the old timing-only
@@ -18,6 +18,11 @@ import { frozenJsonSnapshot } from './annotated-text-r2.ts';
 // row per (word, family) anchored to immutable RGA endpoints; the framework
 // read resolves those anchors against current text on demand. Never part of
 // the CRDT checkpoint.
+//
+// Issue #33 (blockless): evidence is DOCUMENT-scoped — one row per (word,
+// family) over the continuous document text. There is no block or
+// source_block dimension anymore; words carry absolute document.startUtf16 /
+// endUtf16 and are resolved to whole-document structural endpoints.
 
 const IDENTIFIER = /^[A-Za-z][A-Za-z0-9_-]{0,127}$/;
 
@@ -168,7 +173,7 @@ export function wordEvidenceTableName(entityName: string, fieldName: string): st
 
 function upsertStatement(db: DbHandle, tableName: string): DbStatement {
   const columns = [
-    'scope', 'document_id', 'word_id', 'family', 'source_block_id', 'source_ordinal',
+    'scope', 'document_id', 'word_id', 'family',
     'start_anchor', 'end_anchor', 'source_start_utf16', 'source_end_utf16', 'original_token',
     'payload', 'origin_seq', 'format_version',
   ];
@@ -214,41 +219,47 @@ export function createWordEvidenceConsumer({ db, entityName, fieldName, tableNam
         const payload = delivery.payload;
         const annotated = payload.__workbench?.annotatedText?.[fieldName];
         if (!annotated?.blocks || annotated.blocks.length === 0) return { kind: 'ack' };
-        const family = importTextFamilyFromBlocks(payload.id, annotated.actor, annotated.blocks);
+        // Blockless (issue #33): the whole document is one continuous text.
+        // Join the source blocks in order, import them as one family, and
+        // resolve each word's ABSOLUTE document offset to a structural endpoint.
+        const blockTexts = annotated.blocks.map((entry: any) => String(entry.text ?? ''));
+        const fullText = blockTexts.join('');
+        const family = importTextToFamily(payload.id, annotated.actor, fullText);
         const frontier = family.checkpoint.frontier;
         const originSeq = parseInt(String(delivery.metadata.committedEventId).split(':').at(-1) ?? '0', 10);
         const insert = upsertStatement(db, tableName);
-        let ordinal = 0;
+        let utf16Cursor = 0;
         await txn(db, () => {
           for (const block of annotated.blocks) {
             const evidence = block.wordEvidence;
-            if (!evidence) continue;
-            for (let i = 0; i < evidence.ids.length; i++) {
-              const startAnchor = resolvePositionToEndpoint(family, block.id, evidence.startsUtf16[i], frontier, 'right');
-              const endAnchor = resolvePositionToEndpoint(family, block.id, evidence.endsUtf16[i], frontier, 'right');
-              for (const familyName of Object.keys(evidence.families)) {
-                const familyDeclaration = declared.get(familyName);
-                if (!familyDeclaration) throw new Error(`word evidence family '${familyName}' is not declared on ${entityName}.${fieldName}`);
-                const familyInput = evidence.families[familyName];
-                insert.run(
-                  delivery.metadata.scopeId,
-                  payload.id,
-                  evidence.ids[i],
-                  familyName,
-                  block.id,
-                  ordinal,
-                  JSON.stringify(startAnchor),
-                  JSON.stringify(endAnchor),
-                  evidence.startsUtf16[i],
-                  evidence.endsUtf16[i],
-                  evidence.originalTokens[i],
-                  JSON.stringify(familyInput.values[i]),
-                  originSeq,
-                  familyDeclaration.formatVersion,
-                );
+            if (evidence) {
+              for (let i = 0; i < evidence.ids.length; i++) {
+                const start = evidence.startsUtf16[i] + utf16Cursor;
+                const end = evidence.endsUtf16[i] + utf16Cursor;
+                const startAnchor = resolveOffsetToEndpoint(family, start, frontier, 'right');
+                const endAnchor = resolveOffsetToEndpoint(family, end, frontier, 'right');
+                for (const familyName of Object.keys(evidence.families)) {
+                  const familyDeclaration = declared.get(familyName);
+                  if (!familyDeclaration) throw new Error(`word evidence family '${familyName}' is not declared on ${entityName}.${fieldName}`);
+                  const familyInput = evidence.families[familyName];
+                  insert.run(
+                    delivery.metadata.scopeId,
+                    payload.id,
+                    evidence.ids[i],
+                    familyName,
+                    JSON.stringify(startAnchor),
+                    JSON.stringify(endAnchor),
+                    start,
+                    end,
+                    evidence.originalTokens[i],
+                    JSON.stringify(familyInput.values[i]),
+                    originSeq,
+                    familyDeclaration.formatVersion,
+                  );
+                }
               }
-              ordinal++;
             }
+            utf16Cursor += String(block.text ?? '').length;
           }
         });
         return { kind: 'ack' };
@@ -307,20 +318,18 @@ export function wordEvidenceFieldHandle(entityName: string, fieldName: string, d
 
 interface EvidenceEntry {
   shared: {
-    sourceBlockId: unknown;
-    sourceOrdinal: unknown;
     startAnchor: unknown;
     endAnchor: unknown;
-    sourceStartUtf16: unknown;
-    sourceEndUtf16: unknown;
-    originalToken: unknown;
+    sourceStartUtf16: number;
+    sourceEndUtf16: number;
+    originalToken: string;
   };
   evidence: Record<string, unknown>;
 }
 
 /**
- * Resolve a field's immutable word-evidence anchors against the document's
- * current text (framework-native read). Reads the evidence rows and the
+ * Resolve a document's immutable word-evidence anchors against the current
+ * continuous text (framework-native read). Reads the evidence rows and the
  * annotated-text family checkpoint from one consistent snapshot; a word whose
  * anchor no longer projects to its original token is marked `edited`. The
  * caller compares the returned `structureVersion` with its live document.
@@ -336,38 +345,34 @@ export function readWordEvidence({ database, entityName, fieldName, tableName, s
 }): { structureVersion: unknown; words: readonly unknown[] } | null {
   const state = database.prepare(`SELECT structure_version, family_checkpoint FROM ${entityName}_${fieldName}_state WHERE document_id = ?`).get(documentId);
   if (!state) return null;
-  const family = restoreTextFamilyCheckpoint(JSON.parse(state.family_checkpoint as string));
+  const family = restoreTextFamily(JSON.parse(state.family_checkpoint as string));
   const familyFilter = families && families.length > 0 ? families : null;
   const rows = familyFilter
-    ? database.prepare(`SELECT * FROM ${tableName} WHERE scope = ? AND document_id = ? AND family IN (${familyFilter.map(() => '?').join(', ')}) ORDER BY source_ordinal`)
+    ? database.prepare(`SELECT * FROM ${tableName} WHERE scope = ? AND document_id = ? AND family IN (${familyFilter.map(() => '?').join(', ')}) ORDER BY source_start_utf16`)
         .all(scope, documentId, ...familyFilter)
-    : database.prepare(`SELECT * FROM ${tableName} WHERE scope = ? AND document_id = ? ORDER BY source_ordinal`).all(scope, documentId);
+    : database.prepare(`SELECT * FROM ${tableName} WHERE scope = ? AND document_id = ? ORDER BY source_start_utf16`).all(scope, documentId);
   return pivotEvidenceRows(family, state.structure_version, rows);
 }
 
-function pivotEvidenceRows(family: TextFamily, structureVersion: unknown, rows: readonly Record<string, unknown>[]): {
+function pivotEvidenceRows(family: ContinuousTextFamily, structureVersion: unknown, rows: readonly Record<string, unknown>[]): {
   structureVersion: unknown;
   words: readonly Readonly<{
     wordId: string;
-    blockId: string | null;
     start: number;
     end: number;
     text: string;
     edited: boolean;
-    sourceOrdinal: unknown;
     evidence: Readonly<Record<string, unknown>>;
   }>[];
 } {
   const byWord = new Map<string, EvidenceEntry>();
   for (const row of rows) {
     const shared = {
-      sourceBlockId: row.source_block_id,
-      sourceOrdinal: row.source_ordinal,
       startAnchor: row.start_anchor,
       endAnchor: row.end_anchor,
-      sourceStartUtf16: row.source_start_utf16,
-      sourceEndUtf16: row.source_end_utf16,
-      originalToken: row.original_token,
+      sourceStartUtf16: row.source_start_utf16 as number,
+      sourceEndUtf16: row.source_end_utf16 as number,
+      originalToken: String(row.original_token),
     };
     const wordId = String(row.word_id);
     const existing = byWord.get(wordId);
@@ -385,50 +390,51 @@ function pivotEvidenceRows(family: TextFamily, structureVersion: unknown, rows: 
   }
   const words: Array<{
     wordId: string;
-    blockId: string | null;
     start: number;
     end: number;
     text: string;
     edited: boolean;
-    sourceOrdinal: unknown;
     evidence: Readonly<Record<string, unknown>>;
   }> = [];
   for (const [wordId, entry] of byWord) {
-    const { sourceBlockId, sourceOrdinal, startAnchor, endAnchor, sourceStartUtf16, sourceEndUtf16, originalToken } = entry.shared;
+    const { startAnchor, endAnchor, sourceStartUtf16, sourceEndUtf16, originalToken } = entry.shared;
     let start: number;
     let end: number;
-    let blockId: string | null = null;
     let edited = false;
     try {
-      start = projectEndpointToBlockOffset(family, String(sourceBlockId), JSON.parse(startAnchor as string) as StructuralEndpoint);
-      end = projectEndpointToBlockOffset(family, String(sourceBlockId), JSON.parse(endAnchor as string) as StructuralEndpoint);
-      blockId = String(sourceBlockId);
+      start = projectEndpointToOffset(family, JSON.parse(startAnchor as string) as StructuralEndpoint);
+      end = projectEndpointToOffset(family, JSON.parse(endAnchor as string) as StructuralEndpoint);
     } catch {
-      start = sourceStartUtf16 as number;
-      end = sourceEndUtf16 as number;
+      start = sourceStartUtf16;
+      end = sourceEndUtf16;
       edited = true;
     }
-    let text = String(originalToken);
-    if (blockId) {
-      try {
-        text = materializeBlock(family, blockId).slice(start, end);
-      } catch {
-        text = String(originalToken);
+    let text = originalToken;
+    if (!(start < end)) {
+      // Zero-width or unprojectable range: fall back to the original token and
+      // flag it as no longer matching the current document.
+      text = originalToken;
+      edited = true;
+    } else {
+      const docText = materializeText(family);
+      if (end > docText.length) {
+        text = originalToken;
+        edited = true;
+      } else {
+        text = docText.slice(start, end);
+        if (text !== originalToken) edited = true;
       }
     }
-    if (text !== String(originalToken)) edited = true;
     words.push({
       wordId,
-      blockId,
       start,
       end,
       text,
       edited,
-      sourceOrdinal,
       evidence: Object.freeze({ ...entry.evidence }),
     });
   }
-  words.sort((a, b) => (a.sourceOrdinal as number) - (b.sourceOrdinal as number) || a.wordId.localeCompare(b.wordId));
+  words.sort((a, b) => a.start - b.start || a.wordId.localeCompare(b.wordId));
   return {
     structureVersion,
     words: Object.freeze(words.map((word) => Object.freeze(word))),

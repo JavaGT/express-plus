@@ -216,7 +216,7 @@ principalSnapshot.select = function select(...handles                     )     
 };
 
 principalSnapshot.orderBy = function orderBy(handle                   , direction                 = 'asc')                    {
-  assertBrand('principalSnapshot.orderBy', handle, _orderBrand, 'source field handle');
+  assertBrand('principalSnapshot.orderBy', handle, _sourceFieldBrand, 'source field handle');
   if (direction !== 'asc' && direction !== 'desc') {
     throw new Error("principalSnapshot.orderBy direction must be 'asc' or 'desc'");
   }
