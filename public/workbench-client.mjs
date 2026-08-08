@@ -53,6 +53,45 @@ function backoffDelay(attempt, base, max) {
   return Math.min(base * 2 ** attempt, max);
 }
 
+// ---------------------------------------------------------------------------
+// createOpLifecycle — the one operation-record lifecycle both fold-echo
+// engines (createLiveDeliverySession, createScopeLiveStore) reimplemented.
+// The REST-overlay model (createLiveStore) keeps its own overlay bookkeeping.
+// ---------------------------------------------------------------------------
+
+function shouldReconcile(_operation, { confirmedCursor, echoCursor }) {
+  return echoCursor != null && (confirmedCursor == null || echoCursor >= confirmedCursor);
+}
+
+function makeOperation({ actionId, ...extra }) {
+  return {
+    opId: actionId,
+    actionId,
+    status: 'pending',
+    error: null,
+    delivered: false,
+    confirmedCursor: null,
+    echoCursor: null,
+    ...extra,
+  };
+}
+
+function createOpLifecycle() {
+  const operations = new Map();
+  return {
+    operations,
+    makeOperation,
+    shouldReconcile,
+    count(status) {
+      let count = 0;
+      for (const operation of operations.values()) {
+        if (operation.status === status) count += 1;
+      }
+      return count;
+    },
+  };
+}
+
 function normalizeSubscribeArgs(optionsOrOnEvent, maybeOnEvent) {
   if (typeof optionsOrOnEvent === 'function' || optionsOrOnEvent === undefined || optionsOrOnEvent === null) {
     return { options: {}, onEvent: optionsOrOnEvent };
@@ -2245,7 +2284,7 @@ export function createLiveDeliverySession({
   let snapshotRecoveryRunning = false;
   let snapshotRecoveryWaiters = [];
   const listeners = new Set();
-  const operations = new Map();
+  const { operations, makeOperation, shouldReconcile, count } = createOpLifecycle();
   const recoveryRetryWaiters = new Set();
   const admissionWaiters = [];
   let recoveryWarningTimer = null;
@@ -2797,11 +2836,15 @@ export function createLiveDeliverySession({
   async function dispatch(type, payload) {
     const actionId = nextActionId();
     const action = freezeClone(structuredClone({ actionId, type, payload }));
-    const operation = {
-      opId: actionId, actionId, action, status: 'pending', error: null,
-      delivered: false, outcome: 'unknown', confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null,
+    const operation = makeOperation({
+      actionId,
+      action,
+      outcome: 'unknown',
+      confirmedThrough: null,
+      receiptGeneration: null,
+      receiptSnapshotGeneration: null,
       foldableEcho: isFoldableEcho(action) === true,
-    };
+    });
     const settlement = createSettlement(operation);
     if (!initialized || closed || status === 'unavailable' || status === 'revoked') {
       settleOperation(operation, { status: terminalStatus() });
@@ -2869,8 +2912,7 @@ export function createLiveDeliverySession({
         if (operation.foldableEcho) recoverFoldableAfterGrace(operation);
         else recoverReceiptSnapshot(operation);
       }
-      if (operation.echoCursor != null
-        && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
+      if (shouldReconcile(operation, { confirmedCursor: operation.confirmedCursor, echoCursor: operation.echoCursor })) {
         settleOperation(operation, { status: 'reconciled' });
         operations.delete(operation.actionId);
       }
@@ -2941,7 +2983,7 @@ export function createLiveDeliverySession({
         if (operation.foldableEcho) recoverFoldableAfterGrace(operation);
         else recoverReceiptSnapshot(operation);
       }
-      if (operation.echoCursor != null && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
+      if (shouldReconcile(operation, { confirmedCursor: operation.confirmedCursor, echoCursor: operation.echoCursor })) {
         settleOperation(operation, { status: 'reconciled' });
         operations.delete(operation.actionId);
       }
@@ -2989,7 +3031,16 @@ export function createLiveDeliverySession({
     }
     const retainedActions = freezeClone(structuredClone(actions));
     const batchEnvelope = Object.freeze({ actionId, actions: retainedActions });
-    const operation = { opId: actionId, actionId, batch: batchEnvelope, actions: retainedActions, status: 'pending', error: null, delivered: false, outcome: 'unknown', confirmedCursor: null, confirmedThrough: null, receiptGeneration: null, receiptSnapshotGeneration: null, echoCursor: null, foldableEcho: isFoldableEcho(retainedActions[0]) === true };
+    const operation = makeOperation({
+      actionId,
+      batch: batchEnvelope,
+      actions: retainedActions,
+      outcome: 'unknown',
+      confirmedThrough: null,
+      receiptGeneration: null,
+      receiptSnapshotGeneration: null,
+      foldableEcho: isFoldableEcho(retainedActions[0]) === true,
+    });
     createSettlement(operation);
     operations.set(actionId, operation);
     publish();
@@ -3041,7 +3092,7 @@ export function createLiveDeliverySession({
         error: operation.error,
       }));
     },
-    pendingCount() { return [...operations.values()].filter((operation) => operation.status === 'pending').length; },
+    pendingCount() { return count('pending'); },
     subscribe(listener) {
       listeners.add(listener);
       if (visibleSnapshot !== null || status === 'revoked') listener(visibleSnapshot);
@@ -3667,7 +3718,7 @@ export function createScopeLiveStore({
   let resyncRetryTimer = null;
   const queued = [];
   const listeners = new Set();
-  const operations = new Map();
+  const { operations, makeOperation, shouldReconcile, count } = createOpLifecycle();
 
   function nextActionId() {
     if (createActionId) return createActionId();
@@ -3748,7 +3799,7 @@ export function createScopeLiveStore({
       // reconciles the operation even when it was retained as an
       // outcome-unknown placeholder (delivered is false) after a transport throw.
       const reconcile = ownOperation.delivered || ownOperation.status === 'failed';
-      if (reconcile && (ownOperation.confirmedCursor == null || cursor >= ownOperation.confirmedCursor)) {
+      if (reconcile && shouldReconcile(ownOperation, { confirmedCursor: ownOperation.confirmedCursor, echoCursor: cursor })) {
         operations.delete(event.actionId);
       }
     }
@@ -3829,16 +3880,7 @@ export function createScopeLiveStore({
   async function dispatch(type, payload) {
     const actionId = nextActionId();
     const action = { actionId, scope, type, payload };
-    const operation = {
-      opId: actionId,
-      actionId,
-      action,
-      status: 'pending',
-      error: null,
-      delivered: false,
-      confirmedCursor: null,
-      echoCursor: null,
-    };
+    const operation = makeOperation({ actionId, action });
     operations.set(actionId, operation);
     publish();
     try {
@@ -3852,8 +3894,7 @@ export function createScopeLiveStore({
       const confirmedCursor = receipt?.cursor ?? receipt?.seq;
       operation.delivered = true;
       if (Number.isFinite(confirmedCursor)) operation.confirmedCursor = confirmedCursor;
-      if (operation.echoCursor != null
-        && (operation.confirmedCursor == null || operation.echoCursor >= operation.confirmedCursor)) {
+      if (shouldReconcile(operation, { confirmedCursor: operation.confirmedCursor, echoCursor: operation.echoCursor })) {
         operations.delete(actionId);
       }
       publish();
@@ -3875,8 +3916,8 @@ export function createScopeLiveStore({
     get ready() { return readyPromise; },
     dispatch,
     operations() { return [...operations.values()]; },
-    pendingCount() { return [...operations.values()].filter((operation) => operation.status === 'pending').length; },
-    failedCount() { return [...operations.values()].filter((operation) => operation.status === 'failed').length; },
+    pendingCount() { return count('pending'); },
+    failedCount() { return count('failed'); },
     discardFailed(opId) {
       if (operations.get(opId)?.status === 'failed') {
         operations.delete(opId);
