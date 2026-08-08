@@ -43,7 +43,7 @@ DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 
 | Piece | Role |
 | --- | --- |
-| `Doc.body: annotatedText(...)` | Decision-0010 document field (blocks + CRDT bodies) |
+| `Doc.body: annotatedText(...)` | Decision-0010 document field (one continuous CRDT text + range annotations) |
 | `annotation('comment', { empty: 'orphan', fields: { color: text({ oneOf: [...] }) } })` | Comment family; color required, one of five palette hexes |
 | `protectingAnnotation('confidential', { protects: 'sensitive', ... })` | Confidential span: a protecting annotation over a range; the reader principal sees the real text replaced by the placeholder |
 | Fixed principals `demo` (owner) + `reader` | The demo shows both sides of the per-recipient projection: owner sees real text, reader sees the redacted placeholder |
@@ -53,6 +53,11 @@ DB file defaults to `projects/annotated-doc/annotated-doc.db` (override with
 | `/live-delivery` | Recipient snapshot fold + ingest recovery |
 | Comments panel + color select | Marker apply/delete UI with highlight colors |
 | Live JSON state (`<details>`) | Optional debug of the session document snapshot |
+
+Range boundaries follow the CRDT's locked affinity: typing at the **start** of a
+comment joins the comment (the range grows), typing at its **end** stays
+outside, and a replacement that covers the range empties it (the comment is
+orphaned and its card disappears).
 
 ## Confidential spans
 
