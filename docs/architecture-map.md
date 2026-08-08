@@ -79,6 +79,14 @@ Not a fourth loop — transport over the machine.
 | `http-body.mjs` / `http-response*.mjs` / `http-route-match.mjs` / `http-handler-chain.mjs` | Leaf HTTP utilities |
 | `middleware.mjs` / `rate-limit.mjs` / `lifecycle.mjs` / `config.mjs` | HTTP policy and process shutdown |
 
+One deliberate exception: `app.use(prefix, fn)` prefix intercepts (router.ts
+`kind: 'handler'`, serve.mjs intercept chain) run before `matchRoute`, so
+neither default-on auth layer applies — no route gate (`requireUser`), no row
+grant (`mayRow`/`mayVerb`). The handler receives the principal
+(`principalOf(req)`) but admission is entirely the app author's job: this is
+the intentional app-author escape hatch, not a silent default-on gap. CSRF and
+security headers still apply — both run earlier in serve.mjs's `handle()`.
+
 ## Coat (known-app seams on the machine)
 
 Auth product lives under **`src/auth/`** (directory packaging, S3). Compile-loop
