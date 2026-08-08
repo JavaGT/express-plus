@@ -20,13 +20,15 @@
       "workbench": ["./index.d.ts"],
       "workbench/client": ["./client.d.ts"],
       "workbench/server": ["./src/server.d.ts"],
-      "workbench/annotated-text": ["./annotated-text.d.ts"]
+      "workbench/annotated-text": ["./annotated-text.d.ts"],
+      "workbench/annotated-text-coords": ["./annotated-text-coords.d.ts"]
     }
   },
   "include": [
     "index.d.ts",
     "client.d.ts",
     "annotated-text.d.ts",
+    "annotated-text-coords.d.ts",
     "src/server.d.ts",
     "src/**/*.ts",
     "type-test/**/*.ts"

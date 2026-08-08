@@ -58,6 +58,16 @@ export const PUBLIC_API = Object.freeze({
         'importTextFamilyFromBlocks', 'resolvePositionToEndpoint', 'projectEndpointToBlockOffset', 'materializeBlock', 'textFamilyCheckpoint', 'restoreTextFamilyCheckpoint',
     ]),
   }),
+  'workbench/annotated-text-coords': Object.freeze({
+    default: false,
+    exact: true,
+    named: Object.freeze([
+      'wireToDisplayPosition', 'displayToWirePosition', 'classifyDisplayOffset',
+      'selectionCrossesDisplayRedaction', 'placeholderDisplayWidth',
+      'scalarStart', 'scalarEnd', 'changedRange',
+      'projectRangesOverEdit', 'projectRangesOverText',
+    ]),
+  }),
 });
 
 const PRIVATE_ENTRYPOINTS = Object.freeze([

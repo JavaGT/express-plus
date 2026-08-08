@@ -37,6 +37,13 @@ import {
   registerAnnotatedTextStructuralExtension,
   type AnnotatedTextFieldHandle, type AnnotatedTextOptions,
 } from 'workbench/annotated-text';
+import {
+  changedRange, classifyDisplayOffset, displayToWirePosition, placeholderDisplayWidth,
+  projectRangesOverEdit, projectRangesOverText, scalarEnd, scalarStart,
+  selectionCrossesDisplayRedaction, wireToDisplayPosition,
+  type AnnotatedTextChangedRange, type AnnotatedTextCoordinatedPosition,
+  type AnnotatedTextRange, type AnnotatedTextRedactionMarker,
+} from 'workbench/annotated-text-coords';
 import { DatabaseSync } from 'node:sqlite';
 
 declare const claimedBlobApp: WorkbenchApp;
@@ -89,6 +96,20 @@ registerAnnotatedTextStructuralExtension('invalidAsyncMeasurement', {
   },
 });
 void [annotatedTextHandle, protecting];
+
+declare const coordsMarkers: readonly AnnotatedTextRedactionMarker[];
+const wirePosition: AnnotatedTextCoordinatedPosition = wireToDisplayPosition({ offset: 2, affinity: 'right' }, coordsMarkers);
+const displayPosition: AnnotatedTextCoordinatedPosition = displayToWirePosition(wirePosition, coordsMarkers);
+const displayOffset = classifyDisplayOffset(wirePosition.offset, coordsMarkers);
+const crosses: boolean = selectionCrossesDisplayRedaction(wirePosition.offset, displayPosition.offset, coordsMarkers);
+const placeholderWidth: number = placeholderDisplayWidth(coordsMarkers);
+const scalarStartOffset: number = scalarStart('ab', 1);
+const scalarEndOffset: number = scalarEnd('ab', 1);
+const change: AnnotatedTextChangedRange = changedRange('ab', 'ac');
+declare const sourceRanges: readonly AnnotatedTextRange[];
+const editedRanges: readonly AnnotatedTextRange[] = projectRangesOverEdit(sourceRanges, 0, 0, 'x');
+const projectedRanges: readonly AnnotatedTextRange[] = projectRangesOverText(sourceRanges, 'ab', 'axb');
+void [displayPosition, displayOffset, crosses, placeholderWidth, scalarStartOffset, scalarEndOffset, change, editedRanges, projectedRanges];
 
 declare const annotatedTextEntity: WorkbenchEntity;
 declare const requiredAnnotatedTextHandle: AnnotatedTextFieldHandle;

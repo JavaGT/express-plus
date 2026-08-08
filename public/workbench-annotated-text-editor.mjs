@@ -18,19 +18,19 @@ import { projectRangesOverEdit } from './workbench-annotated-text-snapshot.mjs';
 // text child.
 const BLOCK_ID = 'b';
 
-function scalarStart(text, offset) {
+export function scalarStart(text, offset) {
   if (offset > 0 && offset < text.length && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff
     && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff) return offset - 1;
   return offset;
 }
 
-function scalarEnd(text, offset) {
+export function scalarEnd(text, offset) {
   if (offset > 0 && offset < text.length && text.charCodeAt(offset) >= 0xdc00 && text.charCodeAt(offset) <= 0xdfff
     && text.charCodeAt(offset - 1) >= 0xd800 && text.charCodeAt(offset - 1) <= 0xdbff) return offset + 1;
   return offset;
 }
 
-function changedRange(before, after) {
+export function changedRange(before, after) {
   let from = 0;
   while (from < before.length && from < after.length && before[from] === after[from]) from += 1;
   from = scalarStart(before, scalarStart(after, from));

@@ -21,6 +21,10 @@
 		"./annotated-text": {
 			"types": "./annotated-text.d.ts",
 			"default": "./src/annotated-text-public.mjs"
+		},
+		"./annotated-text-coords": {
+			"types": "./annotated-text-coords.d.ts",
+			"default": "./public/workbench-annotated-text-coords.mjs"
 		}
 	},
 	"scripts": {
