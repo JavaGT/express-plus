@@ -158,6 +158,38 @@ test('wrong password → 401 and no cookie', async (t) => {
   });
 });
 
+test('login after an expired lock does not instantly relock (wrong password → 401)', async (t) => {
+  const { origin, app } = await boot(t);
+  await fetch(`${origin}/auth/register`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  // Arm an EXPIRED lock: the pre-lock failed-attempt counter is stale and the
+  // lock time has passed. The next wrong password must restart the series, not
+  // immediately relock (the stale counter alone would trip the threshold).
+  app.db.prepare('UPDATE User SET failedLoginAttempts = ?, lockedUntil = ? WHERE username = ?')
+    .run(3, Date.now() - 1000, 'alice');
+
+  const res = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'wrong' }),
+  });
+  assert.equal(res.status, 401, 'an expired lock must not make the next wrong password a relock (403)');
+  const row = app.db.prepare('SELECT failedLoginAttempts FROM User WHERE username = ?').get('alice');
+  assert.equal(row.failedLoginAttempts, 1, 'the failed-attempt series restarts at 1');
+
+  // A correct password after the expiry logs in normally.
+  const ok = await fetch(`${origin}/auth/login`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ username: 'alice', password: 'hunter2' }),
+  });
+  assert.equal(ok.status, 201);
+  assert.ok(ok.headers.get('set-cookie'));
+});
+
 test('logout deletes the session and clears the cookie; the old cookie is anonymous afterwards', async (t) => {
   const { origin, app } = await boot(t);
   const loginRes = await fetch(`${origin}/auth/register`, {

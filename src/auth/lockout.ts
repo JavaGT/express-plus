@@ -43,11 +43,31 @@ export function totpLockoutDecision(opts: TotpLockoutOptions = {} as TotpLockout
   return { locked: true, lockedUntil: now + durationMs, retryAfterMs: durationMs };
 }
 
-// Check whether a lockout is still active. Returns { locked, retryAfterMs }
-// when the lockout has not expired, or null when the lockout has expired
-// (caller may proceed, and should reset the attempt counter).
-export function checkLockout(lockedUntil: number | null | undefined, now: number = Date.now()): { locked: true; retryAfterMs: number } | null {
-  if (lockedUntil == null) return null;
+// A lockout-fence verdict. One evaluation shared by the login and TOTP routes:
+//   - { locked: true, retryAfterMs } — the lock is still active; reject.
+//   - { locked: false, resetAttempts: false } — no lock was ever set (or the
+//     counter is already clear): the next failure counts from the stored value.
+//   - { locked: false, resetAttempts: true } — the previous lock has EXPIRED
+//     but the stale failed-attempt counter still holds the pre-lock value. The
+//     next failure must count from 0, or one invalid token after expiry would
+//     instantly relock (the stale counter alone would trip the threshold).
+export type LockoutVerdict =
+  | { locked: true; retryAfterMs: number }
+  | { locked: false; resetAttempts: boolean };
+
+export function evaluateLockout(
+  failedAttempts: number | null | undefined,
+  lockedUntil: number | null | undefined,
+  now: number = Date.now(),
+): LockoutVerdict {
+  if (lockedUntil == null) return { locked: false, resetAttempts: false };
   if (now < lockedUntil) return { locked: true, retryAfterMs: lockedUntil - now };
-  return null;
+  return { locked: false, resetAttempts: (failedAttempts ?? 0) > 0 };
+}
+
+// The next failed-attempt count to record for a clear fence (a locked verdict
+// is rejected by the caller before counting): the stored counter when no lock
+// existed, or 0 when an expired lock's stale counter must not relock instantly.
+export function nextFailedAttemptCount(resetAttempts: boolean, failedAttempts: number | null | undefined): number {
+  return (resetAttempts ? 0 : (failedAttempts ?? 0)) + 1;
 }

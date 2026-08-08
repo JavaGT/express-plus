@@ -14,7 +14,7 @@
 // Tests:
 //   - base32 / generateSecret / hotp / verifyTotp primitives
 //   - generateBackupCodes: 8 codes, 32 hex chars (128-bit entropy), hashed
-//   - loginChallengeStore: user binding, TTL, attempt limit, single-use consume
+//   - loginChallengeStore: user binding, TTL, attempt limit, claim lifecycle
 //   - HTTP: enroll → verify → disable round-trip
 //   - HTTP: login issues a challenge; authenticate (TOTP or backup) mints a session
 //   - HTTP: backup-code reuse / challenge reuse / exhaustion / lockout interplay
@@ -318,26 +318,90 @@ test('createLoginChallengeStore: challenges expire after the TTL', async () => {
   assert.notEqual(store.get(c), null);
   await sleep(60);
   assert.equal(store.get(c), null, 'expired challenge returns null');
-  assert.equal(store.consume(c, 'user-1'), false, 'expired challenge cannot be consumed');
+  assert.equal(store.reserve(c), null, 'expired challenge cannot be reserved');
   store.destroy();
 });
 
-test('createLoginChallengeStore: registerFailure counts and destroys at maxAttempts', () => {
+test('createLoginChallengeStore: expiry before reserve rejects; a reservation made before expiry settles after it', () => {
+  let clock = 1_000_000;
+  const store = createLoginChallengeStore(1000, 5, () => clock);
+
+  // Expired before reserve → rejected.
+  const c = store.set('user-1');
+  clock = 1_001_100; // past the 1000ms TTL
+  assert.equal(store.reserve(c), null, 'an expired challenge cannot be reserved');
+
+  // Reserved before expiry, clock crosses the TTL while reserved → settle allowed.
+  const c2 = store.set('user-1');
+  const claim = store.reserve(c2);
+  assert.ok(claim, 'a live challenge reserves');
+  clock = 1_001_100;
+  assert.equal(store.finalize(claim), true, 'a reservation made before expiry may settle after it');
+  assert.equal(store.reserve(c2), null, 'the settled challenge is gone');
+  store.destroy();
+});
+
+test('createLoginChallengeStore: release returns available before expiry and deletes after', () => {
+  let clock = 1_000_000;
+  const store = createLoginChallengeStore(1000, 5, () => clock);
+
+  // Release before the original expiry → available again.
+  const c = store.set('user-1');
+  const claim = store.reserve(c);
+  clock = 1_000_500;
+  assert.equal(store.release(claim), true);
+  assert.notEqual(store.get(c), null, 'released before expiry returns to available');
+  assert.equal(store.get(c).attempts, 0, 'release does not increment attempts');
+
+  // Release after the original expiry → deleted.
+  clock = 1_000_000; // reset so the fresh challenge gets a known creation time
+  const c2 = store.set('user-1');
+  const claim2 = store.reserve(c2);
+  clock = 1_001_100;
+  assert.equal(store.release(claim2), true);
+  assert.equal(store.get(c2), null, 'released after expiry is deleted');
+  store.destroy();
+});
+
+test('createLoginChallengeStore: fail counts attempts and destroys at maxAttempts', () => {
   const store = createLoginChallengeStore(5000, 3);
   const c = store.set('user-1');
-  assert.equal(store.registerFailure(c), true); // attempt 1
-  assert.equal(store.registerFailure(c), true); // attempt 2
-  assert.equal(store.registerFailure(c), false); // attempt 3 → destroyed
+  let claim = store.reserve(c);
+  assert.ok(claim);
+  assert.equal(store.fail(claim), true); // attempt 1 → available again
+  claim = store.reserve(c);
+  assert.equal(store.fail(claim), true); // attempt 2
+  assert.equal(store.get(c).attempts, 2);
+  claim = store.reserve(c);
+  assert.equal(store.fail(claim), false); // attempt 3 → destroyed
   assert.equal(store.get(c), null, 'challenge destroyed once the attempt limit is hit');
   store.destroy();
 });
 
-test('createLoginChallengeStore: consume is single-use and user-bound', () => {
+test('createLoginChallengeStore: reserve is atomic and finalize is single-use', () => {
   const store = createLoginChallengeStore(5000);
   const c = store.set('user-1');
-  assert.equal(store.consume(c, 'user-2'), false, 'wrong user cannot consume');
-  assert.equal(store.consume(c, 'user-1'), true);
-  assert.equal(store.consume(c, 'user-1'), false, 'replay is rejected');
+  const claim = store.reserve(c);
+  assert.ok(claim);
+  assert.equal(claim.userId, 'user-1', 'the claim carries the bound user');
+  assert.equal(store.reserve(c), null, 'a reserved challenge cannot be reserved again');
+  assert.equal(store.finalize(claim), true);
+  assert.equal(store.reserve(c), null, 'replay is rejected after finalize');
+  store.destroy();
+});
+
+test('createLoginChallengeStore: a stale claim cannot settle a re-reserved challenge', () => {
+  const store = createLoginChallengeStore(5000);
+  const c = store.set('user-1');
+  const claimA = store.reserve(c);
+  assert.ok(claimA);
+  assert.equal(store.release(claimA), true); // A's request rolled back
+  const claimB = store.reserve(c);           // B picks the challenge up
+  assert.ok(claimB);
+  // A's stale claim can neither finalize nor release: finalize fails closed and
+  // invalidates the challenge so a stale claim can never reopen it.
+  assert.equal(store.finalize(claimA), false, 'finalize with a stale claim fails closed');
+  assert.equal(store.get(c), null, 'the stale finalize invalidated the challenge');
   store.destroy();
 });
 
@@ -663,9 +727,11 @@ test('authenticate with an unknown or consumed challenge → 400, no session', a
   assert.equal(random.status, 400);
   assert.equal(random.headers.get('set-cookie'), null);
 
-  // A real challenge, consumed server-side (forces the "expired" failure).
-  const { challenge, userId } = await loginForTotp(origin);
-  assert.equal(loginChallengeStore.consume(challenge, userId), true);
+  // A real challenge, settled server-side (forces the "expired" failure).
+  const { challenge } = await loginForTotp(origin);
+  const claim = loginChallengeStore.reserve(challenge);
+  assert.ok(claim);
+  assert.equal(loginChallengeStore.finalize(claim), true);
   const consumed = await authenticate(origin, challenge, currentTotpToken(secret));
   assert.equal(consumed.status, 400);
   assert.equal(consumed.headers.get('set-cookie'), null);
@@ -814,6 +880,363 @@ test('successful backup-code login resets the TOTP lockout counters', async (t) 
   const after = app.db.prepare('SELECT totpFailedAttempts, totpLockedUntil FROM TwoFactor WHERE userId = ?').get(userId);
   assert.equal(after.totpFailedAttempts, 0);
   assert.equal(after.totpLockedUntil, null);
+});
+
+// ---- expired-lock reset (deterministic clock) --------------------------------
+// The TOTP fence is armed directly in the DB (past/future `totpLockedUntil`)
+// so the expiry behavior is deterministic — no sleeping.
+
+function armExpiredTotpLock(app, userId) {
+  app.db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE userId = ?')
+    .run(5, Date.now() - 1000, userId);
+}
+
+function armActiveTotpLock(app, userId) {
+  app.db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE userId = ?')
+    .run(5, Date.now() + 60_000, userId);
+}
+
+test('verify after an expired lock does not instantly relock (invalid token → 400)', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  await enrollAndEnable(origin, cookie);
+  // A stale 5-attempt counter with a lock that has already expired.
+  armExpiredTotpLock(app, userId);
+
+  const attempt = () => fetch(`${origin}/auth/totp/verify`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ token: '999999' }),
+  });
+
+  const first = await attempt();
+  assert.equal(first.status, 400, 'an invalid token after an expired lock is a plain failure, not a relock');
+  assert.equal(first.headers.get('set-cookie'), null);
+  let row = app.db.prepare('SELECT totpFailedAttempts, totpLockedUntil FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(row.totpFailedAttempts, 1, 'the stale counter is not carried into the new series');
+  assert.equal(row.totpLockedUntil, null, 'no fresh lock was armed');
+
+  const second = await attempt();
+  assert.equal(second.status, 400, 'a second invalid token still does not relock');
+  row = app.db.prepare('SELECT totpFailedAttempts, totpLockedUntil FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(row.totpFailedAttempts, 2, 'the fresh series accumulates normally after the reset');
+  assert.equal(row.totpLockedUntil, null);
+
+  // The reset restored the throttle: a full fresh series re-locks (5th → 429).
+  for (let i = 0; i < 3; i++) await attempt();
+  row = app.db.prepare('SELECT totpFailedAttempts, totpLockedUntil FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(row.totpFailedAttempts, 5);
+  assert.ok(row.totpLockedUntil > Date.now(), 'a fresh threshold series arms a new lock');
+  const relocked = await attempt();
+  assert.equal(relocked.status, 429, 'a fresh threshold series re-locks after the reset');
+});
+
+test('verify after an expired lock accepts a valid TOTP token and clears the fence', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  const { secret } = await enrollAndEnable(origin, cookie);
+  armExpiredTotpLock(app, userId);
+
+  const res = await fetch(`${origin}/auth/totp/verify`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ token: currentTotpToken(secret) }),
+  });
+  assert.equal(res.status, 200);
+  const row = app.db.prepare('SELECT totpFailedAttempts, totpLockedUntil FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(row.totpFailedAttempts, 0);
+  assert.equal(row.totpLockedUntil, null);
+});
+
+test('verify with an active lock → 429 even for a valid TOTP token', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  const { secret } = await enrollAndEnable(origin, cookie);
+  armActiveTotpLock(app, userId);
+
+  const res = await fetch(`${origin}/auth/totp/verify`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ token: currentTotpToken(secret) }),
+  });
+  assert.equal(res.status, 429, 'the TOTP fence blocks verification while the lock holds');
+  const body = await res.json();
+  assert.ok(body.failure.details.retryAfterMs > 0, 'the lockout response carries a retry hint');
+});
+
+test('authenticate after an expired lock does not instantly relock (invalid token → 400)', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  await enrollAndEnable(origin, cookie);
+  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+  armExpiredTotpLock(app, userId);
+
+  const { challenge } = await loginForTotp(origin);
+  const res = await authenticate(origin, challenge, '123456');
+  assert.equal(res.status, 400, 'an invalid token after an expired lock is a plain failure, not 429');
+  assert.equal(res.headers.get('set-cookie'), null);
+  const row = app.db.prepare('SELECT totpFailedAttempts, totpLockedUntil FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(row.totpFailedAttempts, 1, 'the stale counter is not carried into the new series');
+  assert.equal(row.totpLockedUntil, null, 'no fresh lock was armed');
+});
+
+test('disable after an expired lock does not instantly relock (invalid token → 400)', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  await enrollAndEnable(origin, cookie);
+  armExpiredTotpLock(app, userId);
+
+  const res = await fetch(`${origin}/auth/totp/disable`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ token: '999999' }),
+  });
+  assert.equal(res.status, 400, 'an invalid token after an expired lock is a plain failure, not 429');
+  const row = app.db.prepare('SELECT totpFailedAttempts, totpLockedUntil, enabled FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(row.totpFailedAttempts, 1);
+  assert.equal(row.totpLockedUntil, null);
+  assert.equal(row.enabled, 1, 'the enrollment survives an invalid disable attempt');
+});
+
+test('disable with a backup code succeeds while the TOTP lock is active', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  const { backupCodes } = await enrollAndEnable(origin, cookie);
+  armActiveTotpLock(app, userId);
+
+  const res = await fetch(`${origin}/auth/totp/disable`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', cookie },
+    body: JSON.stringify({ token: backupCodes[0] }),
+  });
+  assert.equal(res.status, 204, 'a backup code is the recovery escape hatch');
+  const row = app.db.prepare('SELECT id FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(row, undefined, 'the enrollment was removed');
+});
+
+// ---- backup-code burn prevention ---------------------------------------------
+
+test('same-challenge race with different valid codes: the losing code stays usable', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  const { backupCodes } = await enrollAndEnable(origin, cookie);
+  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+
+  const { challenge } = await loginForTotp(origin);
+  const results = await Promise.all([
+    authenticate(origin, challenge, backupCodes[0]),
+    authenticate(origin, challenge, backupCodes[1]),
+  ]);
+  const successes = results.filter((r) => r.status === 201);
+  const failures = results.filter((r) => r.status === 400);
+  assert.equal(successes.length, 1, 'exactly one concurrent use of the challenge succeeds');
+  assert.equal(failures.length, 1, 'the other concurrent use is rejected');
+  for (const r of failures) assert.equal(r.headers.get('set-cookie'), null);
+
+  const row = app.db.prepare('SELECT backupCodes FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(JSON.parse(row.backupCodes).length, 7, 'exactly one code was consumed');
+
+  const loserCode = results[0].status === 201 ? backupCodes[1] : backupCodes[0];
+  const retry = await loginForTotp(origin);
+  const retryRes = await authenticate(origin, retry.challenge, loserCode);
+  assert.equal(retryRes.status, 201, 'the losing code was rolled back with the failed mint and stays usable');
+});
+
+test('a challenge that expires between the reads does not burn the backup code', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  const { backupCodes } = await enrollAndEnable(origin, cookie);
+  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+
+  const { challenge } = await loginForTotp(origin);
+
+  // Simulate the challenge being claimed by a racing request (or expiring)
+  // between the route's reserve and its settle step.
+  const racingClaim = loginChallengeStore.reserve(challenge);
+  assert.ok(racingClaim);
+  assert.equal(loginChallengeStore.finalize(racingClaim), true);
+
+  const res = await authenticate(origin, challenge, backupCodes[0]);
+  assert.equal(res.status, 400, 'an expired challenge cannot complete a login');
+  assert.equal(res.headers.get('set-cookie'), null);
+
+  const row = app.db.prepare('SELECT backupCodes FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(JSON.parse(row.backupCodes).length, 8, 'no backup code was consumed');
+
+  const retry = await loginForTotp(origin);
+  const retryRes = await authenticate(origin, retry.challenge, backupCodes[0]);
+  assert.equal(retryRes.status, 201, 'the backup code remains usable after the race');
+});
+
+test('a failed session mint (confirmed rollback) releases the same challenge+code for a retry', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  const { backupCodes } = await enrollAndEnable(origin, cookie);
+  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+
+  let challenge;
+  // Break Session writes so the mint fails inside the settlement transaction.
+  app.db.prepare('ALTER TABLE Session RENAME TO Session_hidden').run();
+  try {
+    ({ challenge } = await loginForTotp(origin));
+    const res = await authenticate(origin, challenge, backupCodes[0]);
+    assert.equal(res.status, 500, 'a session-mint failure surfaces as a server error');
+    assert.equal(res.headers.get('set-cookie'), null);
+  } finally {
+    app.db.prepare('ALTER TABLE Session_hidden RENAME TO Session').run();
+  }
+
+  const row = app.db.prepare('SELECT backupCodes, totpFailedAttempts FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(JSON.parse(row.backupCodes).length, 8, 'the code removal rolled back with the failed mint');
+  assert.equal(row.totpFailedAttempts, 0, 'the fence reset rolled back with the failed mint');
+
+  // The confirmed rollback RELEASED the challenge — the SAME challenge + code
+  // retries without a fresh password login.
+  const retryRes = await authenticate(origin, challenge, backupCodes[0]);
+  assert.equal(retryRes.status, 201, 'the same challenge and code retry after the confirmed rollback');
+  assert.ok(sidFromSetCookie(retryRes.headers.get('set-cookie')));
+});
+
+// ---- deterministic claim-protocol HTTP tests --------------------------------
+// The claim protocol makes the settlement interleavings deterministic: reserve
+// is synchronous and atomic, so a second request is rejected before SQL, and
+// the txn outcome (committed / rolled-back / ambiguous) drives a single
+// settlement call. These tests pin each ordering with hooks and DB barriers —
+// no timing sleeps.
+
+test('a request that holds a reservation rejects a second request before SQL', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  const { secret } = await enrollAndEnable(origin, cookie);
+  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+
+  const { challenge } = await loginForTotp(origin);
+
+  // Request A has reserved the challenge (an in-flight second-factor settle).
+  const claim = loginChallengeStore.reserve(challenge);
+  assert.ok(claim, 'request A reserves the challenge');
+  assert.equal(claim.userId, userId, 'the user is derived from the claim');
+
+  // Break Session writes: ANY SQL request B touches would blow up with a 500.
+  // B must be rejected by reserve BEFORE SQL, so it still gets a clean 400.
+  app.db.prepare('ALTER TABLE Session RENAME TO Session_hidden').run();
+  try {
+    const res = await authenticate(origin, challenge, currentTotpToken(secret));
+    assert.equal(res.status, 400, 'request B is rejected before SQL');
+    assert.equal(res.headers.get('set-cookie'), null);
+    const body = await res.json();
+    assert.match(body.failure.message, /unknown or expired/i);
+  } finally {
+    app.db.prepare('ALTER TABLE Session_hidden RENAME TO Session').run();
+    // A settles its reservation; B never touched it.
+    loginChallengeStore.finalize(claim);
+  }
+});
+
+test('two challenges using one backup code admit at most one success and do not restore lists', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  const { backupCodes } = await enrollAndEnable(origin, cookie);
+  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+
+  const first = await loginForTotp(origin);
+  const firstRes = await authenticate(origin, first.challenge, backupCodes[0]);
+  assert.equal(firstRes.status, 201, 'the first challenge consumes the code');
+  assert.ok(sidFromSetCookie(firstRes.headers.get('set-cookie')));
+
+  const row = app.db.prepare('SELECT backupCodes FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(JSON.parse(row.backupCodes).length, 7, 'exactly one code was consumed');
+
+  const second = await loginForTotp(origin);
+  const secondRes = await authenticate(origin, second.challenge, backupCodes[0]);
+  assert.equal(secondRes.status, 400, 'the second challenge cannot reuse the consumed code');
+  assert.equal(secondRes.headers.get('set-cookie'), null);
+
+  const after = app.db.prepare('SELECT backupCodes FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(JSON.parse(after.backupCodes).length, 7, 'the loser did not restore the consumed code');
+});
+
+test('finalize runs before the response is constructed (a settlement failure after commit sends no cookie)', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  const { backupCodes } = await enrollAndEnable(origin, cookie);
+  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+
+  const original = loginChallengeStore.finalize;
+  let finalizedCalls = 0;
+  loginChallengeStore.finalize = () => {
+    finalizedCalls += 1;
+    return false; // the settlement step fails AFTER the commit confirmed
+  };
+  try {
+    const { challenge } = await loginForTotp(origin);
+    const res = await authenticate(origin, challenge, backupCodes[0]);
+    assert.equal(finalizedCalls, 1, 'finalize was invoked after the commit');
+    assert.equal(res.status, 500, 'a failed finalize fails closed');
+    assert.equal(res.headers.get('set-cookie'), null, 'no cookie — the response was not built before finalize');
+  } finally {
+    loginChallengeStore.finalize = original;
+  }
+
+  // The commit had already landed before finalize: session + code removal stand.
+  const row = app.db.prepare('SELECT backupCodes FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(JSON.parse(row.backupCodes).length, 7, 'the code removal committed');
+  const sessions = app.db.prepare('SELECT COUNT(*) AS n FROM Session').get().n;
+  assert.equal(sessions, 1, 'the session committed');
+});
+
+test('an ambiguous commit fails closed: the challenge is invalidated, never released', async (t) => {
+  const { origin, cookie, app } = await login(t);
+  const { backupCodes } = await enrollAndEnable(origin, cookie);
+  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+
+  const { challenge } = await loginForTotp(origin);
+
+  const realCommit = app.db.commit;
+  const realRollback = app.db.rollback;
+  // Force the driver's sync txn primitives into the ambiguous state: COMMIT
+  // fails AND the follow-up ROLLBACK also fails, so the transaction's fate is
+  // unknown. (The connection is left inside an open transaction — restored and
+  // rolled back in the finally below.)
+  app.db.commit = () => { throw new Error('commit failed'); };
+  app.db.rollback = () => { throw new Error('rollback failed'); };
+  try {
+    const res = await authenticate(origin, challenge, backupCodes[0]);
+    assert.equal(res.status, 500, 'an ambiguous commit surfaces as a server error');
+    assert.equal(res.headers.get('set-cookie'), null);
+    assert.equal(loginChallengeStore.reserve(challenge), null, 'the challenge was invalidated, not released');
+  } finally {
+    app.db.commit = realCommit;
+    app.db.rollback = realRollback;
+    app.db.rollback(); // close the transaction the forced failures left open
+  }
+});
+
+test('a failed COMMIT with a successful ROLLBACK is a confirmed no-commit: the same challenge+code retries cleanly', async (t) => {
+  const { origin, cookie, app, userId } = await login(t);
+  const { backupCodes } = await enrollAndEnable(origin, cookie);
+  await fetch(`${origin}/auth/logout`, { method: 'POST', headers: { cookie } });
+
+  const { challenge } = await loginForTotp(origin);
+
+  const realCommit = app.db.commit;
+  // Force the driver's sync COMMIT to fail while the follow-up ROLLBACK still
+  // succeeds — the route's confirmed no-commit branch, NOT the ambiguous one.
+  // All settlement writes (fence reset, code removal, Session mint) were issued
+  // but never committed; the route's own rollback closes the transaction.
+  app.db.commit = () => { throw new Error('commit failed'); };
+  try {
+    const res = await authenticate(origin, challenge, backupCodes[0]);
+    assert.equal(res.status, 500, 'a failed COMMIT surfaces as a server error');
+    assert.equal(res.headers.get('set-cookie'), null, 'no cookie from a confirmed no-commit');
+  } finally {
+    app.db.commit = realCommit;
+  }
+
+  // Confirmed no-commit: nothing persisted — no session, no burned code, no fence reset.
+  const row = app.db.prepare('SELECT backupCodes, totpFailedAttempts FROM TwoFactor WHERE userId = ?').get(userId);
+  assert.equal(JSON.parse(row.backupCodes).length, 8, 'the code removal rolled back');
+  assert.equal(row.totpFailedAttempts, 0, 'the fence reset rolled back');
+  const sessions = app.db.prepare('SELECT COUNT(*) AS n FROM Session').get().n;
+  assert.equal(sessions, 0, 'the session mint rolled back');
+
+  // The confirmed no-commit RELEASED the challenge — the SAME challenge + code
+  // retry successfully without a fresh password login. (Prove availability
+  // directly, then free the claim so the retry can take it.)
+  const released = loginChallengeStore.reserve(challenge);
+  assert.ok(released, 'the challenge was released, not invalidated');
+  assert.equal(loginChallengeStore.release(released), true);
+  const retryRes = await authenticate(origin, challenge, backupCodes[0]);
+  assert.equal(retryRes.status, 201, 'the same challenge and code retry after the confirmed no-commit');
+  assert.ok(sidFromSetCookie(retryRes.headers.get('set-cookie')));
 });
 
 // ---- GET /auth/totp status ---------------------------------------------------

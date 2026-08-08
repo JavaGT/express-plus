@@ -31,7 +31,8 @@ import { sessionCookie, sessionTokenOf, SESSION_COOKIE } from './session.ts';
 import { config, type WorkbenchConfig } from '../config.ts';
 import { verifyTotp, verifyBackupCode } from './totp.ts';
 import { loginChallengeStore } from './login-challenge.ts';
-import { checkLockout, loginLockoutDecision, totpLockoutDecision } from './lockout.ts';
+import { evaluateLockout, nextFailedAttemptCount, loginLockoutDecision, totpLockoutDecision } from './lockout.ts';
+import { txn, begin, commit, rollback, type DbHandle } from '../driver.ts';
 import { serializeField } from '../field-strategy.ts';
 import {
   generateChallenge,
@@ -56,11 +57,7 @@ export interface AuthRoutesOptions {
   secure?: boolean;
   identifyBy?: string[];
   entities?: Record<string, any> | null;
-  db?: AuthDb | null;
-}
-
-interface AuthDb {
-  prepare(sql: string): { run(...params: unknown[]): unknown };
+  db?: DbHandle | null;
 }
 
 interface AuthRequest {
@@ -86,10 +83,14 @@ type AuthNext = (err?: unknown) => void;
 // always travels in the body's `username` slot (kept for backward
 // compatibility); only the lookup columns change. Every named field MUST exist
 // on the User entity — a typo fails closed at first login with a thrown lookup.
-export function authRoutes({ secure = config.env === 'production', identifyBy = ['username'], entities, db }: AuthRoutesOptions = {}) {
-  if (!entities || !db) {
+export function authRoutes({ secure = config.env === 'production', identifyBy = ['username'], entities, db: maybeDb }: AuthRoutesOptions = {}) {
+  if (!entities || !maybeDb) {
     throw new Error('authRoutes requires entities and db options');
   }
+  // Bind the guarded driver to a const so the nested function declarations
+  // below — which TypeScript does not narrow across their declaration
+  // boundary — see a non-null, fully-typed handle.
+  const db: DbHandle = maybeDb;
   const { User, Session, Credential, Invitation, ApiKey, TwoFactor } = entities;
   const { createInvitation, acceptInvitation, rejectInvitation, listInvitationsForUser } = createInvitationApi({ Invitation });
   const s = router();
@@ -109,31 +110,76 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     return { isValid: isTotpValid || isBackupValid, usedBackup: isBackupValid, backupCodes };
   }
 
-  // Consume a backup code DURABLY, with transactional protection: re-read the
-  // persisted backupCodes JSON inside a BEGIN IMMEDIATE transaction (write lock)
-  // so two concurrent submissions of the same code cannot both mint a session.
-  // The list is stored as SHA-256 hashes; the in-memory decoded list is compared
-  // against the persisted list within the transaction and only written back on a
-  // match. Returns { usedBackup } — a consumed code is persisted before the
-  // session is minted (the caller), never after.
-  function consumeBackupCode(twoFactorId: string, token: string): { usedBackup: boolean } {
-    db.exec('BEGIN IMMEDIATE');
-    try {
-      const row = db.prepare('SELECT secret, backupCodes FROM TwoFactor WHERE id = ?').get(twoFactorId) as { secret: string; backupCodes: string | null } | undefined;
-      const { usedBackup, backupCodes } = verifyTotpOrBackupCode(
-        { secret: row?.secret ?? '', backupCodes: row?.backupCodes ?? '[]' },
-        token,
-      );
-      if (usedBackup) {
-        db.prepare('UPDATE TwoFactor SET backupCodes = ?, totpFailedAttempts = 0, totpLockedUntil = NULL WHERE id = ?')
-          .run(JSON.stringify(backupCodes), twoFactorId);
-      }
-      db.exec('COMMIT');
-      return { usedBackup };
-    } catch (err) {
-      db.exec('ROLLBACK');
-      throw err;
+  // The shared outcome of settling one second-factor token (the disable and
+  // authenticate routes each settle inside their own driver transaction):
+  //   - 'ok'      — the token was valid; the TOTP fence was reset and a backup
+  //                 code's removal was persisted in the caller's transaction.
+  //   - 'invalid' — a failed non-backup attempt; the failed-attempt/lockout
+  //                 counters were advanced in the caller's transaction.
+  //   - 'locked'  — the TOTP fence is active and the token is not a backup code;
+  //                 nothing was written and the caller rejects with 429.
+  type SecondFactorOutcome =
+    | { kind: 'ok'; usedBackup: boolean }
+    | { kind: 'invalid' }
+    | { kind: 'locked'; retryAfterMs: number };
+
+  // The ONE TOTP failed-attempt write, shared by authenticate/disable (via
+  // settleSecondFactor) and by the verify route — a single normalization, not
+  // three inline copies that can drift. A failed token advances the counter and
+  // optionally arms a lock; an EXPIRED lock's stale timestamp is cleared along
+  // with the restart so the series re-accumulates from 0 instead of instantly
+  // relocking (or being frozen at 1 and never re-locking) on the next token.
+  function recordTotpFailure(
+    row: { id: unknown; totpFailedAttempts: number | null | undefined; totpLockedUntil: unknown },
+    resetAttempts: boolean,
+  ): void {
+    const attempts = nextFailedAttemptCount(resetAttempts, row.totpFailedAttempts);
+    const decision = totpLockoutDecision({ attempts });
+    if (decision) {
+      db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE id = ?')
+        .run(attempts, decision.lockedUntil, row.id);
+    } else {
+      // Clearing the expired lock's stale timestamp along with the counter so
+      // the row does not keep a dead lock after the series restarts.
+      db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE id = ?')
+        .run(attempts, resetAttempts ? null : row.totpLockedUntil, row.id);
     }
+  }
+
+  // Settle one second-factor token against the authoritative TwoFactor row,
+  // INSIDE the caller's driver transaction (`txn`). Re-reading the persisted
+  // backupCodes JSON under the write lock is what serializes concurrent
+  // submissions of the same code: the second reader sees the code already
+  // removed and rejects. A backup code is only removed here — never by a
+  // read-only pre-check — so the removal commits atomically with the caller's
+  // final write (a minted Session or a deleted enrollment).
+  function settleSecondFactor(row: any, token: string): SecondFactorOutcome {
+    const verdict = evaluateLockout(row.totpFailedAttempts, row.totpLockedUntil);
+    const { isValid, usedBackup, backupCodes } = verifyTotpOrBackupCode(row, token);
+    // Only a backup code may lift an ACTIVE lock; a TOTP token — valid or not —
+    // is rejected while the lock holds, and the failed-attempt counter is not
+    // advanced (the lock itself already throttles).
+    if (verdict.locked) {
+      if (!usedBackup) {
+        return { kind: 'locked', retryAfterMs: verdict.retryAfterMs };
+      }
+    }
+    if (!isValid) {
+      // Not locked here (an active lock rejected non-backup tokens above; an
+      // expired lock leaves only the stale counter, which must not relock the
+      // next invalid token instantly — it counts from 0 instead).
+      recordTotpFailure(row, verdict.locked ? false : verdict.resetAttempts);
+      return { kind: 'invalid' };
+    }
+    // Valid: clear the TOTP fence; a backup code's one-time consumption is
+    // persisted here, inside the caller's transaction.
+    db.prepare('UPDATE TwoFactor SET totpFailedAttempts = 0, totpLockedUntil = NULL WHERE id = ?')
+      .run(row.id);
+    if (usedBackup) {
+      db.prepare('UPDATE TwoFactor SET backupCodes = ? WHERE id = ?')
+        .run(JSON.stringify(backupCodes), row.id);
+    }
+    return { kind: 'ok', usedBackup };
   }
 
   function findIdentity(credential: unknown, next: AuthNext): { user: any; failed: boolean } {
@@ -181,20 +227,25 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     {
       // Lockout check — before password verification so scrypt is skipped
       // when the account is locked. A non-existent user has no lockout state.
-      const lockout = checkLockout(user.lockedUntil);
-      if (lockout) {
-        return next({ status: 403, message: 'account locked', retryAfterMs: lockout.retryAfterMs });
+      // A lock that has expired must not let the stale failed-attempt counter
+      // instantly relock the next wrong password, so the count restarts at 0.
+      const verdict = evaluateLockout(user.failedLoginAttempts, user.lockedUntil);
+      if (verdict.locked) {
+        return next({ status: 403, message: 'account locked', details: { retryAfterMs: verdict.retryAfterMs } });
       }
       if (!user.password.verify(password)) {
         // Failed attempt: increment counter and optionally lock the account.
-        const attempts = (user.failedLoginAttempts ?? 0) + 1;
+        const attempts = nextFailedAttemptCount(verdict.resetAttempts, user.failedLoginAttempts);
         const decision = loginLockoutDecision({ attempts });
         if (decision) {
           db.prepare('UPDATE User SET failedLoginAttempts = ?, lockedUntil = ? WHERE id = ?')
             .run(attempts, decision.lockedUntil, user.id);
         } else {
-          db.prepare('UPDATE User SET failedLoginAttempts = ? WHERE id = ?')
-            .run(attempts, user.id);
+          // Clearing the expired lock's stale timestamp along with the counter
+          // so the series re-accumulates from 0 instead of being frozen at 1
+          // (which would let the account bypass re-locking entirely).
+          db.prepare('UPDATE User SET failedLoginAttempts = ?, lockedUntil = ? WHERE id = ?')
+            .run(attempts, verdict.resetAttempts ? null : user.lockedUntil, user.id);
         }
         return next({ status: 401, message: 'bad credentials' });
       }
@@ -613,22 +664,18 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     if (!twoFactor) {
       return next({ status: 400, message: 'TOTP not enrolled' });
     }
-    // TOTP lockout check — before token verification.
-    const totpLock = checkLockout(twoFactor.totpLockedUntil);
-    if (totpLock) {
-      return next({ status: 429, message: 'TOTP temporarily locked', retryAfterMs: totpLock.retryAfterMs });
+    // TOTP lockout check — before token verification. A lock that has expired
+    // must not let the stale failed-attempt counter instantly relock the next
+    // invalid token, so the count restarts at 0.
+    const verdict = evaluateLockout(twoFactor.totpFailedAttempts, twoFactor.totpLockedUntil);
+    if (verdict.locked) {
+      return next({ status: 429, message: 'TOTP temporarily locked', details: { retryAfterMs: verdict.retryAfterMs } });
     }
     if (!verifyTotp(twoFactor.secret, token as string)) {
-      // Failed TOTP attempt: increment counter and optionally lock.
-      const attempts = (twoFactor.totpFailedAttempts ?? 0) + 1;
-      const decision = totpLockoutDecision({ attempts });
-      if (decision) {
-        db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE id = ?')
-          .run(attempts, decision.lockedUntil, twoFactor.id);
-      } else {
-        db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ? WHERE id = ?')
-          .run(attempts, twoFactor.id);
-      }
+      // Failed TOTP attempt: advance the shared counter/lock normalization —
+      // the same write authenticate and disable use — so an expired lock's
+      // stale fence is cleared and the series re-accumulates from 0.
+      recordTotpFailure(twoFactor, verdict.resetAttempts);
       return next({ status: 400, message: 'invalid TOTP token' });
     }
     // Successful TOTP verification: reset counter.
@@ -645,7 +692,7 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
   // POST /auth/totp/disable — remove the TOTP enrollment.
   // requireUser: only an authenticated user can disable. Requires a valid TOTP
   // token, a backup code, or the user's password to confirm the action.
-  s.post('/totp/disable', requireUser(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
+  s.post('/totp/disable', requireUser(), async (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { token, password } = req.body ?? {};
     if (!token && !password) {
       return next({ status: 400, message: 'token or password is required' });
@@ -666,115 +713,192 @@ export function authRoutes({ secure = config.env === 'production', identifyBy = 
     if (!twoFactor) {
       return next({ status: 400, message: 'TOTP not enrolled' });
     }
-    // Check lockout for TOTP tokens, but backup codes always bypass lockout
-    // (they are the recovery escape hatch when the authenticator is lost).
-    const totpLock = checkLockout(twoFactor.totpLockedUntil);
-    const { isValid, usedBackup, backupCodes } = verifyTotpOrBackupCode(twoFactor, token as string);
-    if (!isValid) {
-      // If lockout is active and the token wasn't a valid backup code, enforce
-      // the TOTP lockout. If lockout is inactive, count failed TOTP attempts.
-      if (!usedBackup) {
-        if (totpLock) {
-          return next({ status: 429, message: 'TOTP temporarily locked', retryAfterMs: totpLock.retryAfterMs });
+    const tokenValue = String(token);
+
+    // Verifying the factor, consuming a backup code, and removing the
+    // enrollment commit in ONE driver transaction: a valid token can never
+    // leave the enrollment half-disabled with a backup code burned.
+    type DisableOutcome =
+      | { kind: 'ok' }
+      | { kind: 'invalid' }
+      | { kind: 'locked'; retryAfterMs: number }
+      | { kind: 'gone' };
+    let outcome: DisableOutcome | undefined;
+    try {
+      await txn(db, () => {
+        // Re-read the enrollment inside the write lock — the authoritative row.
+        const row = TwoFactor.findById(twoFactor.id);
+        if (!row) {
+          outcome = { kind: 'gone' };
+          return;
         }
-        const attempts = (twoFactor.totpFailedAttempts ?? 0) + 1;
-        const decision = totpLockoutDecision({ attempts });
-        if (decision) {
-          db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE id = ?')
-            .run(attempts, decision.lockedUntil, twoFactor.id);
-        } else {
-          db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ? WHERE id = ?')
-            .run(attempts, twoFactor.id);
+        const settled = settleSecondFactor(row, tokenValue);
+        if (settled.kind !== 'ok') {
+          outcome = settled;
+          return;
         }
-      }
+        TwoFactor.delete(row.id);
+        outcome = { kind: 'ok' };
+      });
+    } catch (err) {
+      const e = err as { status?: unknown; message?: string };
+      return next({ status: e.status ?? 500, message: e.message });
+    }
+    if (!outcome) {
+      return next({ status: 500, message: 'TOTP disable did not settle' });
+    }
+    if (outcome.kind === 'locked') {
+      return next({ status: 429, message: 'TOTP temporarily locked', details: { retryAfterMs: outcome.retryAfterMs } });
+    }
+    if (outcome.kind === 'gone') {
+      return next({ status: 400, message: 'TOTP not enrolled' });
+    }
+    if (outcome.kind === 'invalid') {
       return next({ status: 400, message: 'invalid token or backup code' });
     }
-    // Successful TOTP verification resets the lockout counter.
-    if (!usedBackup) {
-      db.prepare('UPDATE TwoFactor SET totpFailedAttempts = 0, totpLockedUntil = NULL WHERE id = ?')
-        .run(twoFactor.id);
-    }
-    // If it was a backup code, persist the consumed code before deleting.
-    if (usedBackup) {
-      db.prepare('UPDATE TwoFactor SET backupCodes = ? WHERE id = ?')
-        .run(JSON.stringify(backupCodes), twoFactor.id);
-    }
-    TwoFactor.delete(twoFactor.id);
     res.sendStatus(204);
   });
 
   // POST /auth/totp/authenticate — complete login with TOTP 2FA.
   // allowAnonymous: the caller already provided a password via /auth/login, which
   // returned { requiresTotp: true, challenge }. The user is derived FROM the
-  // challenge (bound server-side to the user who passed the password); a
+  // challenge CLAIM (bound server-side to the user who passed the password); a
   // client-supplied userId is never trusted here. The route accepts either a
-  // valid TOTP token or an unused backup code, consumes the challenge, mints a
+  // valid TOTP token or an unused backup code, settles the challenge, mints a
   // Session, and sets the sid cookie — the same authentication pathway as
   // password login. TOTP and backup success share ONE response so the response
   // never reveals which factor was used.
-  s.post('/totp/authenticate', allowAnonymous(), (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
+  //
+  // The challenge lifecycle is the claim protocol in login-challenge.mjs, and
+  // this route is its ONLY settlement consumer:
+  //   1. reserve the challenge atomically (userId comes only from the claim);
+  //   2. enter the write transaction;
+  //   3. re-read the TwoFactor row under the write lock;
+  //   4. verify the authoritative TOTP / backup-code hashes;
+  //   5. valid → reset the fence, remove a used backup code, mint the Session
+  //      in the SAME transaction;
+  //   6. settle the claim only against the CONFIRMED transaction outcome
+  //      (finalize on commit, fail on invalid/locked, release on gone);
+  //   7. build the response only after finalization.
+  //
+  // The driver's callback form (`txn`) cannot tell a confirmed rollback from an
+  // ambiguous COMMIT, and the claim settlement depends on that, so this route
+  // uses the driver's sync primitives (the documented alternative call style)
+  // instead: a successful COMMIT is confirmed; a failed COMMIT followed by a
+  // successful ROLLBACK is a confirmed no-commit; a failed ROLLBACK means the
+  // transaction's fate is unknown and the claim must be invalidated — never
+  // released, so a maybe-committed session cannot be paired with a reusable
+  // challenge.
+  s.post('/totp/authenticate', allowAnonymous(), async (req: AuthRequest, res: AuthResponse, next: AuthNext) => {
     const { challenge, token } = req.body ?? {};
     if (!challenge || !token) {
       return next({ status: 400, message: 'challenge and token are required' });
     }
     const challengeId = String(challenge);
-    const entry = loginChallengeStore.get(challengeId);
-    if (!entry) {
+
+    // 1. Reserve the challenge atomically. A racing second request for the same
+    // challenge is rejected HERE, before any SQL.
+    const claim = loginChallengeStore.reserve(challengeId);
+    if (!claim) {
       return next({ status: 400, message: 'unknown or expired challenge' });
     }
-    const userId = entry.userId;
-    const twoFactor = TwoFactor.findOne(TwoFactor.userId.is(userId));
-    if (!twoFactor || twoFactor.enabled !== 1) {
+    const userId = claim.userId;
+    const tokenValue = String(token);
+
+    // 2. Enter the write transaction and complete the second factor + mint the
+    // Session in it. The backup-code removal (one-time), the fence reset, and
+    // the Session row commit together or not at all: a valid backup code is
+    // never durably consumed unless the session actually exists, and a second
+    // concurrent submission re-reads the code under the write lock and is
+    // rejected.
+    type AuthenticateOutcome =
+      | { kind: 'ok'; session: { token: string }; username: string }
+      | { kind: 'invalid' }
+      | { kind: 'locked'; retryAfterMs: number }
+      | { kind: 'gone' };
+    let outcome: AuthenticateOutcome | undefined;
+    let commitStatus: 'committed' | 'rolled-back' | 'ambiguous' = 'ambiguous';
+    let error: unknown;
+    try {
+      begin(db);
+      // 3. Re-read the enrollment under the write lock — the authoritative row.
+      const row = TwoFactor.findOne(TwoFactor.userId.is(userId));
+      if (!row || row.enabled !== 1) {
+        outcome = { kind: 'gone' };
+      } else {
+        // 4. Verify against the authoritative hashes.
+        const settled = settleSecondFactor(row, tokenValue);
+        if (settled.kind !== 'ok') {
+          outcome = settled;
+        } else {
+          // 5. Valid factor: fence reset + one-time code removal already wrote
+          // inside this transaction; mint the Session in it too.
+          const session = Session.create({ userId });
+          const user = User.getOrFail(userId);
+          outcome = { kind: 'ok', session, username: user.username };
+        }
+      }
+      commit(db);
+      commitStatus = 'committed';
+    } catch (err) {
+      error = err;
+      try {
+        rollback(db);
+        commitStatus = 'rolled-back';
+      } catch {
+        commitStatus = 'ambiguous';
+      }
+    }
+
+    // 6. Settle the claim against the CONFIRMED transaction outcome.
+    if (commitStatus === 'ambiguous') {
+      // The driver could not confirm whether the commit landed. Fail closed:
+      // invalidate the challenge (never release it) — a session may exist, and
+      // the challenge must not be reusable either way.
+      loginChallengeStore.finalize(claim);
+      return next({ status: 500, message: 'authentication outcome could not be confirmed; please log in again' });
+    }
+    if (commitStatus === 'rolled-back') {
+      // Confirmed no-commit: release the claim, preserving the challenge and
+      // the code (both rolled back) for a retry if they are still live.
+      loginChallengeStore.release(claim);
+      const e = error as { status?: unknown; message?: string };
+      return next({ status: e.status ?? 500, message: e.message });
+    }
+    // Committed.
+    if (!outcome) {
+      // A confirmed commit with no recorded outcome is defensively unreachable
+      // (outcome is always assigned before commit), but if it ever happens a
+      // session may exist, so the challenge must not be reusable either way.
+      // Fail closed: invalidate the claim (finalize deletes it; a mismatched
+      // claim also invalidates) before surfacing the 500 — never return with
+      // the challenge left permanently reserved.
+      loginChallengeStore.finalize(claim);
+      return next({ status: 500, message: 'authentication did not settle' });
+    }
+    if (outcome.kind === 'locked') {
+      // A failed attempt under lockout still consumes one challenge attempt, so
+      // the max-attempt cap holds even when the TOTP lockout is active.
+      loginChallengeStore.fail(claim);
+      return next({ status: 429, message: 'TOTP temporarily locked', details: { retryAfterMs: outcome.retryAfterMs } });
+    }
+    if (outcome.kind === 'gone') {
+      loginChallengeStore.release(claim);
       return next({ status: 400, message: 'TOTP not enabled for this user' });
     }
-
-    // Success: consume the challenge (single-use), reset the TOTP lockout
-    // counters (reset below the CAS for backup success), and mint the session.
-    // consume is checked so a stale race cannot mint a second session.
-    const mintSession = () => {
-      if (!loginChallengeStore.consume(challengeId, userId)) {
-        return next({ status: 400, message: 'unknown or expired challenge' });
-      }
-      createSessionResponse(User.getOrFail(userId), res);
-    };
-
-    // Valid TOTP obeys the existing TOTP lockout. A valid backup code may
-    // succeed while the lockout is active (it is the recovery escape hatch).
-    const totpLock = checkLockout(twoFactor.totpLockedUntil);
-    if (totpLock) {
-      const backup = consumeBackupCode(twoFactor.id, String(token));
-      if (!backup.usedBackup) {
-        // A failed attempt under lockout still consumes one challenge attempt,
-        // so the max-attempt cap holds even when the TOTP lockout is active.
-        loginChallengeStore.registerFailure(challengeId);
-        return next({ status: 429, message: 'TOTP temporarily locked', retryAfterMs: totpLock.retryAfterMs });
-      }
-      return mintSession();
+    if (outcome.kind === 'invalid') {
+      // Invalid second factor: consume one challenge attempt, never a backup code.
+      loginChallengeStore.fail(claim);
+      return next({ status: 400, message: 'invalid token or backup code' });
     }
-
-    if (verifyTotp(twoFactor.secret, String(token))) {
-      db.prepare('UPDATE TwoFactor SET totpFailedAttempts = 0, totpLockedUntil = NULL WHERE id = ?')
-        .run(twoFactor.id);
-      return mintSession();
+    // 7. Finalize the claim, then build the response — never before. If the
+    // challenge cannot be finalized, fail closed: the session and code are
+    // committed, but no cookie is issued and the client gets no session token.
+    if (!loginChallengeStore.finalize(claim)) {
+      return next({ status: 500, message: 'login challenge could not be finalized' });
     }
-
-    const backup = consumeBackupCode(twoFactor.id, String(token));
-    if (backup.usedBackup) {
-      return mintSession();
-    }
-
-    // Invalid second factor: consume one challenge attempt, never a backup code.
-    const attempts = (twoFactor.totpFailedAttempts ?? 0) + 1;
-    const decision = totpLockoutDecision({ attempts });
-    if (decision) {
-      db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ?, totpLockedUntil = ? WHERE id = ?')
-        .run(attempts, decision.lockedUntil, twoFactor.id);
-    } else {
-      db.prepare('UPDATE TwoFactor SET totpFailedAttempts = ? WHERE id = ?')
-        .run(attempts, twoFactor.id);
-    }
-    loginChallengeStore.registerFailure(challengeId);
-    return next({ status: 400, message: 'invalid token or backup code' });
+    res.setHeader('set-cookie', sessionCookie(outcome.session.token, { secure }));
+    res.status(201).json({ user: { id: userId, username: outcome.username } });
   });
 
   return s;
