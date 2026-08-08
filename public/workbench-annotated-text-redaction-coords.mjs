@@ -1,13 +1,45 @@
-// Pure display-space walks over public recipient redaction markers
-// `{ start, end: start, placeholder }`. Zero-width at `start` in stripped text;
-// rendered placeholder occupies `placeholder.length` in the editor DOM.
+// Document-wide display↔wire coordinate mapping for recipient redaction
+// markers (issue #33 step 8). Coordinate spaces:
+//
+//   canonical  — the server text before recipient projection (not addressed
+//                here: the recipient receives the projected document only);
+//   wire       — the recipient's document.text, with redacted intervals
+//                removed;
+//   display    — the wire text as the editor renders it: each redaction
+//                placeholder occupies placeholder.length display columns at
+//                the display image of its wire start.
+//
+// A marker { start, end, placeholder } is zero-width in wire space
+// (start === end); its placeholder renders as `placeholder` text at the
+// display image of `start`. Markers must be sorted by `start`. Every function
+// is pure and redaction lists are never mutated.
 
 function displayInterval(redaction, displayed) {
   const start = redaction.start + displayed;
   return { start, end: start + redaction.placeholder.length, nextDisplayed: displayed + redaction.placeholder.length };
 }
 
-/** Map a display caret/selection offset onto wire (stripped-text) coordinates. */
+/** Wire → display. `value` is { offset, affinity? }. A wire offset that lands
+ * exactly on a placeholder start maps to its left edge ('left' affinity) or
+ * right edge ('right' affinity); a missing affinity chooses the left edge. */
+export function wireToDisplayPosition(value, redactions = []) {
+  let displayed = 0;
+  for (const redaction of redactions) {
+    if (value.offset < redaction.start) break;
+    if (value.offset === redaction.start) {
+      return {
+        ...value,
+        offset: displayed + redaction.start + (value.affinity === 'right' ? redaction.placeholder.length : 0),
+        affinity: value.affinity === 'right' ? 'right' : 'left',
+      };
+    }
+    displayed += redaction.placeholder.length;
+  }
+  return { ...value, offset: value.offset + displayed };
+}
+
+/** Display → wire. Throws TypeError when the offset is inside a placeholder
+ * (an interior is not a legal caret). */
 export function displayToWirePosition(value, redactions = []) {
   let displayed = 0;
   for (const redaction of redactions) {
@@ -42,7 +74,7 @@ export function classifyDisplayOffset(offset, redactions = []) {
   return { kind: 'plain', offset };
 }
 
-/** True when [fromOffset, toOffset] overlaps any placeholder interior/edge span. */
+/** True when [fromOffset, toOffset] (display) overlaps any placeholder interior/edge span. */
 export function selectionCrossesDisplayRedaction(fromOffset, toOffset, redactions = []) {
   let displayed = 0;
   for (const redaction of redactions) {
@@ -51,4 +83,12 @@ export function selectionCrossesDisplayRedaction(fromOffset, toOffset, redaction
     displayed = nextDisplayed;
   }
   return false;
+}
+
+/** Total display width contributed by the placeholders, to back the display
+ * length of a rendered wire text out to its wire length. */
+export function placeholderDisplayWidth(redactions = []) {
+  let total = 0;
+  for (const redaction of redactions) total += redaction.placeholder.length;
+  return total;
 }

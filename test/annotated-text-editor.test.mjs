@@ -4,8 +4,8 @@ import { JSDOM } from 'jsdom';
 
 import { bindAnnotatedTextEditor } from '../public/workbench-client.mjs';
 
-function visible(text, id = 'block-1') {
-  return { version: 1, blocks: [{ kind: 'visible', id, text }] };
+function visible(text) {
+  return { version: 1, text, ranges: [], annotations: [] };
 }
 
 function setup(text = 'Hello', document = visible(text)) {
@@ -26,32 +26,25 @@ function setup(text = 'Hello', document = visible(text)) {
   const binding = bindAnnotatedTextEditor({ element, session, onError: (error) => errors.push(error) });
   function select(from, to = from) {
     element.focus();
+    const span = element.querySelector('[data-block-id="b"]');
+    const node = span?.firstChild?.nodeType === 3 ? span.firstChild : span;
     const range = dom.window.document.createRange();
-    const node = element.firstChild?.firstChild;
     range.setStart(node, from);
     range.setEnd(node, to);
     dom.window.getSelection().removeAllRanges();
     dom.window.getSelection().addRange(range);
-  }
-  function selectBlock(blockId, from, to = from) {
-    element.focus();
-    const span = element.querySelector(`[data-block-id="${blockId}"]`);
-    const range = dom.window.document.createRange();
-    const node = span.firstChild;
-    range.setStart(node, from); range.setEnd(node, to);
-    dom.window.getSelection().removeAllRanges(); dom.window.getSelection().addRange(range);
   }
   function beforeinput(inputType, data = null, extras = {}) {
     const event = new dom.window.InputEvent('beforeinput', { bubbles: true, cancelable: true, inputType, data, ...extras });
     element.dispatchEvent(event);
     return event;
   }
-  return { dom, element, session, calls, errors, binding, select, selectBlock, beforeinput, publish(document) { session.document = document; listener?.(document); } };
+  return { dom, element, session, calls, errors, binding, select, beforeinput, publish(document) { session.document = document; listener?.(document); } };
 }
 
 const flushInput = () => new Promise((resolve) => setTimeout(resolve, 110));
 
-test('annotated editor replaces a selection within one block', async () => {
+test('annotated editor replaces a selection within the document', async () => {
   const harness = setup();
   assert.equal(harness.element.textContent, 'Hello');
   harness.select(1, 4);
@@ -60,8 +53,8 @@ test('annotated editor replaces a selection within one block', async () => {
   assert.equal(harness.element.textContent, 'Hio');
   await flushInput();
   assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'block-1', offset: 1, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 4, affinity: 'right' },
+    from: { blockId: 'b', offset: 1, affinity: 'right' },
+    to: { blockId: 'b', offset: 4, affinity: 'right' },
     text: 'i',
   });
   assert.deepEqual(harness.errors, []);
@@ -74,8 +67,8 @@ test('annotated editor backspace and forward delete preserve surrogate pairs', a
   backward.beforeinput('deleteContentBackward');
   await flushInput();
   assert.deepEqual(backward.calls[0][1], {
-    from: { blockId: 'block-1', offset: 1, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 3, affinity: 'right' },
+    from: { blockId: 'b', offset: 1, affinity: 'right' },
+    to: { blockId: 'b', offset: 3, affinity: 'right' },
     text: '',
   });
   backward.binding.close();
@@ -85,39 +78,28 @@ test('annotated editor backspace and forward delete preserve surrogate pairs', a
   forward.beforeinput('deleteContentForward');
   await flushInput();
   assert.deepEqual(forward.calls[0][1], {
-    from: { blockId: 'block-1', offset: 1, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 3, affinity: 'right' },
+    from: { blockId: 'b', offset: 1, affinity: 'right' },
+    to: { blockId: 'b', offset: 3, affinity: 'right' },
     text: '',
   });
   forward.binding.close();
 });
 
-test('annotated editor deletes into an adjacent block at a collapsed block boundary', async () => {
-  const document = { version: 1, blocks: [
-    { kind: 'visible', id: 'before', text: '12' },
-    { kind: 'visible', id: 'comment', text: '34' },
-    { kind: 'visible', id: 'after', text: '56' },
-  ] };
-  const backward = setup('', document);
-  backward.selectBlock('comment', 0);
+test('annotated editor deletes at a collapsed document boundary are no-ops', async () => {
+  const backward = setup('ab');
+  backward.select(0);
   backward.beforeinput('deleteContentBackward');
   await flushInput();
-  assert.deepEqual(backward.calls[0][1], {
-    from: { blockId: 'before', offset: 1, affinity: 'right' },
-    to: { blockId: 'before', offset: 2, affinity: 'right' },
-    text: '',
-  });
+  assert.deepEqual(backward.calls, []);
+  assert.deepEqual(backward.errors, []);
   backward.binding.close();
 
-  const forward = setup('', document);
-  forward.selectBlock('comment', 2);
+  const forward = setup('ab');
+  forward.select(2);
   forward.beforeinput('deleteContentForward');
   await flushInput();
-  assert.deepEqual(forward.calls[0][1], {
-    from: { blockId: 'after', offset: 0, affinity: 'right' },
-    to: { blockId: 'after', offset: 1, affinity: 'right' },
-    text: '',
-  });
+  assert.deepEqual(forward.calls, []);
+  assert.deepEqual(forward.errors, []);
   forward.binding.close();
 });
 
@@ -128,8 +110,8 @@ test('annotated editor deletes to the start of the line for soft and hard line b
     harness.beforeinput(inputType);
     await flushInput();
     assert.deepEqual(harness.calls[0][1], {
-      from: { blockId: 'block-1', offset: 2, affinity: 'right' },
-      to: { blockId: 'block-1', offset: 3, affinity: 'right' },
+      from: { blockId: 'b', offset: 2, affinity: 'right' },
+      to: { blockId: 'b', offset: 3, affinity: 'right' },
       text: '',
     });
     harness.binding.close();
@@ -139,8 +121,8 @@ test('annotated editor deletes to the start of the line for soft and hard line b
     emoji.beforeinput(inputType);
     await flushInput();
     assert.deepEqual(emoji.calls[0][1], {
-      from: { blockId: 'block-1', offset: 2, affinity: 'right' },
-      to: { blockId: 'block-1', offset: 5, affinity: 'right' },
+      from: { blockId: 'b', offset: 2, affinity: 'right' },
+      to: { blockId: 'b', offset: 5, affinity: 'right' },
       text: '',
     });
     emoji.binding.close();
@@ -164,8 +146,8 @@ test('annotated editor commits composition once and delegates history', async ()
   assert.equal(harness.calls.length, 1);
   assert.equal(harness.calls[0][0], 'replace');
   assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'block-1', offset: 1, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 1, affinity: 'right' },
+    from: { blockId: 'b', offset: 1, affinity: 'right' },
+    to: { blockId: 'b', offset: 1, affinity: 'right' },
     text: '語',
   });
   harness.beforeinput('historyUndo');
@@ -208,9 +190,29 @@ test('annotated editor rebases compatible buffered insertion over a foreign appe
   assert.equal(harness.element.textContent, 'aXb!');
   await flushInput();
   assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'block-1', offset: 1, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 1, affinity: 'right' },
+    from: { blockId: 'b', offset: 1, affinity: 'right' },
+    to: { blockId: 'b', offset: 1, affinity: 'right' },
     text: 'X',
+  });
+  harness.binding.close();
+});
+
+test('annotated editor preserves the caret across a compatible foreign fold while input is buffered', async () => {
+  const harness = setup('ab');
+  harness.select(1);
+  harness.beforeinput('insertText', 'X');
+  assert.equal(harness.element.textContent, 'aXb');
+  assert.deepEqual(harness.binding.getSelection(), {
+    from: { blockId: 'b', offset: 2, affinity: 'right' },
+    to: { blockId: 'b', offset: 2, affinity: 'right' },
+  });
+  // A foreign fold appends text; the draft rebases onto the foreign text and
+  // the caret stays after the locally-typed character (not at the buffer start).
+  harness.publish(visible('ab!'));
+  assert.equal(harness.element.textContent, 'aXb!');
+  assert.deepEqual(harness.binding.getSelection(), {
+    from: { blockId: 'b', offset: 2, affinity: 'right' },
+    to: { blockId: 'b', offset: 2, affinity: 'right' },
   });
   harness.binding.close();
 });
@@ -238,8 +240,8 @@ test('annotated editor preserves later typing while the preceding replacement se
   settlements.shift()();
   await flushInput();
   assert.deepEqual(harness.calls[1][1], {
-    from: { blockId: 'block-1', offset: 2, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 2, affinity: 'right' },
+    from: { blockId: 'b', offset: 2, affinity: 'right' },
+    to: { blockId: 'b', offset: 2, affinity: 'right' },
     text: 'c',
   });
   harness.element.focus();
@@ -252,8 +254,8 @@ test('annotated editor preserves later typing while the preceding replacement se
   settlements.shift()();
   await flushInput();
   assert.deepEqual(harness.calls[2][1], {
-    from: { blockId: 'block-1', offset: 3, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 3, affinity: 'right' },
+    from: { blockId: 'b', offset: 3, affinity: 'right' },
+    to: { blockId: 'b', offset: 3, affinity: 'right' },
     text: 'd',
   });
   assert.deepEqual(harness.errors, []);
@@ -284,8 +286,8 @@ test('annotated editor waits for receipt ingest before flushing a queued success
   harness.publish(visible('ab'));
   await flushInput();
   assert.deepEqual(harness.calls[1][1], {
-    from: { blockId: 'block-1', offset: 2, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 2, affinity: 'right' },
+    from: { blockId: 'b', offset: 2, affinity: 'right' },
+    to: { blockId: 'b', offset: 2, affinity: 'right' },
     text: 'c',
   });
   harness.publish(visible('abc'));
@@ -306,8 +308,8 @@ test('annotated editor folds queued typing into one composition replacement', as
 
   assert.equal(harness.calls.length, 1);
   assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'block-1', offset: 1, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 1, affinity: 'right' },
+    from: { blockId: 'b', offset: 1, affinity: 'right' },
+    to: { blockId: 'b', offset: 1, affinity: 'right' },
     text: 'b語',
   });
   harness.binding.close();
@@ -324,8 +326,8 @@ test('annotated editor rebases queued typing and composition over a compatible f
 
   assert.equal(harness.element.textContent, 'ab語c');
   assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'block-1', offset: 1, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 1, affinity: 'right' },
+    from: { blockId: 'b', offset: 1, affinity: 'right' },
+    to: { blockId: 'b', offset: 1, affinity: 'right' },
     text: 'b語',
   });
   assert.deepEqual(harness.errors, []);
@@ -400,8 +402,8 @@ test('annotated editor queues composition behind a submitted replacement', async
   settlements.shift()();
   await flushInput();
   assert.deepEqual(harness.calls[1][1], {
-    from: { blockId: 'block-1', offset: 2, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 2, affinity: 'right' },
+    from: { blockId: 'b', offset: 2, affinity: 'right' },
+    to: { blockId: 'b', offset: 2, affinity: 'right' },
     text: '語',
   });
   assert.deepEqual(harness.errors, []);
@@ -474,8 +476,8 @@ test('annotated editor submits new input from a foreign snapshot after its prede
   await flushInput();
 
   assert.deepEqual(harness.calls[1][1], {
-    from: { blockId: 'block-1', offset: 7, affinity: 'right' },
-    to: { blockId: 'block-1', offset: 7, affinity: 'right' },
+    from: { blockId: 'b', offset: 7, affinity: 'right' },
+    to: { blockId: 'b', offset: 7, affinity: 'right' },
     text: '!',
   });
   harness.binding.close();
@@ -492,91 +494,73 @@ test('annotated editor conflict errors never include buffered or document text',
   harness.binding.close();
 });
 
-test('annotated editor renders ordered visible and restricted blocks as keyed spans', () => {
-  const document = { version: 1, blocks: [
-    { kind: 'visible', id: 'left', text: 'Left' },
-    { kind: 'restricted', id: 'secret', placeholder: '[restricted]' },
-    { kind: 'visible', id: 'right', text: 'Right' },
-  ] };
-  const harness = setup('', document);
-  assert.deepEqual([...harness.element.children].map((span) => [span.dataset.blockId, span.textContent]), [
-    ['left', 'Left'], ['secret', '[restricted]'], ['right', 'Right'],
-  ]);
-  assert.equal(harness.element.querySelector('[data-block-id="secret"]').contentEditable, 'false');
+test('annotated editor fails closed when a buffered delete base reverts to a shorter prefix', () => {
+  // A transient tail (double-application reversion) collapses onto the
+  // authoritative text only for pure insertions. A buffered DELETE whose base
+  // becomes a strict prefix must fail closed instead of re-deriving offsets.
+  const harness = setup('abXc');
+  harness.select(1, 2);
+  harness.beforeinput('deleteContentBackward');
+  harness.publish(visible('abX'));
+
+  assert.deepEqual(harness.calls, []);
+  assert.equal(harness.errors[0].message, 'annotated text changed before buffered input was submitted');
   harness.binding.close();
 });
 
-test('annotated editor exposes visible annotation families and identities on their block spans', () => {
+test('annotated editor collapses a buffered insertion whose base reverts to a shorter prefix', () => {
+  const harness = setup('abc');
+  harness.select(3);
+  harness.beforeinput('insertText', 'X');
+  // The optimistic base 'abcX' reverts to the committed 'abc' (the tail never
+  // landed); the pure-insertion draft collapses and still submits exactly once.
+  harness.publish(visible('abc'));
+  harness.session.status = 'live';
+  return flushInput().then(() => {
+    assert.equal(harness.calls.length, 1);
+    assert.deepEqual(harness.calls[0][1], {
+      from: { blockId: 'b', offset: 3, affinity: 'right' },
+      to: { blockId: 'b', offset: 3, affinity: 'right' },
+      text: 'X',
+    });
+    assert.deepEqual(harness.errors, []);
+    harness.binding.close();
+  });
+});
+
+test('annotated editor renders redaction placeholders inside the one root span', () => {
   const document = {
-    version: 1,
-    blocks: [{ kind: 'visible', id: 'marked', text: 'marked', annotationIds: ['comment-1'] }],
+    version: 1, text: 'hello  world', ranges: [], annotations: [],
+    redactions: [{ start: 6, end: 6, placeholder: '[restricted]' }],
+  };
+  const harness = setup('', document);
+  assert.equal(harness.element.children.length, 1);
+  const span = harness.element.firstChild;
+  assert.equal(span.dataset.blockId, 'b');
+  assert.equal(span.contentEditable, 'true');
+  assert.equal(harness.element.textContent, 'hello [restricted] world');
+  const restricted = harness.element.querySelector('[data-restricted="true"]');
+  assert.ok(restricted);
+  assert.equal(restricted.contentEditable, 'false');
+  assert.equal(restricted.textContent, '[restricted]');
+  harness.binding.close();
+});
+
+test('annotated editor exposes annotation families and identities on interval markers', () => {
+  const document = {
+    version: 1, text: 'marked', ranges: [{ annotationId: 'comment-1', start: 0, end: 6 }],
     annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
   };
   const harness = setup('', document);
-
-  assert.equal(
-    harness.element.querySelector('[data-block-id="marked"]').dataset.annotationFamilies,
-    'comment',
-  );
-  assert.equal(
-    harness.element.querySelector('[data-block-id="marked"]').dataset.annotationIds,
-    'comment-1',
-  );
+  const marked = harness.element.querySelector('[data-annotation-ids="comment-1"]');
+  assert.equal(marked.dataset.annotationFamilies, 'comment');
+  assert.equal(marked.textContent, 'marked');
   harness.binding.close();
 });
 
-test('annotated editor routes middle and right edits with local offsets', async () => {
-  const document = { version: 1, blocks: [
-    { kind: 'visible', id: 'left', text: 'Left' },
-    { kind: 'visible', id: 'middle', text: 'Middle' },
-    { kind: 'visible', id: 'right', text: 'Right' },
-  ] };
-  const harness = setup('', document);
-  harness.selectBlock('middle', 2);
-  harness.beforeinput('insertText', 'X');
-  await flushInput();
-  harness.publish({ version: 1, blocks: [
-    { kind: 'visible', id: 'left', text: 'Left' },
-    { kind: 'visible', id: 'middle', text: 'MiXddle' },
-    { kind: 'visible', id: 'right', text: 'Right' },
-  ] });
-  harness.selectBlock('right', 1);
-  harness.beforeinput('deleteContentBackward');
-  await flushInput();
-  assert.equal(harness.calls[0][1].from.blockId, 'middle');
-  assert.equal(harness.calls[0][1].from.offset, 2);
-  assert.equal(harness.calls[1][1].from.blockId, 'right');
-  assert.deepEqual(harness.calls[1][1].from, { blockId: 'right', offset: 0, affinity: 'right' });
-  harness.binding.close();
-});
-
-test('annotated editor maps selections and rejects cross-block replacement without mutation', () => {
-  const document = { version: 1, blocks: [
-    { kind: 'visible', id: 'left', text: 'Left' },
-    { kind: 'visible', id: 'right', text: 'Right' },
-  ] };
-  const harness = setup('', document);
-  harness.selectBlock('right', 2, 4);
-  assert.deepEqual(harness.binding.getSelection(), { from: { blockId: 'right', offset: 2, affinity: 'right' }, to: { blockId: 'right', offset: 4, affinity: 'right' } });
-  const range = harness.dom.window.document.createRange();
-  range.setStart(harness.element.querySelector('[data-block-id="left"]').firstChild, 1);
-  range.setEnd(harness.element.querySelector('[data-block-id="right"]').firstChild, 2);
-  const selection = harness.dom.window.getSelection(); selection.removeAllRanges(); selection.addRange(range);
-  const before = harness.element.innerHTML;
-  harness.beforeinput('insertText', 'nope');
-  assert.equal(harness.element.innerHTML, before);
-  assert.deepEqual(harness.calls, []);
-  assert.match(harness.errors[0].message, /not yet supported atomically/);
-  harness.binding.close();
-});
-
-test('annotated editor maps a span boundary to the end of that block', () => {
-  const document = { version: 1, blocks: [
-    { kind: 'visible', id: 'left', text: 'Left' },
-    { kind: 'visible', id: 'right', text: 'Right' },
-  ] };
-  const harness = setup('', document);
-  const span = harness.element.querySelector('[data-block-id="left"]');
+test('annotated editor maps a span boundary to the end of the document', () => {
+  const harness = setup('Right');
+  const span = harness.element.querySelector('[data-block-id="b"]');
   const range = harness.dom.window.document.createRange();
   range.setStart(span, span.childNodes.length);
   range.collapse(true);
@@ -585,283 +569,123 @@ test('annotated editor maps a span boundary to the end of that block', () => {
   selection.addRange(range);
 
   assert.deepEqual(harness.binding.getSelection(), {
-    from: { blockId: 'left', offset: 4, affinity: 'right' },
-    to: { blockId: 'left', offset: 4, affinity: 'right' },
+    from: { blockId: 'b', offset: 5, affinity: 'right' },
+    to: { blockId: 'b', offset: 5, affinity: 'right' },
   });
   harness.binding.close();
 });
 
-test('annotated editor rejects selections touching restricted spans, including root boundaries', () => {
-  const document = { version: 1, blocks: [
-    { kind: 'visible', id: 'left', text: 'Left' },
-    { kind: 'restricted', id: 'secret', placeholder: '[restricted]' },
-    { kind: 'visible', id: 'right', text: 'Right' },
-  ] };
+test('annotated editor rejects selections crossing a redaction placeholder', () => {
+  const document = {
+    version: 1, text: 'hello  world', ranges: [], annotations: [],
+    redactions: [{ start: 6, end: 6, placeholder: '[restricted]' }],
+  };
   const harness = setup('', document);
-  const left = harness.element.querySelector('[data-block-id="left"]');
-  const right = harness.element.querySelector('[data-block-id="right"]');
-  const secret = harness.element.querySelector('[data-block-id="secret"]');
   const selection = harness.dom.window.getSelection();
-  const range = harness.dom.window.document.createRange();
-
-  range.setStart(left.firstChild, 4); range.setEnd(right.firstChild, 0);
-  selection.removeAllRanges(); selection.addRange(range);
+  const span = harness.element.querySelector('[data-block-id="b"]');
+  // A caret at the placeholder's left display edge maps to its wire start.
+  const before = harness.dom.window.document.createRange();
+  before.setStart(span.firstChild, 6);
+  before.collapse(true);
+  selection.removeAllRanges(); selection.addRange(before);
+  assert.deepEqual(harness.binding.getSelection(), {
+    from: { blockId: 'b', offset: 6, affinity: 'left' },
+    to: { blockId: 'b', offset: 6, affinity: 'left' },
+  });
+  // A selection spanning the placeholder maps to no valid range.
+  const crossing = harness.dom.window.document.createRange();
+  const displayPoint = (target) => {
+    let offset = 0;
+    const walker = span.ownerDocument.createTreeWalker(span, 4);
+    let node;
+    while ((node = walker.nextNode())) {
+      const next = offset + node.data.length;
+      if (target <= next) return [node, target - offset];
+      offset = next;
+    }
+    throw new Error('display offset is outside the editor');
+  };
+  const [startNode, startOffset] = displayPoint(2);
+  const [endNode, endOffset] = displayPoint(20);
+  crossing.setStart(startNode, startOffset);
+  crossing.setEnd(endNode, endOffset);
+  selection.removeAllRanges(); selection.addRange(crossing);
   assert.equal(harness.binding.getSelection(), null);
-  range.setStart(harness.element, 1); range.collapse(true);
-  selection.removeAllRanges(); selection.addRange(range);
+  // A caret inside the placeholder is not a legal position.
+  const restricted = harness.element.querySelector('[data-restricted="true"]');
+  const interior = harness.dom.window.document.createRange();
+  interior.setStart(restricted.firstChild, 2);
+  interior.collapse(true);
+  selection.removeAllRanges(); selection.addRange(interior);
   assert.equal(harness.binding.getSelection(), null);
-  range.setStart(secret, 0); range.collapse(true);
-  selection.removeAllRanges(); selection.addRange(range);
-  assert.equal(harness.binding.getSelection(), null);
   harness.binding.close();
 });
 
-test('annotated editor fails closed when another block is edited while one is pending', async () => {
-  const document = { version: 1, blocks: [
-    { kind: 'visible', id: 'left', text: 'Left' },
-    { kind: 'visible', id: 'right', text: 'Right' },
-  ] };
-  const harness = setup('', document);
-  harness.selectBlock('left', 4);
-  harness.beforeinput('insertText', '!');
-  harness.selectBlock('right', 5);
-  const before = harness.element.innerHTML;
-  const event = harness.beforeinput('insertText', '?');
-  assert.equal(event.defaultPrevented, true);
-  assert.equal(harness.element.innerHTML, before);
-  assert.equal(harness.calls.length, 0);
-  assert.match(harness.errors.at(-1).message, /another block/);
-  harness.binding.close();
-});
-
-test('annotated editor reverts cross-block composition while another block is pending', () => {
-  const document = { version: 1, blocks: [
-    { kind: 'visible', id: 'left', text: 'Left' },
-    { kind: 'visible', id: 'right', text: 'Right' },
-  ] };
-  const harness = setup('', document);
-  harness.selectBlock('left', 4);
-  harness.beforeinput('insertText', '!');
-  harness.selectBlock('right', 2, 4);
-  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionstart', { bubbles: true, cancelable: true }));
-  harness.element.querySelector('[data-block-id="right"]').firstChild.textContent = 'R語ght';
-  harness.element.dispatchEvent(new harness.dom.window.CompositionEvent('compositionend', { bubbles: true, data: '語' }));
-  assert.equal(harness.element.textContent, 'Left!Right');
-  assert.equal(harness.calls.length, 1);
-  assert.equal(harness.calls[0][1].from.blockId, 'left');
-  harness.binding.close();
-});
-
-test('annotated editor preserves a buffered block when another block changes', () => {
-  const document = { version: 1, blocks: [
-    { kind: 'visible', id: 'left', text: 'Left' },
-    { kind: 'visible', id: 'right', text: 'Right' },
-  ] };
-  const harness = setup('', document);
-  harness.selectBlock('right', 5);
-  harness.beforeinput('insertText', '!');
-  harness.publish({ version: 1, blocks: [
-    { kind: 'visible', id: 'left', text: 'Changed' },
-    { kind: 'visible', id: 'right', text: 'Right' },
-  ] });
-
-  assert.equal(harness.element.textContent, 'ChangedRight!');
-  assert.deepEqual(harness.errors, []);
-  harness.binding.close();
-});
-
-test('annotated editor fails closed when its buffered block disappears', () => {
+test('annotated editor fails closed when an incompatible foreign change arrives while input is buffered', () => {
   const harness = setup('Right');
   harness.select(5);
   harness.beforeinput('insertText', '!');
-  harness.publish({ version: 1, blocks: [{ kind: 'visible', id: 'replacement', text: 'Other' }] });
+  harness.publish(visible('foreign replacement'));
 
-  assert.equal(harness.element.textContent, 'Other');
+  assert.equal(harness.element.textContent, 'foreign replacement');
   assert.equal(harness.element.getAttribute('aria-busy'), 'false');
   assert.match(harness.errors[0].message, /changed before buffered input/);
+  harness.binding.close();
+});
+
+test('annotated editor optimistically empties the document and keeps the one root span', async () => {
+  const harness = setup('ab');
+  harness.session.status = 'live';
+  harness.select(2);
+  harness.beforeinput('deleteContentBackward');
+  harness.element.focus();
+  harness.select(1);
+  harness.beforeinput('deleteContentBackward');
+  assert.equal(harness.element.textContent, '');
+  assert.equal(harness.element.querySelectorAll('[data-block-id="b"]').length, 1);
+  await flushInput();
+  assert.ok(harness.calls.length >= 1, 'emptying the document submits a delete');
+  harness.publish(visible(''));
+  await flushInput();
+  assert.deepEqual(harness.errors, []);
   harness.binding.close();
 });
 
 function annotatedDocument() {
   return {
     version: 1,
-    blocks: [
-      { kind: 'visible', id: 'b1', text: 'ab', annotationIds: ['ann-1'] },
-      { kind: 'visible', id: 'b2', text: 'cd', annotationIds: ['ann-1', 'ann-2'] },
-      { kind: 'visible', id: 'b3', text: 'ef' },
+    text: 'abcdef',
+    ranges: [
+      { annotationId: 'ann-1', start: 0, end: 4 },
+      { annotationId: 'ann-2', start: 2, end: 6 },
     ],
     annotations: [
-      { id: 'ann-1', family: 'comment' },
-      { id: 'ann-2', family: 'comment' },
+      { id: 'ann-1', family: 'comment', fields: {} },
+      { id: 'ann-2', family: 'comment', fields: {} },
     ],
   };
 }
 
-test('annotated editor optimistically prunes an emptied block and continues backspace', async () => {
-  const document = {
-    version: 1,
-    blocks: [
-      { kind: 'visible', id: 'marked', text: '56', annotationIds: ['comment-1'] },
-      { kind: 'visible', id: 'after', text: 'x' },
-    ],
-    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
-  };
-  const harness = setup('', document);
-  harness.session.status = 'live';
-  const settlements = [];
-  harness.session.replace = async (input) => {
-    harness.calls.push(['replace', input]);
-    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settlements.push(resolve); }) } };
-  };
-
-  harness.selectBlock('after', 1);
-  harness.beforeinput('deleteContentBackward');
-  assert.equal(harness.element.querySelector('[data-block-id="after"]'), null);
-  assert.equal(harness.element.textContent, '56');
-  assert.equal(harness.binding.getSelection()?.from.blockId, 'marked');
-  await flushInput();
-  assert.equal(harness.calls.length, 1);
-  assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'after', offset: 0, affinity: 'right' },
-    to: { blockId: 'after', offset: 1, affinity: 'right' },
-    text: '',
-  });
-
-  // Empty draft does not lock the neighbor — next backspace applies immediately.
-  harness.beforeinput('deleteContentBackward');
-  assert.deepEqual(harness.errors, []);
-  assert.equal(harness.element.textContent, '5');
-  await flushInput();
-  assert.equal(harness.calls.length, 1, 'neighbor edit stays queued until predecessor settles');
-
-  harness.publish({
-    version: 1,
-    blocks: [
-      { kind: 'visible', id: 'marked', text: '56', annotationIds: ['comment-1'] },
-    ],
-    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
-  });
-  settlements.shift()?.();
-  await flushInput();
-  await flushInput();
-
-  assert.deepEqual(harness.errors, []);
-  assert.equal(harness.calls.length, 2);
-  assert.deepEqual(harness.calls[1][1], {
-    from: { blockId: 'marked', offset: 1, affinity: 'right' },
-    to: { blockId: 'marked', offset: 2, affinity: 'right' },
-    text: '',
-  });
-  harness.binding.close();
-});
-
-test('annotated editor follows insert-block when boundary typing leaves the annotated block', async () => {
-  const marked = {
-    version: 1,
-    blocks: [
-      { kind: 'visible', id: 'prefix', text: '12345678' },
-      { kind: 'visible', id: 'marked', text: '90', annotationIds: ['comment-1'] },
-    ],
-    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
-  };
-  const harness = setup('', marked);
-  harness.session.status = 'live';
-  let settle;
-  harness.session.replace = async (input) => {
-    harness.calls.push(['replace', input]);
-    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settle = resolve; }) } };
-  };
-
-  harness.selectBlock('marked', 2);
-  harness.beforeinput('insertText', 'x');
-  assert.equal(harness.element.textContent, '1234567890x');
-  await flushInput();
-  assert.deepEqual(harness.calls[0][1], {
-    from: { blockId: 'marked', offset: 2, affinity: 'right' },
-    to: { blockId: 'marked', offset: 2, affinity: 'right' },
-    text: 'x',
-  });
-
-  harness.publish({
-    version: 1,
-    blocks: [
-      { kind: 'visible', id: 'prefix', text: '12345678' },
-      { kind: 'visible', id: 'marked', text: '90', annotationIds: ['comment-1'] },
-      { kind: 'visible', id: 'after', text: 'x' },
-    ],
-    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
-  });
-  settle();
-  await flushInput();
-
-  assert.deepEqual(harness.errors, []);
-  assert.equal(harness.element.textContent, '1234567890x');
-  assert.equal(harness.element.querySelector('[data-block-id="marked"]').textContent, '90');
-  assert.equal(harness.element.querySelector('[data-block-id="after"]').textContent, 'x');
-  assert.deepEqual(harness.binding.getSelection(), {
-    from: { blockId: 'after', offset: 1, affinity: 'right' },
-    to: { blockId: 'after', offset: 1, affinity: 'right' },
-  });
-
-  harness.beforeinput('insertText', 'y');
-  await flushInput();
-  assert.deepEqual(harness.errors, []);
-  assert.equal(harness.calls[1][1].from.blockId, 'after');
-  assert.equal(harness.calls[1][1].text, 'y');
-  harness.binding.close();
-});
-
-test('annotated editor follows insert-block before an annotated block', async () => {
-  const marked = {
-    version: 1,
-    blocks: [
-      { kind: 'visible', id: 'marked', text: '34', annotationIds: ['comment-1'] },
-    ],
-    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
-  };
-  const harness = setup('', marked);
-  harness.session.status = 'live';
-  let settle;
-  harness.session.replace = async (input) => {
-    harness.calls.push(['replace', input]);
-    return { ok: true, settlement: { wait: () => new Promise((resolve) => { settle = resolve; }) } };
-  };
-
-  harness.selectBlock('marked', 0);
-  harness.beforeinput('insertText', 'L');
-  await flushInput();
-  harness.publish({
-    version: 1,
-    blocks: [
-      { kind: 'visible', id: 'before', text: 'L' },
-      { kind: 'visible', id: 'marked', text: '34', annotationIds: ['comment-1'] },
-    ],
-    annotations: [{ id: 'comment-1', family: 'comment', fields: {} }],
-  });
-  settle();
-  await flushInput();
-
-  assert.deepEqual(harness.errors, []);
-  assert.equal(harness.element.textContent, 'L34');
-  assert.deepEqual(harness.binding.getSelection()?.from.blockId, 'before');
-  harness.binding.close();
-});
+function markerSpans(element) {
+  return [...element.querySelectorAll('[data-annotation-ids]')];
+}
 
 test('setAnnotationHighlight toggles data-active-annotation on matching spans only', () => {
   const harness = setup('', annotatedDocument());
-  const b1 = harness.element.querySelector('[data-block-id="b1"]');
-  const b2 = harness.element.querySelector('[data-block-id="b2"]');
-  const b3 = harness.element.querySelector('[data-block-id="b3"]');
+  const onlyAnn1 = markerSpans(harness.element).find((span) => span.textContent === 'ab');
+  const overlap = markerSpans(harness.element).find((span) => span.textContent === 'cd');
+  const onlyAnn2 = markerSpans(harness.element).find((span) => span.textContent === 'ef');
+  assert.ok(onlyAnn1 && overlap && onlyAnn2);
 
   harness.binding.setAnnotationHighlight('ann-1', true);
-  assert.equal(b1.dataset.activeAnnotation, 'true');
-  assert.equal(b2.dataset.activeAnnotation, 'true');
-  assert.equal(b3.hasAttribute('data-active-annotation'), false);
+  assert.equal(onlyAnn1.dataset.activeAnnotation, 'true');
+  assert.equal(overlap.dataset.activeAnnotation, 'true');
+  assert.equal(onlyAnn2.hasAttribute('data-active-annotation'), false);
 
   harness.binding.setAnnotationHighlight('ann-1', false);
-  assert.equal(b1.hasAttribute('data-active-annotation'), false);
-  assert.equal(b2.hasAttribute('data-active-annotation'), false);
-  assert.equal(b3.hasAttribute('data-active-annotation'), false);
+  assert.equal(onlyAnn1.hasAttribute('data-active-annotation'), false);
+  assert.equal(overlap.hasAttribute('data-active-annotation'), false);
+  assert.equal(onlyAnn2.hasAttribute('data-active-annotation'), false);
   harness.binding.close();
 });
 
@@ -879,12 +703,12 @@ test('selectAnnotation selects the contiguous range across all matching spans', 
   const selection = harness.dom.window.getSelection();
   assert.equal(selection.rangeCount, 1);
   const range = selection.getRangeAt(0);
-  const b1 = harness.element.querySelector('[data-block-id="b1"]');
-  const b2 = harness.element.querySelector('[data-block-id="b2"]');
-  assert.equal(range.startContainer, b1.firstChild);
+  const onlyAnn1 = markerSpans(harness.element).find((span) => span.textContent === 'ab');
+  const overlap = markerSpans(harness.element).find((span) => span.textContent === 'cd');
+  assert.equal(range.startContainer, onlyAnn1.firstChild);
   assert.equal(range.startOffset, 0);
-  assert.equal(range.endContainer, b2.firstChild);
-  assert.equal(range.endOffset, b2.firstChild.data.length);
+  assert.equal(range.endContainer, overlap.firstChild);
+  assert.equal(range.endOffset, overlap.firstChild.data.length);
   assert.equal(harness.element.ownerDocument.activeElement, harness.element);
   harness.binding.close();
 });
@@ -901,10 +725,10 @@ test('selectAnnotation is a no-op for an unknown annotation id', () => {
 
 test('annotation helpers fail closed after close', () => {
   const harness = setup('', annotatedDocument());
-  const b1 = harness.element.querySelector('[data-block-id="b1"]');
+  const onlyAnn1 = markerSpans(harness.element).find((span) => span.textContent === 'ab');
   harness.binding.close();
   harness.binding.setAnnotationHighlight('ann-1', true);
-  assert.equal(b1.hasAttribute('data-active-annotation'), false);
+  assert.equal(onlyAnn1.hasAttribute('data-active-annotation'), false);
   harness.binding.selectAnnotation('ann-1');
   assert.equal(harness.dom.window.getSelection().rangeCount, 0);
 });

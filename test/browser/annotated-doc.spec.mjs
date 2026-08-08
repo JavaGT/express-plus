@@ -859,6 +859,11 @@ test('a confidential span shows the real text to the owner and a redacted placeh
   await readerEditor.pressSequentially('X', { delay: 0 });
   await expect(readerEditor).toHaveText('hello [restricted] world');
   await expect.poll(() => readerErrors).toContainEqual(expect.stringContaining('redacted'));
+  // The failed reader edit never submitted an action: the owner still sees the
+  // original text after a fresh load.
+  await page.reload();
+  await openDocument(page, id);
+  await expect(page.locator('#editor')).toHaveText('hello secret world');
   await context.close();
 });
 
@@ -897,6 +902,9 @@ test('IME composition inside a comment grows the comment range and persists', as
   const { id, editor, marked } = await createCommentedDocument(page, { text: '1234567890', from: 3, to: 5 });
   // The comment covers '45'. Compose between '4' and '5' (caret at marked
   // offset 1): the marked span becomes '4語5' and the range grows with it.
+  // A real IME fires insertCompositionText beforeinput during the composition;
+  // the editor ignores those and consumes compositionstart/end around the DOM
+  // text change, which is exactly the path exercised here.
   await marked.evaluate((element) => {
     const range = document.createRange();
     range.setStart(element.firstChild, 1);
@@ -905,6 +913,9 @@ test('IME composition inside a comment grows the comment range and persists', as
     selection.removeAllRanges();
     selection.addRange(range);
     element.dispatchEvent(new CompositionEvent('compositionstart', { bubbles: true, cancelable: true }));
+    element.dispatchEvent(new InputEvent('beforeinput', {
+      bubbles: true, cancelable: true, inputType: 'insertCompositionText', data: '語',
+    }));
     element.firstChild.data = '4語5';
     element.dispatchEvent(new CompositionEvent('compositionend', { bubbles: true, data: '語' }));
   });
