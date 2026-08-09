@@ -113,7 +113,7 @@ function wireDocumentOf(span) {
  * The document is ONE `text` with absolute `ranges` and document-wide
  * `redactions`; the editor renders one contentEditable root span and reads
  * caret/selection/edit offsets through the wire↔display coordinate module. */
-export function bindAnnotatedTextEditor({ element, session, onError = () => {} }) {
+export function bindAnnotatedTextEditor({ element, session, onError = () => {}, caretLayer }) {
   if (!element || typeof element.addEventListener !== 'function') throw new TypeError('annotated text editor requires an element');
   if (!session || typeof session.subscribe !== 'function' || typeof session.replace !== 'function') throw new TypeError('annotated text editor requires a session');
   if (typeof onError !== 'function') throw new TypeError('annotated text editor onError must be a function');
@@ -127,6 +127,28 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
   let submitting = false;
   let blockedComposition = false;
   let historyInputHandled = false;
+
+  // Recipient-projected caret presence (issue #9). The surface is OPTIONAL and
+  // binds only when the host passes a `caretLayer` element AND the session
+  // exposes the caret methods; an editor bound to a caret-less session (or no
+  // layer) behaves exactly as before.
+  const hasCaretSurface = Boolean(
+    caretLayer
+    && typeof caretLayer.appendChild === 'function'
+    && typeof session.publishCaret === 'function'
+    && typeof session.clearCaret === 'function'
+    && typeof session.onCaret === 'function',
+  );
+  const CARET_THROTTLE_MS = 100;
+  let caretActive = false;
+  let caretFrame = null;
+  let caretTimer = null;
+  let caretThrottle = null;
+  let caretSentOffset = null;
+  let caretLastSentAt = 0;
+  let caretWasLive = isLive();
+  const caretBars = new Map();
+  let unsubscribeCaret = null;
 
   // The markers the editor is currently showing: an active optimistic draft
   // carries its own (placeholder positions move with adjacent edits), otherwise
@@ -299,6 +321,221 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
+  }
+
+  // --- Recipient-projected caret plumbing (issue #9) ---
+  //
+  // LOCAL presence: publish the collapsed caret while the editor is focused
+  // and the session is live; retract on blur, close, lost visibility, or any
+  // session status that leaves 'live'. Publishes are deduped by offset,
+  // coalesced to one per frame (requestAnimationFrame with a setTimeout(0)
+  // fallback for hosts without rAF, e.g. jsdom), and throttled to ~100ms for
+  // continuous moves; focus publishes immediately. A failed send (offline)
+  // never marks the offset as sent, so the next trigger retries.
+  // REMOTE presence: every validated annotated-text-caret frame keys a
+  // decoration by presence. Carets are vertical bars at the display image of
+  // their wire offset; restricted recipients render an opaque edge at the
+  // container start. Bars live in `caretLayer` — NEVER inside the container
+  // span, so they never enter wireDocumentOf, drafts, or history and never
+  // alter text or selection — and are repositioned after every render and on
+  // layer/element scroll and window resize.
+
+  function caretDocumentHidden() {
+    return element.ownerDocument.visibilityState === 'hidden';
+  }
+
+  function caretClearLocal() {
+    if (!hasCaretSurface || closed) return;
+    caretSentOffset = null;
+    caretLastSentAt = 0;
+    try { session.clearCaret(); } catch { /* isolated */ }
+  }
+
+  function publishCaretOffset(offset, now) {
+    try {
+      if (session.publishCaret({ offset })) {
+        caretSentOffset = offset;
+        caretLastSentAt = now;
+      }
+    } catch { /* isolated */ }
+  }
+
+  function caretPublish(immediate = false) {
+    if (!hasCaretSurface || closed) return;
+    if (!caretActive || !isLive() || caretDocumentHidden()) return;
+    const selection = getSelection();
+    if (!selection || selection.from.offset !== selection.to.offset) return;
+    const offset = selection.from.offset;
+    if (offset === caretSentOffset) return;
+    const now = Date.now();
+    if (immediate || now - caretLastSentAt >= CARET_THROTTLE_MS) {
+      publishCaretOffset(offset, now);
+      return;
+    }
+    if (caretThrottle != null) return;
+    caretThrottle = setTimeout(() => {
+      caretThrottle = null;
+      if (!closed) caretPublish();
+    }, CARET_THROTTLE_MS - (now - caretLastSentAt));
+  }
+
+  function caretScheduleFlush() {
+    if (!hasCaretSurface || closed) return;
+    if (caretFrame != null || caretTimer != null) return;
+    const view = element.ownerDocument.defaultView;
+    if (view && typeof view.requestAnimationFrame === 'function') {
+      caretFrame = view.requestAnimationFrame(() => {
+        caretFrame = null;
+        caretPublish();
+      });
+    } else {
+      caretTimer = setTimeout(() => {
+        caretTimer = null;
+        caretPublish();
+      }, 0);
+    }
+  }
+
+  function caretCheckStatus() {
+    if (!hasCaretSurface || closed) return;
+    const live = isLive();
+    if (live === caretWasLive) return;
+    caretWasLive = live;
+    if (!live) {
+      caretClearLocal();
+    } else if (caretActive) {
+      caretPublish(true);
+    }
+  }
+
+  function handleCaretFocus() {
+    if (!hasCaretSurface || closed) return;
+    caretActive = true;
+    caretSentOffset = null;
+    caretPublish(true);
+  }
+
+  function handleCaretBlur() {
+    if (!hasCaretSurface || closed) return;
+    caretActive = false;
+    if (caretThrottle != null) {
+      clearTimeout(caretThrottle);
+      caretThrottle = null;
+    }
+    caretClearLocal();
+  }
+
+  function handleSelectionChange() {
+    caretScheduleFlush();
+  }
+
+  function handleCaretVisibility() {
+    if (caretDocumentHidden()) caretClearLocal();
+  }
+
+  function handleCaretFrame(frame) {
+    if (closed) return;
+    const change = frame?.change;
+    if (!change || typeof change !== 'object') return;
+    const presence = change.value?.presence ?? change.presence;
+    if (typeof presence !== 'string' || presence === '') return;
+    if (change.op === 'upsert') {
+      const value = change.value;
+      if (!value || typeof value !== 'object') return;
+      if (value.kind === 'caret') upsertCaretBar(presence, 'caret', value.offset);
+      else if (value.kind === 'edge') upsertCaretBar(presence, 'edge', null);
+    } else if (change.op === 'remove') {
+      removeCaretBar(presence);
+    }
+  }
+
+  function caretBarFor(presence) {
+    let bar = caretBars.get(presence);
+    if (bar) return bar;
+    bar = caretLayer.ownerDocument.createElement('div');
+    bar.dataset.presence = presence;
+    bar.dataset.kind = 'caret';
+    bar.setAttribute('contenteditable', 'false');
+    bar.style.position = 'absolute';
+    bar.style.pointerEvents = 'none';
+    caretLayer.appendChild(bar);
+    caretBars.set(presence, bar);
+    return bar;
+  }
+
+  function upsertCaretBar(presence, kind, offset) {
+    const bar = caretBarFor(presence);
+    bar.dataset.kind = kind;
+    if (kind === 'caret' && Number.isSafeInteger(offset) && offset >= 0) {
+      bar.dataset.offset = String(offset);
+      bar.__displayOffset = wireToDisplayPosition({ offset, affinity: 'left' }, currentRedactions()).offset;
+    } else {
+      delete bar.dataset.offset;
+      bar.__displayOffset = null;
+    }
+    repositionCaretBars();
+  }
+
+  function removeCaretBar(presence) {
+    const bar = caretBars.get(presence);
+    if (!bar) return;
+    bar.remove();
+    caretBars.delete(presence);
+  }
+
+  function clearRemoteCaretBars() {
+    for (const bar of caretBars.values()) bar.remove();
+    caretBars.clear();
+  }
+
+  function caretDisplayPoint(displayOffset) {
+    const span = rootSpan(element);
+    if (!span) return null;
+    const displayLength = (span.textContent ?? '').length;
+    let target = null;
+    let nodeOffset = 0;
+    let remaining = Math.max(0, Math.min(displayOffset, displayLength));
+    const walker = textWalker(span);
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      if (remaining <= node.data.length) {
+        target = node;
+        nodeOffset = remaining;
+        break;
+      }
+      remaining -= node.data.length;
+    }
+    if (target === null) {
+      target = span;
+      nodeOffset = 0;
+    }
+    const range = element.ownerDocument.createRange();
+    range.setStart(target, nodeOffset);
+    range.collapse(true);
+    if (typeof range.getClientRects === 'function') {
+      return range.getClientRects()[0] ?? null;
+    }
+    const rect = typeof range.getBoundingClientRect === 'function' ? range.getBoundingClientRect() : null;
+    return rect && !Number.isNaN(rect.left) && !Number.isNaN(rect.top) ? rect : null;
+  }
+
+  function repositionCaretBars() {
+    if (!hasCaretSurface || closed) return;
+    let layerRect = null;
+    try { layerRect = caretLayer.getBoundingClientRect(); } catch { /* ignore */ }
+    for (const bar of caretBars.values()) {
+      if (bar.__displayOffset == null) {
+        // An opaque edge has no offset: pin it to the container's start.
+        bar.style.left = '0px';
+        bar.style.top = '0px';
+        continue;
+      }
+      if (!layerRect) continue;
+      const rect = caretDisplayPoint(bar.__displayOffset);
+      if (!rect) continue;
+      bar.style.left = `${rect.left - layerRect.left}px`;
+      bar.style.top = `${rect.top - layerRect.top}px`;
+    }
   }
 
   /**
@@ -555,6 +792,9 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     if (closed || composing) return;
     if (!document) {
       for (const child of [...element.children]) child.remove();
+      caretCheckStatus();
+      caretClearLocal();
+      clearRemoteCaretBars();
       return;
     }
     const current = document ?? session.document;
@@ -637,6 +877,12 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
     if (!queued && !submitted && !submitting) {
       element.setAttribute('aria-busy', 'false');
     }
+    // A render may have restored or moved the caret (edits, remote folds, the
+    // re-placement after a DOM repaint) — reflect the collapsed caret on the
+    // wire so peers see typing in progress.
+    caretCheckStatus();
+    caretScheduleFlush();
+    repositionCaretBars();
   }
 
   function report(work) {
@@ -907,6 +1153,16 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
   element.addEventListener('compositionend', compositionEnd);
   element.addEventListener('keydown', keyDown);
   const unsubscribe = session.subscribe(render);
+  if (hasCaretSurface) {
+    unsubscribeCaret = session.onCaret(handleCaretFrame);
+    element.addEventListener('focus', handleCaretFocus);
+    element.addEventListener('blur', handleCaretBlur);
+    element.ownerDocument.addEventListener('selectionchange', handleSelectionChange);
+    element.ownerDocument.addEventListener('visibilitychange', handleCaretVisibility);
+    caretLayer.addEventListener('scroll', repositionCaretBars);
+    element.addEventListener('scroll', repositionCaretBars);
+    element.ownerDocument.defaultView?.addEventListener('resize', repositionCaretBars);
+  }
   render();
 
   return Object.freeze({
@@ -919,6 +1175,31 @@ export function bindAnnotatedTextEditor({ element, session, onError = () => {} }
       closed = true;
       clearTimeout(queuedTimer);
       unsubscribe();
+      if (unsubscribeCaret) unsubscribeCaret();
+      if (hasCaretSurface) {
+        // Best-effort retraction and decoration teardown before listeners go.
+        try { session.clearCaret(); } catch { /* best effort */ }
+        clearRemoteCaretBars();
+        if (caretThrottle != null) {
+          clearTimeout(caretThrottle);
+          caretThrottle = null;
+        }
+        if (caretFrame != null) {
+          element.ownerDocument.defaultView?.cancelAnimationFrame?.(caretFrame);
+          caretFrame = null;
+        }
+        if (caretTimer != null) {
+          clearTimeout(caretTimer);
+          caretTimer = null;
+        }
+        element.removeEventListener('focus', handleCaretFocus);
+        element.removeEventListener('blur', handleCaretBlur);
+        element.ownerDocument.removeEventListener('selectionchange', handleSelectionChange);
+        element.ownerDocument.removeEventListener('visibilitychange', handleCaretVisibility);
+        caretLayer.removeEventListener('scroll', repositionCaretBars);
+        element.removeEventListener('scroll', repositionCaretBars);
+        element.ownerDocument.defaultView?.removeEventListener('resize', repositionCaretBars);
+      }
       element.removeEventListener('beforeinput', beforeInput);
       element.removeEventListener('compositionstart', compositionStart);
       element.removeEventListener('compositionend', compositionEnd);

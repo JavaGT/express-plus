@@ -3,10 +3,11 @@
 // One factory: createLiveDelivery(httpServer, opts) →
 //   { count, close, createConsumer, wake }
 //
-// Owns: WS upgrade, connection lifecycle, fan-out, subscribe admission (via
-// LiveConnection), per-commit authz row latch (createConsumer), and the
-// committed-event delivery core (live-delivery-core). Kernel only registers the
-// consumer this seam contributes when app.live is engaged.
+// Owns: the committed-event delivery core (live-delivery-core), the shared
+// envelope builder, and the consumer seam the kernel registers. The WebSocket
+// upgrade, connection lifecycle, ephemeral fan-out, and caret presence are
+// delegated to the extracted transport (live-delivery-websocket) over this
+// seam's own core — one committed authority, transport is a skin.
 //
 // The committed post-commit consumer (createConsumer) only wakes core; the core
 // re-reads the _Log, re-authorises, projects, and delivers to WebSocket
@@ -20,18 +21,12 @@
 // private implementation of this seam — callers do not import them for wiring.
 
                                                          
-                                          
 
-import { upgradeWebSocket } from './websocket.mjs';
-import { isSameOriginRequest } from './middleware.mjs';
-import { createLiveFanout } from './live-fanout.mjs';
-                                                                                    
 import { createLiveDeliveryCore } from './live-delivery-core.mjs';
                                                                                     
 import { createLiveEnvelopeBuilder } from './live-delivery-envelope.mjs';
-import { LiveConnection } from './live-connection.mjs';
-import { createAnnotatedTextCaretLive } from './annotated-text-caret-live.mjs';
-import { readSeq } from './cursor.mjs';
+import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
+
                                                 
                                              
                                                      
@@ -67,14 +62,6 @@ export function createLiveDelivery(httpServer        , {
                                  
                             
   = {}) {
-  const fanout                   = createLiveFanout({ mayVerb });
-  const carets = createAnnotatedTextCaretLive({ db: db         , resolveEntity: resolveEntity         , mayVerb: mayVerb         , fanout });
-  const connections = new Set                ();
-  const pendingUpgrades = new Set        ();
-  let closed = false;
-
-  const currentSeq = (scope        ) => readSeq(db, scope);
-
   // Shared envelope builder — one delta projector for the whole delivery seam.
   const envelopeBuilder = createLiveEnvelopeBuilder();
 
@@ -89,85 +76,33 @@ export function createLiveDelivery(httpServer        , {
     log,
   });
 
+  // The WebSocket transport is a pure upgrade skin over the SAME core. It owns
+  // its own ephemeral fan-out and caret presence; the committed authority stays
+  // here with the envelope builder.
+  const wsTransport = createLiveDeliveryWebSocket(httpServer, {
+    path,
+    core,
+    principalOf,
+    resolveEntity,
+    mayVerb,
+    db,
+    ready,
+    log,
+  });
+
   function count()         {
-    return connections.size;
+    return wsTransport.count();
   }
 
-  function close()       {
-    closed = true;
+  async function close()                {
     core.close();
     envelopeBuilder.clear();
-    for (const socket of pendingUpgrades) socket.destroy();
-    pendingUpgrades.clear();
-    for (const conn of connections) {
-      try { conn.close?.(); } catch { /* ignore */ }
-    }
-    connections.clear();
-    fanout.close();
+    await wsTransport.close();
   }
 
   function wake(scope        )       {
     core.wake(scope);
   }
-
-  httpServer.on('upgrade', (req, socket, _head) => {
-    const url = req.url ? new URL(req.url, 'http://localhost') : { pathname: '' };
-    if (url.pathname !== path) {
-      socket.destroy();
-      return;
-    }
-
-    // CSWSH defense — same same-origin verdict as REST CSRF (middleware.mjs).
-    if (!isSameOriginRequest(req)) {
-      socket.destroy();
-      return;
-    }
-
-    if (closed) {
-      socket.destroy();
-      return;
-    }
-
-    // HTTP requests and WebSocket subscriptions share one application-start
-    // barrier. Keep the raw socket outside the connection registry until the
-    // schema, Kernel, recovery, and admission engine are ready. A failed start
-    // fails closed; shutdown destroys sockets waiting at this barrier.
-    pendingUpgrades.add(socket);
-    Promise.resolve()
-      .then(() => ready())
-      .then(() => {
-        pendingUpgrades.delete(socket);
-        if (closed || socket.destroyed) {
-          socket.destroy();
-          return;
-        }
-
-        const result = upgradeWebSocket(req, socket);
-        if (!result) {
-          socket.destroy();
-          return;
-        }
-
-        const id = `ws:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
-        const conn = new LiveConnection(socket, id, {
-          fanout,
-          core,
-          resolveEntity,
-          mayVerb,
-          db,
-          currentSeq,
-          log,
-          carets,
-          onClose: () => connections.delete(conn),
-        });
-        conn.setPrincipal(principalOf(req)                        );
-        connections.add(conn);
-      })
-      .catch(() => {
-        pendingUpgrades.delete(socket);
-        socket.destroy();
-      });
-  });
 
   /**
    * Post-commit consumer for the durable pipeline. Only wakes the core — the

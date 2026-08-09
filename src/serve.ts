@@ -511,6 +511,13 @@ export function listen(app: any, port: any, optionsOrCallback: any = {}) {
 
   // Live Delivery is a durable _Log consumer, so a headless HTTP application
   // has no delivery seam to attach. DB-backed apps retain the single seam.
+  // One authority per app: an application-integrated delivery owns BOTH
+  // transports (the SSE handler is routed above, the WebSocket transport is
+  // mounted here) over its shared core; an app without its own delivery gets
+  // the framework seam. The old `!app._applicationLiveDelivery` skip left
+  // app-integrated apps without any WebSocket upgrade path — a browser
+  // WebSocket handshake degraded into an ordinary GET and 400'd against the
+  // SSE handler.
   if (app.db && !app._applicationLiveDelivery) {
     app.live = createLiveDelivery(httpServer, {
       path: '/events',
@@ -521,6 +528,8 @@ export function listen(app: any, port: any, optionsOrCallback: any = {}) {
       ready: () => app.ready,
       log: app.log,
     } as any);
+  } else if (app.db && app._applicationLiveDelivery) {
+    app._applicationLiveDelivery.mountWebSocket(httpServer);
   }
   app._transportAttached = true;
 

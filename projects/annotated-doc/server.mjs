@@ -19,6 +19,7 @@ import workbench, {
   annotatedTextRetireAction,
   annotation,
   entity,
+  ephemeral,
   everyone,
   grant,
   protectingAnnotation,
@@ -46,9 +47,15 @@ export const Project = entity('Project', {
 export const Doc = entity('Doc', {
   project: ref('Project'),
   owner: ref('User', { role: 'owner' }),
+  // Ephemeral recipient-projected caret presence. The annotatedText field
+  // declares the `caret` cell of this side-table; it never persists and never
+  // becomes placeholder text. Restricted recipients receive only an opaque
+  // edge, never an offset.
+  presence: ephemeral({ caret: true }),
   body: annotatedText({
     project: 'project',
     owner: 'owner',
+    carets: { field: 'presence', cell: 'caret' },
     annotations: [
       annotation('comment', { empty: 'orphan', fields: { color: text({ oneOf: COMMENT_COLORS }) } }),
       // `sensitive` is the protected target that a confidential span covers. It

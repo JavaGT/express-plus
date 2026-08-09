@@ -155,8 +155,9 @@ export interface OwnedLiveDeliveryOptions {
 
 // Package-private assembly for an application-owned activation. The public
 // factory below deliberately returns only the delivery protocol; application
-// lifecycle wiring retains the committed consumer and shutdown capability.
-export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, principalSnapshots, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }: OwnedLiveDeliveryOptions): { delivery: OwnedLiveDelivery; consumer: (events: readonly LiveCommittedEvent[]) => Promise<void>; close: () => void } {
+// lifecycle wiring retains the committed consumer, the shared core (which the
+// WebSocket transport presents over the same authority), and shutdown.
+export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, principalSnapshots, schema, log = null, maxCatchupEvents = 1000, includeActionId = true }: OwnedLiveDeliveryOptions): { delivery: OwnedLiveDelivery; consumer: (events: readonly LiveCommittedEvent[]) => Promise<void>; close: () => void; core: LiveDeliveryCore } {
   if (!Number.isSafeInteger(maxCatchupEvents) || maxCatchupEvents < 1) throw new TypeError('maxCatchupEvents must be a positive safe integer');
   const resolveEntity = typeof entities === 'function' ? entities : (name: string) => entities.get(name);
   const composites = compileSnapshots(snapshots, resolveEntity, db as never) as unknown as CompiledSnapshots;
@@ -456,8 +457,7 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
 
   return {
     delivery,
-    consumer: async (events: readonly LiveCommittedEvent[]): Promise<void> => {
-      const scopes = new Set<string>();
+    consumer: async (events: readonly LiveCommittedEvent[]): Promise<void> => {      const scopes = new Set<string>();
       for (const event of events) {
         if (event?.scope) scopes.add(event.scope);
       }
@@ -490,6 +490,11 @@ export function createOwnedLiveDelivery({ db, entities, mayVerb, snapshots, prin
       core.close();
       principalDelivery?.close();
     },
+    // The committed-event core behind the public delivery protocol. The
+    // WebSocket transport consumes this SAME authority, so SSE and WebSocket
+    // share one re-read/re-authorise/project/deliver path (never a second
+    // committed-delivery machine).
+    core,
   };
 }
 

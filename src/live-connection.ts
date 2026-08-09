@@ -55,6 +55,8 @@ export class LiveConnection {
   #parser: FrameParser;
   #id: string;
   #closed = false;
+  #closing = false;
+  #closePromise: Promise<void> | null = null;
   #principal: Principal | null;
   #fanout: LiveFanoutHandle;
   #core: LiveDeliveryCore | null;
@@ -89,6 +91,7 @@ export class LiveConnection {
     this.#coreGen = new Map();
 
     socket.on('data', (chunk) => {
+      if (this.#closing) return;
       this.#parser.feed(chunk);
       this.#drain();
     });
@@ -102,7 +105,7 @@ export class LiveConnection {
   get closed(): boolean { return this.#closed; }
   get principal(): Principal | null { return this.#principal; }
 
-  close(): void { this.#close(); }
+  close(): Promise<void> { return this.#close(); }
 
   setPrincipal(p: Principal): void {
     this.#principal = p;
@@ -407,14 +410,26 @@ export class LiveConnection {
     this.#fanout.addSubscription(scope, this, result.fields, result.pace, { ...result.interest, carets: result.carets });
   }
 
-  #close(): void {
+  #close(): Promise<void> {
+    if (this.#closePromise) return this.#closePromise;
+    this.#closePromise = this.#performClose();
+    return this.#closePromise;
+  }
+
+  async #performClose(): Promise<void> {
     if (this.#closed) return;
+    this.#closing = true;
+    // Remove the connection from the transport registry synchronously. The
+    // returned promise still waits for caret retraction and socket cleanup,
+    // but callers observing count() during shutdown must not see a closing
+    // connection as live.
+    this.#onClose?.();
+    await this.#cleanup();
     this.#closed = true;
-    this.#cleanup();
     try { this.#socket.destroy(); } catch { /* ignore */ }
   }
 
-  #cleanup(): void {
+  async #cleanup(): Promise<void> {
     for (const ac of this.#coreAcs.values()) {
       ac.abort();
     }
@@ -427,7 +442,6 @@ export class LiveConnection {
     this.#coreAcs.clear();
     this.#coreActivations.clear();
     this.#fanout.removeAll(this);
-    this.#carets?.removeConnection(this).catch(() => {});
-    this.#onClose?.();
+    await this.#carets?.removeConnection(this).catch(() => {});
   }
 }

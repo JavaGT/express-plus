@@ -6,6 +6,7 @@
 
 import { createOwnedLiveDelivery } from './live-delivery-public.mjs';
 import { createLiveDeliveryHttpHandler } from './live-delivery-http.mjs';
+import { createLiveDeliveryWebSocket } from './live-delivery-websocket.mjs';
 import { mayVerb } from './row-grant.mjs';
 import { validatePrincipalSnapshotDeclarations } from './principal-snapshot-delivery.mjs';
                                                 
@@ -26,6 +27,7 @@ import { validatePrincipalSnapshotDeclarations } from './principal-snapshot-deli
                         
                                
                                      
+
                            
                    
                                           
@@ -74,16 +76,44 @@ export function attachApplicationLiveDelivery(app                    , {
     log: app.log,
   });
 
+  // The WebSocket transport is mounted at listen() time, when the httpServer
+  // exists. It is a pure upgrade skin over the SAME owned core — one committed
+  // authority, SSE and WebSocket skins both present it. SSE rides the request
+  // chain at `path` (+ `/bootstrap`, `/events`); the WebSocket upgrade mounts
+  // at `<path>/events`, so a browser WebSocket and an EventSource coexist on
+  // the same URL without a second delivery machine.
+  let wsTransport                                                        = null;
+
   app._applicationLiveDelivery = Object.freeze({
     consumer: owned.consumer,
     handler,
     wake: owned.delivery.wake,
     close: owned.close,
+    mountWebSocket: (httpServer                                                   ) => {
+      if (!wsTransport) {
+        wsTransport = createLiveDeliveryWebSocket(httpServer, {
+          path: `${path}/events`,
+          core: owned.core,
+          principalOf,
+          resolveEntity: (name        ) => app.entities.get(name),
+          mayVerb: (entity                  , verb        , row                                            , principal           ) => mayVerb(entity         , verb, row, principal),
+          db: app.db                ,
+          ready: () => Promise.resolve(app.ready),
+          log: app.log,
+        });
+      }
+      return wsTransport;
+    },
   });
   for (const declaration of principalSnapshots ?? []) app._principalSnapshotRuntime._registerDeclaration(declaration);
   if (principalSnapshots?.length) app._principalSnapshotRuntime._setWakeHook((declaration, principal) => {
     owned.delivery.wake(`PrincipalSnapshot:${declaration.name}/${principal.type}/${encodeURIComponent(principal.id ?? '')}`);
   });
-  app.onShutdown('live delivery', () => owned.close(), { timeoutMs: 1000 });
+  app.onShutdown('live delivery', async () => {
+    // Release WebSocket connections first (they retract caret presence and end
+    // their sockets), then the committed authority revokes remaining SSE subs.
+    await wsTransport?.close();
+    await owned.close();
+  }, { timeoutMs: 1000 });
   return app;
 }

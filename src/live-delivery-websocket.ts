@@ -1,0 +1,154 @@
+// Live Delivery WebSocket transport — a thin upgrade seam for the Deliver loop.
+//
+// Transport-neutral: it accepts an INJECTED committed-event subscription
+// authority (a live-delivery-core-shaped `core`) plus the same admission
+// dependencies the HTTP skin uses (resolveEntity / mayVerb / db). The seam owns
+// only socket I/O, connection lifecycle, the ephemeral fan-out, and caret
+// presence — never the committed authority itself, which the caller
+// (createLiveDelivery or an application-integrated delivery) owns and closes.
+//
+// One authority rule: SSE (live-delivery-http) and WebSocket both present the
+// SAME injected core, so a subscribed client receives committed events through
+// exactly one re-read / re-authorise / project / deliver path regardless of
+// transport. Mounting this seam is the only way an application-integrated
+// delivery gets a WebSocket upgrade; without an 'upgrade' listener a WS
+// handshake request is handled as an ordinary GET and 400s against the SSE
+// handler ('invalid live delivery request').
+
+import type { Server, IncomingMessage } from 'node:http';
+import type { Duplex } from 'node:stream';
+
+import { upgradeWebSocket } from './websocket.ts';
+import { isSameOriginRequest } from './middleware.ts';
+import { createLiveFanout } from './live-fanout.ts';
+import type { LiveEntityRecord, LiveFanoutHandle, MayVerb } from './live-fanout.ts';
+import type { LiveDeliveryCore } from './live-delivery-core.ts';
+import { LiveConnection } from './live-connection.ts';
+import { createAnnotatedTextCaretLive } from './annotated-text-caret-live.ts';
+import { readSeq } from './cursor.ts';
+import { anonymous, type Principal } from './principal.ts';
+import type { FrameworkLog } from './log.ts';
+import type { LiveDatabase } from './live-fanout.ts';
+
+export interface LiveDeliveryWebSocketOptions {
+  path?: string;
+  core?: LiveDeliveryCore | null;
+  principalOf?: (req: IncomingMessage) => Principal | Promise<Principal>;
+  resolveEntity?: ((name: string) => LiveEntityRecord | undefined | null) | null;
+  mayVerb?: MayVerb | null;
+  db?: LiveDatabase | null;
+  ready?: () => Promise<unknown>;
+  log?: FrameworkLog | null;
+}
+
+export interface LiveDeliveryWebSocket {
+  count(): number;
+  close(): Promise<void>;
+}
+
+export function createLiveDeliveryWebSocket(httpServer: Server, {
+  path = '/events',
+  core = null,
+  principalOf = (() => anonymous) as () => Principal,
+  resolveEntity = null,
+  mayVerb = null,
+  db = null,
+  ready = () => Promise.resolve(),
+  log = null,
+}: LiveDeliveryWebSocketOptions = {}): LiveDeliveryWebSocket {
+  const fanout: LiveFanoutHandle = createLiveFanout({ mayVerb });
+  const carets = createAnnotatedTextCaretLive({ db: db as never, resolveEntity: resolveEntity as never, mayVerb: mayVerb as never, fanout });
+  const connections = new Set<LiveConnection>();
+  const pendingUpgrades = new Set<Duplex>();
+  let closed = false;
+  let closePromise: Promise<void> | null = null;
+
+  const currentSeq = (scope: string) => readSeq(db, scope);
+
+  async function close(): Promise<void> {
+    if (closePromise) return closePromise;
+    closePromise = closeImpl();
+    return closePromise;
+  }
+
+  async function closeImpl(): Promise<void> {
+    closed = true;
+    for (const socket of pendingUpgrades) socket.destroy();
+    pendingUpgrades.clear();
+    await Promise.all([...connections].map((conn) => conn.close?.().catch(() => {})));
+    connections.clear();
+    fanout.close();
+  }
+
+  httpServer.on('upgrade', (req, socket, _head) => {
+    const url = req.url ? new URL(req.url, 'http://localhost') : { pathname: '' };
+    if (url.pathname !== path) {
+      socket.destroy();
+      return;
+    }
+
+    // CSWSH defense — same same-origin verdict as REST CSRF (middleware.mjs).
+    if (!isSameOriginRequest(req)) {
+      socket.destroy();
+      return;
+    }
+
+    if (closed) {
+      socket.destroy();
+      return;
+    }
+
+    // HTTP requests and WebSocket subscriptions share one application-start
+    // barrier. Keep the raw socket outside the connection registry until the
+    // schema, Kernel, recovery, and admission engine are ready. A failed start
+    // fails closed; shutdown destroys sockets waiting at this barrier.
+    pendingUpgrades.add(socket);
+    Promise.resolve()
+      .then(() => ready())
+      .then(async () => {
+        pendingUpgrades.delete(socket);
+        if (closed || socket.destroyed) {
+          socket.destroy();
+          return;
+        }
+
+        const result = upgradeWebSocket(req, socket);
+        if (!result) {
+          socket.destroy();
+          return;
+        }
+
+        // principalOf may be asynchronous (a session lookup). Resolve it BEFORE
+        // wiring the connection so admission never observes a pending promise
+        // standing in for a principal. The browser cannot send frames before the
+        // 101 handshake, and any bytes buffered before the connection is wired
+        // are flushed to the 'data' listener once it attaches.
+        const principal = await principalOf(req);
+        if (closed || socket.destroyed) {
+          socket.destroy();
+          return;
+        }
+
+        const id = `ws:${Date.now()}:${Math.random().toString(36).slice(2, 10)}`;
+        const conn = new LiveConnection(socket, id, {
+          fanout,
+          core,
+          resolveEntity,
+          mayVerb,
+          db,
+          currentSeq,
+          log,
+          carets,
+          onClose: () => connections.delete(conn),
+        });
+        conn.setPrincipal(principal);
+        connections.add(conn);
+      })
+      .catch(() => {
+        pendingUpgrades.delete(socket);
+        socket.destroy();
+      });
+  });
+
+  return { count: () => connections.size, close };
+}

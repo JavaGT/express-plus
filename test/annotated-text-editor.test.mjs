@@ -1202,3 +1202,190 @@ test('annotated editor rebuilds run nodes when the whole document is replaced', 
   assert.deepEqual(harness.errors, []);
   harness.binding.close();
 });
+
+// --- recipient-projected caret presence (issue #9) ---
+
+const caretTick = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+function caretHarness(text = 'Hello', document = visible(text)) {
+  const dom = new JSDOM('<div id="editor"></div><div id="carets"></div>');
+  const element = dom.window.document.getElementById('editor');
+  const caretLayer = dom.window.document.getElementById('carets');
+  const calls = [];
+  const errors = [];
+  const listeners = new Set();
+  let caretListener = null;
+  const session = {
+    document,
+    history: { undo: async () => {}, redo: async () => {} },
+    replace: async (input) => { calls.push(['replace', input]); return { ok: true }; },
+    subscribe(next) { listeners.add(next); return () => listeners.delete(next); },
+    publishCaret: ({ offset }) => { calls.push(['publish', offset]); return true; },
+    clearCaret: () => { calls.push(['clear']); return true; },
+    onCaret(listener) { caretListener = listener; return () => { if (caretListener === listener) caretListener = null; }; },
+  };
+  const binding = bindAnnotatedTextEditor({ element, session, caretLayer, onError: (error) => errors.push(error) });
+  // Place a collapsed caret at a DISPLAY offset without focusing (the focus
+  // path is exercised explicitly by the caret tests).
+  function placeCaret(offset) {
+    const span = element.querySelector('[data-block-id="b"]');
+    let remaining = Math.max(0, Math.min(offset, (span.textContent ?? '').length));
+    const walker = span.ownerDocument.createTreeWalker(span, 4);
+    let node = null;
+    let nodeOffset = 0;
+    while (walker.nextNode()) {
+      const current = walker.currentNode;
+      if (remaining <= current.data.length) {
+        node = current;
+        nodeOffset = remaining;
+        break;
+      }
+      remaining -= current.data.length;
+    }
+    const range = dom.window.document.createRange();
+    range.setStart(node ?? span, nodeOffset);
+    range.collapse(true);
+    const selection = dom.window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+  function publish(document) {
+    session.document = document;
+    for (const listener of [...listeners]) listener(document);
+  }
+  function emitCaret(frame) { caretListener?.(frame); }
+  return { dom, element, session, caretLayer, calls, errors, binding, placeCaret, publish, emitCaret };
+}
+
+function caretFrame(presence, kind = 'caret', offset) {
+  const value = kind === 'edge'
+    ? { kind: 'edge', presence, edge: 'start' }
+    : { kind: 'caret', presence, offset };
+  return {
+    type: 'annotated-text-caret', version: 1,
+    entity: 'Doc', id: 'd1', field: 'body',
+    change: { op: 'upsert', value },
+  };
+}
+
+test('annotated editor publishes a collapsed caret on focus and clears on blur', async () => {
+  const h = caretHarness();
+  h.placeCaret(2);
+  await caretTick();
+  assert.deepEqual(h.calls, [], 'a caret is not published until the editor is focused');
+  h.element.focus();
+  await caretTick();
+  assert.deepEqual(h.calls, [['publish', 2]]);
+  h.element.blur();
+  await caretTick();
+  assert.deepEqual(h.calls, [['publish', 2], ['clear']]);
+  h.binding.close();
+});
+
+test('annotated editor publishes only collapsed carets', async () => {
+  const h = caretHarness();
+  h.element.focus();
+  await caretTick();
+  assert.deepEqual(h.calls, [['publish', 0]], 'focus publishes the initial collapsed caret');
+  // jsdom resets the selection on focus, so set the non-collapsed range after
+  // focusing and drive a selectionchange through the coalesce path.
+  const span = h.element.querySelector('[data-block-id="b"]');
+  const text = span.ownerDocument.createTreeWalker(span, 4).nextNode();
+  assert.ok(text, 'the run renders a text node');
+  const range = h.dom.window.document.createRange();
+  range.setStart(text, 1);
+  range.setEnd(text, 4);
+  h.dom.window.getSelection().removeAllRanges();
+  h.dom.window.getSelection().addRange(range);
+  h.element.ownerDocument.dispatchEvent(new h.dom.window.Event('selectionchange'));
+  await caretTick();
+  assert.deepEqual(h.calls, [['publish', 0]], 'a non-collapsed selection never publishes a caret');
+  h.binding.close();
+});
+
+test('annotated editor dedupes and coalesces caret publishes', async () => {
+  const h = caretHarness();
+  h.placeCaret(1);
+  h.element.focus();
+  await caretTick();
+  assert.deepEqual(h.calls.filter(([kind]) => kind === 'publish'), [['publish', 1]]);
+  // Repeated selectionchange events at the same offset coalesce into nothing.
+  h.element.ownerDocument.dispatchEvent(new h.dom.window.Event('selectionchange'));
+  h.element.ownerDocument.dispatchEvent(new h.dom.window.Event('selectionchange'));
+  await caretTick();
+  assert.deepEqual(h.calls.filter(([kind]) => kind === 'publish'), [['publish', 1]]);
+  // A caret move coalesces several selectionchange events into one publish.
+  h.placeCaret(3);
+  h.element.ownerDocument.dispatchEvent(new h.dom.window.Event('selectionchange'));
+  h.element.ownerDocument.dispatchEvent(new h.dom.window.Event('selectionchange'));
+  h.element.ownerDocument.dispatchEvent(new h.dom.window.Event('selectionchange'));
+  await caretTick();
+  assert.deepEqual(h.calls.filter(([kind]) => kind === 'publish'), [['publish', 1]], 'the throttled publish has not fired yet');
+  await new Promise((resolve) => setTimeout(resolve, 140));
+  assert.deepEqual(h.calls.filter(([kind]) => kind === 'publish'), [['publish', 1], ['publish', 3]]);
+  h.binding.close();
+});
+
+test('annotated editor renders remote caret and edge bars and removes them', async () => {
+  const h = caretHarness();
+  h.emitCaret(caretFrame('peer-1', 'caret', 2));
+  const caretBar = h.caretLayer.querySelector('[data-presence="peer-1"]');
+  assert.ok(caretBar, 'a remote caret renders a bar in the caret layer');
+  assert.equal(caretBar.dataset.kind, 'caret');
+  assert.equal(caretBar.dataset.offset, '2');
+  assert.equal(caretBar.getAttribute('contenteditable'), 'false');
+  assert.equal(caretBar.style.position, 'absolute');
+  assert.equal(caretBar.style.pointerEvents, 'none');
+
+  h.emitCaret(caretFrame('peer-2', 'edge'));
+  const edgeBar = h.caretLayer.querySelector('[data-presence="peer-2"]');
+  assert.ok(edgeBar, 'a restricted edge renders an opaque edge marker');
+  assert.equal(edgeBar.dataset.kind, 'edge');
+  assert.equal(edgeBar.hasAttribute('data-offset'), false);
+
+  h.emitCaret({ type: 'annotated-text-caret', version: 1, entity: 'Doc', id: 'd1', field: 'body', change: { op: 'remove', presence: 'peer-1' } });
+  assert.equal(h.caretLayer.querySelector('[data-presence="peer-1"]'), null, 'a remove deletes the bar');
+  assert.ok(h.caretLayer.querySelector('[data-presence="peer-2"]'), 'other presences survive');
+  h.binding.close();
+});
+
+test('annotated editor never places caret decorations inside the container span', async () => {
+  const h = caretHarness();
+  h.emitCaret(caretFrame('peer-1', 'caret', 2));
+  h.emitCaret(caretFrame('peer-2', 'edge'));
+  const span = h.element.querySelector('[data-block-id="b"]');
+  assert.equal(span.querySelector('[data-presence]'), null);
+  assert.equal(span.querySelector('[data-kind]'), null);
+  assert.equal(h.element.querySelector('[data-presence]'), null);
+  assert.equal(h.element.querySelector('[data-kind]'), null);
+  h.binding.close();
+});
+
+test('annotated editor clears remote bars and local presence on close', async () => {
+  const h = caretHarness();
+  h.emitCaret(caretFrame('peer-1', 'caret', 2));
+  h.placeCaret(2);
+  h.element.focus();
+  await caretTick();
+  assert.ok(h.caretLayer.querySelector('[data-presence="peer-1"]'));
+  h.binding.close();
+  assert.equal(h.caretLayer.children.length, 0, 'close removes all caret bars');
+  assert.deepEqual(h.calls.filter(([kind]) => kind === 'clear'), [['clear']], 'close retracts local presence');
+});
+
+test('annotated editor with a caret layer but a caret-less session stays inert', async () => {
+  const dom = new JSDOM('<div id="editor"></div><div id="carets"></div>');
+  const element = dom.window.document.getElementById('editor');
+  const caretLayer = dom.window.document.getElementById('carets');
+  const session = {
+    document: visible('Hello'),
+    history: { undo: async () => {}, redo: async () => {} },
+    replace: async () => ({ ok: true }),
+    subscribe() { return () => {}; },
+  };
+  const binding = bindAnnotatedTextEditor({ element, session, caretLayer });
+  element.focus();
+  await caretTick();
+  assert.equal(caretLayer.children.length, 0);
+  binding.close();
+});

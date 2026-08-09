@@ -1084,3 +1084,106 @@ test('ordinary typing repaints only the touched run and preserves the other run 
   await openDocument(page, id);
   await expect(editor).toHaveText('aXaa\nbbb\nccc');
 });
+
+// --- recipient-projected editor carets (issue #9) ---
+//
+// Carets are ephemeral presence projected over the live channel: the focused
+// tab publishes collapsed caret offsets; a peer tab renders them as
+// decorations in the caret layer (`#editor-carets`), never as placeholder
+// text. A redacted reader receives only an opaque edge (`data-kind="edge"`),
+// never offsets. Carets never survive reload.
+
+test('a peer tab renders the owner caret at the typed position and clears it on blur and close', async ({ browser }) => {
+  const context = await browser.newContext();
+  const owner = await context.newPage();
+  const id = await createDocument(owner);
+  const peer = await context.newPage();
+  await openDocument(peer, id);
+
+  const ownerEditor = owner.locator('#editor');
+  const peerEditor = peer.locator('#editor');
+  const peerLayer = peer.locator('#editor-carets');
+  const ownerBar = (offset) => peerLayer.locator(`[data-kind="caret"][data-offset="${offset}"]`);
+
+  await ownerEditor.pressSequentially('Hello', { delay: 0 });
+  await expect(ownerEditor).toHaveAttribute('aria-busy', 'false');
+
+  // Collapse the owner caret at display offset 2 (between 'H' and 'e').
+  await placeCaretAtDisplay(ownerEditor, 2);
+  await owner.evaluate(() => document.dispatchEvent(new Event('selectionchange')));
+
+  // The peer renders the owner's caret at the typed position. The peer's own
+  // presence bar (published on focus, offset 0) may coexist; the owner's bar
+  // is the one at offset 2.
+  await expect(ownerBar('2')).toHaveCount(1, { timeout: 10000 });
+  await expect(peerEditor).toHaveText('Hello');
+
+  // Blur clears the owner's presence on the peer.
+  await ownerEditor.blur();
+  await expect(ownerBar('2')).toHaveCount(0, { timeout: 10000 });
+
+  // Re-focus and republish, then close the owner page: the peer clears it.
+  await ownerEditor.click();
+  await placeCaretAtDisplay(ownerEditor, 2);
+  await owner.evaluate(() => document.dispatchEvent(new Event('selectionchange')));
+  await expect(ownerBar('2')).toHaveCount(1, { timeout: 10000 });
+  await owner.close();
+  await expect(ownerBar('2')).toHaveCount(0, { timeout: 10000 });
+
+  await context.close();
+});
+
+test('a redacted reader receives only edge caret presence and never offsets', async ({ page, browser }) => {
+  const id = await createDocument(page);
+  const editor = page.locator('#editor');
+  await editor.pressSequentially('hello secret world', { delay: 0 });
+  await expect(editor).toHaveAttribute('aria-busy', 'false');
+  await editor.evaluate((element) => {
+    const node = element.ownerDocument.createTreeWalker(element.firstElementChild, NodeFilter.SHOW_TEXT).nextNode();
+    const range = document.createRange();
+    range.setStart(node, 6);
+    range.setEnd(node, 12);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+  });
+  await page.getByRole('button', { name: 'Mark confidential' }).click();
+  await expect(page.locator('#status')).toHaveText('confidential span marked');
+
+  const context = await browser.newContext();
+  await context.addInitScript(() => sessionStorage.setItem('annotated-doc-view-as', 'reader'));
+  const reader = await context.newPage();
+  await reader.goto(origin);
+  await reader.locator('.doc', { hasText: id }).click();
+  await expect(reader.locator('#status')).toContainText('live', { timeout: 15000 });
+  const readerEditor = reader.locator('#editor');
+  await expect(readerEditor).toHaveText('hello [restricted] world');
+  const readerLayer = reader.locator('#editor-carets');
+
+  // The reader's own focus publishes its caret back to itself as an edge,
+  // which proves the reader's caret channel is subscribed before the owner
+  // publishes below.
+  await expect(readerLayer.locator('[data-kind="edge"]')).toHaveCount(1, { timeout: 10000 });
+
+  // The owner publishes a collapsed caret; the reader gets only an opaque
+  // edge — never an offset — and the reader's text is untouched.
+  await editor.click();
+  await placeCaretAtDisplay(editor, 2);
+  await page.evaluate(() => document.dispatchEvent(new Event('selectionchange')));
+  await expect(readerLayer.locator('[data-kind="edge"]')).toHaveCount(2, { timeout: 10000 });
+  await expect(readerLayer.locator('[data-kind="caret"]')).toHaveCount(0);
+  await expect(readerLayer.locator('[data-offset]')).toHaveCount(0);
+  await expect(readerEditor).toHaveText('hello [restricted] world');
+
+  // Reload stability: carets are ephemeral — a reload rehydrates no presence
+  // as decoration or placeholder text, and never leaks offsets.
+  await reader.reload();
+  await openDocument(reader, id);
+  await expect(readerEditor).toHaveText('hello [restricted] world');
+  await expect(readerLayer.locator('[data-kind="caret"]')).toHaveCount(0);
+  await expect(readerLayer.locator('[data-offset]')).toHaveCount(0);
+  // The owner's document is untouched throughout.
+  await expect(editor).toHaveText('hello secret world');
+
+  await context.close();
+});

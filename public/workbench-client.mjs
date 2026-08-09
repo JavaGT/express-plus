@@ -3313,7 +3313,7 @@ export function createPrincipalSnapshotHttpSession({
  * A document-bound annotated-text session. The document context owns scope,
  * action grammar, and private authoring bindings; callers only name positions.
  */
-export function createAnnotatedTextHttpSession({ baseUrl, context, historySession, fetchImpl, eventSourceFactory, createActionId, onRecoveryDelayed, onFoldApplied }) {
+export function createAnnotatedTextHttpSession({ baseUrl, context, historySession, fetchImpl, eventSourceFactory, createActionId, onRecoveryDelayed, onFoldApplied, carets }) {
   if (!context || typeof context !== 'object' || typeof context.documentId !== 'string' || context.documentId.length === 0) {
     throw new TypeError('annotated text context requires a documentId');
   }
@@ -3352,6 +3352,43 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
   const snapshotBinding = createAnnotatedTextSnapshotSessionBinding();
   const requestIdentity = { entity: entity.name, field: field.fieldName, documentId, authoringClient };
   if (typeof context.viewAs === 'string' && context.viewAs.length > 0) requestIdentity.viewAs = context.viewAs;
+
+  // Optional recipient-projected carets: ephemeral presence ONLY. When the host
+  // supplies a `carets` option the session owns ONE caret LiveChannel — the
+  // document subscription carries caret interest, validated `annotated-text-caret`
+  // frames feed registered listeners, and publish/clear are volatile (never
+  // queued, never durable, never optimistic text). Without the option the
+  // session exposes no caret surface and never constructs a channel.
+  const caretsOption = carets ?? null;
+  const caretListeners = new Set();
+  let caretChannel = null;
+  if (caretsOption != null) {
+    if (typeof caretsOption !== 'object' || Array.isArray(caretsOption)
+      || typeof caretsOption.wsBaseUrl !== 'string' || caretsOption.wsBaseUrl.length === 0) {
+      throw new TypeError('annotated text carets option requires a wsBaseUrl');
+    }
+    if (caretsOption.socketFactory !== undefined && typeof caretsOption.socketFactory !== 'function') {
+      throw new TypeError('annotated text carets socketFactory must be a function');
+    }
+    try {
+      caretChannel = new LiveChannel(caretsOption.wsBaseUrl, {
+        ...(typeof caretsOption.socketFactory === 'function' ? { socketFactory: caretsOption.socketFactory } : {}),
+      });
+      // Eager subscribe so presence is ready when the editor first focuses.
+      // A host without WebSocket support rejects the subscription; degrade to a
+      // no-op channel instead of failing session construction.
+      caretChannel.subscribe(entity.name, documentId, {
+        carets: [field.fieldName],
+        onCaret: (frame) => {
+          for (const listener of caretListeners) {
+            try { listener(frame); } catch { /* isolate consumers */ }
+          }
+        },
+      }).catch(() => {});
+    } catch {
+      caretChannel = null;
+    }
+  }
 
   function installAuthoringFromFold(foldAuthoring, fence) {
     if (!foldAuthoring || foldAuthoring.acknowledgementFence !== fence) {
@@ -3647,7 +3684,7 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       flushAuthoringAcknowledgements();
     }
   }
-  return Object.freeze({
+  const annotatedSurface = {
     get document() { return annotatedDocumentView(session.snapshot); },
     get history() { return session.history; },
     get status() { return session.status; },
@@ -3695,9 +3732,36 @@ export function createAnnotatedTextHttpSession({ baseUrl, context, historySessio
       wakeAuthoringMutation?.();
       wakeAuthoringMutation = null;
       revokeAnnotatedTextSnapshotSessionBinding(snapshotBinding);
+      if (caretChannel) {
+        // Best-effort retraction before the channel closes; a server with no
+        // presence yet still accepts the clear, so no error is expected.
+        try { caretChannel.clearCaret({ entity: entity.name, id: documentId, field: field.fieldName }); } catch { /* best effort */ }
+        try { caretChannel.close(); } catch { /* best effort */ }
+        caretChannel = null;
+      }
+      caretListeners.clear();
       session.close();
     },
-  });
+  };
+  if (caretsOption != null) {
+    annotatedSurface.publishCaret = function publishCaret({ offset } = {}) {
+      if (!Number.isSafeInteger(offset) || offset < 0) {
+        throw new TypeError('annotated text caret offset must be a non-negative safe integer');
+      }
+      if (!caretChannel) return false;
+      return caretChannel.updateCaret({ entity: entity.name, id: documentId, field: field.fieldName, offset });
+    };
+    annotatedSurface.clearCaret = function clearCaret() {
+      if (!caretChannel) return false;
+      return caretChannel.clearCaret({ entity: entity.name, id: documentId, field: field.fieldName });
+    };
+    annotatedSurface.onCaret = function onCaret(listener) {
+      if (typeof listener !== 'function') throw new TypeError('annotated text caret listener must be a function');
+      caretListeners.add(listener);
+      return () => caretListeners.delete(listener);
+    };
+  }
+  return Object.freeze(annotatedSurface);
 }
 
 function annotatedDocumentView(snapshot) {

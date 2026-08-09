@@ -33,7 +33,11 @@
     #add-comment:disabled { opacity:.5; cursor:default; }
     #document-workspace { display:grid; grid-template-columns:minmax(0,1fr) 260px; flex:1; min-height:0; }
     #editor-column { display:flex; flex-direction:column; min-width:0; overflow:auto; }
-    #editor { flex:1; overflow:auto; min-height:200px; margin:16px 16px 8px; padding:16px 18px; border:1px solid var(--line); border-radius:10px; outline:none; background:var(--panel); white-space:pre-wrap; font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
+    #editor-host { position:relative; display:flex; flex:1; min-width:0; min-height:200px; margin:16px 16px 8px; }
+    #editor { flex:1; min-width:0; min-height:200px; padding:16px 18px; border:1px solid var(--line); border-radius:10px; outline:none; background:var(--panel); white-space:pre-wrap; overflow:auto; font:15px/1.55 ui-sans-serif,system-ui,sans-serif; }
+    #editor-carets { position:absolute; inset:0; overflow:hidden; pointer-events:none; }
+    #editor-carets [data-presence] { position:absolute; width:2px; height:100%; background:var(--accent); opacity:.85; border-radius:1px; }
+    #editor-carets [data-kind="edge"] { width:10px; height:10px; background:var(--danger); opacity:1; border-radius:999px; }
     #editor [data-annotation-families~="comment"] { background:var(--annotation-color, #fef08a); }
     #editor [data-annotation-families~="sensitive"] { background:#111; color:#fff; border-radius:3px; padding:0 2px; box-shadow:inset 0 0 0 1px #000; }
     #editor [data-restricted="true"] { background:#111; color:#fff; border-radius:3px; padding:0 2px; box-shadow:inset 0 0 0 1px #000; }
@@ -53,7 +57,7 @@
     #live-state pre { max-height:240px; overflow:auto; margin:0; padding:10px; border-top:1px solid var(--line); background:#f8fafc; color:#334155; font:11px/1.45 ui-monospace,SFMono-Regular,monospace; }
     #empty { margin:40px auto; color:var(--muted); text-align:center; }
     .hidden { display:none !important; }
-    @media (max-width:700px) { main { grid-template-columns:1fr; grid-template-rows:auto 1fr; } aside { display:flex; gap:8px; overflow:auto; border-right:0; border-bottom:1px solid var(--line); } #create { width:auto; margin:0; } #list { display:flex; gap:4px; } .doc { min-width:140px; } #document-workspace { grid-template-columns:1fr; grid-template-rows:minmax(240px,1fr) auto; overflow:auto; } #editor { min-height:240px; } #annotations-panel { overflow:visible; margin:0 16px 16px; padding:14px 0 0; border-top:1px solid var(--line); border-left:0; } }
+    @media (max-width:700px) { main { grid-template-columns:1fr; grid-template-rows:auto 1fr; } aside { display:flex; gap:8px; overflow:auto; border-right:0; border-bottom:1px solid var(--line); } #create { width:auto; margin:0; } #list { display:flex; gap:4px; } .doc { min-width:140px; } #document-workspace { grid-template-columns:1fr; grid-template-rows:minmax(240px,1fr) auto; overflow:auto; } #editor-host { min-height:240px; } #editor { min-height:240px; } #annotations-panel { overflow:visible; margin:0 16px 16px; padding:14px 0 0; border-top:1px solid var(--line); border-left:0; } }
   </style>
 </head>
 <body>
@@ -90,7 +94,10 @@
       <div id="empty">No document open.</div>
       <div id="document-workspace" class="hidden">
          <div id="editor-column">
-           <div id="editor" spellcheck="true" data-placeholder="Type here" role="textbox" aria-multiline="true"></div>
+           <div id="editor-host">
+             <div id="editor" spellcheck="true" data-placeholder="Type here" role="textbox" aria-multiline="true"></div>
+             <div id="editor-carets" aria-hidden="true"></div>
+           </div>
            <details id="live-state">
              <summary>Live JSON state</summary>
              <pre aria-label="Live JSON state"></pre>
@@ -240,6 +247,9 @@
       unsubscribe?.();
       editorBinding?.close();
       session?.close();
+      // The editor binding already retracts caret presence and removes the
+      // decoration bars; clear the layer defensively for any failed binding.
+      $('editor-carets')?.replaceChildren();
       unsubscribe = null;
       editorBinding = null;
       session = null;
@@ -281,6 +291,10 @@
           baseUrl: '/live-delivery',
           context: { entity: DocClient, field: DocClient.body, documentId: id, viewAs },
           historySession,
+          carets: {
+            wsBaseUrl: location.origin + '/live-delivery',
+            socketFactory: (url) => new WebSocket(url + '?viewAs=' + encodeURIComponent(viewAs)),
+          },
           onRecoveryDelayed: (delayed) => {
             if (delayed) setStatus('sync delayed - still retrying...');
           },
@@ -288,6 +302,7 @@
         editorBinding = bindAnnotatedTextEditor({
           element: $('editor'),
           session,
+          caretLayer: $('editor-carets'),
           onError: reportError,
         });
         unsubscribe = session.subscribe(renderSession);
