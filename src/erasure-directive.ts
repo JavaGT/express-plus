@@ -461,14 +461,26 @@ export async function applyErasureDirective(db: DbHandle, directive: ErasureDire
   const ids = [...targetById.keys()];
   const tombstone = db.prepare('UPDATE _Log SET eventType = ?, eventData = ?, actionId = ? WHERE scope = ? AND actionId = ?');
   const deleteReceipt = db.prepare('DELETE FROM _ActionReceipt WHERE scope = ? AND actionId = ?');
-  for (const id of ids) { tombstone.run(TOMBSTONE_TYPE, TOMBSTONE_DATA, TOMBSTONE_ACTION_ID, scope, id); deleteReceipt.run(scope, id); }
+  const deletePrivateFact = db.prepare('DELETE FROM _PrivateActionFact WHERE scope = ? AND actionId = ?');
+  for (const id of ids) {
+    tombstone.run(TOMBSTONE_TYPE, TOMBSTONE_DATA, TOMBSTONE_ACTION_ID, scope, id);
+    deleteReceipt.run(scope, id);
+    deletePrivateFact.run(scope, id);
+  }
 
   const cursors = db.prepare('SELECT * FROM _HistoryCursor WHERE scope = ?').all(scope);
   const retired = new Set(ids);
   const updateCursor = db.prepare('UPDATE _HistoryCursor SET past = ?, future = ? WHERE principalKey = ? AND sessionId = ? AND scope = ?');
+  const retiredFrame = (frame: unknown): boolean => {
+    if (typeof frame === 'string') return retired.has(frame);
+    if (!frame || typeof frame !== 'object' || Array.isArray(frame)) return false;
+    const entry = frame as Record<string, unknown>;
+    return (typeof entry.rootActionId === 'string' && retired.has(entry.rootActionId))
+      || (typeof entry.headActionId === 'string' && retired.has(entry.headActionId));
+  };
   for (const cursor of cursors) {
-    const past = (json(cursor.past, 'history cursor past') as unknown[]).filter((id) => !retired.has(id as string));
-    const future = (json(cursor.future, 'history cursor future') as unknown[]).filter((id) => !retired.has(id as string));
+    const past = (json(cursor.past, 'history cursor past') as unknown[]).filter((frame) => !retiredFrame(frame));
+    const future = (json(cursor.future, 'history cursor future') as unknown[]).filter((frame) => !retiredFrame(frame));
     updateCursor.run(JSON.stringify(past), JSON.stringify(future), cursor.principalKey, cursor.sessionId, scope);
   }
 }

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DatabaseSync } from 'node:sqlite';
 
-import workbench, { erasureDirective, erasureDirectivePreparation } from '../src/index.mjs';
+import workbench, { durableHistory, erasureDirective, erasureDirectivePreparation } from '../src/index.mjs';
 import { generateFrameworkDDL, prepareErasureDirective } from '../src/internal.mjs';
 import { frameworkTableNames } from '../src/server.mjs';
 import { frameworkTableNamesWithoutAuthCompile } from '../src/framework-table-names.mjs';
@@ -23,8 +23,22 @@ function fixture() {
     (scope, actionId, committedAt, eventRefs, historyOrder, actionType, actionData, principalKey, sessionId, operation)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(scope, 'old-action', '2026-07-27T00:00:00.000Z', refs, 1, 'artefact.delete', JSON.stringify({ id: 'artefact-1' }), 'user:u1', 's1', 'action');
+  db.prepare(`INSERT INTO _PrivateActionFact (scope, actionId, committedAt, fact, effects)
+    VALUES (?, ?, ?, ?, ?)`)
+    .run(scope, 'old-action', '2026-07-27T00:00:00.000Z', JSON.stringify({ before: { id: 'artefact-1', sensitive: 'remove-me' }, after: {} }), '[]');
   db.prepare('INSERT INTO _HistoryCursor (principalKey, sessionId, scope, past, future) VALUES (?, ?, ?, ?, ?)')
-    .run('user:u1', 's1', scope, JSON.stringify(['before', 'old-action', 'after']), JSON.stringify(['old-action', 'later']));
+    .run('user:u1', 's1', scope,
+      JSON.stringify([
+        { rootActionId: 'before', headActionId: 'before' },
+        { rootActionId: 'old-action', headActionId: 'old-action' },
+        { rootActionId: 'old-action', headActionId: 'retained-head' },
+        { rootActionId: 'after', headActionId: 'after' },
+        { rootActionId: 'after', headActionId: 'old-action' },
+      ]),
+      JSON.stringify([
+        { rootActionId: 'old-action', headActionId: 'old-action' },
+        { rootActionId: 'later', headActionId: 'later' },
+      ]));
   return db;
 }
 
@@ -451,8 +465,15 @@ test('registered erasure atomically tombstones targets, retires receipts/cursors
   const erased = db.prepare('SELECT * FROM _Log WHERE scope = ? AND seq = 1').get(scope);
   assert.deepEqual({ eventType: erased.eventType, eventData: erased.eventData, actionId: erased.actionId }, { eventType: '$workbench.erased', eventData: '{"version":1}', actionId: '$workbench.erased' });
   assert.equal(db.prepare('SELECT 1 FROM _ActionReceipt WHERE scope = ? AND actionId = ?').get(scope, 'old-action'), undefined);
+  assert.equal(db.prepare('SELECT 1 FROM _PrivateActionFact WHERE scope = ? AND actionId = ?').get(scope, 'old-action'), undefined);
   const cursor = db.prepare('SELECT past, future FROM _HistoryCursor WHERE scope = ?').get(scope);
-  assert.equal(cursor.past, JSON.stringify(['before', 'after'])); assert.equal(cursor.future, JSON.stringify(['later']));
+  assert.equal(cursor.past, JSON.stringify([
+    { rootActionId: 'before', headActionId: 'before' },
+    { rootActionId: 'after', headActionId: 'after' },
+  ]));
+  assert.equal(cursor.future, JSON.stringify([
+    { rootActionId: 'later', headActionId: 'later' },
+  ]));
   const receipt = db.prepare('SELECT * FROM _ActionReceipt WHERE scope = ? AND actionId = ?').get(scope, 'purge-1');
   assert.deepEqual({ actionType: receipt.actionType, actionData: receipt.actionData, principalKey: receipt.principalKey, sessionId: receipt.sessionId, operation: receipt.operation }, { actionType: 'lifecycle.purge', actionData: '{"version":1}', principalKey: null, sessionId: null, operation: 'erasure' });
   const second = await instance.dispatch({ actionId: 'purge-1', type: 'lifecycle.purge', payload: { confirmation: 'never persisted' }, principal: { type: 'user', id: 'u1' }, scope });
@@ -513,4 +534,98 @@ test('a census target omitted from the manifest aborts without partial erasure',
   assert.equal(result.ok, false);
   assert.equal(db.prepare('SELECT eventType FROM _Log WHERE scope = ? AND seq = 1').get(scope).eventType, 'artefact.deleted');
   assert.ok(db.prepare('SELECT 1 FROM _ActionReceipt WHERE scope = ? AND actionId = ?').get(scope, 'old-action'));
+});
+
+test('legacy string-array history cursors are still pruned by erasure', async () => {
+  const db = fixture();
+  db.prepare('UPDATE _HistoryCursor SET past = ?, future = ? WHERE scope = ?')
+    .run(JSON.stringify(['before', 'old-action', 'after']), JSON.stringify(['old-action', 'later']), scope);
+  const instance = app(db, directive); await instance.start();
+  const result = await instance.dispatch({ actionId: 'purge-legacy-cursor', type: 'lifecycle.purge', payload: {}, principal: { type: 'user', id: 'u1' }, scope });
+  assert.equal(result.ok, true);
+  const cursor = db.prepare('SELECT past, future FROM _HistoryCursor WHERE scope = ?').get(scope);
+  assert.equal(cursor.past, JSON.stringify(['before', 'after']));
+  assert.equal(cursor.future, JSON.stringify(['later']));
+});
+
+test('erasure prunes durableHistory frame cursors and erases private facts so erased actions are unreachable', async () => {
+  const db = new DatabaseSync(':memory:');
+  const history = durableHistory({
+    authorize: () => true,
+    actions: {
+      'document.set': {
+        inverse: ({ fact }) => ({ type: 'document.set', payload: { value: fact.before } }),
+        redo: ({ fact }) => ({ type: 'document.set', payload: { value: fact.after } }),
+      },
+    },
+  });
+  const instance = workbench({ db, history, actions: [
+    {
+      type: 'document.set', authorize: () => true,
+      handler({ payload }) {
+        const commit = { events: [{ type: 'document.changed', scope, data: { id: payload.id, value: payload.value } }] };
+        if (payload.before !== undefined) commit.privateFact = { before: payload.before, after: payload.value };
+        return commit;
+      },
+    },
+    {
+      type: 'lifecycle.purge', erasure: true, history: { cursor: 'excluded' }, authorize: () => true,
+      handler() {
+        return {
+          events: [{ type: 'lifecycle.purged', scope, data: { done: true } }],
+          directive: erasureDirectivePreparation({
+            owningScope: scope, subject: 'artefact-1',
+            census: {
+              version: 1,
+              rules: [
+                { kind: 'action', type: 'document.set', disposition: 'target', identityPointers: ['/id'] },
+                { kind: 'event', type: 'document.changed', disposition: 'target', identityPointers: ['/id'] },
+                { kind: 'event', type: 'lifecycle.purged', disposition: 'retain', identityPointers: ['/id'] },
+              ],
+            },
+          }),
+        };
+      },
+    },
+  ] });
+  await instance.start();
+
+  const principal = Object.freeze({ type: 'user', id: 'u1' });
+  const cursorArgs = { scope, principal, session: 'tab-a' };
+  await instance.dispatch({ actionId: 'doc-a1', type: 'document.set', payload: { id: 'artefact-1', value: 1, before: 0 }, principal, scope, history: { session: 'tab-a' } });
+  await instance.dispatch({ actionId: 'doc-a2', type: 'document.set', payload: { id: 'artefact-2', value: 1, before: 0 }, principal, scope, history: { session: 'tab-a' } });
+  assert.deepEqual(JSON.parse(db.prepare('SELECT past FROM _HistoryCursor WHERE scope = ?').get(scope).past), [
+    { rootActionId: 'doc-a1', headActionId: 'doc-a1' },
+    { rootActionId: 'doc-a2', headActionId: 'doc-a2' },
+  ]);
+
+  const beforeUndo = await instance.history.cursor(cursorArgs);
+  const undone = await instance.history.undo({ ...cursorArgs, actionId: 'undo-a2', revision: beforeUndo.revision });
+  assert.equal(undone.ok, true);
+  const prePurge = JSON.parse(db.prepare('SELECT future FROM _HistoryCursor WHERE scope = ?').get(scope).future);
+  assert.deepEqual(prePurge, [{ rootActionId: 'doc-a2', headActionId: 'undo-a2' }]);
+  const prePurgeRevision = (await instance.history.cursor(cursorArgs)).revision;
+
+  const purged = await instance.dispatch({ actionId: 'purge-int', type: 'lifecycle.purge', payload: {}, principal, scope });
+  assert.equal(purged.ok, true);
+
+  const stored = db.prepare('SELECT past, future FROM _HistoryCursor WHERE scope = ?').get(scope);
+  assert.deepEqual(JSON.parse(stored.past), []);
+  assert.deepEqual(JSON.parse(stored.future), [{ rootActionId: 'doc-a2', headActionId: 'undo-a2' }]);
+
+  assert.equal(db.prepare('SELECT 1 FROM _PrivateActionFact WHERE scope = ? AND actionId = ?').get(scope, 'doc-a1'), undefined);
+  assert.equal(db.prepare('SELECT 1 FROM _ActionReceipt WHERE scope = ? AND actionId = ?').get(scope, 'doc-a1'), undefined);
+  assert.equal(db.prepare('SELECT eventType FROM _Log WHERE scope = ? AND seq = 1').get(scope).eventType, '$workbench.erased');
+
+  assert.partialDeepStrictEqual(await instance.history.cursor(cursorArgs), { undo: 0, redo: 1 });
+  await assert.rejects(instance.history.undo({ ...cursorArgs, actionId: 'undo-a1', revision: prePurgeRevision }), /cursor is stale/);
+
+  const current = await instance.history.cursor(cursorArgs);
+  const redone = await instance.history.redo({ ...cursorArgs, actionId: 'redo-a2', revision: current.revision });
+  assert.equal(redone.ok, true);
+
+  db.prepare('UPDATE _HistoryCursor SET past = ?, future = ? WHERE scope = ?')
+    .run(JSON.stringify([{ rootActionId: 'doc-a1', headActionId: 'doc-a1' }]), '[]', scope);
+  const rogue = await instance.history.cursor(cursorArgs);
+  await assert.rejects(instance.history.undo({ ...cursorArgs, actionId: 'undo-rogue', revision: rogue.revision }), /no longer retained/);
 });
